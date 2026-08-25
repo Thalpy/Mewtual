@@ -13364,6 +13364,51 @@ button.stage-mute.nomic:hover {
 
 /* The voice section of the Connectivity surface: the media plane's own evidence, in the same
    place the mesh's lives, because they are the same question asked about two stacks. */
+.connection-member-health {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  background: var(--bg-elev);
+}
+.connection-member-health > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+.connection-member-health h3 {
+  margin: 0;
+  font: 0.72rem var(--mono);
+  letter-spacing: 0.08em;
+}
+.connection-member-health header p { margin: 3px 0 0; }
+.member-route-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.member-route-grid article {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--panel);
+}
+.member-route-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.member-route-head b { overflow: hidden; text-overflow: ellipsis; }
+.member-route-grid p { margin: 7px 0; color: var(--muted); font-size: 0.7rem; line-height: 1.45; }
+.member-route-grid article > small { display: block; color: var(--text-2); line-height: 1.4; }
+.member-route-grid ul { display: grid; gap: 3px; margin: 8px 0 0; padding: 0; list-style: none; }
+.member-route-grid li { display: flex; justify-content: space-between; gap: 8px; font-size: 0.68rem; }
+.member-route-grid li small { color: var(--muted); }
+
 .connection-voice {
   display: flex;
   flex-direction: column;
@@ -13404,6 +13449,10 @@ button.stage-mute.nomic:hover {
 .conn-facts li .stage-label {
   flex: none;
   min-width: 11ch;
+}
+
+@media (max-width: 760px) {
+  .connection-member-health > header { flex-direction: column; }
 }
 
 /* ============================================================
@@ -13836,6 +13885,24 @@ button.dbg-lvl.on.l-trace {
   margin-bottom: 4px;
   color: var(--muted);
   font-size: 0.7rem;
+  display: grid;
+  gap: 2px;
+}
+.dbg-drop-caveats {
+  margin: 0;
+  padding-left: 14px;
+  list-style: disc;
+}
+/* The sink's own reported state decides the colour, so a file that is not being written cannot
+   read as an aside. `faint` is the ordinary case and stays at the muted default. */
+.dbg-tone-warn {
+  color: var(--warn);
+}
+.dbg-tone-danger {
+  color: var(--danger);
+}
+.dbg-tone-ok {
+  color: var(--ok);
 }
 .dbg-line {
   display: flex;

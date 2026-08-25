@@ -220,8 +220,7 @@ heights.
   mockup marks the affordance).
 - "This device" card (`dbg-kv` pairs):
   public IPv4 (pii) with an AutoNAT chip (`CONFIRMED` ok / `UNCONFIRMED` warn),
-  IPv6 usability (`USABLE` ok / `NO ROUTE` warn with an explanatory `muted small`
-  line: this is exactly the failure that stranded a node for an hour),
+  observed public IPv6 candidates (explicitly not an outbound-route test),
   active router mappings: one line per mapping, protocol chip (UPNP / PCP / NAT-PMP),
   internal to external port, expiry age.
 - A short "attention" list: the newest 3 errors/warnings from any feed, each prefixed
@@ -234,16 +233,17 @@ heights.
 
 The big one. Three cards in order:
 
-- Peer table (`dbg-table` in a `dbg-table-wrap`):
-  Columns: peer (short id, pii, plus member name when known), device fingerprint (short,
-  pii), state (chip: `CONNECTED` ok / `DIALLING` transfer / `BACKING OFF` warn /
-  `UNREACHABLE` danger), transport (chip: QUIC / TCP / RELAY), address in use (pii,
-  mono, truncated with title), fails (consecutive failure count, right-aligned; danger
-  colour when > 0), next dial (age countdown or `-`).
-  Row expansion (`dbg-row-toggle` on the row, `dbg-row-detail` row beneath): full list
-  of last known addresses each with its last outcome and time, plus the last error
-  string verbatim. This is where "it only ever dials two IPv6 addresses" becomes
-  visible: the detail lists every candidate address and what happened to each.
+- Member-route table (`dbg-table` in a `dbg-table-wrap`):
+  Columns: member, claimed transport peer (pii), typed state (`DIRECT PATH`, `RELAY PATH`,
+  `PATH LIVE`, `NO RECORD`, `NO ROUTE`, `DIAL COOLDOWN`, `DIAL ELIGIBLE`, or forward-compatible
+  `UNKNOWN`), route count, signed-record sequence, policy-approved dial batches submitted, and
+  scheduler cooldown. A non-zero batch count is not danger-styled and is not called a failure,
+  because the current transport seam does not return per-address outcomes.
+  Row expansion (`dbg-row-toggle` on the row, `dbg-row-detail` row beneath) lists current coarse
+  paths, time-bounded historical success, typed safe actions, and every signed candidate address.
+  IPv6-only candidates are a clue, never a claim that this host lacks an outbound IPv6 route.
+  A failed poll retains the previous rows only as an explicitly labelled last snapshot, suppresses
+  live findings, and omits those rows from copied current-evidence output.
 - Dial attempt feed (`dbg-feed`): every dial with timestamp, peer (short, pii), address
   (pii), outcome (`OK` ok / `FAILED` danger) and the error reason verbatim
   (e.g. `network unreachable (no IPv6 route on this host)`). Bounded, pausable,

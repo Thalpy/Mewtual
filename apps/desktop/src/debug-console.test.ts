@@ -26,7 +26,12 @@ import {
   maybeRedact,
   redactText,
   routeChip,
+  routeDisplayChip,
+  routeOverviewCounts,
+  routeActionLabel,
+  routeActionScopeLabel,
   routeExplanation,
+  routePathLabel,
   routeState,
   shortTrace,
   shownCount,
@@ -37,8 +42,15 @@ import {
   deviceLines,
   levelClass,
   mediaPathChip,
+  memberRoutesVisible,
+  mergeMemberRoutePoll,
+  mergeMemberRouteRead,
   routeFindings,
+  routeGroupState,
+  routeHistoricalAge,
+  routeIsConnected,
   routeLines,
+  shouldRefreshMemberRoutes,
   voiceLines,
   webrtcChip,
   type DebugDevice,
@@ -102,6 +114,13 @@ const route: MemberRoute = {
   connected: false,
   dial_attempts: 0,
   next_dial_in_ms: 0,
+  health: "claimed_peer_dial_eligible",
+  binding: "self_asserted",
+  active_paths: [],
+  last_success: null,
+  candidate_families: ["ipv4"],
+  candidate_transports: ["quic_v1"],
+  actions: [],
 };
 
 /**
@@ -591,43 +610,99 @@ test("a filtered feed shows its own arithmetic, so it cannot look empty by accid
   assert.equal(shownCount(2, 40), "2 of 40 shown");
 });
 
-test("route state tells the four failures apart that the roster showed as one grey dot", () => {
-  assert.equal(routeState({ ...route, connected: true }), "connected");
-  assert.equal(routeState({ ...route, peer: "" }), "no-record");
-  assert.equal(routeState({ ...route, addresses: [] }), "no-route");
-  assert.equal(routeState({ ...route, dial_attempts: 3 }), "backing-off");
-  assert.equal(routeState(route), "reachable");
+test("backend route health stays authoritative and unknown values fail to unknown", () => {
+  assert.equal(routeState({ ...route, health: "claimed_peer_connected_direct" }), "direct");
+  assert.equal(routeState({ ...route, health: "claimed_peer_connected_relay" }), "relay");
+  assert.equal(routeState({ ...route, health: "claimed_peer_connected_other" }), "connected-other");
+  assert.equal(routeState({ ...route, health: "no_peer_record" }), "no-record");
+  assert.equal(routeState({ ...route, health: "claimed_peer_has_no_route" }), "no-route");
+  assert.equal(routeState({ ...route, health: "claimed_peer_dial_cooling_down" }), "cooldown");
+  assert.equal(routeState(route), "dial-eligible");
+  assert.equal(routeState({ ...route, health: "newer_backend_state" }), "unknown");
+});
+
+test("unknown future health never becomes a connected or isolated verdict", () => {
+  const future = { ...route, connected: true, health: "newer_backend_state" };
+  assert.equal(routeIsConnected(future), false, "the legacy boolean cannot override typed health");
+  assert.equal(routeGroupState([future]), "unknown");
+  assert.equal(
+    routeFindings([future]).find(
+      (finding) => finding.code === "NET.ROUTE.NO_LIVE_MEMBER_CONNECTION",
+    ),
+    undefined,
+  );
 });
 
 test("status colour is a job: failure is danger, holding off is advisory", () => {
-  assert.equal(routeChip("connected").tone, "ok");
+  assert.equal(routeChip("direct").tone, "ok");
+  assert.equal(routeChip("relay").tone, "ok");
   assert.equal(routeChip("no-record").tone, "danger");
   assert.equal(routeChip("no-route").tone, "danger");
-  assert.equal(routeChip("backing-off").tone, "warn");
+  assert.equal(routeChip("cooldown").tone, "warn");
+  assert.equal(routeChip("unknown").label, "UNKNOWN");
 });
 
-test("an IPv6-only member on a host with no IPv6 route is named as exactly that", () => {
-  // The hour of isolation, in one sentence. Every attempt failed instantly and the only trace was
-  // a raw sendmsg warning from inside the QUIC stack.
+test("an unavailable route read turns every retained status into an explicit warning snapshot", () => {
+  assert.deepEqual(routeDisplayChip("direct", true), { label: "LAST: DIRECT PATH", tone: "warn" });
+  assert.deepEqual(routeDisplayChip("no-route", true), { label: "LAST: NO ROUTE", tone: "warn" });
+  assert.deepEqual(routeDisplayChip("direct", false), routeChip("direct"));
+});
+
+test("overview current counts disappear when their only rows are a retained snapshot", () => {
+  assert.deepEqual(routeOverviewCounts([{ ...route, health: "claimed_peer_connected_direct" }], true), {
+    connected: "—",
+    roster: "—",
+  });
+  assert.deepEqual(routeOverviewCounts([{ ...route, health: "claimed_peer_connected_direct" }], false), {
+    connected: "1 / 1",
+    roster: "2",
+  });
+});
+
+test("connected wording preserves the self-asserted transport binding caveat", () => {
+  const said = routeExplanation({ ...route, connected: true, health: "claimed_peer_connected_direct" }, true);
+  assert.match(said, /transport identity/);
+  assert.match(said, /self-asserted/);
+  assert.doesNotMatch(said, /member is (online|live)/i);
+});
+
+test("an IPv6-only cooldown is surfaced as a clue, not an invented route verdict", () => {
   const v6only: MemberRoute = {
     ...route,
     addresses: ["/ip6/2601:441:4581:a5c0::1/udp/23123/quic-v1"],
     dial_attempts: 8,
     next_dial_in_ms: 900_000,
+    health: "claimed_peer_dial_cooling_down",
+    candidate_families: ["ipv6"],
   };
   const said = routeExplanation(v6only, false);
-  assert.match(said, /IPv6/);
-  assert.match(said, /no IPv6 route/);
+  assert.match(said, /IPv6-only/);
+  assert.match(said, /does not measure outbound IPv6/);
+  assert.match(said, /does not prove/);
+  assert.match(said, /does not prove that every candidate was attempted or failed/);
   assert.match(said, /15m/, "and says when it will bother trying again");
 
   const withV6 = routeExplanation(v6only, true);
-  assert.ok(!withV6.includes("no IPv6 route"), "not blamed on the family when the host has one");
+  assert.equal(withV6, said, "an inbound/public observation is not an outbound IPv6 route test");
 });
 
 test("a member with no record is told what is missing and how it arrives", () => {
-  const said = routeExplanation({ ...route, peer: "" }, true);
+  const said = routeExplanation({ ...route, peer: "", health: "no_peer_record", binding: "absent" }, true);
   assert.match(said, /PEX/);
   assert.match(said, /cannot be dialled/);
+});
+
+test("typed paths and recommended actions have safe forward-compatible labels", () => {
+  assert.equal(
+    routePathLabel({ family: "ipv6", transport: "circuit_relay", direction: "listener" }),
+    "IPv6 · circuit relay",
+  );
+  assert.equal(
+    routeActionLabel({ scope: "group", kind: "configure_fallback_node" }),
+    "Configure a trusted fallback node",
+  );
+  assert.equal(routeActionScopeLabel({ scope: "group", kind: "configure_fallback_node" }), "group");
+  assert.match(routeActionLabel({ scope: "future", kind: "future_action" }), /Update Mewtual/);
 });
 
 test("durations read as a countdown, and a sub-second wait is not a stuck zero", () => {
@@ -636,6 +711,77 @@ test("durations read as a countdown, and a sub-second wait is not a stuck zero",
   assert.equal(formatDuration(42_000), "42s");
   assert.equal(formatDuration(200_000), "3m 20s");
   assert.equal(formatDuration(180_000), "3m");
+});
+
+test("historical route age advances locally without inventing negative elapsed time", () => {
+  const historical = {
+    ...route,
+    last_success: {
+      age_ms: 30_000,
+      path: { family: "ipv4", transport: "quic_v1", direction: "dialer" },
+    },
+  };
+  assert.equal(routeHistoricalAge(historical, 1_000, 61_000), 90_000);
+  assert.equal(routeHistoricalAge(historical, 61_000, 1_000), 30_000);
+  assert.equal(routeHistoricalAge(route, 1_000, 61_000), null);
+});
+
+test("member-route refresh decisions are scoped to visible Connectivity", () => {
+  assert.equal(memberRoutesVisible(7, "connectivity"), true);
+  assert.equal(memberRoutesVisible(null, "connectivity"), false);
+  assert.equal(memberRoutesVisible(7, "chat"), false);
+  assert.equal(shouldRefreshMemberRoutes(7, "connectivity", 7), true);
+  assert.equal(shouldRefreshMemberRoutes(7, "connectivity", 8), false);
+  assert.equal(shouldRefreshMemberRoutes(7, "chat", 7), false);
+});
+
+test("asynchronous route answers stay bound to server ids and failures retain marked snapshots", () => {
+  const older = { 1: [{ ...route, fingerprint: "one" }], 2: [{ ...route, fingerprint: "two" }] };
+  const freshTwo = [{ ...route, fingerprint: "two-fresh" }];
+  const merged = mergeMemberRoutePoll(
+    [2, 1, 3],
+    older,
+    [
+      { id: 1, ok: false, rows: [] },
+      { id: 2, ok: true, rows: freshTwo },
+      { id: 99, ok: true, rows: [{ ...route, fingerprint: "removed" }] },
+    ],
+  );
+  assert.equal(merged.routes[1][0].fingerprint, "one");
+  assert.equal(merged.routes[2][0].fingerprint, "two-fresh");
+  assert.deepEqual(merged.routes[3], []);
+  assert.deepEqual([...merged.unavailable].sort(), [1, 3]);
+  assert.equal(merged.routes[99], undefined);
+});
+
+test("main Connectivity retains a failed same-server read and rejects stale-server answers", () => {
+  const previous = [{ ...route, fingerprint: "old" }];
+  const failed = mergeMemberRouteRead(7, 7, previous, false, null);
+  assert.equal(failed.applied, true);
+  assert.equal(failed.unavailable, true);
+  assert.deepEqual(failed.routes, previous);
+
+  const stale = mergeMemberRouteRead(
+    8,
+    7,
+    previous,
+    true,
+    [{ ...route, fingerprint: "wrong-server" }],
+  );
+  assert.equal(stale.applied, false);
+  assert.equal(stale.unavailable, true);
+  assert.deepEqual(stale.routes, previous);
+
+  const recovered = mergeMemberRouteRead(
+    7,
+    7,
+    previous,
+    true,
+    [{ ...route, fingerprint: "fresh" }],
+  );
+  assert.equal(recovered.applied, true);
+  assert.equal(recovered.unavailable, false);
+  assert.equal(recovered.routes[0].fingerprint, "fresh");
 });
 
 test("a copied bundle states its redaction mode and carries the privacy contract", () => {
@@ -705,17 +851,17 @@ const rowLines = (lines: string[]) => lines.filter((l) => !/\[(WARN|DANGER)\]/.t
 
 test("route lines carry the state, the counters and every candidate address", () => {
   const servers = [{ id: 1, name: "Studio" }];
-  const routes = { 1: [{ ...route, dial_attempts: 3, next_dial_in_ms: 42_000 }] };
+  const routes = { 1: [{ ...route, health: "claimed_peer_dial_cooling_down", dial_attempts: 3, next_dial_in_ms: 42_000 }] };
   const [line] = rowLines(routeLines(servers, routes, makeAliases(), false));
   assert.match(line, /^Studio /);
-  assert.match(line, /BACKING OFF/);
-  assert.match(line, /fails=3/);
+  assert.match(line, /DIAL COOLDOWN/);
+  assert.match(line, /submits=3/);
   assert.match(line, /next=42s/);
   assert.match(line, /\/ip4\/203\.0\.113\.9\/udp\/31484\/quic-v1/);
 });
 
 test("a member with no address says so rather than trailing off", () => {
-  const lines = routeLines([{ id: 1, name: "Studio" }], { 1: [{ ...route, addresses: [] }] }, makeAliases(), false);
+  const lines = routeLines([{ id: 1, name: "Studio" }], { 1: [{ ...route, health: "claimed_peer_has_no_route", addresses: [] }] }, makeAliases(), false);
   assert.match(rowLines(lines)[0], /\(no address\)/);
 });
 
@@ -727,12 +873,20 @@ test("a member with no address says so rather than trailing off", () => {
 test("a copied report leads with what is wrong, then the rows it was drawn from", () => {
   const lines = routeLines(
     [{ id: 1, name: "Studio" }],
-    { 1: [{ ...route, addresses: ["/ip6/2001:db8::1/udp/1/quic-v1"], dial_attempts: 2 }] },
+    {
+      1: [{
+        ...route,
+        health: "claimed_peer_dial_cooling_down",
+        addresses: ["/ip6/2001:db8::1/udp/1/quic-v1"],
+        candidate_families: ["ipv6"],
+        dial_attempts: 2,
+      }],
+    },
     makeAliases(),
     false,
     false,
   );
-  assert.match(lines[0], /\[DANGER\] NET\.ROUTE\.NO_IPV6_PATH/);
+  assert.match(lines[0], /\[WARN\] NET\.ROUTE\.IPV6_ONLY/);
   assert.match(lines[0], /^Studio /, "each finding names its server, as the rows do");
   assert.ok(rowLines(lines).length === 1, "and the row still follows");
 });
@@ -740,7 +894,7 @@ test("a copied report leads with what is wrong, then the rows it was drawn from"
 test("a healthy server's report is rows only, with nothing to conclude", () => {
   const lines = routeLines(
     [{ id: 1, name: "Studio" }],
-    { 1: [{ ...route, connected: true }] },
+    { 1: [{ ...route, connected: true, health: "claimed_peer_connected_direct" }] },
     makeAliases(),
     false,
   );
@@ -749,6 +903,21 @@ test("a healthy server's report is rows only, with nothing to conclude", () => {
 
 test("a server with no members contributes nothing rather than an empty row", () => {
   assert.deepEqual(routeLines([{ id: 1, name: "Studio" }], {}, makeAliases(), false), []);
+});
+
+test("an unavailable server copies no retained row as current evidence", () => {
+  const lines = routeLines(
+    [{ id: 1, name: "Studio" }],
+    { 1: [{ ...route, connected: true, health: "claimed_peer_connected_direct" }] },
+    makeAliases(),
+    false,
+    true,
+    new Set([1]),
+  );
+  assert.deepEqual(lines.length, 1);
+  assert.match(lines[0], /\[UNAVAILABLE\]/);
+  assert.match(lines[0], /last snapshot/);
+  assert.doesNotMatch(lines[0], /DIRECT PATH/);
 });
 
 test("voice lines carry every state that decides whether a call is working", () => {
@@ -911,11 +1080,16 @@ const v6 = (fingerprint: string, over: Partial<MemberRoute> = {}): MemberRoute =
   fingerprint,
   addresses: ["/ip6/2001:db8::1/udp/31484/quic-v1"],
   dial_attempts: 3,
+  health: "claimed_peer_dial_cooling_down",
+  candidate_families: ["ipv6"],
   ...over,
 });
 
 test("a healthy server produces no findings at all", () => {
-  const connected = [{ ...route, connected: true }, { ...route, fingerprint: "b", connected: true }];
+  const connected = [
+    { ...route, connected: true, health: "claimed_peer_connected_direct" },
+    { ...route, fingerprint: "b", connected: true, health: "claimed_peer_connected_relay" },
+  ];
   assert.deepEqual(routeFindings(connected, true), []);
 });
 
@@ -924,27 +1098,27 @@ test("a server with nobody else in it is not a reachability problem", () => {
 });
 
 /** The hour-long isolation, as one sentence instead of a pile of multiaddrs. */
-test("v6-only members on a host with no v6 route are named as unreachable forever", () => {
+test("v6-only members are named without claiming the host has no outbound route", () => {
   const found = routeFindings([v6("a"), v6("b")], false);
-  const ipv6 = found.find((f) => f.code === "NET.ROUTE.NO_IPV6_PATH");
+  const ipv6 = found.find((f) => f.code === "NET.ROUTE.IPV6_ONLY");
   assert.ok(ipv6, JSON.stringify(found));
-  assert.equal(ipv6.severity, "danger");
+  assert.equal(ipv6.severity, "warn");
   assert.equal(ipv6.affected, 2);
-  // The actionable part: this is not something retrying fixes.
-  assert.match(ipv6.detail, /Retrying cannot help/);
+  assert.match(ipv6.detail, /does not measure outbound IPv6/);
+  assert.match(ipv6.detail, /cannot prove/);
   assert.ok(!ipv6.detail.includes("2001:db8"), "a finding never carries an address");
 });
 
-test("the same members on a host that has IPv6 are not diagnosed that way", () => {
+test("a public IPv6 observation does not suppress the candidate-shape advisory", () => {
   const found = routeFindings([v6("a"), v6("b")], true);
-  assert.equal(found.find((f) => f.code === "NET.ROUTE.NO_IPV6_PATH"), undefined);
+  assert.equal(found.find((f) => f.code === "NET.ROUTE.IPV6_ONLY")?.affected, 2);
 });
 
 test("a member with no record is a different problem from one with no address", () => {
   const found = routeFindings(
     [
-      { ...route, fingerprint: "a", peer: "" },
-      { ...route, fingerprint: "b", addresses: [] },
+      { ...route, fingerprint: "a", peer: "", health: "no_peer_record" },
+      { ...route, fingerprint: "b", addresses: [], health: "claimed_peer_has_no_route" },
     ],
     true,
   );
@@ -952,30 +1126,40 @@ test("a member with no record is a different problem from one with no address", 
   assert.equal(found.find((f) => f.code === "NET.ROUTE.NO_DIALABLE_ADDRESS")?.affected, 1);
 });
 
-test("total isolation is reported, and after the reason for it", () => {
+test("no live claimed-peer connection is reported without claiming routes are unreachable", () => {
   const found = routeFindings([v6("a"), v6("b")], false);
   const codes = found.map((f) => f.code);
-  assert.ok(codes.includes("NET.ROUTE.ISOLATED"));
+  assert.ok(codes.includes("NET.ROUTE.NO_LIVE_MEMBER_CONNECTION"));
   // A reader scanning from the top meets the explanation before the symptom.
   assert.ok(
-    codes.indexOf("NET.ROUTE.NO_IPV6_PATH") < codes.indexOf("NET.ROUTE.ISOLATED"),
+    codes.indexOf("NET.ROUTE.IPV6_ONLY") < codes.indexOf("NET.ROUTE.NO_LIVE_MEMBER_CONNECTION"),
     codes.join(","),
   );
+  const noLive = found.find((f) => f.code === "NET.ROUTE.NO_LIVE_MEMBER_CONNECTION")!;
+  assert.equal(noLive.severity, "warn");
+  assert.match(noLive.detail, /does not prove their routes are unreachable/);
 });
 
-test("partial reachability is not reported as isolation", () => {
-  const found = routeFindings([v6("a"), { ...route, fingerprint: "b", connected: true }], false);
-  assert.equal(found.find((f) => f.code === "NET.ROUTE.ISOLATED"), undefined);
-  assert.equal(found.find((f) => f.code === "NET.ROUTE.NO_IPV6_PATH")?.affected, 1);
+test("one live claimed-peer connection suppresses the no-live aggregate", () => {
+  const found = routeFindings(
+    [v6("a"), { ...route, fingerprint: "b", connected: true, health: "claimed_peer_connected_direct" }],
+    false,
+  );
+  assert.equal(
+    found.find((f) => f.code === "NET.ROUTE.NO_LIVE_MEMBER_CONNECTION"),
+    undefined,
+  );
+  assert.equal(found.find((f) => f.code === "NET.ROUTE.IPV6_ONLY")?.affected, 1);
 });
 
 test("a member advertising a mix of families is not blamed on IPv6", () => {
   // One usable v4 candidate means the v6 ones are not the explanation.
   const mixed = v6("a", {
     addresses: ["/ip6/2001:db8::1/udp/1/quic-v1", "/ip4/203.0.113.9/udp/1/quic-v1"],
+    candidate_families: ["ipv4", "ipv6"],
   });
   assert.equal(
-    routeFindings([mixed], false).find((f) => f.code === "NET.ROUTE.NO_IPV6_PATH"),
+    routeFindings([mixed], false).find((f) => f.code === "NET.ROUTE.IPV6_ONLY"),
     undefined,
   );
 });
@@ -984,12 +1168,21 @@ test("a finding reads as a sentence for one member and for several", () => {
   // "1 member(s) advertise" is the sort of thing that makes a reader trust the rest a little less.
   const one = routeFindings([v6("a")], false);
   assert.match(one[0].detail, /^1 member advertises only IPv6/);
-  assert.match(one.find((f) => f.code === "NET.ROUTE.ISOLATED").detail, /only other member/);
+  assert.match(
+    one.find((f) => f.code === "NET.ROUTE.NO_LIVE_MEMBER_CONNECTION").detail,
+    /only other member/,
+  );
 
   const many = routeFindings([v6("a"), v6("b"), v6("c")], false);
   assert.match(many[0].detail, /^3 members advertise only IPv6/);
-  assert.match(many.find((f) => f.code === "NET.ROUTE.ISOLATED").detail, /3 other members/);
+  assert.match(
+    many.find((f) => f.code === "NET.ROUTE.NO_LIVE_MEMBER_CONNECTION").detail,
+    /3 other members/,
+  );
 
-  const singleNoRecord = routeFindings([{ ...route, peer: "", connected: false }], true);
+  const singleNoRecord = routeFindings(
+    [{ ...route, peer: "", connected: false, health: "no_peer_record" }],
+    true,
+  );
   assert.match(singleNoRecord[0].detail, /1 member has no signed peer record/);
 });

@@ -133,6 +133,7 @@ async fn joiner_discovers_inviter_via_rendezvous_and_joins_over_real_tcp() {
         peer: discovered.peer.to_bytes(),
         addresses: discovered.addresses.iter().map(|a| a.to_string()).collect(),
         source: Source::Rendezvous(rz_id.to_bytes()),
+        freshness: catcoms_discovery::FreshnessPrincipal::Transport(discovered.peer.to_bytes()),
         seq: 1,
         tag_verified: false,
     };

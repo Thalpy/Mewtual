@@ -102,6 +102,24 @@ table with the commit that closed it.
   but not the metadata/connection cost of probing its new holder. PEX success proves one live
   member connection at that moment; failure means only “not reachable from this device by this
   path,” never offline, removed, or malicious.
+- **Typed member-route health describes a self-asserted claimed peer.** A member's device signature
+  authenticates the `PeerDescriptor` fields it chose; it does not prove control of the transport
+  key named in `peer_id`. A malicious member can claim an unrelated already-connected peer and
+  make its own row inherit that peer's current coarse path evidence. The backend therefore uses
+  `ClaimedPeer*` health variants, exports `binding=self_asserted`, attaches observations only to
+  the signer/member's own row, clears history when the claimed transport identity is replaced or
+  removed, and the UI preserves the caveat. A fresher address epoch for the same stable transport
+  keeps that peer-scoped history; it is still labelled historical and carries no address. This is
+  diagnostic evidence, never authorization, membership proof, “online,” or
+  public reachability. A reciprocal device-to-transport challenge remains required to strengthen
+  it. Raw active snapshots and retained history are capped, deduplicated, session-only,
+  monotonic-aged, and hidden after 24 hours. Transport churn can still backpressure the actor's
+  bounded event queue; connection limits and duplicate-close suppression bound amplification but
+  do not make it free. Unclaimed transport peers do not invalidate the member-only UI projection.
+  A dial-scheduler row proves only that a policy-approved batch was submitted, not that every
+  candidate reached the transport or failed, and the UI does not infer outbound IPv6 capability
+  from inbound/public candidate observations. Current switchboards forward admission only and are
+  not presented as a post-join repair path.
 - **The desktop webview is trusted only while the UI session is unlocked.** An explicit lock keeps
   native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
   the main-window capability reduce injection reach; the native command gate is the enforcement

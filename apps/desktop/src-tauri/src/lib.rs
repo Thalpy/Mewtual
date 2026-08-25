@@ -9,6 +9,7 @@
 //! every forwarded event is tagged with its server id so the UI routes it correctly.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -37,7 +38,7 @@ use catcoms_net::{
     PortMappingTransport, RelayAddressSnapshot, RendezvousTarget,
 };
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
-use catcoms_sync::{join_namespace, JOIN_REPLY_PROOF_KIND};
+use catcoms_sync::{join_namespace, PreOwnerConnectionHandoff, JOIN_REPLY_PROOF_KIND};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
 use serde::{Deserialize, Serialize};
@@ -1696,6 +1697,9 @@ fn forward_events(
                         trace,
                     );
                 }
+                AppEvent::MemberRoutesChanged => {
+                    emit_tracked(&app, "member-routes-changed", ServerEvt { server }, trace);
+                }
                 AppEvent::SwitchboardsChanged => {
                     emit_tracked(&app, "switchboard-changed", ServerEvt { server }, trace);
                 }
@@ -3113,17 +3117,13 @@ async fn reserve_relay_circuit(mesh: &MeshService, relay: &str) -> Result<String
     // Dialing again when the transport was already constructed dialing this relay is harmless
     // (libp2p collapses it onto the existing connection) and is what makes a reload self-contained.
     mesh.dial(relay_addr).await.map_err(|e| e.to_string())?;
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if p == relay_peer {
-                    break;
-                }
-            }
-        }
-    })
+    timeout(
+        Duration::from_secs(20),
+        mesh.wait_for_peer_connected(relay_peer),
+    )
     .await
-    .map_err(|_| "could not connect to the relay".to_string())?;
+    .map_err(|_| "could not connect to the relay".to_string())?
+    .map_err(|_| "the relay transport closed while connecting".to_string())?;
     mesh.listen_on(circuit).await.map_err(|e| e.to_string())?;
     let addr = timeout(Duration::from_secs(20), async {
         loop {
@@ -3159,17 +3159,13 @@ async fn connect_rendezvous(
         .await
         .map_err(|e| e.to_string())?;
     let rz_peer = phase0_peer_id(&rz.peer);
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if p == rz_peer {
-                    break;
-                }
-            }
-        }
-    })
+    timeout(
+        Duration::from_secs(20),
+        mesh.wait_for_peer_connected(rz_peer),
+    )
     .await
-    .map_err(|_| "could not connect to the rendezvous".to_string())?;
+    .map_err(|_| "could not connect to the rendezvous".to_string())?
+    .map_err(|_| "the rendezvous transport closed while connecting".to_string())?;
     Ok(rz)
 }
 
@@ -4275,15 +4271,10 @@ async fn discover_and_connect(
 
     // Wait until at least one rendezvous node is connected.
     let rz_peers: Vec<PeerId> = targets.iter().map(|t| phase0_peer_id(&t.peer)).collect();
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if rz_peers.contains(&p) {
-                    break;
-                }
-            }
-        }
-    })
+    timeout(
+        Duration::from_secs(20),
+        mesh.wait_for_any_connected(&rz_peers),
+    )
     .await
     .map_err(|_| {
         steps.push(DiagStep::failed(
@@ -4296,7 +4287,8 @@ async fn discover_and_connect(
             "timed out connecting to the rendezvous",
         ));
         "timed out connecting to the rendezvous".to_string()
-    })?;
+    })?
+    .map_err(|_| "the rendezvous transport closed while connecting".to_string())?;
     steps.push(DiagStep::ok(
         "rendezvous",
         rz_addrs
@@ -4337,6 +4329,7 @@ async fn discover_and_connect(
                 peer: d.peer.to_bytes(),
                 addresses,
                 source: Source::Rendezvous(root.clone()),
+                freshness: catcoms_discovery::FreshnessPrincipal::Transport(d.peer.to_bytes()),
                 // The record's own signed seq gives the policy real anti-replay freshness; the
                 // backstop remains request_join's Welcome-signature + group-id check, which fails
                 // closed if we dial the wrong peer. tag_verified stays false pre-join (no group
@@ -4402,15 +4395,10 @@ async fn discover_and_connect(
             Err(e) => steps.push(DiagStep::failed("dial", a.clone(), e.to_string())),
         }
     }
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if p == inviter {
-                    break;
-                }
-            }
-        }
-    })
+    timeout(
+        Duration::from_secs(20),
+        mesh.wait_for_peer_connected(inviter),
+    )
     .await
     .map_err(|_| {
         steps.push(DiagStep::failed(
@@ -4419,7 +4407,8 @@ async fn discover_and_connect(
             "none of the dialled addresses answered within 20s",
         ));
         "timed out connecting to the discovered server".to_string()
-    })?;
+    })?
+    .map_err(|_| "the join transport closed while connecting".to_string())?;
     steps.push(DiagStep::ok("connect", "", "connected to the server"));
     // The rendezvous config the joiner keeps for steady-state discovery (re-finding the group).
     let rz_config: Vec<(String, Vec<u8>)> = targets
@@ -4690,17 +4679,11 @@ async fn found_server_inner(
 /// Join an existing server by pasting its invite: decode it, dial all bootstrap addresses,
 /// run the MLS join, then catch up #general / profiles / files.
 async fn wait_for_peer(mesh: &MeshService, wanted: PeerId, within: Duration) -> Result<(), ()> {
-    timeout(within, async {
-        loop {
-            match mesh.next_event().await {
-                Some(TransportEvent::PeerConnected(peer)) if peer == wanted => return,
-                Some(_) => {}
-                None => std::future::pending::<()>().await,
-            }
-        }
-    })
-    .await
-    .map_err(|_| ())
+    timeout(within, mesh.wait_for_peer_connected(wanted))
+        .await
+        .map_err(|_| ())?
+        .map(|_| ())
+        .map_err(|_| ())
 }
 
 /// Wait for whichever peer answers a reply-code dial-back.  The reply candidate is public and
@@ -4708,6 +4691,7 @@ async fn wait_for_peer(mesh: &MeshService, wanted: PeerId, within: Duration) -> 
 /// path distinguishes them and never grants the helper admission authority.
 async fn wait_for_reply_peer(
     mesh: &MeshService,
+    connection_handoff: &mut PreOwnerConnectionHandoff,
     reply: &JoinReply,
     invite_nonce: &[u8; 16],
     within: Duration,
@@ -4735,6 +4719,7 @@ async fn wait_for_reply_peer(
                 Some(TransportEvent::Request { responder, .. }) => {
                     responder.respond(bytes::Bytes::new());
                 }
+                Some(event) if connection_handoff.observe(&event) => {}
                 Some(_) => {}
                 None => std::future::pending::<()>().await,
             }
@@ -4749,23 +4734,50 @@ async fn wait_for_switchboard_peer(
     allowed: &HashMap<PeerId, u64>,
     within: Duration,
 ) -> Result<(PeerId, u64), ()> {
+    let now_ms = SystemClock.now_ms();
+    let mut wanted: Vec<_> = allowed
+        .iter()
+        .filter_map(|(peer, expires_at_ms)| (*expires_at_ms >= now_ms).then_some(*peer))
+        .collect();
     timeout(within, async {
         loop {
-            match mesh.next_event().await {
-                Some(TransportEvent::PeerConnected(peer)) => {
-                    if let Some(expires_at_ms) = allowed.get(&peer).copied() {
-                        if SystemClock.now_ms() <= expires_at_ms {
-                            return (peer, expires_at_ms);
-                        }
-                    }
-                }
-                Some(_) => {}
-                None => std::future::pending::<()>().await,
+            if wanted.is_empty() {
+                return Err(());
             }
+            let connected = mesh.wait_for_any_connected(&wanted).await.map_err(|_| ())?;
+            if let Some(candidate) = accept_or_prune_switchboard_candidate(
+                &mut wanted,
+                allowed,
+                connected.peer,
+                SystemClock.now_ms(),
+            ) {
+                return Ok(candidate);
+            }
+            // The returned row expired while the wait was pending. It has been removed from
+            // `wanted`, so an already-connected valid helper can win the next immediate watch
+            // query instead of the expired row masking it forever.
         }
     })
     .await
-    .map_err(|_| ())
+    .map_err(|_| ())?
+}
+
+/// Accept a still-current switchboard route, or remove an expired/confused candidate before the
+/// caller waits again. Keeping this decision pure makes the two-connected-helper expiry race
+/// deterministic in unit tests.
+fn accept_or_prune_switchboard_candidate(
+    wanted: &mut Vec<PeerId>,
+    allowed: &HashMap<PeerId, u64>,
+    connected: PeerId,
+    now_ms: u64,
+) -> Option<(PeerId, u64)> {
+    if let Some(expires_at_ms) = allowed.get(&connected).copied() {
+        if now_ms <= expires_at_ms {
+            return Some((connected, expires_at_ms));
+        }
+    }
+    wanted.retain(|peer| *peer != connected);
+    None
 }
 
 #[tauri::command]
@@ -5026,6 +5038,7 @@ async fn join_server_inner(
     let mut join_contact = inviter;
     let mut reply_expires_at_ms = None;
     let mut reply_context: Option<JoinReply> = None;
+    let mut connection_handoff = PreOwnerConnectionHandoff::default();
     let mut switchboard_expires_at_ms = None;
     let mut switchboard_contacts = Vec::new();
     if needs_direct_wait {
@@ -5154,6 +5167,7 @@ async fn join_server_inner(
                 let remaining = reply.expires_at_ms.saturating_sub(SystemClock.now_ms());
                 join_contact = wait_for_reply_peer(
                 &mesh,
+                &mut connection_handoff,
                 &reply,
                 &invite.invite_nonce,
                 Duration::from_millis(remaining),
@@ -5215,8 +5229,9 @@ async fn join_server_inner(
             .as_ref()
             .ok_or_else(|| "reply connection was selected without its proof context".to_string())?;
         let reply_joiner_peer = reply.joiner.to_bytes();
-        Server::join_from_reply(
+        Server::join_from_reply_with_handoff(
             mesh,
+            connection_handoff,
             device,
             OsCryptoRng,
             Box::new(SystemClock),
@@ -6735,25 +6750,120 @@ struct MemberRouteEvt {
     addresses: Vec<String>,
     seq: u64,
     connected: bool,
+    /// Policy-approved dial batches submitted for this record epoch, not confirmed failures.
     dial_attempts: u8,
     next_dial_in_ms: u64,
+    health: &'static str,
+    binding: &'static str,
+    active_paths: Vec<ConnectionPathEvt>,
+    last_success: Option<MemberRouteSuccessEvt>,
+    candidate_families: Vec<&'static str>,
+    candidate_transports: Vec<&'static str>,
+    actions: Vec<MemberRouteActionEvt>,
+}
+
+#[derive(Serialize)]
+struct ConnectionPathEvt {
+    family: &'static str,
+    transport: &'static str,
+    direction: &'static str,
+}
+
+#[derive(Serialize)]
+struct MemberRouteSuccessEvt {
+    path: ConnectionPathEvt,
+    age_ms: u64,
+}
+
+#[derive(Serialize)]
+struct MemberRouteActionEvt {
+    scope: &'static str,
+    kind: &'static str,
+}
+
+fn connection_family_name(family: catcoms_rt::ConnectionFamily) -> &'static str {
+    use catcoms_rt::ConnectionFamily::*;
+    match family {
+        Ipv4 => "ipv4",
+        Ipv6 => "ipv6",
+        Dns => "dns",
+        Memory => "memory",
+        Unknown => "unknown",
+    }
+}
+
+fn connection_transport_name(transport: catcoms_rt::ConnectionTransport) -> &'static str {
+    use catcoms_rt::ConnectionTransport::*;
+    match transport {
+        Tcp => "tcp",
+        QuicV1 => "quic_v1",
+        WebSocket => "websocket",
+        CircuitRelay => "circuit_relay",
+        Memory => "memory",
+        Unknown => "unknown",
+    }
+}
+
+fn connection_path_evt(path: catcoms_rt::ConnectionPath) -> ConnectionPathEvt {
+    ConnectionPathEvt {
+        family: connection_family_name(path.family),
+        transport: connection_transport_name(path.transport),
+        direction: match path.direction {
+            catcoms_rt::ConnectionDirection::Dialer => "dialer",
+            catcoms_rt::ConnectionDirection::Listener => "listener",
+        },
+    }
+}
+
+fn member_route_health_name(health: catcoms_sync::MemberRouteHealth) -> &'static str {
+    use catcoms_sync::MemberRouteHealth::*;
+    match health {
+        NoPeerRecord => "no_peer_record",
+        ClaimedPeerHasNoRoute => "claimed_peer_has_no_route",
+        ClaimedPeerConnectedDirect => "claimed_peer_connected_direct",
+        ClaimedPeerConnectedRelay => "claimed_peer_connected_relay",
+        ClaimedPeerConnectedOther => "claimed_peer_connected_other",
+        ClaimedPeerDialCoolingDown => "claimed_peer_dial_cooling_down",
+        ClaimedPeerDialEligible => "claimed_peer_dial_eligible",
+    }
+}
+
+fn member_route_action_evt(action: catcoms_sync::MemberRouteAction) -> MemberRouteActionEvt {
+    use catcoms_sync::{MemberRouteActionKind as Kind, MemberRouteActionScope as Scope};
+    MemberRouteActionEvt {
+        scope: match action.scope {
+            Scope::ThisDevice => "this_device",
+            Scope::MemberDevice => "member_device",
+            Scope::Group => "group",
+        },
+        kind: match action.kind {
+            Kind::WaitForAutomaticRecovery => "wait_for_automatic_recovery",
+            Kind::CheckMemberConnectivity => "check_member_connectivity",
+            Kind::KeepAnotherMemberConnected => "keep_another_member_connected",
+            Kind::ConfigureFallbackNode => "configure_fallback_node",
+        },
+    }
 }
 
 /// What this node knows about reaching each member of a server.
 ///
 /// The question none of the existing views could answer: the roster shows names whether or not
-/// anything can be reached, and presence collapses "no record for them yet", "a record whose only
-/// route is on a network this host cannot use" and "backing off after repeated failures" into one
-/// grey dot. Local state only, so asking costs nothing on the wire.
+/// anything can be reached, and presence collapses "no record for them yet", "a record with no
+/// candidate" and "a submitted dial batch is in scheduler cooldown" into one grey dot. Local
+/// state only, so asking costs nothing on the wire. Submission is not a per-address failure result.
 #[tauri::command]
 async fn get_member_routes(
     state: State<'_, AppState>,
     server: u64,
 ) -> Result<Vec<MemberRouteEvt>, String> {
     let actor = actor_of(&state, server).await?;
-    Ok(actor
-        .member_routes()
-        .await
+    let deadline_clock = SystemClock;
+    let routes = finish_member_route_query_before(
+        actor.try_member_routes(),
+        deadline_clock.sleep(Duration::from_secs(5)),
+    )
+    .await?;
+    Ok(routes
         .into_iter()
         .map(|r| MemberRouteEvt {
             fingerprint: r.fingerprint,
@@ -6763,8 +6873,48 @@ async fn get_member_routes(
             connected: r.connected,
             dial_attempts: r.dial_attempts,
             next_dial_in_ms: r.next_dial_in_ms,
+            health: member_route_health_name(r.health),
+            binding: match r.binding {
+                catcoms_sync::MemberRouteBinding::Absent => "absent",
+                catcoms_sync::MemberRouteBinding::SelfAsserted => "self_asserted",
+            },
+            active_paths: r
+                .active_paths
+                .into_iter()
+                .map(connection_path_evt)
+                .collect(),
+            last_success: r.last_success.map(|success| MemberRouteSuccessEvt {
+                path: connection_path_evt(success.path),
+                age_ms: success.age_ms,
+            }),
+            candidate_families: r
+                .candidate_families
+                .into_iter()
+                .map(connection_family_name)
+                .collect(),
+            candidate_transports: r
+                .candidate_transports
+                .into_iter()
+                .map(connection_transport_name)
+                .collect(),
+            actions: r.actions.into_iter().map(member_route_action_evt).collect(),
         })
         .collect())
+}
+
+/// Bound a present-time diagnostic query so a busy server actor becomes an explicit unavailable
+/// snapshot instead of leaving old green rows labelled as current indefinitely.
+async fn finish_member_route_query_before<T, Q, D>(query: Q, deadline: D) -> Result<T, String>
+where
+    Q: Future<Output = Result<T, String>>,
+    D: Future<Output = ()>,
+{
+    tokio::pin!(query);
+    tokio::pin!(deadline);
+    tokio::select! {
+        result = &mut query => result,
+        _ = &mut deadline => Err("member-route snapshot timed out".to_string()),
+    }
 }
 
 /// Delivery state for this device's recent messages in a channel; the seed a UI paints on open,
@@ -10502,17 +10652,13 @@ async fn join_one_grant(
     })?;
     let (mesh, _id) = MeshService::new_tcp(None, &addrs).map_err(|e| e.to_string())?;
     let mesh_handle = mesh.handle();
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if p == contact {
-                    break;
-                }
-            }
-        }
-    })
+    timeout(
+        Duration::from_secs(20),
+        mesh.wait_for_peer_connected(contact),
+    )
     .await
-    .map_err(|_| "timed out connecting to the server".to_string())?;
+    .map_err(|_| "timed out connecting to the server".to_string())?
+    .map_err(|_| "the server transport closed while connecting".to_string())?;
 
     let name = grant.server_name.clone();
     let mut server = Server::join_with_grant(
@@ -11950,6 +12096,26 @@ mod tests {
     use super::*;
     use catcoms_rt::ManualClock;
 
+    #[tokio::test]
+    async fn a_stalled_member_route_query_becomes_an_unavailable_snapshot() {
+        let clock = ManualClock::new(0);
+        let deadline_clock = clock.clone();
+        let query = tokio::spawn(async move {
+            finish_member_route_query_before(
+                std::future::pending::<Result<(), String>>(),
+                deadline_clock.sleep(Duration::from_secs(5)),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        clock.advance_ms(5_000);
+
+        assert_eq!(
+            query.await.unwrap().unwrap_err(),
+            "member-route snapshot timed out"
+        );
+    }
+
     /// A canonical event as it reaches the webview.
     ///
     /// The last hop of P3-005, and the one worth testing separately: the canonical model and the
@@ -12087,7 +12253,10 @@ mod tests {
             "the fix is a passphrase, and the advice has to say so"
         );
 
-        assert_eq!(ActorLookup::NotOpen.code().code(), "SERVER.ACTOR.UNAVAILABLE");
+        assert_eq!(
+            ActorLookup::NotOpen.code().code(),
+            "SERVER.ACTOR.UNAVAILABLE"
+        );
         assert_eq!(
             ActorLookup::NotOpen.code().remediation(),
             Some(errors::Remediation::Restart)
@@ -13714,6 +13883,26 @@ mod tests {
     }
 
     #[test]
+    fn an_expired_connected_switchboard_cannot_mask_another_live_candidate() {
+        let expired = PeerId::from_u64(70);
+        let valid = PeerId::from_u64(71);
+        let allowed = HashMap::from([(expired, 1_000), (valid, 2_000)]);
+        let mut wanted = vec![expired, valid];
+
+        assert_eq!(
+            accept_or_prune_switchboard_candidate(&mut wanted, &allowed, expired, 1_001),
+            None,
+            "a route that expires while the watch is pending must not abort the whole join"
+        );
+        assert_eq!(wanted, vec![valid]);
+        assert_eq!(
+            accept_or_prune_switchboard_candidate(&mut wanted, &allowed, valid, 1_001),
+            Some((valid, 2_000)),
+            "the next already-connected, still-endorsed helper remains usable"
+        );
+    }
+
+    #[test]
     fn switchboard_host_eligibility_requires_a_public_literal_even_for_relays() {
         let relay = test_libp2p_peer(70);
         let client = test_libp2p_peer(71);
@@ -15128,5 +15317,98 @@ mod tests {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| display_name.clone());
         assert_eq!(name, "DM with Friend");
+    }
+
+    #[test]
+    fn member_route_enums_have_stable_exhaustive_webview_names() {
+        use catcoms_rt::{ConnectionFamily as Family, ConnectionTransport as Transport};
+        use catcoms_sync::{
+            MemberRouteAction, MemberRouteActionKind as Kind, MemberRouteActionScope as Scope,
+            MemberRouteHealth as Health,
+        };
+
+        assert_eq!(
+            [
+                Family::Ipv4,
+                Family::Ipv6,
+                Family::Dns,
+                Family::Memory,
+                Family::Unknown,
+            ]
+            .map(connection_family_name),
+            ["ipv4", "ipv6", "dns", "memory", "unknown"]
+        );
+        assert_eq!(
+            [
+                Transport::Tcp,
+                Transport::QuicV1,
+                Transport::WebSocket,
+                Transport::CircuitRelay,
+                Transport::Memory,
+                Transport::Unknown,
+            ]
+            .map(connection_transport_name),
+            [
+                "tcp",
+                "quic_v1",
+                "websocket",
+                "circuit_relay",
+                "memory",
+                "unknown",
+            ]
+        );
+        assert_eq!(
+            [
+                Health::NoPeerRecord,
+                Health::ClaimedPeerHasNoRoute,
+                Health::ClaimedPeerConnectedDirect,
+                Health::ClaimedPeerConnectedRelay,
+                Health::ClaimedPeerConnectedOther,
+                Health::ClaimedPeerDialCoolingDown,
+                Health::ClaimedPeerDialEligible,
+            ]
+            .map(member_route_health_name),
+            [
+                "no_peer_record",
+                "claimed_peer_has_no_route",
+                "claimed_peer_connected_direct",
+                "claimed_peer_connected_relay",
+                "claimed_peer_connected_other",
+                "claimed_peer_dial_cooling_down",
+                "claimed_peer_dial_eligible",
+            ]
+        );
+
+        let scopes = [Scope::ThisDevice, Scope::MemberDevice, Scope::Group].map(|scope| {
+            member_route_action_evt(MemberRouteAction {
+                scope,
+                kind: Kind::WaitForAutomaticRecovery,
+            })
+            .scope
+        });
+        assert_eq!(scopes, ["this_device", "member_device", "group"]);
+
+        let kinds = [
+            Kind::WaitForAutomaticRecovery,
+            Kind::CheckMemberConnectivity,
+            Kind::KeepAnotherMemberConnected,
+            Kind::ConfigureFallbackNode,
+        ]
+        .map(|kind| {
+            member_route_action_evt(MemberRouteAction {
+                scope: Scope::Group,
+                kind,
+            })
+            .kind
+        });
+        assert_eq!(
+            kinds,
+            [
+                "wait_for_automatic_recovery",
+                "check_member_connectivity",
+                "keep_another_member_connected",
+                "configure_fallback_node",
+            ]
+        );
     }
 }

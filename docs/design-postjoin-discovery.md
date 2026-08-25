@@ -32,11 +32,14 @@ Adversarial review follows [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md).
 - [ ] Add an optional, tightly bounded previous-address-epoch grace window (one record, minutes,
   current routes first); never build an indefinite address history.
 - [ ] Add authenticated reciprocal-dial signalling through an already connected member.
-- [ ] Track bounded pairwise reachability evidence by address family and transport.
+- [x] Track bounded, session-only pairwise reachability evidence by address family and transport;
+  keep aggregate connect/disconnect authoritative, handle concurrent relay/direct paths, and expire
+  historical successes after 24 hours.
 - [ ] Add SWIM-style indirect probes without equating suspicion with membership removal.
 - [ ] Split topology maintenance into HyParView-like active/passive views and randomized promotion.
 - [ ] Add CYCLON-like age-biased, source-diverse passive-view shuffles.
-- [ ] Surface typed per-device health and safe personal/group actions in Connectivity.
+- [x] Surface typed per-device claimed-route health and safe personal/group actions in
+  Connectivity/debug output without equating local unreachability with offline presence.
 - [ ] Add an explicit manual fallback-redial action for a completely isolated member.
 - [ ] Make rendezvous renewal TTL-aware instead of re-registering every discovery tick.
 
@@ -109,7 +112,8 @@ detector needed from it is served by roster-backed confirmation instead (the P8 
   `transport.rendezvous_register(ns, rz_node)` (advertise our external addrs under the member-only
   namespace) and `transport.rendezvous_discover(ns, rz_node)`.
 - `next_discovered()` (async): delegate to `transport.next_discovered()`.
-- `ingest_discovered(d)` (async): build a `Candidate { source: Rendezvous(rz_node), seq,
+- `ingest_discovered(d)` (async): build a `Candidate { peer: canonical_transport_peer,
+  source: Rendezvous(rz_node), freshness: Transport(canonical_transport_peer), seq,
   tag_verified: false }`, apply the retry deadline, then call
   `DiscoveryPolicy::plan(roster = member_count)`. Only policy-granted dials receive retry state;
   budget-deferred candidates remain eligible. Every surviving address must be canonical and end
@@ -142,7 +146,9 @@ their separate validator and lifecycle rather than being claimed here.
 ## Scope / deferred
 - **Record seq; DONE (follow-up):** the discovered record's signed `seq` is now surfaced
   (`Discovered`/`DiscoveredPeer`/`Candidate`), so the `DiscoveryPolicy`'s anti-replay freshness is
-  live (was inert under the placeholder `seq=1`).
+  live (was inert under the placeholder `seq=1`). Freshness is signer-scoped: cached member
+  descriptors use `Device(device_id)` while rendezvous records use `Transport(peer_id)`; both may
+  merge into the same canonical transport dial target without either sequence pinning the other.
 - **`EclipseDetector` surfacing; DONE (follow-up):** `ChannelSync::observe_eclipse` feeds the
   hysteretic detector (R = roster, D = reachable member peers + self, S = distinct rendezvous roots);
   the actor emits `EclipseChanged{caution}` on a change and the UI shows an advisory banner. Strictly
@@ -164,13 +170,14 @@ their separate validator and lifecycle rather than being claimed here.
   signed peer-record epoch before PEX in that same pass. Exact ownership prevents a disappearing
   raw GUA from removing an identical live PCPv6/manual route. The roughly-minute discovery poll
   remains active as the portable repair path if platform monitoring fails or misses an event.
-- **Pairwise reachability and general post-join reciprocal dial signalling:** not yet represented.
+- **Pairwise reachability: DONE; general post-join reciprocal dial signalling: not yet represented.**
   The invite `JoinReply` proof retry now has a connected-only network command and cannot implicitly
   redial from the ordinary recent-peer cache after the endpoint scheduler refuses a pass. A
   connected member
-  can distribute signed records, but it does not yet carry a bounded, authenticated “please dial
-  this member's fresh candidate now” signal or report which address/transport worked from its own
-  vantage point.
+  can distribute signed records, and each device now retains bounded local path evidence for
+  records that claim a live transport. It does not yet carry a bounded, authenticated “please dial
+  this member's fresh candidate now” signal or authenticated evidence of which address/transport
+  worked from another member's vantage point.
 
 ## Reciprocal-dial design after adversarial review
 
@@ -269,11 +276,27 @@ unconfirmed candidates without deleting the member. SWIM-style indirect probes c
 active members whether they can reach a suspect peer. “Unreachable from me” must remain distinct
 from “offline” and must never remove a member.
 
-The product-facing model should be typed per device: `connected_direct`, `connected_relay`,
-`reachable_via_member`, `retrying`, `no_current_route`, last successful contact, candidate families,
-and the next safe actions. Personal actions include reopening/forwarding the stable port or sharing
-a fresh reply code; group actions include enabling a reachable switchboard or configuring a
-relay/rendezvous node. No single peer's failed probe is a global health verdict.
+The product-facing model is now typed per device record: `claimed_peer_connected_direct`,
+`claimed_peer_connected_relay`, `claimed_peer_connected_other`,
+`claimed_peer_dial_cooling_down`,
+`claimed_peer_dial_eligible`, `claimed_peer_has_no_route`, and `no_peer_record`, plus current path
+families/transports, a time-bounded last successful path, candidate families/transports, and typed
+personal/member/group actions. `reachable_via_member` remains deliberately absent until an
+authenticated indirect-probe/helper protocol provides that evidence. No single peer's failed probe
+is a global health verdict.
+
+`claimed_peer_dial_cooling_down` means a policy-approved dial batch was submitted and its scheduler
+deadline has not elapsed. The current transport seam does not report a per-address dial result, so
+the counter is not labelled as attempts that reached the transport or failures. Likewise,
+IPv6-only candidates are shown as a clue: an advertised/public IPv6 observation is not an outbound
+route test and cannot prove why a connection did not open. Current switchboards remain bounded
+**admission-only** forwarders; they are not offered as a repair action for already-joined members.
+
+The `claimed_peer_` prefix and `self_asserted` binding are load-bearing. A member signs the
+`PeerDescriptor` containing its transport id, but the current protocol does not prove that its
+device key controls that libp2p key. Active path observations can therefore refine the route named
+by the member's record, but cannot yet prove the person/device is online. A later reciprocal
+challenge must bind both keys before product wording may remove that qualification.
 
 ## Security
 Discovery only *surfaces* candidates; the `DiscoveryPolicy` ranks dials (budget-bounded,

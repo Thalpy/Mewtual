@@ -3,8 +3,8 @@
    * The in-app debug console (`docs/design-debug-console.md`).
    *
    * The app used to fail silently: a call died while the roster still showed the peer online, and a
-   * node sat isolated for an hour dialling addresses it could never reach with not one dial failure
-   * surfaced anywhere. This is the live view of what the diagnostics know, segmented so the failing
+   * node sat isolated for an hour submitting dial batches with no connection and none of that
+   * activity surfaced anywhere. This is the live view of what the diagnostics know, segmented so the failing
    * layer is findable in seconds: is it the network, the voice stack, the backend, or the frontend?
    *
    * Capture is native and always on (`catcoms-log`'s ring). This polls it while open, so a closed
@@ -34,7 +34,6 @@
     collectAllEvents,
     copyBundle,
     deviceLines,
-    dropNote,
     eventLine,
     eventParts,
     filterEvents,
@@ -43,13 +42,24 @@
     isFrontend,
     latestSeq,
     levelClass,
+    retentionStatus,
+    sinkLines,
+    sinkSummary,
     makeAliases,
     maybeRedact,
     mediaPathChip,
-    routeChip,
+    mergeMemberRoutePoll,
+    routeDisplayChip,
+    routeActionLabel,
+    routeActionScopeLabel,
     routeExplanation,
     routeFindings,
+    routeGroupState,
+    routeOverviewCounts,
+    routeIsConnected,
+    routeIsDisconnected,
     routeLines,
+    routePathLabel,
     routeState,
     shownCount,
     taskChip,
@@ -57,6 +67,7 @@
     voiceLines,
     webrtcChip,
     type CaptureConfig,
+    type DebugLogSink,
     type DbgSection,
     type DebugDevice,
     type DebugServer,
@@ -121,6 +132,10 @@
     session_id: "",
   });
   let capture = $state<CaptureConfig | null>(null);
+  // What the log file is actually doing, as opposed to what was asked of it. Null until the first
+  // read succeeds, and the retention notice says so rather than assuming either way: the command
+  // needs an unlocked session, so a console opened over a locked vault genuinely does not know.
+  let logSink = $state<DebugLogSink | null>(null);
   /** Which mode the user has asked for but not yet confirmed. Empty when nothing is pending. */
   let pendingMode = $state("");
   let captureError = $state("");
@@ -136,6 +151,8 @@
   /** Shared by every feed: a trace pasted from an error banner narrows all of them at once. */
   let traceFilter = $state("");
   let routes = $state<Record<number, MemberRoute[]>>({});
+  /** Servers whose latest route read failed. Prior rows remain visible but are explicitly stale. */
+  let routeUnavailable = $state<Set<number>>(new Set());
   let taskHealth = $state<TaskHealth[]>([]);
   let voicePeers = $state<DebugVoicePeer[]>([]);
   let expanded = $state("");
@@ -207,14 +224,20 @@
     try {
       // Concurrently rather than one after another: these are independent local reads, and a
       // sequential walk made the whole refresh as slow as the sum of every server on the list.
+      // Bind every answer to the id captured before the await. Re-reading `servers` by array index
+      // afterward can put A's fingerprints and addresses under B when props reorder mid-poll.
+      const requested = servers.map((server) => ({
+        id: server.id,
+        answer: invoke<MemberRoute[]>("get_member_routes", { server: server.id })
+          .then((rows) => ({ ok: true as const, rows }))
+          .catch(() => ({ ok: false as const, rows: [] as MemberRoute[] })),
+      }));
       const answers = await Promise.all(
-        servers.map((s) =>
-          invoke<MemberRoute[]>("get_member_routes", { server: s.id }).catch(() => [] as MemberRoute[]),
-        ),
+        requested.map(async ({ id, answer }) => ({ id, ...(await answer) })),
       );
-      const next: Record<number, MemberRoute[]> = {};
-      servers.forEach((s, at) => (next[s.id] = answers[at]));
-      routes = next;
+      const merged = mergeMemberRoutePoll(servers.map((server) => server.id), routes, answers);
+      routes = merged.routes;
+      routeUnavailable = merged.unavailable;
     } finally {
       pollingRoutes = false;
     }
@@ -225,6 +248,15 @@
       taskHealth = await invoke<TaskHealth[]>("get_task_health");
     } catch {
       /* the panel simply does not render; supervision itself is unaffected */
+    }
+  }
+
+  async function pollSink() {
+    try {
+      logSink = await invoke<DebugLogSink>("get_debug_logging");
+    } catch {
+      // Left as it was rather than cleared: a single failed read is not evidence the file stopped,
+      // and dropping to "unknown" on a transient error would be its own false statement.
     }
   }
 
@@ -245,6 +277,7 @@
     void pollLog();
     void pollRoutes();
     void pollTasks();
+    void pollSink();
     const timer = setInterval(() => {
       // Paused freezes the view, not the capture: the ring keeps filling natively and a resume
       // shows what arrived. Skipping the poll instead would lose it.
@@ -257,6 +290,10 @@
       // the rail badge is the point: a dead forwarder should be visible from whichever section
       // somebody happened to open.
       if (tick % ROUTE_TICKS === 0) void pollTasks();
+      // The sink's own counters move only when it writes, fails or hits its quota, so this does
+      // not need the log's cadence either. It has to keep being read rather than sampled once:
+      // a sink that fails or fills up mid-session is exactly when the retention notice matters.
+      if (tick % ROUTE_TICKS === 0) void pollSink();
       voicePeers = voice();
     }, 1000);
     return () => clearInterval(timer);
@@ -339,11 +376,12 @@
   const backWarns = $derived(backend.filter((e) => e.level === "WARN").length);
   const frontErrors = $derived(frontend.filter((e) => e.level === "ERROR").length);
   const frontWarns = $derived(frontend.filter((e) => e.level === "WARN").length);
-  /** Members this node cannot currently reach, across every server: the Network badge. */
+  /** Members this node cannot currently reach, excluding servers whose retained rows are stale. */
   const unreachable = $derived(
-    Object.values(routes)
-      .flat()
-      .filter((r) => routeState(r) !== "connected").length,
+    Object.entries(routes)
+      .filter(([server]) => !routeUnavailable.has(Number(server)))
+      .flatMap(([, rows]) => rows)
+      .filter(routeIsDisconnected).length,
   );
   /**
    * The network section: transport, reachability, discovery and join.
@@ -374,8 +412,8 @@
       .slice(-4)
       .reverse(),
   );
-  /** Whether this device has any usable IPv6 route, which decides how a v6-only peer is explained. */
-  const hasIpv6 = $derived((device?.public_ipv6.length ?? 0) > 0);
+  /** An inbound/public candidate observation only; deliberately not an outbound IPv6 route test. */
+  const hasPublicIpv6Observation = $derived((device?.public_ipv6.length ?? 0) > 0);
   /**
    * Background tasks in a state somebody should be told about.
    *
@@ -435,7 +473,7 @@
       { version, at: Date.now(), redacted: redact, capture: stats.capture, session: stats.session_id },
       [
         { title: "this device", lines: deviceLines(device, aliases, redact) },
-        { title: "reachability", lines: routeLines(servers, routes, aliases, redact, hasIpv6) },
+        { title: "reachability", lines: routeLines(servers, routes, aliases, redact, hasPublicIpv6Observation, routeUnavailable) },
         { title: "call peers", lines: voiceLines(voicePeers, aliases, redact) },
         // The event sections follow the console's own rail order, so a reader who has seen the
         // screen knows where to look in the file.
@@ -649,24 +687,30 @@
             {#if servers.length}
               <div class="dbg-table-wrap">
                 <table class="dbg-table">
-                  <thead><tr><th>Server</th><th class="num">Reachable</th><th class="num">Roster</th><th>State</th></tr></thead>
+                  <thead><tr><th>Server</th><th class="num">Claimed peers connected</th><th class="num">Roster</th><th>State</th></tr></thead>
                   <tbody>
                     {#each servers as s (s.id)}
                       {@const rows = routes[s.id] ?? []}
-                      {@const live = rows.filter((r) => r.connected).length}
+                      {@const unavailable = routeUnavailable.has(s.id)}
+                      {@const counts = routeOverviewCounts(rows, unavailable)}
+                      {@const state = unavailable ? "unavailable" : routeGroupState(rows)}
                       <tr>
                         <td class="name-cell">{s.name}</td>
-                        <td class="num">{live} / {rows.length}</td>
-                        <td class="num">{rows.length + 1}</td>
+                        <td class="num">{counts.connected}</td>
+                        <td class="num">{counts.roster}</td>
                         <td>
-                          {#if rows.length === 0}
+                          {#if state === "unavailable"}
+                            <span class="chip warn">UNAVAILABLE</span>
+                          {:else if state === "alone"}
                             <span class="chip faint">ALONE</span>
-                          {:else if live === rows.length}
-                            <span class="chip ok">ALL REACHED</span>
-                          {:else if live === 0}
-                            <span class="chip danger">NONE REACHED</span>
+                          {:else if state === "all-connected"}
+                            <span class="chip ok">ALL CLAIMED PEERS CONNECTED HERE</span>
+                          {:else if state === "none-connected"}
+                            <span class="chip warn">NO CLAIMED PEER CONNECTED HERE</span>
+                          {:else if state === "partial"}
+                            <span class="chip warn">SOME CLAIMED PEERS CONNECTED HERE</span>
                           {:else}
-                            <span class="chip warn">PARTIAL</span>
+                            <span class="chip warn">UNKNOWN</span>
                           {/if}
                         </td>
                       </tr>
@@ -674,6 +718,7 @@
                   </tbody>
                 </table>
               </div>
+              <p class="muted small">These are local connections to self-asserted transport peers from signed member records. They do not prove the person is online or reachable from another network.</p>
             {:else}
               <div class="dbg-empty">No servers joined yet. Reachability below still describes this device.</div>
             {/if}
@@ -703,18 +748,34 @@
                   {#if device.router_maps}<span class="chip ok">YES</span>{:else}<span class="chip warn">NO</span>{/if}
                 </span>
               </div>
-              {#if !hasIpv6}
-                <!-- The failure that stranded a node for an hour: every dial went to an IPv6
-                     address this machine has no route to, and failed instantly. -->
-                <p class="dbg-note">
-                  No usable IPv6 route on this device. A member whose record advertises only
-                  IPv6 addresses cannot be dialled from here at all, and each attempt fails
-                  immediately rather than timing out.
-                </p>
-              {/if}
+              <p class="dbg-note">Public IPv6 observations describe inbound candidates, not a test of this device's outbound IPv6 route.</p>
               <p class="dbg-note">{device.advice}</p>
             {:else}
               <div class="dbg-empty">No reachability report yet. Open a server, or use Settings, Connection, Diagnostics.</div>
+            {/if}
+          </div>
+
+          <!-- What the log file is doing, as opposed to what was asked of it. Shown here because
+               the retention notice down in the feeds points at it: telling somebody the file "may
+               hold more" is only useful next to somewhere they can check whether it exists. Every
+               row is the sink's own reported state, never the preference. -->
+          <div class="dbg-card">
+            <div class="dbg-card-h">
+              <span>Debug log file</span>
+              <span class="dbg-card-actions">
+                <button class="ghost small" onclick={() => copy("sink", sinkLines(logSink).join("\n"))}>
+                  {copied === "sink" ? "Copied" : "Copy"}
+                </button>
+              </span>
+            </div>
+            <p class="dbg-note dbg-tone-{sinkSummary(logSink).tone}">{sinkSummary(logSink).text}</p>
+            {#if logSink}
+              <div class="dbg-kv">
+                {#each sinkLines(logSink) as row (row)}
+                  <span class="k">{row.slice(0, row.indexOf(":"))}</span>
+                  <span class="v">{row.slice(row.indexOf(":") + 1).trim()}</span>
+                {/each}
+              </div>
             {/if}
           </div>
 
@@ -741,10 +802,11 @@
         <div class="dbg-sec">
           {#each servers as s (s.id)}
             {@const rows = routes[s.id] ?? []}
-            {@const findings = routeFindings(rows, hasIpv6)}
+            {@const unavailable = routeUnavailable.has(s.id)}
+            {@const findings = unavailable ? [] : routeFindings(rows, hasPublicIpv6Observation)}
             {#if findings.length}
-              <!-- Conclusions, above the table they were drawn from. Working this out used to mean
-                   reading multiaddrs one at a time and knowing whether this host had IPv6. -->
+              <!-- Conclusions, above the table they were drawn from. Candidate families are
+                   observable here; outbound route capability is not. -->
               <div class="dbg-card">
                 <div class="dbg-card-h"><span>{s.name}: what is wrong</span></div>
                 {#each findings as f (f.code)}
@@ -759,18 +821,21 @@
               <div class="dbg-card-h">
                 <span>{s.name}</span>
                 <span class="dbg-card-actions">
-                  <button class="ghost small" onclick={() => copy("routes", routeLines(servers, routes, aliases, redact, hasIpv6).join("\n"))}>
+                  <button class="ghost small" onclick={() => copy("routes", routeLines(servers, routes, aliases, redact, hasPublicIpv6Observation, routeUnavailable).join("\n"))}>
                     {copied === "routes" ? "Copied" : "Copy"}
                   </button>
                 </span>
               </div>
+              {#if unavailable}
+                <p class="dbg-note warn">Member-route refresh is unavailable. Any rows below are the last snapshot and are not current reachability evidence.</p>
+              {/if}
               {#if rows.length}
                 <div class="dbg-table-wrap">
                   <table class="dbg-table">
-                    <thead><tr><th></th><th>Member</th><th>Peer</th><th>State</th><th class="num">Routes</th><th class="num">Seq</th><th class="num">Fails</th><th>Next dial</th></tr></thead>
+                    <thead><tr><th></th><th>Member</th><th>Peer</th><th>State</th><th class="num">Routes</th><th class="num">Seq</th><th class="num">Dial batches</th><th>Cooldown</th></tr></thead>
                     <tbody>
                       {#each rows as r (r.fingerprint)}
-                        {@const chip = routeChip(routeState(r))}
+                        {@const chip = routeDisplayChip(routeState(r), unavailable)}
                         {@const key = `${s.id}:${r.fingerprint}`}
                         <tr class="dbg-row-toggle" onclick={() => (expanded = expanded === key ? "" : key)}>
                           <td>{expanded === key ? "▾" : "▸"}</td>
@@ -779,13 +844,26 @@
                           <td><span class="chip {chip.tone}">{chip.label}</span></td>
                           <td class="num">{r.addresses.length}</td>
                           <td class="num">{r.seq}</td>
-                          <td class="num" class:bad={r.dial_attempts > 0}>{r.dial_attempts}</td>
+                          <td class="num">{r.dial_attempts}</td>
                           <td>{r.next_dial_in_ms > 0 ? formatDuration(r.next_dial_in_ms) : "-"}</td>
                         </tr>
                         {#if expanded === key}
                           <tr class="dbg-row-detail">
                             <td colspan="8">
-                              <div class="muted small">{routeExplanation(r, hasIpv6)}</div>
+                              <div class="muted small">{unavailable ? "This retained row cannot establish the member's current connection state." : routeExplanation(r, hasPublicIpv6Observation)}</div>
+                              {#if r.active_paths.length}
+                                <div class="muted small">{unavailable ? "Last snapshot paths" : "Current paths"}: {r.active_paths.map(routePathLabel).join(", ")}</div>
+                              {/if}
+                              {#if r.last_success}
+                                <div class="muted small">{unavailable ? "At the last snapshot, the last path had opened" : "Last path opened"} {formatDuration(r.last_success.age_ms)} ago: {routePathLabel(r.last_success.path)} (historical only).</div>
+                              {/if}
+                              {#if !unavailable && r.actions.length}
+                                <ul>
+                                  {#each r.actions as action}
+                                    <li>{routeActionLabel(action)} <span class="muted">({routeActionScopeLabel(action)})</span></li>
+                                  {/each}
+                                </ul>
+                              {/if}
                               {#if r.addresses.length}
                                 <ul>
                                   {#each r.addresses as a (a)}
@@ -800,6 +878,8 @@
                     </tbody>
                   </table>
                 </div>
+              {:else if unavailable}
+                <div class="dbg-empty">No retained member-route snapshot is available.</div>
               {:else}
                 <div class="dbg-empty">No other members on this server yet.</div>
               {/if}
@@ -913,7 +993,24 @@
             </div>
             <div class="dbg-feed-scroll h-lg" role="log">
               {#if stats.dropped > 0}
-                <div class="dbg-drop-note">{dropNote(stats.dropped, events.length)}</div>
+                {@const retention = retentionStatus({
+                  dropped: stats.dropped,
+                  kept: events.length,
+                  sink: logSink,
+                  filtered: stats.filtered,
+                  events,
+                })}
+                <div class="dbg-drop-note dbg-tone-{retention.tone}">
+                  <div>{retention.ring}</div>
+                  <div>{retention.sink}</div>
+                  {#if retention.caveats.length}
+                    <ul class="dbg-drop-caveats">
+                      {#each retention.caveats as caveat (caveat.code)}
+                        <li>{caveat.text}</li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </div>
               {/if}
               {#if backShown.length}
                 {#each backShown as e (e.seq)}

@@ -133,6 +133,7 @@ async fn joiner_discovers_inviter_via_join_ns_then_joins_with_no_hardcoded_addr(
         peer: discovered.peer.to_bytes(),
         addresses: discovered.addresses.iter().map(|a| a.to_string()).collect(),
         source: Source::Rendezvous(rz_id.to_bytes()),
+        freshness: catcoms_discovery::FreshnessPrincipal::Transport(discovered.peer.to_bytes()),
         seq: 1,
         tag_verified: false,
     };

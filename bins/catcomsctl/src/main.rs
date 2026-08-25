@@ -663,15 +663,16 @@ async fn run_serve(
     if let Some(r) = &relay {
         // Wait for the relay connection (TCP+Noise+identify) before reserving, so
         // the relay-client transport has a connection to reserve over.
-        timeout(Duration::from_secs(20), async {
-            loop {
-                if let Some(TransportEvent::PeerConnected(_)) = mesh.next_event().await {
-                    break;
-                }
-            }
-        })
+        let relay_addr: Multiaddr = r.parse()?;
+        let relay_peer = catcoms_net::target_peer_in_multiaddr(&relay_addr)
+            .map(|peer| phase0_peer_id(&peer))
+            .ok_or("relay address has no peer id")?;
+        timeout(
+            Duration::from_secs(20),
+            mesh.wait_for_peer_connected(relay_peer),
+        )
         .await
-        .map_err(|_| "could not connect to the relay")?;
+        .map_err(|_| "could not connect to the relay")??;
         let circuit: Multiaddr = format!("{r}/p2p-circuit").parse()?;
         mesh.listen_on(circuit).await?;
         let circuit_addr = timeout(Duration::from_secs(20), async {
@@ -748,17 +749,12 @@ async fn run_serve(
     if let Some(t) = &rz_target {
         let rz_phase0 = phase0_peer_id(&t.peer);
         sync.transport().dial(t.addr.clone()).await?;
-        timeout(Duration::from_secs(20), async {
-            loop {
-                match sync.transport().next_event().await {
-                    Some(TransportEvent::PeerConnected(p)) if p == rz_phase0 => break,
-                    Some(_) => continue,
-                    None => break,
-                }
-            }
-        })
+        timeout(
+            Duration::from_secs(20),
+            sync.transport().wait_for_peer_connected(rz_phase0),
+        )
         .await
-        .map_err(|_| "could not connect to the rendezvous")?;
+        .map_err(|_| "could not connect to the rendezvous")??;
         sync.transport()
             .add_external_address(format!("/ip4/{host}/tcp/{port}").parse()?)
             .await?;
@@ -861,6 +857,7 @@ async fn run_join_via_rendezvous(invite: InviteToken) -> Result<(), Box<dyn Erro
         peer: discovered.peer.to_bytes(),
         addresses: discovered.addresses.iter().map(|a| a.to_string()).collect(),
         source: Source::Rendezvous(rz.peer.to_bytes()),
+        freshness: catcoms_discovery::FreshnessPrincipal::Transport(discovered.peer.to_bytes()),
         seq: 1,
         tag_verified: false,
     };
@@ -887,17 +884,12 @@ async fn wait_for_peer(
     target: PeerId,
     what: &str,
 ) -> Result<(), Box<dyn Error>> {
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if p == target {
-                    return;
-                }
-            }
-        }
-    })
+    timeout(
+        Duration::from_secs(20),
+        mesh.wait_for_peer_connected(target),
+    )
     .await
-    .map_err(|_| format!("timed out connecting to {what}"))?;
+    .map_err(|_| format!("timed out connecting to {what}"))??;
     Ok(())
 }
 
@@ -910,9 +902,16 @@ async fn join_and_converge(
 ) -> Result<(), Box<dyn Error>> {
     println!("[join] connected; requesting to join…");
     let device = MlsDevice::generate()?;
+    let mut connection_handoff = catcoms_sync::PreOwnerConnectionHandoff::default();
     let (group, routing) = timeout(
         Duration::from_secs(20),
-        catcoms_sync::request_join(&mesh, inviter, &device, invite),
+        catcoms_sync::request_join_tracking(
+            &mesh,
+            &mut connection_handoff,
+            inviter,
+            &device,
+            invite,
+        ),
     )
     .await
     .map_err(|_| "join timed out")??;
@@ -926,6 +925,7 @@ async fn join_and_converge(
         Box::new(SystemClock),
         routing,
     );
+    sync.adopt_pre_owner_connections(connection_handoff);
     // A joiner has to subscribe the control topic, exactly as `run_serve` does for the founder.
     // Without it `desired_routing_topics()` omits the control topics, this node never receives
     // another membership commit, and every member who joins after it stays invisible to it

@@ -22,6 +22,7 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use mem::{Hub, MemNetwork};
 pub use rng::{CryptoRng, CryptoRngCore, OsCryptoRng, RngCore};
 pub use transport::{
-    DiscoveredPeer, MeshTransport, PeerId, ProtocolId, Responder, ResponderRx, Topic,
-    TransportError, TransportEvent,
+    ConnectionDirection, ConnectionFamily, ConnectionPath, ConnectionTransport, DiscoveredPeer,
+    MeshTransport, PeerConnectionSnapshot, PeerId, ProtocolId, Responder, ResponderRx, Topic,
+    TransportError, TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT,
 };

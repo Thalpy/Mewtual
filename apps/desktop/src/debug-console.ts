@@ -197,7 +197,10 @@ function randomSalt(): string {
  */
 function tag(salt: string, kind: string, value: string): string {
   let hash = 0x811c9dc5;
-  for (const ch of `${salt} ${kind} ${value}`) {
+  // The separators are written as escapes on purpose. As raw bytes they made this file read as
+  // binary to grep and every other text tool, and anything that quietly strips them would join
+  // the three fields into one string where a kind boundary could land anywhere.
+  for (const ch of `${salt}\x00${kind}\x00${value}`) {
     hash ^= ch.codePointAt(0) ?? 0;
     // The FNV prime, by shift-add because JavaScript's `*` would lose the low bits to a double.
     hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0;
@@ -751,9 +754,114 @@ export type MemberRoute = {
   connected: boolean;
   dial_attempts: number;
   next_dial_in_ms: number;
+  health:
+    | "no_peer_record"
+    | "claimed_peer_has_no_route"
+    | "claimed_peer_connected_direct"
+    | "claimed_peer_connected_relay"
+    | "claimed_peer_connected_other"
+    | "claimed_peer_dial_cooling_down"
+    | "claimed_peer_dial_eligible"
+    | string;
+  /** Explicitly self-asserted until a reciprocal challenge binds the device and transport keys. */
+  binding: "absent" | "self_asserted" | string;
+  active_paths: ConnectionPath[];
+  last_success: { path: ConnectionPath; age_ms: number } | null;
+  candidate_families: ConnectionFamily[];
+  candidate_transports: ConnectionTransport[];
+  actions: MemberRouteAction[];
 };
 
-export type RouteState = "connected" | "no-record" | "no-route" | "backing-off" | "reachable";
+export type MemberRoutePollAnswer =
+  | { id: number; ok: true; rows: MemberRoute[] }
+  | { id: number; ok: false; rows: MemberRoute[] };
+
+/**
+ * Merge one asynchronous all-server route poll without ever matching answers by array position.
+ *
+ * A failed or not-yet-requested server keeps its last rows so an operator can inspect the previous
+ * snapshot, but is explicitly marked unavailable. Callers must not derive live findings from rows
+ * whose id is in `unavailable`.
+ */
+export function mergeMemberRoutePoll(
+  currentServerIds: readonly number[],
+  previous: Readonly<Record<number, MemberRoute[]>>,
+  answers: readonly MemberRoutePollAnswer[],
+): { routes: Record<number, MemberRoute[]>; unavailable: Set<number> } {
+  const current = new Set(currentServerIds);
+  const routes: Record<number, MemberRoute[]> = {};
+  const unavailable = new Set<number>();
+  for (const answer of answers) {
+    if (!current.has(answer.id)) continue;
+    if (answer.ok) routes[answer.id] = answer.rows;
+    else {
+      routes[answer.id] = previous[answer.id] ?? [];
+      unavailable.add(answer.id);
+    }
+  }
+  for (const id of current) {
+    if (!(id in routes)) {
+      routes[id] = previous[id] ?? [];
+      unavailable.add(id);
+    }
+  }
+  return { routes, unavailable };
+}
+
+/** Apply one main-Connectivity read while preserving stale-server and failed-read truthfulness. */
+export function mergeMemberRouteRead(
+  currentServer: number | null,
+  requestedServer: number,
+  previousRoutes: readonly MemberRoute[],
+  previousUnavailable: boolean,
+  response: readonly MemberRoute[] | null,
+): { applied: boolean; routes: MemberRoute[]; unavailable: boolean } {
+  if (currentServer !== requestedServer) {
+    return {
+      applied: false,
+      routes: [...previousRoutes],
+      unavailable: previousUnavailable,
+    };
+  }
+  if (response === null) {
+    return { applied: true, routes: [...previousRoutes], unavailable: true };
+  }
+  return { applied: true, routes: [...response], unavailable: false };
+}
+
+export type ConnectionFamily = "ipv4" | "ipv6" | "dns" | "memory" | "unknown" | string;
+export type ConnectionTransport =
+  | "tcp"
+  | "quic_v1"
+  | "websocket"
+  | "circuit_relay"
+  | "memory"
+  | "unknown"
+  | string;
+export type ConnectionPath = {
+  family: ConnectionFamily;
+  transport: ConnectionTransport;
+  direction: "dialer" | "listener" | string;
+};
+export type MemberRouteAction = {
+  scope: "this_device" | "member_device" | "group" | string;
+  kind:
+    | "wait_for_automatic_recovery"
+    | "check_member_connectivity"
+    | "keep_another_member_connected"
+    | "configure_fallback_node"
+    | string;
+};
+
+export type RouteState =
+  | "direct"
+  | "relay"
+  | "connected-other"
+  | "no-record"
+  | "no-route"
+  | "cooldown"
+  | "dial-eligible"
+  | "unknown";
 
 /**
  * Classify what is happening with one member, which is the column the roster could never show.
@@ -765,60 +873,185 @@ export type RouteState = "connected" | "no-record" | "no-route" | "backing-off" 
  * from the inside.
  */
 export function routeState(r: MemberRoute): RouteState {
-  if (r.connected) return "connected";
-  if (!r.peer) return "no-record";
-  if (r.addresses.length === 0) return "no-route";
-  if (r.dial_attempts > 0) return "backing-off";
-  return "reachable";
+  switch (r.health) {
+    case "claimed_peer_connected_direct": return "direct";
+    case "claimed_peer_connected_relay": return "relay";
+    case "claimed_peer_connected_other": return "connected-other";
+    case "no_peer_record": return "no-record";
+    case "claimed_peer_has_no_route": return "no-route";
+    case "claimed_peer_dial_cooling_down": return "cooldown";
+    case "claimed_peer_dial_eligible": return "dial-eligible";
+    default: return "unknown";
+  }
+}
+
+export type RouteConnectionState = "connected" | "disconnected" | "unknown";
+
+/** Preserve unknown as a third state; treating it as disconnected invents an isolation verdict. */
+export function routeConnectionState(r: MemberRoute): RouteConnectionState {
+  const state = routeState(r);
+  if (["direct", "relay", "connected-other"].includes(state)) return "connected";
+  if (state === "unknown") return "unknown";
+  return "disconnected";
+}
+
+export function routeIsConnected(r: MemberRoute): boolean {
+  return routeConnectionState(r) === "connected";
+}
+
+export function routeIsDisconnected(r: MemberRoute): boolean {
+  return routeConnectionState(r) === "disconnected";
+}
+
+export type RouteGroupState = "alone" | "all-connected" | "none-connected" | "partial" | "unknown";
+
+export function routeGroupState(routes: readonly MemberRoute[]): RouteGroupState {
+  if (routes.length === 0) return "alone";
+  const states = routes.map(routeConnectionState);
+  if (states.includes("unknown")) return "unknown";
+  const connected = states.filter((state) => state === "connected").length;
+  if (connected === routes.length) return "all-connected";
+  if (connected === 0) return "none-connected";
+  return "partial";
+}
+
+/** Current-count cells for the overview; stale rows cannot masquerade as live arithmetic. */
+export function routeOverviewCounts(
+  routes: readonly MemberRoute[],
+  unavailable: boolean,
+): { connected: string; roster: string } {
+  if (unavailable) return { connected: "—", roster: "—" };
+  const connected = routes.filter(routeIsConnected).length;
+  return { connected: `${connected} / ${routes.length}`, roster: String(routes.length + 1) };
 }
 
 /** The chip label and semantic colour job for a route state. */
 export function routeChip(state: RouteState): { label: string; tone: "ok" | "warn" | "danger" | "faint" } {
   switch (state) {
-    case "connected":
-      return { label: "CONNECTED", tone: "ok" };
+    case "direct":
+      return { label: "DIRECT PATH", tone: "ok" };
+    case "relay":
+      return { label: "RELAY PATH", tone: "ok" };
+    case "connected-other":
+      return { label: "PATH LIVE", tone: "ok" };
     case "no-record":
       return { label: "NO RECORD", tone: "danger" };
     case "no-route":
       return { label: "NO ROUTE", tone: "danger" };
-    case "backing-off":
-      return { label: "BACKING OFF", tone: "warn" };
+    case "cooldown":
+      return { label: "DIAL COOLDOWN", tone: "warn" };
+    case "dial-eligible":
+      return { label: "DIAL ELIGIBLE", tone: "faint" };
     default:
-      return { label: "IDLE", tone: "faint" };
+      return { label: "UNKNOWN", tone: "warn" };
   }
+}
+
+/** A retained row must never reuse the live green/danger visual language after its read failed. */
+export function routeDisplayChip(
+  state: RouteState,
+  unavailable: boolean,
+): { label: string; tone: "ok" | "warn" | "danger" | "faint" } {
+  const current = routeChip(state);
+  return unavailable ? { label: `LAST: ${current.label}`, tone: "warn" } : current;
 }
 
 /**
  * A one-line explanation of a member's state, in the terms someone can act on.
  *
- * The address-family note is the one that matters most: a host with no IPv6 route dialling an
- * IPv6-only record fails instantly, forever, and the only trace it left in a log was a raw
- * `sendmsg` warning from deep inside the QUIC stack.
+ * Address-family shape is useful evidence, but this snapshot does not test outbound IPv6. It must
+ * therefore describe IPv6-only candidates as a clue and never promote them into a causal verdict.
  */
-export function routeExplanation(r: MemberRoute, hasIpv6: boolean): string {
+export function routeExplanation(r: MemberRoute, _hasPublicIpv6Observation = false): string {
   switch (routeState(r)) {
-    case "connected":
-      return "A transport connection to this member is live.";
+    case "direct":
+      return "This device has a live non-circuit path to the transport identity in this member's signed record. That device-to-transport binding is self-asserted, not independently proven.";
+    case "relay":
+      return "This device has a live circuit-relay path to the transport identity in this member's signed record. That device-to-transport binding is self-asserted, not independently proven.";
+    case "connected-other":
+      return "A connection to the transport identity in this member's signed record is live, but this transport supplied no path classification. The identity binding is self-asserted.";
     case "no-record":
       return "No signed peer record learned yet, so this member cannot be dialled, called or sent a friend request. It arrives over PEX once any member that holds it is reachable.";
     case "no-route":
       return "This member's record carries no dialable address. Nothing can be attempted until it publishes one.";
-    case "backing-off": {
-      const only6 = r.addresses.length > 0 && r.addresses.every(isIpv6Addr);
+    case "cooldown": {
+      const only6 =
+        r.candidate_families.length > 0 &&
+        r.candidate_families.every((family) => family === "ipv6");
       const wait = r.next_dial_in_ms > 0 ? ` Next attempt in ${formatDuration(r.next_dial_in_ms)}.` : "";
-      if (only6 && !hasIpv6) {
-        return `Every address this member advertises is IPv6, and this device has no IPv6 route, so each attempt fails immediately.${wait}`;
-      }
-      return `${r.dial_attempts} attempt(s) have failed, so the retry backoff is holding.${wait}`;
+      const family = only6
+        ? " Its advertised candidates are IPv6-only; this report does not measure outbound IPv6 capability, so that is a clue rather than a proven cause."
+        : "";
+      return `${r.dial_attempts} policy-approved dial batch(es) have been submitted and the scheduler cooldown is active. Submission alone does not prove that every candidate was attempted or failed.${family}${wait}`;
     }
+    case "dial-eligible":
+      return "A signed record has candidate routes and its claimed peer is eligible for an automatic dial pass; it is not connected here right now.";
     default:
-      return "A record is held and no dial has failed; this member is simply not connected right now.";
+      return "This app version does not recognize the backend's route-health value, so it will not guess whether the claimed peer is connected.";
   }
 }
 
-/** Whether a multiaddr's host component is IPv6. */
-export function isIpv6Addr(addr: string): boolean {
-  return addr.startsWith("/ip6/");
+/** Short, stable wording for the backend-owned recommended actions. */
+export function routeActionLabel(action: MemberRouteAction): string {
+  switch (action.kind) {
+    case "wait_for_automatic_recovery": return "Wait for automatic retry";
+    case "check_member_connectivity": return "Ask them to run Connectivity";
+    case "keep_another_member_connected": return "Keep another group member connected";
+    case "configure_fallback_node": return "Configure a trusted fallback node";
+    default: return "Update Mewtual to understand this recommendation";
+  }
+}
+
+export function routeActionScopeLabel(action: MemberRouteAction): string {
+  switch (action.scope) {
+    case "this_device": return "you";
+    case "member_device": return "that member";
+    case "group": return "group";
+    default: return "unknown actor";
+  }
+}
+
+export function routePathLabel(path: ConnectionPath): string {
+  const transport: Record<string, string> = {
+    tcp: "TCP",
+    quic_v1: "QUIC",
+    websocket: "WebSocket",
+    circuit_relay: "circuit relay",
+    memory: "memory",
+    unknown: "unknown transport",
+  };
+  const family: Record<string, string> = {
+    ipv4: "IPv4",
+    ipv6: "IPv6",
+    dns: "DNS",
+    memory: "memory",
+    unknown: "unknown family",
+  };
+  return `${family[path.family] ?? "unknown family"} · ${transport[path.transport] ?? "unknown transport"}`;
+}
+
+/** Advance a historical backend age using the frontend's local monotonic-enough wall-clock tick. */
+export function routeHistoricalAge(
+  route: MemberRoute,
+  receivedAtMs: number,
+  nowMs: number,
+): number | null {
+  if (!route.last_success) return null;
+  return route.last_success.age_ms + Math.max(0, nowMs - receivedAtMs);
+}
+
+/** Whether an event can affect the member-route rows currently visible in Connectivity. */
+export function shouldRefreshMemberRoutes(
+  activeServer: number | null,
+  view: string,
+  changedServer: number,
+): boolean {
+  return activeServer === changedServer && view === "connectivity";
+}
+
+/** Time-derived cooldown and history expiry need a bounded refresh even without an event. */
+export function memberRoutesVisible(activeServer: number | null, view: string): boolean {
+  return activeServer !== null && view === "connectivity";
 }
 
 /** One conclusion about why members cannot be reached, across a whole server. */
@@ -845,38 +1078,44 @@ function members(n: number): string {
  *
  * `routeExplanation` answers "what is happening with this member", which is the right question when
  * you already suspect a member. The question nobody could answer was the aggregate one: a node sat
- * isolated for an hour dialling addresses it could never reach, and the evidence for that was a
- * scattering of raw `sendmsg` warnings from inside the QUIC stack. Working it out required reading
- * multiaddrs one at a time and knowing that the host had no IPv6 route.
+ * isolated for an hour dialling IPv6-only records, and the evidence for that was a scattering of
+ * raw `sendmsg` warnings from inside the QUIC stack. Candidate shape is useful context, but this
+ * report deliberately does not infer outbound IPv6 capability from inbound/public advertisements.
  *
  * These are conclusions, not observations, and they carry codes so they can be counted across
  * reports instead of re-derived by whoever is reading.
  */
-export function routeFindings(routes: readonly MemberRoute[], hasIpv6: boolean): RouteFinding[] {
+export function routeFindings(
+  routes: readonly MemberRoute[],
+  _hasPublicIpv6Observation = false,
+): RouteFinding[] {
   const findings: RouteFinding[] = [];
   if (routes.length === 0) return findings;
 
-  const unreachable = routes.filter((r) => routeState(r) !== "connected");
-  if (unreachable.length === 0) return findings;
+  const withoutLiveConnection = routes.filter(routeIsDisconnected);
+  if (withoutLiveConnection.length === 0) return findings;
 
-  // The failure that stranded a node for an hour. Every candidate is IPv6 on a host with no IPv6
-  // route, so each dial fails instantly and forever, and nothing about a retry will ever help.
-  const v6Only = unreachable.filter(
-    (r) => r.addresses.length > 0 && r.addresses.every(isIpv6Addr),
+  // IPv6-only candidates are worth surfacing, but are not a causal verdict: the reachability
+  // snapshot does not currently measure the host's outbound IPv6 route.
+  const v6Only = withoutLiveConnection.filter(
+    (r) =>
+      r.candidate_families.length > 0 &&
+      r.candidate_families.every((family) => family === "ipv6"),
   );
-  if (!hasIpv6 && v6Only.length > 0) {
+  if (v6Only.length > 0) {
     findings.push({
-      code: "NET.ROUTE.NO_IPV6_PATH",
-      severity: "danger",
+      code: "NET.ROUTE.IPV6_ONLY",
+      severity: "warn",
       affected: v6Only.length,
       detail:
         `${members(v6Only.length)} ${v6Only.length === 1 ? "advertises" : "advertise"} only IPv6 ` +
-        `addresses and this device has no IPv6 route, so every attempt fails immediately. Retrying ` +
-        `cannot help: they need an IPv4 or relay route, or this device needs IPv6.`,
+        `addresses. This report does not measure outbound IPv6 capability, so it cannot prove that ` +
+        `the address family explains the absence of a live connection; if dials do not connect, ` +
+        `check IPv6 or add a relay route.`,
     });
   }
 
-  const noRecord = unreachable.filter((r) => routeState(r) === "no-record");
+  const noRecord = withoutLiveConnection.filter((r) => routeState(r) === "no-record");
   if (noRecord.length > 0) {
     findings.push({
       code: "NET.ROUTE.NO_RECORD",
@@ -889,7 +1128,7 @@ export function routeFindings(routes: readonly MemberRoute[], hasIpv6: boolean):
     });
   }
 
-  const noRoute = unreachable.filter((r) => routeState(r) === "no-route");
+  const noRoute = withoutLiveConnection.filter((r) => routeState(r) === "no-route");
   if (noRoute.length > 0) {
     findings.push({
       code: "NET.ROUTE.NO_DIALABLE_ADDRESS",
@@ -903,15 +1142,15 @@ export function routeFindings(routes: readonly MemberRoute[], hasIpv6: boolean):
 
   // Reported last because it is the consequence, and the findings above are the cause. A reader
   // scanning from the top meets the explanation before the symptom.
-  if (unreachable.length === routes.length) {
+  if (routes.every(routeIsDisconnected)) {
     findings.push({
-      code: "NET.ROUTE.ISOLATED",
-      severity: "danger",
+      code: "NET.ROUTE.NO_LIVE_MEMBER_CONNECTION",
+      severity: "warn",
       affected: routes.length,
       detail:
         routes.length === 1
-          ? "This server's only other member is not reachable from here."
-          : `Not one of this server's ${routes.length} other members is reachable from here.`,
+          ? "No claimed peer for this server's only other member is connected here right now. This does not prove its routes are unreachable."
+          : `No claimed peer for this server's ${routes.length} other members is connected here right now. This does not prove their routes are unreachable.`,
     });
   }
   return findings;
@@ -1151,19 +1390,29 @@ export function routeLines(
   aliases: Aliases,
   redact: boolean,
   hasIpv6 = true,
+  unavailable: ReadonlySet<number> = new Set(),
 ): string[] {
   const mask = (s: string) => maybeRedact(s, aliases, redact);
-  return servers.flatMap((s) => [
-    ...routeFindings(routes[s.id] ?? [], hasIpv6).map(
-      (f) => `${s.name} [${f.severity.toUpperCase()}] ${f.code} (${f.affected}) ${f.detail}`,
-    ),
-    ...(routes[s.id] ?? []).map((r) => {
+  return servers.flatMap((s) => {
+    if (unavailable.has(s.id)) {
+      return [`${s.name} [UNAVAILABLE] member-route refresh failed; retained rows were omitted because they are only a last snapshot.`];
+    }
+    return [
+      ...routeFindings(routes[s.id] ?? [], hasIpv6).map(
+        (f) => `${s.name} [${f.severity.toUpperCase()}] ${f.code} (${f.affected}) ${f.detail}`,
+      ),
+      ...(routes[s.id] ?? []).map((r) => {
       const chip = routeChip(routeState(r));
       const addresses = r.addresses.map(mask).join(" ") || "(no address)";
       const next = r.next_dial_in_ms ? formatDuration(r.next_dial_in_ms) : "-";
-      return `${s.name} ${mask(r.fingerprint)} ${chip.label} peer=${mask(r.peer) || "(none)"} seq=${r.seq} fails=${r.dial_attempts} next=${next} ${addresses}`;
-    }),
-  ]);
+      const paths = r.active_paths.map(routePathLabel).join(",") || "(none)";
+      const actions = r.actions
+        .map((action) => `${action.scope}:${action.kind}`)
+        .join(",") || "(none)";
+      return `${s.name} ${mask(r.fingerprint)} ${chip.label} binding=${r.binding} peer=${mask(r.peer) || "(none)"} seq=${r.seq} submits=${r.dial_attempts} next=${next} paths=${paths} actions=${actions} ${addresses}`;
+      }),
+    ];
+  });
 }
 
 /** The live call's per-peer state as copyable lines. Empty outside a call. */

@@ -334,7 +334,7 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
       });
     // The debug console's sources. The data deliberately re-enacts the two incidents the console
     // was built for, so the fixture shows it doing its job rather than showing an empty shell:
-    // Moss advertises only IPv6 while this device has no IPv6 route, and the voice signalling run
+    // Moss advertises only IPv6 while this device has no observed public IPv6 candidate, and the voice signalling run
     // fails against a peer whose transport connection has gone.
     case "save_diagnostics_report":
       return clone({
@@ -542,6 +542,16 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
               connected: true,
               dial_attempts: 0,
               next_dial_in_ms: 0,
+              health: "claimed_peer_connected_direct",
+              binding: "self_asserted",
+              active_paths: [{ family: "ipv4", transport: "quic_v1", direction: "listener" }],
+              last_success: {
+                path: { family: "ipv4", transport: "quic_v1", direction: "listener" },
+                age_ms: 12_000,
+              },
+              candidate_families: ["ipv4"],
+              candidate_transports: ["quic_v1"],
+              actions: [],
             },
             {
               fingerprint: MOSS,
@@ -551,6 +561,15 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
               connected: false,
               dial_attempts: 8,
               next_dial_in_ms: 812_000,
+              health: "claimed_peer_dial_cooling_down",
+              binding: "self_asserted",
+              active_paths: [],
+              last_success: null,
+              candidate_families: ["ipv6"],
+              candidate_transports: ["quic_v1"],
+              actions: [
+                { scope: "this_device", kind: "wait_for_automatic_recovery" },
+              ],
             },
           ])
         : [];

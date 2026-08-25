@@ -60,7 +60,7 @@
   } from "./voice-signaling";
   import {
     deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, jukeClaimWins, mediaChoices,
-    mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, queueDigest, resolveCallName,
+    mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, queueChanged, queueDigest, resolveCallName,
     stallChip, validJukeSeq, STALL_ANNOUNCE_MS,
     type FetchPhase, type JukeEntry, type MediaFilter, type MediaKind,
   } from "./jukebox";
@@ -156,7 +156,12 @@
   import { callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, type MappedPort } from "./callroutes";
   // Types only. The console's own logic and markup live in DebugConsole.svelte, which is loaded
   // on demand; this file needs just enough to describe what it hands over.
-  import type { DbgSection, DebugVoicePeer } from "./debug-console";
+  import {
+    memberRoutesVisible, mergeMemberRouteRead, routeActionLabel, routeActionScopeLabel, routeChip,
+    routeExplanation, routeHistoricalAge, routeIsConnected, routePathLabel, routeState,
+    shouldRefreshMemberRoutes,
+    type DbgSection, type DebugVoicePeer, type MemberRoute,
+  } from "./debug-console";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -4193,16 +4198,16 @@
     if (h < 24) return `${h}h`;
     return `${Math.round(h / 24)}d`;
   }
-  // The presence detail line for a member: "You" / "Online" / "Online · 5m" / "Last seen 5m ago" /
-  // "Offline". Durations only appear for transitions we actually observed this session.
+  // Presence is local transport evidence, never a claim that the person is online or offline on
+  // every path. Durations only appear for transitions observed during this session.
   function presenceText(fp: string, you: boolean): string {
     if (you) return "You";
     if (onlineMembers.has(fp)) {
       const since = onlineSince[fp];
-      return since ? `Online · ${relTime(nowTick - since)}` : "Online";
+      return since ? `Connected here · ${relTime(nowTick - since)}` : "Connected here";
     }
     const ls = lastSeen[fp];
-    return ls ? `Last seen ${relTime(nowTick - ls)} ago` : "Offline";
+    return ls ? `Last connected here ${relTime(nowTick - ls)} ago` : "Not connected here";
   }
   function fmtSize(n: number): string {
     if (n < 1024) return `${n} B`;
@@ -4932,6 +4937,9 @@
     roster = [];
     members = 0;
     onlineMembers = new Set();
+    memberRoutes = [];
+    memberRoutesReceivedAt = 0;
+    memberRoutesUnavailable = false;
     profiles = {};
     // Roles gate the privileged surfaces, so the empty map is the safe transient: unprivileged
     // until this group's own roles resolve.
@@ -5663,13 +5671,13 @@
     if (dl && (dl.status === "queued" || dl.status === "waiting"))
       return hasPeers
         ? { cls: "downloading", icon: "↓", label: "Waiting for source" }
-        : { cls: "offline", icon: "○", label: "No peers online" };
+        : { cls: "offline", icon: "○", label: "No peers connected here" };
     if (f.total > 0 && f.held >= f.total)
       return { cls: "local", icon: "●", label: "On this device" };
     if (f.held > 0)
       return { cls: "partial", icon: "◐", label: `Partial ${f.held}/${f.total}` };
     if (hasPeers) return { cls: "remote", icon: "○", label: "Downloadable" };
-    return { cls: "offline", icon: "○", label: "No peers online" };
+    return { cls: "offline", icon: "○", label: "No peers connected here" };
   }
   async function refreshStatuses() {
     const gen = viewGeneration;
@@ -5729,6 +5737,14 @@
   let joinAttempts = $state<JoinAttempt[]>([]);
   let joinLogCopied = $state(false);
   let connectivity = $state<Connectivity | null>(null);
+  /** Current-server route evidence. Unlike presence, each row says exactly what this device knows. */
+  let memberRoutes = $state<MemberRoute[]>([]);
+  /** Wall-clock receipt time used only to advance a backend-provided historical age on screen. */
+  let memberRoutesReceivedAt = $state(0);
+  /** A failed local read retains the same-server snapshot but strips it of current-evidence status. */
+  let memberRoutesUnavailable = $state(false);
+  let connectedMemberRouteCount = $derived(memberRoutes.filter(routeIsConnected).length);
+  const memberRouteRefreshGeneration = new Map<number, number>();
   type SwitchboardStatus = {
     offered: boolean;
     eligible: boolean;
@@ -5801,6 +5817,52 @@
         connectivityRefreshGeneration,
       );
     }
+  }
+  async function refreshMemberRoutesNow() {
+    const server = activeServerId;
+    if (server === null) {
+      memberRoutes = [];
+      memberRoutesReceivedAt = 0;
+      memberRoutesUnavailable = false;
+      return;
+    }
+    const generation = (memberRouteRefreshGeneration.get(server) ?? 0) + 1;
+    memberRouteRefreshGeneration.set(server, generation);
+    try {
+      const routes = await invoke<MemberRoute[]>("get_member_routes", { server });
+      // A slow response for the previous server must never put its fingerprints or route evidence
+      // under the newly selected server's heading.
+      if (memberRouteRefreshGeneration.get(server) !== generation) return;
+      const merged = mergeMemberRouteRead(
+        activeServerId,
+        server,
+        memberRoutes,
+        memberRoutesUnavailable,
+        routes,
+      );
+      if (!merged.applied) return;
+      memberRoutes = merged.routes;
+      memberRoutesUnavailable = merged.unavailable;
+      memberRoutesReceivedAt = Date.now();
+    } catch {
+      if (memberRouteRefreshGeneration.get(server) !== generation) return;
+      const merged = mergeMemberRouteRead(
+        activeServerId,
+        server,
+        memberRoutes,
+        memberRoutesUnavailable,
+        null,
+      );
+      if (!merged.applied) return;
+      memberRoutes = merged.routes;
+      memberRoutesUnavailable = merged.unavailable;
+    }
+  }
+  // Connection/path events can arrive in bursts. Keep at most one local actor read active and one
+  // coalesced follow-up; generation/server checks above still reject a slow response after switch.
+  const memberRouteRefresh = new CoalescedAsyncRefresh(async () => refreshMemberRoutesNow());
+  function refreshMemberRoutes(): Promise<void> {
+    return memberRouteRefresh.request();
   }
   async function refreshSwitchboards() {
     const server = activeServerId;
@@ -6065,7 +6127,9 @@
     if (v === "events") refreshEvents();
     if (v === "moderation") refreshModeration();
     if (v === "storage" || v === "downloads") refreshStorageHealth();
-    if (v === "connectivity") void Promise.all([refreshConnectivity(), refreshSwitchboards()]);
+    if (v === "connectivity") {
+      void Promise.all([refreshConnectivity(), refreshMemberRoutes(), refreshSwitchboards()]);
+    }
   }
 
   // Delegated click handler for rendered rich text: [[wiki links]] navigate to the wiki tab.
@@ -8402,7 +8466,7 @@
     if (t.direction === "download") {
       lines.push(`Data ready: ${formatBytes(t.bytesDone)} / ${formatBytes(t.bytesTotal)}`);
       if (t.savedPath) lines.push(`Saved to: ${t.savedPath}`);
-      lines.push(`Source: ${t.provider ? `${nameOf(t.provider)}${transferConnected(t) ? "" : " (last source; now offline)"}` : transferConnected(t) ? "finding a reachable member" : "no member connected"}`);
+      lines.push(`Source: ${t.provider ? `${nameOf(t.provider)}${transferConnected(t) ? "" : " (last source; not connected here now)"}` : transferConnected(t) ? "finding a reachable member" : "no member connected"}`);
       if (t.speed > 0 && t.status === "downloading") lines.push(`Speed: ${formatRate(t.speed)}`);
       if (t.heldBefore > 0) lines.push(`Already held when started: ${t.heldBefore} chunk${t.heldBefore === 1 ? "" : "s"}`);
     } else {
@@ -10582,7 +10646,9 @@
       jukeQueueStale = false;
       return;
     }
-    const before = queueDigest(jukeQueue);
+    // The contents, not a digest of them. Copied because the refresh below awaits, and the live
+    // array can be replaced while it does.
+    const before = jukeQueue.slice();
     try {
       const next = await invoke<JukeEntry[]>("get_jukebox", { server, channel });
       if (!jukeQueueCurrent(generation, server, channel)) {
@@ -10597,7 +10663,6 @@
         });
         return;
       }
-      const after = queueDigest(next);
       diagRecord({
         section: "channels",
         code: "JUKEBOX.REFRESH.APPLIED",
@@ -10607,9 +10672,10 @@
           entries_after: next.length,
           // The one that matters. An event said the jukebox moved and the queue came back
           // identical: the event and the document disagree, which used to be indistinguishable
-          // from a queue that legitimately had not changed since the last look.
-          changed: before !== after,
-          digest: after,
+          // from a queue that legitimately had not changed since the last look. Decided by
+          // comparing the entries, so a digest collision cannot report this one as quiet.
+          changed: queueChanged(before, next),
+          digest: queueDigest(next),
         },
       });
       jukeQueue = next;
@@ -12975,6 +13041,9 @@
       for (const s of servers) await refreshChannels(s.id);
       rebuildAllUnread();
       if (activeServerId !== null && cur?.active) await channelEventRefresh.request(true);
+      // A lost member-route or membership event otherwise leaves Connectivity stale forever.
+      // Refresh only while that projection is visible; the backend read is local and bounded.
+      if (memberRoutesVisible(activeServerId, view)) await refreshMemberRoutes();
       diagRecord({
         section: "ipc",
         code: "UI.RESYNC.APPLIED",
@@ -13239,6 +13308,9 @@
         if (e.payload.server === activeServerId) {
           refreshMembers();
           if (view === "files") refreshFiles(); // membership change ⇒ re-check fetch availability
+          if (shouldRefreshMemberRoutes(activeServerId, view, e.payload.server)) {
+            void refreshMemberRoutes();
+          }
         }
       }),
       listen<{ server: number }>("profiles-updated", (e) => {
@@ -13374,6 +13446,14 @@
             }
           onlineMembers = next;
           refreshFiles(); // a peer came/went: re-evaluate the availability hint (has_peers)
+          if (view === "connectivity") void refreshMemberRoutes();
+        }
+      }),
+      listen<{ server: number }>("member-routes-changed", (e) => {
+        // Aggregate presence can stay unchanged while DCUtR replaces a relay with a direct path,
+        // or while one of several live paths closes. Refresh the typed row only when it is visible.
+        if (shouldRefreshMemberRoutes(activeServerId, view, e.payload.server)) {
+          void refreshMemberRoutes();
         }
       }),
       listen<JoinReplyReady>("join-reply-ready", (e) => {
@@ -13393,7 +13473,9 @@
         if (locked) return;
         const server = e.payload.server;
         if (reachabilityEventAffectsReport(connectivity, server)) refreshConnectivity();
-        if (server === activeServerId && view === "connectivity") refreshSwitchboards();
+        if (server === activeServerId && view === "connectivity") {
+          void Promise.all([refreshMemberRoutes(), refreshSwitchboards()]);
+        }
         void refreshInviteFor(server);
       }),
       listen<{ server: number }>("switchboard-changed", (e) => {
@@ -13628,10 +13710,12 @@
     window.addEventListener("blur", onBlur);
     window.addEventListener("mousedown", onMouseNav);
     const stopTextEffects = mountTextEffectRuntime();
-    // Keep relative presence times current.
+    // Keep relative presence times current. The same bounded visible-view refresh is what lets
+    // backend cooldown and 24-hour history expiry become visible without unrelated network churn.
     const tick = setInterval(() => {
       nowTick = Date.now();
       pruneTicker(); // stale news stops being news
+      if (memberRoutesVisible(activeServerId, view)) void refreshMemberRoutes();
     }, 60_000);
     // A moving transfer must stop looking active when no new chunk has arrived. This small UI-only
     // clock drives that freshness check; it does not poll the network or alter transfer state.
@@ -14554,7 +14638,7 @@
   {#each Object.entries(deviceMap).filter(([, d]) => d.origin === originFp) as [cfp, d] (cfp)}
     {@const conline = onlineMembers.has(cfp)}
     <li class="member-row companion" title={cfp}>
-      <span class="presence" class:online={conline} title={conline ? "Device online" : "Device offline"}>●</span>
+      <span class="presence" class:online={conline} title={conline ? "Device connected here" : "Device not connected here"}>●</span>
       <span class="dev-tag">· {d.name}</span>
     </li>
   {/each}
@@ -17458,11 +17542,62 @@
           </div>
         {:else if view === "connectivity"}
           <div class="operations-pane tab-pane">
-            <header class="ops-head"><div><span class="stx-crumb">SERVER // OPERATIONS // CONNECTIVITY</span><h2>Connectivity assistant</h2><p class="muted small">What this device can prove, what it merely attempted, and what to try next.</p></div><button class="ghost small" onclick={refreshConnectivity}>Refresh</button></header>
+            <header class="ops-head"><div><span class="stx-crumb">SERVER // OPERATIONS // CONNECTIVITY</span><h2>Connectivity assistant</h2><p class="muted small">What this device can prove, what it merely attempted, and what to try next.</p></div><button class="ghost small" onclick={() => void Promise.all([refreshConnectivity(), refreshMemberRoutes(), refreshSwitchboards()])}>Refresh</button></header>
             {#if connectivity?.action}
               {@render connDetail(connectivity)}
               <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
-            {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Live peer presence above is still current.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
+            {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Current member-path evidence below is still available.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
+            <section class="connection-member-health" aria-labelledby="connection-member-health-title">
+              <header>
+                <div>
+                  <h3 id="connection-member-health-title">MEMBER PATHS</h3>
+                  <p class="muted small">What this device can currently reach, how the path runs, and safe next actions. “Not connected here” never means the person is offline.</p>
+                </div>
+                {#if memberRoutesUnavailable}
+                  <span class="hosting-state" data-ready={false}>SNAPSHOT UNAVAILABLE</span>
+                {:else}
+                  <span class="hosting-state" data-ready={connectedMemberRouteCount > 0}>{connectedMemberRouteCount} CLAIMED PEER{connectedMemberRouteCount === 1 ? "" : "S"} CONNECTED</span>
+                {/if}
+              </header>
+              {#if memberRoutesUnavailable}
+                <p class="muted small">The current member-route snapshot could not be read. Retained rows below are labelled as the last snapshot and are not current reachability evidence.</p>
+              {/if}
+              {#if memberRoutes.length}
+                <div class="member-route-grid">
+                  {#each memberRoutes as route (route.fingerprint)}
+                    {@const routeStatusChip = routeChip(routeState(route))}
+                    {@const chip = memberRoutesUnavailable ? { label: `LAST: ${routeStatusChip.label}`, tone: "warn" } : routeStatusChip}
+                    {@const historicalAge = routeHistoricalAge(route, memberRoutesReceivedAt, nowTick)}
+                    <article>
+                      <div class="member-route-head">
+                        <b>{nameOf(route.fingerprint)}</b>
+                        <span class="chip {chip.tone}">{chip.label}</span>
+                      </div>
+                      <p>{memberRoutesUnavailable ? "This was the last local snapshot; current claimed-peer connection state is unavailable." : routeExplanation(route, (connectivity?.advertised ?? []).some((address) => address.startsWith("/ip6/")))}</p>
+                      {#if route.active_paths.length}
+                        <small>{memberRoutesUnavailable ? "Last snapshot" : "Now"}: {route.active_paths.map(routePathLabel).join(", ")}</small>
+                      {:else if route.last_success && historicalAge !== null}
+                        <small>Last path opened {relTime(historicalAge)} ago: {routePathLabel(route.last_success.path)}. Historical only.</small>
+                      {:else if route.candidate_families.length || route.candidate_transports.length}
+                        <small>Candidates: {route.candidate_families.join(", ") || "family unknown"} · {route.candidate_transports.join(", ") || "transport unknown"}</small>
+                      {/if}
+                      {#if route.actions.length && !memberRoutesUnavailable}
+                        <ul>
+                          {#each route.actions as action}
+                            <li><span>{routeActionLabel(action)}</span><small>{routeActionScopeLabel(action)}</small></li>
+                          {/each}
+                        </ul>
+                      {/if}
+                    </article>
+                  {/each}
+                </div>
+              {:else if memberRoutesUnavailable}
+                <p class="muted small">No retained route snapshot is available.</p>
+              {:else}
+                <p class="muted small">No other current member routes to assess.</p>
+              {/if}
+              <p class="muted small hosting-disclosure">A member signs the peer identity and addresses in its record, but this protocol version does not yet prove that the member's device key controls that transport key. A live row is therefore evidence about the claimed peer path on this device—not proof that the person is online or directly reachable from elsewhere.</p>
+            </section>
             <!-- The media plane's own evidence. It lives here rather than in a panel of its own
                  because "why will my call not connect" and "why will my server not connect" are
                  the same question asked about two stacks, and answering them in two places is how
@@ -18090,7 +18225,7 @@
             <p class="muted small">{groupLoading ? "Loading members…" : rosterFilter.trim() ? "No matching members." : "No members to show."}</p>
           {/if}
           {#if onlineRoster.length}
-            <h3><span>online: {onlineRoster.length}</span></h3>
+            <h3><span>connected here: {onlineRoster.length}</span></h3>
             <ul>
               {#each onlineRoster as m (m.fingerprint)}
                 {@render memberRow(m, true)}
@@ -18099,7 +18234,7 @@
             </ul>
           {/if}
           {#if offlineRoster.length}
-            <h3><span>offline: {offlineRoster.length}</span></h3>
+            <h3><span>not connected here: {offlineRoster.length}</span></h3>
             <ul>
               {#each offlineRoster as m (m.fingerprint)}
                 {@render memberRow(m, false)}
@@ -18654,7 +18789,7 @@
                     {@const b = badges[fp]}
                     <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""} title="Badge assigned by a server admin">{b.label}</span>
                   {/if}
-                  <span class="muted small">{fp === myFp || onlineMembers.has(fp) ? "online" : "offline"}</span>
+                  <span class="muted small">{fp === myFp || onlineMembers.has(fp) ? "connected here" : "not connected here"}</span>
                 </div>
               </div>
             </div>
@@ -18907,7 +19042,7 @@
                 class:sp-search-dim={!!spaceSearch && !spaceSearchMatches.some((s) => s.id === it.s.id)}
                 style={`left:${spaceVw / 2 + it.x}px; top:${spaceVh / 2 + it.y}px; --sp-s:${it.scale.toFixed(3)}; --sp-delay:${-((it.s.id % 13) * 0.17).toFixed(2)}s;${spaceAccents[it.s.id] ? ` --sp-a:${spaceAccents[it.s.id]};` : ""}`}
                 data-name={it.s.name}
-                title={`${it.s.name} · ${online} online${mentions ? ` · ${mentions} mention${mentions === 1 ? "" : "s"}` : ""}${voice ? ` · ${voice} in voice` : ""}`}
+                title={`${it.s.name} · ${online} connected here${mentions ? ` · ${mentions} mention${mentions === 1 ? "" : "s"}` : ""}${voice ? ` · ${voice} in voice` : ""}`}
                 onpointerdown={(e) => onSpaceServerDown(e, it.s.id)}
                 onclick={() => spaceIconClick(it.s.id)}
                 use:contextMenu={() => spaceServerMenu(it.s)}
@@ -18921,7 +19056,7 @@
                   <span class="rail-badge">{it.s.unread.length}</span>
                 {/if}
                 {#if online > 1}
-                  <span class="sp-orbiters" aria-label={`${online} online`}>
+                  <span class="sp-orbiters" aria-label={`${online} connected here`}>
                     {#each Array(Math.min(8, online - 1)) as _, i}<i style={`--sp-dot:${i}; --sp-dots:${Math.min(8, online - 1)}`}></i>{/each}
                     {#if online > 9}<b>+{online - 9}</b>{/if}
                   </span>
@@ -20425,7 +20560,7 @@
                       {@render nameTag(d.origin)}
                       <span class="dev-tag">· {d.name}</span>
                       <span class="fp small">{cfp.slice(0, 8)}</span>
-                      <span class="muted small">{onlineMembers.has(cfp) ? "online" : "offline"}</span>
+                      <span class="muted small">{onlineMembers.has(cfp) ? "connected here" : "not connected here"}</span>
                       {#if d.origin === myFp}
                         {#if confirmRevokeFp === cfp}
                           <button class="ghost small danger-btn" onclick={() => revokeDevice(cfp)}>Confirm revoke</button>

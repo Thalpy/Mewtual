@@ -35,8 +35,10 @@ use catcoms_storage::{BlobStore, FileManifest};
 // verifies a reassembled download against it.
 pub use catcoms_storage::{Cid, CidHasher, FileRef, SealedBlob};
 use catcoms_sync::{
-    fingerprint, read_published_roster, request_device_join, request_join, request_join_from_reply,
-    request_join_from_switchboards, request_join_via_helper, ChannelSync, SyncError, ROLES_DOC,
+    fingerprint, read_published_roster, request_device_join_tracking,
+    request_join_from_reply_tracking, request_join_from_switchboards_tracking,
+    request_join_tracking, request_join_via_helper_tracking, ChannelSync,
+    PreOwnerConnectionHandoff, SyncError, ROLES_DOC,
 };
 pub use catcoms_sync::{
     peer_addrs_from_snapshot, InviteJoinPlan, JoinAttempt, JoinOutcome, SwitchboardOffer,
@@ -2034,14 +2036,14 @@ pub struct FileListing {
     pub total_chunks: u32,
 }
 
-/// The shared file list with per-file local-availability counts, plus whether **any** catch-up
-/// peer is currently reachable to fetch missing chunks from. `has_peers` is a cheap in-memory
+/// The shared file list with per-file local-availability counts, plus whether a current member
+/// is currently reachable to fetch missing chunks from. `has_peers` is a cheap in-memory
 /// signal; it does NOT prove a given file is held by any peer, only that a fetch could be tried.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesView {
     /// The listed files with availability counts.
     pub files: Vec<FileListing>,
-    /// Whether ≥1 peer (proven member or candidate) is currently known to fetch from.
+    /// Whether ≥1 roster-backed current member is connected on this device.
     pub has_peers: bool,
 }
 
@@ -2407,15 +2409,23 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         invite: &InviteToken,
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
+        let mut connection_handoff = PreOwnerConnectionHandoff::default();
         // Bound the whole join so a never-finalizing owner (an Option-C admin invite whose owner
         // stays offline) can't wedge the joiner forever; the sync layer stays runtime-agnostic.
         let (group, routing) = tokio::time::timeout(
             std::time::Duration::from_secs(JOIN_TIMEOUT_SECS),
-            request_join(&transport, inviter, &device, invite),
+            request_join_tracking(
+                &transport,
+                &mut connection_handoff,
+                inviter,
+                &device,
+                invite,
+            ),
         )
         .await
         .map_err(|_| AppError::JoinTimeout)??;
         let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
         // Seed the inviter as an untrusted **candidate** peer. `request_join` ran straight on the
         // transport, before this `ChannelSync` existed, so without this a brand-new member starts
         // life knowing nobody at all and cannot ask anyone for anything (PEX included) until the
@@ -2446,13 +2456,22 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         invite: &InviteToken,
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
+        let mut connection_handoff = PreOwnerConnectionHandoff::default();
         let (group, routing) = tokio::time::timeout(
             std::time::Duration::from_secs(JOIN_TIMEOUT_SECS),
-            request_join_via_helper(&transport, helper, inviter, &device, invite),
+            request_join_via_helper_tracking(
+                &transport,
+                &mut connection_handoff,
+                helper,
+                inviter,
+                &device,
+                invite,
+            ),
         )
         .await
         .map_err(|_| AppError::JoinTimeout)??;
         let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
         // Both are only candidates until a roster-verified catch-up proves them. The helper is the
         // currently reachable bootstrap; retaining the inviter as well lets discovery recover the
         // direct topology as soon as its route works.
@@ -2483,9 +2502,44 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         reply_joiner_peer: &[u8],
         expires_at_ms: u64,
     ) -> Result<(Self, PeerId), AppError> {
+        Self::join_from_reply_with_handoff(
+            transport,
+            PreOwnerConnectionHandoff::default(),
+            device,
+            rng,
+            clock,
+            display_name,
+            first_contact,
+            inviter,
+            invite,
+            reply_joiner_nonce,
+            reply_joiner_peer,
+            expires_at_ms,
+        )
+        .await
+    }
+
+    /// Reply-code join after a bridge-side proof wait has already consumed lifecycle events.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn join_from_reply_with_handoff(
+        transport: T,
+        mut connection_handoff: PreOwnerConnectionHandoff,
+        device: MlsDevice,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        first_contact: PeerId,
+        inviter: PeerId,
+        invite: &InviteToken,
+        reply_joiner_nonce: [u8; 16],
+        reply_joiner_peer: &[u8],
+        expires_at_ms: u64,
+    ) -> Result<(Self, PeerId), AppError> {
         let device_id = device.device_id();
-        let (group, routing, contact) = request_join_from_reply(
+        let (group, routing, contact) = request_join_from_reply_tracking(
             &transport,
+            &mut connection_handoff,
             first_contact,
             inviter,
             &device,
@@ -2497,6 +2551,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         )
         .await?;
         let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
         sync.note_candidate_peer(inviter);
         sync.note_candidate_peer(contact);
         Ok((
@@ -2526,8 +2581,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         join_plan: &[u8],
     ) -> Result<(Self, PeerId), AppError> {
         let device_id = device.device_id();
-        let join = request_join_from_switchboards(
+        let mut connection_handoff = PreOwnerConnectionHandoff::default();
+        let join = request_join_from_switchboards_tracking(
             &transport,
+            &mut connection_handoff,
             first_contact,
             allowed_contacts,
             inviter,
@@ -2543,6 +2600,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
         };
         let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
         sync.note_candidate_peer(inviter);
         sync.note_candidate_peer(contact);
         Ok((
@@ -2615,12 +2673,14 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
         let now_ms = clock.now_ms();
+        let mut connection_handoff = PreOwnerConnectionHandoff::default();
         // Bounded like the invite join: an owner that never comes online to serialize the Add
         // must not wedge the device forever.
         let (group, routing) = tokio::time::timeout(
             std::time::Duration::from_secs(JOIN_TIMEOUT_SECS),
-            request_device_join(
+            request_device_join_tracking(
                 &transport,
+                &mut connection_handoff,
                 contact,
                 &device,
                 &grant.certificate,
@@ -2631,6 +2691,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         .await
         .map_err(|_| AppError::JoinTimeout)??;
         let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
         // Same reasoning as the invite join: the contact that relayed this admission is the one
         // peer a fresh companion device has, so seed it as a candidate.
         sync.note_candidate_peer(contact);
@@ -3822,12 +3883,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         })
     }
 
-    /// Whether ≥1 transport peer is connected **right now**; a cheap, accurate proxy for "a
-    /// missing chunk could be fetched". Maintained on connect/disconnect (does NOT go stale like the
-    /// catch-up source lists), though it does not prove any peer holds a particular file. Zero
-    /// network cost (an in-memory peer-set check).
+    /// Whether ≥1 roster-backed current member is connected **right now**; a cheap proxy for "a
+    /// missing chunk could be fetched". A relay/rendezvous socket is deliberately excluded: it
+    /// cannot serve a group blob merely by being connected. This does not prove the member holds a
+    /// particular file. Zero network cost (an in-memory roster/peer-set check).
     pub fn has_fetch_peers(&self) -> bool {
-        self.sync.has_connected_peer()
+        !self.sync.connected_member_fingerprints().is_empty()
     }
 
     /// The fingerprints of current members reachable right now (a live connection), for the
@@ -3841,6 +3902,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// view. Local state only; see [`ChannelSync::member_routes`].
     pub fn member_routes(&self) -> Vec<catcoms_sync::MemberRoute> {
         self.sync.member_routes()
+    }
+
+    /// Cheap session-local invalidation epoch for [`Self::member_routes`].
+    pub fn member_route_revision(&self) -> u64 {
+        self.sync.member_route_revision()
     }
 
     /// Every inbound join attempt this node served this session, newest first, with why each was
@@ -3874,7 +3940,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         };
         let (ids, changes): (Vec<String>, Vec<ChangeHash>) = recent.iter().cloned().unzip();
         let reachable = self.online_members().len();
-        let any_peer = self.sync.has_connected_peer();
+        let any_peer = reachable > 0;
         let holders = self
             .sync
             .peers_with_changes(DocType::Channel, channel, &changes);
@@ -6890,6 +6956,33 @@ mod tests {
     // cannot catch that class of bug: they call the primitives directly, so they pass whether or
     // not anything above them does. This drives the same entry points the actor's discovery tick
     // drives, and asserts on the product-facing answer (`online_members`).
+
+    #[test]
+    fn an_unclaimed_infrastructure_connection_is_not_a_fetchable_member() {
+        let hub = Hub::new();
+        let mut server = Server::found(
+            hub.join(PeerId::from_u64(1)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(99),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        let relay = PeerId::from_u64(9_999);
+        let mut handoff = PreOwnerConnectionHandoff::default();
+        assert!(handoff.observe(&catcoms_rt::TransportEvent::PeerConnected(relay)));
+        server.sync.adopt_pre_owner_connections(handoff);
+
+        assert!(
+            server.sync.has_connected_peer(),
+            "the transport fact exists for relay/rendezvous bookkeeping"
+        );
+        assert!(server.online_members().is_empty());
+        assert!(
+            !server.has_fetch_peers(),
+            "an unclaimed infrastructure socket cannot be labelled as a member/blob source"
+        );
+    }
 
     #[tokio::test]
     async fn two_members_exchange_records_and_report_each_other_online() {

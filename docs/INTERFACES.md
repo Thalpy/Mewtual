@@ -35,6 +35,7 @@ CryptoRngCore>` does **not** satisfy the bound (CryptoRng isn't forwarded throug
 ```rust
 pub trait MeshTransport: Send + Sync {
     fn local_peer(&self) -> PeerId;
+    fn connection_snapshot(&self) -> Vec<PeerConnectionSnapshot>; // bounded, present-time; default empty
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError>;
     async fn unsubscribe(&self, topic: Topic) -> Result<(), TransportError>;
     async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError>;
@@ -53,8 +54,18 @@ pub struct ProtocolId(pub &'static str);
 pub enum TransportEvent {
     Gossip { topic: Topic, from: PeerId, data: Bytes },
     Request { from: PeerId, proto: ProtocolId, data: Bytes, responder: Responder },
-    PeerConnected(PeerId), PeerDisconnected(PeerId),
+    PeerConnected(PeerId),
+    PeerPathsChanged { peer: PeerId, active: Vec<ConnectionPath>, newly_established: Option<ConnectionPath> },
+    PeerDisconnected(PeerId),
 }
+pub struct ConnectionPath { family: ConnectionFamily, transport: ConnectionTransport,
+                             direction: ConnectionDirection }
+pub struct PeerConnectionSnapshot { peer: PeerId, active: Vec<ConnectionPath> }
+pub const MAX_CONNECTED_PEER_SNAPSHOT: usize = 320;
+pub const MAX_CONNECTION_PATH_SNAPSHOT: usize = 64;
+pub enum ConnectionFamily { Ipv4, Ipv6, Dns, Memory, Unknown }
+pub enum ConnectionTransport { Tcp, QuicV1, WebSocket, CircuitRelay, Memory, Unknown }
+pub enum ConnectionDirection { Dialer, Listener }
 pub struct Responder;  fn respond(self, Bytes);  fn channel() -> (Responder, ResponderRx);
 pub struct ResponderRx; async fn recv(self) -> Option<Bytes>;
 pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, NoResponse }
@@ -68,6 +79,30 @@ Implementations:
   proof send: the actor succeeds only when its current peer map and `Swarm::is_connected` both say
   the transport is live. Unlike ordinary `request_control`, it never consults `recent_peers` and
   cannot implicitly redial after the shared scheduler denied a new socket attempt.
+  `PeerConnected`/`PeerDisconnected` retain their legacy one-edge aggregate meaning.
+  `PeerPathsChanged` follows them on the same ordered event stream and also fires when a second
+  connection upgrades/refines a path without changing aggregate liveness. It carries no address or
+  physical-connection count. Relay/WebSocket semantics win over their TCP carrier; IPv4-mapped IPv6
+  normalizes to IPv4. Connection limits bound the actor ledger (320 global/eight per peer), and
+  duplicate coarse close snapshots are suppressed. Each genuine establishment still emits a
+  snapshot to timestamp historical success, so intense connection churn can consume the bounded
+  256-event channel and backpressure the single swarm actor; limits bound memory but do not erase
+  that availability residual.
+  `connection_snapshot()` is the non-consuming handoff seam: admission/relay/rendezvous waits use
+  `MeshService::wait_for_*_connected` over its coalesced watch, leaving every ordered event for the
+  eventual owner. The admission routines that must inspect pushed proof/Welcome requests on that
+  stream coalesce any lifecycle events they dequeue into a bounded
+  `PreOwnerConnectionHandoff`; the newly constructed `ChannelSync` adopts its final live table once
+  before draining later queued events. Because the legacy query snapshot and event stream have no
+  shared revision watermark, `ChannelSync` never seeds from `connection_snapshot()` directly. A
+  stopped actor returns an empty snapshot / `Closed`, never Tokio watch's retained last value.
+  `catcoms-sync` increments a session-local member-route revision only when a current member's
+  path, record, dial-scheduler state, or verdict can change. `catcoms-app` compares that revision
+  and emits `AppEvent::MemberRoutesChanged` / Tauri `member-routes-changed` without rebuilding the
+  O(roster × addresses) projection after every sync. Unclaimed Noise-peer churn retains only its
+  bounded evidence and does not bump the UI revision. Time-derived cooldown/history expiry does
+  not mutate that revision, so the visible Connectivity view also refreshes at most once a minute;
+  the debug console already uses a bounded poll.
   - **NAT traversal:** `listen_on(circuit)` / `next_listen_addr()` reserve a relay
     circuit; `next_direct_upgrade()` surfaces a DCUtR hole-punch. Infra nodes:
     `build_relay_swarm()`/`run_relay(...)`, `build_rendezvous_swarm()`/`run_rendezvous(...)`.
@@ -440,7 +475,11 @@ pub struct DiscoveryPolicy;  new() / with_config(PolicyConfig);  remaining_budge
   // ranking: tag-verified member > multi-rendezvous corroboration > cache > raw junk (never dropped);
   // ≤1 trust root/rendezvous; round-robin interleave; roster clamp; seq-freshness (drop stale/replayed).
 pub enum Source { Rendezvous(PeerKey), Pex(PeerKey), Cache }   pub type PeerKey = Vec<u8>;
-pub struct Candidate { peer:PeerKey, addresses:Vec<String>, source:Source, seq:u64, tag_verified:bool }  // seq MUST be from a verified PeerRecord
+pub enum FreshnessPrincipal { Device(PeerKey), Transport(PeerKey) }
+pub struct Candidate { peer:PeerKey /*canonical transport merge/dial key*/, addresses:Vec<String>,
+                       source:Source, freshness:FreshnessPrincipal, seq:u64, tag_verified:bool }
+// `seq` is compared only within its verified signer domain: device-signed PeerDescriptor cache
+// rows use Device(device id); transport-signed rendezvous PeerRecords use Transport(peer id).
 pub struct PlannedDial { peer:PeerKey, addresses:Vec<String> }
 pub struct PolicyConfig { dial_budget, window_ms, jitter_ms, roster_headroom, min_dial_slots, max_addresses, max_tracked_peers }
 
@@ -453,7 +492,7 @@ pub struct EclipseConfig { roster_floor, min_reach:f64, min_sources, grace_ms, c
 // Cross-session cache of proven members (first-contact eclipse). SQLCipher backing deferred.
 pub struct AddressCache;  new(CacheConfig);  insert(CachedPeer, &mut impl CryptoRngCore);  get(&PeerKey)->Option<&CachedPeer>;  candidates()->Vec<CachedPeer>;
   to_bytes(&[u8;32])->Vec<u8>;  from_bytes(&[u8], &[u8;32], CacheConfig)->Result<Self,CacheError>;  // BLAKE3 keyed tag → tamper-detected (constant-time) on load
-pub struct CachedPeer { peer:PeerKey /*device id*/, addresses:Vec<String>, seq:u64, record:Vec<u8> }
+pub struct CachedPeer { peer:PeerKey /*device-id storage key; not Candidate.peer*/, addresses:Vec<String>, seq:u64, record:Vec<u8> }
 ```
 
 ---

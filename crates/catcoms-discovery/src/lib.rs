@@ -56,6 +56,18 @@ pub use eclipse::{EclipseConfig, EclipseDetector, EclipseLevel, EclipseObservati
 /// a `Vec<u8>` so this crate stays free of a libp2p dependency and fully pure.
 pub type PeerKey = Vec<u8>;
 
+/// The authenticated signer whose monotonic sequence domain a candidate belongs to.
+///
+/// A cached PEX `PeerDescriptor` is signed by a member device even though it may self-assert a
+/// different transport peer. A rendezvous `PeerRecord` is signed by the transport peer itself.
+/// Keeping those domains distinct prevents either signer from pinning or resetting the other's
+/// anti-replay high-water while candidates still merge and dial by [`Candidate::peer`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FreshnessPrincipal {
+    Device(PeerKey),
+    Transport(PeerKey),
+}
+
 /// Where a candidate came from; its **trust-root class**. Eclipse-resistance counts
 /// *distinct* roots: every rendezvous is at most one root (so two colluding
 /// rendezvous cannot fake corroboration); each PEX-vouching member is one root; a
@@ -85,22 +97,21 @@ pub enum Source {
 /// inert; do not read them as a live signal.
 #[derive(Debug, Clone)]
 pub struct Candidate {
-    /// The peer the record names (the record's signer).
+    /// The canonical transport peer to dial and merge candidates under.
     pub peer: PeerKey,
     /// The addresses the record advertised (as multiaddr strings; opaque here).
     pub addresses: Vec<String>,
     /// Which trust root surfaced this candidate.
     pub source: Source,
-    /// The registrant's **own signed** monotonic sequence number (the libp2p
-    /// `PeerRecord` seq). Freshness is judged off this, never a server TTL.
+    /// The authenticated signer/sequence domain for [`Self::seq`].
+    pub freshness: FreshnessPrincipal,
+    /// The principal's **own signed** monotonic sequence number. Freshness is judged off this,
+    /// never a server TTL.
     ///
-    /// INVARIANT: the caller MUST only build a `Candidate` from a `PeerRecord` whose
-    /// libp2p signature it has verified, so this `seq` is the peer's *own* signed
-    /// claim. libp2p verifies that signature when surfacing a discovered record, so an
-    /// off-path attacker cannot mint a high `seq` for a peer it does not control. The
-    /// policy folds `seq` into its anti-replay high-water map; an *unauthenticated*
-    /// `seq` could pin that high-water and suppress a peer's later genuine records
-    /// (an availability-only self-eclipse), which this invariant rules out.
+    /// INVARIANT: the caller MUST verify the record signature and select the matching freshness
+    /// principal: `Transport` for a libp2p `PeerRecord`, `Device` for a member-signed
+    /// `PeerDescriptor`. An unauthenticated or mismatched principal could pin another signer's
+    /// high-water and suppress its later genuine records (an availability-only self-eclipse).
     pub seq: u64,
     /// Whether the member-only registration tag verified (caller-checked).
     pub tag_verified: bool,
@@ -661,8 +672,8 @@ impl Merged {
 #[derive(Debug)]
 pub struct DiscoveryPolicy {
     config: PolicyConfig,
-    /// High-water signed seq per peer, to drop replayed/stale records.
-    best_seq: BTreeMap<PeerKey, u64>,
+    /// High-water signed seq per authenticated signer domain, to drop replayed/stale records.
+    best_seq: BTreeMap<FreshnessPrincipal, u64>,
     /// Current budget window start (on the injected clock), or `None` before the
     /// first `plan`.
     window_start_ms: Option<u64>,
@@ -693,6 +704,16 @@ impl DiscoveryPolicy {
     /// not advance the window.
     pub fn remaining_budget(&self) -> u32 {
         self.config.dial_budget.saturating_sub(self.spent)
+    }
+
+    /// Forget the signed-sequence high-water for a member device whose record state was removed.
+    ///
+    /// This removes only the device-signed descriptor domain. A member cannot reset the genuine
+    /// transport-signed rendezvous high-water for a peer it merely self-asserted. Process/window
+    /// dial budgets are intentionally not refunded by record removal.
+    pub fn forget_device_freshness(&mut self, device: &[u8]) {
+        self.best_seq
+            .remove(&FreshnessPrincipal::Device(device.to_vec()));
     }
 
     /// Return locally planned endpoint tokens that a final shared scheduler did not grant.
@@ -726,17 +747,17 @@ impl DiscoveryPolicy {
         //    below the high-water seq we have already accepted for it (a replayed or
         //    superseded record). Drop all of a stale peer's candidates; otherwise
         //    learn the new high-water.
-        let mut incoming_max: BTreeMap<PeerKey, u64> = BTreeMap::new();
+        let mut incoming_max: BTreeMap<FreshnessPrincipal, u64> = BTreeMap::new();
         for c in &candidates {
-            let e = incoming_max.entry(c.peer.clone()).or_insert(c.seq);
+            let e = incoming_max.entry(c.freshness.clone()).or_insert(c.seq);
             *e = (*e).max(c.seq);
         }
-        let mut stale: BTreeMap<PeerKey, bool> = BTreeMap::new();
-        for (peer, &max_seq) in &incoming_max {
-            let is_stale = matches!(self.best_seq.get(peer), Some(&b) if max_seq < b);
-            stale.insert(peer.clone(), is_stale);
+        let mut stale: BTreeMap<FreshnessPrincipal, bool> = BTreeMap::new();
+        for (principal, &max_seq) in &incoming_max {
+            let is_stale = matches!(self.best_seq.get(principal), Some(&b) if max_seq < b);
+            stale.insert(principal.clone(), is_stale);
             if !is_stale {
-                let slot = self.best_seq.entry(peer.clone()).or_insert(max_seq);
+                let slot = self.best_seq.entry(principal.clone()).or_insert(max_seq);
                 *slot = (*slot).max(max_seq);
             } else {
                 tracing::trace!("dropping stale-seq peer from discovery plan");
@@ -747,7 +768,7 @@ impl DiscoveryPolicy {
         // 2. Merge surviving candidates by peer (union sources + addresses, max seq).
         let mut merged: BTreeMap<PeerKey, Merged> = BTreeMap::new();
         for c in candidates {
-            if *stale.get(&c.peer).unwrap_or(&false) {
+            if *stale.get(&c.freshness).unwrap_or(&false) {
                 continue;
             }
             merged
@@ -894,10 +915,16 @@ mod tests {
     }
 
     fn cand(p: u8, source: Source, seq: u64, tag_verified: bool) -> Candidate {
+        let peer = peer(p);
+        let freshness = match &source {
+            Source::Cache => FreshnessPrincipal::Device(peer.clone()),
+            Source::Rendezvous(_) | Source::Pex(_) => FreshnessPrincipal::Transport(peer.clone()),
+        };
         Candidate {
-            peer: peer(p),
+            peer,
             addresses: vec![format!("/ip4/10.0.0.{p}/tcp/4001")],
             source,
+            freshness,
             seq,
             tag_verified,
         }
@@ -957,6 +984,7 @@ mod tests {
                 peer: p.to_be_bytes().to_vec(),
                 addresses: vec!["/ip4/10.0.0.1/tcp/1".into()],
                 source: Source::Rendezvous(rdv(1)),
+                freshness: FreshnessPrincipal::Transport(p.to_be_bytes().to_vec()),
                 seq: 1,
                 tag_verified: false,
             });
@@ -967,6 +995,7 @@ mod tests {
             peer: b_peer.clone(),
             addresses: vec!["/ip4/10.0.0.2/tcp/2".into()],
             source: Source::Rendezvous(rdv(2)),
+            freshness: FreshnessPrincipal::Transport(b_peer.clone()),
             seq: 1,
             tag_verified: false,
         });
@@ -995,6 +1024,7 @@ mod tests {
                 peer: p.to_be_bytes().to_vec(),
                 addresses: vec!["/ip4/10.0.0.1/tcp/1".into()],
                 source: Source::Rendezvous(rdv(1)),
+                freshness: FreshnessPrincipal::Transport(p.to_be_bytes().to_vec()),
                 seq: 1,
                 tag_verified: false,
             })
@@ -1033,6 +1063,72 @@ mod tests {
             &mut r,
         );
         assert_eq!(plan3.len(), 1, "a newer seq is accepted");
+    }
+
+    #[test]
+    fn signer_scoped_freshness_domains_cannot_pin_or_reset_each_other() {
+        let mut pol = ranking_policy();
+        let clock = ManualClock::new(0);
+        let mut r = rng();
+        let target = peer(5);
+        let device_a = peer(41);
+        let device_b = peer(42);
+        let candidate = |freshness, seq| Candidate {
+            peer: target.clone(),
+            addresses: vec!["/ip4/10.0.0.5/tcp/4001".into()],
+            source: Source::Cache,
+            freshness,
+            seq,
+            tag_verified: false,
+        };
+
+        assert_eq!(
+            pol.plan(
+                vec![candidate(FreshnessPrincipal::Device(device_a.clone()), 900)],
+                5,
+                &clock,
+                &mut r,
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            pol.plan(
+                vec![candidate(FreshnessPrincipal::Transport(target.clone()), 1,)],
+                5,
+                &clock,
+                &mut r,
+            )
+            .len(),
+            1,
+            "a device descriptor's high sequence cannot stale the transport-signed domain"
+        );
+
+        assert_eq!(
+            pol.plan(
+                vec![candidate(FreshnessPrincipal::Device(device_b), 1)],
+                5,
+                &clock,
+                &mut r,
+            )
+            .len(),
+            1,
+            "a second device signer has an independent descriptor sequence domain"
+        );
+
+        // Releasing A's member record must not reset the genuine transport's rendezvous
+        // high-water: a replayed lower transport-signed sequence remains stale.
+        pol.forget_device_freshness(&device_a);
+        assert!(
+            pol.plan(
+                vec![candidate(FreshnessPrincipal::Transport(target.clone()), 0)],
+                5,
+                &clock,
+                &mut r,
+            )
+            .is_empty(),
+            "a member cannot reset the transport signer's anti-replay state"
+        );
     }
 
     #[test]
@@ -1092,6 +1188,7 @@ mod tests {
                 .map(|port| format!("/ip4/203.0.113.1/tcp/{port}"))
                 .collect(),
             source: Source::Cache,
+            freshness: FreshnessPrincipal::Device(peer(1)),
             seq: 1,
             tag_verified: false,
         };
@@ -1121,6 +1218,7 @@ mod tests {
                 .map(|port| format!("/ip4/203.0.113.1/tcp/{port}"))
                 .collect(),
             source: Source::Cache,
+            freshness: FreshnessPrincipal::Device(peer(1)),
             seq: 1,
             tag_verified: false,
         };
@@ -1149,6 +1247,7 @@ mod tests {
             peer: peer(1),
             addresses: vec!["a".into(), "b".into()],
             source: Source::Cache,
+            freshness: FreshnessPrincipal::Device(peer(1)),
             seq: 1,
             tag_verified: false,
         };
@@ -1400,6 +1499,7 @@ mod tests {
                 peer: peer(5),
                 addresses: vec!["/ip4/1.1.1.1/tcp/1".into()],
                 source: Source::Rendezvous(rdv(1)),
+                freshness: FreshnessPrincipal::Transport(peer(5)),
                 seq: 4,
                 tag_verified: false,
             },
@@ -1407,6 +1507,7 @@ mod tests {
                 peer: peer(5),
                 addresses: vec!["/ip4/2.2.2.2/tcp/2".into()],
                 source: Source::Cache,
+                freshness: FreshnessPrincipal::Device(peer(42)),
                 seq: 7,
                 tag_verified: false,
             },

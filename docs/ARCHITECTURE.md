@@ -117,6 +117,21 @@ is broken. The load-bearing fixes:
   current address is unknown to every peer still needs
   out-of-band signalling, rendezvous/relay infrastructure, or a reachable member; swarm sampling
   cannot manufacture a route from no contact.
+- Pairwise route evidence is a bounded, session-only refinement of aggregate transport liveness.
+  Libp2p reports a sorted/deduplicated IPv4/IPv6/DNS/memory + TCP/QUIC/WebSocket/circuit snapshot
+  after connection edges, including relay-to-direct DCUtR upgrades and partial closes. The sync
+  layer accepts detail only while `PeerConnected` remains live, caps custom transports again,
+  retains historical success for at most 24 monotonic hours, and never serializes it. Admission
+  paths that temporarily inspect pushed proof/Welcome requests coalesce any lifecycle
+  edges they dequeue into a bounded final-state handoff, which the new sync owner adopts once;
+  ordinary pre-owner connection waits use a non-consuming watch. Connectivity exposes typed
+  claimed-peer health/actions, refreshes on path changes even when aggregate presence
+  is unchanged (plus a bounded visible-view refresh for time-derived expiry), and says “not
+  connected here,” never “offline.” Dial counters describe scheduler submissions/cooldown, not
+  unobserved per-address failures, and IPv6 candidate shape is not presented as an outbound-route
+  test. A
+  signed peer record is still a self-asserted device-to-transport binding, so this evidence is not
+  proof that the member controls that live transport key or is reachable from another network.
 - A **fully compromised device** exposes its current keys and plaintext; PCS only heals
   *after* the device is removed.
 - **Already-fetched files cannot be un-shared.**

@@ -123,6 +123,96 @@ impl ResponderRx {
     }
 }
 
+/// Address family used by one live transport path.
+///
+/// This deliberately describes the local node's observed connection endpoint, not a claim that
+/// the same family is reachable from every other member. Keeping the type in `catcoms-rt` lets
+/// the sync layer consume the evidence without depending on libp2p's address types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ConnectionFamily {
+    /// An IPv4 endpoint.
+    Ipv4,
+    /// An IPv6 endpoint.
+    Ipv6,
+    /// A DNS-named endpoint whose eventual IP family is not represented here.
+    Dns,
+    /// An in-process libp2p memory endpoint (tests and local tooling).
+    Memory,
+    /// The endpoint did not carry a family this version understands.
+    Unknown,
+}
+
+/// Transport used by one live peer connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ConnectionTransport {
+    /// TCP without a WebSocket component.
+    Tcp,
+    /// QUIC v1 over UDP.
+    QuicV1,
+    /// WebSocket or secure WebSocket.
+    WebSocket,
+    /// A libp2p circuit-relay path. This takes precedence over the relay's underlying transport.
+    CircuitRelay,
+    /// An in-process libp2p memory transport.
+    Memory,
+    /// The endpoint did not carry a transport this version understands.
+    Unknown,
+}
+
+/// Which side opened one live connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ConnectionDirection {
+    /// Libp2p represented this side as the dialer endpoint. During hole punching the negotiated
+    /// stream role can differ, so this must not be presented as proof of who initiated contact.
+    Dialer,
+    /// Libp2p represented this side as the listener endpoint.
+    Listener,
+}
+
+/// A coarse, privacy-preserving description of one live connection.
+///
+/// No IP address or connection identifier crosses this seam. Multiple physical connections that
+/// share the same description are intentionally deduplicated in the diagnostic snapshot: the
+/// product needs to explain *how* a member is reachable, not expose low-level connection state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConnectionPath {
+    /// Address family observed on the connection endpoint.
+    pub family: ConnectionFamily,
+    /// Transport observed on the connection endpoint.
+    pub transport: ConnectionTransport,
+    /// The local libp2p endpoint role (not necessarily the socket initiator during hole punching).
+    pub direction: ConnectionDirection,
+}
+
+/// Maximum full-path snapshot a [`MeshTransport`] implementation may emit in one event.
+///
+/// Production connection limits keep snapshots much smaller. This public seam is also implemented
+/// by tests and may be implemented by alternate transports, so consumers need a declared bound
+/// before sorting or deduplicating caller-owned input.
+pub const MAX_CONNECTION_PATH_SNAPSHOT: usize = 64;
+
+/// Maximum peers returned by [`MeshTransport::connection_snapshot`].
+///
+/// Production's swarm limit is 320 established connections, so a larger alternate-transport
+/// snapshot cannot describe state the product supports and would only create unbounded startup
+/// work in consumers.
+pub const MAX_CONNECTED_PEER_SNAPSHOT: usize = 320;
+
+/// One peer in a transport's present-time connection snapshot.
+///
+/// This is deliberately a read-only, coarse companion to the ordered event stream. It lets an
+/// admission or infrastructure waiter observe liveness without stealing [`TransportEvent`] values
+/// from the eventual owner. A consumer must not seed state from this snapshot and then replay an
+/// older queued stream unless its transport supplies a shared revision watermark; this legacy seam
+/// deliberately does not. The snapshot carries no membership meaning and no network addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerConnectionSnapshot {
+    /// The transport peer that is connected at the instant of the snapshot.
+    pub peer: PeerId,
+    /// The current privacy-preserving paths for that peer.
+    pub active: Vec<ConnectionPath>,
+}
+
 /// An inbound transport event, drained via [`MeshTransport::next_event`].
 #[derive(Debug)]
 pub enum TransportEvent {
@@ -148,6 +238,24 @@ pub enum TransportEvent {
     },
     /// A peer became reachable.
     PeerConnected(PeerId),
+    /// The coarse set of paths currently carrying connections to `peer` changed.
+    ///
+    /// `newly_established` is present only for an establishment edge and lets consumers retain a
+    /// time-bounded historical success after the connection closes. `active` is a full snapshot,
+    /// not a delta, so consumers do not reconstruct path state. Events share the ordered
+    /// `MeshTransport::next_event` stream; no cross-stream reordering guarantee is implied.
+    /// Existing `PeerConnected`/`PeerDisconnected` events retain their one-per-peer semantics for
+    /// callers interested only in aggregate liveness.
+    PeerPathsChanged {
+        /// The peer whose path set changed.
+        peer: PeerId,
+        /// Live path descriptions. Implementations must send at most
+        /// [`MAX_CONNECTION_PATH_SNAPSHOT`] entries; production sends sorted/deduplicated rows,
+        /// while consumers still validate and normalize custom implementations.
+        active: Vec<ConnectionPath>,
+        /// The path that caused this update, when a new connection was established.
+        newly_established: Option<ConnectionPath>,
+    },
     /// A peer became unreachable.
     PeerDisconnected(PeerId),
 }
@@ -175,6 +283,17 @@ pub struct DiscoveredPeer {
 pub trait MeshTransport: Send + Sync {
     /// This node's peer id.
     fn local_peer(&self) -> PeerId;
+
+    /// Return the transport's current connected-peer/path state without consuming its ordered
+    /// event stream.
+    ///
+    /// Transports without an independently queryable connection table may keep the empty default;
+    /// their consumers continue to learn liveness from [`MeshTransport::next_event`]. Implementors
+    /// must return at most [`MAX_CONNECTED_PEER_SNAPSHOT`] entries and bound each `active` vector
+    /// by [`MAX_CONNECTION_PATH_SNAPSHOT`].
+    fn connection_snapshot(&self) -> Vec<PeerConnectionSnapshot> {
+        Vec::new()
+    }
 
     /// Start receiving gossip on `topic`.
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError>;

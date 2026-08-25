@@ -323,10 +323,26 @@ Trusted operator-infrastructure connections are not all mediated by this schedul
 yet own actor-consumed/refundable permits, a separate exact relay-outer-socket lease, or process-wide
 in-flight leases, and endpoint signatures still do not prove IP/port ownership.
 
-Current discovery follow-ups are the typed peer-bound batch/permit API, the capability-gated addressed
-reciprocal/helper protocol and actor cancellation/replay state, pairwise reachability evidence,
-swarm-style indirect probes/views, typed member health, and TTL-aware rendezvous scheduling; see the
-checked backlog in `design-postjoin-discovery.md`.
+Pairwise path evidence and typed claimed-peer health/actions are now complete. The transport tracks
+concurrent connection ids so relay-to-direct upgrades and partial closes remain truthful; the sync
+layer bounds transient detail/history, expires historical success, and exposes safe action ids to
+both Connectivity and the debug console. The UI no longer translates this device's missing
+connection into “offline.” The explicit `self_asserted` binding remains because signed descriptors
+do not yet prove device-key control of their claimed transport key. Dial counts are scheduler
+submissions rather than asserted transport failures; IPv6-only candidates are diagnostic clues,
+not proof this host lacks an outbound IPv6 route; and admission-only switchboards are not offered
+as post-join repair.
+
+Current discovery follow-ups are the typed peer-bound batch/permit API, the capability-gated
+addressed reciprocal/helper protocol and actor cancellation/replay state, SWIM-style indirect
+probes, HyParView/CYCLON active/passive maintenance, manual fallback redial, and TTL-aware
+rendezvous scheduling; see the checked backlog in `design-postjoin-discovery.md`.
+
+> **Connectivity terminology note:** current UI and diagnostics report this node's observed
+> **connected here / not connected here**, never proof that a person is online or globally
+> reachable. This supersedes the older roadmap row's “online dots/count”, “no peers online”, and
+> “Online / Last seen” wording; read those as “connected-here dots/count”, “no claimed peer
+> connected here”, and “Connected here / Last connected here”.
 
 ### Earlier blocks (history)
 6d-1b (missed-commit recovery + past-epoch key window) and 6d-2 (fork resolution +

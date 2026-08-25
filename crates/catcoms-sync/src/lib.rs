@@ -36,7 +36,7 @@ use catcoms_crypto::{
 use catcoms_discovery::{
     parse_peer_dial_route, AddressCache, CacheConfig, CacheError, CachedPeer, Candidate,
     DialEndpoint, DiscoveryPolicy, EclipseConfig, EclipseDetector, EclipseLevel,
-    EclipseObservation, EndpointDialScheduler, PolicyConfig, RouteHost, Source,
+    EclipseObservation, EndpointDialScheduler, FreshnessPrincipal, PolicyConfig, RouteHost, Source,
 };
 use catcoms_mls::{
     key_package_signature_key, restore_server, serialize_key_package, snapshot_server, Incoming,
@@ -44,7 +44,8 @@ use catcoms_mls::{
 };
 use catcoms_replication::{EncryptedDoc, SealedOp};
 use catcoms_rt::{
-    Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId, ProtocolId, Topic, TransportEvent,
+    Clock, ConnectionFamily, ConnectionPath, ConnectionTransport, CryptoRngCore, DiscoveredPeer,
+    MeshTransport, PeerId, ProtocolId, Topic, TransportEvent, MAX_CONNECTION_PATH_SNAPSHOT,
 };
 use catcoms_storage::{
     open_file as open_file_fn, seal_file as seal_file_fn, BlobStore, Cid, FileRef, MemoryBlobStore,
@@ -129,6 +130,82 @@ const KIND_SWITCHBOARD_OFFER: u8 = 12;
 /// transport can verify it before constructing `ChannelSync` and disclosing the bearer invite.
 pub const JOIN_REPLY_PROOF_KIND: u8 = 13;
 const JOIN_REPLY_PROOF_DOMAIN: &str = "catcoms/join-reply/dialback-proof/v1";
+
+/// Bounded connection state consumed before [`ChannelSync`] becomes the sole event-stream owner.
+///
+/// Reply-code and standing-switchboard admission must inspect a few inbound requests before the
+/// post-join synchronizer exists. While doing so they also dequeue adjacent lifecycle events from
+/// the same ordered stream. This coalescer retains only the final connected peers and their latest
+/// privacy-preserving paths, so ownership can be handed over without losing live presence or
+/// replaying stale connect/disconnect edges. Disconnected rows are removed immediately, keeping
+/// the bound equal to the transport's concurrent-peer bound rather than total churn over a reply
+/// window. It carries no membership proof and no addresses.
+#[derive(Debug, Default)]
+pub struct PreOwnerConnectionHandoff {
+    peers: HashMap<PeerId, PreOwnerConnectedPeer>,
+}
+
+#[derive(Debug, Default)]
+struct PreOwnerConnectedPeer {
+    active: Vec<ConnectionPath>,
+    newly_established: Option<ConnectionPath>,
+}
+
+impl PreOwnerConnectionHandoff {
+    /// Coalesce a lifecycle event and return whether it was consumed by this handoff.
+    /// Requests and gossip remain the admission routine's responsibility.
+    pub fn observe(&mut self, event: &TransportEvent) -> bool {
+        match event {
+            TransportEvent::PeerConnected(peer) => {
+                if self.peers.contains_key(peer)
+                    || self.peers.len() < catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT
+                {
+                    self.peers.entry(*peer).or_default();
+                }
+                true
+            }
+            TransportEvent::PeerPathsChanged {
+                peer,
+                active,
+                newly_established,
+            } => {
+                if active.len() > MAX_CONNECTION_PATH_SNAPSHOT {
+                    // A custom transport violated the public bound. Preserve aggregate liveness
+                    // if a preceding edge established it, but reject attacker-sized detail.
+                    if let Some(state) = self.peers.get_mut(peer) {
+                        state.active.clear();
+                        state.newly_established = None;
+                    }
+                    return true;
+                }
+                if active.is_empty() {
+                    // A full close is ordered after PeerDisconnected and must not recreate the
+                    // removed row. A coarse empty refinement on a live custom transport merely
+                    // leaves it connected with an unknown path.
+                    if let Some(state) = self.peers.get_mut(peer) {
+                        state.active.clear();
+                        state.newly_established = None;
+                    }
+                    return true;
+                }
+                if let Some(state) = self.peers.get_mut(peer) {
+                    // Path detail refines an authoritative aggregate edge; it never creates
+                    // liveness by itself. Alternate/custom transports must preserve that same
+                    // ordering contract, and a path event cannot bypass the peer cap.
+                    state.active = active.clone();
+                    state.newly_established =
+                        newly_established.filter(|path| active.contains(path));
+                }
+                true
+            }
+            TransportEvent::PeerDisconnected(peer) => {
+                self.peers.remove(peer);
+                true
+            }
+            TransportEvent::Gossip { .. } | TransportEvent::Request { .. } => false,
+        }
+    }
+}
 /// A helper keeps at most this many staged forwarded joins.  In practice there is normally one;
 /// the bound makes a pasted bearer invite incapable of turning a member into durable state.
 const MAX_FORWARDED_JOINS: usize = 16;
@@ -228,6 +305,15 @@ const DIAL_RETRY_MAX_MS: u64 = 15 * 60_000;
 /// Positive jitter applied to each retry deadline. This keeps members that observed the same
 /// outage from all redialling one peer on the same second.
 const DIAL_RETRY_JITTER_MS: u64 = 15_000;
+/// Historical path evidence is useful for explaining a recent disconnect, but it must not become
+/// a durable claim after networks and addresses have changed. It is hidden after one day and is
+/// never serialized; active paths remain governed by connect/disconnect edges instead.
+const REACHABILITY_EVIDENCE_TTL_MS: u64 = 24 * 60 * 60_000;
+/// Matches the transport's hard per-peer connection ceiling. A custom/malicious transport can
+/// still send a larger vector through the trait, so the sync boundary enforces the cap again.
+const MAX_ACTIVE_PATHS_PER_PEER: usize = 8;
+/// Distinct authenticated sequence domains retained inside one shared transport retry row.
+const MAX_DIAL_RETRY_PRINCIPALS: usize = 8;
 /// Cap on dialable addresses carried per peer record.
 const MAX_PEX_ADDRESSES: usize = 8;
 /// Minimum interval (ms, on the injected clock) between PEX responses served to the
@@ -991,6 +1077,9 @@ pub struct RoutingState {
     /// routing secrets. `None` for an absent/empty transfer (the joiner then cannot open
     /// group files until it obtains the key).
     file_wrap_key: Option<[u8; 32]>,
+    /// Transient lifecycle state consumed while waiting for a staged Welcome. Never encoded,
+    /// sealed, persisted, or sent on the wire; `new_joined` drains it exactly once.
+    connection_handoff: PreOwnerConnectionHandoff,
 }
 
 impl std::fmt::Debug for RoutingState {
@@ -1039,6 +1128,7 @@ fn open_routing_transfer(
             .map(|(slot, s)| (slot, Zeroizing::new(s)))
             .collect(),
         file_wrap_key: Some(file_wrap_key),
+        connection_handoff: PreOwnerConnectionHandoff::default(),
     })
 }
 
@@ -1376,12 +1466,90 @@ pub enum SyncError {
 /// device id is in the roster) before treating it as a dial candidate.
 ///
 /// NOTE for the discovery bridge (6e-3d-9): `seq` is a per-**device** counter, and the
-/// authenticated identity is `device_pubkey`. When turning records into
-/// `catcoms-discovery` `Candidate`s, key the candidate (and its anti-replay seq) on the
-/// **device id**, not the self-asserted `peer_id`; two records could claim the same
-/// `peer_id`, so keying on `peer_id` would let one member pin another's freshness.
-/// `peer_id`/`addresses` are the dial target only.
-/// What this node knows about reaching one current member, for the debug console's network view.
+/// authenticated identity is `device_pubkey`. A cache candidate therefore uses the canonical
+/// transport `peer_id` as `Candidate.peer` (merge/dial key), and
+/// `FreshnessPrincipal::Device(device_id)` as the signer-scoped anti-replay domain. Two records may
+/// claim the same transport without either device pinning the other's sequence; transport-signed
+/// rendezvous records use the separate `FreshnessPrincipal::Transport(peer_id)` domain.
+/// How strongly the current member record binds its device key to the transport peer it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberRouteBinding {
+    /// No signed peer record has been learned.
+    Absent,
+    /// The current member signed the descriptor, but no challenge proves that its device key
+    /// controls the claimed transport identity. This is intentionally not called "verified".
+    SelfAsserted,
+}
+
+/// A typed, present-time verdict for one current member record's claimed route.
+///
+/// The `ClaimedPeer*` names are a security boundary: a signed [`PeerDescriptor`] authenticates the
+/// device that made the claim, but the protocol does not yet bind that device key to the libp2p
+/// key it placed in `peer_id`. These variants therefore must not be relabelled as proof that the
+/// human/member is online until a reciprocal challenge binds the two identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberRouteHealth {
+    /// No signed descriptor for this member is known.
+    NoPeerRecord,
+    /// The descriptor names a peer but advertises no address to dial.
+    ClaimedPeerHasNoRoute,
+    /// A live non-circuit path to the descriptor's claimed peer exists on this device.
+    ClaimedPeerConnectedDirect,
+    /// Only live circuit-relay paths to the descriptor's claimed peer are observed.
+    ClaimedPeerConnectedRelay,
+    /// Aggregate liveness exists, but this transport did not provide path classification.
+    ClaimedPeerConnectedOther,
+    /// One or more policy-approved dial batches were submitted and scheduler cooldown is active.
+    /// This does not claim that libp2p attempted every candidate or that the peer answered.
+    ClaimedPeerDialCoolingDown,
+    /// At least one candidate exists and the claimed peer is eligible for the next dial pass.
+    ClaimedPeerDialEligible,
+}
+
+/// Who can perform a route recommendation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberRouteActionScope {
+    /// This device/user can act locally.
+    ThisDevice,
+    /// The member whose route is being described needs to act on their device.
+    MemberDevice,
+    /// Any suitable current member can improve the group's redundancy.
+    Group,
+}
+
+/// Stable recommendation identifiers. Product surfaces own the wording, while the backend owns
+/// when an action is applicable so debug and Connectivity cannot silently disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberRouteActionKind {
+    /// Let the bounded discovery scheduler make its next attempt.
+    WaitForAutomaticRecovery,
+    /// Ask the member to open their Connectivity assistant and refresh their advertised routes.
+    CheckMemberConnectivity,
+    /// Keep another already-connected member available so authenticated PEX can fill records.
+    KeepAnotherMemberConnected,
+    /// Configure a mutually trusted relay/rendezvous node when member hosting is insufficient.
+    ConfigureFallbackNode,
+}
+
+/// One safe next action attached to a member-route verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemberRouteAction {
+    /// The actor capable of taking the action.
+    pub scope: MemberRouteActionScope,
+    /// Stable action identity.
+    pub kind: MemberRouteActionKind,
+}
+
+/// A recent successful path, explicitly historical rather than current reachability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemberRouteSuccess {
+    /// The path that became established.
+    pub path: ConnectionPath,
+    /// Monotonic age of the observation at the instant this report was built.
+    pub age_ms: u64,
+}
+
+/// What this node knows about reaching one current member, for Connectivity and diagnostics.
 ///
 /// Every field is local state, never a claim about the member's own view of things: `connected`
 /// means this node holds a live transport connection, and `addresses` are what the member's signed
@@ -1400,11 +1568,112 @@ pub struct MemberRoute {
     pub seq: u64,
     /// Whether a transport connection to it is live right now.
     pub connected: bool,
-    /// Consecutive dial attempts charged against it. Climbing while `connected` is false is what a
-    /// peer this node cannot reach looks like.
+    /// Policy-approved dial batches submitted for this record epoch. Submission is not a transport
+    /// failure: libp2p may queue, suppress, or race individual candidates.
     pub dial_attempts: u8,
     /// Milliseconds until the backoff permits another dial; zero when eligible now.
     pub next_dial_in_ms: u64,
+    /// Typed verdict derived from present liveness, active paths, the current descriptor, and the
+    /// retry ledger. This never claims the member is offline.
+    pub health: MemberRouteHealth,
+    /// Strength of the device-to-transport binding behind `health`.
+    pub binding: MemberRouteBinding,
+    /// Sorted, deduplicated paths currently carrying a connection to the claimed peer.
+    pub active_paths: Vec<ConnectionPath>,
+    /// Most recent successful path in this process, hidden after the evidence TTL.
+    pub last_success: Option<MemberRouteSuccess>,
+    /// Families present in the current signed descriptor, not inferred from inbound endpoints.
+    pub candidate_families: Vec<ConnectionFamily>,
+    /// Transports present in the current signed descriptor.
+    pub candidate_transports: Vec<ConnectionTransport>,
+    /// Safe, typed next actions for this verdict.
+    pub actions: Vec<MemberRouteAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PairwiseReachability {
+    active_paths: Vec<ConnectionPath>,
+    last_success: Option<(ConnectionPath, u64)>,
+    updated_at_ms: u64,
+}
+
+fn advertised_route_shape(
+    addresses: &[String],
+) -> (Vec<ConnectionFamily>, Vec<ConnectionTransport>) {
+    let mut families = BTreeSet::new();
+    let mut transports = BTreeSet::new();
+    for address in addresses {
+        let parts: Vec<_> = address.split('/').filter(|part| !part.is_empty()).collect();
+        let family = if parts.contains(&"ip4") {
+            ConnectionFamily::Ipv4
+        } else if let Some(index) = parts.iter().position(|part| *part == "ip6") {
+            match parts
+                .get(index + 1)
+                .and_then(|raw| raw.parse::<std::net::Ipv6Addr>().ok())
+            {
+                Some(ip) if ip.to_ipv4_mapped().is_some() => ConnectionFamily::Ipv4,
+                _ => ConnectionFamily::Ipv6,
+            }
+        } else if parts
+            .iter()
+            .any(|part| matches!(*part, "dns" | "dns4" | "dns6" | "dnsaddr"))
+        {
+            ConnectionFamily::Dns
+        } else if parts.contains(&"memory") {
+            ConnectionFamily::Memory
+        } else {
+            ConnectionFamily::Unknown
+        };
+        let transport = if parts.contains(&"p2p-circuit") {
+            ConnectionTransport::CircuitRelay
+        } else if parts.iter().any(|part| matches!(*part, "ws" | "wss")) {
+            ConnectionTransport::WebSocket
+        } else if parts.contains(&"quic-v1") {
+            ConnectionTransport::QuicV1
+        } else if parts.contains(&"tcp") {
+            ConnectionTransport::Tcp
+        } else if parts.contains(&"memory") {
+            ConnectionTransport::Memory
+        } else {
+            ConnectionTransport::Unknown
+        };
+        families.insert(family);
+        transports.insert(transport);
+    }
+    (
+        families.into_iter().collect(),
+        transports.into_iter().collect(),
+    )
+}
+
+fn route_actions(health: MemberRouteHealth) -> Vec<MemberRouteAction> {
+    use MemberRouteActionKind as Kind;
+    use MemberRouteActionScope as Scope;
+    let action = |scope, kind| MemberRouteAction { scope, kind };
+    match health {
+        MemberRouteHealth::NoPeerRecord => vec![
+            action(Scope::MemberDevice, Kind::CheckMemberConnectivity),
+            action(Scope::Group, Kind::KeepAnotherMemberConnected),
+        ],
+        MemberRouteHealth::ClaimedPeerHasNoRoute => vec![
+            action(Scope::MemberDevice, Kind::CheckMemberConnectivity),
+            action(Scope::Group, Kind::ConfigureFallbackNode),
+        ],
+        MemberRouteHealth::ClaimedPeerDialCoolingDown
+        | MemberRouteHealth::ClaimedPeerDialEligible => {
+            vec![action(Scope::ThisDevice, Kind::WaitForAutomaticRecovery)]
+        }
+        MemberRouteHealth::ClaimedPeerConnectedDirect
+        | MemberRouteHealth::ClaimedPeerConnectedRelay
+        | MemberRouteHealth::ClaimedPeerConnectedOther => Vec::new(),
+    }
+}
+
+fn is_recognized_direct_path(path: &ConnectionPath) -> bool {
+    matches!(
+        path.transport,
+        ConnectionTransport::Tcp | ConnectionTransport::QuicV1 | ConnectionTransport::WebSocket
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2478,15 +2747,14 @@ struct JoinHelperCapability {
     expires_at_ms: u64,
 }
 
-/// Transient retry state for one discovery identity.
+/// Transient retry state for one canonical transport peer.
 ///
-/// The key lives outside this value because it is intentionally the discovery policy's identity:
-/// a signed PEX/cache candidate is keyed by member device id, while a not-yet-proven rendezvous
-/// candidate is keyed by the opaque transport bytes the rendezvous returned. `seq` is what makes
-/// a freshly signed address epoch immediately eligible even if the preceding route is backed off.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Cooldown/attempts are shared so alternating discovery sources cannot hammer one transport.
+/// Freshness remains signer-scoped: member-device descriptor and transport-signed rendezvous
+/// sequences are incomparable, and a newly signed epoch bypasses cooldown only in its own domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DialRetry {
-    seq: u64,
+    epochs: BTreeMap<FreshnessPrincipal, u64>,
     attempts: u8,
     last_attempt_ms: u64,
     next_attempt_ms: u64,
@@ -2578,6 +2846,14 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// which only grow. The accurate liveness signal for presence + the file-availability hint.
     /// Transient (connections re-establish on reload).
     connected_peers: HashSet<PeerId>,
+    /// Bounded, session-only path evidence keyed by the claimed transport identity. It is never
+    /// membership proof: `member_routes` attaches it only to that member's own signed record and
+    /// carries [`MemberRouteBinding::SelfAsserted`] alongside the result.
+    pairwise_reachability: HashMap<PeerId, PairwiseReachability>,
+    /// Cheap invalidation epoch for the app actor. Building `member_routes()` is O(roster ×
+    /// addresses), so ordinary message traffic must not rebuild it merely to discover no route
+    /// state changed. Session-only and allowed to wrap.
+    member_route_revision: u64,
     /// Recovery work to perform on the next async drain.
     catchup_queue: Vec<CatchupTask>,
     /// Peers that recently answered a commit catch-up without filling the gap;
@@ -2783,6 +3059,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         mut rng: R,
         clock: Box<dyn Clock + Send>,
     ) -> Self {
+        // Admission/infrastructure waits use the transport's non-consuming watch, so every
+        // lifecycle edge remains queued for this sole ordered-stream owner. Do not also seed from
+        // `connection_snapshot()`: the snapshot and legacy event stream intentionally have no
+        // shared revision watermark, and mixing a newest snapshot with older queued edges could
+        // transiently erase or downgrade a connection that is live now. The untouched queue is
+        // therefore the one authoritative handoff path.
         // Mint this group's stable file-wrap key (Phase 9h). A founder keeps it; a joiner
         // replaces it with the transferred one via `adopt_routing_state`.
         let mut file_wrap_key = Zeroizing::new([0u8; 32]);
@@ -2815,6 +3097,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             known_peers: VecDeque::new(),
             member_peers: VecDeque::new(),
             connected_peers: HashSet::new(),
+            pairwise_reachability: HashMap::new(),
+            member_route_revision: 0,
             catchup_queue: Vec::new(),
             failed_catchup_peers: VecDeque::new(),
             pending: None,
@@ -3059,6 +3343,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .map(|(l, s)| (l, Zeroizing::new(s)))
                 .collect(),
             file_wrap_key: None,
+            connection_handoff: PreOwnerConnectionHandoff::default(),
         });
         this.file_wrap_key = Zeroizing::new(file_wrap_key);
         this.ledger = InviteLedger::restore(&ledger_bytes).map_err(|_| SyncError::Malformed)?;
@@ -3254,8 +3539,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         device: MlsDevice,
         rng: R,
         clock: Box<dyn Clock + Send>,
-        routing: RoutingState,
+        mut routing: RoutingState,
     ) -> Self {
+        let connection_handoff = std::mem::take(&mut routing.connection_handoff);
         let mut this = Self::new(transport, group, device, rng, clock);
         // A joiner has NO group file-wrap key of its own; only the founder mints one. Zero
         // the random key `new` seeded so that an absent/failed transfer leaves `has_file_key`
@@ -3263,6 +3549,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // seal files no other member could open. A successful transfer installs the real key.
         this.file_wrap_key = Zeroizing::new([0u8; 32]);
         this.adopt_routing_state(routing);
+        this.adopt_pre_owner_connections(connection_handoff);
         this
     }
 
@@ -3435,6 +3722,209 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    fn touch_member_routes(&mut self) {
+        self.member_route_revision = self.member_route_revision.wrapping_add(1);
+    }
+
+    /// Whether a current roster entry self-asserts this Phase-0 transport identity.
+    ///
+    /// The transport accepts authenticated Noise peers before PEX tells us which member, if any,
+    /// claims that peer. We retain their bounded path evidence for a later record, but they must
+    /// not invalidate the member-only UI projection: otherwise an unrelated Internet peer can
+    /// churn connections and force O(roster) WebView reads without changing a single visible row.
+    fn peer_claimed_by_current_member(&self, peer: PeerId) -> bool {
+        self.peer_records.iter().any(|(device, record)| {
+            self.group.contains_device(device) && record.peer_id == *peer.as_bytes()
+        })
+    }
+
+    /// Adopt the final connection table coalesced by an admission routine that temporarily owned
+    /// the ordered stream. This is deliberately distinct from `connection_snapshot()`: every
+    /// event represented here was actually dequeued, so no older duplicate remains for the new
+    /// owner to replay over this baseline. The ordinary queued stream advances it afterward.
+    pub fn adopt_pre_owner_connections(&mut self, handoff: PreOwnerConnectionHandoff) {
+        let mut peers: Vec<_> = handoff.peers.into_iter().collect();
+        peers.sort_by_key(|(peer, _)| *peer);
+        for (peer, state) in peers {
+            self.note_peer_connected(peer);
+            self.note_peer_paths(peer, state.active, state.newly_established);
+        }
+    }
+
+    /// Whether this retry row can affect the current member-route projection.
+    ///
+    /// A rendezvous transport principal can share the same canonical transport key without being
+    /// evidence for any member descriptor. Only a current device principal at least as fresh as
+    /// its signed record makes the retry attempts/cooldown visible in `member_routes()`.
+    fn retry_visible_to_current_member(
+        &self,
+        key: &[u8],
+        epochs: &BTreeMap<FreshnessPrincipal, u64>,
+    ) -> bool {
+        self.peer_records.iter().any(|(device, record)| {
+            self.group.contains_device(device)
+                && record.peer_id.as_slice() == key
+                && epochs
+                    .get(&FreshnessPrincipal::Device(device.as_bytes().to_vec()))
+                    .is_some_and(|seq| *seq >= record.seq)
+        })
+    }
+
+    /// Release claimed path evidence after the last current record claim ends.
+    ///
+    /// Dial retry state has signer-scoped epochs and is released separately. In particular, a
+    /// transport-signed rendezvous epoch/cooldown must survive a member moving its self-asserted
+    /// descriptor away from that peer, or toggling a claim could reset the shared endpoint budget.
+    fn forget_peer_state_if_unclaimed(&mut self, peer: PeerId) {
+        if self.peer_claimed_by_current_member(peer) {
+            return;
+        }
+        self.pairwise_reachability.remove(&peer);
+    }
+
+    /// Remove one member device's descriptor epoch from a shared peer retry row. Preserve any
+    /// transport-signed epoch and its cooldown; delete only an epoch-empty shell.
+    fn release_record_bound_peer_state(&mut self, device: &DeviceId, peer: PeerId) {
+        let key = peer.as_bytes().as_slice();
+        let remove_retry = if let Some(retry) = self.dial_retries.get_mut(key) {
+            retry
+                .epochs
+                .remove(&FreshnessPrincipal::Device(device.as_bytes().to_vec()));
+            retry.epochs.is_empty()
+        } else {
+            false
+        };
+        if remove_retry {
+            self.dial_retries.remove(key);
+        }
+        self.forget_peer_state_if_unclaimed(peer);
+    }
+
+    /// Apply the aggregate connection edge before any optional path refinement.
+    fn note_peer_connected(&mut self, peer: PeerId) {
+        if !self.connected_peers.insert(peer) {
+            // The seam promises one aggregate edge per peer generation. Treat a duplicate from an
+            // alternate transport as a no-op instead of clearing valid path detail and amplifying
+            // a member-route refresh.
+            return;
+        }
+        let changes_member_route = self.peer_claimed_by_current_member(peer);
+        // A legacy transport may never send path snapshots, while libp2p sends this edge
+        // immediately before its new snapshot. Clear detail from an earlier connection
+        // generation first: briefly reporting `ConnectedOther` is truthful; briefly carrying a
+        // stale `ConnectedDirect` is not.
+        if let Some(evidence) = self.pairwise_reachability.get_mut(&peer) {
+            evidence.active_paths.clear();
+            evidence.updated_at_ms = self.clock.monotonic_ms();
+        }
+        self.clear_dial_retries_for_transport(peer);
+        self.remember_peer(peer);
+        self.maybe_probe_for_missed_commits();
+        self.sweep_docs_on_reconnect(peer);
+        if changes_member_route {
+            self.touch_member_routes();
+        }
+    }
+
+    /// Sanitize and retain a full active-path snapshot from the transport.
+    fn note_peer_paths(
+        &mut self,
+        peer: PeerId,
+        mut active: Vec<ConnectionPath>,
+        newly_established: Option<ConnectionPath>,
+    ) {
+        // Path evidence refines aggregate liveness; it never creates liveness by itself. This
+        // rejects a stale final snapshot delivered after PeerDisconnected and keeps custom
+        // transports from manufacturing a connected verdict with the new variant.
+        if !self.connected_peers.contains(&peer) {
+            if let Some(evidence) = self.pairwise_reachability.get_mut(&peer) {
+                evidence.active_paths.clear();
+                evidence.updated_at_ms = self.clock.monotonic_ms();
+            }
+            return;
+        }
+        // A connection can precede PEX/record ingestion, so retain its *active* coarse path under
+        // the transport id and attach it only if a current signed descriptor later claims that
+        // id. The separately capped map prevents arbitrary Noise peers from growing memory
+        // without bound. Historical success is stricter: do not keep it until a current member
+        // has made the signed (still self-asserted) claim, otherwise a later claim could inherit a
+        // stranger's stale history.
+        let claimed_by_current_member = self.peer_claimed_by_current_member(peer);
+        if active.len() > MAX_CONNECTION_PATH_SNAPSHOT {
+            // Reject before O(n log n) normalization. Keeping an earlier detailed snapshot would
+            // be a stale-success claim after an invalid authoritative replacement, so fall back
+            // to aggregate `ConnectedOther` while preserving the connected edge itself.
+            let mut changed = false;
+            if let Some(evidence) = self.pairwise_reachability.get_mut(&peer) {
+                changed = !evidence.active_paths.is_empty();
+                evidence.active_paths.clear();
+                evidence.updated_at_ms = self.clock.monotonic_ms();
+            }
+            if claimed_by_current_member && changed {
+                self.touch_member_routes();
+            }
+            return;
+        }
+        // When a custom transport reports more coarse paths than the product retains, preserve
+        // non-circuit/direct evidence first. Enum-order truncation could otherwise leave only
+        // relay rows and turn a genuine direct+relay connection into a false relay-only verdict.
+        active.sort_unstable_by_key(|path| {
+            let priority = if is_recognized_direct_path(path) {
+                0
+            } else if path.transport != ConnectionTransport::CircuitRelay {
+                // Preserve one opaque/non-relay class ahead of relay rows so truncation cannot
+                // turn `ConnectedOther` into a false relay-only verdict either.
+                1
+            } else {
+                2
+            };
+            (priority, *path)
+        });
+        active.dedup();
+        active.truncate(MAX_ACTIVE_PATHS_PER_PEER);
+        let coherent_success = newly_established.filter(|path| active.contains(path));
+        let now = self.clock.monotonic_ms();
+        let evidence = self
+            .pairwise_reachability
+            .entry(peer)
+            .or_insert(PairwiseReachability {
+                active_paths: Vec::new(),
+                last_success: None,
+                updated_at_ms: now,
+            });
+        let projection_changed = evidence.active_paths != active || coherent_success.is_some();
+        evidence.active_paths = active;
+        if claimed_by_current_member {
+            if let Some(path) = coherent_success {
+                // A public/custom transport cannot mint history with an internally inconsistent
+                // event. Production always includes the just-opened path in its full snapshot;
+                // rejecting anything else fails safely to "unknown".
+                evidence.last_success = Some((path, now));
+            }
+        }
+        evidence.updated_at_ms = now;
+        self.bound_pairwise_reachability();
+        if claimed_by_current_member && projection_changed {
+            self.touch_member_routes();
+        }
+    }
+
+    /// Apply the aggregate disconnect edge even if no path snapshot follows it.
+    fn note_peer_disconnected(&mut self, peer: PeerId) {
+        if !self.connected_peers.remove(&peer) {
+            return;
+        }
+        let changes_member_route = self.peer_claimed_by_current_member(peer);
+        if let Some(evidence) = self.pairwise_reachability.get_mut(&peer) {
+            evidence.active_paths.clear();
+            evidence.updated_at_ms = self.clock.monotonic_ms();
+        }
+        self.clear_dial_retries_for_transport(peer);
+        if changes_member_route {
+            self.touch_member_routes();
+        }
+    }
+
     pub async fn run_once(&mut self) -> Result<bool, SyncError> {
         // Admin invites (Option C): re-broadcast any pending Add-request whose retry elapsed
         // (caught up by the owner on its reconnect), then flush the Welcome a result produced;
@@ -3535,35 +4025,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 Ok(true)
             }
             Some(TransportEvent::PeerConnected(peer)) => {
-                self.connected_peers.insert(peer);
-                self.clear_dial_retries_for_transport(peer);
-                self.remember_peer(peer);
-                // A freshly-connected peer is a catch-up source; proactively probe in
-                // case we fell behind while the live topic was outside our window
-                // (commit catch-up is point-to-point, so it works off-topic). Deduped,
-                // and skipped on the committer (it never lags and must keep serving).
-                self.maybe_probe_for_missed_commits();
-                // Gossip only carries live edits; it does not replay anything written while this
-                // member was offline. Pull every document we already have open whenever a *proven
-                // member* reconnects so chat, wiki, calendar, status and the channel directory
-                // converge without requiring the user to visit each surface or send a sacrificial
-                // message. `enqueue_doc_catchup` deduplicates and bounds this work.
-                //
-                // The membership gate is load-bearing, not tidiness. `remember_peer` above runs on
-                // every inbound request *before* authentication, so a peer that is merely mid-join
-                // is already in `known_peers`, and `pick_catchup_peer` prefers the most recently
-                // seen live peer. Sweeping unconditionally therefore aimed a catch-up request at
-                // the joiner, whose membership check has not run yet and which cannot serve a
-                // members-only catch-up. This loop then blocked awaiting a reply that could not
-                // come, so the join it was racing was never served and surfaced on the joiner as
-                // `Transport(Closed)`: a mutual deadlock that broke every real-network join.
-                // `member_peers` is written only by `promote_member_peer`, off a roster-verified
-                // signed catch-up, so it is exactly "somebody who has proved they can answer".
-                //
-                // Cost, accepted deliberately: a node whose `member_peers` is empty (a fresh
-                // restore) does not sweep on its first reconnect. It proves a member on the first
-                // successful catch-up and sweeps from then on.
-                self.sweep_docs_on_reconnect(peer);
+                self.note_peer_connected(peer);
+                Ok(true)
+            }
+            Some(TransportEvent::PeerPathsChanged {
+                peer,
+                active,
+                newly_established,
+            }) => {
+                self.note_peer_paths(peer, active, newly_established);
                 Ok(true)
             }
             Some(TransportEvent::PeerDisconnected(peer)) => {
@@ -3572,8 +4042,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // this previously-live member immediately instead of inheriting a pre-connect
                 // backoff. (Catch-up source lists are left as-is; they age out / re-prove; only
                 // liveness and redial eligibility need the precise removal.)
-                self.connected_peers.remove(&peer);
-                self.clear_dial_retries_for_transport(peer);
+                self.note_peer_disconnected(peer);
                 Ok(true)
             }
         }
@@ -4237,6 +4706,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if *target == self.device.device_id() {
             return; // our own removal: there is nobody to disconnect but ourselves
         }
+        // Even a member without a descriptor contributes a `NoPeerRecord` row. Its removal changes
+        // the typed view regardless of whether a transport peer can be resolved below.
+        self.touch_member_routes();
         let resolved = self.transport_peer_of(target);
         // A removed device is not a member, so its record must not be retained: `ingest_peer_record`
         // would refuse it now, and keeping it would let a departed squatter hold a peer-id claim
@@ -4244,6 +4716,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // that peer id.
         self.peer_records.remove(target);
         self.peer_record_seen.remove(target);
+        self.discovery
+            .forget_device_freshness(target.as_bytes().as_slice());
+        if let Some(peer) = resolved {
+            self.release_record_bound_peer_state(target, peer);
+        }
         let Some(peer) = resolved else {
             tracing::debug!(
                 "removed member has no known peer record; no transport eviction possible"
@@ -4487,15 +4964,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// Whether discovery may spend another dial on `key` at signed address epoch `seq`.
+    /// Whether discovery may spend another dial on `key` at one signer's address epoch.
     ///
     /// An unseen identity and a newer signed epoch are immediately eligible. Equal epochs wait
     /// for their monotonic deadline; a wall-clock correction must never prolong or accelerate a
     /// transport retry.
-    fn dial_retry_eligible(&self, key: &[u8], seq: u64) -> bool {
+    fn dial_retry_eligible(&self, key: &[u8], freshness: &FreshnessPrincipal, seq: u64) -> bool {
         match self.dial_retries.get(key) {
             None => true,
-            Some(previous) if seq > previous.seq => true,
+            Some(previous)
+                if previous
+                    .epochs
+                    .get(freshness)
+                    .is_none_or(|previous_seq| seq > *previous_seq) =>
+            {
+                true
+            }
             Some(previous) => self.clock.monotonic_ms() >= previous.next_attempt_ms,
         }
     }
@@ -4503,13 +4987,43 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Record one policy-approved dial and schedule its next opportunity with bounded
     /// exponential backoff. This is deliberately recorded only after `DiscoveryPolicy::plan`
     /// grants the peer: budget-deferred candidates have not been attempted and remain eligible.
-    fn note_dial_attempt(&mut self, key: Vec<u8>, seq: u64) {
+    fn note_dial_attempt(
+        &mut self,
+        key: Vec<u8>,
+        submitted_epochs: Vec<(FreshnessPrincipal, u64)>,
+    ) {
         let now = self.clock.monotonic_ms();
-        let attempts = self
+        let mut visible_route_changed = self
             .dial_retries
             .get(&key)
-            .filter(|previous| previous.seq == seq)
-            .map_or(1, |previous| previous.attempts.saturating_add(1));
+            .is_some_and(|retry| self.retry_visible_to_current_member(&key, &retry.epochs));
+        let mut epochs = self
+            .dial_retries
+            .get(&key)
+            .map(|previous| previous.epochs.clone())
+            .unwrap_or_default();
+        let any_fresh_epoch = submitted_epochs.iter().any(|(principal, seq)| {
+            epochs
+                .get(principal)
+                .is_none_or(|previous_seq| seq > previous_seq)
+        });
+        let attempts = self.dial_retries.get(&key).map_or(1, |previous| {
+            if any_fresh_epoch {
+                1
+            } else {
+                previous.attempts.saturating_add(1)
+            }
+        });
+        for (principal, seq) in submitted_epochs {
+            let slot = epochs.entry(principal).or_insert(seq);
+            *slot = (*slot).max(seq);
+        }
+        while epochs.len() > MAX_DIAL_RETRY_PRINCIPALS {
+            let Some(victim) = epochs.keys().next().cloned() else {
+                break;
+            };
+            epochs.remove(&victim);
+        }
         // Shift only as far as can affect the capped result. Avoiding a large shift is both a
         // panic guard and what keeps a perpetually-offline peer's state simple.
         let exponent = attempts.saturating_sub(1).min(8);
@@ -4536,23 +5050,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 })
                 .map(|(key, _)| key.clone());
             if let Some(victim) = victim {
-                self.dial_retries.remove(&victim);
+                if let Some(removed) = self.dial_retries.remove(&victim) {
+                    visible_route_changed |=
+                        self.retry_visible_to_current_member(&victim, &removed.epochs);
+                }
             }
         }
+        visible_route_changed |= self.retry_visible_to_current_member(&key, &epochs);
         self.dial_retries.insert(
             key,
             DialRetry {
-                seq,
+                epochs,
                 attempts,
                 last_attempt_ms: now,
                 next_attempt_ms: now.saturating_add(delay),
             },
         );
+        if visible_route_changed {
+            self.touch_member_routes();
+        }
     }
 
     /// A successful connection proves every retry identity that resolves to this transport is no
     /// longer pending. Remove those rows rather than leaving their backoff behind: after a later
-    /// disconnect the next discovery pass should try promptly, not inherit an old failure count.
+    /// disconnect the next discovery pass should try promptly, not inherit an old submission count.
     fn clear_dial_retries_for_transport(&mut self, peer: PeerId) {
         // Retry/high-water state uses one identity domain everywhere: the Phase-0 transport id.
         // It used to mix device ids, raw libp2p bytes, and Phase-0 bytes, so cache and rendezvous
@@ -4636,13 +5157,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         }
         let peer = expected_peer.to_vec();
-        if !self.dial_retry_eligible(&peer, seq) {
+        let freshness = FreshnessPrincipal::Transport(peer.clone());
+        if !self.dial_retry_eligible(&peer, &freshness, seq) {
             return;
         }
         let candidate = Candidate {
-            peer,
+            peer: peer.clone(),
             addresses,
             source: Source::Rendezvous(rz_root),
+            freshness: freshness.clone(),
             // The record's own signed seq gives the policy real anti-replay freshness.
             // `tag_verified` stays false by decision, not by omission (see
             // `routing_membership_tag`); and it would change nothing here even if it were set,
@@ -4672,7 +5195,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             if granted.is_empty() {
                 continue;
             }
-            self.note_dial_attempt(pd.peer.clone(), seq);
+            self.note_dial_attempt(pd.peer.clone(), vec![(freshness.clone(), seq)]);
             for addr in granted {
                 let _ = self.transport.dial_addr(&addr).await;
             }
@@ -4824,14 +5347,47 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.peer_records.values().cloned().collect()
     }
 
-    /// What this node knows about reaching each current member: the debug console's network view.
+    /// Bound raw path evidence independently of the transport implementation. Production libp2p
+    /// already caps established connections at 320, but `MeshTransport` is a public seam and a
+    /// custom implementation must not be able to grow this map indefinitely. Inactive history is
+    /// discarded first; losing diagnostic detail is safer than dropping live aggregate liveness.
+    fn bound_pairwise_reachability(&mut self) {
+        while self.pairwise_reachability.len() > MAX_PEER_RECORDS {
+            let victim = self
+                .pairwise_reachability
+                .iter()
+                .min_by_key(|(peer, evidence)| {
+                    (
+                        !evidence.active_paths.is_empty(),
+                        evidence.updated_at_ms,
+                        **peer,
+                    )
+                })
+                .map(|(peer, _)| *peer);
+            match victim {
+                Some(peer) => {
+                    self.pairwise_reachability.remove(&peer);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Session-local invalidation epoch for [`Self::member_routes`]. Consumers can compare this
+    /// before paying the O(roster × addresses) cost of rebuilding the diagnostic projection.
+    pub fn member_route_revision(&self) -> u64 {
+        self.member_route_revision
+    }
+
+    /// What this node knows about reaching each current member: Connectivity's network view.
     ///
     /// Read-only and derived entirely from state the node already holds, so asking costs nothing on
     /// the wire and cannot perturb what it reports. It exists because none of this was visible
     /// anywhere: a node can sit unable to reach anybody while the roster still shows names, and the
-    /// difference between "no record for them yet", "a record whose only addresses are on a network
-    /// this host cannot route" and "backing off after repeated failures" is the whole diagnosis and
-    /// looked identical from outside.
+    /// difference between "no record for them yet", "a record with no usable candidate" and "a
+    /// submitted dial batch is in scheduler cooldown" is the whole diagnosis and looked identical
+    /// from outside. A submission is deliberately not reported as a transport failure: the current
+    /// seam does not return a per-address outcome.
     ///
     /// Sorted by fingerprint so a polling view does not reshuffle under the reader.
     pub fn member_routes(&self) -> Vec<MemberRoute> {
@@ -4847,20 +5403,85 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // Retry state is keyed by the canonical Phase-0 transport id, not by roster
                 // device id. Keep this read in the same identity domain as rendezvous/cache
                 // writers or Connectivity would claim a failing peer had never been tried.
-                let retry =
-                    record.and_then(|record| self.dial_retries.get(record.peer_id.as_slice()));
+                let retry = record
+                    .and_then(|record| {
+                        self.dial_retries
+                            .get(record.peer_id.as_slice())
+                            .map(|retry| (record, retry))
+                    })
+                    .filter(|(record, retry)| {
+                        let principal = FreshnessPrincipal::Device(device.as_bytes().to_vec());
+                        retry
+                            .epochs
+                            .get(&principal)
+                            .is_some_and(|seen| *seen >= record.seq)
+                    })
+                    .map(|(_, retry)| retry);
+                let peer = record.map(|record| PeerId::new(record.peer_id));
+                let connected = peer.is_some_and(|peer| self.connected_peers.contains(&peer));
+                let evidence = peer.and_then(|peer| self.pairwise_reachability.get(&peer));
+                let active_paths = if connected {
+                    evidence
+                        .map(|evidence| evidence.active_paths.clone())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let last_success = evidence
+                    .and_then(|evidence| evidence.last_success)
+                    .and_then(|(path, observed_at_ms)| {
+                        let age_ms = now.saturating_sub(observed_at_ms);
+                        (age_ms <= REACHABILITY_EVIDENCE_TTL_MS)
+                            .then_some(MemberRouteSuccess { path, age_ms })
+                    });
+                let addresses = record.map(|r| r.addresses.clone()).unwrap_or_default();
+                let (candidate_families, candidate_transports) = advertised_route_shape(&addresses);
+                let health = if record.is_none() {
+                    MemberRouteHealth::NoPeerRecord
+                } else if connected {
+                    let has_direct = active_paths.iter().any(is_recognized_direct_path);
+                    if has_direct {
+                        MemberRouteHealth::ClaimedPeerConnectedDirect
+                    } else if !active_paths.is_empty()
+                        && active_paths
+                            .iter()
+                            .all(|path| path.transport == ConnectionTransport::CircuitRelay)
+                    {
+                        MemberRouteHealth::ClaimedPeerConnectedRelay
+                    } else {
+                        MemberRouteHealth::ClaimedPeerConnectedOther
+                    }
+                } else if addresses.is_empty() {
+                    MemberRouteHealth::ClaimedPeerHasNoRoute
+                } else if retry
+                    .is_some_and(|retry| retry.attempts > 0 && now < retry.next_attempt_ms)
+                {
+                    MemberRouteHealth::ClaimedPeerDialCoolingDown
+                } else {
+                    MemberRouteHealth::ClaimedPeerDialEligible
+                };
                 MemberRoute {
                     fingerprint: roles::fingerprint(&device),
                     peer_id: record.map(|r| r.peer_id),
-                    addresses: record.map(|r| r.addresses.clone()).unwrap_or_default(),
+                    addresses,
                     seq: record.map_or(0, |r| r.seq),
-                    connected: record
-                        .is_some_and(|r| self.connected_peers.contains(&PeerId::new(r.peer_id))),
+                    connected,
                     dial_attempts: retry.map_or(0, |r| r.attempts),
                     // Milliseconds until the backoff lets this member be dialled again; zero when
                     // it is eligible now. A member stuck at the cap is the visible symptom of a
                     // node burning every attempt on a route that cannot work.
                     next_dial_in_ms: retry.map_or(0, |r| r.next_attempt_ms.saturating_sub(now)),
+                    health,
+                    binding: if record.is_some() {
+                        MemberRouteBinding::SelfAsserted
+                    } else {
+                        MemberRouteBinding::Absent
+                    },
+                    active_paths,
+                    last_success,
+                    candidate_families,
+                    candidate_transports,
+                    actions: route_actions(health),
                 }
             })
             .collect();
@@ -5273,9 +5894,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Store a record and stamp it, so eviction can be least-recently-refreshed.
     fn store_peer_record(&mut self, device: DeviceId, desc: PeerDescriptor) {
         let now = self.clock.now_ms();
+        let replaced_peer = self
+            .peer_records
+            .get(&device)
+            .filter(|previous| previous.peer_id != desc.peer_id)
+            .map(|previous| PeerId::new(previous.peer_id));
         self.peer_records.insert(device, desc);
         self.peer_record_seen.insert(device, now);
+        if let Some(previous) = replaced_peer {
+            // The old record slot no longer owns this self-asserted transport. Clear all
+            // peer-keyed history only if no other current record still claims it.
+            self.release_record_bound_peer_state(&device, previous);
+        }
         self.bound_peer_records();
+        self.touch_member_routes();
     }
 
     /// Bound the known-records map to `MAX_PEER_RECORDS`, never evicting our own record.
@@ -5296,7 +5928,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .copied();
             match victim {
                 Some(v) => {
-                    self.peer_records.remove(&v);
+                    if let Some(record) = self.peer_records.remove(&v) {
+                        self.release_record_bound_peer_state(&v, PeerId::new(record.peer_id));
+                    }
+                    self.discovery
+                        .forget_device_freshness(v.as_bytes().as_slice());
                     self.peer_record_seen.remove(&v);
                 }
                 None => break,
@@ -5885,8 +6521,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // seals it at the end. Dialing `CachedPeer.addresses` here would wait another
                 // whole minute before trying a dynamic-IP update.
                 let record = self.peer_records.get(&device)?;
+                let freshness = FreshnessPrincipal::Device(device.as_bytes().to_vec());
                 if self.connected_peers.contains(&PeerId::new(record.peer_id))
-                    || !self.dial_retry_eligible(&record.peer_id, record.seq)
+                    || !self.dial_retry_eligible(&record.peer_id, &freshness, record.seq)
                 {
                     return None;
                 }
@@ -5900,11 +6537,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     return None;
                 }
                 Some(Candidate {
-                    // Candidate, retry, high-water, and scheduler state all use the record-bound
-                    // Phase-0 transport id. The device id remains only the cache lookup key.
+                    // Candidate merging, retry, and scheduler state use the record-bound Phase-0
+                    // transport id. Freshness is signer-scoped to the member device: descriptor
+                    // sequences are not comparable with transport-signed rendezvous sequences.
                     peer: record.peer_id.to_vec(),
                     addresses,
                     source: Source::Cache,
+                    freshness,
                     seq: record.seq,
                     // The pre-dial membership tag is a rendezvous-registration primitive; a cache
                     // entry carries no tag, so it ranks on being a prior proven contact.
@@ -5915,10 +6554,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if candidates.is_empty() {
             return 0;
         }
-        let candidate_seqs: HashMap<Vec<u8>, u64> = candidates
-            .iter()
-            .map(|candidate| (candidate.peer.clone(), candidate.seq))
-            .collect();
+        let mut candidate_epochs: HashMap<Vec<u8>, Vec<(FreshnessPrincipal, u64)>> = HashMap::new();
+        for candidate in &candidates {
+            candidate_epochs
+                .entry(candidate.peer.clone())
+                .or_default()
+                .push((candidate.freshness.clone(), candidate.seq));
+        }
         let roster = self.member_count();
         let plan = self
             .discovery
@@ -5928,7 +6570,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // Record an attempt only once the policy actually plans it. Recording every
             // *candidate* would back off peers the dial budget deferred without touching a
             // socket, recreating the old sticky-dedup failure in a subtler form.
-            let seq = candidate_seqs.get(&pd.peer).copied().unwrap_or(0);
+            let epochs = candidate_epochs.remove(&pd.peer).unwrap_or_default();
             let Ok(expected) = <[u8; 32]>::try_from(pd.peer.as_slice()) else {
                 continue;
             };
@@ -5945,7 +6587,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             if granted.is_empty() {
                 continue;
             }
-            self.note_dial_attempt(pd.peer.clone(), seq);
+            self.note_dial_attempt(pd.peer.clone(), epochs);
             dialed += 1;
             for addr in granted {
                 let _ = self.transport.dial_addr(&addr).await;
@@ -8675,6 +9317,22 @@ pub async fn request_join<T: MeshTransport>(
     device: &MlsDevice,
     invite: &InviteToken,
 ) -> Result<(ServerGroup, RoutingState), SyncError> {
+    let mut handoff = PreOwnerConnectionHandoff::default();
+    let (group, mut routing) =
+        request_join_tracking(transport, &mut handoff, inviter, device, invite).await?;
+    routing.connection_handoff = handoff;
+    Ok((group, routing))
+}
+
+/// App-layer form of [`request_join`] that returns consumed lifecycle state to its future owner.
+#[doc(hidden)]
+pub async fn request_join_tracking<T: MeshTransport>(
+    transport: &T,
+    connection_handoff: &mut PreOwnerConnectionHandoff,
+    inviter: PeerId,
+    device: &MlsDevice,
+    invite: &InviteToken,
+) -> Result<(ServerGroup, RoutingState), SyncError> {
     // Authenticate the pasted invite itself (signature + pubkey binds device id).
     if !invite.verify_self() {
         tracing::warn!("invite failed self-verification");
@@ -8704,7 +9362,7 @@ pub async fn request_join<T: MeshTransport>(
             // The wall-clock bound on this wait lives at the call site (catcoms-app, which owns
             // the tokio runtime) so this crate stays runtime-agnostic; see the `request_join`
             // timeout wrapper there, so a never-finalizing owner can't wedge the joiner.
-            await_welcome_push(transport, inviter, device, invite).await
+            await_welcome_push(transport, connection_handoff, inviter, device, invite).await
         }
         // Empty or unknown => rejected.
         _ => Err(SyncError::JoinRejected),
@@ -8720,6 +9378,24 @@ pub async fn request_join<T: MeshTransport>(
 /// admission authority or a general traffic relay.
 pub async fn request_join_via_helper<T: MeshTransport>(
     transport: &T,
+    helper: PeerId,
+    inviter: PeerId,
+    device: &MlsDevice,
+    invite: &InviteToken,
+) -> Result<(ServerGroup, RoutingState), SyncError> {
+    let mut handoff = PreOwnerConnectionHandoff::default();
+    let (group, mut routing) =
+        request_join_via_helper_tracking(transport, &mut handoff, helper, inviter, device, invite)
+            .await?;
+    routing.connection_handoff = handoff;
+    Ok((group, routing))
+}
+
+/// App-layer form of [`request_join_via_helper`] that preserves consumed lifecycle state.
+#[doc(hidden)]
+pub async fn request_join_via_helper_tracking<T: MeshTransport>(
+    transport: &T,
+    connection_handoff: &mut PreOwnerConnectionHandoff,
     helper: PeerId,
     inviter: PeerId,
     device: &MlsDevice,
@@ -8753,7 +9429,7 @@ pub async fn request_join_via_helper<T: MeshTransport>(
                 ?helper,
                 "helper forwarded a staged admission; awaiting Welcome"
             );
-            await_welcome_push(transport, helper, device, invite).await
+            await_welcome_push(transport, connection_handoff, helper, device, invite).await
         }
         _ => Err(SyncError::JoinRejected),
     }
@@ -8819,6 +9495,39 @@ async fn start_reply_join<T: MeshTransport>(
 #[allow(clippy::too_many_arguments)]
 pub async fn request_join_from_reply<T: MeshTransport>(
     transport: &T,
+    first_contact: PeerId,
+    inviter: PeerId,
+    device: &MlsDevice,
+    invite: &InviteToken,
+    reply_joiner_nonce: [u8; 16],
+    reply_joiner_peer: &[u8],
+    clock: &dyn Clock,
+    expires_at_ms: u64,
+) -> Result<(ServerGroup, RoutingState, PeerId), SyncError> {
+    let mut handoff = PreOwnerConnectionHandoff::default();
+    let (group, mut routing, contact) = request_join_from_reply_tracking(
+        transport,
+        &mut handoff,
+        first_contact,
+        inviter,
+        device,
+        invite,
+        reply_joiner_nonce,
+        reply_joiner_peer,
+        clock,
+        expires_at_ms,
+    )
+    .await?;
+    routing.connection_handoff = handoff;
+    Ok((group, routing, contact))
+}
+
+/// App-layer form of [`request_join_from_reply`] that preserves consumed lifecycle state.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn request_join_from_reply_tracking<T: MeshTransport>(
+    transport: &T,
+    connection_handoff: &mut PreOwnerConnectionHandoff,
     first_contact: PeerId,
     inviter: PeerId,
     device: &MlsDevice,
@@ -8901,7 +9610,7 @@ pub async fn request_join_from_reply<T: MeshTransport>(
             futures::future::Either::Right(_) => return Err(SyncError::JoinRejected),
         };
         match event {
-            Some(TransportEvent::PeerConnected(_)) => {}
+            Some(event) if connection_handoff.observe(&event) => {}
             Some(TransportEvent::Request {
                 from,
                 data,
@@ -9032,6 +9741,37 @@ pub async fn request_join_from_switchboards<T: MeshTransport>(
     join_plan: &[u8],
     clock: &dyn Clock,
 ) -> Result<(ServerGroup, RoutingState, PeerId), SyncError> {
+    let mut handoff = PreOwnerConnectionHandoff::default();
+    let (group, mut routing, contact) = request_join_from_switchboards_tracking(
+        transport,
+        &mut handoff,
+        first_contact,
+        allowed_contacts,
+        inviter,
+        device,
+        invite,
+        join_plan,
+        clock,
+    )
+    .await?;
+    routing.connection_handoff = handoff;
+    Ok((group, routing, contact))
+}
+
+/// App-layer form of [`request_join_from_switchboards`] that preserves consumed lifecycle state.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn request_join_from_switchboards_tracking<T: MeshTransport>(
+    transport: &T,
+    connection_handoff: &mut PreOwnerConnectionHandoff,
+    first_contact: PeerId,
+    allowed_contacts: &[(PeerId, u64)],
+    inviter: PeerId,
+    device: &MlsDevice,
+    invite: &InviteToken,
+    join_plan: &[u8],
+    clock: &dyn Clock,
+) -> Result<(ServerGroup, RoutingState, PeerId), SyncError> {
     let allowed: HashMap<PeerId, u64> = allowed_contacts
         .iter()
         .map(|(peer, expires)| (*peer, (*expires).min(invite.expires_at_ms)))
@@ -9147,7 +9887,9 @@ pub async fn request_join_from_switchboards<T: MeshTransport>(
                 // A reconnect is a meaningful retry signal. The per-contact counter prevents a
                 // flapping/hostile helper from creating an unbounded request loop.
                 contacts.push_back(contact);
+                connection_handoff.observe(&TransportEvent::PeerConnected(contact));
             }
+            Some(event) if connection_handoff.observe(&event) => {}
             Some(TransportEvent::Request {
                 from,
                 data,
@@ -9230,6 +9972,33 @@ pub async fn request_device_join<T: MeshTransport>(
     owner_public_key: &[u8; 32],
     now_ms: u64,
 ) -> Result<(ServerGroup, RoutingState), SyncError> {
+    let mut handoff = PreOwnerConnectionHandoff::default();
+    let (group, mut routing) = request_device_join_tracking(
+        transport,
+        &mut handoff,
+        contact,
+        device,
+        certificate,
+        owner_public_key,
+        now_ms,
+    )
+    .await?;
+    routing.connection_handoff = handoff;
+    Ok((group, routing))
+}
+
+/// App-layer form of [`request_device_join`] that preserves consumed lifecycle state.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn request_device_join_tracking<T: MeshTransport>(
+    transport: &T,
+    connection_handoff: &mut PreOwnerConnectionHandoff,
+    contact: PeerId,
+    device: &MlsDevice,
+    certificate: &DeviceCertificate,
+    owner_public_key: &[u8; 32],
+    now_ms: u64,
+) -> Result<(ServerGroup, RoutingState), SyncError> {
     // Authenticate our own grant before spending anything on it (the analogue of an invited
     // joiner's `verify_self`), and confirm it is for *this* device.
     if !certificate.verify(&certificate.origin_id) {
@@ -9286,7 +10055,15 @@ pub async fn request_device_join<T: MeshTransport>(
         // The contact relayed to the owner; the Welcome is pushed when the owner serializes it.
         Some((&JOIN_PENDING, _)) => {
             tracing::debug!("device admission relayed to the owner; awaiting the Welcome push");
-            await_device_welcome(transport, contact, device, certificate, owner_public_key).await
+            await_device_welcome(
+                transport,
+                connection_handoff,
+                contact,
+                device,
+                certificate,
+                owner_public_key,
+            )
+            .await
         }
         _ => Err(SyncError::JoinRejected),
     }
@@ -9344,6 +10121,7 @@ fn finish_device_join(
 /// `Server::join_with_grant` applies the join timeout.
 async fn await_device_welcome<T: MeshTransport>(
     transport: &T,
+    connection_handoff: &mut PreOwnerConnectionHandoff,
     expected: PeerId,
     device: &MlsDevice,
     certificate: &DeviceCertificate,
@@ -9373,6 +10151,7 @@ async fn await_device_welcome<T: MeshTransport>(
                     _ => return Err(SyncError::JoinRejected),
                 }
             }
+            Some(event) if connection_handoff.observe(&event) => {}
             // Ignore unrelated requests (ack so the sender isn't left hanging).
             Some(TransportEvent::Request { responder, .. }) => responder.respond(Bytes::new()),
             Some(_) => continue,
@@ -9391,6 +10170,7 @@ async fn await_device_welcome<T: MeshTransport>(
 /// `JOIN_TIMEOUT_SECS`); anything calling this API directly must do the same.
 async fn await_welcome_push<T: MeshTransport>(
     transport: &T,
+    connection_handoff: &mut PreOwnerConnectionHandoff,
     expected: PeerId,
     device: &MlsDevice,
     invite: &InviteToken,
@@ -9413,6 +10193,7 @@ async fn await_welcome_push<T: MeshTransport>(
                     _ => return Err(SyncError::JoinRejected),
                 }
             }
+            Some(event) if connection_handoff.observe(&event) => {}
             // Ignore unrelated requests (ack so the sender isn't left hanging).
             Some(TransportEvent::Request { responder, .. }) => responder.respond(Bytes::new()),
             Some(_) => continue,
@@ -9699,6 +10480,7 @@ mod tests {
                     TransportEvent::Gossip { from, .. } => Some(*from),
                     TransportEvent::Request { from, .. } => Some(*from),
                     TransportEvent::PeerConnected(p) => Some(*p),
+                    TransportEvent::PeerPathsChanged { peer, .. } => Some(*peer),
                     TransportEvent::PeerDisconnected(_) => None,
                 };
                 // An evicted peer has no connection, so nothing it sends reaches the membership
@@ -10467,6 +11249,7 @@ mod tests {
             label: 0,
             secrets: Vec::new(), // even with no routing secrets, the key is installed
             file_wrap_key: Some(founder_key),
+            connection_handoff: PreOwnerConnectionHandoff::default(),
         });
         assert_eq!(
             joiner.open_file(&stored, &fref).unwrap(),
@@ -11776,6 +12559,12 @@ mod tests {
             local: joiner_peer,
             response: Bytes::from_static(&[JOIN_PENDING]),
             events: std::sync::Mutex::new(VecDeque::from([
+                TransportEvent::PeerConnected(helper_peer),
+                TransportEvent::PeerPathsChanged {
+                    peer: helper_peer,
+                    active: vec![direct_v4_quic()],
+                    newly_established: Some(direct_v4_quic()),
+                },
                 TransportEvent::Request {
                     from: attacker_peer,
                     proto: ProtocolId(RR_PROTOCOL),
@@ -11793,8 +12582,10 @@ mod tests {
         let clock = ManualClock::new(1_000);
         let joiner_nonce = [0x92; 16];
         let reply_joiner_peer = b"scripted-reply-joiner";
-        let (group, _, contact) = request_join_from_reply(
+        let mut connection_handoff = PreOwnerConnectionHandoff::default();
+        let (group, routing, contact) = request_join_from_reply_tracking(
             &transport,
+            &mut connection_handoff,
             helper_peer,
             inviter_peer,
             &joiner_device,
@@ -11808,6 +12599,166 @@ mod tests {
         .unwrap();
         assert_eq!(contact, helper_peer);
         assert!(group.contains_device(&joiner_device.device_id()));
+        let mut joined = ChannelSync::new_joined(
+            transport,
+            group,
+            joiner_device,
+            ChaCha20Rng::seed_from_u64(80),
+            Box::new(clock),
+            routing,
+        );
+        joined.adopt_pre_owner_connections(connection_handoff);
+        assert!(joined.connected_peers.contains(&helper_peer));
+        assert_eq!(
+            joined.pairwise_reachability[&helper_peer].active_paths,
+            vec![direct_v4_quic()],
+            "reply admission must hand consumed live-path evidence to ChannelSync"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_staged_direct_join_hands_consumed_connection_state_to_sync() {
+        let inviter_peer = PeerId::from_u64(41);
+        let joiner_peer = PeerId::from_u64(42);
+        let inviter_device = MlsDevice::generate().unwrap();
+        let inviter_group = ServerGroup::create(&inviter_device).unwrap();
+        let mut inviter = ChannelSync::new(
+            Hub::new().join(inviter_peer),
+            inviter_group,
+            inviter_device,
+            ChaCha20Rng::seed_from_u64(81),
+            Box::new(ManualClock::new(1_000)),
+        );
+        let invite = inviter.mint_invite([0x81; 16], 10_000, Vec::new()).unwrap();
+        let joiner_device = MlsDevice::generate().unwrap();
+        let key_package = joiner_device
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let join_body = encode_join_req(&invite, &serialize_key_package(&key_package).unwrap());
+        let ready = inviter
+            .serve_join(joiner_peer, &join_body)
+            .expect("inviter creates a valid signed Welcome");
+        let mut push = vec![KIND_WELCOME];
+        push.extend_from_slice(&ready);
+        let (responder, _) = catcoms_rt::Responder::channel();
+        let transport = ScriptedReplyNetwork {
+            local: joiner_peer,
+            response: Bytes::from_static(&[JOIN_PENDING]),
+            events: std::sync::Mutex::new(VecDeque::from([
+                TransportEvent::PeerConnected(inviter_peer),
+                TransportEvent::PeerPathsChanged {
+                    peer: inviter_peer,
+                    active: vec![direct_v4_quic()],
+                    newly_established: Some(direct_v4_quic()),
+                },
+                TransportEvent::Request {
+                    from: inviter_peer,
+                    proto: ProtocolId(RR_PROTOCOL),
+                    data: Bytes::from(push),
+                    responder,
+                },
+            ])),
+        };
+        let mut handoff = PreOwnerConnectionHandoff::default();
+        let (group, routing) = request_join_tracking(
+            &transport,
+            &mut handoff,
+            inviter_peer,
+            &joiner_device,
+            &invite,
+        )
+        .await
+        .unwrap();
+        let mut joined = ChannelSync::new_joined(
+            transport,
+            group,
+            joiner_device,
+            ChaCha20Rng::seed_from_u64(82),
+            Box::new(ManualClock::new(1_000)),
+            routing,
+        );
+        joined.adopt_pre_owner_connections(handoff);
+        assert!(joined.connected_peers.contains(&inviter_peer));
+        assert_eq!(
+            joined.pairwise_reachability[&inviter_peer].active_paths,
+            vec![direct_v4_quic()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_staged_switchboard_join_hands_consumed_connection_state_to_sync() {
+        let inviter_peer = PeerId::from_u64(51);
+        let helper_peer = PeerId::from_u64(52);
+        let joiner_peer = PeerId::from_u64(53);
+        let inviter_device = MlsDevice::generate().unwrap();
+        let inviter_group = ServerGroup::create(&inviter_device).unwrap();
+        let mut inviter = ChannelSync::new(
+            Hub::new().join(inviter_peer),
+            inviter_group,
+            inviter_device,
+            ChaCha20Rng::seed_from_u64(83),
+            Box::new(ManualClock::new(1_000)),
+        );
+        let invite = inviter.mint_invite([0x83; 16], 10_000, Vec::new()).unwrap();
+        let joiner_device = MlsDevice::generate().unwrap();
+        let key_package = joiner_device
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let join_body = encode_join_req(&invite, &serialize_key_package(&key_package).unwrap());
+        let ready = inviter
+            .serve_join(joiner_peer, &join_body)
+            .expect("inviter creates a valid signed Welcome");
+        let mut push = vec![KIND_WELCOME];
+        push.extend_from_slice(&ready);
+        let (responder, _) = catcoms_rt::Responder::channel();
+        let transport = ScriptedReplyNetwork {
+            local: joiner_peer,
+            response: Bytes::from_static(&[JOIN_PENDING]),
+            events: std::sync::Mutex::new(VecDeque::from([
+                TransportEvent::PeerConnected(helper_peer),
+                TransportEvent::PeerPathsChanged {
+                    peer: helper_peer,
+                    active: vec![relayed_v6()],
+                    newly_established: Some(relayed_v6()),
+                },
+                TransportEvent::Request {
+                    from: helper_peer,
+                    proto: ProtocolId(RR_PROTOCOL),
+                    data: Bytes::from(push),
+                    responder,
+                },
+            ])),
+        };
+        let clock = ManualClock::new(1_000);
+        let mut handoff = PreOwnerConnectionHandoff::default();
+        let (group, routing, contact) = request_join_from_switchboards_tracking(
+            &transport,
+            &mut handoff,
+            helper_peer,
+            &[(helper_peer, 10_000)],
+            inviter_peer,
+            &joiner_device,
+            &invite,
+            b"inviter-endorsed-plan",
+            &clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(contact, helper_peer);
+        let mut joined = ChannelSync::new_joined(
+            transport,
+            group,
+            joiner_device,
+            ChaCha20Rng::seed_from_u64(84),
+            Box::new(clock),
+            routing,
+        );
+        joined.adopt_pre_owner_connections(handoff);
+        assert!(joined.connected_peers.contains(&helper_peer));
+        assert_eq!(
+            joined.pairwise_reachability[&helper_peer].active_paths,
+            vec![relayed_v6()]
+        );
     }
 
     #[tokio::test]
@@ -13029,6 +13980,13 @@ mod tests {
         // Advance through the maximum possible first-delay jitter. The policy's independent
         // budget window also rolls over, exactly as the desktop's minute tick would.
         clock.advance_ms(DIAL_RETRY_BASE_MS + DIAL_RETRY_JITTER_MS);
+        let route = alice.member_routes().into_iter().next().unwrap();
+        assert_eq!(route.next_dial_in_ms, 0);
+        assert_eq!(
+            route.health,
+            MemberRouteHealth::ClaimedPeerDialEligible,
+            "an elapsed backoff is eligible even though its attempt count remains diagnostic history"
+        );
         assert_eq!(
             alice.dial_cached_peers().await,
             1,
@@ -13042,6 +14000,516 @@ mod tests {
         assert_eq!(route.next_dial_in_ms, 0);
     }
 
+    fn direct_v4_quic() -> ConnectionPath {
+        ConnectionPath {
+            family: ConnectionFamily::Ipv4,
+            transport: ConnectionTransport::QuicV1,
+            direction: catcoms_rt::ConnectionDirection::Dialer,
+        }
+    }
+
+    fn relayed_v6() -> ConnectionPath {
+        ConnectionPath {
+            family: ConnectionFamily::Ipv6,
+            transport: ConnectionTransport::CircuitRelay,
+            direction: catcoms_rt::ConnectionDirection::Listener,
+        }
+    }
+
+    #[test]
+    fn pre_owner_connection_handoff_coalesces_churn_without_replaying_stale_edges() {
+        let old = PeerId::from_u64(90_210);
+        let current = PeerId::from_u64(90_211);
+        let path_only = PeerId::from_u64(90_212);
+        let old_path = relayed_v6();
+        let current_path = direct_v4_quic();
+        let mut handoff = PreOwnerConnectionHandoff::default();
+        assert!(handoff.observe(&TransportEvent::PeerPathsChanged {
+            peer: path_only,
+            active: vec![current_path],
+            newly_established: Some(current_path),
+        }));
+        for event in [
+            TransportEvent::PeerConnected(old),
+            TransportEvent::PeerPathsChanged {
+                peer: old,
+                active: vec![old_path],
+                newly_established: Some(old_path),
+            },
+            TransportEvent::PeerDisconnected(old),
+            // Production emits the final empty path snapshot after the disconnect. It must not
+            // recreate a row the aggregate edge just removed.
+            TransportEvent::PeerPathsChanged {
+                peer: old,
+                active: Vec::new(),
+                newly_established: None,
+            },
+            TransportEvent::PeerConnected(current),
+            TransportEvent::PeerPathsChanged {
+                peer: current,
+                active: vec![current_path],
+                newly_established: Some(current_path),
+            },
+        ] {
+            assert!(handoff.observe(&event));
+        }
+
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let mut node = ChannelSync::new(
+            Hub::new().join(PeerId::from_u64(1)),
+            group,
+            device,
+            ChaCha20Rng::seed_from_u64(79),
+            Box::new(ManualClock::new(1_000)),
+        );
+        node.adopt_pre_owner_connections(handoff);
+
+        assert!(!node.connected_peers.contains(&old));
+        assert!(!node.pairwise_reachability.contains_key(&old));
+        assert!(
+            !node.connected_peers.contains(&path_only),
+            "path detail alone cannot manufacture aggregate liveness"
+        );
+        assert!(node.connected_peers.contains(&current));
+        assert_eq!(
+            node.pairwise_reachability[&current].active_paths,
+            vec![current_path]
+        );
+        assert_eq!(
+            node.known_peers,
+            VecDeque::from([current]),
+            "the final live peer receives reconnect/catch-up side effects exactly once"
+        );
+    }
+
+    #[test]
+    fn pre_owner_path_events_cannot_bypass_the_connected_peer_bound() {
+        let mut handoff = PreOwnerConnectionHandoff::default();
+        for n in 0..catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT {
+            assert!(
+                handoff.observe(&TransportEvent::PeerConnected(PeerId::from_u64(
+                    100_000 + n as u64,
+                )))
+            );
+        }
+        let overflow = PeerId::from_u64(999_999);
+        assert!(handoff.observe(&TransportEvent::PeerConnected(overflow)));
+        assert!(handoff.observe(&TransportEvent::PeerPathsChanged {
+            peer: overflow,
+            active: vec![direct_v4_quic()],
+            newly_established: Some(direct_v4_quic()),
+        }));
+        assert_eq!(handoff.peers.len(), catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT);
+        assert!(!handoff.peers.contains_key(&overflow));
+    }
+
+    #[test]
+    fn member_route_actions_only_offer_implemented_postjoin_recovery() {
+        use MemberRouteActionKind as Kind;
+        use MemberRouteActionScope as Scope;
+        let action = |scope, kind| MemberRouteAction { scope, kind };
+
+        assert_eq!(
+            route_actions(MemberRouteHealth::NoPeerRecord),
+            vec![
+                action(Scope::MemberDevice, Kind::CheckMemberConnectivity),
+                action(Scope::Group, Kind::KeepAnotherMemberConnected),
+            ]
+        );
+        assert_eq!(
+            route_actions(MemberRouteHealth::ClaimedPeerHasNoRoute),
+            vec![
+                action(Scope::MemberDevice, Kind::CheckMemberConnectivity),
+                action(Scope::Group, Kind::ConfigureFallbackNode),
+            ]
+        );
+        assert_eq!(
+            route_actions(MemberRouteHealth::ClaimedPeerDialCoolingDown),
+            vec![action(Scope::ThisDevice, Kind::WaitForAutomaticRecovery)]
+        );
+        assert!(route_actions(MemberRouteHealth::ClaimedPeerConnectedDirect).is_empty());
+    }
+
+    #[tokio::test]
+    async fn member_route_health_tracks_direct_relay_disconnect_and_expiry() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let clock = ManualClock::new(1_000);
+        alice.clock = Arc::new(clock.clone());
+
+        bob.publish_self_record(
+            member_routes(
+                &bob,
+                &[
+                    "/ip4/203.0.113.2/udp/22487/quic-v1",
+                    "/ip6/2001:db8::2/tcp/22487",
+                ],
+            ),
+            7,
+        )
+        .unwrap();
+        assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
+        let peer = bob.local_peer();
+
+        let route = alice.member_routes().into_iter().next().unwrap();
+        assert_eq!(route.health, MemberRouteHealth::ClaimedPeerDialEligible);
+        assert_eq!(route.binding, MemberRouteBinding::SelfAsserted);
+        assert_eq!(
+            route.candidate_families,
+            vec![ConnectionFamily::Ipv4, ConnectionFamily::Ipv6]
+        );
+        assert_eq!(
+            route.candidate_transports,
+            vec![ConnectionTransport::Tcp, ConnectionTransport::QuicV1]
+        );
+
+        // A legacy-only connection is live but carries no transport detail.
+        alice.note_peer_connected(peer);
+        assert_eq!(
+            alice.member_routes()[0].health,
+            MemberRouteHealth::ClaimedPeerConnectedOther
+        );
+
+        alice.note_peer_paths(peer, vec![relayed_v6()], Some(relayed_v6()));
+        assert_eq!(
+            alice.member_routes()[0].health,
+            MemberRouteHealth::ClaimedPeerConnectedRelay
+        );
+
+        // DCUtR adds a direct path without a second PeerConnected edge. Direct is preferred while
+        // both carry traffic, and closing it leaves the still-live relay rather than disconnecting.
+        alice.note_peer_paths(
+            peer,
+            vec![relayed_v6(), direct_v4_quic(), direct_v4_quic()],
+            Some(direct_v4_quic()),
+        );
+        let route = &alice.member_routes()[0];
+        assert_eq!(route.health, MemberRouteHealth::ClaimedPeerConnectedDirect);
+        assert_eq!(
+            route.active_paths.len(),
+            2,
+            "coarse duplicate paths are collapsed"
+        );
+        assert_eq!(route.last_success.unwrap().path, direct_v4_quic());
+
+        alice.note_peer_paths(peer, vec![relayed_v6()], None);
+        assert_eq!(
+            alice.member_routes()[0].health,
+            MemberRouteHealth::ClaimedPeerConnectedRelay
+        );
+
+        alice.note_peer_disconnected(peer);
+        let route = &alice.member_routes()[0];
+        assert!(!route.connected);
+        assert!(route.active_paths.is_empty());
+        assert_eq!(route.health, MemberRouteHealth::ClaimedPeerDialEligible);
+        assert_eq!(route.last_success.unwrap().age_ms, 0);
+
+        clock.advance_ms(REACHABILITY_EVIDENCE_TTL_MS);
+        assert!(
+            alice.member_routes()[0].last_success.is_some(),
+            "TTL boundary is inclusive"
+        );
+        clock.advance_ms(1);
+        assert!(
+            alice.member_routes()[0].last_success.is_none(),
+            "expired history must not read as current reachability"
+        );
+    }
+
+    #[tokio::test]
+    async fn path_evidence_is_bounded_coherent_and_survives_connect_before_record() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let peer = bob.local_peer();
+
+        let revision_before_connection = alice.member_route_revision();
+        alice.note_peer_connected(peer);
+        assert_eq!(
+            alice.member_route_revision(),
+            revision_before_connection,
+            "an unclaimed transport peer cannot invalidate the member-only projection"
+        );
+        alice.note_peer_paths(peer, vec![direct_v4_quic()], Some(direct_v4_quic()));
+        assert_eq!(
+            alice.member_route_revision(),
+            revision_before_connection,
+            "bounded evidence for an unclaimed peer remains invisible until a member claims it"
+        );
+        let _ = alice.member_routes();
+        assert_eq!(
+            alice.member_route_revision(),
+            revision_before_connection,
+            "reading the projection must not invalidate it"
+        );
+        assert_eq!(
+            alice.member_routes()[0].health,
+            MemberRouteHealth::NoPeerRecord
+        );
+
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 1)
+            .unwrap();
+        assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
+        assert_ne!(
+            alice.member_route_revision(),
+            revision_before_connection,
+            "record ingestion reveals the retained live path and must invalidate the projection"
+        );
+        let route = &alice.member_routes()[0];
+        assert_eq!(route.health, MemberRouteHealth::ClaimedPeerConnectedDirect);
+        assert!(
+            route.last_success.is_none(),
+            "a later claimant may use a current path but must not inherit stranger history"
+        );
+        let stable_revision = alice.member_route_revision();
+        alice.note_peer_paths(peer, vec![direct_v4_quic()], None);
+        assert_eq!(
+            alice.member_route_revision(),
+            stable_revision,
+            "an identical snapshot without a new establishment cannot amplify UI refreshes"
+        );
+
+        let mut opaque_heavy = Vec::new();
+        for transport in [ConnectionTransport::Memory, ConnectionTransport::Unknown] {
+            for family in [ConnectionFamily::Ipv4, ConnectionFamily::Ipv6] {
+                for direction in [
+                    catcoms_rt::ConnectionDirection::Dialer,
+                    catcoms_rt::ConnectionDirection::Listener,
+                ] {
+                    opaque_heavy.push(ConnectionPath {
+                        family,
+                        transport,
+                        direction,
+                    });
+                }
+            }
+        }
+        assert_eq!(opaque_heavy.len(), MAX_ACTIVE_PATHS_PER_PEER);
+        opaque_heavy.push(direct_v4_quic());
+        alice.note_peer_paths(peer, opaque_heavy, None);
+        let route = &alice.member_routes()[0];
+        assert_eq!(route.active_paths.len(), MAX_ACTIVE_PATHS_PER_PEER);
+        assert_eq!(
+            route.health,
+            MemberRouteHealth::ClaimedPeerConnectedDirect,
+            "bounded reduction must preserve recognized direct evidence ahead of opaque rows"
+        );
+
+        alice.note_peer_paths(
+            peer,
+            vec![direct_v4_quic(); MAX_CONNECTION_PATH_SNAPSHOT + 1],
+            Some(direct_v4_quic()),
+        );
+        let route = &alice.member_routes()[0];
+        assert!(route.active_paths.is_empty());
+        assert_eq!(
+            route.health,
+            MemberRouteHealth::ClaimedPeerConnectedOther,
+            "an oversized custom snapshot is rejected before normalization"
+        );
+
+        // An internally inconsistent success hint cannot create historical evidence.
+        alice.note_peer_paths(peer, vec![relayed_v6()], Some(direct_v4_quic()));
+        assert!(alice.member_routes()[0].last_success.is_none());
+
+        // The public transport seam may be implemented by something other than libp2p; enforce
+        // the memory cap here even if it reports more live peers than production allows.
+        for n in 0..=MAX_PEER_RECORDS {
+            let candidate = PeerId::from_u64(10_000 + n as u64);
+            alice.connected_peers.insert(candidate);
+            alice.note_peer_paths(candidate, vec![direct_v4_quic()], Some(direct_v4_quic()));
+        }
+        assert_eq!(alice.pairwise_reachability.len(), MAX_PEER_RECORDS);
+
+        // A fresh connection generation clears path detail even when no new snapshot follows.
+        alice.note_peer_disconnected(peer);
+        alice.note_peer_connected(peer);
+        assert_eq!(
+            alice.member_routes()[0].health,
+            MemberRouteHealth::ClaimedPeerConnectedOther
+        );
+        alice.note_peer_disconnected(peer);
+        alice.note_peer_paths(peer, vec![direct_v4_quic()], Some(direct_v4_quic()));
+        assert!(alice.member_routes()[0].active_paths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claimed_transport_replacement_and_removal_drop_historical_path_evidence() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let bob = it.next().unwrap();
+        let old_peer = bob.local_peer();
+        assert!(alice.ingest_peer_record(signed_record_claiming(&bob, *old_peer.as_bytes(), 1,)));
+        alice.note_peer_connected(old_peer);
+        alice.note_peer_paths(old_peer, vec![direct_v4_quic()], Some(direct_v4_quic()));
+        assert!(alice.member_routes()[0].last_success.is_some());
+
+        assert!(!alice.ingest_peer_record(signed_record_claiming(&bob, *old_peer.as_bytes(), 2,)));
+        assert!(
+            alice.member_routes()[0].last_success.is_some(),
+            "a new address epoch for the same stable transport keeps peer-scoped history"
+        );
+
+        let replacement = PeerId::from_u64(44_444);
+        assert!(!alice.ingest_peer_record(signed_record_claiming(
+            &bob,
+            *replacement.as_bytes(),
+            3,
+        )));
+        assert!(
+            !alice.pairwise_reachability.contains_key(&old_peer),
+            "the old transport identity cannot lend history to a future claimant"
+        );
+
+        alice.note_peer_connected(replacement);
+        alice.note_peer_paths(replacement, vec![direct_v4_quic()], Some(direct_v4_quic()));
+        assert!(alice.pairwise_reachability.contains_key(&replacement));
+        alice.queue_eviction(&bob.device.device_id());
+        assert!(!alice.pairwise_reachability.contains_key(&replacement));
+    }
+
+    #[tokio::test]
+    async fn released_transport_claim_does_not_pin_the_next_members_retry_or_sequence() {
+        let (_hub, members, _ids) = build_members(3).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mallory = it.next().unwrap();
+        let bob = it.next().unwrap();
+        let bob_peer = bob.local_peer();
+        let bob_address = member_route(&bob, "/ip4/203.0.113.22/tcp/1");
+
+        let mallory_key = mallory.device.public_key_bytes();
+        let squat_addresses = vec![bob_address.clone()];
+        let squat_payload =
+            peer_record_signing_payload(&mallory_key, bob_peer.as_bytes(), &squat_addresses, 900);
+        assert!(alice.ingest_peer_record(PeerDescriptor {
+            device_pubkey: mallory_key,
+            peer_id: *bob_peer.as_bytes(),
+            addresses: squat_addresses,
+            seq: 900,
+            signature: mallory.device.sign(&squat_payload).unwrap(),
+        }));
+        alice.cache_known_records();
+        assert_eq!(alice.dial_cached_peers().await, 1);
+        assert_eq!(
+            alice
+                .dial_retries
+                .get(bob_peer.as_bytes().as_slice())
+                .unwrap()
+                .attempts,
+            1
+        );
+        let transport_freshness = FreshnessPrincipal::Transport(bob_peer.as_bytes().to_vec());
+        alice.note_dial_attempt(
+            bob_peer.as_bytes().to_vec(),
+            vec![(transport_freshness.clone(), 7)],
+        );
+
+        // Mallory moves its own record elsewhere. That releases its self-asserted claim on Bob's
+        // transport. Its device epoch must leave at the same instant, while independently signed
+        // rendezvous freshness/cooldown survives so claim-toggling cannot reset shared work.
+        assert!(!alice.ingest_peer_record(signed_record_claiming(
+            &mallory,
+            *mallory.local_peer().as_bytes(),
+            901,
+        )));
+        let retained = alice
+            .dial_retries
+            .get(bob_peer.as_bytes().as_slice())
+            .expect("transport-signed retry state survives the descriptor move");
+        assert_eq!(retained.epochs.get(&transport_freshness), Some(&7));
+        assert!(!retained.epochs.contains_key(&FreshnessPrincipal::Device(
+            mallory.device.device_id().as_bytes().to_vec(),
+        )));
+
+        let bob_key = bob.device.public_key_bytes();
+        let bob_addresses = vec![bob_address];
+        let bob_payload =
+            peer_record_signing_payload(&bob_key, bob_peer.as_bytes(), &bob_addresses, 1);
+        assert!(alice.ingest_peer_record(PeerDescriptor {
+            device_pubkey: bob_key,
+            peer_id: *bob_peer.as_bytes(),
+            addresses: bob_addresses,
+            seq: 1,
+            signature: bob.device.sign(&bob_payload).unwrap(),
+        }));
+        let bob_fp = roles::fingerprint(&bob.device.device_id());
+        let route = alice
+            .member_routes()
+            .into_iter()
+            .find(|route| route.fingerprint == bob_fp)
+            .unwrap();
+        assert_eq!(route.health, MemberRouteHealth::ClaimedPeerDialEligible);
+        assert_eq!(route.dial_attempts, 0);
+
+        alice.cache_known_records();
+        assert_eq!(
+            alice.dial_cached_peers().await,
+            1,
+            "Bob's lower signer-scoped sequence must be planned immediately"
+        );
+        let retry = alice
+            .dial_retries
+            .get(bob_peer.as_bytes().as_slice())
+            .unwrap();
+        assert_eq!(
+            retry.epochs.get(&FreshnessPrincipal::Device(
+                bob.device.device_id().as_bytes().to_vec(),
+            )),
+            Some(&1)
+        );
+        assert_eq!(retry.attempts, 1);
+        assert_eq!(retry.epochs.get(&transport_freshness), Some(&7));
+    }
+
+    #[tokio::test]
+    async fn unclaimed_retry_work_does_not_invalidate_the_member_route_projection() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let bob = it.next().unwrap();
+
+        let stable = alice.member_route_revision();
+        let stranger = PeerId::from_u64(92_001);
+        alice.note_dial_attempt(
+            stranger.as_bytes().to_vec(),
+            vec![(
+                FreshnessPrincipal::Transport(stranger.as_bytes().to_vec()),
+                1,
+            )],
+        );
+        assert_eq!(
+            alice.member_route_revision(),
+            stable,
+            "rendezvous churn for an unclaimed transport cannot force an O(roster) UI refresh"
+        );
+
+        assert!(alice.ingest_peer_record(signed_record_claiming(
+            &bob,
+            *bob.local_peer().as_bytes(),
+            7,
+        )));
+        let after_record = alice.member_route_revision();
+        alice.note_dial_attempt(
+            bob.local_peer().as_bytes().to_vec(),
+            vec![(
+                FreshnessPrincipal::Device(bob.device.device_id().as_bytes().to_vec()),
+                7,
+            )],
+        );
+        assert_ne!(
+            alice.member_route_revision(),
+            after_record,
+            "a current descriptor's visible attempt/cooldown must still refresh Connectivity"
+        );
+    }
+
     #[tokio::test]
     async fn cache_and_rendezvous_share_one_canonical_transport_budget() {
         let (_hub, members, _ids) = build_members(2).await;
@@ -13053,22 +14521,14 @@ mod tests {
                 window_ms: 60_000,
                 process_limit: 8,
                 server_limit: 8,
-                peer_limit: 4,
+                peer_limit: 8,
                 endpoint_limit: 2,
                 prefix_limit: 8,
             },
         ));
 
         bob.publish_self_record(
-            member_routes(
-                &bob,
-                &[
-                    "/ip4/203.0.113.2/tcp/1",
-                    "/ip4/203.0.113.3/tcp/1",
-                    "/ip4/203.0.113.4/tcp/1",
-                    "/ip4/203.0.113.5/tcp/1",
-                ],
-            ),
+            member_routes(&bob, &["/ip4/203.0.113.2/tcp/1", "/ip4/203.0.113.3/tcp/1"]),
             1,
         )
         .unwrap();
@@ -13077,7 +14537,11 @@ mod tests {
         assert_eq!(alice.dial_cached_peers().await, 1);
 
         let canonical = bob.local_peer().as_bytes().to_vec();
-        assert_eq!(alice.dial_retries.get(&canonical).unwrap().seq, 1);
+        let bob_freshness = FreshnessPrincipal::Device(bob.device.device_id().as_bytes().to_vec());
+        assert_eq!(
+            alice.dial_retries[&canonical].epochs.get(&bob_freshness),
+            Some(&1)
+        );
 
         // The same transport now arrives from rendezvous under raw libp2p bytes and a fresher
         // epoch. Before canonicalization that source received a second four-grant peer bucket
@@ -13101,18 +14565,44 @@ mod tests {
                     ],
                 ),
                 namespace,
-                seq: 2,
+                seq: 900,
             })
             .await;
 
         let retry = alice.dial_retries.get(&canonical).unwrap();
-        assert_eq!(retry.seq, 1);
+        assert_eq!(retry.epochs.get(&bob_freshness), Some(&1));
+        assert_eq!(
+            retry
+                .epochs
+                .get(&FreshnessPrincipal::Transport(canonical.clone())),
+            Some(&900),
+            "transport-signed freshness is independent of the member descriptor"
+        );
         assert_eq!(retry.attempts, 1);
         assert_eq!(
             alice.dial_retries.len(),
             1,
             "rendezvous must not mint a second retry/scheduler identity for the cached transport"
         );
+
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.22/tcp/22")], 2)
+            .unwrap();
+        assert!(!alice.ingest_peer_record(bob.self_record().unwrap().clone()));
+        alice.cache_known_records();
+        assert_eq!(
+            alice.dial_cached_peers().await,
+            1,
+            "a device-signed epoch newer in its own domain bypasses cooldown even below transport seq 900"
+        );
+        let retry = alice.dial_retries.get(&canonical).unwrap();
+        assert_eq!(retry.epochs.get(&bob_freshness), Some(&2));
+        assert_eq!(
+            retry
+                .epochs
+                .get(&FreshnessPrincipal::Transport(canonical.clone())),
+            Some(&900)
+        );
+        assert_eq!(retry.attempts, 1);
     }
 
     #[tokio::test]
@@ -13154,7 +14644,12 @@ mod tests {
         );
         let key = bob.local_peer().as_bytes().to_vec();
         let retry = alice.dial_retries.get(&key).unwrap();
-        assert_eq!(retry.seq, 8);
+        assert_eq!(
+            retry.epochs.get(&FreshnessPrincipal::Device(
+                bob.device.device_id().as_bytes().to_vec(),
+            )),
+            Some(&8)
+        );
         assert_eq!(retry.attempts, 1, "the new address epoch starts fresh");
     }
 

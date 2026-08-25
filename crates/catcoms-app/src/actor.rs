@@ -821,6 +821,9 @@ pub enum AppEvent {
     /// The set of members reachable right now (a live connection) changed; `online` is their
     /// fingerprints, for the roster's presence indicators + the file-availability hint.
     ConnectivityChanged { online: Vec<String> },
+    /// Typed claimed-peer route evidence changed without necessarily changing aggregate presence.
+    /// This catches relay/direct upgrades, partial closes, fresh records, and retry transitions.
+    MemberRoutesChanged,
     /// The fresh, connected standing-switchboard offer set changed or expired. The UI should
     /// re-fetch its typed status instead of retaining an old host indefinitely.
     SwitchboardsChanged,
@@ -1774,16 +1777,21 @@ impl ServerActor {
 
     /// Fetch what this node knows about reaching each member (the debug console's network view).
     pub async fn member_routes(&self) -> Vec<catcoms_sync::MemberRoute> {
+        self.try_member_routes().await.unwrap_or_default()
+    }
+
+    /// Fallible member-route query for user-facing diagnostics.
+    ///
+    /// An empty live roster and a stopped actor are different facts. Callers that retain the last
+    /// diagnostic snapshot use this form so actor failure becomes "snapshot unavailable" instead
+    /// of a successful empty result that erases evidence.
+    pub async fn try_member_routes(&self) -> Result<Vec<catcoms_sync::MemberRoute>, String> {
         let (reply, rx) = oneshot::channel();
-        if self
-            .cmd_tx
+        self.cmd_tx
             .send(AppCommand::MemberRoutes { reply })
             .await
-            .is_err()
-        {
-            return Vec::new();
-        }
-        rx.await.unwrap_or_default()
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())
     }
 
     /// Fetch the recent inbound join attempts this node served, newest first.
@@ -2697,6 +2705,7 @@ where
         let mut last_moderation = server.moderation_state();
         let mut last_eclipse = false;
         let mut last_online = server.online_members();
+        let mut last_member_route_revision = server.member_route_revision();
         let mut last_switchboards = server.connected_switchboard_offers();
         let mut last_dm_requests = server.dm_requests();
         // Per channel: when delivery state was last recomputed, and what it was; the throttle
@@ -3601,6 +3610,11 @@ where
                         // signature is precisely the signal that should bypass retry backoff.
                         server.cache_known_records();
                         server.dial_cached_peers().await;
+                        let route_revision = server.member_route_revision();
+                        if route_revision != last_member_route_revision {
+                            last_member_route_revision = route_revision;
+                            let _ = event_tx.send(AppEvent::MemberRoutesChanged).await;
+                        }
                         let switchboards = server.connected_switchboard_offers();
                         if switchboards != last_switchboards {
                             last_switchboards = switchboards;
@@ -3722,6 +3736,16 @@ where
                             let _ = event_tx
                                 .send(AppEvent::ConnectivityChanged { online })
                                 .await;
+                        }
+                        // A DCUtR upgrade or one partial close does not change aggregate presence,
+                        // but it can change the Connectivity verdict from relay to direct (or
+                        // back). The session-local revision is bumped only by mutations that can
+                        // affect a current member row, avoiding an O(roster x addresses) compare
+                        // and preventing unclaimed Internet-peer churn from driving UI refreshes.
+                        let route_revision = server.member_route_revision();
+                        if route_revision != last_member_route_revision {
+                            last_member_route_revision = route_revision;
+                            let _ = event_tx.send(AppEvent::MemberRoutesChanged).await;
                         }
                         let switchboards = server.connected_switchboard_offers();
                         if switchboards != last_switchboards {
@@ -4167,6 +4191,27 @@ mod tests {
     use tokio::time::timeout;
 
     const GENERAL: u128 = 1;
+
+    #[tokio::test]
+    async fn fallible_member_routes_distinguishes_a_stopped_actor_from_an_empty_view() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let actor = ServerActor {
+            cmd_tx: CommandSender {
+                tx,
+                trace: Trace::NONE,
+            },
+        };
+
+        assert_eq!(
+            actor.try_member_routes().await.unwrap_err(),
+            "server stopped"
+        );
+        assert!(
+            actor.member_routes().await.is_empty(),
+            "the compatibility convenience remains an empty fallback"
+        );
+    }
 
     fn founder(
         hub: &std::sync::Arc<Hub>,
