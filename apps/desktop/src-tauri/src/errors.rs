@@ -188,9 +188,44 @@ pub mod codes {
         /// A backup that could not be written.
         VAULT_BACKUP_FAILED = "VAULT.BACKUP.FAILED", retryable: true, Some(Retry);
 
-        /// A write to a server document (wiki, status, calendar) that was refused. Almost always
-        /// the content: too long, malformed, or a name that is not allowed.
+        /// A write to a server document (wiki, calendar) that was refused. Almost always the
+        /// content: too long, malformed, or a name that is not allowed.
+        ///
+        /// The status feed used to be on this code too, and the six below are what taking it off
+        /// looks like: its writes are refused by a role and a policy rather than by their content,
+        /// so the one thing this code promises about a failure was wrong for most of the places
+        /// that returned it.
         DOCUMENT_WRITE_REJECTED = "DOCUMENT.WRITE.REJECTED", retryable: false, Some(AmendInput);
+
+        /// A post to the status feed refused. Split off from `DOCUMENT_WRITE_REJECTED` with the
+        /// five below, for the same reason chat's refusals are split five ways: the feed is the
+        /// server addressing its members, so what refuses a post is who is asking, and a declared
+        /// remedy of "amend the input" sends a member on a closed feed away to rewrite an
+        /// announcement that was never going to land. The role and the policy are the only things
+        /// that refuse here, so there is nothing to suggest.
+        STATUS_POST_REJECTED = "STATUS.POST.REJECTED", retryable: false, None;
+
+        /// An edit to a status post refused. Mirrors `CHAT_EDIT_REJECTED`, remedy included: an
+        /// edit is the one feed command whose payload is text the caller is still holding, so it
+        /// is the only one where changing something could be an answer at all. What refuses it
+        /// today is authorship (a post is its author's to reword or nobody's), so the remedy is
+        /// the generous reading rather than the common one.
+        STATUS_EDIT_REJECTED = "STATUS.EDIT.REJECTED", retryable: false, Some(AmendInput);
+
+        /// Taking a status post down refused: it is not yours and you are not a moderator.
+        /// Authority, exactly as for a chat message, and nothing typed differently changes it.
+        STATUS_DELETE_REJECTED = "STATUS.DELETE.REJECTED", retryable: false, None;
+
+        /// A reaction on a status post refused; in practice a post that has since been deleted.
+        /// The caller typed nothing to amend: they picked an emoji off a list.
+        STATUS_REACTION_REJECTED = "STATUS.REACTION.REJECTED", retryable: false, None;
+
+        /// A status pin refused: owner/admin only, like a channel pin.
+        STATUS_PIN_REJECTED = "STATUS.PIN.REJECTED", retryable: false, None;
+
+        /// Changing who may post to the feed refused: owner/admin only. The sharpest of the six,
+        /// and the one furthest from anything the caller could have typed.
+        STATUS_POLICY_REJECTED = "STATUS.POLICY.REJECTED", retryable: false, None;
 
         /// A channel topic refused; over the byte limit, in practice.
         CHANNEL_TOPIC_REJECTED = "CHANNEL.TOPIC.REJECTED", retryable: false, Some(AmendInput);

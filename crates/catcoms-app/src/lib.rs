@@ -2885,12 +2885,25 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// refused if the message isn't authored by this device (a modified client could bypass it, as
     /// with all CRDT content; see THREAT-MODEL.md). A no-op edit (same text) is dropped, so the
     /// `post` always carries a real change (automerge suppresses a same-value `put`).
+    ///
+    /// An empty `id` is refused before any of that. It is the id every message written before ids
+    /// existed carries ([`ChatMessage::id`]), so it names all of them and none of them: the author
+    /// check below would pass on the caller's *own* id-less message while the write matched
+    /// whichever id-less message the document holds first, putting one member's words under
+    /// another member's fingerprint. Honest-client gating is the whole of what protects this
+    /// document (the documented R6 residual), and a gate that passes on one message while the
+    /// write lands on another is not gating anything.
     pub async fn edit_message(
         &mut self,
         channel: u128,
         id: &str,
         new_text: &str,
     ) -> Result<(), AppError> {
+        if id.is_empty() {
+            return Err(AppError::Invalid(
+                "a message with no id cannot be addressed".into(),
+            ));
+        }
         let me = self.my_fingerprint();
         let Some(current) = self
             .messages(channel)
@@ -2919,7 +2932,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// anyone's (moderation). Honest-client gating (a modified client could post a raw delete op
     /// for any message regardless; the documented R6 residual). Errors if the message is gone or
     /// you may not delete it.
+    ///
+    /// An empty `id` is refused for the reason [`Server::edit_message`] gives: it names every
+    /// message written before ids existed rather than one of them, so the delete would land on
+    /// whichever of those the document happens to hold first.
     pub async fn delete_message(&mut self, channel: u128, id: &str) -> Result<(), AppError> {
+        if id.is_empty() {
+            return Err(AppError::Invalid(
+                "a message with no id cannot be addressed".into(),
+            ));
+        }
         let me = self.my_fingerprint();
         let Some(msg) = self.messages(channel).into_iter().find(|m| m.id == id) else {
             return Err(AppError::Invalid("no such message".into()));
@@ -2941,6 +2963,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// Toggle this member's `emoji` reaction on the message `id` in a channel (add if absent,
     /// remove if present). Anyone may react to any message. Errors if the message doesn't exist.
+    ///
+    /// An empty `id` is refused with the other trust-boundary checks, for the reason
+    /// [`Server::edit_message`] gives: it names every message written before ids existed rather
+    /// than one of them, so the reaction would land on whichever the document holds first.
     pub async fn toggle_reaction(
         &mut self,
         channel: u128,
@@ -2950,6 +2976,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // Enforce the flat-key invariant at the trust boundary, before anything reaches the doc.
         if !valid_reaction_emoji(emoji) {
             return Err(AppError::Invalid("bad emoji".into()));
+        }
+        if id.is_empty() {
+            return Err(AppError::Invalid(
+                "a message with no id cannot be addressed".into(),
+            ));
         }
         let me = self.my_fingerprint();
         if !self.messages(channel).iter().any(|m| m.id == id) {
@@ -2968,10 +2999,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Pin or unpin a message (by id) in a channel. **Owner/admin only** (honest-client gating, like
     /// message deletion; the documented R6 residual). Errors if the message is gone, you may not
     /// pin, or the pin state is already as requested (no redundant op).
+    ///
+    /// An empty `id` is refused for the reason [`Server::edit_message`] gives: it names every
+    /// message written before ids existed rather than one of them, so the pin would land on
+    /// whichever the document holds first.
     pub async fn set_pin(&mut self, channel: u128, id: &str, pinned: bool) -> Result<(), AppError> {
         if !matches!(self.my_role(), Role::Owner | Role::Admin) {
             return Err(AppError::Invalid(
                 "only an owner/admin can pin messages".into(),
+            ));
+        }
+        if id.is_empty() {
+            return Err(AppError::Invalid(
+                "a message with no id cannot be addressed".into(),
             ));
         }
         let Some(msg) = self.messages(channel).into_iter().find(|m| m.id == id) else {
@@ -4298,7 +4338,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// (`delete_status`) rather than putting different words in its author's mouth. Honest-client
     /// gating, as everywhere in a CRDT (see THREAT-MODEL.md). A no-op edit (same text) is dropped,
     /// so the `post` always carries a real change.
+    ///
+    /// An empty `id` is refused first, exactly as in [`Server::edit_message`]: it is the id every
+    /// post written before ids existed carries, so the author check below would pass on the
+    /// caller's own id-less post while the write landed on the first id-less post in the document,
+    /// whoever wrote it. Rewording somebody else's announcement is the one thing this method says
+    /// cannot happen, so the guard sits here and not in the composer: the command is reachable from
+    /// the webview directly, and honest-client gating only holds while the id names one post.
     pub async fn edit_status(&mut self, id: &str, new_text: &str) -> Result<(), AppError> {
+        if id.is_empty() {
+            return Err(AppError::Invalid(
+                "a status post with no id cannot be addressed".into(),
+            ));
+        }
         let me = self.my_fingerprint();
         let Some(current) = self
             .statuses()
@@ -4326,7 +4378,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Delete a status post (by id): **your own**, or; if you are the owner/admin; anyone's
     /// (moderation). Honest-client gating, exactly as for a chat message (the documented R6
     /// residual). Errors if the post is gone or you may not delete it.
+    ///
+    /// An empty `id` is refused for the reason [`Server::edit_status`] gives: it names every post
+    /// written before ids existed rather than one of them, so the delete would land on whichever of
+    /// those the document happens to hold first.
     pub async fn delete_status(&mut self, id: &str) -> Result<(), AppError> {
+        if id.is_empty() {
+            return Err(AppError::Invalid(
+                "a status post with no id cannot be addressed".into(),
+            ));
+        }
         let me = self.my_fingerprint();
         let Some(post) = self.statuses().into_iter().find(|m| m.id == id) else {
             return Err(AppError::Invalid("no such status post".into()));
@@ -4349,10 +4410,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Toggle this member's `emoji` reaction on the status post `id` (add if absent, remove if
     /// present). **Anyone may react**, whoever may post: reading the feed is the one thing every
     /// member does, and a reaction is how they answer it. Errors if the post doesn't exist.
+    ///
+    /// An empty `id` is refused with the other trust-boundary checks, for the reason
+    /// [`Server::edit_status`] gives: it names every post written before ids existed rather than
+    /// one of them, so the reaction would land on whichever the document holds first.
     pub async fn toggle_status_reaction(&mut self, id: &str, emoji: &str) -> Result<(), AppError> {
         // Enforce the flat-key invariant at the trust boundary, before anything reaches the doc.
         if !valid_reaction_emoji(emoji) {
             return Err(AppError::Invalid("bad emoji".into()));
+        }
+        if id.is_empty() {
+            return Err(AppError::Invalid(
+                "a status post with no id cannot be addressed".into(),
+            ));
         }
         let me = self.my_fingerprint();
         if !self.statuses().iter().any(|m| m.id == id) {
@@ -4372,10 +4442,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// scroll. **Owner/admin only** (honest-client gating, like a channel pin). Several posts may
     /// be pinned at once, as in a channel. Errors if the post is gone, you may not pin, or the pin
     /// state is already as requested (no redundant op).
+    ///
+    /// An empty `id` is refused for the reason [`Server::edit_status`] gives: it names every post
+    /// written before ids existed rather than one of them, so the pin would land on whichever the
+    /// document holds first.
     pub async fn set_status_pin(&mut self, id: &str, pinned: bool) -> Result<(), AppError> {
         if !matches!(self.my_role(), Role::Owner | Role::Admin) {
             return Err(AppError::Invalid(
                 "only an owner/admin can pin status posts".into(),
+            ));
+        }
+        if id.is_empty() {
+            return Err(AppError::Invalid(
+                "a status post with no id cannot be addressed".into(),
             ));
         }
         let Some(post) = self.statuses().into_iter().find(|m| m.id == id) else {
@@ -7451,6 +7530,51 @@ mod tests {
         assert!(!alice.messages(GENERAL).iter().any(|m| m.id == "mid-01"));
     }
 
+    /// A channel that has carried messages since before ids existed holds several rows whose id is
+    /// `""`, and matching on that field cannot tell them apart. `edit_message` is where that stops
+    /// being untidy and becomes a rewrite: the author check runs over the caller's own messages and
+    /// the write runs over everybody's, so an empty id passes the first on one message and lands
+    /// the second on another. Found by adversarial review.
+    #[tokio::test]
+    async fn a_channel_command_with_no_message_id_is_refused_rather_than_aimed_at_random() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        let mine = alice.my_fingerprint();
+
+        // Two id-less messages, somebody else's first, injected as if they had arrived over gossip
+        // from a client that predated ids.
+        alice
+            .sync
+            .post(DocType::Channel, GENERAL, move |d| {
+                append_message(d, "", "beefbeef", "theirs", 5, "")
+            })
+            .await
+            .unwrap();
+        alice
+            .sync
+            .post(DocType::Channel, GENERAL, move |d| {
+                append_message(d, "", &mine, "mine", 6, "")
+            })
+            .await
+            .unwrap();
+
+        assert!(alice.edit_message(GENERAL, "", "mine now").await.is_err());
+        assert!(alice.delete_message(GENERAL, "").await.is_err());
+        assert!(alice.set_pin(GENERAL, "", true).await.is_err());
+        assert!(alice.toggle_reaction(GENERAL, "", "👍").await.is_err());
+
+        // Both messages are exactly as they were: the same words under the same fingerprints, and
+        // the one that would have been hit is the one the caller never wrote.
+        let msgs = alice.messages(GENERAL);
+        assert_eq!(msgs.len(), 2, "nothing was deleted");
+        assert_eq!(msgs[0].text, "theirs");
+        assert_eq!(msgs[0].author, "beefbeef");
+        assert_eq!(msgs[0].edited, 0, "and nobody's words were replaced");
+        assert!(!msgs[0].pinned);
+        assert!(msgs[0].reactions.is_empty());
+        assert_eq!(msgs[1].text, "mine");
+    }
+
     #[tokio::test]
     async fn signed_warning_evidence_and_advisory_kick_vote_converge() {
         let clock = ManualClock::new(T0);
@@ -8959,6 +9083,65 @@ mod tests {
         let bobs = bob.statuses();
         assert!(!bobs.iter().find(|m| m.id == first).unwrap().pinned);
         assert!(bobs.iter().find(|m| m.id == second).unwrap().pinned);
+    }
+
+    /// The four addressed feed commands, given the id that addresses nothing.
+    ///
+    /// `""` is what every post written before ids existed carries, so it names all of them at once
+    /// and the document match cannot tell them apart. The sharp edge is `edit_status`: its author
+    /// check runs over the caller's own posts while the write runs over everybody's, so Alice
+    /// asking to edit "her" id-less post would have reworded whichever id-less post the document
+    /// holds first; here, Bob's. Found by adversarial review.
+    #[tokio::test]
+    async fn a_feed_command_with_no_post_id_is_refused_rather_than_aimed_at_random() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, bob) = status_duo(&clock).await;
+        let his = bob.my_fingerprint();
+        let mine = alice.my_fingerprint();
+
+        // Two id-less posts, Bob's first, injected as if they had arrived over gossip from a
+        // client that predated ids.
+        alice
+            .sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                append_message(d, "", &his, "bob's old notice", 5, "")
+            })
+            .await
+            .unwrap();
+        alice
+            .sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                append_message(d, "", &mine, "alice's old notice", 6, "")
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            alice.edit_status("", "mine now").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.delete_status("").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.set_status_pin("", true).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.toggle_status_reaction("", "🎉").await,
+            Err(AppError::Invalid(_))
+        ));
+
+        // Both posts are exactly as they were: the same words under the same fingerprints.
+        let feed = alice.statuses();
+        assert_eq!(feed.len(), 2, "nothing was deleted");
+        assert_eq!(feed[0].text, "bob's old notice");
+        assert_eq!(feed[0].author, bob.my_fingerprint());
+        assert_eq!(feed[0].edited, 0, "and nobody's words were replaced");
+        assert!(!feed[0].pinned);
+        assert!(feed[0].reactions.is_empty());
+        assert_eq!(feed[1].text, "alice's old notice");
     }
 
     #[tokio::test]

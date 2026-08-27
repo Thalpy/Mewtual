@@ -18,12 +18,30 @@
  * implausible row AT the ceiling, so it is covered by the read rather than sticking as a permanent
  * unread divider that nothing can clear.
  *
- * The cursor carries a small set of post ids alongside the timestamp, and only for posts sitting at
- * the mark. Announcements arrive in batches -- a seeded or migrated server stamps a whole feed in
- * one millisecond -- and a bare timestamp cannot tell two posts in the same millisecond apart, so
- * the second one is silently already read. An id is minted with the post and means the same thing
- * on every device, so it settles the tie with no clock involved. The set is bounded by construction
- * because it only ever holds one millisecond's worth of posts, and advancing the mark discards it.
+ * That settling belongs to BOTH sides of the question, which is why every unread check here takes
+ * the feed's ceiling next to the cursor. A mark written from a settled row and read back against a
+ * raw one is a mark that can never cover that row: the write says "the ceiling", the read says
+ * "four hundred minutes from now", and the two never meet however many times the feed is read.
+ * `statusCeiling` is the one definition, and a caller holding a feed and a clock is the only thing
+ * that can supply it.
+ *
+ * The cursor carries a small set of post ids alongside the timestamp, and only for posts that
+ * settle AT the mark. Announcements arrive in batches -- a seeded or migrated server stamps a whole
+ * feed in one millisecond -- and a bare timestamp cannot tell two posts in the same millisecond
+ * apart, so the second one is silently already read. An id is minted with the post and means the
+ * same thing on every device, so it settles the tie with no clock involved. Rows a bad clock put
+ * above the ceiling settle there too and are named the same way, which is what keeps a SECOND
+ * implausible post announcing itself instead of being swallowed by the read that covered the first.
+ * Nothing bounds how many of those a feed can hold, so the set has a cap and an escape hatch.
+ *
+ * A mark is refused in the other direction as well. Reading a feed while this machine's own clock
+ * is a year fast writes a mark a year ahead, and every announcement for the next year then reads as
+ * already seen: the same silence, arriving through the read rather than through the post. So a mark
+ * further ahead of `now` than the skew grace is not believed -- `sanitizeStatusCursor` drops it on
+ * the way in and `markStatusRead` refuses to carry it forward -- and a corrected clock recovers on
+ * the very next read. The cost is that announcements "read" under the bad clock announce themselves
+ * once more, and that is the trade this module wants: re-reading a feed is an annoyance, a feed
+ * that never speaks again is a lost announcement.
  *
  * The caller owns storage, and that storage is the unlocked vault's UI-state record -- the sealed
  * blob that already carries composer drafts and chat read marks -- never plaintext localStorage.
@@ -56,12 +74,13 @@ export type StatusPost = {
  * How far a person has read one server's announcements.
  *
  * `ts` is the newest TRUSTED timestamp covered by the read: trusted meaning it passed
- * `readCeiling`, not meaning any sender vouched for it. `ids` disambiguates that one millisecond,
- * and holds nothing else.
+ * `readCeiling`, not meaning any sender vouched for it. `ids` names the posts that settle on that
+ * boundary, and holds nothing else.
  *
- * Read as a rule: a post older than `ts` is read; a post at or after `ts` is read only if its id is
- * in `ids`. A post with no id at all cannot be excused that way, so for those the boundary itself
- * counts as read -- see `isStatusUnread`.
+ * Read as a rule, against the post's SETTLED timestamp rather than its raw one: a post below `ts`
+ * is read; a post at or above `ts` is read only if its id is in `ids`. A post with no id at all
+ * cannot be excused that way, so for those the boundary itself counts as read -- see
+ * `isStatusUnread`.
  */
 export type StatusReadCursor = {
   ts: number;
@@ -74,12 +93,12 @@ export const NO_STATUS_READ: StatusReadCursor = { ts: 0, ids: [] };
 /**
  * How many ids the boundary set may hold.
  *
- * Generous for the real case (posts sharing an exact millisecond) and small enough that a corrupt
- * or hostile blob cannot turn a read check into a scan of thousands of strings. Overflow does not
- * truncate the set and hope, because a feed of 200 posts all stamped alike would then leave 136 of
- * them permanently unread with no way to clear: `markStatusRead` steps the mark one millisecond
- * past the boundary instead, which reads them all as seen. Losing a tie is recoverable; a badge
- * that can never be cleared is not.
+ * Generous for the real cases -- posts sharing an exact millisecond, and rows a wrong clock parked
+ * above the ceiling -- and small enough that a corrupt or hostile blob cannot turn a read check
+ * into a scan of thousands of strings. Overflow does not truncate the set and hope, because a feed
+ * of 200 posts all settling alike would then leave 136 of them permanently unread with no way to
+ * clear: `markStatusRead` steps the mark one millisecond past the boundary instead, which reads
+ * every settled row as seen. Losing a tie is recoverable; a badge that can never be cleared is not.
  */
 export const STATUS_BOUNDARY_IDS_MAX = 64;
 
@@ -96,12 +115,24 @@ const ID_MAX_LENGTH = 128;
  *
  * Takes the already-parsed value rather than a string, because the cursors arrive as one field of
  * the sealed UI-state record and the JSON around them was decoded before this module ever sees it.
+ * `now` is an argument like everywhere else here, but it defaults to this machine's clock because
+ * this is the one door a stored mark comes through with no feed beside it to date it against, and a
+ * door that can be opened without a clock is a door the upper clamp below can be walked past.
  */
-export function sanitizeStatusCursor(value: unknown): StatusReadCursor {
+export function sanitizeStatusCursor(
+  value: unknown,
+  now = Date.now(),
+  grace = CLOCK_SKEW_GRACE_MS,
+): StatusReadCursor {
   const out: StatusReadCursor = { ts: 0, ids: [] };
   if (!value || typeof value !== "object" || Array.isArray(value)) return out;
   const j = value as { ts?: unknown; ids?: unknown };
   if (typeof j.ts === "number" && Number.isFinite(j.ts) && j.ts > 0) out.ts = Math.floor(j.ts);
+  // A mark cannot honestly claim to have read past what this machine believes is now. Without this
+  // one read taken under a clock a year fast outlives the clock by a year -- no later read walks a
+  // mark backwards -- and a hand-edited record reaches the same state without a clock at all. The
+  // ids go with the timestamp: they describe a boundary that is no longer being kept.
+  if (out.ts > now + grace) return { ts: 0, ids: [] };
   if (Array.isArray(j.ids)) {
     const seen = new Set<string>();
     for (const id of j.ids) {
@@ -132,11 +163,27 @@ export function sameStatusCursor(a: StatusReadCursor, b: StatusReadCursor): bool
   return true;
 }
 
+/**
+ * The newest timestamp in a feed this machine is willing to believe, which every question about
+ * that feed has to be asked against.
+ *
+ * One definition, called by `markStatusRead` on the way in and by every caller of the unread checks
+ * on the way out, because the moment the two sides settle a row differently the row becomes
+ * uncoverable: the read insists it is newer than any mark this machine will write, and the mark
+ * insists it already covered it.
+ */
+export function statusCeiling(posts: { ts: number }[], now: number, grace = CLOCK_SKEW_GRACE_MS): number {
+  const list = Array.isArray(posts) ? posts : [];
+  return readCeiling(list.map((p) => (p ? p.ts : 0)), now, grace);
+}
+
 /** The shared rule behind every unread question here, so no two surfaces can answer differently. */
-function unreadAgainst(id: string, ts: number, cursor: StatusReadCursor): boolean {
+function unreadAgainst(id: string, ts: number, cursor: StatusReadCursor, ceiling: number): boolean {
   // Decided by id where there is one on both sides: no clock is consulted, so no clock can lie.
   if (id && cursor.ids.includes(id)) return false;
-  const at = Number.isFinite(ts) ? ts : 0;
+  // The settled reading, which is the one the mark was written from. A row stamped past the ceiling
+  // is judged where the ceiling puts it rather than where its sender's clock claimed to be.
+  const at = effectiveTs(ts, ceiling);
   if (!id) {
     // Nothing can excuse this post from the boundary, so the boundary must not hold it: `>=` here
     // would leave the post the mark was written from permanently unread with no way to clear it.
@@ -145,18 +192,18 @@ function unreadAgainst(id: string, ts: number, cursor: StatusReadCursor): boolea
   return at >= cursor.ts;
 }
 
-/** Has this person seen this announcement? */
-export function isStatusUnread(post: StatusPost, cursor: StatusReadCursor = NO_STATUS_READ): boolean {
+/** Has this person seen this announcement? `ceiling` is the feed's, from `statusCeiling`. */
+export function isStatusUnread(post: StatusPost, cursor: StatusReadCursor, ceiling: number): boolean {
   if (!post) return false;
   const id = typeof post.id === "string" ? post.id : "";
-  return unreadAgainst(id, post.ts, cursor);
+  return unreadAgainst(id, post.ts, cursor, ceiling);
 }
 
 /** How many announcements this person has not seen: the surface count and the surface-bar chip. */
-export function statusUnreadCount(posts: StatusPost[], cursor: StatusReadCursor = NO_STATUS_READ): number {
+export function statusUnreadCount(posts: StatusPost[], cursor: StatusReadCursor, ceiling: number): number {
   if (!Array.isArray(posts)) return 0;
   let n = 0;
-  for (const post of posts) if (isStatusUnread(post, cursor)) n += 1;
+  for (const post of posts) if (isStatusUnread(post, cursor, ceiling)) n += 1;
   return n;
 }
 
@@ -175,7 +222,9 @@ export function statusUnreadCount(posts: StatusPost[], cursor: StatusReadCursor 
  * Announcements surface can be opened against a short page, a filtered view, or a feed that failed
  * to load and came back empty, and in every one of those the newly computed ceiling is lower than
  * what has already been read. Taking the higher of the two makes an empty feed a no-op instead of
- * an event that marks a year of announcements unread again.
+ * an event that marks a year of announcements unread again. The one mark it will not take forward
+ * is one that is ahead of `now` by more than the grace, because "never backwards" applied to a mark
+ * written under a wrong clock is how a read silences a feed for as long as the bad stamp said.
  */
 export function markStatusRead(
   posts: StatusPost[],
@@ -184,23 +233,26 @@ export function markStatusRead(
   grace = CLOCK_SKEW_GRACE_MS,
 ): StatusReadCursor {
   const list = Array.isArray(posts) ? posts : [];
-  const ceiling = readCeiling(list.map((p) => (p ? p.ts : 0)), now, grace);
-  const ts = previous.ts > ceiling ? previous.ts : ceiling;
-  // Carried forward only when the mark did not move: ids describe one millisecond, and the ids of
-  // a millisecond the mark has left behind describe nothing.
-  const ids = new Set<string>(ts === previous.ts ? previous.ids : []);
+  const ceiling = statusCeiling(list, now, grace);
+  const held = previous.ts > now + grace ? NO_STATUS_READ : previous;
+  const ts = held.ts > ceiling ? held.ts : ceiling;
+  // Carried forward only when the mark did not move: ids describe one boundary, and the ids of a
+  // boundary the mark has left behind describe nothing.
+  const ids = new Set<string>(ts === held.ts ? held.ids : []);
   for (const post of list) {
     const id = post && typeof post.id === "string" ? post.id : "";
     if (!id || id.length > ID_MAX_LENGTH) continue;
-    const raw = post && Number.isFinite(post.ts) ? post.ts : 0;
-    // Both readings count. `raw >= ts` catches the ordinary tie; `effectiveTs` catches the post a
-    // future-stamped clock put above the ceiling, which this read is covering whether its sender's
-    // clock agrees or not.
-    if (raw >= ts || effectiveTs(raw, ceiling) >= ts) ids.add(id);
+    // The settled reading and nothing else, because that is the only reading an unread check can
+    // ask. Naming a post by its raw stamp instead puts an id in the set for a row every later read
+    // still finds above the mark, which is a count that walks the mark forward and never falls.
+    if (effectiveTs(post.ts, ceiling) >= ts) ids.add(id);
   }
-  // One millisecond's worth of posts overflowed the set. Stepping the mark past the boundary reads
-  // all of them as seen, which loses the tie for anything posted in that same millisecond after
-  // this read -- and is still the right trade against a count that can never reach zero.
+  // More posts settled on the boundary than the set may name. Stepping the mark one millisecond
+  // past it reads every one of them as seen, which loses the tie for anything that lands on that
+  // same boundary after this read: another post in the boundary millisecond, or -- while the
+  // ceiling stays where it is -- another row from the clock that put these above it. Both re-appear
+  // if the ceiling later rises past the mark, and announcing a read post again is the safe
+  // direction. A count that can never reach zero is not.
   if (ids.size > STATUS_BOUNDARY_IDS_MAX) return { ts: ts + 1, ids: [] };
   return { ts, ids: [...ids] };
 }
@@ -248,15 +300,16 @@ export function statusFeedOrder(posts: StatusPost[]): StatusFeedOrder {
  */
 export function firstStatusUnreadIndex(
   posts: StatusPost[],
-  cursor: StatusReadCursor = NO_STATUS_READ,
+  cursor: StatusReadCursor,
+  ceiling: number,
   order: StatusFeedOrder = statusFeedOrder(posts),
 ): number {
   if (!Array.isArray(posts) || posts.length === 0) return -1;
   if (order === "newest-first") {
-    for (let i = posts.length - 1; i >= 0; i -= 1) if (isStatusUnread(posts[i], cursor)) return i;
+    for (let i = posts.length - 1; i >= 0; i -= 1) if (isStatusUnread(posts[i], cursor, ceiling)) return i;
     return -1;
   }
-  for (let i = 0; i < posts.length; i += 1) if (isStatusUnread(posts[i], cursor)) return i;
+  for (let i = 0; i < posts.length; i += 1) if (isStatusUnread(posts[i], cursor, ceiling)) return i;
   return -1;
 }
 
@@ -335,6 +388,42 @@ export function statusCursorFor(cursors: StatusCursors, server: number): StatusR
   return found && Array.isArray(found.ids) && typeof found.ts === "number" ? found : NO_STATUS_READ;
 }
 
+/** Per-server read ceilings, the cross-server shape of what `statusCeiling` answers for one feed. */
+export type StatusCeilings = Record<number, number>;
+
+/**
+ * Each server's ceiling, over the announcements one aggregation is holding.
+ *
+ * The News tab flattens every server's whole feed into one list, and a ceiling belongs to a feed:
+ * measuring one server's rows against the newest plausible stamp in SOMEBODY ELSE'S feed settles
+ * them somewhere the mark for their own server was never written from. Computed once for the whole
+ * list rather than per chip, so filtering the tab cannot change what a row is measured against.
+ */
+export function newsCeilings(items: NewsItem[], now: number, grace = CLOCK_SKEW_GRACE_MS): StatusCeilings {
+  const feeds = new Map<number, number[]>();
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item || item.kind !== "status") continue;
+    const held = feeds.get(item.server);
+    if (held) held.push(item.ts);
+    else feeds.set(item.server, [item.ts]);
+  }
+  const out: StatusCeilings = {};
+  for (const [server, timestamps] of feeds) out[server] = readCeiling(timestamps, now, grace);
+  return out;
+}
+
+/**
+ * One server's ceiling.
+ *
+ * Zero for a server that is not in the map, which is the same answer a server whose entire feed is
+ * implausible gets: there is no stamp in it this machine will believe, so nothing settles above the
+ * floor. Both mean the same thing to a read, so neither needs to be told apart from the other.
+ */
+export function statusCeilingFor(ceilings: StatusCeilings, server: number): number {
+  const found = ceilings ? ceilings[server] : undefined;
+  return typeof found === "number" && Number.isFinite(found) ? found : 0;
+}
+
 /**
  * Is this News row something the person has not seen?
  *
@@ -346,10 +435,11 @@ export function statusCursorFor(cursors: StatusCursors, server: number): StatusR
  * tab already surfaces events under "Upcoming", which is the indicator they actually want; when
  * events grow a creation timestamp of their own, this is where the second rule goes.
  */
-export function isNewsItemUnseen(item: NewsItem, cursors: StatusCursors): boolean {
+export function isNewsItemUnseen(item: NewsItem, cursors: StatusCursors, ceilings: StatusCeilings): boolean {
   if (!item || item.kind !== "status") return false;
   const id = typeof item.id === "string" ? item.id : "";
-  return unreadAgainst(id, item.ts, statusCursorFor(cursors, item.server));
+  const server = item.server;
+  return unreadAgainst(id, item.ts, statusCursorFor(cursors, server), statusCeilingFor(ceilings, server));
 }
 
 /** What the News tab's kind chips can select. */
@@ -401,11 +491,38 @@ export function splitNewsSections<T extends NewsItem & { pinned?: boolean }>(
   return { pinned, feed: posts.filter((item) => !shown.has(item)).sort((a, b) => b.ts - a.ts).slice(0, limit) };
 }
 
+/**
+ * Stamp every News row with a render key that is unique BY CONSTRUCTION.
+ *
+ * A keyed `{#each}` needs one per row, and a key spelled out of the row's own fields is not one: an
+ * announcement old enough to predate minted ids carries an empty one, so two of those from the same
+ * server in the same millisecond describe themselves identically. Svelte raises `each_key_duplicate`
+ * on that, in production as well as in development, and the throw takes the whole News render down
+ * rather than the one row -- a pair of legacy posts for a blank tab. The exposure grew with the
+ * aggregation, which now holds each server's whole feed instead of its five newest posts.
+ *
+ * The occurrence counter is what makes the key unique; the fields in front of it are what make it
+ * STABLE, so a row keeps its identity across a re-aggregation and Svelte moves the node it already
+ * has instead of tearing it down and building another.
+ */
+export function keyNewsRows<T extends NewsItem>(items: T[]): (T & { key: string })[] {
+  const seen = new Map<string, number>();
+  const out: (T & { key: string })[] = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item) continue;
+    const base = `${item.server}:${item.kind}:${item.id ?? ""}:${item.ts}`;
+    const nth = seen.get(base) ?? 0;
+    seen.set(base, nth + 1);
+    out.push({ ...item, key: `${base}#${nth}` });
+  }
+  return out;
+}
+
 /** The News half of the left rail's inbox badge, to be summed with the mentions count. */
-export function newsUnseenCount(items: NewsItem[], cursors: StatusCursors): number {
+export function newsUnseenCount(items: NewsItem[], cursors: StatusCursors, ceilings: StatusCeilings): number {
   if (!Array.isArray(items)) return 0;
   let n = 0;
-  for (const item of items) if (isNewsItemUnseen(item, cursors)) n += 1;
+  for (const item of items) if (isNewsItemUnseen(item, cursors, ceilings)) n += 1;
   return n;
 }
 
@@ -415,11 +532,15 @@ export function newsUnseenCount(items: NewsItem[], cursors: StatusCursors): numb
  * One pass producing every billboard's number, so no server's beacon can disagree with the rail
  * badge that is summing them. Servers with nothing unseen are absent rather than present as `0`.
  */
-export function newsUnseenByServer(items: NewsItem[], cursors: StatusCursors): Record<number, number> {
+export function newsUnseenByServer(
+  items: NewsItem[],
+  cursors: StatusCursors,
+  ceilings: StatusCeilings,
+): Record<number, number> {
   const out: Record<number, number> = {};
   if (!Array.isArray(items)) return out;
   for (const item of items) {
-    if (!isNewsItemUnseen(item, cursors)) continue;
+    if (!isNewsItemUnseen(item, cursors, ceilings)) continue;
     out[item.server] = (out[item.server] ?? 0) + 1;
   }
   return out;

@@ -102,7 +102,10 @@ export const TAURI_COMMAND_GROUPS = {
       // is author-only; a delete is the author's or a moderator's; a reaction is every member's,
       // because reading the feed is the one thing everyone does and reacting is how they answer.
       // Each is checked natively against the caller's own fingerprint and role, so the ⋯ menu the
-      // webview draws narrows what is offered and never what is permitted.
+      // webview draws narrows what is offered and never what is permitted. That check is only
+      // worth anything if the id names one post, so an empty one is refused natively too: it is
+      // what every post written before ids existed carries, which makes it an address for
+      // whichever of them the feed happens to hold first rather than for one the caller chose.
       "edit_status", "delete_status", "toggle_status_reaction",
     ],
   },

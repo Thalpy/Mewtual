@@ -70,9 +70,10 @@
     type ChannelChange, type ChannelHead, type ReadMark, type UnreadDecision, type UnreadState,
   } from "./unread";
   import {
-    NO_STATUS_READ, firstStatusUnreadIndex, isNewsItemUnseen, isStatusUnread, markStatusRead,
-    newsFilter, newsUnseenByServer, newsUnseenCount, sameStatusCursor, splitNewsSections,
-    statusCursorFor, statusIsObserved, statusSurfaceOpen, statusUnreadCount,
+    NO_STATUS_READ, firstStatusUnreadIndex, isNewsItemUnseen, isStatusUnread, keyNewsRows,
+    markStatusRead, newsCeilings, newsFilter, newsUnseenByServer, newsUnseenCount, sameStatusCursor,
+    splitNewsSections, statusCeiling, statusCursorFor, statusIsObserved, statusSurfaceOpen,
+    statusUnreadCount,
     type NewsKindFilter, type StatusCursors, type StatusObservation, type StatusPost,
     type StatusReadCursor,
   } from "./statusread.ts";
@@ -2524,7 +2525,12 @@
       statusCursors = {};
       error = `Durable history could not be authenticated and was not loaded: ${e}`;
     } finally {
-      if (generation === uiStateLoadGeneration && !locked) uiStateReady = true;
+      if (generation === uiStateLoadGeneration && !locked) {
+        uiStateReady = true;
+        // Anything marked read while this was in flight was held rather than written, because the
+        // assignments above would have overwritten it. Replay it now, against what actually loaded.
+        flushPendingStatusMarks();
+      }
     }
   }
   function chanKey(): string | null {
@@ -3955,10 +3961,14 @@
   // read cursor settles a same-millisecond tie by id, and the Pinned section needs to know without
   // a second fetch. Only the active server's tab count reads the live `statuses` instead, because
   // it has a fresher copy of the one feed it is counting.
-  type NewsItem = {
+  type NewsRow = {
     server: number; serverName: string; kind: "status" | "event";
     id: string; ts: number; text: string; author: string; pinned: boolean;
   };
+  // A row as the tab renders it: the aggregation's row plus the key `keyNewsRows` stamped on it.
+  // The key is minted where the list is built rather than spelled out of the row at render time,
+  // because a row's own fields do not identify it -- see `keyNewsRows`.
+  type NewsItem = NewsRow & { key: string };
   let inboxMode = $state<"mentions" | "news">("mentions");
   let newsItems = $state<NewsItem[]>([]);
   let newsLoading = $state(false);
@@ -3969,7 +3979,7 @@
     // loads are routine: without a generation the first to finish clears the spinner for the rest.
     const generation = ++newsGeneration;
     newsLoading = true;
-    const items: NewsItem[] = [];
+    const items: NewsRow[] = [];
     const now = Date.now();
     await Promise.all(
       servers.filter((s) => !s.isDm).map(async (s) => {
@@ -3994,7 +4004,7 @@
     if (generation !== newsGeneration) return; // a later load owns the list and the spinner
     newsLoading = false;
     if (locked) return; // as loadInbox: the lock cleared this, and it is cross-server text
-    newsItems = items;
+    newsItems = keyNewsRows(items);
   }
   // Every announcement mutation on every peer -- a post, an edit, a reaction, a pin, a policy
   // change -- arrives as the same "status-updated" event, and each one used to re-read both feeds
@@ -4023,12 +4033,35 @@
     // more next launch, which is the safe direction.
     scheduleUiStateSave();
   }
+  // Marks taken before the sealed record has finished loading, replayed as soon as it has.
+  //
+  // `restoreReloaded` clears `locked` before `loadUiContinuity` resolves, so the Inbox is on screen
+  // and live for the whole of that read: "Mark all read" can land while the hydration that assigns
+  // `statusCursors` wholesale is still in flight. Writing the mark there loses it in silence --
+  // `scheduleUiStateSave` seals nothing before the record has loaded, and the load then overwrites
+  // what was written -- so the badge clears and comes back a moment later with no error to explain
+  // it. Held rather than refused, because refusing is still dropping somebody's click: replaying it
+  // re-runs the mark against the cursor that actually loaded, which is what would have happened had
+  // the click landed a moment later. One entry per server, because a later snapshot of a feed
+  // covers everything an earlier snapshot of it did.
+  const pendingStatusMarks = new Map<number, StatusPost[]>();
+  function flushPendingStatusMarks() {
+    if (!pendingStatusMarks.size) return;
+    const held = [...pendingStatusMarks];
+    pendingStatusMarks.clear();
+    for (const [server, posts] of held) markStatusesRead(server, posts);
+  }
   // Takes the read-state module's own shape rather than `Msg`, because both callers hold a
   // different record of the same posts: the surface has the server's live feed, and "Mark all read"
   // has the News rows this aggregation built. Both carry the id and timestamp the mark is made of.
   /** Cover everything in `posts` as read for `server`, and persist it if that moved the mark. */
   function markStatusesRead(server: number, posts: StatusPost[]) {
     if (!posts.length) return;
+    if (!uiStateReady) {
+      // Nothing to mark against yet, and nowhere to seal it: see `pendingStatusMarks`.
+      if (!locked) pendingStatusMarks.set(server, posts);
+      return;
+    }
     const previous = statusCursorFor(statusCursors, server);
     const next = markStatusRead(posts, Date.now(), previous);
     if (sameStatusCursor(next, previous)) return; // nothing moved, so nothing to seal
@@ -4048,19 +4081,18 @@
   let newsSections = $derived(splitNewsSections(newsMatches, 30));
   let newsFeed = $derived(newsSections.feed);
   let newsPinned = $derived(newsSections.pinned);
+  // Each server's read ceiling over the feed this aggregation holds, which is what a row's stamp is
+  // settled against before it is measured. Derived from the whole list rather than per section, so
+  // a chip cannot change what a row is compared with; recomputed with the list, as chat's is.
+  let newsTsCeilings = $derived(newsCeilings(newsItems, Date.now()));
   // Unfiltered on purpose: a chip narrows what is listed, never what is outstanding, and a badge
   // that empties because someone picked a filter is a badge that has stopped meaning anything.
-  let newsUnseenNow = $derived(newsUnseenCount(newsItems, statusCursors));
+  let newsUnseenNow = $derived(newsUnseenCount(newsItems, statusCursors, newsTsCeilings));
   let newsServersListed = $derived.by(() => {
     const seen = new Map<number, string>();
     for (const n of newsItems) if (!seen.has(n.server)) seen.set(n.server, n.serverName);
     return [...seen].map(([id, name]) => ({ id, name }));
   });
-  // A row's identity across a re-aggregation. The id alone will not do: a post old enough to
-  // predate minted ids carries an empty one, and two of those in the same list would be one key.
-  function newsKey(n: NewsItem): string {
-    return `${n.server}:${n.kind}:${n.id}:${n.ts}:${n.author}`;
-  }
   /** Advance every server's mark over the posts this aggregation actually fetched. */
   function markAllNewsRead() {
     const byServer = new Map<number, NewsItem[]>();
@@ -4770,6 +4802,7 @@
     drafts = {};
     readMarks = {};
     statusCursors = {}; // a reading habit, sealed beside the marks above and dropped with them
+    pendingStatusMarks.clear(); // and a mark still waiting on hydration is not replayed behind a lock
     uiStateReady = false;
     uiStateSaveFailed = false;
     uiStateLoadGeneration += 1;
@@ -5078,8 +5111,12 @@
     showWikiHistory = false;
     wikiHistorySel = "";
     statuses = [];
-    // The policy is this server's, and so is anything half-done to a post of its feed.
+    // The policy is this server's, and so is anything half-done to a post of its feed. The
+    // composer draft included: it has no per-server home the way a channel draft does, so left
+    // alone it follows you into the next server's noticeboard and sits behind the lock screen,
+    // which is the one place this function exists to leave nothing.
     statusPolicy = false;
+    statusDraft = "";
     statusEditingId = "";
     statusEditDraft = "";
     statusReactionPickerFor = "";
@@ -5845,9 +5882,13 @@
     setServerSoundEnabled("news", statusCueOn ? "off" : "on");
   }
   let statusCursor = $derived(activeServerId === null ? NO_STATUS_READ : statusCursorFor(statusCursors, activeServerId));
+  // The newest stamp in this feed this machine is willing to believe, which every unread question
+  // below is asked against: a post above it is judged where the ceiling puts it, exactly as the
+  // mark that covered it was written. Recomputed only when the rows change, as chat's is.
+  let statusTsCeiling = $derived(statusCeiling(statuses, Date.now()));
   // Zero for a DM, which has no noticeboard: the tab is not offered there, and a chip counting a
   // surface nobody can open is a chip that can never be cleared.
-  let statusUnreadNow = $derived(cur?.isDm ? 0 : statusUnreadCount(statuses, statusCursor));
+  let statusUnreadNow = $derived(cur?.isDm ? 0 : statusUnreadCount(statuses, statusCursor, statusTsCeiling));
   // Pinned posts render in their own block above the feed and are left out of it, so a pin lifts a
   // post rather than duplicating it. Both halves keep `get_statuses`' newest-first order.
   let pinnedStatuses = $derived(statuses.filter((s) => s.pinned));
@@ -5864,11 +5905,11 @@
   // Falls back to the live cursor until the snapshot exists, so the first render of a surface shows
   // the boundary the store already holds rather than a feed briefly claiming to be entirely unread.
   let statusBoundary = $derived(statusDividerFor === activeServerId ? statusDividerCursor : statusCursor);
-  let statusNewCount = $derived(statusUnreadCount(statuses, statusBoundary));
+  let statusNewCount = $derived(statusUnreadCount(statuses, statusBoundary, statusTsCeiling));
   // Where the NEW divider sits: above the oldest unread post, which in a newest-first array is the
   // LAST unread index. Computed over the feed the divider is drawn in, so the pinned block (which
   // is out of chronological order by construction) cannot drag it to the wrong row.
-  let statusDividerAt = $derived(firstStatusUnreadIndex(statusFeed, statusBoundary, "newest-first"));
+  let statusDividerAt = $derived(firstStatusUnreadIndex(statusFeed, statusBoundary, statusTsCeiling, "newest-first"));
   // Reading the surface is what marks it read: the switch onto it, and anything arriving while it
   // is the visible surface and somebody is actually there. Everything this writes is untracked,
   // because a read of one's own write is a loop; the posts, the surface and whether the window is
@@ -10094,7 +10135,7 @@
   // The herald beacon's numbers, off the same aggregation the Inbox and the rail badge read. A
   // billboard is beaconed only while its server has unread announcements; the corners it does not
   // touch keep their existing signals (unread top-right, mentions top-left, voice bottom-right).
-  let spaceStatusCounts = $derived(newsUnseenByServer(newsItems, statusCursors));
+  let spaceStatusCounts = $derived(newsUnseenByServer(newsItems, statusCursors, newsTsCeilings));
   // The newest announcement per server, for the headline card a hovered beacon shows. Every
   // server's, not just the beaconed ones, so the card can still say what the last post was.
   let spaceStatusLatest = $derived.by(() => {
@@ -10114,6 +10155,12 @@
   // browser because the card is `pointer-events: none` chrome floating over a rotating scene: a
   // billboard near the edge would otherwise hang the card half off-screen with nothing to scroll.
   // The card itself is derived below, beside the projection it reads its position from.
+  //
+  // Both numbers reach the stylesheet as custom properties rather than being written out a second
+  // time there. A card the CSS renders taller than what this placement assumed hangs the difference
+  // off the top of the viewport with nothing able to scroll it back, and a snippet is as many lines
+  // as its words make it, so the card holds itself to the height below and its body stops instead
+  // of growing past it.
   const SPACE_HERALD_CARD = { w: 244, h: 96 };
   function stopSpaceCameraTween() {
     if (spaceCameraRaf) cancelAnimationFrame(spaceCameraRaf);
@@ -13758,8 +13805,11 @@
         spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) {
           refreshStatuses();
-          // The policy rides the feed document, so this event is also how a policy change arrives.
-          void refreshStatusPolicy();
+          // The policy rides the feed document, so this event is also how a policy change arrives --
+          // but only the announcements surface renders anything that reads it, and both routes onto
+          // that surface refresh it on the way in. Every other surface would be paying a round-trip
+          // per reaction anybody makes, for an answer nothing on screen is asking.
+          if (view === "status") void refreshStatusPolicy();
         }
         if (!(e.payload.server === activeServerId && view === "status" && document.hasFocus())) {
           newsUnseen = true;
@@ -16997,7 +17047,7 @@
                  events never do, because an event's time is when it starts, not when it was
                  written, so it would read as unread until the day it happened. -->
             {#snippet newsRow(n: NewsItem)}
-              <li class="inbox-item" class:unseen={isNewsItemUnseen(n, statusCursors)}>
+              <li class="inbox-item" class:unseen={isNewsItemUnseen(n, statusCursors, newsTsCeilings)}>
                 <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
                   <div class="inbox-meta">
                     {#if n.kind === "event"}
@@ -17042,7 +17092,7 @@
               {#if newsPinned.length}
                 <h3 class="ev-h"><span>Pinned</span></h3>
                 <ul class="inbox-list" use:richClicks>
-                  {#each newsPinned as n (newsKey(n))}
+                  {#each newsPinned as n (n.key)}
                     {@render newsRow(n)}
                   {/each}
                 </ul>
@@ -17050,7 +17100,7 @@
               {#if newsUpcoming.length}
                 <h3 class="ev-h"><span>Upcoming events</span></h3>
                 <ul class="inbox-list" use:richClicks>
-                  {#each newsUpcoming as n (newsKey(n))}
+                  {#each newsUpcoming as n (n.key)}
                     {@render newsRow(n)}
                   {/each}
                 </ul>
@@ -17061,7 +17111,7 @@
                   <p class="muted inbox-empty">No announcements yet: servers' Announcements surfaces feed this.</p>
                 {:else}
                   <ul class="inbox-list" use:richClicks>
-                    {#each newsFeed as n (newsKey(n))}
+                    {#each newsFeed as n (n.key)}
                       {@render newsRow(n)}
                     {/each}
                   </ul>
@@ -18195,7 +18245,7 @@
             <li
               data-sid={s.id}
               class:flash={!!s.id && s.id === flashStatusId}
-              class:unread={isStatusUnread(s, statusBoundary)}
+              class:unread={isStatusUnread(s, statusBoundary, statusTsCeiling)}
               use:contextMenu={() => statusMenu(s)}
             >
               <span class="status-head">
@@ -19647,7 +19697,11 @@
           {#if spaceHerald}
             <!-- Display only, and deliberately outside the icon layer: it never takes the pointer,
                  so a drag begun on the billboard under it keeps every event it would have had. -->
-            <div class="sp-herald-card" style={`left:${spaceHerald.left}px; top:${spaceHerald.top}px`} aria-hidden="true">
+            <div
+              class="sp-herald-card"
+              style={`left:${spaceHerald.left}px; top:${spaceHerald.top}px; --sp-herald-w:${SPACE_HERALD_CARD.w}px; --sp-herald-h:${SPACE_HERALD_CARD.h}px`}
+              aria-hidden="true"
+            >
               <span class="sp-herald-where">{spaceHerald.name}</span>
               {#if spaceHerald.latest}
                 <span class="sp-herald-line">{msgSnippet(spaceHerald.latest.text, 90)}</span>

@@ -53,6 +53,13 @@ All notable changes to Mewtual are documented here.
   dropped in silence, taking the words with it and leaving no reason on screen. The refusal is now
   reported, and the draft stays in the composer.
 
+- **A half-written announcement followed you into the next server, and stayed behind the lock
+  screen.** Unlike a chat draft, which is kept per channel and restored to the one it was written
+  in, the announcement composer held a single box that nothing ever cleared: switching servers
+  showed server A's unfinished post in server B's noticeboard, and locking left it in memory
+  along with it. It is now dropped with the rest of the group's contents, on the switch and on the
+  lock.
+
 - **The Linux build crashed while packaging the AppImage**, even though a full icon set already
   sat in `src-tauri/icons/`. Tauri's Windows installer gets its icon from `build.rs` embedding
   `icon.ico` directly into the exe, independent of `tauri.conf.json`; the Linux and Debian

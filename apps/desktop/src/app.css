@@ -9984,11 +9984,20 @@ button.juke-expand:hover {
 }
 /* The headline card. Positioned by the projection like the billboards are, and deliberately inert:
    the space's drag, lasso and carry all run off pointer events on the layer underneath, so a card
-   that could take one would swallow the gesture that started on the server it is describing. */
+   that could take one would swallow the gesture that started on the server it is describing.
+
+   Its box comes from SPACE_HERALD_CARD, which is also what decides whether the card is drawn above
+   or below the billboard and how far in from the edges it is held. A card taller than that constant
+   hangs the surplus off the top of the viewport, and it cannot be scrolled back into view because
+   nothing here takes the pointer. So the height is a ceiling and not a suggestion: the snippet stops
+   at three lines, and the card clips anything that still would not fit. The fallbacks are the
+   constant's own values, for the case where the properties never arrive. */
 .sp-herald-card {
   position: absolute;
   z-index: 8;
-  width: 244px;
+  width: var(--sp-herald-w, 244px);
+  max-height: var(--sp-herald-h, 96px);
+  overflow: hidden;
   transform: translateX(-50%);
   display: flex;
   flex-direction: column;
@@ -10000,24 +10009,38 @@ button.juke-expand:hover {
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.6);
   pointer-events: none;
 }
+/* Which line, of the three, gives way when the budget is short. The name and the count are the card:
+   they never shrink. The snippet is the only part whose length is somebody else's writing, so it is
+   the only part allowed to lose lines, and `min-height: 0` is what lets it do that inside a column
+   flexbox rather than pushing the count out through the bottom of the card. Line heights are pinned
+   rather than left at `normal` because a budget cannot be kept in units a font gets to choose. */
 .sp-herald-where {
+  flex: none;
   font-size: 0.72rem;
+  line-height: 1.3;
   font-weight: 600;
   color: var(--text);
 }
 .sp-herald-line {
+  min-height: 0;
   font-size: 0.7rem;
   line-height: 1.4;
   color: var(--text-2);
   overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .sp-herald-meta {
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   font-family: var(--mono);
   font-size: 0.58rem;
+  line-height: 1.3;
   color: var(--muted);
 }
 .sp-herald-meta b {

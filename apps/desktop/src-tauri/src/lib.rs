@@ -7296,7 +7296,7 @@ async fn post_status(
     actor
         .post_status(text)
         .await
-        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
+        .map_err(|e| op.fail(codes::STATUS_POST_REJECTED, e))?;
     persist_server(&state, server).await;
     op.succeeded("STATUS.POST.PERSISTED");
     Ok(())
@@ -7335,7 +7335,7 @@ async fn edit_status(
     actor
         .edit_status(msg_id, text)
         .await
-        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
+        .map_err(|e| op.fail(codes::STATUS_EDIT_REJECTED, e))?;
     persist_server(&state, server).await;
     op.succeeded("STATUS.EDIT.PERSISTED");
     Ok(())
@@ -7360,7 +7360,7 @@ async fn delete_status(
     actor
         .delete_status(msg_id)
         .await
-        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
+        .map_err(|e| op.fail(codes::STATUS_DELETE_REJECTED, e))?;
     persist_server(&state, server).await;
     op.succeeded("STATUS.DELETE.PERSISTED");
     Ok(())
@@ -7387,7 +7387,7 @@ async fn toggle_status_reaction(
     actor
         .toggle_status_reaction(msg_id, emoji)
         .await
-        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
+        .map_err(|e| op.fail(codes::STATUS_REACTION_REJECTED, e))?;
     persist_server(&state, server).await;
     op.succeeded("STATUS.REACTION.PERSISTED");
     Ok(())
@@ -7413,7 +7413,7 @@ async fn set_status_pin(
     actor
         .set_status_pin(msg_id, pinned)
         .await
-        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
+        .map_err(|e| op.fail(codes::STATUS_PIN_REJECTED, e))?;
     persist_server(&state, server).await;
     op.succeeded("STATUS.PIN.PERSISTED");
     Ok(())
@@ -7447,7 +7447,7 @@ async fn set_status_policy(
     actor
         .set_status_members_may_post(members_may_post)
         .await
-        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
+        .map_err(|e| op.fail(codes::STATUS_POLICY_REJECTED, e))?;
     persist_server(&state, server).await;
     op.succeeded("STATUS.POLICY.PERSISTED");
     Ok(())
@@ -12512,6 +12512,37 @@ mod tests {
         assert_ne!(
             ActorLookup::Locked.code().remediation(),
             ActorLookup::NotOpen.code().remediation()
+        );
+    }
+
+    /// A refusal about who somebody is must not arrive as advice about what they typed.
+    ///
+    /// The status feed's commands all reported `DOCUMENT.WRITE.REJECTED`, whose declared remedy is
+    /// `AmendInput`, so a member refused by the feed's posting policy was told to change their
+    /// wording while the composer deliberately kept their draft: the app's combined answer to "you
+    /// may not post here" was "try rephrasing it". The sentence above it was correct in every
+    /// case, which is what let it stand. Found by adversarial review.
+    #[test]
+    fn a_status_refusal_about_authority_suggests_nothing_to_retype() {
+        for code in [
+            codes::STATUS_POST_REJECTED,
+            codes::STATUS_DELETE_REJECTED,
+            codes::STATUS_REACTION_REJECTED,
+            codes::STATUS_PIN_REJECTED,
+            codes::STATUS_POLICY_REJECTED,
+        ] {
+            assert_eq!(
+                code.remediation(),
+                None,
+                "{} is refused by a role or a policy, so it has nothing to suggest",
+                code.code()
+            );
+        }
+        // And the one that does carry a remedy is the one carrying the caller's text, so the
+        // split is asserted rather than only its larger half.
+        assert_eq!(
+            codes::STATUS_EDIT_REJECTED.remediation(),
+            Some(errors::Remediation::AmendInput)
         );
     }
 
