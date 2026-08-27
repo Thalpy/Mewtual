@@ -28,6 +28,11 @@ Real-time voice for a server's members, end-to-end encrypted, reusing what Mewtu
 
 ## Phases
 
+Status correction (2026-08-26): phase 1 and the WebRTC mesh/call UI portion of phase 2 are in the
+tree. The phase-2 Encoded-Transform AEAD described below is **not implemented**: the backend exposes
+`call_media_key`, but no frontend call site or encoded-frame transform exists. Treat the phase list
+as the intended design, not a completion claim; the current product statement is in `HANDOVER.md`.
+
 1. **Crypto + signalling foundation (Rust core).** `media_key` (MLS-derived) + `KIND_CALL_SIGNAL`
    push + actor/bridge plumbing + the `call-signal` event. Cargo-testable (members derive the same
    key; signal round-trips). _← this commit._

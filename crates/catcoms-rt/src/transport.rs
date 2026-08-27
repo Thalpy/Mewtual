@@ -91,6 +91,15 @@ pub enum TransportError {
     NoResponse,
 }
 
+/// What the transport actor did with a runtime dial command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialSubmission {
+    /// The exact endpoint entered the actor's pending/socket-start path.
+    Submitted,
+    /// No socket will start because the actor already has this endpoint covered.
+    Suppressed,
+}
+
 /// Reply handle handed to a request handler. Dropping it without calling
 /// [`Responder::respond`] surfaces [`TransportError::NoResponse`] to the caller.
 #[derive(Debug)]
@@ -370,6 +379,13 @@ pub trait MeshTransport: Send + Sync {
     /// Dial a peer address string at runtime (the higher layer's chosen dial, post-policy).
     async fn dial_addr(&self, _addr: &str) -> Result<(), TransportError> {
         Ok(())
+    }
+
+    /// Dial with actor acknowledgement. Transports without an actor preserve their existing
+    /// behavior and report submission after `dial_addr` succeeds.
+    async fn dial_addr_outcome(&self, addr: &str) -> Result<DialSubmission, TransportError> {
+        self.dial_addr(addr).await?;
+        Ok(DialSubmission::Submitted)
     }
 
     /// Advertise `addr` as an externally-reachable address, so a rendezvous registration can flush.

@@ -25,6 +25,7 @@ use catcoms_app::{channel_id, spawn, AppEvent, Server, ServerActor};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::MeshService;
 use catcoms_rt::{MeshTransport, OsCryptoRng, SystemClock, TransportEvent};
+use catcoms_storage::Cid;
 use libp2p::Multiaddr;
 use tokio::time::timeout;
 
@@ -149,6 +150,85 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
     })
     .await
     .expect("the joiner never received the founder's message over TCP");
+
+    // Prove the product path is bidirectional. A one-way assertion would miss a joiner whose
+    // subscriptions work but whose own signed operations never leave its actor/transport.
+    bob.send_message(general, "reply over tcp").await;
+    timeout(WAIT, async {
+        loop {
+            if alice
+                .messages(general)
+                .await
+                .iter()
+                .any(|m| m.text == "reply over tcp")
+            {
+                return;
+            }
+            let _ = timeout(Duration::from_millis(20), alice_events.recv()).await;
+        }
+    })
+    .await
+    .expect("the founder never received the joiner's reply over TCP");
+
+    // Exercise the file-index gossip and authenticated chunk request/response over the same real
+    // socket. The bytes are deterministic and deliberately cross several ordinary data shapes;
+    // the final CID assertion detects truncation, reordering and corruption.
+    let file_bytes: Vec<u8> = (0..12_345u32)
+        .map(|i| (i.wrapping_mul(29) % 251) as u8)
+        .collect();
+    let cid_hex = alice
+        .add_file(
+            "tcp-check.bin".into(),
+            "application/octet-stream".into(),
+            "acceptance".into(),
+            file_bytes.clone(),
+        )
+        .await
+        .expect("the founder can publish the deterministic test file");
+    let entry = timeout(WAIT, async {
+        loop {
+            if let Some(entry) = bob
+                .files()
+                .await
+                .into_iter()
+                .find(|entry| entry.name == "tcp-check.bin")
+            {
+                return entry;
+            }
+            let _ = timeout(Duration::from_millis(20), bob_events.recv()).await;
+        }
+    })
+    .await
+    .expect("the joiner never received the file listing over TCP");
+    assert_eq!(
+        entry
+            .cid
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        cid_hex,
+        "the listing carries the uploader's content address"
+    );
+    let (chunks, size) = bob
+        .file_download_plan(entry.cid.clone())
+        .await
+        .expect("the received listing has a valid download plan");
+    assert_eq!(size, file_bytes.len() as u64);
+    let mut downloaded = Vec::with_capacity(size as usize);
+    for index in 0..chunks {
+        let (bytes, provider) = bob
+            .fetch_file_chunk(entry.cid.clone(), index)
+            .await
+            .unwrap_or_else(|error| panic!("TCP file chunk {index}/{chunks} failed: {error}"));
+        assert_eq!(provider.as_deref(), Some(alice_fp.as_str()));
+        downloaded.extend_from_slice(&bytes);
+    }
+    assert_eq!(downloaded, file_bytes, "the file crosses TCP byte-for-byte");
+    assert_eq!(
+        Cid::of(&downloaded).as_bytes(),
+        entry.cid.as_slice(),
+        "the downloaded plaintext verifies against its content address"
+    );
 
     // --- presence lights up ---
     //

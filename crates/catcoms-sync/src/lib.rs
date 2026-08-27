@@ -5187,17 +5187,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .iter()
                 .filter_map(|addr| validated_peer_endpoint(addr, &expected))
                 .collect();
-            let granted =
-                self.endpoint_dials
-                    .reserve(&self.group.group_id(), &endpoints, &*self.clock);
+            let granted = self.endpoint_dials.reserve_permits(
+                &self.group.group_id(),
+                &endpoints,
+                &*self.clock,
+            );
             self.discovery
                 .refund_endpoint_budget(pd.addresses.len().saturating_sub(granted.len()));
             if granted.is_empty() {
                 continue;
             }
             self.note_dial_attempt(pd.peer.clone(), vec![(freshness.clone(), seq)]);
-            for addr in granted {
-                let _ = self.transport.dial_addr(&addr).await;
+            for permit in granted {
+                if matches!(
+                    self.transport.dial_addr_outcome(permit.address()).await,
+                    Ok(catcoms_rt::DialSubmission::Submitted)
+                ) {
+                    permit.commit();
+                }
             }
         }
     }
@@ -6579,9 +6586,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .iter()
                 .filter_map(|addr| validated_peer_endpoint(addr, &expected))
                 .collect();
-            let granted =
-                self.endpoint_dials
-                    .reserve(&self.group.group_id(), &endpoints, &*self.clock);
+            let granted = self.endpoint_dials.reserve_permits(
+                &self.group.group_id(),
+                &endpoints,
+                &*self.clock,
+            );
             self.discovery
                 .refund_endpoint_budget(pd.addresses.len().saturating_sub(granted.len()));
             if granted.is_empty() {
@@ -6589,8 +6598,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             self.note_dial_attempt(pd.peer.clone(), epochs);
             dialed += 1;
-            for addr in granted {
-                let _ = self.transport.dial_addr(&addr).await;
+            for permit in granted {
+                if matches!(
+                    self.transport.dial_addr_outcome(permit.address()).await,
+                    Ok(catcoms_rt::DialSubmission::Submitted)
+                ) {
+                    permit.commit();
+                }
             }
         }
         dialed

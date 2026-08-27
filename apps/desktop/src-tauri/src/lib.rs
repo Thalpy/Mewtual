@@ -11426,6 +11426,100 @@ struct SavedReport {
     /// Just the file name, for saying "saved as X" without a wall of directory.
     file: String,
     bytes: usize,
+    /// Non-blocking validator categories still present (currently legacy bridged prose). The UI
+    /// must disclose these rather than turning "written" into "safe".
+    review: Vec<String>,
+}
+
+/// Validate the exact bytes about to leave the process and return the non-blocking categories the
+/// reader should review. This deliberately lives at the native write boundary: a compromised or
+/// stale webview must not be able to bypass it by invoking the command directly.
+fn validate_report_for_save(text: &str) -> Result<Vec<String>, String> {
+    validate_report_for_mode(text, catcoms_log::hub().mode())
+}
+
+fn validate_report_for_mode(
+    text: &str,
+    mode: catcoms_diagnostics::CaptureMode,
+) -> Result<Vec<String>, String> {
+    let report = catcoms_diagnostics::export::validate_export(text, mode);
+    if report.blocked() {
+        let mut blocked: Vec<String> = report
+            .findings
+            .iter()
+            .filter(|finding| finding.category.blocks())
+            .map(|finding| format!("{} at line {}", finding.category.as_str(), finding.line))
+            .collect();
+        blocked.sort();
+        blocked.dedup();
+        return Err(format!(
+            "privacy check refused the report: {}. Turn on redaction, review the named lines, and try again",
+            blocked.join(", ")
+        ));
+    }
+    Ok(report
+        .categories()
+        .into_iter()
+        .map(|category| category.as_str().to_string())
+        .collect())
+}
+
+#[cfg(test)]
+mod report_validation_tests {
+    use super::validate_report_for_mode;
+    use catcoms_diagnostics::CaptureMode;
+
+    #[test]
+    fn saved_reports_refuse_known_sensitive_shapes() {
+        let error = validate_report_for_mode(
+            "Mewtual report\nerror at C:\\Users\\private\\vault.db\n",
+            CaptureMode::Safe,
+        )
+        .expect_err("a local account path must block export");
+        assert!(error.contains("local_path at line 2"));
+        assert!(!error.contains("C:\\Users"), "the refusal must not echo the secret text");
+    }
+
+    #[test]
+    fn raw_addresses_follow_the_native_capture_mode() {
+        let text = "route 203.0.113.9:443";
+        assert!(validate_report_for_mode(text, CaptureMode::Safe).is_err());
+        assert!(validate_report_for_mode(text, CaptureMode::Enhanced).is_ok());
+    }
+
+    #[test]
+    fn legacy_bridged_prose_requires_review_but_does_not_force_a_bypass() {
+        let review = validate_report_for_mode(
+            "LOG.TRACING.EVENT outcome=failed",
+            CaptureMode::Safe,
+        )
+        .expect("legacy prose without a concrete sensitive shape remains exportable");
+        assert_eq!(review, vec!["bridged_prose"]);
+    }
+}
+
+#[derive(Serialize)]
+struct ReportValidation {
+    review: Vec<String>,
+}
+
+/// Check a report immediately before the webview copies it. Validation stays native and uses the
+/// native capture mode, so the clipboard path cannot drift into a weaker frontend-only scanner.
+#[tauri::command]
+async fn validate_diagnostics_report(
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<ReportValidation, String> {
+    require_unlocked_session(&state).await?;
+    if text.len() > MAX_REPORT_BYTES {
+        return Err(format!(
+            "the report is larger than the {} MiB limit",
+            MAX_REPORT_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(ReportValidation {
+        review: validate_report_for_save(&text)?,
+    })
 }
 
 /// Write a diagnostics report next to the debug log.
@@ -11455,6 +11549,7 @@ async fn save_diagnostics_report(
             MAX_REPORT_BYTES / (1024 * 1024)
         ));
     }
+    let review = validate_report_for_save(&text)?;
 
     // One save at a time: two would race on retention, each deleting what the other was about to
     // count. Released on every exit below, including the error paths.
@@ -11494,6 +11589,7 @@ async fn save_diagnostics_report(
         path: path.display().to_string(),
         file,
         bytes: text.len(),
+        review,
     })
 }
 
@@ -12056,6 +12152,7 @@ pub fn run() {
             get_event_cursor,
             get_task_health,
             save_diagnostics_report,
+            validate_diagnostics_report,
             log_ui,
             log_ui_batch,
             record_ui_events,

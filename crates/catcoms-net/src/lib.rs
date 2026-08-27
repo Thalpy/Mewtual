@@ -977,7 +977,10 @@ enum Command {
     /// Start listening on `addr` (e.g. a `…/p2p-circuit` relay reservation).
     Listen(Multiaddr),
     /// Dial `addr` (e.g. a relay, before reserving a circuit on it).
-    Dial(Multiaddr),
+    Dial {
+        addr: Multiaddr,
+        reply: Option<oneshot::Sender<catcoms_rt::DialSubmission>>,
+    },
     /// Advertise `addr` as an external (reachable) address; for a node with a
     /// directly-reachable address (a public IP, or a memory listener in tests) that
     /// does not need a relay circuit to be registerable at a rendezvous. Flushes any
@@ -3491,7 +3494,12 @@ impl Actor {
                     tracing::warn!(%addr, error = %e, "listen failed");
                 }
             }
-            Command::Dial(addr) => self.dial_gated(addr),
+            Command::Dial { addr, reply } => {
+                let outcome = self.dial_gated(addr);
+                if let Some(reply) = reply {
+                    let _ = reply.send(outcome);
+                }
+            }
             Command::AddExternalAddress(addr) => {
                 tracing::debug!(%addr, "add external address");
                 // `Swarm::add_external_address` is an assertion: it marks the address confirmed
@@ -3679,7 +3687,7 @@ impl Actor {
     /// PEX validate the terminal id against the signed record before this point; retaining a bare
     /// fallback here would silently turn a malformed record back into an arbitrary socket dial.
     /// (The jitter half of P11 lives in the caller that drives the timer.)
-    fn dial_gated(&mut self, addr: Multiaddr) {
+    fn dial_gated(&mut self, addr: Multiaddr) -> catcoms_rt::DialSubmission {
         // Routing *through* a relay makes it this node's infrastructure just as surely as
         // reserving on it does, and only the reservation path was noting it. The gate below
         // resolves the LAST `/p2p/` component, which for `…/p2p/RELAY/p2p-circuit/p2p/TARGET` is
@@ -3692,11 +3700,10 @@ impl Actor {
         }
         let Some(target) = target_peer_in_multiaddr(&addr) else {
             tracing::warn!(%addr, "dial refused: address has no terminal peer id");
-            return;
+            return catcoms_rt::DialSubmission::Suppressed;
         };
         if self.infra_peers.contains(&target) {
-            self.dial_infra(target, addr);
-            return;
+            return self.dial_infra(target, addr);
         }
         if self.covered_addrs.len() > MAX_DIAL_LEDGER_PEERS {
             // Entries are dropped when a peer disconnects or a dial fails, so this is the
@@ -3712,23 +3719,27 @@ impl Actor {
             .insert(addr.clone())
         {
             tracing::trace!(%addr, peer = %target, "dial suppressed: this address is already dialing or connected");
-            return;
+            return catcoms_rt::DialSubmission::Suppressed;
         }
         self.pending_dials.entry(target).or_default().push(addr);
+        catcoms_rt::DialSubmission::Submitted
     }
 
     /// Dial an infra target under the strict one-connection-per-peer condition.
-    fn dial_infra(&mut self, target: libp2p::PeerId, addr: Multiaddr) {
+    fn dial_infra(&mut self, target: libp2p::PeerId, addr: Multiaddr) -> catcoms_rt::DialSubmission {
         if self.swarm.is_connected(&target) {
             tracing::trace!(%addr, peer = %target, "infra dial suppressed: already connected");
-            return;
+            return catcoms_rt::DialSubmission::Suppressed;
         }
         let opts = DialOpts::peer_id(target)
             .addresses(vec![addr.clone()])
             .condition(PeerCondition::DisconnectedAndNotDialing)
             .build();
         match self.swarm.dial(opts) {
-            Ok(()) => tracing::debug!(%addr, peer = %target, "dialing infra node"),
+            Ok(()) => {
+                tracing::debug!(%addr, peer = %target, "dialing infra node");
+                return catcoms_rt::DialSubmission::Submitted;
+            }
             // `DialError::DialPeerConditionFalse` is the condition doing its job (a dial to this
             // peer is already in flight), not a failure worth warning about.
             Err(libp2p::swarm::DialError::DialPeerConditionFalse(cond)) => {
@@ -3744,6 +3755,7 @@ impl Actor {
                 self.release_failed_dial(Some(target), &e);
             }
         }
+        catcoms_rt::DialSubmission::Suppressed
     }
 
     /// Issue one racing dial per member peer whose addresses accumulated during this drain.
@@ -4646,10 +4658,19 @@ impl MeshService {
 
     /// Dial `addr` at runtime (e.g. a relay, before reserving a circuit on it).
     pub async fn dial(&self, addr: Multiaddr) -> Result<(), TransportError> {
+        self.dial_outcome(addr).await.map(|_| ())
+    }
+
+    pub async fn dial_outcome(
+        &self,
+        addr: Multiaddr,
+    ) -> Result<catcoms_rt::DialSubmission, TransportError> {
+        let (reply, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::Dial(addr))
+            .send(Command::Dial { addr, reply: Some(reply) })
             .await
-            .map_err(|_| TransportError::Closed)
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)
     }
 
     /// Advertise `addr` as an external (reachable) address, so a node with a directly-
@@ -4833,7 +4854,7 @@ impl MeshHandle {
     /// See [`MeshService::dial`].
     pub async fn dial(&self, addr: Multiaddr) -> Result<(), TransportError> {
         self.cmd_tx
-            .send(Command::Dial(addr))
+            .send(Command::Dial { addr, reply: None })
             .await
             .map_err(|_| TransportError::Closed)
     }
@@ -4850,7 +4871,7 @@ impl MeshHandle {
     ) -> Result<(), TransportError> {
         for address in addresses.iter().take(4) {
             self.cmd_tx
-                .send(Command::Dial(address.clone()))
+                .send(Command::Dial { addr: address.clone(), reply: None })
                 .await
                 .map_err(|_| TransportError::Closed)?;
         }
@@ -4998,6 +5019,14 @@ impl MeshTransport for MeshService {
     async fn dial_addr(&self, addr: &str) -> Result<(), TransportError> {
         let m: Multiaddr = addr.parse().map_err(|_| TransportError::Closed)?;
         MeshService::dial(self, m).await
+    }
+
+    async fn dial_addr_outcome(
+        &self,
+        addr: &str,
+    ) -> Result<catcoms_rt::DialSubmission, TransportError> {
+        let m: Multiaddr = addr.parse().map_err(|_| TransportError::Closed)?;
+        MeshService::dial_outcome(self, m).await
     }
 
     async fn add_external_addr(&self, addr: &str) -> Result<(), TransportError> {

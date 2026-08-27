@@ -436,6 +436,60 @@ pub struct EndpointDialScheduler {
     state: Arc<Mutex<EndpointDialState>>,
 }
 
+/// A single-use reservation for one exact canonical endpoint.
+///
+/// Dropping it before [`EndpointDialPermit::start`] returns every counter it consumed. This makes
+/// cancellation and duplicate suppression safe by default: only the code immediately about to
+/// submit a socket-starting operation can commit the charge. The permit is intentionally not
+/// `Clone`; one plan cannot be replayed into several attempts.
+#[derive(Debug)]
+pub struct EndpointDialPermit {
+    scheduler: EndpointDialScheduler,
+    address: String,
+    server_key: [u8; 32],
+    peer_key: [u8; 32],
+    endpoint_key: [u8; 32],
+    prefix_key: [u8; 32],
+    started: bool,
+}
+
+impl EndpointDialPermit {
+    /// Commit this reservation immediately before submitting the exact endpoint to the transport.
+    /// Consumes the permit, so a caller cannot start it twice.
+    pub fn start(mut self) -> String {
+        self.started = true;
+        std::mem::take(&mut self.address)
+    }
+
+    /// Commit after the transport actor acknowledges that this endpoint entered its dial path.
+    pub fn commit(mut self) {
+        self.started = true;
+    }
+
+    /// The exact canonical endpoint this permit owns, for duplicate/already-connected checks.
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+}
+
+impl Drop for EndpointDialPermit {
+    fn drop(&mut self) {
+        if self.started {
+            return;
+        }
+        let mut state = self
+            .scheduler
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.process_spent = state.process_spent.saturating_sub(1);
+        decrement(&mut state.server_spent, self.server_key);
+        decrement(&mut state.peer_spent, self.peer_key);
+        decrement(&mut state.endpoint_spent, self.endpoint_key);
+        decrement(&mut state.prefix_spent, self.prefix_key);
+    }
+}
+
 impl EndpointDialScheduler {
     /// Construct an isolated scheduler. Production creates one and clones it into every server;
     /// tests can construct isolated handles without process-global cross-test interference.
@@ -457,6 +511,20 @@ impl EndpointDialScheduler {
         endpoints: &[DialEndpoint],
         clock: &dyn Clock,
     ) -> Vec<String> {
+        self.reserve_permits(server, endpoints, clock)
+            .into_iter()
+            .map(EndpointDialPermit::start)
+            .collect()
+    }
+
+    /// Reserve exact, single-use endpoint permits. Unlike [`Self::reserve`], unused results refund
+    /// themselves on drop; new socket-starting call sites should use this API.
+    pub fn reserve_permits(
+        &self,
+        server: &[u8],
+        endpoints: &[DialEndpoint],
+        clock: &dyn Clock,
+    ) -> Vec<EndpointDialPermit> {
         let mut state = self
             .state
             .lock()
@@ -505,7 +573,15 @@ impl EndpointDialScheduler {
             increment(&mut state.peer_spent, peer_key);
             increment(&mut state.endpoint_spent, endpoint.attempt_key);
             increment(&mut state.prefix_spent, endpoint.prefix_key);
-            granted.push(endpoint.address.clone());
+            granted.push(EndpointDialPermit {
+                scheduler: self.clone(),
+                address: endpoint.address.clone(),
+                server_key,
+                peer_key,
+                endpoint_key: endpoint.attempt_key,
+                prefix_key: endpoint.prefix_key,
+                started: false,
+            });
         }
         granted
     }
@@ -530,6 +606,16 @@ fn scoped_key(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 fn increment(map: &mut HashMap<[u8; 32], u32>, key: [u8; 32]) {
     let value = map.entry(key).or_default();
     *value = value.saturating_add(1);
+}
+
+fn decrement(map: &mut HashMap<[u8; 32], u32>, key: [u8; 32]) {
+    let Some(value) = map.get_mut(&key) else {
+        return;
+    };
+    *value = value.saturating_sub(1);
+    if *value == 0 {
+        map.remove(&key);
+    }
 }
 
 /// Tunable bounds. Defaults suit a desktop node; tests shrink them.
@@ -1346,6 +1432,41 @@ mod tests {
             vec!["c", "d"]
         );
         assert_eq!(scheduler.state.lock().unwrap().process_spent, 3);
+    }
+
+    #[test]
+    fn unused_endpoint_permits_refund_every_scope_exactly_once() {
+        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
+            window_ms: 1_000,
+            process_limit: 1,
+            server_limit: 1,
+            peer_limit: 1,
+            endpoint_limit: 1,
+            prefix_limit: 1,
+        });
+        let clock = ManualClock::new(0);
+        let endpoint = DialEndpoint::from_key_material(
+            "route",
+            b"socket",
+            b"prefix",
+            CanonicalDialPeer(phase0(PEER_A)),
+        );
+        let permits = scheduler.reserve_permits(
+            b"server",
+            std::slice::from_ref(&endpoint),
+            &clock,
+        );
+        assert_eq!(permits.len(), 1);
+        assert_eq!(permits[0].address(), "route");
+        assert!(scheduler
+            .reserve_permits(b"server", std::slice::from_ref(&endpoint), &clock)
+            .is_empty());
+
+        drop(permits);
+        let replacement = scheduler.reserve_permits(b"server", &[endpoint], &clock);
+        assert_eq!(replacement.len(), 1, "drop returned every charged scope");
+        assert_eq!(replacement.into_iter().next().unwrap().start(), "route");
+        assert_eq!(scheduler.state.lock().unwrap().process_spent, 1);
     }
 
     #[test]

@@ -324,6 +324,12 @@ cargo run -p catcomsctl -- serve --port 9000 --invite-file invite.txt
 cargo run -p catcomsctl -- join --invite-file invite.txt
 ```
 
+For automated two-client product checks, the real-TCP test, and the current manual desktop
+procedure, see [Two-client testing](docs/TWO-CLIENT-TESTING.md). The packaged two-desktop-process
+smoke harness described there is planned and is clearly separated from commands available today.
+Current implementation and verification progress across the remaining roadmap is tracked in
+[Development sweep](docs/DEVELOPMENT-SWEEP.md).
+
 For a relayed connection:
 
 ```sh

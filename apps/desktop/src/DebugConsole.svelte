@@ -19,6 +19,7 @@
    */
   import { onMount, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { buildFeedbackIssue, isAllowedIssueUrl } from "./feedback";
   import {
     BRIDGED_CODE,
     CAPTURE_LEVELS,
@@ -487,7 +488,43 @@
   }
 
   async function copyReport() {
-    await copy("report", await buildReport(false));
+    saved = "";
+    try {
+      const report = await buildReport(false);
+      const checked = await invoke<{ review: string[] }>("validate_diagnostics_report", {
+        text: report,
+      });
+      await copy("report", report);
+      if (checked.review.length) saved = `copied · review ${checked.review.join(", ")}`;
+    } catch (e) {
+      saved = `could not copy: ${String(e)}`;
+    }
+  }
+
+  async function prepareIssue() {
+    saved = "";
+    try {
+      const report = await buildReport(true);
+      const checked = await invoke<{ review: string[] }>("validate_diagnostics_report", {
+        text: report,
+      });
+      const issue = buildFeedbackIssue(
+        "bug",
+        "Diagnostic report",
+        report,
+        version,
+        navigator.userAgent,
+      );
+      if (!isAllowedIssueUrl(issue.url)) throw new Error("issue destination failed its local check");
+      if (issue.truncated) await oncopy(issue.report);
+      await invoke("open_issue_url", { url: issue.url });
+      saved = issue.truncated
+        ? "issue opened · full report copied for review"
+        : "issue opened for review";
+      if (checked.review.length) saved += ` · review ${checked.review.join(", ")}`;
+    } catch (e) {
+      saved = `could not prepare issue: ${String(e)}`;
+    }
   }
 
   /**
@@ -503,10 +540,12 @@
     saved = "";
     try {
       const report = await buildReport(true);
-      const written = await invoke<{ file: string; bytes: number }>("save_diagnostics_report", {
+      const written = await invoke<{ file: string; bytes: number; review: string[] }>("save_diagnostics_report", {
         text: report,
       });
-      saved = written.file;
+      saved = written.review.length
+        ? `${written.file} · review ${written.review.join(", ")}`
+        : written.file;
     } catch (e) {
       saved = `could not save: ${String(e)}`;
     } finally {
@@ -548,6 +587,7 @@
       <button class="ghost small" disabled={saving} onclick={saveReport}>
         {saving ? "Saving" : "Save report"}
       </button>
+      <button class="ghost small" disabled={saving} onclick={prepareIssue}>Prepare issue</button>
     </div>
     <button type="button" class="stx-esc" onclick={onclose} title="Close (Esc)">
       <span class="stx-esc-ring">✕</span>

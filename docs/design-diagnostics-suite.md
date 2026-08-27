@@ -104,7 +104,7 @@ Default on, one click to turn off permanently. Revisit before general release, n
 | M3 | Correlation, typed errors, task supervision, invoke migration | done |
 | M4 | Rebuild the console on the hub | reading and capture control done; findings, checks and virtualised list outstanding |
 | M5 | Findings and checks | not started |
-| M6 | Export bundle and GitHub issue flow | partly: text export done |
+| M6 | Export bundle and GitHub issue flow | mostly done: native validation gates Copy/Save/issue preparation; bounded browser issue flow reuses the reviewed feedback destination; source-typed frontend references remain |
 | M7 | Hardening, privacy property tests, performance budgets, CI gates | not started |
 
 ### M3, as delivered
@@ -414,8 +414,9 @@ Neither was in a review, and both are the kind of thing a passing suite says not
 - **Structured detail on `AppError`.** Removed rather than carried unused.
 
 ## 4a. Every finding from the Part 3 review
-<!-- Seventeen of twenty resolved. Open: P3-015, P3-018, P3-020, plus the named remainders of
-     P3-002, P3-016, P3-017 and P3-019. -->
+<!-- The original Part 3 findings are resolved except for the named P3-002/M6 and P3-016 startup
+     remainders. P3-018 through P3-020 were closed by later P-fixes work; keep the table aligned
+     with the implementation and regression tests rather than with the pinned historical review. -->
 
 
 `docs/reviews/Mewtual_PFixes_Part3_Adversarial_Review.md`, pinned to `f6c1be6`. Read the review for
@@ -434,7 +435,7 @@ can be read.
 | ID | Sev | Finding | Status |
 |---|---|---|---|
 | P3-001 | Critical | Safe multiaddr rendering can expose a raw peer id | Fixed, `dbf965f` |
-| P3-002 | Critical | The exported-report privacy promise is false and unvalidated | Wording fixed, `dbf965f`. The validator that would make a stronger claim true is M6. |
+| P3-002 | Critical | The exported-report privacy promise is false and unvalidated | Validator implemented in `catcoms-diagnostics::export` and now enforced natively before both saved-report writes and report clipboard copies; blocking findings refuse export and non-blocking legacy-prose categories are returned to the UI. Source-typed migration remains M6 work. |
 | P3-003 | High | Saved reports bypass retention and can fill the log directory | Fixed, `cfbead6` |
 | P3-004 | High | Trace correlation stops before the actor and event pipeline | Fixed, `74166bf` |
 | P3-005 | High | The console consumes a lossy, hard-coded Enhanced projection | Fixed, `dde528d` |
@@ -450,14 +451,14 @@ can be read.
 | P3-015 | Med | Redaction and frontend field ordering break deterministic export | Fixed, see below. Source-typed references instead of output regexes is M6. |
 | P3-016 | Med | Startup capture begins too late for static-import failures | Fixed, `3480681`. One part open: a failure to fetch `main.ts` itself needs `index.html`, which the CSP makes awkward. |
 | P3-017 | Med | The typed-error registry is conventional, not enforced | Fixed, `d061574`. The `SERVER.ACTOR.UNAVAILABLE` split is not done; see below. |
-| P3-018 | Med | Unread reconciliation uses an unsafe sender-clock cursor | Pre-existing, not introduced by this work. |
-| P3-019 | Med | The jukebox digest is weak and the revision can saturate | Digest fixed, `f58d7f2`. The saturating revision is in `apps/desktop/src/jukebox.ts` and is still open. |
-| P3-020 | Low | Some status messages overstate what was retained | |
+| P3-018 | Med | Unread reconciliation uses an unsafe sender-clock cursor | Fixed in 12j: read decisions clamp sender time to the channel's plausible ceiling; `unread.ts` has focused regression tests. |
+| P3-019 | Med | The jukebox digest is weak and the revision can saturate | Fixed: digest strengthened; revisions are bounded, implausible leads are rejected, and a spent ceiling resets instead of saturating. `jukebox.test.ts` pins the attack. |
+| P3-020 | Low | Some status messages overstate what was retained | Fixed: unavailable reads omit stale rows/current counts and label retained snapshots explicitly; `debug-console.test.ts` carries the regression cases. |
 
 ## 4b. Found while fixing, not yet fixed
 
-Three things that turned up as neighbours of the findings above and are worth writing down rather
-than losing:
+Things that turned up as neighbours of the findings above and are worth keeping in the record.
+Only the unstruck `main.ts` fetch case remains open:
 
 * ~~**A locked session is reported as a broken server.**~~ Fixed. `actor_of` checked the lock and
   then reported every failure alike, so a locked vault reached the user as
@@ -470,7 +471,7 @@ than losing:
   The test asserts on the *remediation*, not only the code. That is where it went wrong: the
   sentence shown to the user was correct and only the advice was useless, so a test comparing
   labels would have passed.
-* **Webview field order is nondeterministic.** `record_ui_events` deserialises the webview's fields
+* ~~**Webview field order is nondeterministic.**~~ Fixed with P3-015. `record_ui_events` used to deserialize the webview's fields
   into a `HashMap` and iterates it, so events from that producer have no stable field order. That
   undercuts the byte-identical-output property for exactly the events the console shows most. It
   belongs with P3-015.

@@ -368,7 +368,7 @@ suite) is **COMPLETE**. Every networking + NAT-traversal path is proven end-to-e
 The consolidated security suite (`security.rs`, 7b) maps the threat model to where each
 property is proven and adds the cross-layer scenarios (eclipse-never-gates-a-removal;
 removed-member-excluded-from-the-rotated-namespace). Deeper adversarial scenarios are
-deferred to the dedicated hardening + security-review phase (**13** in the table above;
+deferred to the dedicated hardening + security-review phase (**14** in the table above;
 it was numbered "10" before the UI overhaul took that number).
 
 **Goal:** members find each other with no hard-coded bootstrap addresses, and an
@@ -487,8 +487,10 @@ authenticated signalling.
   ledger + commit log + peer records) written atomically under the vault, an on-disk
   sealing blob store, and a stable per-group **file-wrap key** minted at founding +
   transferred in the join handshake (so files are e2e ciphertext keyed by ciphertext CID).
-  Residual: **no passphrase change/recovery path** (lose it and the servers are
-  unreadable; there is no escrow by design, but there is also no re-key flow), and a
+  Vault-secret rotation is implemented: `change_vault_passphrase` authenticates the current
+  secret and atomically rewraps the same DEK under a fresh salt/nonce. Residual: **no secret-reset
+  or recovery path** (lose every valid secret and the servers are unreadable; there is no escrow
+  by design), and a
   corrupted/partial snapshot surfaces as a load failure rather than a repair.
 - **Network admission is single-committer-only** (only the lowest-leaf-index member
   admits). Concurrent admits / fork resolution + cross-member single-use = 6d-2.
