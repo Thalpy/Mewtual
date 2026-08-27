@@ -28,7 +28,7 @@ Status meanings:
 | 7 | Desktop performance and IPC hardening | In progress | Existing bounded DOM/cache/event and lock-gate work is landed. Remaining sequence is view extraction, native paging, worker search, remote-media consent, and measurements. |
 | 8 | Endpoint scheduler permits and socket-start accounting | In progress | Added non-cloneable exact-endpoint permits plus transport-actor `Submitted`/`Suppressed` acknowledgement. Post-join rendezvous/cache dials commit only when the actor accepts the exact endpoint; duplicates and command failures refund on drop. Pre-join migration, relay outer-socket leases, and process-wide in-flight limits remain. |
 | 9 | Post-join discovery resilience | Open | Reciprocal/helper dial protocol, manual fallback, TTL-aware renewal, indirect probes, and active/passive peer maintenance. |
-| 10 | Last-copy-safe storage retention | Deferred | `catcoms-storage::RetentionIndex` already implements holder-aware expiry/GC, but the live app has no persisted metadata index or fresh holder oracle. Design those boundaries before wiring eviction; do not substitute “connected peer” for proof that a peer holds every chunk. |
+| 10 | Last-copy-safe storage retention | In progress | Integration contract now specifies a vault-sealed local index, signed nonce-bound per-CID holder probes, post-await rechecks, dedup/pin rules, and crash reconciliation. Wire/persistence implementation remains; never substitute connectivity for possession. |
 | 11 | Diagnostics M4-M7 remainder | In progress | Native validation now gates Save, Copy, and bounded GitHub issue preparation; the reviewed feedback URL builder/native destination allowlist are reused. Source-typed migration, findings/checks, virtualisation, budgets, and CI gates remain. |
 | 12 | Notification controls review | Deferred | Parallel implementation is referenced but not identified as safe to merge; review after the first sweep. |
 | 13 | Channel governance | Deferred | Requires a compatibility/threat design and antagonist review before wire/schema changes. |
@@ -96,6 +96,9 @@ These were checked against implementation and tests after the first sweep:
   endpoint entered its pending dial path or was suppressed as duplicate/already connected; sync
   commits a permit only for `Submitted`, so suppressed and failed command deliveries refund without
   a count-based guess. Existing non-actor transports keep a compatible submitted-by-default seam.
+- Added `design-retention-integration.md`, defining the missing durable index and authenticated
+  holder-probe protocol, stale-decision rechecks, dedup/pin transaction, recovery behavior, bounds,
+  and required antagonist tests before automatic GC can be wired safely.
 
 ## Verification log
 
