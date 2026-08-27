@@ -15,11 +15,34 @@ test("continuity sanitization keeps only bounded drafts and safe read positions"
     },
   });
   assert.deepEqual(state, {
-    version: 1, drafts: { good: "draft" }, readMarks: { good: { ts: 42, id: "m1" } },
+    version: 1, drafts: { good: "draft" }, readMarks: { good: { ts: 42, id: "m1" } }, statusCursors: {},
   });
   assert.deepEqual(sanitizeUiContinuity({ drafts: [], readMarks: null }), {
-    version: 1, drafts: {}, readMarks: {},
+    version: 1, drafts: {}, readMarks: {}, statusCursors: {},
   });
+});
+
+test("announcement read cursors are sealed here too, keyed by a real server id", () => {
+  // These were plaintext localStorage before this: how far somebody has read is a reading habit,
+  // and reading habits belong in the vault beside the chat marks rather than next to them in the
+  // clear. The bounds are the cursor module's; what this adds is the key.
+  const state = sanitizeUiContinuity({
+    drafts: {},
+    readMarks: {},
+    statusCursors: {
+      0: { ts: 5, ids: ["a"] },            // server 0 is a real id
+      7: { ts: 900.7, ids: ["b", "b", 3] },
+      "": { ts: 8, ids: [] },              // names no server; must not become server 0
+      " 9": { ts: 8, ids: [] },
+      "1e3": { ts: 8, ids: [] },
+      "-1": { ts: 8, ids: [] },
+      dm: { ts: 8, ids: [] },
+      4: "not a cursor",
+      5: { ts: 0, ids: [] },               // indistinguishable from having none
+    },
+  });
+  assert.deepEqual(state.statusCursors, { 0: { ts: 5, ids: ["a"] }, 7: { ts: 900, ids: ["b"] } });
+  assert.deepEqual(sanitizeUiContinuity({ drafts: {}, readMarks: {} }).statusCursors, {});
 });
 
 test("a read mark from a build that only stored a timestamp upgrades in place", () => {
@@ -34,12 +57,16 @@ test("a read mark from a build that only stored a timestamp upgrades in place", 
 });
 
 test("a valid legacy map is saved before its plaintext key is removed", () => {
-  const current = sanitizeUiContinuity({ drafts: { room: "hello" }, readMarks: {} });
+  const current = sanitizeUiContinuity({
+    drafts: { room: "hello" }, readMarks: {}, statusCursors: { 3: { ts: 7, ids: [] } },
+  });
   const plan = planLegacyReadMarkMigration(current, '{"server:channel":123}');
   assert.equal(plan.saveBeforeRemoval, true);
   assert.equal(plan.removeLegacy, true);
   assert.deepEqual(plan.state.readMarks, { "server:channel": { ts: 123, id: "" } });
   assert.deepEqual(plan.state.drafts, { room: "hello" });
+  // The legacy key only ever held chat marks, so adopting it must not drop what sits beside them.
+  assert.deepEqual(plan.state.statusCursors, { 3: { ts: 7, ids: [] } });
 });
 
 test("sealed state wins over stale legacy data and malformed legacy data is preserved", () => {

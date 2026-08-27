@@ -4,7 +4,54 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Announcements became a noticeboard instead of a list of posts.** Posting belongs to the owner
+  and admins by default, and a chip in the surface header opens the feed to every member for
+  servers that want that; the switch rides on the replicated feed itself, the way the wiki's review
+  window does, and is enforced by every member's app rather than by the group keys, the same
+  residual as deleting a message. Posts now take reactions from anyone (chat's picker, server custom
+  emoji included), an edit from their author carrying the edited mark chat already uses, a deletion
+  from the author, the owner or an admin, and a pin from an owner or admin that lifts them into a
+  highlighted block at the top of the feed. A second header chip reaches this server's news-cue
+  switch without a trip through server settings; it is the same per-device preference that panel
+  already held, and still nothing other members can see.
+- **Announcements remember what you have already read.** A **NEW** divider sits above the oldest one
+  you have not seen, the surface's tab carries the outstanding count, and reading the surface marks
+  them read. The mark is per server and survives a restart, and it is rebuilt from the posts that
+  exist rather than from events the app happened to be awake for, so announcements posted while the
+  app was closed are still new when it opens. A post's timestamp is its sender's clock, so the mark
+  refuses to advance past what this machine finds plausible: one wrong clock in a feed can no longer
+  park the mark years ahead and silence every real announcement after it.
+- **Inbox → News reads per item rather than per app.** Rows you have not seen are highlighted
+  individually, off the same per-server read state the surface uses, in place of the single
+  "something changed" flag that could only be on or off. Filter chips (All / Announcements / Events,
+  plus a server picker), a **Pinned** section holding each server's latest pinned announcement, and
+  a **Mark all read** button were added alongside it, and a row now jumps to the exact post and
+  flashes it instead of opening the surface and leaving you to find it. The rail's inbox badge counts
+  unseen announcements one by one. Events deliberately never raise it: an event's timestamp is its
+  scheduled start rather than the moment it was written, so it cannot honestly be "unseen"; the
+  ticker and the news cue still announce event changes.
+- **A server with unread announcements says so from the orbit view.** Its billboard wears a
+  herald: a slow ripple plus a small **◈ N** at the bottom left, the one corner the existing signals
+  did not already claim (unread chat top right, mention flare top left, voice bottom right; the
+  compass is unchanged). Hovering the billboard shows a card with that server's latest announcement,
+  and clicking it still enters the server. With motion effects off the ripple renders as a static
+  ring.
+
 ### Fixed
+
+- **The News feed showed each server's five oldest announcements.** The aggregation took the first
+  five posts of a newest-first feed and called them recent, so a server that had ever posted six
+  times showed the same five forever and nothing posted since ever appeared there. It now aggregates
+  the real feed.
+- **An edit, a reaction or a pin on an announcement never reached anyone else.** Change detection
+  compared how many posts a feed had, which an edit, a reaction and a pin all leave alone, so other
+  members' views kept rendering the version they last happened to load. The comparison now covers
+  what the posts say, not just how many there are.
+- **A refused announcement disappeared without saying why.** A post the server would not accept was
+  dropped in silence, taking the words with it and leaving no reason on screen. The refusal is now
+  reported, and the draft stays in the composer.
 
 - **The Linux build crashed while packaging the AppImage**, even though a full icon set already
   sat in `src-tauri/icons/`. Tauri's Windows installer gets its icon from `build.rs` embedding

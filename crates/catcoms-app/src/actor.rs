@@ -518,11 +518,44 @@ pub enum AppCommand {
     WikiPinnedCids { reply: oneshot::Sender<Vec<String>> },
     /// Pull the file index from `peer` (e.g. right after joining).
     CatchUpFiles { peer: PeerId },
-    /// Post to the server status feed.
-    PostStatus { text: String },
+    /// Post to the server status feed (owner/admin, or anyone once the feed is opened to members).
+    PostStatus {
+        text: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Query the status feed.
     Statuses {
         reply: oneshot::Sender<Vec<ChatMessage>>,
+    },
+    /// Edit one of your own status posts (by id).
+    EditStatus {
+        id: String,
+        text: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Delete a status post (by id): your own, or anyone's as an owner/admin.
+    DeleteStatus {
+        id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Toggle this member's emoji reaction on a status post (by id).
+    ToggleStatusReaction {
+        id: String,
+        emoji: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Pin or unpin a status post (by id) (owner/admin).
+    SetStatusPin {
+        id: String,
+        pinned: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Query whether plain members may post to the status feed.
+    StatusMembersMayPost { reply: oneshot::Sender<bool> },
+    /// Open or close the status feed to plain members (owner/admin only).
+    SetStatusMembersMayPost {
+        allow: bool,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Pull the status feed from `peer` (e.g. right after joining).
     CatchUpStatus { peer: PeerId },
@@ -2053,12 +2086,23 @@ impl ServerActor {
         let _ = self.cmd_tx.send(AppCommand::CatchUpFiles { peer }).await;
     }
 
-    /// Post to the status feed (a `StatusUpdated` event follows).
-    pub async fn post_status(&self, text: impl Into<String>) {
-        let _ = self
+    /// Post to the status feed (a `StatusUpdated` event follows on success). Refused for a plain
+    /// member while the feed is closed to members, which is why the caller gets the answer back
+    /// rather than a post that quietly never happened.
+    pub async fn post_status(&self, text: impl Into<String>) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
             .cmd_tx
-            .send(AppCommand::PostStatus { text: text.into() })
-            .await;
+            .send(AppCommand::PostStatus {
+                text: text.into(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
     /// Fetch the status feed.
@@ -2073,6 +2117,93 @@ impl ServerActor {
             return Vec::new();
         }
         rx.await.unwrap_or_default()
+    }
+
+    /// Edit one of your own status posts (by id).
+    pub async fn edit_status(&self, id: String, text: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::EditStatus { id, text, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Delete a status post (by id): your own, or anyone's as an owner/admin.
+    pub async fn delete_status(&self, id: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::DeleteStatus { id, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Toggle this member's emoji reaction on a status post (by id).
+    pub async fn toggle_status_reaction(&self, id: String, emoji: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ToggleStatusReaction { id, emoji, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Pin or unpin a status post (by id) (owner/admin).
+    pub async fn set_status_pin(&self, id: String, pinned: bool) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetStatusPin { id, pinned, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Whether plain members may post to the status feed. A stopped server reads as `false`, the
+    /// same answer an unread feed gives, so a UI that cannot reach the actor offers no posting box
+    /// rather than one whose posts would be refused.
+    pub async fn status_members_may_post(&self) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::StatusMembersMayPost { reply })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Open or close the status feed to plain members; owner/admin only (a `StatusUpdated` event
+    /// follows).
+    pub async fn set_status_members_may_post(&self, allow: bool) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetStatusMembersMayPost { allow, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
     /// Pull the status feed from `peer`.
@@ -2679,7 +2810,7 @@ where
         if let Err(e) = server.open_status().await {
             tracing::warn!(error = %e, "open_status failed");
         }
-        let mut status_count = server.statuses().len();
+        let mut last_statuses = status_snapshot(&server);
         // …and the calendar, so the server's scheduled events reach this client.
         if let Err(e) = server.open_calendar().await {
             tracing::warn!(error = %e, "open_calendar failed");
@@ -3270,22 +3401,73 @@ where
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
-                    Some(AppCommand::PostStatus { text }) => {
-                        if let Err(e) = server.post_status(&text).await {
-                            tracing::warn!(error = %e, "post_status failed");
-                        }
-                        if status_changed(&server, &mut status_count) {
+                    Some(AppCommand::PostStatus { text, reply }) => {
+                        let res = server.post_status(&text).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if status_changed(&server, &mut last_statuses) {
                             let _ = event_tx.send(AppEvent::StatusUpdated).await;
                         }
                     }
                     Some(AppCommand::Statuses { reply }) => {
                         let _ = reply.send(server.statuses());
                     }
+                    Some(AppCommand::EditStatus { id, text, reply }) => {
+                        let res = server
+                            .edit_status(&id, &text)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if status_changed(&server, &mut last_statuses) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::DeleteStatus { id, reply }) => {
+                        let res = server.delete_status(&id).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if status_changed(&server, &mut last_statuses) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::ToggleStatusReaction { id, emoji, reply }) => {
+                        let res = server
+                            .toggle_status_reaction(&id, &emoji)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if status_changed(&server, &mut last_statuses) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::SetStatusPin { id, pinned, reply }) => {
+                        let res = server
+                            .set_status_pin(&id, pinned)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if status_changed(&server, &mut last_statuses) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::StatusMembersMayPost { reply }) => {
+                        let _ = reply.send(server.status_members_may_post());
+                    }
+                    Some(AppCommand::SetStatusMembersMayPost { allow, reply }) => {
+                        let res = server
+                            .set_status_members_may_post(allow)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        // The policy rides the feed document, so a UI that re-reads the feed on
+                        // this event also re-reads who may write to it.
+                        if status_changed(&server, &mut last_statuses) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                    }
                     Some(AppCommand::CatchUpStatus { peer }) => {
                         if let Err(e) = server.request_status_catchup(peer).await {
                             tracing::warn!(error = %e, "status catch-up failed");
                         }
-                        if status_changed(&server, &mut status_count) {
+                        if status_changed(&server, &mut last_statuses) {
                             let _ = event_tx.send(AppEvent::StatusUpdated).await;
                         }
                     }
@@ -3712,7 +3894,7 @@ where
                         if files_changed(&server, &mut file_count) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
-                        if status_changed(&server, &mut status_count) {
+                        if status_changed(&server, &mut last_statuses) {
                             let _ = event_tx.send(AppEvent::StatusUpdated).await;
                         }
                         if events_changed(&server, &mut last_events) {
@@ -3954,15 +4136,33 @@ where
     }
 }
 
-/// Whether the status feed count changed since last seen (updating the record).
-fn status_changed<T, R>(server: &Server<T, R>, last: &mut usize) -> bool
+/// What [`status_changed`] compares: the feed's posts, and the policy deciding whether this
+/// member is offered anywhere to write. Both ride the same document and both change what is
+/// rendered, so both belong in the comparison.
+type StatusSnapshot = (Vec<ChatMessage>, bool);
+
+/// The status feed's current posts + posting policy.
+fn status_snapshot<T, R>(server: &Server<T, R>) -> StatusSnapshot
 where
     T: MeshTransport,
     R: CryptoRngCore,
 {
-    let n = server.statuses().len();
-    if *last != n {
-        *last = n;
+    (server.statuses(), server.status_members_may_post())
+}
+
+/// Whether the status feed changed since last seen (updating the record). A count of posts was
+/// enough while the feed only grew; an edit, a reaction, a pin and a policy change each leave the
+/// number of posts exactly where it was, and each still has to reach the UI. Both states are in
+/// memory at this moment, so comparing them can only be more truthful than folding either into a
+/// digest first.
+fn status_changed<T, R>(server: &Server<T, R>, last: &mut StatusSnapshot) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = status_snapshot(server);
+    if now != *last {
+        *last = now;
         true
     } else {
         false

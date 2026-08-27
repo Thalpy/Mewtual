@@ -1,9 +1,19 @@
+import { sanitizeStatusCursor, type StatusCursors } from "./statusread.ts";
 import type { ReadMark } from "./unread";
 
 export type UiContinuity = {
   version: 1;
   drafts: Record<string, string>;
   readMarks: Record<string, ReadMark>;
+  /**
+   * How far this person has read each server's announcements, keyed by server id.
+   *
+   * Sealed here beside the chat read marks rather than kept in localStorage, for the reason those
+   * were moved: what somebody has and has not read is a reading habit, and reading habits do not
+   * fall back to plaintext storage. The native envelope check only requires `version`, `drafts` and
+   * `readMarks`, so this field rides along without a Rust change.
+   */
+  statusCursors: StatusCursors;
 };
 
 const MAX_ENTRIES = 2_000;
@@ -33,7 +43,18 @@ export function sanitizeUiContinuity(value: unknown): UiContinuity {
     const mark = readMark(item);
     if (mark) readMarks[key] = mark;
   }
-  return { version: 1, drafts, readMarks };
+  const statusCursors: StatusCursors = {};
+  for (const [key, item] of Object.entries(record(root.statusCursors)).slice(0, MAX_ENTRIES)) {
+    // A server id is a number on the app's side and a string in JSON. A key that is not the exact
+    // decimal spelling of one names no server, so nothing would ever read its cursor back: `""`
+    // would otherwise become server 0, which is a real id belonging to somebody else's feed.
+    const server = Number(key);
+    if (!Number.isSafeInteger(server) || server < 0 || String(server) !== key) continue;
+    const cursor = sanitizeStatusCursor(item);
+    // A cursor at zero is indistinguishable from having no cursor, so it is not worth sealing.
+    if (cursor.ts > 0 || cursor.ids.length) statusCursors[server] = cursor;
+  }
+  return { version: 1, drafts, readMarks, statusCursors };
 }
 
 /**
@@ -78,7 +99,13 @@ export function planLegacyReadMarkMigration(
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       return { state: current, saveBeforeRemoval: false, removeLegacy: false };
     }
-    const migrated = sanitizeUiContinuity({ drafts: current.drafts, readMarks: parsed });
+    // The legacy key only ever held chat read marks, so everything else in the sealed record is
+    // carried across unchanged rather than being dropped by the migration that adopts them.
+    const migrated = sanitizeUiContinuity({
+      drafts: current.drafts,
+      readMarks: parsed,
+      statusCursors: current.statusCursors,
+    });
     return { state: migrated, saveBeforeRemoval: true, removeLegacy: true };
   } catch {
     // Preserve malformed legacy data for diagnosis rather than deleting it under a migration claim.

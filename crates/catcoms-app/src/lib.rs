@@ -373,6 +373,14 @@ pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
 /// Separator (0x1F); a control char that appears in neither emoji nor hex fingerprints.
 const REACTION_SEP: char = '\u{1f}';
 
+/// Whether `emoji` is one this server will store as a reaction key. An emoji carrying the key
+/// separator would forge a second field on the message map, so the flat-key layout only holds if
+/// every document that uses it applies the same rule; hence one predicate rather than a copy per
+/// feed. The length bound is a gossip budget: honest clients send a small fixed set.
+fn valid_reaction_emoji(emoji: &str) -> bool {
+    !emoji.is_empty() && !emoji.contains(REACTION_SEP) && emoji.len() <= 64
+}
+
 /// Read a message map's reactions and group them by emoji. Reactions are stored as flat scalar keys
 /// *directly on the message map*; `"<emoji>\x1f<fingerprint>" = true` (see `toggle_reaction_in_doc`)
 ///; alongside the regular field keys (`id`/`author`/…, none of which contain the separator, so they
@@ -620,6 +628,35 @@ fn int_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> u64 {
         },
         _ => 0,
     }
+}
+
+// --- the status feed's posting policy ---------------------------------------
+//
+// The status feed is the schema above on its own per-server document, so every message helper
+// already reaches it. What it does not inherit from a chat channel is *who may write*: a channel
+// is conversation, the feed is the server announcing itself. That decision is one boolean at the
+// feed document's ROOT, replicated with the feed, so there is no second document that could drift
+// out of step with the posts it governs.
+
+/// The status feed's root key holding its posting policy.
+const STATUS_MAY_POST: &str = "members_may_post";
+
+/// Whether plain members may post to this status feed. Absent (every feed written before the
+/// policy existed) and anything stored under the key that is not a boolean both read as `false`:
+/// a document from a peer that has never heard of the policy, or one carrying junk, closes the
+/// feed rather than opening it.
+fn read_status_may_post(doc: &AutoCommit) -> bool {
+    match doc.get(ROOT, STATUS_MAY_POST) {
+        Ok(Some((Value::Scalar(s), _))) => matches!(s.as_ref(), ScalarValue::Boolean(true)),
+        _ => false,
+    }
+}
+
+/// Set the posting policy: one scalar key at the ROOT (which always exists), so; like `pinned` on
+/// a message map; there is no container two admins could concurrently create and lose one of, and
+/// a concurrent change is a clean last-writer-wins.
+fn write_status_may_post(doc: &mut AutoCommit, allow: bool) -> Result<(), AutomergeError> {
+    doc.put(ROOT, STATUS_MAY_POST, allow)
 }
 
 // --- member profiles --------------------------------------------------------
@@ -2910,9 +2947,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         id: &str,
         emoji: &str,
     ) -> Result<(), AppError> {
-        // Enforce the flat-key invariant at the trust boundary: a non-empty emoji that can't contain
-        // the key separator, with a sane length bound (honest clients send a small fixed set).
-        if emoji.is_empty() || emoji.contains(REACTION_SEP) || emoji.len() > 64 {
+        // Enforce the flat-key invariant at the trust boundary, before anything reaches the doc.
+        if !valid_reaction_emoji(emoji) {
             return Err(AppError::Invalid("bad emoji".into()));
         }
         let me = self.my_fingerprint();
@@ -4218,7 +4254,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Post to the status feed (authored by this device's fingerprint, clock-stamped).
+    ///
+    /// The feed is the server addressing its members rather than a conversation between them, so
+    /// a plain member is refused unless an owner/admin has opened it with
+    /// [`Server::set_status_members_may_post`]. Honest-client gating, like a pin or a delete: a
+    /// modified client could append the raw op regardless (the documented R6 residual), so this
+    /// shapes what the app offers, not what the document can be made to hold.
     pub async fn post_status(&mut self, text: &str) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) && !self.status_members_may_post() {
+            return Err(AppError::Invalid(
+                "only an owner or admin can post to the status feed".into(),
+            ));
+        }
         let author = self.my_fingerprint();
         let ts = self.sync.now_ms();
         let id = self.sync.random_id();
@@ -4244,6 +4291,136 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .sync
             .request_catchup(peer, DocType::Status, STATUS_DOC)
             .await?)
+    }
+
+    /// Edit the text of one of **your own** status posts (by id). Authorship is the whole claim to
+    /// a post's wording, so not even an owner may reword someone else's; moderation removes a post
+    /// (`delete_status`) rather than putting different words in its author's mouth. Honest-client
+    /// gating, as everywhere in a CRDT (see THREAT-MODEL.md). A no-op edit (same text) is dropped,
+    /// so the `post` always carries a real change.
+    pub async fn edit_status(&mut self, id: &str, new_text: &str) -> Result<(), AppError> {
+        let me = self.my_fingerprint();
+        let Some(current) = self
+            .statuses()
+            .into_iter()
+            .find(|m| m.id == id && m.author == me)
+        else {
+            return Err(AppError::Invalid(
+                "you can only edit your own status posts".into(),
+            ));
+        };
+        if current.text == new_text {
+            return Ok(()); // unchanged; don't post a redundant op
+        }
+        let edited = self.sync.now_ms();
+        let id = id.to_string();
+        let new_text = new_text.to_string();
+        self.sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                edit_message_in_doc(d, &id, &new_text, edited).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Delete a status post (by id): **your own**, or; if you are the owner/admin; anyone's
+    /// (moderation). Honest-client gating, exactly as for a chat message (the documented R6
+    /// residual). Errors if the post is gone or you may not delete it.
+    pub async fn delete_status(&mut self, id: &str) -> Result<(), AppError> {
+        let me = self.my_fingerprint();
+        let Some(post) = self.statuses().into_iter().find(|m| m.id == id) else {
+            return Err(AppError::Invalid("no such status post".into()));
+        };
+        let moderator = matches!(self.my_role(), Role::Owner | Role::Admin);
+        if post.author != me && !moderator {
+            return Err(AppError::Invalid(
+                "you can only delete your own status posts".into(),
+            ));
+        }
+        let id = id.to_string();
+        self.sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                delete_message_in_doc(d, &id).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Toggle this member's `emoji` reaction on the status post `id` (add if absent, remove if
+    /// present). **Anyone may react**, whoever may post: reading the feed is the one thing every
+    /// member does, and a reaction is how they answer it. Errors if the post doesn't exist.
+    pub async fn toggle_status_reaction(&mut self, id: &str, emoji: &str) -> Result<(), AppError> {
+        // Enforce the flat-key invariant at the trust boundary, before anything reaches the doc.
+        if !valid_reaction_emoji(emoji) {
+            return Err(AppError::Invalid("bad emoji".into()));
+        }
+        let me = self.my_fingerprint();
+        if !self.statuses().iter().any(|m| m.id == id) {
+            return Err(AppError::Invalid("no such status post".into()));
+        }
+        let id = id.to_string();
+        let emoji = emoji.to_string();
+        self.sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                toggle_reaction_in_doc(d, &id, &emoji, &me).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Pin or unpin a status post (by id): the feed's way of holding an announcement above the
+    /// scroll. **Owner/admin only** (honest-client gating, like a channel pin). Several posts may
+    /// be pinned at once, as in a channel. Errors if the post is gone, you may not pin, or the pin
+    /// state is already as requested (no redundant op).
+    pub async fn set_status_pin(&mut self, id: &str, pinned: bool) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner/admin can pin status posts".into(),
+            ));
+        }
+        let Some(post) = self.statuses().into_iter().find(|m| m.id == id) else {
+            return Err(AppError::Invalid("no such status post".into()));
+        };
+        if post.pinned == pinned {
+            return Ok(()); // already in the requested state; don't post a redundant op
+        }
+        let id = id.to_string();
+        self.sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                set_pin_in_doc(d, &id, pinned).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Whether plain members may post to the status feed. **`false` by default**, so a server that
+    /// has never touched the setting; including every server founded before it existed; keeps the
+    /// feed as an announcement channel until someone deliberately opens it.
+    pub fn status_members_may_post(&self) -> bool {
+        self.sync
+            .doc(DocType::Status, STATUS_DOC)
+            .map(|d| read_status_may_post(d.doc()))
+            .unwrap_or_default()
+    }
+
+    /// Open (`true`) or close (`false`) the status feed to plain members. **Owner or admin only**
+    /// (honest-client gating, like the wiki review window). An unchanged policy is a no-op, so
+    /// re-asserting the current setting costs no op.
+    pub async fn set_status_members_may_post(&mut self, allow: bool) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can change who may post to the status feed".into(),
+            ));
+        }
+        if self.status_members_may_post() == allow {
+            return Ok(()); // already the requested policy; don't post a redundant op
+        }
+        self.sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                write_status_may_post(d, allow)
+            })
+            .await?;
+        Ok(())
     }
 
     /// Open (create/subscribe) the per-server **calendar**; the shared document holding the
@@ -8552,6 +8729,254 @@ mod tests {
         assert_eq!(feed[0].text, "server is live");
         assert_eq!(feed[0].author, alice.my_fingerprint());
         assert_eq!(feed[0].ts, 1_000);
+    }
+
+    /// A founder and a joiner on one server, both with the status feed open. Every rule the feed
+    /// adds is about *who* is acting, so a second identity is the fixture rather than a detail of
+    /// it; the joiner is a plain member, which is the role the rules actually bite on.
+    async fn status_duo(
+        clock: &ManualClock,
+    ) -> (
+        Server<MemNetwork, ChaCha20Rng>,
+        Server<MemNetwork, ChaCha20Rng>,
+    ) {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = Server::found(
+            hub.join(alice_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(clock.clone()),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+        let invite = alice.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(clock.clone()),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = bob.unwrap();
+        alice.open_status().await.unwrap();
+        bob.open_status().await.unwrap();
+        (alice, bob)
+    }
+
+    /// The id of the feed post reading `text`. Ids are random, and a merged list is not obliged to
+    /// keep the order two peers appended in, so the tests address a post by what it says.
+    fn status_id(server: &Server<MemNetwork, ChaCha20Rng>, text: &str) -> String {
+        server
+            .statuses()
+            .into_iter()
+            .find(|m| m.text == text)
+            .unwrap_or_else(|| panic!("no status post reading {text:?}"))
+            .id
+    }
+
+    #[tokio::test]
+    async fn the_status_feed_is_owner_only_until_a_member_is_let_in() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob) = status_duo(&clock).await;
+        assert!(
+            !alice.status_members_may_post(),
+            "a feed nobody has configured is the server announcing itself"
+        );
+
+        assert!(matches!(
+            bob.post_status("i have opinions").await,
+            Err(AppError::Invalid(_))
+        ));
+        drain_sync(&mut alice).await;
+        assert!(
+            alice.statuses().is_empty(),
+            "a refused post reaches the shared document not at all"
+        );
+        alice.post_status("we open at eight").await.unwrap();
+
+        // A member cannot let themselves in; the owner can, and the answer is shared state.
+        assert!(matches!(
+            bob.set_status_members_may_post(true).await,
+            Err(AppError::Invalid(_))
+        ));
+        alice.set_status_members_may_post(true).await.unwrap();
+        drain_sync(&mut bob).await;
+        assert!(bob.status_members_may_post());
+        bob.post_status("i have opinions").await.unwrap();
+        assert_eq!(bob.statuses().len(), 2);
+
+        // Closing it again refuses the next one; the posts already made stay.
+        alice.set_status_members_may_post(false).await.unwrap();
+        drain_sync(&mut bob).await;
+        assert!(matches!(
+            bob.post_status("more opinions").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert_eq!(bob.statuses().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_status_post_is_reworded_only_by_the_member_who_wrote_it() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob) = status_duo(&clock).await;
+        alice.post_status("we open at eight").await.unwrap();
+        drain_sync(&mut bob).await;
+        let id = status_id(&alice, "we open at eight");
+
+        // Bob can read it and still may not reword it; nor could an owner reword his, which is
+        // why moderation removes a post rather than editing one.
+        assert!(matches!(
+            bob.edit_status(&id, "we open at nine").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.edit_status("no-such-post", "hello").await,
+            Err(AppError::Invalid(_))
+        ));
+
+        clock.advance_ms(1_000);
+        alice.edit_status(&id, "we open at nine").await.unwrap();
+        assert_eq!(alice.statuses()[0].text, "we open at nine");
+        assert_eq!(alice.statuses()[0].edited, T0 + 1_000);
+
+        // Re-saving the same words is dropped, so the "edited" stamp does not creep.
+        clock.advance_ms(1_000);
+        alice.edit_status(&id, "we open at nine").await.unwrap();
+        assert_eq!(alice.statuses()[0].edited, T0 + 1_000);
+
+        drain_sync(&mut bob).await;
+        assert_eq!(bob.statuses()[0].text, "we open at nine");
+    }
+
+    #[tokio::test]
+    async fn a_status_post_is_deleted_by_its_author_or_a_moderator_and_nobody_else() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob) = status_duo(&clock).await;
+        alice.set_status_members_may_post(true).await.unwrap();
+        drain_sync(&mut bob).await;
+
+        alice.post_status("the owner's notice").await.unwrap();
+        bob.post_status("bob's first").await.unwrap();
+        bob.post_status("bob's second").await.unwrap();
+        drain_sync(&mut alice).await;
+        drain_sync(&mut bob).await;
+        assert_eq!(bob.statuses().len(), 3);
+
+        let owners = status_id(&bob, "the owner's notice");
+        let first = status_id(&bob, "bob's first");
+        let second = status_id(&bob, "bob's second");
+
+        assert!(matches!(
+            bob.delete_status(&owners).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            bob.delete_status("no-such-post").await,
+            Err(AppError::Invalid(_))
+        ));
+        bob.delete_status(&first).await.unwrap();
+        // The owner may take down a member's post; that is the moderation route.
+        alice.delete_status(&second).await.unwrap();
+
+        drain_sync(&mut alice).await;
+        drain_sync(&mut bob).await;
+        assert_eq!(alice.statuses().len(), 1);
+        assert_eq!(alice.statuses()[0].id, owners);
+        assert_eq!(bob.statuses().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_status_reaction_goes_on_and_comes_off_again() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob) = status_duo(&clock).await;
+        alice.post_status("we open at eight").await.unwrap();
+        drain_sync(&mut bob).await;
+        let id = status_id(&alice, "we open at eight");
+
+        // Reacting is not posting: the member a closed feed refuses may still answer it.
+        assert!(!bob.status_members_may_post());
+        bob.toggle_status_reaction(&id, "🎉").await.unwrap();
+        let feed = bob.statuses();
+        assert_eq!(feed[0].reactions.len(), 1);
+        assert_eq!(feed[0].reactions[0].emoji, "🎉");
+        assert_eq!(feed[0].reactions[0].by, vec![bob.my_fingerprint()]);
+        drain_sync(&mut alice).await;
+        assert_eq!(alice.statuses()[0].reactions[0].by, vec![bob.my_fingerprint()]);
+
+        bob.toggle_status_reaction(&id, "🎉").await.unwrap();
+        assert!(bob.statuses()[0].reactions.is_empty());
+
+        // The trust-boundary rules chat applies apply here too: a post that exists, and an emoji
+        // that cannot smuggle the flat key's separator onto the message map.
+        assert!(matches!(
+            bob.toggle_status_reaction("no-such-post", "🎉").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            bob.toggle_status_reaction(&id, "a\u{1f}b").await,
+            Err(AppError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn pinning_a_status_post_is_owner_or_admin_only() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob) = status_duo(&clock).await;
+        alice.post_status("we open at eight").await.unwrap();
+        alice.post_status("and close at six").await.unwrap();
+        drain_sync(&mut bob).await;
+        let first = status_id(&alice, "we open at eight");
+        let second = status_id(&alice, "and close at six");
+
+        assert!(matches!(
+            bob.set_status_pin(&first, true).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.set_status_pin("no-such-post", true).await,
+            Err(AppError::Invalid(_))
+        ));
+
+        // Several announcements may be held above the scroll at once, as in a channel.
+        alice.set_status_pin(&first, true).await.unwrap();
+        alice.set_status_pin(&second, true).await.unwrap();
+        assert!(alice.statuses().iter().all(|m| m.pinned));
+
+        alice.set_status_pin(&first, true).await.unwrap(); // redundant; posts nothing
+        alice.set_status_pin(&first, false).await.unwrap();
+        let feed = alice.statuses();
+        assert!(!feed.iter().find(|m| m.id == first).unwrap().pinned);
+        assert!(feed.iter().find(|m| m.id == second).unwrap().pinned);
+
+        drain_sync(&mut bob).await;
+        let bobs = bob.statuses();
+        assert!(!bobs.iter().find(|m| m.id == first).unwrap().pinned);
+        assert!(bobs.iter().find(|m| m.id == second).unwrap().pinned);
+    }
+
+    #[tokio::test]
+    async fn a_status_post_and_the_feeds_posting_policy_both_reach_a_joiner() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob) = status_duo(&clock).await;
+        alice.post_status("we open at eight").await.unwrap();
+        alice.set_status_members_may_post(true).await.unwrap();
+        drain_sync(&mut bob).await;
+
+        let feed = bob.statuses();
+        assert_eq!(feed.len(), 1);
+        assert_eq!(feed[0].text, "we open at eight");
+        assert_eq!(feed[0].author, alice.my_fingerprint());
+        assert!(
+            bob.status_members_may_post(),
+            "the policy rides the feed document, so it is shared state and not a local preference"
+        );
     }
 
     #[tokio::test]

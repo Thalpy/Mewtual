@@ -7275,7 +7275,9 @@ async fn download_file(
     Ok(B64.encode(&out))
 }
 
-/// Post to the server status feed.
+/// Post to the server status feed. **Owner/admin only** unless the feed has been opened to
+/// members (`set_status_policy`), so a refusal is a real outcome the caller sees rather than a
+/// post that silently never happened.
 #[tauri::command]
 async fn post_status(
     state: State<'_, AppState>,
@@ -7291,7 +7293,10 @@ async fn post_status(
         None,
     );
     let actor = op.actor(&state, server).await?;
-    actor.post_status(text).await;
+    actor
+        .post_status(text)
+        .await
+        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
     persist_server(&state, server).await;
     op.succeeded("STATUS.POST.PERSISTED");
     Ok(())
@@ -7308,6 +7313,144 @@ async fn get_statuses(state: State<'_, AppState>, server: u64) -> Result<Vec<UiM
         .rev()
         .map(ui_message)
         .collect())
+}
+
+/// Edit one of your own status posts (by post id); re-seals the server.
+#[tauri::command]
+async fn edit_status(
+    state: State<'_, AppState>,
+    server: u64,
+    msg_id: String,
+    text: String,
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "edit_status",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    actor
+        .edit_status(msg_id, text)
+        .await
+        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
+    persist_server(&state, server).await;
+    op.succeeded("STATUS.EDIT.PERSISTED");
+    Ok(())
+}
+
+/// Delete a status post (by post id): your own, or anyone's as an owner/admin.
+#[tauri::command]
+async fn delete_status(
+    state: State<'_, AppState>,
+    server: u64,
+    msg_id: String,
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "delete_status",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    actor
+        .delete_status(msg_id)
+        .await
+        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
+    persist_server(&state, server).await;
+    op.succeeded("STATUS.DELETE.PERSISTED");
+    Ok(())
+}
+
+/// Toggle this member's emoji reaction on a status post (by post id). Any member may react,
+/// whoever the feed lets write.
+#[tauri::command]
+async fn toggle_status_reaction(
+    state: State<'_, AppState>,
+    server: u64,
+    msg_id: String,
+    emoji: String,
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "toggle_status_reaction",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    actor
+        .toggle_status_reaction(msg_id, emoji)
+        .await
+        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
+    persist_server(&state, server).await;
+    op.succeeded("STATUS.REACTION.PERSISTED");
+    Ok(())
+}
+
+/// Pin or unpin a status post (by post id) (owner/admin).
+#[tauri::command]
+async fn set_status_pin(
+    state: State<'_, AppState>,
+    server: u64,
+    msg_id: String,
+    pinned: bool,
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "set_status_pin",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    actor
+        .set_status_pin(msg_id, pinned)
+        .await
+        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
+    persist_server(&state, server).await;
+    op.succeeded("STATUS.PIN.PERSISTED");
+    Ok(())
+}
+
+/// Whether plain members may post to the status feed (`false` = owner/admin only, the default).
+#[tauri::command]
+async fn get_status_policy(state: State<'_, AppState>, server: u64) -> Result<bool, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor.status_members_may_post().await)
+}
+
+/// Open or close the status feed to plain members (owner/admin only); re-seals the server. The
+/// policy rides the feed document, so a `status-updated` event follows and every member re-reads
+/// it along with the posts.
+#[tauri::command]
+async fn set_status_policy(
+    state: State<'_, AppState>,
+    server: u64,
+    members_may_post: bool,
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "set_status_policy",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    actor
+        .set_status_members_may_post(members_may_post)
+        .await
+        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
+    persist_server(&state, server).await;
+    op.succeeded("STATUS.POLICY.PERSISTED");
+    Ok(())
 }
 
 /// Create a server event; re-seals the server. **Any member may**; an event is server content,
@@ -12106,6 +12249,12 @@ pub fn run() {
             get_wiki_pinned_cids,
             post_status,
             get_statuses,
+            edit_status,
+            delete_status,
+            toggle_status_reaction,
+            set_status_pin,
+            get_status_policy,
+            set_status_policy,
             create_event,
             delete_event,
             get_events,

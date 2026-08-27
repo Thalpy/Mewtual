@@ -67,6 +67,11 @@ export const TAURI_COMMAND_GROUPS = {
       "get_dm_requests", "file_available", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
       "get_wiki_history", "get_wiki_pending", "get_wiki_review_days", "get_roles", "get_moderation",
+      // Whether plain members may post to this server's announcement feed. One boolean off the
+      // feed document every member already reads, so it exposes nothing `get_statuses` did not.
+      // The webview uses it to decide whether to draw a composer, which is presentation: the
+      // refusal for a member posting into a closed feed is native, and arrives as an error.
+      "get_status_policy",
       "get_join_attempts", "get_connectivity", "get_call_transport", "get_switchboard_status", "set_switchboard_offered", "get_channel_topic", "get_jukebox", "get_inbox",
       // Local reachability state for the debug console: which members this node holds a record
       // for, the addresses those records advertise, and where the dial backoff has got to.
@@ -90,9 +95,15 @@ export const TAURI_COMMAND_GROUPS = {
       // releases the reservation and collects whatever was sealed. Same authority as add_file
       // had, split so neither the webview nor the server actor is occupied for a whole file.
       "begin_file_upload", "push_file_chunk", "finish_file_upload", "cancel_file_upload",
-      "send_call_signal", "dismiss_dm_request", "download_file", "post_status", "create_event",
+      "send_call_signal", "dismiss_dm_request", "download_file", "create_event",
       "save_wiki_page", "send_message", "edit_message", "delete_message", "toggle_reaction",
       "set_channel_topic", "jukebox_add", "jukebox_remove",
+      // The announcement feed's counterparts to the three above, and gated the same way. An edit
+      // is author-only; a delete is the author's or a moderator's; a reaction is every member's,
+      // because reading the feed is the one thing everyone does and reacting is how they answer.
+      // Each is checked natively against the caller's own fingerprint and role, so the ⋯ menu the
+      // webview draws narrows what is offered and never what is permitted.
+      "edit_status", "delete_status", "toggle_status_reaction",
     ],
   },
   policy_controlled_writes: {
@@ -103,6 +114,16 @@ export const TAURI_COMMAND_GROUPS = {
       "rename_wiki_page", "set_wiki_review_days", "approve_wiki_edit", "reject_wiki_edit",
       "restore_wiki_page", "warn_message", "create_kick_case", "cast_kick_vote",
       "resolve_kick_case", "set_pin",
+      // Pinning an announcement is `set_pin` for the other feed, and owner/admin exactly as that
+      // one is. The policy write is the sharper of the two: it decides who may post to the feed
+      // at all, for every member of the server, so it is owner/admin natively and the chip that
+      // toggles it is drawn from the same role read rather than from the policy it is changing.
+      "set_status_pin", "set_status_policy",
+      // Posting an announcement sits with the pair above rather than with ordinary content writes,
+      // because it is not a mutation every member may make. It is owner/admin unless
+      // `set_status_policy` has opened this server's feed, so what it costs is decided by a role
+      // and a policy read natively; the composer the webview draws only narrows what is offered.
+      "post_status",
     ],
   },
   media_key_material: {

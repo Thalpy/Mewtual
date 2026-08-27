@@ -70,6 +70,13 @@
     type ChannelChange, type ChannelHead, type ReadMark, type UnreadDecision, type UnreadState,
   } from "./unread";
   import {
+    NO_STATUS_READ, firstStatusUnreadIndex, isNewsItemUnseen, isStatusUnread, markStatusRead,
+    newsFilter, newsUnseenByServer, newsUnseenCount, sameStatusCursor, splitNewsSections,
+    statusCursorFor, statusIsObserved, statusSurfaceOpen, statusUnreadCount,
+    type NewsKindFilter, type StatusCursors, type StatusObservation, type StatusPost,
+    type StatusReadCursor,
+  } from "./statusread.ts";
+  import {
     deliveryClass, deliveryGlyph, deliveryLabel, deliveryTip, deliveryVerdict, mergeDelivery,
     type DeliveryEvidence,
   } from "./delivery";
@@ -2474,7 +2481,7 @@
     if (!uiStateReady || locked) return;
     clearTimeout(uiStateSaveTimer);
     uiStateSaveTimer = setTimeout(() => {
-      const json = JSON.stringify({ version: 1, drafts, readMarks });
+      const json = JSON.stringify({ version: 1, drafts, readMarks, statusCursors });
       void invoke("save_ui_state", { json }).then(() => {
         uiStateSaveFailed = false;
       }).catch((e) => {
@@ -2508,11 +2515,13 @@
       if (generation !== uiStateLoadGeneration || locked) return;
       drafts = next.drafts;
       readMarks = next.readMarks;
+      statusCursors = next.statusCursors;
     } catch (e) {
       if (generation !== uiStateLoadGeneration || locked) return;
       console.warn("UI continuity load failed", e);
       drafts = {};
       readMarks = {};
+      statusCursors = {};
       error = `Durable history could not be authenticated and was not loaded: ${e}`;
     } finally {
       if (generation === uiStateLoadGeneration && !locked) uiStateReady = true;
@@ -2655,7 +2664,19 @@
   let dragOver = $state(false); // composer drag-over highlight
   let statuses = $state<Msg[]>([]);
   let statusDraft = $state("");
-  let statusEl = $state<HTMLUListElement | undefined>(undefined);
+  // The scroll box holding both the pinned block and the feed, so a `status:ID` chip finds its post
+  // by id wherever the pin state has put it, and one rich-click delegate covers the whole surface.
+  let statusEl = $state<HTMLElement | undefined>(undefined);
+  // Whether plain members may post to THIS server's feed. `false` until the read answers, matching
+  // the backend's default and its answer for a stopped actor: a composer that is not offered is a
+  // smaller wrong than one that is offered and then refuses everything typed into it.
+  let statusPolicy = $state(false);
+  let statusPolicyBusy = $state(false);
+  // Inline edit + the reaction quick-picker for one announcement, exactly as chat holds them.
+  let statusEditingId = $state("");
+  let statusEditDraft = $state("");
+  let statusEditEl = $state<HTMLTextAreaElement | undefined>(undefined);
+  let statusReactionPickerFor = $state("");
 
   // Custom emoji (10f): files under the "emoji" folder. code -> cid, and resolved code -> URL.
   let emojiUrls = $state<Record<string, string>>({});
@@ -3924,9 +3945,20 @@
     return `${day} · ${t}${end}`;
   }
 
-  // News feed (inbox): recent status posts + upcoming events across every server.
+  // News feed (inbox): every server's announcements + its live events, in one list.
   // Client-side aggregation over existing per-server invokes: nothing new on the wire.
-  type NewsItem = { server: number; serverName: string; kind: "status" | "event"; ts: number; text: string; author: string };
+  //
+  // This is also the single source the announcement indicators are all read from. The rail's inbox
+  // badge, the News rows, the billboard beacons in the orbit view and the surface-bar tab count are
+  // four ways of asking which announcements this person has not seen, and answering them from four
+  // places is how they end up disagreeing. `id` and `pinned` ride along for the same reason: the
+  // read cursor settles a same-millisecond tie by id, and the Pinned section needs to know without
+  // a second fetch. Only the active server's tab count reads the live `statuses` instead, because
+  // it has a fresher copy of the one feed it is counting.
+  type NewsItem = {
+    server: number; serverName: string; kind: "status" | "event";
+    id: string; ts: number; text: string; author: string; pinned: boolean;
+  };
   let inboxMode = $state<"mentions" | "news">("mentions");
   let newsItems = $state<NewsItem[]>([]);
   let newsLoading = $state(false);
@@ -3946,11 +3978,14 @@
             invoke<Msg[]>("get_statuses", { server: s.id }),
             invoke<UiEvent[]>("get_events", { server: s.id }).catch(() => [] as UiEvent[]),
           ]);
-          for (const st of sts.slice(-5))
-            items.push({ server: s.id, serverName: s.name, kind: "status", ts: st.ts, text: st.text, author: st.author });
+          // The whole feed, not a recent slice. A count that stops at five cannot say how many
+          // announcements are waiting, and the badges above are asking exactly that; the display
+          // list does its own trimming below, where trimming is only a matter of screen space.
+          for (const st of sts)
+            items.push({ server: s.id, serverName: s.name, kind: "status", id: st.id, ts: st.ts, text: st.text, author: st.author, pinned: st.pinned });
           for (const ev of evs)
             if (eventLive(ev, now))
-              items.push({ server: s.id, serverName: s.name, kind: "event", ts: ev.start_ts, text: ev.title, author: ev.author });
+              items.push({ server: s.id, serverName: s.name, kind: "event", id: ev.id, ts: ev.start_ts, text: ev.title, author: ev.author, pinned: false });
         } catch {
           /* unreachable server actor: skip it */
         }
@@ -3961,13 +3996,90 @@
     if (locked) return; // as loadInbox: the lock cleared this, and it is cross-server text
     newsItems = items;
   }
-  let newsUpcoming = $derived(newsItems.filter((n) => n.kind === "event").sort((a, b) => a.ts - b.ts));
-  let newsFeed = $derived(newsItems.filter((n) => n.kind === "status").sort((a, b) => b.ts - a.ts).slice(0, 30));
+  // Every announcement mutation on every peer -- a post, an edit, a reaction, a pin, a policy
+  // change -- arrives as the same "status-updated" event, and each one used to re-read both feeds
+  // of every server on the spot. A member reacting three times running is one burst, not three
+  // aggregations, so the trailing edge wins and the whole cross-server pass runs once. Short enough
+  // that the badges still move while the person who caused it is still looking at them.
+  let newsAggregateTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleNewsAggregation() {
+    clearTimeout(newsAggregateTimer);
+    newsAggregateTimer = setTimeout(() => {
+      newsAggregateTimer = undefined;
+      void loadNews();
+    }, 400);
+  }
+
+  // How far this person has read each server's announcements, so the four surfaces above can each
+  // ask without a round-trip on every render. Durability is the sealed UI-state record's job, the
+  // same one that carries drafts and chat read marks: what somebody has read is a reading habit,
+  // and reading habits do not fall back to plaintext storage. Hydrated by `loadUiContinuity`,
+  // written through here, and dropped by `lockScreen` along with the marks it sits beside.
+  let statusCursors = $state<StatusCursors>({});
+  function saveStatusCursor(server: number, cursor: StatusReadCursor) {
+    statusCursors[server] = cursor;
+    // Debounced and best-effort, exactly as the chat marks are: a vault write that fails costs this
+    // device the mark rather than the feed, and the indicators simply announce these posts once
+    // more next launch, which is the safe direction.
+    scheduleUiStateSave();
+  }
+  // Takes the read-state module's own shape rather than `Msg`, because both callers hold a
+  // different record of the same posts: the surface has the server's live feed, and "Mark all read"
+  // has the News rows this aggregation built. Both carry the id and timestamp the mark is made of.
+  /** Cover everything in `posts` as read for `server`, and persist it if that moved the mark. */
+  function markStatusesRead(server: number, posts: StatusPost[]) {
+    if (!posts.length) return;
+    const previous = statusCursorFor(statusCursors, server);
+    const next = markStatusRead(posts, Date.now(), previous);
+    if (sameStatusCursor(next, previous)) return; // nothing moved, so nothing to seal
+    saveStatusCursor(server, next);
+  }
+
+  // The News tab's chips. The kind filter and the server filter are one predicate, so the list and
+  // anything counting alongside it cannot end up disagreeing about what a chip means.
+  let newsKindFilter = $state<NewsKindFilter>("all");
+  let newsServerFilter = $state<number | null>(null);
+  let newsMatches = $derived(newsItems.filter(newsFilter(newsKindFilter, newsServerFilter)));
+  let newsUpcoming = $derived(newsMatches.filter((n) => n.kind === "event").sort((a, b) => a.ts - b.ts));
+  // Pinned and Recent are one cut, not two filters: the latest pin per server heads the tab, and
+  // "Recent announcements" is everything else, so a pinned post is lifted rather than listed twice.
+  // An older pin is not in the Pinned section, so it still appears in the feed where its date puts
+  // it -- the exclusion is of the rows actually shown above, not of pinned rows in general.
+  let newsSections = $derived(splitNewsSections(newsMatches, 30));
+  let newsFeed = $derived(newsSections.feed);
+  let newsPinned = $derived(newsSections.pinned);
+  // Unfiltered on purpose: a chip narrows what is listed, never what is outstanding, and a badge
+  // that empties because someone picked a filter is a badge that has stopped meaning anything.
+  let newsUnseenNow = $derived(newsUnseenCount(newsItems, statusCursors));
+  let newsServersListed = $derived.by(() => {
+    const seen = new Map<number, string>();
+    for (const n of newsItems) if (!seen.has(n.server)) seen.set(n.server, n.serverName);
+    return [...seen].map(([id, name]) => ({ id, name }));
+  });
+  // A row's identity across a re-aggregation. The id alone will not do: a post old enough to
+  // predate minted ids carries an empty one, and two of those in the same list would be one key.
+  function newsKey(n: NewsItem): string {
+    return `${n.server}:${n.kind}:${n.id}:${n.ts}:${n.author}`;
+  }
+  /** Advance every server's mark over the posts this aggregation actually fetched. */
+  function markAllNewsRead() {
+    const byServer = new Map<number, NewsItem[]>();
+    for (const n of newsItems) {
+      if (n.kind !== "status") continue; // an event's ts is when it starts, not when it was written
+      const held = byServer.get(n.server);
+      if (held) held.push(n);
+      else byServer.set(n.server, [n]);
+    }
+    for (const [server, posts] of byServer) markStatusesRead(server, posts);
+    newsUnseen = false;
+  }
   function jumpToNews(n: NewsItem) {
     navStepStart(); // the server hop and the surface hop are one move, not two
     inboxView = false;
     switchServer(n.server)
       .then(() => switchView(n.kind === "event" ? "events" : "status"))
+      // The row named one post, so land on it rather than on the feed it sits somewhere in.
+      .then(() => (n.kind === "status" && n.id ? openStatusRef(n.id) : undefined))
       .finally(navStepEnd);
   }
 
@@ -4551,6 +4663,12 @@
       // activity head against the read marks that just loaded. Without this pass, a message
       // received during a lock or across a restart is silently lost from the indicators.
       rebuildAllUnread();
+      // The announcement indicators are the same rebuild, for the same reason: posts made while
+      // this device was closed or locked raised no event anyone was awake to hear, so the counts
+      // come from the feeds themselves rather than from what this session witnessed. It waits on
+      // the continuity load with the unread pass because the read cursors are what turn those
+      // feeds into a count instead of an announcement of everything that ever happened.
+      void loadNews();
     });
     refreshAllDmRequests();
     loadInbox();
@@ -4609,9 +4727,10 @@
     }
     clearTimeout(uiStateSaveTimer);
     clearTimeout(inboxTimer);
+    clearTimeout(newsAggregateTimer); // a pending re-aggregation must not read feeds behind the lock
     if (inboxIdle !== undefined && "cancelIdleCallback" in window) window.cancelIdleCallback(inboxIdle);
     inboxIdle = undefined;
-    const continuityJson = uiStateReady ? JSON.stringify({ version: 1, drafts, readMarks }) : null;
+    const continuityJson = uiStateReady ? JSON.stringify({ version: 1, drafts, readMarks, statusCursors }) : null;
     try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
     if (inCall) leaveVoice(); // never leave a hot mic behind a lock screen
     void invoke("lock_session", { uiStateJson: continuityJson }).catch((e) => console.warn("Session locked; final UI continuity save failed", e));
@@ -4650,6 +4769,7 @@
     draft = "";
     drafts = {};
     readMarks = {};
+    statusCursors = {}; // a reading habit, sealed beside the marks above and dropped with them
     uiStateReady = false;
     uiStateSaveFailed = false;
     uiStateLoadGeneration += 1;
@@ -4958,6 +5078,11 @@
     showWikiHistory = false;
     wikiHistorySel = "";
     statuses = [];
+    // The policy is this server's, and so is anything half-done to a post of its feed.
+    statusPolicy = false;
+    statusEditingId = "";
+    statusEditDraft = "";
+    statusReactionPickerFor = "";
     events = [];
     moderation = { events: [], votes: [] };
     moderationMessages = [];
@@ -5049,6 +5174,8 @@
     loadVerified(id); // this server's locally-verified members
     loadDraftFor(chanKey()); // restore this server's active-channel draft
     captureDivider(); // snapshot the read boundary for this server's active channel
+    // The announcement cursors need no per-server step: every server's arrived with the vault at
+    // unlock, so `statusCursorFor` can already answer for this one before anything renders.
     // One barrier, not two. refreshModeration used to be awaited AFTER this batch because it read
     // the privileged message corpus and so had to see this server's roles first; it now fetches
     // only the case/vote state everyone needs in chat, and the corpus loads with the surface that
@@ -5703,6 +5830,77 @@
       if (viewCurrent(gen, srv)) error = String(e);
     }
   }
+  // --- the Announcements surface's own reads ----------------------------------------------------
+  // The composer is offered to whoever the backend would accept: owner/admin always, everyone else
+  // only while this server's policy is open. It decides what is drawn, never what is allowed.
+  let canPostStatus = $derived(canModerate || statusPolicy);
+  // This person's news cue for this server: a local preference, nothing replicated and nothing any
+  // other member can see. The chip reads the EFFECTIVE answer (master switch, then the global
+  // category, then this server's override) so it can never claim a cue the master switch has
+  // silenced, and a click writes an explicit "on"/"off" rather than reverting to inherit, because a
+  // control with two visible states needs two states it can actually write.
+  let statusCueOn = $derived(soundPolicy("news", activeServerId).enabled);
+  function toggleStatusCue() {
+    if (activeServerId === null) return;
+    setServerSoundEnabled("news", statusCueOn ? "off" : "on");
+  }
+  let statusCursor = $derived(activeServerId === null ? NO_STATUS_READ : statusCursorFor(statusCursors, activeServerId));
+  // Zero for a DM, which has no noticeboard: the tab is not offered there, and a chip counting a
+  // surface nobody can open is a chip that can never be cleared.
+  let statusUnreadNow = $derived(cur?.isDm ? 0 : statusUnreadCount(statuses, statusCursor));
+  // Pinned posts render in their own block above the feed and are left out of it, so a pin lifts a
+  // post rather than duplicating it. Both halves keep `get_statuses`' newest-first order.
+  let pinnedStatuses = $derived(statuses.filter((s) => s.pinned));
+  let statusFeed = $derived(statuses.filter((s) => !s.pinned));
+  // The read boundary as it stood when this surface was opened, and the server it was taken for.
+  //
+  // Opening the surface marks it read, so the live cursor moves in the same frame the feed renders
+  // and a divider drawn against it would disappear exactly as you arrived to look at it. The
+  // snapshot is what the divider and the unread cards are measured against, and it is released on
+  // the way out so returning takes a fresh one. Chat keeps a boundary of its own for this reason
+  // (`captureDivider`); this is the announcements' copy of the same idea.
+  let statusDividerCursor = $state<StatusReadCursor>(NO_STATUS_READ);
+  let statusDividerFor = $state<number | null>(null);
+  // Falls back to the live cursor until the snapshot exists, so the first render of a surface shows
+  // the boundary the store already holds rather than a feed briefly claiming to be entirely unread.
+  let statusBoundary = $derived(statusDividerFor === activeServerId ? statusDividerCursor : statusCursor);
+  let statusNewCount = $derived(statusUnreadCount(statuses, statusBoundary));
+  // Where the NEW divider sits: above the oldest unread post, which in a newest-first array is the
+  // LAST unread index. Computed over the feed the divider is drawn in, so the pinned block (which
+  // is out of chronological order by construction) cannot drag it to the wrong row.
+  let statusDividerAt = $derived(firstStatusUnreadIndex(statusFeed, statusBoundary, "newest-first"));
+  // Reading the surface is what marks it read: the switch onto it, and anything arriving while it
+  // is the visible surface and somebody is actually there. Everything this writes is untracked,
+  // because a read of one's own write is a loop; the posts, the surface and whether the window is
+  // being looked at are the inputs that should re-run it.
+  //
+  // Two questions, deliberately not one. Being ON the surface owns the divider: the boundary is
+  // snapshotted on arrival and released on the way out, so alt-tabbing away and back must not move
+  // the NEW line somebody left mid-read. Being on the surface AND looking at it owns the mark,
+  // because `markStatusesRead` is durable -- an announcement landing while the app sits unfocused
+  // on this tab would otherwise be marked read forever by a refresh nobody witnessed. Both terms
+  // are `$state`, so returning to the window re-runs this and reads it then, with the divider it
+  // was left with still in place. This is chat's rule (`chatIsObserved`) for this surface.
+  $effect(() => {
+    const surface: StatusObservation = {
+      view, inboxView, spaceOpen, isDm: !!cur?.isDm, windowFocused, documentVisible,
+    };
+    const onSurface = statusSurfaceOpen(surface);
+    const observed = statusIsObserved(surface);
+    const server = activeServerId;
+    const posts = statuses;
+    untrack(() => {
+      if (!onSurface || server === null) {
+        statusDividerFor = null;
+        return;
+      }
+      if (statusDividerFor !== server) {
+        statusDividerCursor = statusCursorFor(statusCursors, server);
+        statusDividerFor = server;
+      }
+      if (observed) markStatusesRead(server, posts);
+    });
+  });
   // The media plane's own report. The mesh and the call are two separate NAT-traversal stacks, so
   // "chat works" says nothing about whether a call will, and until this was surfaced there was
   // nowhere to look when one failed. See get_call_transport.
@@ -6106,12 +6304,120 @@
   async function postStatus() {
     const text = statusDraft.trim();
     if (!text || activeServerId === null) return;
-    statusDraft = "";
+    // Kept until the invoke returns, not cleared on the way in: a member posting into a feed that
+    // is closed to them is now refused natively, and clearing first would take the words with it.
     try {
       await invokeDebugged("post_status", { server: activeServerId, text });
+      statusDraft = "";
     } catch (e) {
       error = errorText(e);
     }
+  }
+  // Who may post here. The read rides the feed document, so a policy someone else changed arrives
+  // as the same "status-updated" event the posts do and is re-read there.
+  async function refreshStatusPolicy() {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) return;
+    try {
+      const next = await invoke<boolean>("get_status_policy", { server });
+      if (!viewCurrent(gen, server)) return; // a late answer would gate the feed you opened instead
+      statusPolicy = next;
+    } catch {
+      /* unreachable server actor: the closed default already stands */
+    }
+  }
+  async function toggleStatusPolicy() {
+    if (activeServerId === null || statusPolicyBusy) return;
+    statusPolicyBusy = true;
+    try {
+      await invokeDebugged("set_status_policy", { server: activeServerId, membersMayPost: !statusPolicy });
+      await refreshStatusPolicy();
+    } catch (e) {
+      error = errorText(e);
+    } finally {
+      statusPolicyBusy = false;
+    }
+  }
+  async function startStatusEdit(s: Msg) {
+    statusEditingId = s.id;
+    statusEditDraft = s.text;
+    // A card's edit box replaces prose in the middle of a scrolled list, so the caret goes to it
+    // rather than leaving the person to find where the thing they just asked to edit ended up.
+    await tick();
+    statusEditEl?.focus();
+  }
+  function cancelStatusEdit() {
+    statusEditingId = "";
+    statusEditDraft = "";
+  }
+  async function saveStatusEdit(s: Msg) {
+    const text = statusEditDraft.trim();
+    if (!text || activeServerId === null) {
+      cancelStatusEdit();
+      return;
+    }
+    cancelStatusEdit();
+    if (text === s.text) return; // no change
+    try {
+      await invokeDebugged("edit_status", { server: activeServerId, msgId: s.id, text });
+    } catch (e) {
+      error = errorText(e);
+    }
+  }
+  async function deleteStatus(s: Msg) {
+    if (activeServerId === null || !s.id) return;
+    try {
+      await invokeDebugged("delete_status", { server: activeServerId, msgId: s.id });
+    } catch (e) {
+      error = errorText(e);
+    }
+  }
+  function toggleStatusReactionPicker(s: Msg) {
+    statusReactionPickerFor = statusReactionPickerFor === s.id ? "" : s.id;
+  }
+  async function toggleStatusReaction(s: Msg, emoji: string) {
+    statusReactionPickerFor = "";
+    if (activeServerId === null || !s.id) return;
+    try {
+      await invokeDebugged("toggle_status_reaction", { server: activeServerId, msgId: s.id, emoji });
+    } catch (e) {
+      error = errorText(e);
+    }
+  }
+  async function toggleStatusPin(s: Msg) {
+    if (activeServerId === null || !s.id) return;
+    try {
+      await invokeDebugged("set_status_pin", { server: activeServerId, msgId: s.id, pinned: !s.pinned });
+    } catch (e) {
+      error = errorText(e);
+    }
+  }
+  // The ⋯ menu on an announcement card. Every entry here is also gated natively; this decides what
+  // is worth offering, and a role read arriving late can only ever hide an action, never allow one.
+  function statusMenu(s: Msg): MenuItem[] {
+    const items: MenuItem[] = [{ label: "Copy text", icon: "⧉", onSelect: () => copyText(s.text) }];
+    if (s.id) {
+      items.push({ label: "Copy link", icon: "🔗", onSelect: () => copyText(statusMarker(s.text, s.id)) });
+      items.push({ label: "React…", icon: "☺", onSelect: () => (statusReactionPickerFor = s.id) });
+      if (canModerate) {
+        items.push({ label: s.pinned ? "Unpin" : "Pin to the top", icon: "📌", onSelect: () => toggleStatusPin(s) });
+      }
+      if (s.author === myFp) {
+        items.push({ divider: true });
+        items.push({ label: "Edit", icon: "✎", onSelect: () => startStatusEdit(s) });
+      }
+      if (s.author === myFp || canModerate) {
+        if (s.author !== myFp) items.push({ divider: true });
+        items.push({
+          label: "Delete",
+          icon: "🗑",
+          danger: true,
+          onSelect: () => confirmInMenu("Delete this announcement?", () => deleteStatus(s)),
+        });
+      }
+    }
+    return items;
   }
 
   function switchView(v: Tab) {
@@ -6120,10 +6426,20 @@
       toast("Moderation is available to this server's owner and admins", "info", 3500);
       v = "chat";
     }
+    // Announcements are a server's noticeboard. A DM has no membership to address and no policy
+    // worth operating -- its founder is Owner, so the other person would be refused the composer
+    // and shown a policy chip they cannot touch. Guarded here rather than only in the surface bar,
+    // because Ctrl+3, quick-switch and restored history all arrive through this one door.
+    if (v === "status" && cur?.isDm) {
+      toast("Announcements are a server noticeboard; a DM does not have one", "info", 3500);
+      v = "chat";
+    }
     view = v;
     if (v === "wiki") refreshWiki();
     if (v === "files") refreshFiles(); // re-evaluate availability each time the tab opens
-    if (v === "status") refreshStatuses(); // a read that failed during the switch gets a retry here
+    // The policy is read with the surface rather than with the server, because it is only ever
+    // needed by the surface and a server switch already carries enough round-trips.
+    if (v === "status") { refreshStatuses(); void refreshStatusPolicy(); } // a read that failed during the switch gets a retry here
     if (v === "events") refreshEvents();
     if (v === "moderation") refreshModeration();
     if (v === "storage" || v === "downloads") refreshStorageHealth();
@@ -8818,7 +9134,15 @@
   let flashStatusId = $state("");
   async function openStatusRef(id: string) {
     if (!id) return;
+    // The one route to this surface that does not pass through switchView, so it carries the same
+    // refusal: a `status:` chip pasted into a DM names a noticeboard a DM does not have, and
+    // following it would open the very surface the surface bar declines to offer there.
+    if (cur?.isDm) {
+      toast("Announcements are a server noticeboard; a DM does not have one", "info", 3500);
+      return;
+    }
     view = "status";
+    void refreshStatusPolicy(); // this route reaches the surface without going through switchView
     if (!statuses.some((s) => s.id === id)) await refreshStatuses();
     await tick();
     if (!statuses.some((s) => s.id === id)) {
@@ -9767,6 +10091,30 @@
     }
     return count;
   }
+  // The herald beacon's numbers, off the same aggregation the Inbox and the rail badge read. A
+  // billboard is beaconed only while its server has unread announcements; the corners it does not
+  // touch keep their existing signals (unread top-right, mentions top-left, voice bottom-right).
+  let spaceStatusCounts = $derived(newsUnseenByServer(newsItems, statusCursors));
+  // The newest announcement per server, for the headline card a hovered beacon shows. Every
+  // server's, not just the beaconed ones, so the card can still say what the last post was.
+  let spaceStatusLatest = $derived.by(() => {
+    const latest: Record<number, NewsItem> = {};
+    for (const n of newsItems) {
+      if (n.kind !== "status") continue;
+      const held = latest[n.server];
+      if (!held || n.ts > held.ts) latest[n.server] = n;
+    }
+    return latest;
+  });
+  // Which billboard the pointer is over. Tracked on the button's own enter/leave rather than by
+  // hit-testing the space, so it cannot touch the drag/lasso pointer machinery; a carry or a lasso
+  // clears it, because a card hanging off a server being flown across the sky is just in the way.
+  let spaceHeraldHover = $state<number | null>(null);
+  // The card's own box, so it can be kept inside the viewport. Clamped here rather than left to the
+  // browser because the card is `pointer-events: none` chrome floating over a rotating scene: a
+  // billboard near the edge would otherwise hang the card half off-screen with nothing to scroll.
+  // The card itself is derived below, beside the projection it reads its position from.
+  const SPACE_HERALD_CARD = { w: 244, h: 96 };
   function stopSpaceCameraTween() {
     if (spaceCameraRaf) cancelAnimationFrame(spaceCameraRaf);
     spaceCameraRaf = 0;
@@ -9816,6 +10164,7 @@
     spaceSearchOpen = false;
     spaceClusterOpen = null;
     spaceClusterDrop = null;
+    spaceHeraldHover = null;
     if (spaceOpen) {
       // Migrate an older or hand-edited layout too, rather than only preventing
       // new drops from overlapping from this point onward.
@@ -9828,6 +10177,7 @@
       refreshSpaceAccents();
       void refreshSpacePresence();
       void loadInbox();
+      void loadNews(); // the billboards' herald beacons read the same aggregation the Inbox does
     }
   }
   // Where the placed servers land on screen this frame. While carrying, the group's
@@ -9850,6 +10200,26 @@
       out.push({ s, x: pr.x, y: pr.y, scale: pr.scale, carried: carriedIds.has(s.id) });
     }
     return out;
+  });
+  // The headline card for a hovered herald, positioned off the same projection the billboards use.
+  // Nothing while a carry or a lasso is running: a card hanging off a server being flown across the
+  // sky is only in the way of the gesture moving it.
+  let spaceHerald = $derived.by(() => {
+    if (spaceHeraldHover === null || spaceCarried || spaceLasso) return null;
+    const server = spaceHeraldHover;
+    const placed = spacePlaced.find((it) => it.s.id === server);
+    const count = spaceStatusCounts[server] ?? 0;
+    if (!placed || !count) return null;
+    const half = SPACE_HERALD_CARD.w / 2;
+    const lift = spaceState.serverSize / 2 + 16;
+    const left = Math.min(Math.max(spaceVw / 2 + placed.x, half + 8), Math.max(half + 8, spaceVw - half - 8));
+    // Above the billboard by default, below it when there is no room, so the card never covers the
+    // thing it is describing and never leaves the top of the view.
+    const above = spaceVh / 2 + placed.y - lift - SPACE_HERALD_CARD.h;
+    // Below, it clears the hover name chip the billboard already draws under itself.
+    const below = spaceVh / 2 + placed.y + lift + 22;
+    const top = above >= 8 ? above : Math.min(below, Math.max(8, spaceVh - SPACE_HERALD_CARD.h - 8));
+    return { server, name: placed.s.name, left, top, count, latest: spaceStatusLatest[server] ?? null };
   });
   // Servers with no place yet (new joins) wait in the tray until hung.
   let spaceUnplaced = $derived(spaceOpen ? railServers.filter((s) => !spaceState.placements[s.id]) : []);
@@ -9954,6 +10324,11 @@
   }
   function newSpaceDrag(e: PointerEvent, mode: SpaceDragMode, serverId: number | undefined = undefined) {
     spaceCursorFrom(e);
+    // A press is the start of a gesture, and every gesture that follows takes the pointer capture
+    // that stops the billboard's own mouseleave ever arriving. Without this the herald card is
+    // still hanging in the sky after a carry, describing a server the pointer left long ago: the
+    // card must not outlive the pointer that summoned it.
+    spaceHeraldHover = null;
     spaceDrag = {
       id: e.pointerId,
       sx: e.clientX,
@@ -13381,11 +13756,22 @@
       }),
       listen<{ server: number }>("status-updated", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
-        if (e.payload.server === activeServerId) refreshStatuses();
+        if (e.payload.server === activeServerId) {
+          refreshStatuses();
+          // The policy rides the feed document, so this event is also how a policy change arrives.
+          void refreshStatusPolicy();
+        }
         if (!(e.payload.server === activeServerId && view === "status" && document.hasFocus())) {
           newsUnseen = true;
         }
-        if (inboxView && inboxMode === "news") { newsUnseen = false; loadNews(); }
+        // Re-aggregated whether or not anyone is looking at the Inbox: the badge on the rail, the
+        // beacons in the orbit view and the surface-bar count all read that list, and a list only
+        // refreshed while the Inbox happens to be open leaves the other three telling last hour's
+        // story. Debounced because the event fires for every edit, reaction, pin and policy change
+        // as well as every post, and each aggregation is two reads per server on every peer that
+        // heard it; the active server's own feed is refreshed immediately above, untouched.
+        if (inboxView && inboxMode === "news") newsUnseen = false;
+        scheduleNewsAggregation();
       }),
       listen<{ server: number }>("wiki-updated", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
@@ -15613,7 +15999,16 @@
     {/each}
   {:else if view === "status" && !dm}
     <h3><span>Announcements</span></h3>
-    <p class="muted small">A slow feed for this server: one post at a time, no replies.</p>
+    <p class="muted small">
+      {canModerate
+        ? "A slow noticeboard for this server. Post, pin what matters, and decide who else may."
+        : canPostStatus
+          ? "A slow noticeboard for this server. Every member may post here; edit your own, react to any."
+          : "A slow noticeboard for this server. The owner and admins post; everyone reacts."}
+    </p>
+    {#if statusNewCount}
+      <p class="muted small">{statusNewCount} new since you last looked.</p>
+    {/if}
   {:else if !dm}
     <h3><span>Channels</span> <span class="key">[ctrl+k]</span></h3>
     <ul class="channel-list">
@@ -16549,8 +16944,8 @@
             onclick={openInbox}
           >
             {@render icoInbox()}
-            {#if inboxUnseenCount || newsUnseen}
-              <span class="rail-badge">{inboxUnseenCount + (newsUnseen ? 1 : 0)}</span>
+            {#if inboxUnseenCount || newsUnseenNow}
+              <span class="rail-badge">{inboxUnseenCount + newsUnseenNow}</span>
             {/if}
           </button>
           <div class="rail-sep"></div>
@@ -16598,44 +16993,79 @@
             <button class="ghost small inbox-refresh" onclick={() => (inboxMode === "mentions" ? loadInbox() : loadNews())} disabled={inboxMode === "mentions" ? inboxLoading : newsLoading}>↻ Refresh</button>
           </div>
           {#if inboxMode === "news"}
+            <!-- One row, drawn the same wherever it appears. Announcements carry the unseen mark;
+                 events never do, because an event's time is when it starts, not when it was
+                 written, so it would read as unread until the day it happened. -->
+            {#snippet newsRow(n: NewsItem)}
+              <li class="inbox-item" class:unseen={isNewsItemUnseen(n, statusCursors)}>
+                <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
+                  <div class="inbox-meta">
+                    {#if n.kind === "event"}
+                      <span class="inbox-tag event-tag">⧗ event</span>
+                    {:else}
+                      <span class="inbox-tag reply-tag">◇ announcement</span>
+                    {/if}
+                    {#if n.pinned}<span class="inbox-tag pin-tag">📌 pinned</span>{/if}
+                    <span class="inbox-where">{n.serverName}</span>
+                    <span class="inbox-time" title={new Date(n.ts).toLocaleString()}>{n.kind === "event" ? dayLabel(n.ts) : fmtTime(n.ts)}</span>
+                  </div>
+                  <div class="inbox-body"><span class="inbox-text">{@html renderMessage(n.text, "")}</span></div>
+                </button>
+              </li>
+            {/snippet}
+            <div class="news-filters">
+              <div class="news-chips" role="group" aria-label="Filter news by kind">
+                <button class="news-chip" class:active={newsKindFilter === "all"} onclick={() => (newsKindFilter = "all")}>All</button>
+                <button class="news-chip" class:active={newsKindFilter === "status"} onclick={() => (newsKindFilter = "status")}>Announcements</button>
+                <button class="news-chip" class:active={newsKindFilter === "event"} onclick={() => (newsKindFilter = "event")}>Events</button>
+              </div>
+              {#if newsServersListed.length > 1}
+                <select
+                  class="news-server"
+                  aria-label="Filter news by server"
+                  value={newsServerFilter === null ? "" : String(newsServerFilter)}
+                  onchange={(e) => (newsServerFilter = e.currentTarget.value ? Number(e.currentTarget.value) : null)}
+                >
+                  <option value="">Every server</option>
+                  {#each newsServersListed as s (s.id)}
+                    <option value={String(s.id)}>{s.name}</option>
+                  {/each}
+                </select>
+              {/if}
+              <button class="ghost small news-mark" disabled={!newsUnseenNow} onclick={markAllNewsRead}>
+                Mark all read{newsUnseenNow ? ` (${newsUnseenNow})` : ""}
+              </button>
+            </div>
             {#if newsLoading && !newsItems.length}
               <p class="muted inbox-empty">Loading…</p>
             {:else}
-              {#if newsUpcoming.length}
-                <h3 class="ev-h"><span>Upcoming events</span></h3>
+              {#if newsPinned.length}
+                <h3 class="ev-h"><span>Pinned</span></h3>
                 <ul class="inbox-list" use:richClicks>
-                  {#each newsUpcoming as n (n.server + ":" + n.kind + ":" + n.ts + n.text)}
-                    <li class="inbox-item">
-                      <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
-                        <div class="inbox-meta">
-                          <span class="inbox-tag event-tag">⧗ event</span>
-                          <span class="inbox-where">{n.serverName}</span>
-                          <span class="inbox-time" title={new Date(n.ts).toLocaleString()}>{dayLabel(n.ts)}</span>
-                        </div>
-                        <div class="inbox-body"><span class="inbox-text">{@html renderMessage(n.text, "")}</span></div>
-                      </button>
-                    </li>
+                  {#each newsPinned as n (newsKey(n))}
+                    {@render newsRow(n)}
                   {/each}
                 </ul>
               {/if}
-              <h3 class="ev-h"><span>Recent announcements</span></h3>
-              {#if !newsFeed.length}
-                <p class="muted inbox-empty">No announcements yet: servers' Announcements surfaces feed this.</p>
-              {:else}
+              {#if newsUpcoming.length}
+                <h3 class="ev-h"><span>Upcoming events</span></h3>
                 <ul class="inbox-list" use:richClicks>
-                  {#each newsFeed as n (n.server + ":" + n.ts + ":" + n.author)}
-                    <li class="inbox-item">
-                      <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
-                        <div class="inbox-meta">
-                          <span class="inbox-tag reply-tag">◇ announcement</span>
-                          <span class="inbox-where">{n.serverName}</span>
-                          <span class="inbox-time" title={new Date(n.ts).toLocaleString()}>{fmtTime(n.ts)}</span>
-                        </div>
-                        <div class="inbox-body"><span class="inbox-text">{@html renderMessage(n.text, "")}</span></div>
-                      </button>
-                    </li>
+                  {#each newsUpcoming as n (newsKey(n))}
+                    {@render newsRow(n)}
                   {/each}
                 </ul>
+              {/if}
+              {#if newsKindFilter !== "event"}
+                <h3 class="ev-h"><span>Recent announcements</span></h3>
+                {#if !newsFeed.length}
+                  <p class="muted inbox-empty">No announcements yet: servers' Announcements surfaces feed this.</p>
+                {:else}
+                  <ul class="inbox-list" use:richClicks>
+                    {#each newsFeed as n (newsKey(n))}
+                      {@render newsRow(n)}
+                    {/each}
+                  </ul>
+                {/if}
               {/if}
             {/if}
           {:else if inboxLoading && !inboxItems.length}
@@ -16804,9 +17234,14 @@
               <span class="sb-ico">▤</span>files
               {#if files.length}<span class="tab-count">{files.length}</span>{/if}
             </button>
-            <button type="button" class:active={view === "status"} onclick={() => switchView("status")}>
-              <span class="sb-ico">◇</span>announcements
-            </button>
+            <!-- Servers only: a DM has no noticeboard to read or post to, which is why the insert
+                 picker hides the same tab and the News aggregation skips DM feeds entirely. -->
+            {#if !cur.isDm}
+              <button type="button" class:active={view === "status"} onclick={() => switchView("status")}>
+                <span class="sb-ico">◇</span>announcements
+                {#if statusUnreadNow}<span class="tab-count unread" title={`${statusUnreadNow} unread announcement${statusUnreadNow === 1 ? "" : "s"}`}>{statusUnreadNow}</span>{/if}
+              </button>
+            {/if}
             <button type="button" class:active={view === "wiki"} onclick={() => switchView("wiki")}>
               <span class="sb-ico">✎</span>wiki
             </button>
@@ -17754,44 +18189,174 @@
             {/if}
           </ul>
         {:else if view === "status"}
-          <h2>Announcements</h2>
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <form
-            class="composer"
-            class:drag-over={dragOver}
-            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
-            ondragleave={() => (dragOver = false)}
-            ondrop={(e) => onComposerDrop("status", e)}
-            onsubmit={(e) => { e.preventDefault(); postStatus(); }}
-          >
-            <label class="attach" title="Attach image / video / audio">
-              📎
-              <input
-                type="file"
-                accept="image/*,video/*,audio/*"
-                multiple
-                disabled={uploading}
-                onchange={(e) => { embedFiles("status", e.currentTarget.files); e.currentTarget.value = ''; }}
-              />
-            </label>
-            {@render textEffectButton("announcement", "Announcement text effects")}
-            <textarea bind:this={announcementInputEl} bind:value={statusDraft} rows="1" onselect={() => onTextEffectSelection("announcement")} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Write an announcement…"}></textarea>
-            <button type="submit" disabled={uploading}>Post</button>
-          </form>
-          <ul class="status-list tab-pane" bind:this={statusEl} use:richClicks>
-            {#each statuses as s}
-              <li data-sid={s.id} class:flash={!!s.id && s.id === flashStatusId}>
-                <span class="status-head">
-                  {@render avatarTag(s.author)}
-                  {@render nameTag(s.author)}
-                  <span class="time">{fmtTime(s.ts)}</span>
+          <!-- One post card, drawn the same in the pinned block and in the feed: the two differ in
+               where they sit, not in what an announcement is or what may be done to it. -->
+          {#snippet statusCard(s: Msg)}
+            <li
+              data-sid={s.id}
+              class:flash={!!s.id && s.id === flashStatusId}
+              class:unread={isStatusUnread(s, statusBoundary)}
+              use:contextMenu={() => statusMenu(s)}
+            >
+              <span class="status-head">
+                {@render avatarTag(s.author)}
+                {@render nameTag(s.author)}
+                <span class="time" title={new Date(s.ts).toLocaleString()}>{fmtTime(s.ts)}</span>
+                {#if s.pinned}<span class="status-pinned" title="Pinned to the top of this feed">{@render icoPin()}</span>{/if}
+                {#if s.id && statusEditingId !== s.id}
+                  <span class="status-actions">
+                    <button class="msg-action" type="button" title="Add reaction" aria-label="Add reaction" onclick={() => toggleStatusReactionPicker(s)}>{@render icoCat()}</button>
+                    {#if s.author === myFp}
+                      <button class="msg-action" type="button" title="Edit" aria-label="Edit announcement" onclick={() => startStatusEdit(s)}>✎</button>
+                    {/if}
+                    <button class="msg-action" type="button" title="More actions" aria-label="More actions" onclick={(e) => openMenu(e, statusMenu(s))}>⋯</button>
+                  </span>
+                {/if}
+              </span>
+              {#if s.id && statusEditingId === s.id}
+                <div class="msg-edit">
+                  <textarea
+                    bind:this={statusEditEl}
+                    bind:value={statusEditDraft}
+                    rows="2"
+                    onkeydown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); saveStatusEdit(s); } else if (e.key === "Escape") { e.preventDefault(); cancelStatusEdit(); } }}
+                  ></textarea>
+                  <div class="msg-edit-actions">
+                    <button class="ghost small" onclick={() => saveStatusEdit(s)}>Save</button>
+                    <button class="ghost small" onclick={cancelStatusEdit}>Cancel</button>
+                    <span class="muted small">Enter to save · Esc to cancel</span>
+                  </div>
+                </div>
+              {:else}
+                <span class="status-text">
+                  {@html renderMessage(s.text, myMentionName)}{#if s.edited}<span class="edited-tag muted" title={"edited " + new Date(s.edited).toLocaleString()}> (edited)</span>{/if}
                 </span>
-                <span class="status-text">{@html renderMessage(s.text, myMentionName)}</span>
-              </li>
+              {/if}
+              {#if s.reactions.length || (s.id && statusReactionPickerFor === s.id)}
+                <div class="reactions">
+                  {#each s.reactions as r (r.emoji)}
+                    {@const rcode = customEmojiCode(r.emoji)}
+                    <button
+                      class="reaction"
+                      class:mine={r.by.includes(myFp)}
+                      title={r.by.map(nameOf).join(", ")}
+                      aria-pressed={r.by.includes(myFp)}
+                      aria-label={`${r.emoji}, ${r.by.length}, ${r.by.includes(myFp) ? "remove your reaction" : "react"}`}
+                      onclick={() => toggleStatusReaction(s, r.emoji)}
+                    >
+                      {#if rcode && emojiUrls[rcode]}
+                        <img class="r-emoji-img" src={emojiUrls[rcode]} alt={r.emoji} />
+                      {:else}
+                        <span class="r-emoji">{r.emoji}</span>
+                      {/if}
+                      {r.by.length}
+                    </button>
+                  {/each}
+                  {#if s.id}
+                    <button class="reaction add-reaction" title="Add reaction" aria-label="Add reaction" onclick={() => toggleStatusReactionPicker(s)}>＋</button>
+                  {/if}
+                  {#if s.id && statusReactionPickerFor === s.id}
+                    <div class="reaction-picker" role="menu">
+                      {#each QUICK_EMOJI as e}
+                        <button class="qe" type="button" aria-label={`React with ${e}`} onclick={() => toggleStatusReaction(s, e)}>{e}</button>
+                      {/each}
+                      {#each Object.keys(emojiMap) as code}
+                        <button class="qe" type="button" aria-label={`React with :${code}:`} onclick={() => toggleStatusReaction(s, `:${code}:`)}>
+                          {#if emojiUrls[code]}<img src={emojiUrls[code]} alt={code} />{:else}<span class="muted small">:{code}:</span>{/if}
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </li>
+          {/snippet}
+          <!-- The header carries the two things a reader most wants to know about this feed before
+               reading it: who is allowed to post to it, and whether it will make a sound. -->
+          <h2 class="status-topline">
+            <span class="status-title">Announcements</span>
+            {#if canModerate}
+              <button
+                type="button"
+                class="status-chip"
+                class:on={statusPolicy}
+                disabled={statusPolicyBusy}
+                title={statusPolicy ? "Members may post here: click to close the feed to the owner and admins" : "Only the owner and admins post here: click to open the feed to every member"}
+                onclick={toggleStatusPolicy}
+              >◈ {statusPolicy ? "anyone may post" : "owner & admins post"}</button>
             {:else}
-              <li class="muted">No announcements yet.</li>
-            {/each}
-          </ul>
+              <span class="status-chip" class:on={statusPolicy} title="Who may post to this feed">◈ {statusPolicy ? "anyone may post" : "owner & admins post"}</span>
+            {/if}
+            <button
+              type="button"
+              class="status-chip"
+              class:on={statusCueOn}
+              disabled={!soundOn}
+              title={!soundOn
+                ? "Notification sounds are switched off for this device in Settings"
+                : statusCueOn
+                  ? "This server's news cue plays on this device: click to silence it here"
+                  : "This server's news cue is silent on this device: click to hear it here"}
+              onclick={toggleStatusCue}
+            >♪ {soundOn && statusCueOn ? "news cue on" : "news cue off"}</button>
+          </h2>
+          {#if canPostStatus}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <form
+              class="composer"
+              class:drag-over={dragOver}
+              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragleave={() => (dragOver = false)}
+              ondrop={(e) => onComposerDrop("status", e)}
+              onsubmit={(e) => { e.preventDefault(); postStatus(); }}
+            >
+              <label class="attach" title="Attach image / video / audio">
+                📎
+                <input
+                  type="file"
+                  accept="image/*,video/*,audio/*"
+                  multiple
+                  disabled={uploading}
+                  onchange={(e) => { embedFiles("status", e.currentTarget.files); e.currentTarget.value = ''; }}
+                />
+              </label>
+              {@render textEffectButton("announcement", "Announcement text effects")}
+              <textarea bind:this={announcementInputEl} bind:value={statusDraft} rows="1" onselect={() => onTextEffectSelection("announcement")} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Write an announcement…"}></textarea>
+              <button type="submit" disabled={uploading}>Post</button>
+            </form>
+          {:else}
+            <p class="muted small status-closed">Only the owner and admins post here.</p>
+          {/if}
+          <div class="status-board tab-pane" bind:this={statusEl} use:richClicks>
+            {#if pinnedStatuses.length}
+              <h3 class="ev-h"><span>Pinned</span></h3>
+              <ul class="status-list status-pins">
+                {#each pinnedStatuses as s}
+                  {@render statusCard(s)}
+                {/each}
+              </ul>
+            {/if}
+            <!-- Unkeyed, as this list has always been: a post old enough to predate minted ids has
+                 an empty one, and two of those would be the same key. Which card holds the open
+                 editor is decided by `statusEditingId` per row, not by list identity. -->
+            <ul class="status-list">
+              {#each statusFeed as s, i}
+                {@render statusCard(s)}
+                <!-- `statusDividerAt` names the OLDEST unread post, and this feed runs newest-first,
+                     so the boundary goes UNDER that row and everything above it is new. Drawn after
+                     the card for exactly that reason: above it would put the oldest unread post on
+                     the read side of its own boundary. It stays put while the surface is open even
+                     as the read mark advances past it, because a boundary that vanishes as you look
+                     at it tells you nothing. -->
+                {#if i === statusDividerAt}
+                  <li class="status-divider" aria-label="New announcements above"><span>NEW</span></li>
+                {/if}
+              {/each}
+              {#if !statusFeed.length && !pinnedStatuses.length}
+                <li class="muted">No announcements yet.</li>
+              {/if}
+            </ul>
+          </div>
         {:else if view === "wiki"}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
@@ -19032,9 +19597,11 @@
               {@const mentions = spaceMentionCounts[it.s.id] ?? 0}
               {@const voice = spaceVoiceCount(it.s.id)}
               {@const recent = it.s.unread.length > 0 || (spaceActivityAt[it.s.id] ?? 0) > nowTick - 5 * 60_000}
+              {@const heralds = spaceStatusCounts[it.s.id] ?? 0}
               <button
                 class="sp-srv"
                 class:sp-unread={it.s.unread.length > 0}
+                class:sp-heralded={heralds > 0}
                 class:sp-recent={recent}
                 class:sp-carried={it.carried}
                 class:sp-enter-target={spaceEntering === it.s.id}
@@ -19042,9 +19609,11 @@
                 class:sp-search-dim={!!spaceSearch && !spaceSearchMatches.some((s) => s.id === it.s.id)}
                 style={`left:${spaceVw / 2 + it.x}px; top:${spaceVh / 2 + it.y}px; --sp-s:${it.scale.toFixed(3)}; --sp-delay:${-((it.s.id % 13) * 0.17).toFixed(2)}s;${spaceAccents[it.s.id] ? ` --sp-a:${spaceAccents[it.s.id]};` : ""}`}
                 data-name={it.s.name}
-                title={`${it.s.name} · ${online} connected here${mentions ? ` · ${mentions} mention${mentions === 1 ? "" : "s"}` : ""}${voice ? ` · ${voice} in voice` : ""}`}
+                title={`${it.s.name} · ${online} connected here${mentions ? ` · ${mentions} mention${mentions === 1 ? "" : "s"}` : ""}${voice ? ` · ${voice} in voice` : ""}${heralds ? ` · ${heralds} unread announcement${heralds === 1 ? "" : "s"}` : ""}`}
                 onpointerdown={(e) => onSpaceServerDown(e, it.s.id)}
                 onclick={() => spaceIconClick(it.s.id)}
+                onmouseenter={() => (spaceHeraldHover = it.s.id)}
+                onmouseleave={() => { if (spaceHeraldHover === it.s.id) spaceHeraldHover = null; }}
                 use:contextMenu={() => spaceServerMenu(it.s)}
               >
                 {#if serverIcons[it.s.id] && appearance.icons !== "flat"}
@@ -19063,9 +19632,37 @@
                 {/if}
                 {#if mentions}<span class="sp-mention-flare" title={`${mentions} unseen mention${mentions === 1 ? "" : "s"}`}>!</span>{/if}
                 {#if voice}<span class="sp-voice-signal" title={`${voice} in voice`}><i></i><i></i><i></i></span>{/if}
+                {#if heralds}
+                  <!-- The herald: slow rings out of the billboard plus a pip in the one corner the
+                       other signals leave free. With motion off the rings settle into a single
+                       standing ring, so the beacon is still visible to someone who has asked the
+                       whole interface to hold still. -->
+                  <span class="sp-herald-ripple" class:still={fxMotionOff} aria-hidden="true"><i></i><i></i></span>
+                  <span class="sp-herald" title={`${heralds} unread announcement${heralds === 1 ? "" : "s"}`}>◈ {heralds}</span>
+                {/if}
               </button>
             {/each}
           </div>
+
+          {#if spaceHerald}
+            <!-- Display only, and deliberately outside the icon layer: it never takes the pointer,
+                 so a drag begun on the billboard under it keeps every event it would have had. -->
+            <div class="sp-herald-card" style={`left:${spaceHerald.left}px; top:${spaceHerald.top}px`} aria-hidden="true">
+              <span class="sp-herald-where">{spaceHerald.name}</span>
+              {#if spaceHerald.latest}
+                <span class="sp-herald-line">{msgSnippet(spaceHerald.latest.text, 90)}</span>
+                <!-- No author name: `nameOf` resolves against the server you are standing in, and
+                     this card describes one you are not, so it would attribute the post to whoever
+                     happens to share that fingerprint's profile here. -->
+                <span class="sp-herald-meta">
+                  <span>{relTime(nowTick - spaceHerald.latest.ts)} ago</span>
+                  <b>◈ {spaceHerald.count} unread</b>
+                </span>
+              {:else}
+                <span class="sp-herald-meta"><b>◈ {spaceHerald.count} unread</b></span>
+              {/if}
+            </div>
+          {/if}
 
           {#if spaceLasso}
             <svg class="sp-lasso" viewBox={`0 0 ${spaceVw} ${spaceVh}`} preserveAspectRatio="none" aria-hidden="true">

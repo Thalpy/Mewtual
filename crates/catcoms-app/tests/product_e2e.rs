@@ -1177,7 +1177,11 @@ async fn wiki_status_and_events_written_on_one_node_reach_the_other() {
         "with review off an owner's save applies immediately"
     );
 
-    alice.actor.post_status("the new grinder arrived").await;
+    alice
+        .actor
+        .post_status("the new grinder arrived")
+        .await
+        .expect("the owner may post to the status feed");
     let event_id = alice
         .actor
         .create_event(

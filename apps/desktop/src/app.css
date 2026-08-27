@@ -1155,6 +1155,67 @@ select {
   flex-shrink: 0;
 }
 
+/* --- Announcements: a per-server noticeboard, not a second chat ---
+   Posts are cards rather than rows: there are few of them, each is meant to be read once and
+   remembered, and the unread mark and the pin need somewhere to sit that a chat line has no room
+   for. The header carries the feed's two standing facts (who may post, whether it makes a sound). */
+.status-topline {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.status-title {
+  margin-right: 0.2rem;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+button.status-chip {
+  cursor: pointer;
+}
+
+button.status-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text-2);
+}
+
+button.status-chip:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.status-chip.on {
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--border));
+  background: var(--accent-dim);
+  color: var(--accent-hi);
+}
+
+.status-closed {
+  margin: 0.4rem 0 0;
+}
+
+.status-board {
+  display: flex;
+  flex-direction: column;
+}
+
 .status-list {
   list-style: none;
   margin: 0.4rem 0 0;
@@ -1165,9 +1226,55 @@ select {
 }
 
 .status-list li {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
+  padding: calc(var(--row-pad) + 4px) 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+}
+
+/* The same 3px accent edge the Inbox uses for an unseen row, so "you have not read this" looks
+   like one thing across the app rather than one thing per surface. */
+.status-list li.unread {
+  border-left-color: var(--accent);
+}
+
+/* Pinned posts sit in their own block above the feed, tinted so the boundary needs no heading to
+   be legible when the list is scrolled. */
+.status-pins li {
+  border-color: color-mix(in oklab, var(--accent) 34%, var(--border));
+  border-left-color: color-mix(in oklab, var(--accent) 34%, var(--border));
+  background: var(--accent-dim);
+}
+
+/* The unread boundary, wearing the same rule-and-label the event/section headings use. Qualified
+   by the list so it outranks the card styling every other row in that list is wearing. */
+.status-list li.status-divider {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+}
+
+.status-list li.status-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: color-mix(in oklab, var(--accent) 45%, transparent);
 }
 
 .status-head {
@@ -1175,6 +1282,26 @@ select {
   align-items: center;
   gap: 0.35rem;
   font-size: 0.75rem;
+}
+
+.status-pinned {
+  display: inline-flex;
+  color: var(--accent);
+}
+
+/* The row's actions keep out of the way until the card is hovered or one of them is focused,
+   exactly as a message's do; a noticeboard should read as prose first. */
+.status-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  opacity: 0;
+}
+
+.status-list li:hover .status-actions,
+.status-actions:focus-within {
+  opacity: 1;
 }
 
 .status-text {
@@ -1363,6 +1490,13 @@ button.ghost:hover {
   border-radius: 999px;
   padding: 0 0.4rem;
   line-height: 1.4;
+}
+
+/* A count of things WAITING rather than of things present: files and events count what a surface
+   holds, this one counts what has not been read, so it is coloured like the other unread marks. */
+.tab-count.unread {
+  background: var(--accent-dim);
+  color: var(--accent-hi);
 }
 
 .server-icon.gear {
@@ -3149,6 +3283,49 @@ button.primary:hover:not(:disabled) {
 .reply-tag {
   background: var(--accent-dim);
   color: var(--accent);
+}
+.pin-tag {
+  background: var(--bg-elev);
+  color: var(--muted);
+}
+/* The News tab's chips: a kind, optionally one server, and a way to clear the whole backlog. The
+   row sits above the sections so it reads as what narrows them rather than as part of one. */
+.news-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.news-chips {
+  display: flex;
+  gap: 2px;
+}
+.news-chip {
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.73rem;
+  cursor: pointer;
+}
+.news-chip:hover {
+  background: transparent;
+  border-color: var(--accent);
+  color: var(--text-2);
+}
+.news-chip.active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--text);
+}
+.news-server {
+  font-size: 0.73rem;
+  padding: 2px 6px;
+}
+.news-mark {
+  margin-left: auto;
 }
 .inbox-body {
   display: flex;
@@ -5363,7 +5540,7 @@ button.you-panel:hover {
 
 .status-list li.flash {
   animation: flashPulse 1.3s ease-out;
-  border-radius: var(--r);
+  border-radius: var(--r-lg);
 }
 
 /* --- Delivery ticks in the timestamp gutter (own messages; evidence-based) --- */
@@ -9748,6 +9925,104 @@ button.juke-expand:hover {
 }
 .sp-voice-signal i:nth-child(2) { height: 8px; animation-delay: -0.35s; }
 .sp-voice-signal i:nth-child(3) { height: 6px; animation-delay: -0.18s; }
+/* The herald: a billboard whose server has unread announcements. The pip takes the one corner the
+   other three signals leave free (unread top-right, mentions top-left, voice bottom-right), and the
+   rings are slower than every other motion here so the eye reads them as an announcement rather
+   than as activity. Clicking the billboard is unchanged: the herald says there is something to
+   read, and entering the server is still what reads it. */
+.sp-herald {
+  position: absolute;
+  left: -8px;
+  bottom: -7px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid color-mix(in oklab, var(--accent) 58%, var(--border));
+  color: var(--accent-hi);
+  font: 700 0.5rem/1.35 var(--mono);
+  white-space: nowrap;
+}
+.sp-heralded {
+  border-color: color-mix(in oklab, var(--accent) 72%, var(--sp-a, var(--accent)));
+}
+.sp-herald-ripple {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.sp-herald-ripple i {
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  opacity: calc(0.55 * var(--sp-glow, 1));
+  animation: sp-herald-ring 4.4s ease-out infinite;
+}
+.sp-herald-ripple i:nth-child(2) {
+  animation-delay: -2.2s;
+}
+/* Motion off: one standing ring, held at the size the animation starts from. The second ring only
+   exists to stagger the pulse, so it has nothing to say once nothing is pulsing. */
+.sp-herald-ripple.still i {
+  animation: none;
+  inset: -5px;
+  opacity: calc(0.7 * var(--sp-glow, 1));
+}
+.sp-herald-ripple.still i:nth-child(2) {
+  display: none;
+}
+@keyframes sp-herald-ring {
+  0% {
+    transform: scale(0.96);
+    opacity: calc(0.6 * var(--sp-glow, 1));
+  }
+  80%, 100% {
+    transform: scale(1.85);
+    opacity: 0;
+  }
+}
+/* The headline card. Positioned by the projection like the billboards are, and deliberately inert:
+   the space's drag, lasso and carry all run off pointer events on the layer underneath, so a card
+   that could take one would swallow the gesture that started on the server it is describing. */
+.sp-herald-card {
+  position: absolute;
+  z-index: 8;
+  width: 244px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 10px;
+  border-radius: var(--r-lg);
+  border: 1px solid color-mix(in oklab, var(--accent) 45%, var(--border));
+  background: var(--panel);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.sp-herald-where {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.sp-herald-line {
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.sp-herald-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  color: var(--muted);
+}
+.sp-herald-meta b {
+  color: var(--accent-hi);
+}
 @keyframes sp-glow {
   0%, 100% {
     box-shadow: 0 0 0 1px var(--sp-a, var(--accent)), 0 0 10px color-mix(in oklab, var(--sp-a, var(--accent)) 35%, transparent), 0 4px 14px rgba(0, 0, 0, 0.5);
