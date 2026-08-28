@@ -311,8 +311,12 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
 
     // --- recreate the closed joiner with the same identity and no fresh invite ---
     let (b_mesh, restarted_b_id, _) =
-        MeshService::new_tcp_with_key(b_key, std::slice::from_ref(&b_listen), &[])
+        MeshService::new_tcp_with_key(b_key.clone(), std::slice::from_ref(&b_listen), &[])
             .expect("rebuild Bob's transport without an initial dial");
+    let restarted_b_addr = timeout(WAIT, b_mesh.next_listen_addr())
+        .await
+        .expect("restarted joiner listen-addr timeout")
+        .expect("restarted joiner bound a listener");
     assert_eq!(
         restarted_b_id, b_id,
         "the persisted transport identity survives"
@@ -444,8 +448,90 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
         "the downloaded plaintext verifies against its content address"
     );
 
+    // --- changed listener recovery code -----------------------------------------------------
+    // Bring up Bob's replacement listener while the old one is still bound, which guarantees the
+    // address really changes rather than relying on an OS ephemeral-port allocation coincidence.
+    // The restored server intentionally receives no sealed fallback route, so neither side has a
+    // route that can reconnect until Alice applies Bob's current-member-signed code.
+    let changed_snapshot = bob
+        .snapshot()
+        .await
+        .expect("snapshot before address change");
+    let (changed_mesh, changed_b_id, _) =
+        MeshService::new_tcp_with_key(b_key, std::slice::from_ref(&b_listen), &[])
+            .expect("bind Bob's replacement listener");
+    assert_eq!(changed_b_id, b_id, "the transport key remains stable");
+    let changed_b_addr = timeout(WAIT, changed_mesh.next_listen_addr())
+        .await
+        .expect("changed joiner listen-addr timeout")
+        .expect("changed joiner bound a listener");
+    assert_ne!(
+        changed_b_addr, restarted_b_addr,
+        "the recovery test must actually replace the listener address"
+    );
+
     bob.shutdown().await;
     let _ = restarted_task.await;
+    let mut changed_bob = Server::restore(
+        &changed_snapshot,
+        changed_mesh,
+        OsCryptoRng,
+        Box::new(SystemClock),
+        "bob",
+    )
+    .expect("restore Bob on the changed listener");
+    changed_bob
+        .subscribe_control()
+        .await
+        .expect("subscribe the changed listener");
+    // A recovery route must terminate in the same transport identity that the signed member
+    // record claims. `next_listen_addr` reports only the socket, so append the stable peer id just
+    // as the desktop's advertised listener collector does before minting a code.
+    let changed_b_route = format!("{changed_b_addr}/p2p/{changed_b_id}");
+    let recovery = changed_bob
+        .mint_member_recovery_code(vec![changed_b_route])
+        .expect("mint a member-signed code for the changed listener");
+    let (bob, mut changed_events, changed_task) = spawn(changed_bob);
+    bob.open_channel(reconnect).await;
+
+    let applied = alice
+        .apply_member_recovery(recovery.encode())
+        .await
+        .expect("Alice verifies and submits Bob's recovery code");
+    assert_eq!(applied.submitted_routes, 1);
+    timeout(WAIT, async {
+        loop {
+            if alice.online_members().await.contains(&bob_fp)
+                && bob.online_members().await.contains(&alice_fp)
+            {
+                return;
+            }
+            let _ = timeout(Duration::from_millis(20), changed_events.recv()).await;
+            let _ = timeout(Duration::from_millis(20), alice_events.recv()).await;
+        }
+    })
+    .await
+    .expect("the changed listener recovery code never produced an authenticated member path");
+
+    bob.send_message(reconnect, "after changing address").await;
+    timeout(WAIT, async {
+        loop {
+            if alice
+                .messages(reconnect)
+                .await
+                .iter()
+                .any(|message| message.text == "after changing address")
+            {
+                return;
+            }
+            let _ = timeout(Duration::from_millis(20), alice_events.recv()).await;
+        }
+    })
+    .await
+    .expect("messaging did not resume after changed-address recovery");
+
+    bob.shutdown().await;
+    let _ = changed_task.await;
 
     alice.shutdown().await;
     let _ = alice_task.await;

@@ -25,6 +25,19 @@ export function scopeCurrent(captured: ViewScope, live: ViewScope): boolean {
   return captured.generation === live.generation && captured.server === live.server;
 }
 
+/// Whether a long create/join command may apply its result to the current frontend session.
+///
+/// Native generation checks stop stale work from committing after lock. This separate webview
+/// check covers the opposite ordering: native commit completed first, but its resolved Promise
+/// callback was still queued when the synchronous lock handler cleared the UI.
+export function sessionContinuationCurrent(
+  capturedGeneration: number,
+  liveGeneration: number,
+  locked: boolean,
+): boolean {
+  return !locked && capturedGeneration === liveGeneration;
+}
+
 /// The value `wikiReviewDays` carries before this server's policy has been read.
 ///
 /// Deliberately NOT zero: zero is a real policy meaning "edits publish immediately", so clearing to

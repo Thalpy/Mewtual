@@ -733,6 +733,7 @@ dependencies = [
  "catcoms-storage",
  "catcoms-wire",
  "futures",
+ "hex",
  "thiserror 2.0.18",
  "tracing",
  "zeroize",
@@ -4047,7 +4048,7 @@ dependencies = [
 
 [[package]]
 name = "mewtual-desktop"
-version = "0.3.0-alpha.10"
+version = "0.3.0-alpha.11"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4063,6 +4064,8 @@ dependencies = [
  "libp2p",
  "n0-watcher",
  "netwatch",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "tauri",

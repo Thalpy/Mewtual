@@ -282,7 +282,7 @@ TCP** (verified, incl. through a relay).
 | 11u | **desktop UI overhaul; tokens-first "operator terminal" redesign + user customisation.** A declared **token layer** replaced ~90 hardcoded hexes (the old CSS referenced `var(--accent, …)` etc. but *never declared them*; two palettes shipped at once); default preset **Nightshade** (purple-shifted slate) + `aurum`/`verdant`/`garnet`/`slate`, semantic colours have fixed jobs in every theme (green=presence, gold=mentions, red=danger). Reskin: flat **timestamp-gutter** message log (day dividers; grouping never crosses midnight), mono micro-labels, dedicated member column (online/offline groups, role abbrevs), global **status bar** (node/peers/vault/rendezvous/transfers/own-id), squircle rail with hand-drawn **SVG line-icons** (emoji chrome fully replaced; found+fixed `.call-start`'s green never applying under `button.ghost` specificity; the 📎 stays by request). Nav: **surfaces strip** atop the content column + **contextual sidebar** (chat=channels · wiki=pages · files=folders+actions · transfers=clear) killing the wiki double-sidebar; **Ctrl+K quick switcher**. Customisation: Settings → Appearance (preset, accent override, compact density, terminal-chrome scanlines, flatten-bubbles, flat-icons) persisted in `catcoms.appearance`; Discord-style **name styles** (gradient/neon effects, script/caps fonts, swatch picker; `fxClass` now **sanitizes peer-supplied effect ids** before they reach a class attribute); default unicode emoji under the server set in the picker. Frontend-only | ✅ `ba8c20a`, `4ff7b99` |
 | 11v | **server livery + shared server icon** ([`design-livery.md`](design-livery.md)); owner/admin publishes a colour scheme members inherit; per-server user opt-out. `DocType::Livery = 10`, one CRDT doc per server mirroring the Profile path end to end (lazy open, doc sync + **snapshot catch-up**, generic persistence); writes owner/admin-gated at the same policy layer as roles; sizes capped (`MAX_LIVERY_*`); values stored opaquely and **validated client-side** (preset allow-list, `#rrggbb`, colour-token allow-list; recolor-only by construction, semantics untouchable, no URL-shaped values). Precedence: user per-server opt-out > livery > own appearance. **Server icon** rides the same doc (additive `icon` key, 64 KiB cap, own `set_server_icon` command; `set_livery` is a read-modify-write that preserves it); rail shows it live via `livery-changed`, viewers can prefer monograms ("flat server icons"). Round-trip + icon-survival tests | ✅ `9d128fb`, `1bea14a` |
 | 11w | **verify dialog + channel topics.** Out-of-band **identity verification** surface (the eclipse banner's "verify a member out of band" finally has UI): both fingerprints in read-aloud 4-char groups, explicit wording, **local-only** verified marks (`catcoms.verified.<server>`, never gossiped, no crypto weight) → ✓ in roster/profile. **Channel topics**: there is *no backend channel registry* (id = BLAKE3(name), the list is frontend-local), so the topic is a ROOT **LWW scalar in the channel's own doc**; replicates/seals/catches-up like messages, 256-byte cap, **any member** may set (channels are open-create; a topic is content), rides `channel-updated`; header click-to-edit UI. Tests: topic round-trip/cap/multibyte, two-node convergence with a non-owner writer, sealed-store reload. Delivery-states design written ([`design-delivery-states.md`](design-delivery-states.md)): sync-derived (`their_heads` ⊇ op hash), **no read receipts by design**; D1–D3 in progress | ✅ `1757732`, `3c19d07` |
-| 11x | **delivery states + channel topics + member badges.** *Delivery* ([`design-delivery-states.md`](design-delivery-states.md)): neither design route existed (no automerge sync protocol; gossip + full-log pull), so delivery is **signed causal evidence**: a member counts once it authored a change descending from yours (`edit_tracked` returns the change hash at author time; `holders_of` answers a batch in one pass; counts are lower bounds that only rise, silent receipt invisible; **no read receipts by design**). Actor keeps a bounded id→hash map, emits `delivery-changed` (≤1/s/channel); UI: gutter ticks `✕ ◌ ~ ✓ ✓✓` (red only for "no peers reachable"; `--info` blue joins the fixed semantic set) with honest hover copy. *Topics*: no channel registry exists (id = BLAKE3(name)) so the topic is a ROOT LWW scalar in the channel's own doc (256 B, any member, `channel-updated`), click-to-edit in the header. *Badges*: `DocType::Badges = 11`, owner/admin-assigned `fp → {label, color}` chips (roster/profile/role-manager + inline editor); role names reserved backend-side, ignored client-side. Badges re-key to user ids under [`design-multi-device.md`](design-multi-device.md) M3 | ✅ `5b97524` `77f184d` `3c19d07` `1bc07ed` `790b5a2` |
+| 11x | **delivery states + channel topics + member badges.** *Delivery* ([`design-delivery-states.md`](design-delivery-states.md)): signed causal evidence remains the compatibility path, augmented in 2026-08 by an authenticated connected-only receipt for an exact bounded document/change target, so quiet recipients confirm without authoring a reply; evidence is positive within the current roster (counts can fall when membership changes) and **no read receipts exist by design**. Actor keeps a bounded id→hash map, emits a complete bounded `delivery-changed` snapshot (≤1/s/channel); UI replaces omitted/changed rows so stale holders cannot stand in for a new roster. Gutter ticks `✕ ◌ ~ ✓✓` (red only for "no peers reachable"; partial says only how many peers hold it; the double tick requires the whole roster) keep honest hover copy. *Topics*: no channel registry exists (id = BLAKE3(name)) so the topic is a ROOT LWW scalar in the channel's own doc (256 B, any member, `channel-updated`), click-to-edit in the header. *Badges*: `DocType::Badges = 11`, owner/admin-assigned `fp → {label, color}` chips (roster/profile/role-manager + inline editor); role names reserved backend-side, ignored client-side. Badges re-key to user ids under [`design-multi-device.md`](design-multi-device.md) M3 | ✅ `5b97524` `77f184d` `3c19d07` `1bc07ed` `790b5a2` |
 | 11y | **safe livery customisation + events/news + event refs + unlock minigames.** *Customisation* ([`design-livery-customisation-safety.md`](design-livery-customisation-safety.md); raw HTML/CSS is RCE/overlay-phishing in a `csp: null` WebView; **rejected**, incl. for profiles): radius/font/pattern as **catalog ids** in the existing bounded tokens map (client validates per key) + **custom cursor** as inline re-encoded image bytes (own `set_server_cursor`; `set_livery`/icon/cursor mutually preserving, test-pinned; read-side deep validation incl. a minimum-opaque-area anti-griefing floor; `, auto` fallback always). *Events*: the reserved `DocType::Calendar = 4` finally lands; status-path mirror, any-member create, author/owner-admin delete, ⧗ surface (Ctrl+7) + sidebar next-5; **news feed** = inbox Mentions｜News toggle aggregating upcoming events + recent status posts across servers client-side (wiki joins once saves carry timestamps). *Event refs*: `[title](event:ID)`; the "+" picker's fourth kind, seam-tested against the renderer grammar. *Unlock minigames*: Passphrase (recommended) ｜ Spell (24 glyphs, indexed) ｜ Melody (pitch-class piano: on-screen, DAW home row, **Web MIDI**); every method encodes to a scheme-prefixed string into the **unchanged vault KDF**, with a live entropy meter (red <28 / gold <44 / green ≥44 bits). CSP hardening for the WebView remains a named follow-up | ✅ `f253930` `e10515c` `c9a4e66` `e16efc4` `405e896` `5e73e5e` |
 | 11z | **multi-device M1+M2; pairing primitives + the grant ceremony** ([`design-multi-device.md`](design-multi-device.md) v2.2; **adversarially reviewed pre-commit**, BLOCKING findings fixed). Model per owner review: the **origin device is the identity root** (no account key; chain depth 1; master transferable-not-distributable via monotonic `MasterHandoff`), one device per single-use grant. M1 (`f6b7386`): `PairingRequest` / 6-digit **SAS** (domain-separated BLAKE3, bias < 2⁻⁴³) / `DeviceCertificate` + `DeviceRevocation` (carry-the-pubkey verification mirroring `InviteToken::verify_self`; names reject control/bidi/zero-width). M2 (`fe618d3`): the **offline-first paste ceremony**; begin → read (backend stores THE pending ceremony; **mint takes no blob**; TOCTOU closed, the human gate exists backend-side) → SAS-gated popup (pre-mint comparator = **device code**, SAS = post-delivery check; **scope disclosed**; decline **burns the nonce**) → passphrase-sealed all-server bundle (vault primitives verbatim + distinct HKDF label; ≥ 8-char transport passphrase; the sealed bundle is the only object ever linking per-server identities) → open (every cert verified FOR this device; certs **group-bound in the signed payload**). Per-server signing via a narrow `SignDeviceCert` actor command; keys never surface. Dead v1 account-key `cert.rs` (709 lines, zero users) deleted; `/v2` domains prevent cross-verify. M3 (admission via the owner-serialized queue) in progress | ✅ `e44bfe3` `cd8e300` `f6b7386` `fe618d3` |
 | 11z-2 | **multi-device M3–M6; admission, attribution, revocation, carry channels** ([`design-multi-device.md`](design-multi-device.md); M3 **adversarially reviewed**, 3 BLOCKING findings fixed). **M3+M4** (`ba8a8d1`): a companion joins by presenting its group-bound `DeviceCertificate` through the owner-serialized add queue (`CTRL_DEVICE_ADD`, single committer → no fork); the owner-signed `Devices` doc (`DocType::Devices`) gives every member the companion→origin map for attribution; UI nests companions under their member with a mono device tag, owner device panel, "join granted servers" flow. Review fixes: the `Devices` doc entry now carries the **owner's signature** (a certificate proves an origin *wanted* a device, not that the group *admitted* it; an unsigned entry can't poison the depth-1 gate or spoof attribution); the relay path **authenticates before republishing** onto the control topic; a **per-origin device cap** bounds owner-executed Adds; asymmetric freshness; the invite self-gate treats an unreadable roster as "relay, let the owner decide". **M5** (`cca00bb`): `revoke_device` (origin-signed `DeviceRevocation`, owner-enforced MLS Remove, honoured only when the origin matches the companion's *registered* origin so A can't evict B's device) + `remove_member` **cascades** to a kicked member's companion leaves. **M6** (`bcd5e17`): QR + a hand-rolled acoustic FSK modem carry pairing blobs (and invites), both unit-tested. **Deliberate deferral:** `MasterHandoff`'s primitive is committed but inert; consuming it (per-group master state + monotonic seq) is future work; the common flows don't need it. | ✅ `ba8a8d1` `cca00bb` `bcd5e17` |
@@ -340,7 +340,7 @@ local CYCLON age/source sampling, a manual anti-click-bounded redial, and TTL-aw
 renewal. Probe/result/forward/delivery are separate connected-only authenticated pushes, so no
 remote repair timeout is held inside the sole-owner actor; helpers never carry application
 traffic. Newer route withdrawal removes old sealed-cache addresses.
-The reported same-LAN close/reopen gap has a separate narrow repair: after a successful direct
+The reported same-LAN close/reopen gap has two narrow repairs. After a successful direct
 join, the joiner seals the exact outbound IP route that Noise authenticated for the named inviter
 in `ServerNet` v3 under an explicit `AuthorizedPeer` policy. Direct admission also attempts bounded
 PEX before the first post-join snapshot so the inviter's signed descriptor is present for the
@@ -352,11 +352,18 @@ and may migrate once only after a successful overlap in an unambiguous two-membe
 private/loopback route. A real TCP regression snapshots the joiner immediately after direct
 admission, closes both clients, rebinds/restores the inviter, then restores the joiner with the same
 transport identities; they reconnect without a fresh invite and exchange messages and a file.
-The test covers the protocol/store/reload ingredients, but still assembles restore and route
-installation directly rather than exercising the complete Tauri vault unlock loop; an automated
-two-process desktop seal/close/unlock/reload test remains explicit follow-up coverage.
-This does not provide mDNS/first contact, follow a changed listener address, or
-prove the device key controls its self-asserted transport key.
+For a changed listener or an already-isolated pair, a current member can now send a ten-minute
+`mewtual-reconnect-v1:` code out of band. The receiver verifies the server, current device
+membership, signature, expiry and terminal peer binding, then submits at most four literal-IP
+TCP/QUIC routes through the process-wide scheduler. Applying a code seals only consent for that
+peer; the pasted route becomes durable only after an ordinary Noise-authenticated connection.
+The real-TCP regression now also changes the listener while the old one remains bound, applies the
+code, reconnects and exchanges another message. A Tauri-bridge lifecycle regression seals a DM
+server and continuity state, rejects a wrong password, performs two independent vault
+open/restore/actor/shutdown cycles through the production restore seam, and verifies messages,
+DM metadata and reconnect consent each time.
+This does not provide mDNS/first contact or prove the device key controls its self-asserted
+transport key.
 The remaining honest limits are architectural: no repair can heal complete isolation, submitted
 dials cannot be recalled through the current seam, registration grants have no request id, and
 the reciprocal control protocol is not a dual-key device↔transport ownership proof. See
@@ -372,17 +379,18 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
 ### 2026-08-28 field-report triage
 
 - **Message close/reopen:** fixed for a direct join to a stable listener by the sealed authenticated
-  route described above, including immediate inviter PEX, a consent-preserving pre-v3
-  two-member-only migration, and a real TCP immediate-snapshot/shutdown/restore/two-way-message
-  plus file-transfer regression. Full Tauri vault lifecycle automation remains the test gap noted
-  above.
+  route described above. Changed listeners and already-isolated current members have the manual,
+  signed recovery-code path. Real TCP covers stable and changed-address recovery; the desktop
+  bridge covers two complete sealed-vault open/actor/shutdown cycles.
 - **Delivery indicator:** a send accepted by the local actor now says `sent · awaiting
-  confirmation`, not `sending…`. The present protocol still has no explicit receipt frame, so a
-  quiet recipient cannot confirm until it authors a causally-descending signed change. A genuine
-  immediate receipt remains a separate authenticated, replay/rate-bounded wire-protocol slice.
-- **DM first contact:** the reconnect route repairs an *established* two-person server. It cannot
-  make an expired two-way reply valid or discover two mutually unreachable first-time peers. Those
-  still need an overlapping reply window, a direct/rendezvous/relay route, or future mDNS.
+  confirmation`, not `sending…`. A newly applied remote op now generates a connected-only,
+  authenticated kind-18 receipt for the exact bounded document/change target, so a quiet recipient
+  can confirm without replying. It is a delivery receipt, never a read receipt.
+- **DM first contact:** the frontend now surfaces the native `join-reply-ready` code while Add
+  friend or Accept is still waiting, explains its deadline, and gives the inviter an in-DM paste/
+  replacement flow. An expired reply is not revived: retry Connect to create a fresh overlapping
+  60-second window. Member recovery remains only for an already-established server; it does not
+  grant membership or repair an expired first-contact reply.
 - **File trust policy:** not built. Explicit Download always saves locally today; other files and
   missing media chunks are fetched on demand, and inline media may fetch automatically when it is
   rendered. There is no trust-everyone/trust-specific/distrust-everyone selector and no automatic
@@ -390,12 +398,30 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   reveal rather than execute, which prevents a peer from turning the button itself into command or
   path execution. The content remains untrusted; later opening it in another application and
   automatic WebView media decoding retain parser/zero-day risk. See `THREAT-MODEL.md`.
-- **4K playback:** the product already serves original file bytes through bounded HTTP-style Range
-  windows and avoids whole-file IPC, but it does not transcode, recompress, negotiate a codec, or
-  adapt bitrate/resolution. Compressing the encrypted transfer would be ineffective; a real fix
-  needs pre-encryption media encoding/variants plus measured WebView decode and network-buffer
-  telemetry. H.265 is not selected or converted by this code, so support currently depends wholly
-  on the source file and installed platform media stack.
+- **4K screen streaming:** screen capture now has a live settings panel for 720p through 4K,
+  15--60 fps, quality priority and a per-full-resolution-viewer Mbps cap. Each receiver advertises
+  only the nearest display bucket (720/1080/1440/2160), dynamically derived from its Mewtual window
+  with hysteresis or fixed by the user; the sender independently scales/caps each peer and shows
+  per-peer plus aggregate upload estimates. A screen edge stays parked until its resolution,
+  bitrate and frame-rate cap applies; rejection pauses that edge or stops sharing if it cannot be
+  parked. Resize bursts are bounded to one active plus one latest pending mutation per peer. The
+  WebView performs the compressed WebRTC encode.
+  H.265/HEVC is preferred when both runtimes expose it, with AV1/VP9/H.264/VP8 fallbacks, and the UI
+  reports the codec actually observed in stats. There is still no application-owned offline media
+  transcoder or guarantee that a particular platform WebView offers H.265.
+- **Regression coverage added in this round:** real-TCP close/reopen and changed-route recovery;
+  recovery-code signature/group/device→peer/expiry/address limits; pending-consent persistence,
+  lost-update and establish+close evidence; restored-server capture-worker installation; explicit
+  receipt quiet-recipient/catch-up/error-prefix paths; current-roster and omitted-snapshot delivery
+  replacement; two independent sealed-vault restore/shutdown cycles with wrong-passphrase refusal;
+  lock-vs-deferred-command ordering; and pure streaming tests for receiver rounding/hysteresis,
+  actual-source scaling, burst coalescing, frame-rate/bitrate caps, rejected-cap parking, detached
+  first attachment and screen→camera invalidation.
+- **Remaining high-value integration coverage:** a two-native-process Tauri test that changes the
+  listener/interface and performs the human copy/paste recovery ceremony end to end; WebView-level
+  tests against each supported platform's real `RTCRtpSender`/codec implementation (including
+  H.265 availability and rejection behavior); and abrupt process termination at each recovery
+  persistence boundary. These need native/WebRTC harnesses rather than weaker unit substitutes.
 
 Status posts now use distinct `status_post/<random-id>` root maps rather than requiring concurrent
 authors to share/create one Automerge list. Readers and all mutations enumerate every legacy list

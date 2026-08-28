@@ -138,11 +138,16 @@ export const TAURI_COMMAND_GROUPS = {
     commands: ["map_call_port", "unmap_call_port"],
   },
   mesh_repair_boundary: {
-    boundary: "User-triggered member-route retry; native signed-record validation, anti-click cooldown and shared endpoint/process budgets remain authoritative.",
+    boundary: "User-triggered member-route retry and out-of-band recovery; current-roster signatures, canonical routes and shared endpoint/process budgets remain authoritative.",
     commands: [
       // The webview supplies only the registered server id. The actor selects current signed
       // records and cannot be made to dial a caller-supplied address, peer id or descriptor.
       "manual_fallback_redial",
+      // Mint exposes this device's bounded direct listener candidates in a short-lived signed code.
+      // Apply accepts an untrusted pasted string, but it cannot admit membership: the native actor
+      // verifies group/device/transport binding, current roster membership, expiry and address
+      // grammar before a bounded dial, then Noise authentication remains the connection boundary.
+      "mint_member_recovery", "apply_member_recovery",
     ],
   },
   device_pairing: {

@@ -1,10 +1,11 @@
 /**
  * What a delivery tick is allowed to claim (docs/design-delivery-states.md).
  *
- * There is no server to acknowledge a message. "Delivered to X" can only mean "X provably built on
- * the op", which the sync layer already knows, so every state here is evidence-based and the counts
- * only rise. The one thing this must never do is invent a negative: a red "nobody is reachable" is
- * a claim about the network, and not having heard anything yet is not that claim.
+ * There is no server to acknowledge a message. "Delivered to X" means X sent an authenticated
+ * receipt for the exact change or authored a causally-descending change. Both are sound positive
+ * evidence within the current roster; counts may fall when that roster changes. This must never
+ * invent a negative: a red
+ * "nobody is reachable" is a claim about the network, and silence is not that claim.
  *
  * Pure, so the honesty rules are testable without a webview.
  */
@@ -14,10 +15,8 @@ export type DeliveryVerdict =
   | "pending"
   /** Sent, with nobody having proved they hold it yet. */
   | "waiting"
-  /** Some of the reachable members have proved they hold it. */
+  /** At least one other member has proved it holds the message, but not the whole roster. */
   | "partial"
-  /** Every currently-reachable member has proved they hold it. */
-  | "reachable"
   /** Every other member of the roster has proved they hold it. */
   | "everyone"
   /** Nothing to send to, and nobody has it: it waits in the local doc for a peer to appear. */
@@ -70,7 +69,6 @@ export function deliveryVerdict(e: DeliveryEvidence): DeliveryVerdict | null {
     // Evidence of arrival can never be overridden by a reading of the live network. A peer that
     // confirmed and then went offline still holds the message; this is what painted a delivered
     // message red every time a connection flapped.
-    if (e.reachable !== null && e.reachable > 0 && e.delivered >= e.reachable) return "reachable";
     return "partial";
   }
   // Nobody holds it yet. Red needs a measurement saying the message cannot leave at all, and
@@ -87,8 +85,6 @@ export function deliveryGlyph(v: DeliveryVerdict): string {
       return "◌";
     case "partial":
       return "~";
-    case "reachable":
-      return "✓";
     case "everyone":
       return "✓✓";
     case "queued":
@@ -105,8 +101,6 @@ export function deliveryClass(v: DeliveryVerdict): string {
       return "d-wait";
     case "partial":
       return "d-part";
-    case "reachable":
-      return "d-ok";
     case "everyone":
       return "d-all";
     case "queued":
@@ -123,18 +117,14 @@ export function deliveryLabel(v: DeliveryVerdict, e: DeliveryEvidence): string {
     case "pending":
       return "saving…";
     case "waiting":
-      // The command already returned and the message is in the local replicated document. A
-      // quiet receiver cannot produce the causal-descendant evidence used by this protocol
-      // version, so calling this state "sending" makes a completed local send look stuck.
+      // The local write is complete. A receipt is best-effort over a live route, so calling this
+      // state "sending" would still make a completed local send look stuck during disconnection.
       return "sent · awaiting confirmation";
     case "partial":
-      // Phrased against the roster when nothing is reachable, because "1 of 0 reachable" is not a
-      // sentence. The message is held by somebody either way, which is the part that matters.
-      return e.reachable && e.reachable > 0
-        ? `delivering · ${delivered}/${e.reachable} peers`
-        : `held by ${plural(delivered, "peer")}`;
-    case "reachable":
-      return `delivered · ${plural(delivered, "peer")}`;
+      // We have holder identities and a separate reachable count, but not their intersection.
+      // Comparing the cardinalities would let an offline holder stand in for an unconfirmed live
+      // peer, so this claim deliberately says only what the positive evidence proves.
+      return `held by ${plural(delivered, "peer")}`;
     case "everyone":
       return `delivered · all ${plural(e.others, "member")}`;
     case "queued":
@@ -150,14 +140,10 @@ export function deliveryTip(v: DeliveryVerdict, e: DeliveryEvidence): string {
       return "Saving this message locally…";
     case "waiting":
       return e.reachable === null
-        ? "Sent. No delivery report yet; confirmations arrive as members build on the message."
-        : `Sent: no confirmations yet from ${plural(e.reachable, "reachable member")}. Silent receipt isn't visible; the count only rises.`;
+        ? "Sent. No authenticated delivery receipt or later causal proof has arrived yet."
+        : `Sent: no confirmations yet from ${plural(e.reachable, "reachable member")}. Receipts are best-effort; confirmations can change when the current roster changes.`;
     case "partial":
-      return e.reachable && e.reachable > 0
-        ? `Delivering: ${delivered} of ${e.reachable} reachable confirmed (${e.others} members in total). Members confirm by building on the message.`
-        : `Held by ${plural(delivered, "member")}, of ${e.others}. Nobody is reachable right now, so the rest catch up when they reconnect.`;
-    case "reachable":
-      return `Delivered to all ${plural(e.reachable ?? 0, "reachable member")} (${delivered}/${e.others} confirmed overall). Confirmation is proof-based: silent receivers may also have it.`;
+      return `Held by ${plural(delivered, "other member")}, of ${e.others}. Confirmation is an authenticated receipt or later causal proof; it does not identify whether those holders are connected now.`;
     case "everyone":
       return `Delivered to everyone: all ${plural(e.others, "other member")} proved they hold this message.`;
     case "queued":
@@ -166,19 +152,33 @@ export function deliveryTip(v: DeliveryVerdict, e: DeliveryEvidence): string {
 }
 
 /**
- * Merge a delivery report into what is already known, keeping the proved count from regressing.
+ * Replace the previous delivery report with the actor's current-roster snapshot.
  *
- * Confirmations are evidence: once a peer has built on a message it has it, and a later report
- * that happens to see fewer holders (a reset sync record, a peer that dropped) has not unproved
- * anything. Reachability is genuinely live and is taken as reported.
+ * Receipt evidence is durable inside one roster, but the backend deliberately filters holders
+ * through the current roster. Keeping a numeric maximum here would let a removed member's count
+ * stand in for a different current member and could falsely produce "everyone". Identity-keyed
+ * evidence (or a roster revision) would be needed before this count could safely be monotonic.
  */
 export function mergeDelivery(
-  previous: { delivered: number; reachable: number; any_peer: boolean } | undefined,
+  _previous: { delivered: number; reachable: number; any_peer: boolean } | undefined,
   next: { delivered: number; reachable: number; any_peer: boolean },
 ): { delivered: number; reachable: number; any_peer: boolean } {
-  return {
-    delivered: Math.max(previous?.delivered ?? 0, next.delivered),
-    reachable: next.reachable,
-    any_peer: next.any_peer,
-  };
+  return { ...next };
+}
+
+export type DeliveryReport = {
+  id: string;
+  delivered: number;
+  reachable: number;
+  any_peer: boolean;
+};
+
+/** Reconcile an actor event/query that is explicitly a complete bounded snapshot. */
+export function replaceDeliverySnapshot(
+  _previous: Readonly<Record<string, DeliveryReport>>,
+  states: readonly DeliveryReport[],
+): Record<string, DeliveryReport> {
+  const next: Record<string, DeliveryReport> = {};
+  for (const state of states) next[state.id] = { id: state.id, ...mergeDelivery(undefined, state) };
+  return next;
 }

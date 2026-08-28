@@ -12,10 +12,11 @@
 //! during the brief pre-event recovery work may at worst drop an in-flight catch-up,
 //! which the recovery machinery re-detects on the next inbound event (self-healing).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use catcoms_crypto::{DeviceCertificate, DeviceId};
-use catcoms_rt::{CryptoRngCore, MeshTransport, PeerId};
+use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -23,9 +24,10 @@ use catcoms_storage::{Cid, FileRef};
 
 use crate::{
     ChannelHead, ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileRange,
-    FileUsage, FilesView, InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView,
-    MessageStats, ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair,
-    SwitchboardOffer, WikiPendingEdit, WikiRevision,
+    FileUsage, FilesView, InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge,
+    MemberRecoveryApplied, MemberRecoveryCode, MemberRecoveryVerified, MemberView, MessageStats,
+    ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair, SwitchboardOffer,
+    WikiPendingEdit, WikiRevision,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -772,6 +774,25 @@ pub enum AppCommand {
     /// Replace the transient local-only reconnect hints after the bridge observes a currently
     /// live outbound member route. Validation and membership checks remain inside `ChannelSync`.
     SetLocalReconnectRoutes { routes: Vec<(PeerId, String)> },
+    /// Mint a short-lived, member-signed recovery code containing only safe direct listener
+    /// routes. The code is intended for an already-authorized group member over an out-of-band
+    /// channel; it is not an invitation and cannot add a device to the roster.
+    MintMemberRecovery {
+        candidates: Vec<String>,
+        reply: oneshot::Sender<Result<MemberRecoveryCode, String>>,
+    },
+    /// Authenticate a recovery code without performing its dial. The bridge persists this exact,
+    /// expiring peer authority before it sends [`AppCommand::ApplyMemberRecovery`].
+    VerifyMemberRecovery {
+        code: String,
+        reply: oneshot::Sender<Result<MemberRecoveryVerified, String>>,
+    },
+    /// Verify and submit the routes in another current member's recovery code. Authentication of
+    /// the resulting socket still happens in the transport handshake before it becomes live.
+    ApplyMemberRecovery {
+        code: String,
+        reply: oneshot::Sender<Result<MemberRecoveryApplied, String>>,
+    },
     /// Explicit user-triggered isolation repair. The sync layer retains the anti-click cooldown
     /// and every shared egress limit; the reply distinguishes no routes from safety deferral.
     ManualFallbackRedial {
@@ -2743,6 +2764,52 @@ impl ServerActor {
             .map_err(|_| ())
     }
 
+    /// Create an out-of-band recovery code for a member that has lost every usable route to this
+    /// server. Candidate filtering and signing happen inside the server actor, where the current
+    /// roster, transport identity and deterministic clock are authoritative.
+    pub async fn mint_member_recovery(
+        &self,
+        candidates: Vec<String>,
+    ) -> Result<MemberRecoveryCode, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::MintMemberRecovery {
+                candidates,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor stopped".to_string())?
+    }
+
+    /// Apply a current member's signed recovery code without granting membership or trusting the
+    /// advertised route. The eventual Noise-authenticated connection remains the proof boundary.
+    pub async fn apply_member_recovery(
+        &self,
+        code: String,
+    ) -> Result<MemberRecoveryApplied, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::ApplyMemberRecovery { code, reply: tx })
+            .await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor stopped".to_string())?
+    }
+
+    /// Authenticate a current member's signed recovery code without starting a socket attempt.
+    /// Applying repeats the checks, so expiry or roster movement between phases fails safely.
+    pub async fn verify_member_recovery(
+        &self,
+        code: String,
+    ) -> Result<MemberRecoveryVerified, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::VerifyMemberRecovery { code, reply: tx })
+            .await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor stopped".to_string())?
+    }
+
     /// (Re)publish this device's signed peer record. `seq` must come from this launch's reserved
     /// peer-record sequence block (see `ServerNet::reserve_record_seq_block`).
     pub async fn publish_self_record(&self, addresses: Vec<String>, seq: u64) {
@@ -2764,6 +2831,66 @@ impl ServerActor {
             .map_err(|_| "server actor stopped".to_string())?;
         rx.await.map_err(|_| "server actor stopped".to_string())
     }
+}
+
+/// Return the injected-clock delay until any dirty delivery snapshot can be recomputed.
+///
+/// A channel stays dirty when an acknowledgement arrives inside its throttle window. Without a
+/// separately scheduled wake, that acknowledgement would remain invisible until some unrelated
+/// later network event happened to drive the actor again.
+fn next_delivery_delay(
+    now_ms: u64,
+    delivery: &HashMap<u128, (u64, Vec<DeliveryState>)>,
+    dirty: &HashSet<u128>,
+) -> Option<u64> {
+    dirty
+        .iter()
+        .map(|channel| {
+            delivery.get(channel).map_or(0, |(last_ms, _)| {
+                DELIVERY_THROTTLE_MS.saturating_sub(now_ms.saturating_sub(*last_ms))
+            })
+        })
+        .min()
+}
+
+/// Recompute every dirty channel whose throttle has elapsed and return only changed snapshots.
+///
+/// Channel ids are sorted before processing so tests and UI event ordering do not depend on the
+/// randomized iteration order of a `HashSet`. Entries that are still throttled deliberately stay
+/// dirty; the actor's next loop iteration schedules the earliest remaining injected-clock wake.
+fn recompute_due_delivery<T, R>(
+    server: &mut Server<T, R>,
+    delivery: &mut HashMap<u128, (u64, Vec<DeliveryState>)>,
+    dirty: &mut HashSet<u128>,
+) -> Vec<(u128, Vec<DeliveryState>)>
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now_ms = server.runtime_clock().monotonic_ms();
+    let mut channels = dirty.iter().copied().collect::<Vec<_>>();
+    channels.sort_unstable();
+
+    let mut changed = Vec::new();
+    for channel in channels {
+        if delivery
+            .get(&channel)
+            .is_some_and(|(last_ms, _)| now_ms.saturating_sub(*last_ms) < DELIVERY_THROTTLE_MS)
+        {
+            continue;
+        }
+
+        let states = server.delivery_snapshot(channel);
+        dirty.remove(&channel);
+        let did_change = match delivery.insert(channel, (now_ms, states.clone())) {
+            Some((_, previous)) => previous != states,
+            None => !states.is_empty(),
+        };
+        if did_change {
+            changed.push((channel, states));
+        }
+    }
+    changed
 }
 
 /// Move `server` into a background task. Returns a [`ServerActor`] handle, a receiver of
@@ -2874,7 +3001,22 @@ where
         // Per channel: when delivery state was last recomputed, and what it was; the throttle
         // plus the change detector for `DeliveryChanged`.
         let mut delivery: HashMap<u128, (u64, Vec<DeliveryState>)> = HashMap::new();
+        // A sync event inside the throttle window must not be forgotten. Dirty channels are
+        // coalesced here and revisited by an injected-clock timer even if the network goes idle.
+        let mut delivery_dirty = HashSet::new();
         loop {
+            let delivery_clock = server.runtime_clock();
+            let delivery_delay =
+                next_delivery_delay(delivery_clock.monotonic_ms(), &delivery, &delivery_dirty);
+            let delivery_wake = async move {
+                match delivery_delay {
+                    Some(delay_ms) => {
+                        delivery_clock.sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::pin!(delivery_wake);
             tokio::select! {
                 biased;
                 // `begin` unwraps the envelope and adopts the caller's operation for as long as
@@ -3863,6 +4005,25 @@ where
                     Some(AppCommand::SetLocalReconnectRoutes { routes }) => {
                         server.set_local_reconnect_routes(routes);
                     }
+                    Some(AppCommand::MintMemberRecovery { candidates, reply }) => {
+                        let result = server
+                            .mint_member_recovery_code(candidates)
+                            .map_err(|error| error.to_string());
+                        let _ = reply.send(result);
+                    }
+                    Some(AppCommand::VerifyMemberRecovery { code, reply }) => {
+                        let result = server
+                            .verify_member_recovery_code(&code)
+                            .map_err(|error| error.to_string());
+                        let _ = reply.send(result);
+                    }
+                    Some(AppCommand::ApplyMemberRecovery { code, reply }) => {
+                        let result = server
+                            .apply_member_recovery_code(&code)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = reply.send(result);
+                    }
                     Some(AppCommand::ManualFallbackRedial { reply }) => {
                         let outcome = server.manual_fallback_redial().await;
                         let _ = reply.send(outcome);
@@ -3922,6 +4083,21 @@ where
                     Some(AppCommand::Shutdown) | None => {
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
+                    }
+                },
+                // A receipt may be the final network event in a quiet room. Wake from the same
+                // injected clock used to start the throttle so the last coalesced state is still
+                // surfaced without waiting for unrelated traffic.
+                _ = &mut delivery_wake => {
+                    event_tx.idle();
+                    for (channel, states) in recompute_due_delivery(
+                        &mut server,
+                        &mut delivery,
+                        &mut delivery_dirty,
+                    ) {
+                        let _ = event_tx
+                            .send(AppEvent::DeliveryChanged { channel, states })
+                            .await;
                     }
                 },
                 // Work nobody asked for. An op arriving from a peer is not the consequence of the
@@ -4008,24 +4184,17 @@ where
                         }
                         // Delivery: a peer's inbound op may be the evidence that it received one of
                         // our messages. Recomputing walks the channel's change graph, so it is
-                        // rate-limited per channel; the event then fires only on a real change.
-                        for channel in counts.keys().copied().collect::<Vec<_>>() {
-                            let now = server.now_ms();
-                            if let Some((at, _)) = delivery.get(&channel) {
-                                if now.saturating_sub(*at) < DELIVERY_THROTTLE_MS {
-                                    continue;
-                                }
-                            }
-                            let states = server.delivery_snapshot(channel);
-                            let changed = match delivery.insert(channel, (now, states.clone())) {
-                                Some((_, previous)) => previous != states,
-                                None => !states.is_empty(),
-                            };
-                            if changed {
-                                let _ = event_tx
-                                    .send(AppEvent::DeliveryChanged { channel, states })
-                                    .await;
-                            }
+                        // rate-limited per channel; throttled channels remain dirty and receive a
+                        // deterministic timer wake if no later network event arrives.
+                        delivery_dirty.extend(counts.keys().copied());
+                        for (channel, states) in recompute_due_delivery(
+                            &mut server,
+                            &mut delivery,
+                            &mut delivery_dirty,
+                        ) {
+                            let _ = event_tx
+                                .send(AppEvent::DeliveryChanged { channel, states })
+                                .await;
                         }
                         // A DM (friend) request may have arrived over this group; surface a change.
                         if dm_requests_changed(&server, &mut last_dm_requests) {
@@ -4455,7 +4624,7 @@ async fn sync_profiles<T, R>(
 mod tests {
     use super::*;
     use crate::Server;
-    use catcoms_mls::MlsDevice;
+    use catcoms_mls::{InviteToken, MlsDevice};
     use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
@@ -4491,11 +4660,21 @@ mod tests {
         name: &str,
         seed: u64,
     ) -> Server<MemNetwork, ChaCha20Rng> {
+        founder_with_clock(hub, peer, name, seed, &ManualClock::new(1_000))
+    }
+
+    fn founder_with_clock(
+        hub: &std::sync::Arc<Hub>,
+        peer: PeerId,
+        name: &str,
+        seed: u64,
+        clock: &ManualClock,
+    ) -> Server<MemNetwork, ChaCha20Rng> {
         Server::found(
             hub.join(peer),
             MlsDevice::generate().unwrap(),
             ChaCha20Rng::seed_from_u64(seed),
-            Box::new(ManualClock::new(1_000)),
+            Box::new(clock.clone()),
             name,
         )
         .unwrap()
@@ -4504,6 +4683,23 @@ mod tests {
     /// Drain events until the next `ChannelUpdated` for `channel`, returning what it says moved.
     async fn next_change(events: &mut mpsc::Receiver<TracedEvent>, channel: u128) -> ChannelChange {
         next_traced_change(events, channel).await.1
+    }
+
+    async fn wait_for_appended(events: &mut mpsc::Receiver<TracedEvent>, channel: u128) {
+        loop {
+            match events.recv().await {
+                Some(TracedEvent {
+                    event:
+                        AppEvent::ChannelUpdated {
+                            channel: updated,
+                            change,
+                        },
+                    ..
+                }) if updated == channel && change.messages_appended => return,
+                Some(_) => continue,
+                None => panic!("recipient actor closed"),
+            }
+        }
     }
 
     /// As [`next_change`], but keeping the operation the event was attributed to.
@@ -4907,6 +5103,158 @@ mod tests {
         bob.shutdown().await;
         let _ = alice_handle.await;
         let _ = bob_handle.await;
+    }
+
+    /// Two acknowledgements can arrive during one throttle interval and then the room can go
+    /// completely quiet. The second receipt still needs to reach the UI: relying on a third
+    /// network event left the last sender status stuck indefinitely.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_throttled_delivery_receipt_gets_an_injected_clock_wake() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let alice_clock = ManualClock::new(1_000);
+        let mut alice_srv = founder_with_clock(&hub, alice_peer, "alice", 1, &alice_clock);
+        alice_srv.subscribe_control().await.unwrap();
+        alice_srv.open_channel(GENERAL).await.unwrap();
+        alice_srv
+            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/22487".into()], 1)
+            .unwrap();
+        let alice_record = alice_srv.sync.self_record().unwrap().clone();
+        let bob_invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (alice, mut alice_events, alice_handle) = spawn(alice_srv);
+
+        let mut bob_srv = Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(2),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+            alice_peer,
+            &bob_invite,
+        )
+        .await
+        .unwrap();
+        bob_srv.subscribe_control().await.unwrap();
+        assert!(bob_srv.sync.ingest_peer_record(alice_record.clone()));
+        let mut bob_connections = catcoms_sync::PreOwnerConnectionHandoff::default();
+        bob_connections.observe(&catcoms_rt::TransportEvent::PeerConnected(alice_peer));
+        bob_srv.sync.adopt_pre_owner_connections(bob_connections);
+
+        // Minting through the actor guarantees the second invite includes Bob's committed
+        // membership rather than using Alice's pre-join group state.
+        let carol_invite = alice
+            .mint_invite([8u8; 16], u64::MAX, vec![])
+            .await
+            .unwrap();
+        let carol_invite = InviteToken::decode(&carol_invite).unwrap();
+        let mut carol_srv = Server::join(
+            hub.join(PeerId::from_u64(3)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(3),
+            Box::new(ManualClock::new(1_000)),
+            "carol",
+            alice_peer,
+            &carol_invite,
+        )
+        .await
+        .unwrap();
+        assert!(carol_srv.sync.ingest_peer_record(alice_record));
+        let mut carol_connections = catcoms_sync::PreOwnerConnectionHandoff::default();
+        carol_connections.observe(&catcoms_rt::TransportEvent::PeerConnected(alice_peer));
+        carol_srv
+            .sync
+            .adopt_pre_owner_connections(carol_connections);
+
+        // Bob was intentionally not spawned yet, so Carol's membership commit is queued at his
+        // transport and can be applied deterministically before Alice authors at the new epoch.
+        timeout(Duration::from_secs(10), async {
+            while bob_srv.member_count() != 3 {
+                assert!(bob_srv.sync_once().await.unwrap());
+            }
+        })
+        .await
+        .expect("Bob did not learn Carol's membership");
+
+        let (bob, mut bob_events, bob_handle) = spawn(bob_srv);
+        bob.open_channel(GENERAL).await;
+        let (carol, mut carol_events, carol_handle) = spawn(carol_srv);
+        carol.open_channel(GENERAL).await;
+
+        alice.send_message(GENERAL, "quiet acknowledgement").await;
+        timeout(
+            Duration::from_secs(10),
+            wait_for_appended(&mut bob_events, GENERAL),
+        )
+        .await
+        .expect("Bob did not receive Alice's message");
+        timeout(
+            Duration::from_secs(10),
+            wait_for_appended(&mut carol_events, GENERAL),
+        )
+        .await
+        .expect("Carol did not receive Alice's message");
+
+        // Other post-send protocol traffic can establish the throttled baseline at zero before
+        // the first receipt arrives. Poll the underlying authenticated state slowly enough to
+        // leave the biased command arm idle between reads. This establishes that both requests
+        // were accepted while the injected clock remains fixed, not by introducing a third
+        // network event.
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if alice
+                    .delivery_snapshot(GENERAL)
+                    .await
+                    .first()
+                    .is_some_and(|state| state.delivered == 2)
+                {
+                    return;
+                }
+                // Yield without advancing either wall or monotonic time. The actor can service
+                // its network arm, while the throttle remains pinned at the original instant.
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Alice did not authenticate both receipts");
+
+        while let Ok(event) = alice_events.try_recv() {
+            if let AppEvent::DeliveryChanged { channel, states } = event.event {
+                if channel == GENERAL {
+                    let delivered = states.first().map_or(0, |state| state.delivered);
+                    assert_ne!(delivered, 2, "the throttle elapsed before clock advance");
+                }
+            }
+        }
+
+        alice_clock.advance_ms(DELIVERY_THROTTLE_MS);
+        let final_delivered = timeout(Duration::from_secs(10), async {
+            loop {
+                match alice_events.recv().await {
+                    Some(TracedEvent {
+                        event: AppEvent::DeliveryChanged { channel, states },
+                        ..
+                    }) if channel == GENERAL => {
+                        if let Some(state) = states.first() {
+                            if state.delivered == 2 {
+                                return state.delivered;
+                            }
+                        }
+                    }
+                    Some(_) => continue,
+                    None => panic!("Alice's actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("the dirty delivery snapshot did not receive its timer wake");
+        assert_eq!(final_delivered, 2);
+
+        alice.shutdown().await;
+        bob.shutdown().await;
+        carol.shutdown().await;
+        let _ = alice_handle.await;
+        let _ = bob_handle.await;
+        let _ = carol_handle.await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -5,6 +5,7 @@ import {
   mayEditWikiStructure,
   mayPublishLivery,
   moderationSurfaceOpen,
+  sessionContinuationCurrent,
   scopeCurrent,
 } from "./viewscope.ts";
 
@@ -28,6 +29,12 @@ test("no active group accepts nothing", () => {
   assert.equal(scopeCurrent({ generation: 5, server: 7 }, { generation: 5, server: null }), false);
   // And a read issued with no group cannot claim one that has since opened.
   assert.equal(scopeCurrent({ generation: 5, server: null }, { generation: 5, server: 7 }), false);
+});
+
+test("a deferred create or join result cannot repopulate an explicitly locked UI", () => {
+  assert.equal(sessionContinuationCurrent(4, 4, false), true);
+  assert.equal(sessionContinuationCurrent(4, 5, false), false);
+  assert.equal(sessionContinuationCurrent(4, 4, true), false);
 });
 
 test("an unread wiki policy denies the structural controls", () => {

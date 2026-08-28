@@ -1,6 +1,6 @@
 [package]
 name = "mewtual-desktop"
-version = "0.3.0-alpha.10"
+version = "0.3.0-alpha.11"
 edition = "2021"
 rust-version = "1.89"
 publish = false
@@ -42,6 +42,8 @@ tauri-plugin-process = "2"
 
 [dev-dependencies]
 tempfile = "3"
+rand_chacha = "0.3"
+rand_core = "0.6"
 
 # Own workspace so the heavy Tauri/webview deps stay out of the root `cargo test --all`.
 [workspace]

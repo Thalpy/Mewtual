@@ -25,6 +25,17 @@ use crate::ReplError;
 /// target takes one bit of the propagation mask the single DAG pass carries.
 pub const MAX_DELIVERY_TARGETS: usize = 64;
 
+/// Authenticated metadata about one newly applied remote operation.
+///
+/// The sync layer uses this only after [`EncryptedDoc`] has decrypted the sealed frame, verified
+/// the inner device signature and accepted the Automerge change. Exposing the author and stable
+/// change hash here avoids trying to infer either identity from the gossipsub forwarding peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppliedOp {
+    pub author_device: DeviceId,
+    pub change: ChangeHash,
+}
+
 /// One encrypted, replicated CRDT document.
 pub struct EncryptedDoc {
     doc_type: DocType,
@@ -258,13 +269,26 @@ impl EncryptedDoc {
         group: &ServerGroup,
         device: &MlsDevice,
     ) -> Result<bool, ReplError> {
+        self.ingest_tracked(sealed, group, device)
+            .map(|applied| applied.is_some())
+    }
+
+    /// [`Self::ingest`], returning verified author/change metadata for a newly applied op.
+    /// Duplicate ops return `None`, so callers cannot emit duplicate acknowledgements merely
+    /// because gossipsub delivered the same ciphertext through more than one mesh edge.
+    pub fn ingest_tracked(
+        &mut self,
+        sealed: &SealedOp,
+        group: &ServerGroup,
+        device: &MlsDevice,
+    ) -> Result<Option<AppliedOp>, ReplError> {
         self.check_doc(sealed.doc_type, sealed.doc_id)?;
         if sealed.epoch != group.epoch() {
             return Err(ReplError::EpochUnavailable(sealed.epoch));
         }
         let key = group.channel_secret(device, self.doc_type, self.doc_id)?;
         let op = sealed.open(&key)?;
-        self.apply_signed(op)
+        self.apply_signed_tracked(op)
     }
 
     /// Decrypt, verify and apply an inbound sealed op using an **externally
@@ -287,12 +311,23 @@ impl EncryptedDoc {
         expected_epoch: u64,
         key: &[u8; 32],
     ) -> Result<bool, ReplError> {
+        self.ingest_with_key_tracked(sealed, expected_epoch, key)
+            .map(|applied| applied.is_some())
+    }
+
+    /// [`Self::ingest_with_key`], returning verified metadata for a newly applied past-epoch op.
+    pub fn ingest_with_key_tracked(
+        &mut self,
+        sealed: &SealedOp,
+        expected_epoch: u64,
+        key: &[u8; 32],
+    ) -> Result<Option<AppliedOp>, ReplError> {
         self.check_doc(sealed.doc_type, sealed.doc_id)?;
         if sealed.epoch != expected_epoch {
             return Err(ReplError::EpochUnavailable(sealed.epoch));
         }
         let op = sealed.open(key)?;
-        self.apply_signed(op)
+        self.apply_signed_tracked(op)
     }
 
     /// Export the full signed-op log, re-sealed under the current epoch, so a
@@ -318,36 +353,69 @@ impl EncryptedDoc {
         group: &ServerGroup,
         device: &MlsDevice,
     ) -> Result<usize, ReplError> {
-        let key = group.channel_secret(device, self.doc_type, self.doc_id)?;
-        let mut applied = 0;
-        for sealed in ops {
-            self.check_doc(sealed.doc_type, sealed.doc_id)?;
-            if sealed.epoch != group.epoch() {
-                return Err(ReplError::EpochUnavailable(sealed.epoch));
-            }
-            let op = sealed.open(&key)?;
-            if self.apply_signed(op)? {
-                applied += 1;
-            }
-        }
-        Ok(applied)
+        let (applied, terminal) = self.import_catchup_tracked(ops, group, device);
+        terminal.map(|()| applied.len())
     }
 
-    fn apply_signed(&mut self, op: SignedOp) -> Result<bool, ReplError> {
+    /// [`Self::import_catchup`], returning verified author/change metadata for every newly
+    /// applied op. The sync owner uses this to acknowledge messages learned while it was offline;
+    /// live gossip and catch-up must not have different delivery semantics.
+    pub fn import_catchup_tracked(
+        &mut self,
+        ops: &[SealedOp],
+        group: &ServerGroup,
+        device: &MlsDevice,
+    ) -> (Vec<AppliedOp>, Result<(), ReplError>) {
+        let key = match group.channel_secret(device, self.doc_type, self.doc_id) {
+            Ok(key) => key,
+            Err(error) => return (Vec::new(), Err(error.into())),
+        };
+        let mut applied = Vec::new();
+        for sealed in ops {
+            if let Err(error) = self.check_doc(sealed.doc_type, sealed.doc_id) {
+                return (applied, Err(error));
+            }
+            if sealed.epoch != group.epoch() {
+                return (applied, Err(ReplError::EpochUnavailable(sealed.epoch)));
+            }
+            let op = match sealed.open(&key) {
+                Ok(op) => op,
+                Err(error) => return (applied, Err(error)),
+            };
+            match self.apply_signed_tracked(op) {
+                Ok(Some(tracked)) => applied.push(tracked),
+                Ok(None) => {}
+                Err(error) => return (applied, Err(error)),
+            }
+        }
+        (applied, Ok(()))
+    }
+
+    fn apply_signed_tracked(&mut self, op: SignedOp) -> Result<Option<AppliedOp>, ReplError> {
         self.check_doc(op.doc_type, op.doc_id)?;
         let hash = op.hash();
         if self.applied.contains(&hash) {
-            return Ok(false);
+            return Ok(None);
         }
         if !op.verify() {
             return Err(ReplError::BadSignature);
         }
+        // A locally authored SignedOp always carries exactly one Automerge change. Parse that
+        // exact frame before moving it into the document so a receipt can name a stable hash;
+        // malformed or multi-change bytes fail closed exactly as load_incremental would.
+        let change = Change::from_bytes(op.delta.clone())
+            .map_err(|e| ReplError::Automerge(e.to_string()))?
+            .hash();
+        let author_device = op.author_device;
         self.doc
             .load_incremental(&op.delta)
             .map_err(|e| ReplError::Automerge(e.to_string()))?;
         self.applied.insert(hash);
         self.log.push(op);
-        Ok(true)
+        Ok(Some(AppliedOp {
+            author_device,
+            change,
+        }))
     }
 
     fn record(&mut self, op: SignedOp) {

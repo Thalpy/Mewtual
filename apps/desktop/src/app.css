@@ -2664,6 +2664,48 @@ button.primary:hover:not(:disabled) {
 .dm-form textarea {
   width: 100%;
 }
+.dm-reply-ready,
+.member-recovery {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 8px 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--bg-elev);
+}
+.dm-reply-ready {
+  border-color: color-mix(in oklab, var(--warn) 55%, var(--border));
+}
+.dm-reply-ready p,
+.member-recovery p { margin: 0; line-height: 1.4; }
+.member-recovery header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.member-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.member-recovery label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dm-connection-repair {
+  margin-top: 8px;
+  padding: 7px;
+  border-top: 1px solid var(--border);
+}
+.dm-connection-repair > summary {
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: 0.72rem;
+}
+.dm-connection-repair > .invite-code { margin: 7px 0; }
 .dm-list {
   list-style: none;
   margin: 0.4rem 0 0;
@@ -8444,13 +8486,134 @@ button.focus-leave:hover {
   border-top: none;
 }
 
-/* Six actions now share the stage's self row, so the grid and its labels both tighten. */
+/* Seven actions now share the stage's self row, so the grid and its labels both tighten. */
 .stage-acts {
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(7, 1fr);
 }
 .stage-acts .stage-act-lbl {
   font-size: 0.52rem;
   letter-spacing: 0.04em;
+}
+
+/* Screen-stream controls are deliberately embedded in the live call surfaces: settings can be
+   changed while the browser capture is running, and the per-peer rows immediately expose the
+   mesh multiplication that a single "quality" slider would hide. */
+.stream-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--bg-elev);
+  color: var(--text-2);
+  text-align: left;
+}
+.stream-panel-head,
+.stream-panel-head > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.stream-panel-head { justify-content: space-between; }
+.stream-panel-head strong { color: var(--text); font-size: 0.75rem; }
+.stream-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+.stream-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  font-size: 0.66rem;
+  color: var(--muted);
+}
+.stream-fields select,
+.stream-fields input {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 6px;
+  font-size: 0.7rem;
+}
+.stream-quality {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.stream-quality legend {
+  grid-column: 1 / -1;
+  margin-bottom: 3px;
+  font-size: 0.66rem;
+  color: var(--muted);
+}
+.stream-quality button {
+  padding: 5px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 0.64rem;
+}
+.stream-quality button.active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.stream-summary {
+  display: grid;
+  gap: 3px;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  line-height: 1.4;
+}
+.stream-summary b { color: var(--text); }
+.stream-warning {
+  margin: 0;
+  padding: 7px;
+  border: 1px solid var(--warn);
+  border-radius: var(--r);
+  color: var(--warn);
+  font-size: 0.67rem;
+  line-height: 1.4;
+}
+.stream-peers {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.stream-peers li {
+  display: grid;
+  grid-template-columns: minmax(70px, 0.8fr) 1.35fr 1fr;
+  gap: 6px;
+  padding: 5px 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  font-family: var(--mono);
+  font-size: 0.6rem;
+}
+.stream-peers li span:first-child {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.focus-stream-panel {
+  width: min(720px, calc(100% - 24px));
+  max-height: 42vh;
+  margin: 0 auto 10px;
+  overflow-y: auto;
+  flex: none;
+}
+
+@media (max-width: 760px) {
+  .stream-fields,
+  .stream-peers li { grid-template-columns: 1fr; }
 }
 
 /* --- wiki: nested page tree, history browser, edit review (11x) --------------------- */

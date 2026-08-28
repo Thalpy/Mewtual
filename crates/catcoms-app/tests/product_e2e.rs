@@ -902,6 +902,8 @@ async fn a_restarted_server_recovers_its_state_and_re_finds_its_peers_without_a_
         record_seq: 0,
         reconnect_routes: Vec::new(),
         reconnect_policy: ReconnectPolicy::Disabled,
+        pending_recovery_peer: None,
+        pending_recovery_expires_at_ms: 0,
     };
     alice.seq = net.reserve_record_seq_block() - 65_536;
     alice.publish_record(advertised(1)).await;

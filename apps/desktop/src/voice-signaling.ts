@@ -37,7 +37,7 @@ export function heartbeatRecovery(input: {
 }
 
 /** What a peer says about itself: the two mute states plus which video slot they are filling. */
-export type PeerState = { mic: boolean; inst: boolean; vid: number };
+export type PeerState = { mic: boolean; inst: boolean; vid: number; rx: 720 | 1080 | 1440 | 2160 };
 
 /**
  * Fold a peer's broadcast state into what we already hold for them.
@@ -51,12 +51,17 @@ export type PeerState = { mic: boolean; inst: boolean; vid: number };
  */
 export function mergePeerState(
   prev: PeerState | undefined,
-  msg: { mic?: unknown; inst?: unknown; vid?: unknown },
+  msg: { mic?: unknown; inst?: unknown; vid?: unknown; rx?: unknown },
 ): PeerState {
+  const receiveHeight =
+    msg.rx === 720 || msg.rx === 1080 || msg.rx === 1440 || msg.rx === 2160
+      ? msg.rx
+      : prev?.rx ?? 1080;
   return {
     mic: msg.mic === 1,
     inst: msg.inst === 1,
     vid: typeof msg.vid === "number" ? msg.vid : prev?.vid ?? 0,
+    rx: receiveHeight,
   };
 }
 

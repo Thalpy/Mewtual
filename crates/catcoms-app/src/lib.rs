@@ -15,6 +15,7 @@
 //! management land with the Tauri bridge (8b), where the real async runtime lives.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use automerge::transaction::Transactable;
 use automerge::{
@@ -41,8 +42,9 @@ use catcoms_sync::{
     PreOwnerConnectionHandoff, SyncError, ROLES_DOC,
 };
 pub use catcoms_sync::{
-    peer_addrs_from_snapshot, InviteJoinPlan, JoinAttempt, JoinOutcome, SwitchboardOffer,
-    SwitchboardRoute, SWITCHBOARD_OFFER_LIFETIME_MS, SWITCHBOARD_OFFER_MAX_FUTURE_MS,
+    peer_addrs_from_snapshot, InviteJoinPlan, JoinAttempt, JoinOutcome, MemberRecoveryApplied,
+    MemberRecoveryCode, MemberRecoveryVerified, SwitchboardOffer, SwitchboardRoute,
+    MEMBER_RECOVERY_LIFETIME_MS, SWITCHBOARD_OFFER_LIFETIME_MS, SWITCHBOARD_OFFER_MAX_FUTURE_MS,
 };
 use catcoms_wire::DocType;
 use thiserror::Error;
@@ -2599,9 +2601,9 @@ pub const MAX_TRACKED_OWN_MESSAGES: usize = 50;
 pub struct DeliveryState {
     /// The message id, as it appears in [`ChatMessage::id`].
     pub id: String,
-    /// How many **other** members have proved they hold this message. Evidence-based and
-    /// one-sided: it only ever rises, and `0` means "no proof yet", *not* "not delivered"; so
-    /// a renderer must show nothing rather than a failure for `0`.
+    /// How many **other current-roster** members have proved they hold this message. Evidence is
+    /// positive and one-sided, but the count may fall when membership changes. `0` means "no proof
+    /// yet", *not* "not delivered", so a renderer must not turn it into a failure by itself.
     pub delivered: usize,
     /// How many current members claim a transport peer connected here; the same self-asserted
     /// projection that drives [`Server::online_members`]. Independent of `delivered`, which can
@@ -3081,6 +3083,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 append_message(d, &id, &author, text, ts, &reply_to)
             })
             .await?;
+        self.sync
+            .track_delivery_target(DocType::Channel, channel, change);
         // Remember which automerge change carried this message, so its delivery state can be
         // read back later (`delivery_snapshot`). Bounded ring: the UI only ever shows state for
         // recent own messages.
@@ -4213,16 +4217,24 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.now_ms()
     }
 
+    /// Clone the injected runtime clock for actor-owned timers.
+    ///
+    /// Keeping throttles on this seam makes lifecycle and retry behavior deterministic in tests
+    /// and avoids accidentally mixing protocol time with ambient operating-system time.
+    pub(crate) fn runtime_clock(&self) -> Arc<dyn Clock + Send> {
+        self.sync.runtime_clock()
+    }
+
     /// Delivery state for this device's recent messages in `channel`, oldest first
     /// (`docs/design-delivery-states.md`, D2). Empty for a channel this session has not sent to
     ///; including every channel right after a restart, since the `message id → change` mapping
     /// is deliberately not persisted.
     ///
-    /// Read-only over state that already exists: `delivered` comes from the document's own causal
-    /// evidence ([`ChannelSync::peers_with_change`]), `reachable` from the self-asserted route
-    /// projection that drives [`Server::online_members`], and `any_peer` from a live peer that has
-    /// already served a roster-verified catch-up. No new wire traffic, and nothing here is
-    /// observable by anyone else.
+    /// Read-only over state that already exists: `delivered` comes from causal evidence plus
+    /// already-received explicit receipts ([`ChannelSync::peers_with_change`]), `reachable` from
+    /// the self-asserted route projection that drives [`Server::online_members`], and `any_peer`
+    /// from a live peer that has already served a roster-verified catch-up. This query creates no
+    /// wire traffic; receipt frames are sent separately when remote changes are applied.
     pub fn delivery_snapshot(&mut self, channel: u128) -> Vec<DeliveryState> {
         let Some(recent) = self.own_message_changes.get(&channel) else {
             return Vec::new();
@@ -6380,6 +6392,38 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// binding, canonical route grammar and shared endpoint budget.
     pub async fn dial_local_reconnect_routes(&mut self) -> usize {
         self.sync.dial_local_reconnect_routes().await
+    }
+
+    /// Produce this existing member's short-lived, signed out-of-band route update.
+    pub fn mint_member_recovery_code(
+        &mut self,
+        candidates: Vec<String>,
+    ) -> Result<MemberRecoveryCode, AppError> {
+        self.sync
+            .mint_member_recovery_code(candidates)
+            .map_err(|error| AppError::Invalid(error.to_string()))
+    }
+
+    /// Authenticate a recovery code without starting network work. The desktop uses this phase
+    /// to durably record the short-lived peer permission before any submitted dial can complete.
+    pub fn verify_member_recovery_code(
+        &self,
+        code: &str,
+    ) -> Result<MemberRecoveryVerified, AppError> {
+        self.sync
+            .verify_member_recovery_code(code)
+            .map_err(|error| AppError::Invalid(error.to_string()))
+    }
+
+    /// Verify a current member's signed route update and submit its bounded peer-bound dial.
+    pub async fn apply_member_recovery_code(
+        &mut self,
+        code: &str,
+    ) -> Result<MemberRecoveryApplied, AppError> {
+        self.sync
+            .apply_member_recovery_code(code)
+            .await
+            .map_err(|error| AppError::Invalid(error.to_string()))
     }
 
     /// Whether steady-state rendezvous discovery is configured (so the actor drives its tick).

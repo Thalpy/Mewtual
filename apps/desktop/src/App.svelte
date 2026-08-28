@@ -39,6 +39,7 @@
     mayEditWikiStructure,
     mayPublishLivery,
     moderationSurfaceOpen,
+    sessionContinuationCurrent,
     scopeCurrent,
   } from "./viewscope";
   import { pastedImageUrl, safeRemoteUrl } from "./remote-media";
@@ -56,8 +57,15 @@
   } from "./native-download";
   import {
     bufferIce, directionIdle, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState, videoSlotPlan,
-    VIDEO_BITRATE, type SlotDirection, type VideoKind,
+    VIDEO_BITRATE, type PeerState, type SlotDirection, type VideoKind,
   } from "./voice-signaling";
+  import {
+    DEFAULT_STREAM_SETTINGS, PeerVideoBudgetController, estimatedMeshMbps, isStreamHeight,
+    nearestStreamHeight, peerStreamPlan, preferEfficientVideoCodecs, receivingHeightForViewport,
+    recommendedStreamMbps, streamResolutionLabel,
+    type PeerBudgetResult, type PeerStreamPlan, type StreamFrameRate, type StreamHeight,
+    type StreamQuality, type StreamSettings,
+  } from "./streaming";
   import {
     deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, jukeClaimWins, mediaChoices,
     mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, queueChanged, queueDigest, resolveCallName,
@@ -78,7 +86,8 @@
     type StatusReadCursor,
   } from "./statusread.ts";
   import {
-    deliveryClass, deliveryGlyph, deliveryLabel, deliveryTip, deliveryVerdict, mergeDelivery,
+    deliveryClass, deliveryGlyph, deliveryLabel, deliveryTip, deliveryVerdict,
+    replaceDeliverySnapshot,
     type DeliveryEvidence,
   } from "./delivery";
   import { installUiLogging, type UiLogging } from "./uilog";
@@ -2011,6 +2020,7 @@
   let joinSwitchboardConsent = $state(false);
   type JoinReplyReady = { code: string; expires_at_ms: number; candidate_count: number };
   let joinReplyReady = $state<JoinReplyReady | null>(null);
+  let joinAttemptPending = $state(false);
   let joinReplyNow = $state(Date.now());
   let joinReplyExpired = $derived(
     joinReplyReady !== null && joinReplyIsExpired(joinReplyReady.expires_at_ms, joinReplyNow),
@@ -2018,6 +2028,19 @@
   let joinReplyInput = $state("");
   let joinReplyApplying = $state(false);
   let joinReplyNeedsReplace = $state(false);
+  // Invalidates delayed native reply applications when the user locks or switches groups. A
+  // reply contains private listener routes and must never follow the UI into another group.
+  let joinReplyOperation = 0;
+  type MemberRecoveryReady = { code: string; expires_at_ms: number; candidate_count: number };
+  type MemberRecoveryApplied = { fingerprint: string; submitted_routes: number };
+  let memberRecoveryReady = $state<MemberRecoveryReady | null>(null);
+  let memberRecoveryServer = $state<number | null>(null);
+  let memberRecoveryExpired = $derived(
+    memberRecoveryReady !== null && joinReplyIsExpired(memberRecoveryReady.expires_at_ms, joinReplyNow),
+  );
+  let memberRecoveryInput = $state("");
+  let memberRecoveryBusy = $state(false);
+  let memberRecoveryOperation = 0;
   let copied = $state(false);
   let newChannel = $state("");
 
@@ -4766,6 +4789,19 @@
     const continuityJson = uiStateReady ? JSON.stringify({ version: 1, drafts, readMarks, statusCursors }) : null;
     try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
     if (inCall) leaveVoice(); // never leave a hot mic behind a lock screen
+    // Reply/recovery codes carry current listener routes. Clear them synchronously and ignore any
+    // native event from work that the lock invalidated; the native generation gate independently
+    // prevents the same stale work from registering or sealing a server.
+    joinReplyReady = null;
+    joinReplyInput = "";
+    joinReplyApplying = false;
+    joinReplyNeedsReplace = false;
+    joinReplyOperation += 1;
+    memberRecoveryOperation += 1;
+    memberRecoveryReady = null;
+    memberRecoveryServer = null;
+    memberRecoveryInput = "";
+    memberRecoveryBusy = false;
     void invoke("lock_session", { uiStateJson: continuityJson }).catch((e) => console.warn("Session locked; final UI continuity save failed", e));
     spaceOpen = false; // and no server names floating behind it either
     showSettings = false;
@@ -4821,11 +4857,13 @@
     }
     busy = true;
     error = "";
+    const operationGeneration = viewGeneration;
     try {
       const { value: r } = await invokeDebugged<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       addServer(r, displayName);
     } catch (e) {
-      error = errorText(e);
+      if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = errorText(e);
     } finally {
       busy = false;
     }
@@ -4835,11 +4873,13 @@
     busy = true;
     error = "";
     joinReplyReady = null;
+    const operationGeneration = viewGeneration;
     try {
       const { hex, turn } = unwrapInvite(joinInvite);
       const previewMatchesCode = joinPreviewCode === hex;
       if (!previewMatchesCode) {
         joinPreview = await invoke<InvitePreview>("preview_invite", { inviteHex: hex });
+        if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
         joinPreviewCode = hex;
         joinSwitchboardConsent = false;
       }
@@ -4850,12 +4890,14 @@
       );
       // Do not let the click that first reveals the extra-member privacy boundary also cross it.
       if (assistedAction === "preview") return;
+      joinAttemptPending = true;
       const { value: r } = await invokeDebugged<Found>("join_server", {
         inviteHex: hex,
         displayName,
         isDm: false,
         allowSwitchboards: assistedAction === "switchboard",
       });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       if (turn) storeServerTurn(r.server, turn); // inherit the operator's shared TURN
       addServer(r, displayName);
       joinInvite = "";
@@ -4864,9 +4906,11 @@
       joinSwitchboardConsent = false;
       joinReplyReady = null;
     } catch (e) {
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       joinReplyReady = null;
       error = String(e);
     } finally {
+      joinAttemptPending = false;
       busy = false;
     }
   }
@@ -4874,21 +4918,72 @@
   async function applyJoinReply(replace = false) {
     const server = activeServerId;
     if (server === null || !joinReplyInput.trim()) return;
+    const operationGeneration = viewGeneration;
+    const operation = ++joinReplyOperation;
+    const code = joinReplyInput.trim();
     joinReplyApplying = true;
     joinReplyNeedsReplace = false;
     error = "";
     try {
-      const applied = await invoke<{ helper: boolean }>("apply_join_reply", { server, code: joinReplyInput.trim(), replace });
+      const applied = await invoke<{ helper: boolean }>("apply_join_reply", { server, code, replace });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       notice = applied.helper
         ? "Connection reply accepted. Dialling as a member helper; only the admission handshake will be forwarded."
         : "Connection reply accepted. Dialling the joiner now; keep both apps open.";
       joinReplyInput = "";
     } catch (e) {
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       const message = String(e);
       if (joinReplyNeedsReplacement(message)) joinReplyNeedsReplace = true;
       error = message;
     } finally {
-      joinReplyApplying = false;
+      if (joinReplyOperation === operation) joinReplyApplying = false;
+    }
+  }
+
+  async function mintMemberRecovery() {
+    const server = activeServerId;
+    if (server === null) return;
+    const operationGeneration = viewGeneration;
+    const operation = ++memberRecoveryOperation;
+    memberRecoveryBusy = true;
+    error = "";
+    try {
+      const ready = await invoke<MemberRecoveryReady>("mint_member_recovery", { server });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
+      memberRecoveryReady = ready;
+      memberRecoveryServer = server;
+      notice = "Recovery code ready. Send it privately to a current member of this group; it expires in ten minutes.";
+    } catch (e) {
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
+      memberRecoveryReady = null;
+      memberRecoveryServer = null;
+      error = String(e);
+    } finally {
+      if (memberRecoveryOperation === operation) memberRecoveryBusy = false;
+    }
+  }
+
+  async function applyMemberRecovery() {
+    const server = activeServerId;
+    if (server === null || !memberRecoveryInput.trim()) return;
+    const operationGeneration = viewGeneration;
+    const operation = ++memberRecoveryOperation;
+    memberRecoveryBusy = true;
+    error = "";
+    try {
+      const applied = await invoke<MemberRecoveryApplied>("apply_member_recovery", {
+        server,
+        code: memberRecoveryInput.trim(),
+      });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
+      memberRecoveryInput = "";
+      notice = `Submitted ${applied.submitted_routes} recovery route${applied.submitted_routes === 1 ? "" : "s"} for ${applied.fingerprint.slice(0, 8)}. Waiting for the authenticated connection...`;
+      void Promise.all([refreshMemberRoutes(), refreshConnectivity()]);
+    } catch (e) {
+      if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = String(e);
+    } finally {
+      if (memberRecoveryOperation === operation) memberRecoveryBusy = false;
     }
   }
 
@@ -4899,15 +4994,17 @@
     if (!name) return;
     busy = true;
     error = "";
+    const operationGeneration = viewGeneration;
     try {
       // Derive my profile name from the current profile or fall back to "me"
       const myProfileName = (pName.trim() || name).trim() || "me";
       const { value: r } = await invokeDebugged<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       addServer(r, name);
       dmName = "";
       showNewDm = false;
     } catch (e) {
-      error = String(e);
+      if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = String(e);
     } finally {
       busy = false;
     }
@@ -4919,17 +5016,23 @@
     if (!name) return;
     busy = true;
     error = "";
+    joinReplyReady = null;
+    const operationGeneration = viewGeneration;
     try {
       // Derive my profile name from the current profile or fall back to "me"
       const myProfileName = (pName.trim() || name).trim() || "me";
+      joinAttemptPending = true;
       const { value: r } = await invokeDebugged<Found>("join_server", { inviteHex: dmInvite.trim(), displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: name });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
+      joinReplyReady = null;
       addServer(r, name);
       dmName = "";
       dmInvite = "";
       showAddFriend = false;
     } catch (e) {
-      error = String(e);
+      if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = String(e);
     } finally {
+      joinAttemptPending = false;
       busy = false;
     }
   }
@@ -4957,10 +5060,12 @@
     error = "";
     notice = "";
     menu = null;
+    const operationGeneration = viewGeneration;
     try {
       // Derive my profile name from the current profile or fall back to "me"
       const myProfileName = (pName.trim() || name).trim() || "me";
       const { value: r } = await invokeDebugged<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       // Add the DM to the list without switching away from the current server.
       servers = [
         ...servers,
@@ -4974,7 +5079,7 @@
         ? `Friend request sent to ${name}: they'll see it in their DMs.`
         : `Couldn't reach ${name} right now. Open DMs to share a friend code instead.`;
     } catch (e) {
-      error = String(e);
+      if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = String(e);
     } finally {
       busy = false;
     }
@@ -5013,16 +5118,22 @@
   async function acceptDmRequest(req: DmRequest) {
     busy = true;
     error = "";
+    joinReplyReady = null;
+    const operationGeneration = viewGeneration;
     try {
       // Derive my profile name from the current profile or fall back to "me"
       const myProfileName = (pName.trim() || req.from_name).trim() || "me";
+      joinAttemptPending = true;
       const { value: r } = await invokeDebugged<Found>("join_server", { inviteHex: req.invite, displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: req.from_name });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
+      joinReplyReady = null;
       addServer(r, req.from_name);
       await invoke("dismiss_dm_request", { server: req.server, fromFp: req.from_fp });
       dmRequests = dmRequests.filter((x) => !(x.server === req.server && x.from_fp === req.from_fp));
     } catch (e) {
-      error = String(e);
+      if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = String(e);
     } finally {
+      joinAttemptPending = false;
       busy = false;
     }
   }
@@ -5095,6 +5206,17 @@
     memberRoutesReceivedAt = 0;
     memberRoutesUnavailable = false;
     manualRedialNote = "";
+    joinReplyReady = null;
+    joinReplyOperation += 1;
+    joinReplyInput = "";
+    joinReplyApplying = false;
+    joinReplyNeedsReplace = false;
+    joinAttemptPending = false;
+    memberRecoveryOperation += 1;
+    memberRecoveryReady = null;
+    memberRecoveryServer = null;
+    memberRecoveryInput = "";
+    memberRecoveryBusy = false;
     profiles = {};
     // Roles gate the privileged surfaces, so the empty map is the safe transient: unprivileged
     // until this group's own roles resolve.
@@ -5637,10 +5759,10 @@
   // completion points.
   const channelEventRefresh = new CoalescedAsyncRefresh(refresh);
 
-  // Delivery states for OWN messages (docs/design-delivery-states.md). Evidence-based lower
-  // bounds: a member is counted only once it has provably built on the message, so counts
-  // only rise and 0 means "no proof yet", never "failed". Red is reserved for the one true
-  // negative signal we have: no peers reachable at all.
+  // Delivery states for OWN messages (docs/design-delivery-states.md). A member is counted only
+  // once it has proven receipt or built on the message. The current-roster count may fall after
+  // membership changes or bounded evidence eviction; 0 still means "no present proof", never
+  // "failed". Red is reserved for the one true negative signal: no peers reachable at all.
   type DeliveryState = { id: string; delivered: number; reachable: number; any_peer: boolean };
   let delivery = $state<Record<string, DeliveryState>>({});
   async function refreshDelivery() {
@@ -5654,9 +5776,7 @@
     try {
       const list = await invoke<DeliveryState[]>("get_delivery", { server, channel });
       if (!viewCurrent(gen, server) || cur?.active !== channel) return;
-      const map: Record<string, DeliveryState> = {};
-      for (const s of list) map[s.id] = { id: s.id, ...mergeDelivery(delivery[s.id], s) };
-      delivery = map;
+      delivery = replaceDeliverySnapshot(delivery, list);
     } catch {
       if (!viewCurrent(gen, server) || cur?.active !== channel) return;
       delivery = {}; // older backend or closed actor: ticks simply don't render
@@ -5679,8 +5799,9 @@
       latest: mi === lastOwnIdx,
     };
   }
-  // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ partial ·
-  // ✓ all reachable confirmed · ✓✓ the whole roster confirmed. Shown on EVERY message of yours
+  // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ held by
+  // part of the roster · ✓✓ the whole roster confirmed. We intentionally do not infer "all live
+  // peers confirmed" from two unrelated counts. Shown on EVERY message of yours
   // the actor still has evidence for, not only the newest: the point of a per-message tick is to
   // be able to look back up the log and see which ones landed.
   function deliveryTick(m: Msg, mi: number): { g: string; cls: string; tip: string } | null {
@@ -9817,7 +9938,128 @@
   let callHeld = $state<number[]>([]); // notes I am sounding into the call
   let remoteHeld = $state<Record<string, number[]>>({}); // fp -> notes they are sounding
   const remoteWave: Record<string, OscillatorType> = {}; // fp -> their last announced timbre
-  let peerMeta = $state<Record<string, { mic: boolean; inst: boolean; vid: number }>>({}); // their broadcast states (vid: 0 none, 1 camera, 2 screen)
+  let peerMeta = $state<Record<string, PeerState>>({}); // mute/video plus their coarse receive bucket
+  function loadStreamSettings(): StreamSettings {
+    try {
+      const parsed = JSON.parse(localStorage.getItem("catcoms.call.stream.v1") ?? "{}") as Partial<StreamSettings>;
+      const resolution = isStreamHeight(parsed.resolution) ? parsed.resolution : DEFAULT_STREAM_SETTINGS.resolution;
+      const frameRate = [15, 24, 30, 60].includes(Number(parsed.frameRate))
+        ? (Number(parsed.frameRate) as StreamFrameRate)
+        : DEFAULT_STREAM_SETTINGS.frameRate;
+      const quality = ["motion", "balanced", "detail"].includes(String(parsed.quality))
+        ? (parsed.quality as StreamQuality)
+        : DEFAULT_STREAM_SETTINGS.quality;
+      const rawMbps = Number(parsed.mbpsPerPeer);
+      const mbpsPerPeer = Number.isFinite(rawMbps)
+        ? Math.min(50, Math.max(0.5, rawMbps))
+        : DEFAULT_STREAM_SETTINGS.mbpsPerPeer;
+      return { resolution, frameRate, quality, mbpsPerPeer };
+    } catch {
+      return { ...DEFAULT_STREAM_SETTINGS };
+    }
+  }
+  let streamSettings = $state<StreamSettings>(loadStreamSettings());
+  let streamSettingsOpen = $state(false);
+  let actualStream = $state<{
+    width: number;
+    height: number;
+    fps: number;
+    constraintError: string;
+  } | null>(null);
+  type PeerBudgetUi = PeerBudgetResult & { lastApplied?: PeerStreamPlan };
+  let peerVideoBudget = $state<Record<string, PeerBudgetUi>>({});
+  const peerVideoBudgetController = new PeerVideoBudgetController();
+  let peerVideoCodec = $state<Record<string, string>>({});
+  function loadReceiveResolution(): "auto" | StreamHeight {
+    try {
+      const stored = localStorage.getItem("catcoms.call.receive-resolution");
+      if (stored === "auto") return "auto";
+      const numeric = Number(stored);
+      return isStreamHeight(numeric) ? numeric : "auto";
+    } catch {
+      return "auto";
+    }
+  }
+  const initialReceiveResolution = loadReceiveResolution();
+  let receiveResolutionMode = $state<"auto" | StreamHeight>(initialReceiveResolution);
+  let receiveHeight = $state<StreamHeight>(
+    initialReceiveResolution === "auto" ? 1080 : initialReceiveResolution,
+  );
+  let streamReceiverHeights = $derived(
+    callParticipants.map((fingerprint) => peerMeta[fingerprint]?.rx ?? 1080),
+  );
+  let streamSourceHeight = $derived(actualStream?.height || streamSettings.resolution);
+  let streamEstimatedTotal = $derived(
+    estimatedMeshMbps(streamSettings, streamReceiverHeights, streamSourceHeight),
+  );
+  let streamBudgetFailed = $derived(
+    Object.values(peerVideoBudget).some((budget) =>
+      budget.state === "failed" || budget.state === "paused" || budget.state === "stop-required"
+    ),
+  );
+  let streamRecommended = $derived(recommendedStreamMbps(streamSettings));
+
+  function saveStreamSettings(next: StreamSettings) {
+    streamSettings = next;
+    try { localStorage.setItem("catcoms.call.stream.v1", JSON.stringify(next)); } catch { /* optional */ }
+    void applyStreamSettings();
+  }
+  function setStreamResolution(value: string) {
+    const resolution = Number(value);
+    if (isStreamHeight(resolution)) saveStreamSettings({ ...streamSettings, resolution });
+  }
+  function setStreamFrameRate(value: string) {
+    const frameRate = Number(value);
+    if (frameRate === 15 || frameRate === 24 || frameRate === 30 || frameRate === 60) {
+      saveStreamSettings({ ...streamSettings, frameRate });
+    }
+  }
+  function setStreamQuality(quality: StreamQuality) {
+    saveStreamSettings({ ...streamSettings, quality });
+  }
+  function setStreamMbps(value: string) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      saveStreamSettings({ ...streamSettings, mbpsPerPeer: Math.min(50, Math.max(0.5, parsed)) });
+    }
+  }
+  function setReceiveResolution(value: string) {
+    const numeric = Number(value);
+    receiveResolutionMode = value === "auto" ? "auto" : isStreamHeight(numeric) ? numeric : "auto";
+    if (receiveResolutionMode !== "auto") receiveHeight = receiveResolutionMode;
+    try { localStorage.setItem("catcoms.call.receive-resolution", String(receiveResolutionMode)); } catch { /* optional */ }
+    pushInstState();
+    if (inCall && callServer !== null && callChannel) {
+      broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight });
+    }
+  }
+
+  // Auto mode follows the largest 16:9 picture this Mewtual window could display. Only the rounded
+  // bucket is signalled; exact window/monitor dimensions remain local. Debounce plus helper-level
+  // hysteresis prevents a resize drag from continually touching every sender's parameters.
+  $effect(() => {
+    if (receiveResolutionMode !== "auto" || typeof window === "undefined") return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const update = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const physical = receivingHeightForViewport(window.innerWidth, window.innerHeight, window.devicePixelRatio);
+        const next = nearestStreamHeight(physical, receiveHeight);
+        if (next === receiveHeight) return;
+        receiveHeight = next;
+        pushInstState();
+        if (inCall && callServer !== null && callChannel) {
+          broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: next });
+        }
+      }, 180);
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("resize", update);
+    };
+  });
   let instMutedPeers = $state<Record<string, boolean>>({}); // my per-peer instrument mutes
   let callDeafened = $state(false);
   let myTimbre = $state<OscillatorType>(((): OscillatorType => {
@@ -9887,6 +10129,7 @@
       mic: callMuted ? 1 : 0,
       inst: instRxMuted ? 1 : 0,
       vid: myVid(),
+      rx: receiveHeight,
     });
   }
   function pushInstState() {
@@ -9899,7 +10142,13 @@
     let m: Record<string, unknown>;
     try { m = JSON.parse(raw) as Record<string, unknown>; } catch { return; }
     if (m.t === "s") {
-      peerMeta = { ...peerMeta, [fp]: mergePeerState(peerMeta[fp], m) };
+      const before = peerMeta[fp];
+      const after = mergePeerState(before, m);
+      peerMeta = { ...peerMeta, [fp]: after };
+      if (after.rx !== before?.rx && myVideo === "screen") {
+        const sender = callPeers[fp]?.vidSender;
+        if (sender) void capVideo(sender, "screen", fp);
+      }
       return;
     }
     if (m.t !== "n") return;
@@ -11599,7 +11848,17 @@
             // Mesh-friendly by construction: each peer gets its own encode, so keep frames small.
             video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24 } },
           })
-        : await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        : await navigator.mediaDevices.getDisplayMedia({
+            video: {
+              width: {
+                ideal: Math.round((streamSettings.resolution * 16) / 9),
+                max: Math.round((streamSettings.resolution * 16) / 9),
+              },
+              height: { ideal: streamSettings.resolution, max: streamSettings.resolution },
+              frameRate: { ideal: streamSettings.frameRate, max: streamSettings.frameRate },
+            },
+            audio: false,
+          });
     } catch {
       error = kind === "cam" ? "Couldn't access the camera (permission denied or no device)." : "Screen share was cancelled or unavailable.";
       return;
@@ -11610,10 +11869,75 @@
     camStream = s;
     localVideoStream = s;
     myVideo = kind;
+    if (kind === "screen") {
+      peerVideoBudget = {};
+      // Text/edges benefit from the browser's screen-content encoder path where supported.
+      try { track.contentHint = streamSettings.quality === "motion" ? "motion" : "detail"; } catch { /* advisory */ }
+      const settings = track.getSettings();
+      actualStream = {
+        width: settings.width ?? 0,
+        height: settings.height ?? 0,
+        fps: Math.round(settings.frameRate ?? 0),
+        constraintError: "",
+      };
+    }
     track.onended = () => stopVideo(); // the browser's own "stop sharing" chrome ends the track
     for (const p of Object.values(callPeers)) fillVideoSlot(p, track, s, kind);
     if (old) for (const t of old.getTracks()) t.stop();
     pushInstState(); // vid state rides the same channel as the mute states
+  }
+
+  let streamSettingsApplyGeneration = 0;
+  let streamSettingsApplyQueue: Promise<void> = Promise.resolve();
+
+  /** Serialize panel changes; an older browser Promise may never overwrite a newer selection. */
+  function applyStreamSettings(): Promise<void> {
+    const generation = ++streamSettingsApplyGeneration;
+    const requested = { ...streamSettings };
+    const apply = streamSettingsApplyQueue
+      .catch(() => { /* a later selection still runs after an older browser failure */ })
+      .then(() => applyStreamSettingsNow(generation, requested));
+    streamSettingsApplyQueue = apply.catch(() => {});
+    return apply;
+  }
+
+  /** Apply one current setting snapshot to the capture and every independent peer encoding. */
+  async function applyStreamSettingsNow(generation: number, requested: StreamSettings) {
+    if (generation !== streamSettingsApplyGeneration) return;
+    if (myVideo !== "screen" || !camStream) return;
+    const track = camStream.getVideoTracks()[0];
+    if (!track) return;
+    let constraintError = "";
+    try {
+      await track.applyConstraints({
+        width: {
+          ideal: Math.round((requested.resolution * 16) / 9),
+          max: Math.round((requested.resolution * 16) / 9),
+        },
+        height: { ideal: requested.resolution, max: requested.resolution },
+        frameRate: { ideal: requested.frameRate, max: requested.frameRate },
+      });
+      track.contentHint = requested.quality === "motion" ? "motion" : "detail";
+    } catch (e) {
+      constraintError = String(e);
+      console.warn("voice: the selected capture constraints were not fully available", String(e));
+    }
+    if (generation !== streamSettingsApplyGeneration || track !== camStream?.getVideoTracks()[0]) return;
+    // Read this even on failure. Capture constraints are advisory; peer scaling must start from
+    // what the browser is actually producing, not what the settings panel requested.
+    const settings = track.getSettings();
+    const sourceHeight = settings.height || actualStream?.height || requested.resolution;
+    actualStream = {
+      width: settings.width ?? 0,
+      height: settings.height ?? 0,
+      fps: Math.round(settings.frameRate ?? 0),
+      constraintError,
+    };
+    await Promise.all(Object.values(callPeers).map((peer) =>
+      peer.vidSender
+        ? capVideo(peer.vidSender, "screen", peer.fp, requested, sourceHeight)
+        : Promise.resolve()
+    ));
   }
   // The transceiver carrying a peer's video slot, and what direction it is currently in. A slot
   // whose transceiver has gone, or whose connection has closed under it, reads as stopped: that
@@ -11632,14 +11956,88 @@
   // same sender and the two do not cost the same. Mapping over the existing encodings rather than
   // replacing them keeps whatever else negotiation put there; before the first negotiation there
   // is nothing to map, and the capture constraints still bound it either way.
-  function capVideo(sender: RTCRtpSender, kind: VideoKind) {
+  async function capVideo(
+    sender: RTCRtpSender,
+    kind: VideoKind,
+    fingerprint: string,
+    requested = streamSettings,
+    sourceHeight = actualStream?.height || requested.resolution,
+  ) {
+    if (kind === "screen") {
+      const result = await peerVideoBudgetController.apply(
+        sender,
+        requested,
+        peerMeta[fingerprint]?.rx ?? 1080,
+        sourceHeight,
+        true,
+        camStream?.getVideoTracks()[0],
+      );
+      if (result.state === "stale") return;
+      const previous = peerVideoBudget[fingerprint];
+      peerVideoBudget[fingerprint] = result.state !== "applied"
+        ? {
+            ...result,
+            lastApplied: previous?.state === "applied" ? previous.plan : previous?.lastApplied,
+          }
+        : result;
+      const peer = callPeers[fingerprint];
+      if (result.state === "paused") {
+        if (peer?.vidSender === sender) {
+          const slot = vidSlot(peer);
+          const idle = directionIdle(slot.direction);
+          if (idle && slot.tr) slot.tr.direction = idle;
+        }
+        console.warn("voice: paused an edge whose video budget was refused", {
+          peer: fingerprint,
+          error: result.error,
+        });
+        return;
+      }
+      if (result.state === "stop-required") {
+        if (myVideo !== "screen" || callPeers[fingerprint]?.vidSender !== sender) return;
+        error = `Screen sharing stopped because ${callNameOf(fingerprint)}'s encoder cap could not be enforced.`;
+        stopVideo();
+        return;
+      }
+      if (result.state === "failed") {
+        console.warn("voice: could not apply this peer's video budget", {
+          peer: fingerprint,
+          error: result.error,
+        });
+        return;
+      }
+      if (result.state === "applied" && peer?.vidSender === sender && camStream) {
+        const slot = vidSlot(peer);
+        const sending = videoSlotPlan({ hasSender: true, direction: slot.direction }).direction;
+        if (sending && slot.tr) slot.tr.direction = sending;
+      }
+      return;
+    }
     try {
       const prm = sender.getParameters();
+      const maxBitrate = VIDEO_BITRATE.cam;
       prm.encodings = prm.encodings?.length
-        ? prm.encodings.map((e) => ({ ...e, maxBitrate: VIDEO_BITRATE[kind] }))
-        : [{ maxBitrate: VIDEO_BITRATE[kind] }];
-      void sender.setParameters(prm);
+        ? prm.encodings.map((encoding) => ({
+            ...encoding,
+            maxBitrate,
+          }))
+        : [{
+            maxBitrate,
+          }];
+      await sender.setParameters(prm);
     } catch { /* pre-negotiation, or an edge closing: the constraints above still cap it */ }
+  }
+
+  function preferVideoCodecs(transceiver: RTCRtpTransceiver | null) {
+    if (!transceiver?.setCodecPreferences || !RTCRtpReceiver.getCapabilities) return;
+    try {
+      const codecs = RTCRtpReceiver.getCapabilities("video")?.codecs ?? [];
+      if (codecs.length) transceiver.setCodecPreferences(preferEfficientVideoCodecs(codecs));
+    } catch (e) {
+      // Capability and preference support differs between WebView runtimes. Negotiation's default
+      // list remains a compatible fallback, and stats below report what actually won.
+      console.warn("voice: efficient video codec preference was unavailable", String(e));
+    }
   }
   // Put a track into one peer's video slot: reuse the slot if it still exists, open one if not.
   // Reuse is the common path and costs no renegotiation at all; the direction flip only happens
@@ -11650,17 +12048,39 @@
     const plan = videoSlotPlan({ hasSender: !!p.vidSender, direction: slot.direction });
     try {
       if (plan.action === "reuse" && p.vidSender) {
+        if (kind === "screen") {
+          // The controller parks first, applies the exact receiver-rounded budget, then reattaches.
+          // Keeping attachment inside that serialized operation prevents a slow WebView encoder
+          // from sending a default uncapped screen while `setParameters` is still pending.
+          const idle = directionIdle(slot.direction);
+          if (idle && slot.tr) slot.tr.direction = idle;
+          preferVideoCodecs(slot.tr);
+          void capVideo(p.vidSender, kind, p.fp);
+          return;
+        }
+        peerVideoBudgetController.invalidate(p.vidSender);
         // Same m-line: a cam/screen swap never renegotiates. replaceTrack rejects rather than
         // throwing when the edge has gone under us, so the failure is caught on the promise.
         p.vidSender.replaceTrack(track).catch((e: unknown) =>
           console.warn("voice: video swap was refused", { peer: p.fp, error: String(e) }));
         if (plan.direction && slot.tr) slot.tr.direction = plan.direction;
-        capVideo(p.vidSender, kind);
+        preferVideoCodecs(slot.tr);
+        capVideo(p.vidSender, kind, p.fp);
+        return;
+      }
+      if (kind === "screen") {
+        // A trackless sendrecv transceiver preserves the bidirectional video slot without exposing
+        // a frame. `capVideo` is the only operation allowed to attach the screen track.
+        const transceiver = p.pc.addTransceiver("video", { direction: "sendrecv", streams: [stream] });
+        p.vidSender = transceiver.sender;
+        preferVideoCodecs(transceiver);
+        void capVideo(transceiver.sender, kind, p.fp);
         return;
       }
       const sn = p.pc.addTrack(track, stream); // first video: onnegotiationneeded takes it from here
       p.vidSender = sn;
-      capVideo(sn, kind);
+      preferVideoCodecs(p.pc.getTransceivers().find((transceiver) => transceiver.sender === sn) ?? null);
+      capVideo(sn, kind, p.fp);
     } catch (e) {
       console.warn("voice: could not put video on this edge", { peer: p.fp, error: String(e) });
     }
@@ -11669,6 +12089,7 @@
     if (!camStream) return;
     for (const p of Object.values(callPeers)) {
       if (!p.vidSender) continue;
+      peerVideoBudgetController.invalidate(p.vidSender);
       // Park the slot, never removeTrack it. removeTrack retires the transceiver for good (addTrack
       // will not reuse one that has sent), so restarting a share would add a second video section
       // to the SDP each time. replaceTrack(null) stops the frames; dropping the send half is what
@@ -11684,6 +12105,8 @@
     camStream = null;
     localVideoStream = null;
     myVideo = "";
+    actualStream = null;
+    peerVideoBudget = {};
     pushInstState();
   }
   function toggleVideo(kind: "cam" | "screen") {
@@ -11799,6 +12222,25 @@
   async function sniffTransport(fp: string, pc: RTCPeerConnection) {
     try {
       const stats = await pc.getStats();
+      let codecId = "";
+      stats.forEach((stat) => {
+        const outbound = stat as RTCStats & {
+          kind?: string;
+          mediaType?: string;
+          codecId?: string;
+          bytesSent?: number;
+        };
+        if (
+          outbound.type === "outbound-rtp" &&
+          (outbound.kind === "video" || outbound.mediaType === "video") &&
+          (outbound.bytesSent ?? 0) > 0 &&
+          outbound.codecId
+        ) codecId = outbound.codecId;
+      });
+      const codec = codecId
+        ? (stats.get(codecId) as (RTCStats & { mimeType?: string }) | undefined)?.mimeType
+        : undefined;
+      if (codec) peerVideoCodec = { ...peerVideoCodec, [fp]: codec.replace(/^video\//i, "").toUpperCase() };
       let pairId = "";
       stats.forEach((s) => {
         const t = s as RTCStats & { selectedCandidatePairId?: string };
@@ -11970,6 +12412,10 @@
     callPeerStates = rest;
     const { [fp]: _path, ...paths } = peerTransport;
     peerTransport = paths;
+    const { [fp]: _codec, ...codecs } = peerVideoCodec;
+    peerVideoCodec = codecs;
+    const { [fp]: _budget, ...budgets } = peerVideoBudget;
+    peerVideoBudget = budgets;
     // Silence and forget anything they were sounding; a dead edge must not drone on.
     stopAllFrom(fp);
     const { [fp]: _h, ...rh } = remoteHeld;
@@ -12176,13 +12622,13 @@
     alertedRooms.delete(roomKey(server, channel));
     recordPresence(server, channel, callSelfFp);
     void refreshJukebox(); // the room's queue, whatever the DJ is currently on
-    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid() }); // announce + trigger existing members to offer
+    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight }); // announce + trigger existing members to offer
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
       if (callChannel && callServer !== null) {
         // vid rides the heartbeat for the same reason mic does: it is the only thing that repairs
         // a data-channel state message that never arrived, and the video tile is gated on it.
-        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid() });
+        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight });
         recordPresence(callServer, callChannel, callSelfFp); // keep my own presence fresh
         jukeTick(); // the DJ's re-announce (and the listener's DJ-left check) ride this tick
         // Re-read the winning candidate pair: an ICE restart can migrate a live call from
@@ -12234,6 +12680,7 @@
     callSelfFp = "";
     callProfiles = {};
     peerTransport = {};
+    peerVideoCodec = {};
     secInfoOpen = false;
     for (const fp of Object.keys(waitingIce)) delete waitingIce[fp];
   }
@@ -12279,7 +12726,13 @@
       // states matter to the UI. mergePeerState is what keeps an older build's ping, which has
       // no `vid` field at all, from reading as "they stopped sharing".
       if (currentRoom && typeof msg.mic === "number") {
-        peerMeta = { ...peerMeta, [fromFp]: mergePeerState(peerMeta[fromFp], msg) };
+        const before = peerMeta[fromFp];
+        const after = mergePeerState(before, msg);
+        peerMeta = { ...peerMeta, [fromFp]: after };
+        if (after.rx !== before?.rx && myVideo === "screen") {
+          const sender = callPeers[fromFp]?.vidSender;
+          if (sender) capVideo(sender, "screen", fromFp);
+        }
       }
       if (type === "voice-ping") {
         const peer = callPeers[fromFp];
@@ -12327,6 +12780,9 @@
       if (peer.ignoreOffer) return;
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+        for (const transceiver of pc.getTransceivers()) {
+          if (transceiver.receiver.track.kind === "video") preferVideoCodecs(transceiver);
+        }
         await flushWaitingIce(peer);
         await pc.setLocalDescription(); // no-arg picks "answer" from the have-remote-offer state
         void sendSignal(server, fromFp, { callId: cid, type: "answer", sdp: pc.localDescription });
@@ -13865,9 +14321,9 @@
       }),
       listen<{ server: number; channel: string; states: DeliveryState[] }>("delivery-changed", (e) => {
         if (e.payload.server !== activeServerId || e.payload.channel !== cur?.active) return;
-        // Merged, not assigned: a report that happens to see fewer holders has not unproved the
-        // ones already counted, and letting it overwrite them is what made a settled tick flicker.
-        for (const s of e.payload.states) delivery[s.id] = { id: s.id, ...mergeDelivery(delivery[s.id], s) };
+        // The actor reports receipts filtered through the current roster. A removed holder must
+        // not remain as an anonymous count that can stand in for a newly-added member.
+        delivery = replaceDeliverySnapshot(delivery, e.payload.states);
       }),
       listen<{ server: number }>("badges-changed", (e) => {
         if (e.payload.server === activeServerId) refreshBadges();
@@ -13922,6 +14378,7 @@
         // The native join command deliberately remains pending while its listener and NAT mapping
         // stay alive. This event gives the human the return signalling channel without moving the
         // punch deadline into a throttled webview timer.
+        if (locked || !joinAttemptPending) return;
         joinReplyReady = e.payload;
         notice = "Send the connection reply back to the inviter now; keep this app open.";
       }),
@@ -14322,6 +14779,47 @@
   </div>
 {/snippet}
 
+{#snippet memberRecoveryPanel()}
+  <section class="member-recovery">
+    <header><div><strong>Reconnect an existing member</strong><span class="muted small">For changed listener addresses or an isolated pair. This never admits a new member.</span></div></header>
+    <div class="member-recovery-actions">
+      <button class="ghost small" disabled={memberRecoveryBusy || activeServerId === null} onclick={mintMemberRecovery}>
+        {memberRecoveryBusy ? "Working..." : "Create my recovery code"}
+      </button>
+      {#if memberRecoveryReady && memberRecoveryServer === activeServerId && !memberRecoveryExpired}
+        <button class="ghost small" onclick={() => copyText(memberRecoveryReady?.code ?? "")}>Copy code</button>
+      {/if}
+    </div>
+    {#if memberRecoveryReady && memberRecoveryServer === activeServerId && !memberRecoveryExpired}
+      <textarea class="invite-code" readonly rows="3" value={memberRecoveryReady.code}></textarea>
+      <p class="muted small">Send privately to another current member. It contains {memberRecoveryReady.candidate_count} bounded direct route{memberRecoveryReady.candidate_count === 1 ? "" : "s"} and expires {fmtTime(memberRecoveryReady.expires_at_ms)}.</p>
+    {:else if memberRecoveryReady && memberRecoveryServer === activeServerId}
+      <p class="muted small">That recovery code expired. Create a fresh code before sending it.</p>
+    {/if}
+    <label>
+      <span class="muted small">Code from the isolated member</span>
+      <textarea class="invite-code" rows="3" bind:value={memberRecoveryInput} placeholder="paste mewtual-reconnect-v1 code"></textarea>
+    </label>
+    <button class="ghost small" disabled={memberRecoveryBusy || !memberRecoveryInput.trim() || activeServerId === null} onclick={applyMemberRecovery}>
+      {memberRecoveryBusy ? "Checking..." : "Verify and reconnect"}
+    </button>
+    <p class="muted small">A valid code only submits route attempts. The member appears connected after the normal encrypted transport handshake proves the peer identity.</p>
+  </section>
+{/snippet}
+
+{#snippet outboundJoinReplyPanel()}
+  {#if joinReplyReady && !joinReplyExpired}
+    <section class="dm-reply-ready">
+      <strong>Direct route did not answer - send this reply now</strong>
+      <p class="muted small">Keep this app open. Send the reply to the friend who issued the code; they paste it into their DM's connection-reply box before it expires.</p>
+      <textarea class="invite-code" readonly rows="3" value={joinReplyReady.code}></textarea>
+      <button class="ghost small" onclick={() => copyText(joinReplyReady?.code ?? "")}>Copy connection reply</button>
+    </section>
+  {:else if joinReplyReady}
+    <p class="muted small">That connection reply expired. Retry Connect to generate a fresh one, and keep both apps open.</p>
+  {/if}
+{/snippet}
+
 {#snippet nameTag(fp: string)}
   {@const p = profiles[fp]}
   {@render styledName(nameOf(fp), p?.color ?? "", p?.font ?? "", p?.effect ?? "")}
@@ -14386,6 +14884,85 @@
       {callNameOf(fp).slice(0, 1).toUpperCase()}
     </span>
   {/if}
+{/snippet}
+
+<!-- One stream panel, rendered in the compact stage and the full-window focus view. The sender
+     controls capture/quality; every receiver independently advertises only a rounded bucket. -->
+{#snippet streamSettingsPanel()}
+  <section class="stream-panel" aria-label="Screen stream settings">
+    <header class="stream-panel-head">
+      <div><span class="stage-label">SCREEN STREAM</span><strong>Per-viewer adaptive encode</strong></div>
+      <button class="ghost small" aria-label="Close stream settings" onclick={() => (streamSettingsOpen = false)}>x</button>
+    </header>
+    <div class="stream-fields">
+      <label>
+        <span>Capture resolution</span>
+        <select value={streamSettings.resolution} onchange={(event) => setStreamResolution(event.currentTarget.value)}>
+          <option value="720">720p</option>
+          <option value="1080">1080p</option>
+          <option value="1440">1440p</option>
+          <option value="2160">4K (2160p)</option>
+        </select>
+      </label>
+      <label>
+        <span>Frame rate</span>
+        <select value={streamSettings.frameRate} onchange={(event) => setStreamFrameRate(event.currentTarget.value)}>
+          <option value="15">15 fps</option><option value="24">24 fps</option>
+          <option value="30">30 fps</option><option value="60">60 fps</option>
+        </select>
+      </label>
+      <label>
+        <span>Max Mbps per full-size viewer</span>
+        <input type="number" min="0.5" max="50" step="0.5" value={streamSettings.mbpsPerPeer} onchange={(event) => setStreamMbps(event.currentTarget.value)} />
+      </label>
+      <label>
+        <span>My receiving resolution</span>
+        <select value={receiveResolutionMode} onchange={(event) => setReceiveResolution(event.currentTarget.value)}>
+          <option value="auto">Auto from this window</option>
+          <option value="720">720p</option><option value="1080">1080p</option>
+          <option value="1440">1440p</option><option value="2160">4K</option>
+        </select>
+      </label>
+    </div>
+    <fieldset class="stream-quality">
+      <legend>Quality priority</legend>
+      <button class:active={streamSettings.quality === "motion"} onclick={() => setStreamQuality("motion")}>Smooth motion</button>
+      <button class:active={streamSettings.quality === "balanced"} onclick={() => setStreamQuality("balanced")}>Balanced</button>
+      <button class:active={streamSettings.quality === "detail"} onclick={() => setStreamQuality("detail")}>Sharp detail</button>
+    </fieldset>
+    <div class="stream-summary">
+      <span><b>{streamResolutionLabel(receiveHeight)}</b> my advertised receive bucket{receiveResolutionMode === "auto" ? " - window-derived" : " - fixed"}</span>
+      <span><b>{streamEstimatedTotal.toFixed(1)} Mbps</b> planned screen upload for {callParticipants.length} {callParticipants.length === 1 ? "viewer" : "viewers"}, plus audio and overhead</span>
+      {#if actualStream}
+        <span><b>{actualStream.width}x{actualStream.height} @ {actualStream.fps || "?"} fps</b> actual browser capture</span>
+      {:else}
+        <span>Actual capture and negotiated codec appear after sharing starts.</span>
+      {/if}
+    </div>
+    {#if streamSettings.mbpsPerPeer < streamRecommended}
+      <p class="stream-warning">This cap is below the roughly {streamRecommended.toFixed(1)} Mbps suggested for {streamResolutionLabel(streamSettings.resolution)} at {streamSettings.frameRate} fps; text or motion may blur.</p>
+    {/if}
+    {#if actualStream?.constraintError}
+      <p class="stream-warning">The WebView could not apply the selected capture constraints. Per-viewer scaling uses the actual {actualStream.height || "unknown"}p capture instead.</p>
+    {/if}
+    {#if streamBudgetFailed}
+      <p class="stream-warning">At least one viewer's encoder rejected its latest cap, so that screen-share edge is paused. If Mewtual cannot park an uncapped edge, sharing stops for everyone.</p>
+    {/if}
+    {#if callParticipants.length}
+      <ul class="stream-peers">
+        {#each callParticipants as fingerprint (fingerprint)}
+          {@const plan = peerStreamPlan(streamSettings, peerMeta[fingerprint]?.rx ?? 1080, streamSourceHeight)}
+          {@const budget = peerVideoBudget[fingerprint]}
+          <li>
+            <span>{callNameOf(fingerprint)}</span>
+            <span>{streamResolutionLabel(plan.receiveHeight)} requested to {streamResolutionLabel(plan.transportHeight)} transport</span>
+            <span>{budget?.state === "applied" ? "applied up to" : budget?.state === "paused" ? "paused - cap rejected at" : budget?.state === "stop-required" ? "sharing stopped - cap rejected at" : budget?.state === "failed" ? "cap failed at" : "planned up to"} {plan.estimatedMbps.toFixed(1)} Mbps{peerVideoCodec[fingerprint] ? ` - ${peerVideoCodec[fingerprint]}` : " - codec negotiating"}</span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    <p class="muted small">WebRTC compresses each peer encode independently. Mewtual prefers H.265 when both WebViews offer it, then AV1, VP9, H.264 and VP8; the row shows the codec actually negotiated. Exact window and monitor dimensions are never shared.</p>
+  </section>
 {/snippet}
 
 {#snippet textEffectButton(target: TextEffectTarget, label = "Text effects")}
@@ -17219,6 +17796,7 @@
               <button disabled={busy || !dmName.trim() || !dmInvite.trim()}>Connect</button>
             </form>
           {/if}
+          {@render outboundJoinReplyPanel()}
           {#if dmList.length > 1}
             <label class="dm-sort">
               <span class="muted small">Sort</span>
@@ -17254,6 +17832,16 @@
               <textarea class="invite-code" readonly rows="2" value={cur.invite}></textarea>
               <button class="ghost small" onclick={copyInvite}>{copied ? "Copied!" : "Copy code"}</button>
             </div>
+          {/if}
+          {#if cur?.isDm}
+            <details class="dm-connection-repair">
+              <summary>Connection and recovery codes</summary>
+              <p class="muted small">First connection: paste the reply produced by the friend who is joining this DM.</p>
+              <textarea class="invite-code" rows="3" bind:value={joinReplyInput} placeholder="paste mewtual-reply-v1 code"></textarea>
+              <button class="ghost small" disabled={joinReplyApplying || !joinReplyInput.trim()} onclick={() => applyJoinReply(false)}>{joinReplyApplying ? "Dialling..." : "Dial friend"}</button>
+              {#if joinReplyNeedsReplace}<button class="ghost small danger-btn" disabled={joinReplyApplying} onclick={() => applyJoinReply(true)}>Confirm different joiner</button>{/if}
+              {@render memberRecoveryPanel()}
+            </details>
           {/if}
           {#if cur?.isDm}
             {@render contextNav(true)}
@@ -18059,6 +18647,7 @@
               <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" disabled={manualRedialBusy || activeServerId === null} onclick={manualFallbackRedial}>{manualRedialBusy ? "Retrying…" : "Retry group routes now"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
               {#if manualRedialNote}<p class="muted small">{manualRedialNote}</p>{/if}
             {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Current member-path evidence below is still available.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
+            {@render memberRecoveryPanel()}
             <section class="connection-member-health" aria-labelledby="connection-member-health-title">
               <header>
                 <div>
@@ -19106,6 +19695,10 @@
               {@render icoScreen()}
               <span class="stage-act-lbl">Share</span>
             </button>
+            <button class="ghost stage-act" class:on={streamSettingsOpen} aria-expanded={streamSettingsOpen} title="Screen stream resolution, quality and per-peer bitrate" onclick={() => (streamSettingsOpen = !streamSettingsOpen)}>
+              {@render icoGear()}
+              <span class="stage-act-lbl">Stream</span>
+            </button>
             <button class="ghost stage-act" class:on={instOpen} aria-expanded={instOpen} title="Instrument drawer" onclick={toggleInstDrawer}>
               {@render icoNote()}
               <span class="stage-act-lbl">Inst</span>
@@ -19115,6 +19708,7 @@
               <span class="stage-act-lbl">Leave</span>
             </button>
           </div>
+          {#if streamSettingsOpen}{@render streamSettingsPanel()}{/if}
           <div class="stage-devs">
             <label class="stage-dev">
               <span class="stage-label">IN</span>
@@ -19252,6 +19846,9 @@
           <button class="ghost focus-btn" class:on={myVideo === "screen"} aria-pressed={myVideo === "screen"} title={myVideo === "screen" ? "Stop sharing your screen" : "Share your screen"} aria-label="Share your screen" onclick={() => toggleVideo("screen")}>
             {@render icoScreen()}
           </button>
+          <button class="ghost focus-btn" class:on={streamSettingsOpen} aria-expanded={streamSettingsOpen} title="Screen stream settings" aria-label="Screen stream settings" onclick={() => (streamSettingsOpen = !streamSettingsOpen)}>
+            {@render icoGear()}
+          </button>
           <button class="ghost focus-btn" class:on={instOpen} aria-expanded={instOpen} title="Instrument drawer" aria-label="Instruments" onclick={toggleInstDrawer}>
             {@render icoNote()}
           </button>
@@ -19259,6 +19856,8 @@
             {@render icoHangup()}
           </button>
         </div>
+
+        {#if streamSettingsOpen}<div class="focus-stream-panel">{@render streamSettingsPanel()}</div>{/if}
 
         <div class="focus-dock juke-dock-slot">{@render jukeDock()}</div>
 

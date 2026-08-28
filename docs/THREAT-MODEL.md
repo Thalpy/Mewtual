@@ -139,6 +139,23 @@ table with the commit that closed it.
   native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
   the main-window capability reduce injection reach; the native command gate is the enforcement
   layer, not the fact that Svelte hid or cleared a control.
+- **Delivery receipts prove receipt by a member device, not attention by a person.** Only a newly
+  applied, signature-verified op can queue a receipt, and it is sent as a connected-only
+  member-authenticated request. The author records it only when its exact document/change hash is
+  already in the bounded recent-target set; arbitrary hashes, duplicates and unauthenticated
+  frames cannot allocate confirmation state. A recipient can withhold receipts or a modified
+  current member can claim receipt without displaying content, so the UI says delivered/held and
+  never read. Receipt traffic adds message-timing metadata to peers already participating in the
+  encrypted group; it is not broadcast outside the group.
+- **Adaptive stream resolution reveals only a coarse call preference.** A call participant sends
+  one of four height buckets, not its exact window, monitor dimensions, or pixel ratio. The sender
+  treats it as an advisory upper bound and independently caps each WebRTC encoding. Screen tracks
+  stay parked until resolution, bitrate and frame-rate parameters apply; rejection pauses the edge
+  or stops sharing if parking fails. A malicious
+  receiver can request 4K but cannot raise the sender above the sender's own capture/bitrate cap.
+  H.265 and other efficient codecs remain runtime-negotiated capabilities, not security
+  guarantees. WebRTC encryption protects media in transit, while endpoint capture, decoding and
+  the who-is-watching/timing/bitrate metadata remain trusted-endpoint and traffic-analysis risks.
 - **A shared file is authenticated bytes, not trusted content.** Explicit save streams into a
   non-overwriting `.part`, checks the declared size and whole-file content address, sanitizes the
   peer-provided name to one leaf, atomically publishes only after verification, and reveals it in
@@ -176,6 +193,23 @@ table with the commit that closed it.
   do not become durable by accident. If both peers are already isolated with no old hint, no local
   state can reconstruct the missing address; one fresh invite, rendezvous/relay path, or future mDNS
   discovery is still needed.
+
+- **An out-of-band member recovery code is narrow dial consent, not new membership or route
+  proof.** The code is group-bound, signed by a device that must still be in the current MLS roster,
+  expires after ten minutes, and contains at most four terminal-peer-bound literal-IP TCP/QUIC
+  routes. DNS, relay, WebSocket, unsafe host classes, foreign peer ids, wrong groups, future,
+  expired and self codes fail before dialing; accepted candidates spend the shared endpoint,
+  prefix, peer, server and process scheduler. Private/loopback addresses are intentionally allowed
+  because the user explicitly transports the code and same-LAN address churn is the recovery case.
+  The signer's exact transport peer must also be the unique peer in that device's current signed
+  record; re-signing another member's peer is rejected. The signer can still direct bounded attempts
+  at sockets it does not own, and the code exposes its candidate addresses to the recipient.
+  Applying seals only expiring permission before dialing and preserves the prior proven contact.
+  No pasted route becomes durable until outbound Noise authentication proves the peer; bounded
+  process-local success evidence survives a short close edge long enough for the vault worker, but
+  still requires the pending/authorized peer and a unique current roster claim. Expiry is rechecked
+  under the final write lock. A code cannot repair an expired first-contact reply or make two
+  NAT-isolated devices reachable without some viable route.
 
 ## Protocol- / crypto-enforced (a modified client CANNOT bypass)
 

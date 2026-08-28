@@ -419,6 +419,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   set_endpoint_dial_scheduler(EndpointDialScheduler); // inject one process-shared final dial gate
   set_local_reconnect_routes(Vec<(PeerId,String)>);    // sealed desktop hints; direct literal IP only, transient in ChannelSync
   async dial_local_reconnect_routes() -> usize;        // exact current roster claim + shared scheduler rechecked before dial
+  mint_member_recovery_code(Vec<String>) -> Result<MemberRecoveryCode>; // current member signs <=4 current direct listener routes
+  verify_member_recovery_code(&str) -> Result<MemberRecoveryVerified>; // pure group/member/time/exact-device-peer/address validation
+  async apply_member_recovery_code(&str) -> Result<MemberRecoveryApplied>; // verifies group/member/time/peer binding, then scheduler-charged dial
   cache_known_records() -> usize;  async dial_cached_peers() -> usize;
   async drive_mesh_repair() -> usize;               // one bounded target: ≤2 connected-only probes, optional reciprocal request
   async drive_pending_reciprocal() -> usize;        // target-side exact-descriptor direct batch submission
@@ -426,6 +429,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   async drive_discovery();                          // periodic discovery + TTL-aware registration renewal
   async next_postjoin_discovery_event() -> Option<PostJoinDiscoveryEvent>;
   note_rendezvous_registered(RendezvousRegistration) -> bool;
+  track_delivery_target(DocType, doc_id, ChangeHash); // bounded exact targets eligible for an explicit receipt
+  peers_with_changes(DocType, doc_id, &[ChangeHash]) -> Vec<Vec<String>>; // causal authors union authenticated receipts
   authorize_join_helper(joiner:PeerId, invite_nonce:[u8;16], inviter_device:DeviceId,
                         target:PeerId, expires_at_ms:u64) -> bool;
   doc(DocType, doc_id) -> Option<&EncryptedDoc>;  local_peer() -> PeerId;  transport() -> &T;  // transport(): the discovery/dial layer above ChannelSync
@@ -557,6 +562,11 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
   - `17` KIND_INDIRECT_RESULT; separately authed exact target hash + echoed attempt + boolean. It
     is accepted only from the pending proven helper while the target descriptor remains current.
     Two distinct negatives are suspicion only; one positive may queue kind 14 through that helper.
+  - `18` KIND_DELIVERY_RECEIPT; connected-only authed document type, document id, and 32-byte
+    change hash. A receiver queues it only when that exact signed op is newly applied, and the
+    sender accepts it only for one of its bounded recent targets. Duplicates are inert; unknown
+    hashes cannot allocate state. It proves that member device received the op, never that a human
+    displayed or read it.
   - **Authed body** (members-only gate): `bytes inner ‖ bytes requester_pubkey ‖ u64 timestamp_ms ‖ bytes nonce(16) ‖ u64 req_epoch ‖ bytes signature(64)`,
     signature over `"catcoms/catchup-auth/v1" ‖ group_id ‖ u16 kind ‖ inner ‖ requester_pubkey ‖ timestamp_ms ‖ nonce ‖ req_epoch`.
     Served only if `requester_pubkey` content-addresses a **current member**, the timestamp is fresh (`MAX_REQUEST_AGE_MS` 60s),
@@ -564,6 +574,13 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     request, so a captured response cannot be replayed (closes the same-ms `ts`-collision window).
   - Caps: requests 64 KiB; responses 16 MiB (catch-up) / **512 KiB (PEX)**; bundle element counts capped.
 - **`InviteToken`** signed payload (v2): `"catcoms/invite/v2" ‖ group_id ‖ inviter_device_id ‖ inviter_public_key ‖ nonce ‖ u64 expires ‖ u32 n ‖ n×bootstrap_str ‖ u32 m ‖ m×rendezvous_str`, then `signature(64)`.
+
+**Member recovery code.** The text prefix is `mewtual-reconnect-v1:` followed by the hex encoding
+of a canonical group id, member device public key, transport peer, candidate list, nonce, issue and
+expiry times, and the member signature. The whole text is at most 8 KiB, has at most four 512-byte
+direct literal-IP TCP/QUIC candidates, lives exactly ten minutes, and tolerates at most 30 seconds
+of future skew. Every route terminates in the signed transport peer; the signing device must still
+be in the receiver's current MLS roster. This is not an invite or a membership operation.
 
 ## 8. `DocType` tags (stable; only append)
 `Channel=1, Wiki=2, Status=3, Calendar=4, InviteLedger=5, MemberRoles=6, FileIndex=7, Routing=8,
@@ -619,7 +636,9 @@ impl ServerStore {
 `ServerNet` record version 3 adds a reconnect-policy tag after the version-2 switchboard flag:
 `Disabled`, `AuthorizedPeer(peer_id)`, or `LegacyPending`, followed by at most two
 `ReconnectRoute { peer_id, address }` rows. A row is valid only under `AuthorizedPeer` and must name
-that exact peer. Versions 1 and 2 decode with an empty route list and `LegacyPending`; new founders
+that exact peer. Version 4 appends an optional `pending_recovery_peer` plus the signed code's
+absolute expiry. Versions 1 and 2 decode with an empty route list and `LegacyPending`; version 3
+decodes with no pending recovery. New founders
 and helper/reply/switchboard admissions persist `Disabled`, while a successful direct admission
 persists only its named inviter as `AuthorizedPeer`. Each address is capped at 512 bytes and the
 entire record remains vault-sealed and atomically replaced.
@@ -637,6 +656,20 @@ promote once only when the group has exactly one other member and exactly one un
 claim; its captured route must additionally be private/loopback. A non-empty observation replaces
 and installs the bounded hints; an empty observation does not erase them merely because the remote
 app is closed.
+
+Applying a member recovery code first verifies its group, signature, current roster membership,
+exact unique device→transport record, deadline and route grammar **without dialing**. While the UI
+session commit gate is held, the desktop atomically seals only that peer and deadline as pending;
+the previous `ReconnectPolicy` and proven routes remain intact. Applying then repeats validation
+and submits scheduler-charged dials. A coalesced worker installed for both new and restored servers
+may promote the pending peer only before the deadline and only from this process's bounded recent
+outbound Noise-authenticated route evidence. Establish+close therefore cannot erase proof before a
+vault wait completes. Promotion atomically changes `ReconnectPolicy` and installs the exact route;
+a pasted candidate alone never becomes durable. Recovery may retain a safe public direct literal,
+while ordinary legacy migration remains private/loopback-only. The Tauri commands are
+`mint_member_recovery(server) -> {code,expires_at_ms,candidate_count}` and
+`apply_member_recovery(server,code) -> {fingerprint,submitted_routes}`. A successful apply result
+means bounded dial attempts were submitted, not that the member is connected.
 
 `storage_health` counts a chunk as verified only after its storage seal/content address and the
 file-layer decryption both succeed. `repair_storage` explicitly fetches only missing or unreadable
@@ -722,3 +755,26 @@ unread row. Wall time remains display metadata only.
 The single record of a server's outstanding activity is its `unread` channel-id list. The rail
 badge, the orbit glow and the DM circle's dot are all derived from it, so no separate mutable
 "activity" flag can disagree with the channel list.
+
+---
+
+## 11. Adaptive screen-share signalling  *(desktop WebRTC)*
+
+Call signalling's existing authenticated peer state adds an optional `rx` field with exactly one
+of `720`, `1080`, `1440`, or `2160`. Older senders ignore it; newer receivers default an absent or
+invalid field to 1080p. In automatic mode the receiver computes the largest 16:9 physical-pixel
+surface fitting the current Mewtual window, rounds it to the nearest bucket, and keeps the prior
+bucket through a 72-pixel midpoint dead band. Exact window and monitor dimensions never leave the
+device.
+
+Screen capture settings are local and persisted as resolution (720p/1080p/1440p/2160p), frame rate
+(15/24/30/60), quality priority, and a 0.5--50 Mbps full-resolution per-peer cap. For each connected
+viewer the sender chooses `min(capture_height, rx)`, parks that edge, applies
+`scaleResolutionDownBy`, `maxBitrate`, `maxFramerate`, and degradation preference to the independent
+`RTCRtpSender`, and attaches the screen track only after success. Resize/settings bursts retain one
+active plus one overwriteable pending mutation per sender. A rejected cap leaves that edge paused;
+if it cannot be parked, screen sharing stops rather than sending uncapped. The panel shows per-peer
+and aggregate estimates excluding audio/protocol overhead. The WebView performs the actual
+compressed encoding and may vary below the cap. Codec preferences are H.265/HEVC, AV1, VP9, H.264,
+then VP8 when exposed by the runtime; the UI labels only the codec observed in WebRTC outbound
+stats as negotiated.

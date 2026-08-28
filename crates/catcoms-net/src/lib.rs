@@ -178,6 +178,13 @@ pub struct AuthenticatedDialRoute {
     pub address: String,
 }
 
+/// Retain two most-recent exact routes per peer for this process lifetime. This is evidence of a
+/// completed outbound Noise handshake, not current connectivity; the application still supplies
+/// roster and local-consent checks before it may persist or dial one.
+const MAX_AUTHENTICATED_ROUTE_EVIDENCE_PER_PEER: usize = 2;
+const MAX_AUTHENTICATED_ROUTE_EVIDENCE: usize =
+    catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT * MAX_AUTHENTICATED_ROUTE_EVIDENCE_PER_PEER;
+
 /// The result of one AutoNAT v2 dial-back for one candidate address.
 ///
 /// Reachability is deliberately **per address and per observer**, not a permanent property of the
@@ -938,6 +945,34 @@ fn authenticated_route_snapshot(
     snapshot.dedup();
     snapshot.truncate(catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT * MAX_PEER_DIAL_BATCH);
     snapshot
+}
+
+/// Record a completed outbound Noise handshake independently of current liveness. A connection
+/// can establish and close before the desktop obtains its vault lock; clearing this proof on the
+/// close edge would make a valid, explicitly authorized recovery impossible to seal.
+fn record_authenticated_route_evidence(
+    evidence: &mut VecDeque<AuthenticatedDialRoute>,
+    route: AuthenticatedDialRoute,
+) {
+    evidence.retain(|candidate| candidate != &route);
+    while evidence
+        .iter()
+        .filter(|candidate| candidate.peer == route.peer)
+        .count()
+        >= MAX_AUTHENTICATED_ROUTE_EVIDENCE_PER_PEER
+    {
+        let Some(index) = evidence
+            .iter()
+            .position(|candidate| candidate.peer == route.peer)
+        else {
+            break;
+        };
+        evidence.remove(index);
+    }
+    evidence.push_back(route);
+    while evidence.len() > MAX_AUTHENTICATED_ROUTE_EVIDENCE {
+        evidence.pop_front();
+    }
 }
 
 /// Apply one physical close edge and immediately publish its address-bearing result.
@@ -3023,6 +3058,9 @@ struct Actor {
     /// outbound, Noise-authenticated direct routes enter this table; consumers use it to seal a
     /// same-LAN reconnect hint after admission, never for UI presence.
     authenticated_route_tx: watch::Sender<Vec<AuthenticatedDialRoute>>,
+    /// Session-bounded successful outbound routes. Unlike `authenticated_route_tx`, a close does
+    /// not erase these before an authorized recovery capture can seal its evidence.
+    authenticated_route_evidence_tx: watch::Sender<Vec<AuthenticatedDialRoute>>,
     listen_tx: mpsc::Sender<Multiaddr>,
     active_listeners: HashSet<Multiaddr>,
     listener_snapshot_tx: watch::Sender<ListenerSnapshot>,
@@ -3109,6 +3147,8 @@ struct Actor {
     /// Exact authenticated dial endpoints, keyed by physical connection so a close removes only
     /// its own route while a simultaneous TCP/QUIC or DCUtR connection survives.
     authenticated_routes: HashMap<(libp2p::PeerId, ConnectionId), AuthenticatedDialRoute>,
+    /// The newest bounded outbound Noise successes, retained across close edges for this process.
+    authenticated_route_evidence: VecDeque<AuthenticatedDialRoute>,
     /// Peers **this node's own configuration** named as infrastructure or as a bootstrap: the
     /// relays it reserves on, the rendezvous nodes it registers/discovers at, and the addresses
     /// it was constructed to dial. They are never deniable by a membership action.
@@ -3209,6 +3249,8 @@ impl Actor {
         // run this line, so readers additionally reject any retained value once the sender closes.
         self.connection_snapshot_tx.send_replace(Vec::new());
         self.authenticated_route_tx.send_replace(Vec::new());
+        self.authenticated_route_evidence_tx
+            .send_replace(Vec::new());
     }
 
     /// Reconcile router workers from the authoritative live listener set. This runs for both
@@ -4207,7 +4249,13 @@ impl Actor {
                 self.connection_paths.insert((peer_id, connection_id), path);
                 if let Some(route) = authenticated_dial_route(peer_id, &endpoint) {
                     self.authenticated_routes
-                        .insert((peer_id, connection_id), route);
+                        .insert((peer_id, connection_id), route.clone());
+                    record_authenticated_route_evidence(
+                        &mut self.authenticated_route_evidence,
+                        route,
+                    );
+                    self.authenticated_route_evidence_tx
+                        .send_replace(self.authenticated_route_evidence.iter().cloned().collect());
                 }
                 // Update the queryable state atomically before sending either ordered edge. A
                 // waiter that wakes here sees both aggregate liveness and its current path.
@@ -4638,6 +4686,7 @@ pub struct MeshService {
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     connection_snapshot_rx: watch::Receiver<Vec<PeerConnectionSnapshot>>,
     authenticated_route_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
+    authenticated_route_evidence_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
     listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
     listener_snapshot_rx: Mutex<watch::Receiver<ListenerSnapshot>>,
     /// `None` once the desktop has taken the coalesced router-mapping state.
@@ -4679,6 +4728,8 @@ impl MeshService {
         let (event_tx, event_rx) = mpsc::channel(256);
         let (connection_snapshot_tx, connection_snapshot_rx) = watch::channel(Vec::new());
         let (authenticated_route_tx, authenticated_route_rx) = watch::channel(Vec::new());
+        let (authenticated_route_evidence_tx, authenticated_route_evidence_rx) =
+            watch::channel(Vec::new());
         let (listen_tx, listen_rx) = mpsc::channel(16);
         let (listener_snapshot_tx, listener_snapshot_rx) =
             watch::channel(ListenerSnapshot::default());
@@ -4698,6 +4749,7 @@ impl MeshService {
             event_tx,
             connection_snapshot_tx,
             authenticated_route_tx,
+            authenticated_route_evidence_tx,
             listen_tx,
             active_listeners: HashSet::new(),
             listener_snapshot_tx,
@@ -4731,6 +4783,7 @@ impl MeshService {
             pending_dials: HashMap::new(),
             connection_paths: HashMap::new(),
             authenticated_routes: HashMap::new(),
+            authenticated_route_evidence: VecDeque::new(),
             protected: protected.into_iter().collect(),
         };
         tokio::spawn(actor.run());
@@ -4740,6 +4793,7 @@ impl MeshService {
             event_rx: Mutex::new(event_rx),
             connection_snapshot_rx,
             authenticated_route_rx,
+            authenticated_route_evidence_rx,
             listen_rx: Mutex::new(listen_rx),
             listener_snapshot_rx: Mutex::new(listener_snapshot_rx),
             port_mapping_rx: Mutex::new(Some(port_mapping_rx)),
@@ -5101,6 +5155,7 @@ impl MeshService {
             local: self.local,
             cmd_tx: self.cmd_tx.clone(),
             authenticated_route_rx: self.authenticated_route_rx.clone(),
+            authenticated_route_evidence_rx: self.authenticated_route_evidence_rx.clone(),
         }
     }
 }
@@ -5117,6 +5172,7 @@ pub struct MeshHandle {
     local: PeerId,
     cmd_tx: mpsc::Sender<Command>,
     authenticated_route_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
+    authenticated_route_evidence_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
 }
 
 impl MeshHandle {
@@ -5133,6 +5189,16 @@ impl MeshHandle {
     /// later dial.
     pub fn authenticated_dial_routes(&self) -> Vec<AuthenticatedDialRoute> {
         let mut snapshot = self.authenticated_route_rx.clone();
+        current_authenticated_routes(&mut snapshot).unwrap_or_default()
+    }
+
+    /// Snapshot this process's bounded recent outbound Noise-authenticated route evidence.
+    ///
+    /// A route remains here after a short connection closes so an already-authorized recovery can
+    /// seal it without racing liveness. This grants no authority: consumers must still require an
+    /// exact current member-to-peer claim and local admission/recovery consent.
+    pub fn authenticated_dial_route_evidence(&self) -> Vec<AuthenticatedDialRoute> {
+        let mut snapshot = self.authenticated_route_evidence_rx.clone();
         current_authenticated_routes(&mut snapshot).unwrap_or_default()
     }
 
@@ -5682,6 +5748,30 @@ mod tests {
         forget_authenticated_routes(&mut routes, peer, ConnectionId::new_unchecked(999), 0);
         assert!(routes.keys().all(|(candidate, _)| *candidate != peer));
         assert!(routes.keys().any(|(candidate, _)| *candidate == other));
+    }
+
+    #[test]
+    fn recent_authenticated_route_evidence_survives_close_and_is_per_peer_bounded() {
+        let transport = libp2p_peer();
+        let peer = to_peer(&transport);
+        let route = |port| AuthenticatedDialRoute {
+            peer,
+            address: format!("/ip4/192.168.1.40/tcp/{port}/p2p/{transport}"),
+        };
+        let mut live =
+            HashMap::from([((transport, ConnectionId::new_unchecked(1)), route(22_487))]);
+        let mut evidence = VecDeque::new();
+        record_authenticated_route_evidence(&mut evidence, route(22_487));
+        record_authenticated_route_evidence(&mut evidence, route(22_488));
+        record_authenticated_route_evidence(&mut evidence, route(22_489));
+
+        forget_authenticated_routes(&mut live, transport, ConnectionId::new_unchecked(1), 0);
+        assert!(live.is_empty(), "present-time liveness remains truthful");
+        assert_eq!(
+            evidence.into_iter().collect::<Vec<_>>(),
+            vec![route(22_488), route(22_489)],
+            "a short edge leaves bounded proof for the recovery worker"
+        );
     }
 
     #[test]

@@ -13,7 +13,8 @@ use std::future::Future;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -39,7 +40,7 @@ use catcoms_net::{
     PortMappingSnapshot, PortMappingTransport, RelayAddressSnapshot, RendezvousTarget,
 };
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
-use catcoms_sync::{join_namespace, PreOwnerConnectionHandoff, JOIN_REPLY_PROOF_KIND};
+use catcoms_sync::{fingerprint, join_namespace, PreOwnerConnectionHandoff, JOIN_REPLY_PROOF_KIND};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
 use serde::{Deserialize, Serialize};
@@ -218,6 +219,10 @@ struct AppState {
     /// desktop process. Per-server ranking remains inside each actor; this is the final bound on
     /// actual socket fan-out across groups.
     endpoint_dials: EndpointDialScheduler,
+    /// Per-server single-flight wake signals for sealing newly authenticated recovery routes.
+    /// This uses a synchronous mutex only to clone/notify a `watch::Sender`; no actor/store await
+    /// may ever run in the event consumer, or the bounded actor event channel can deadlock.
+    reconnect_capture_signals: StdMutex<HashMap<u64, watch::Sender<u64>>>,
     /// The last few decrypted media chunks. Small and deliberately not an LRU: playback is
     /// sequential, so "the current chunk and the one before it" covers the straddle at a chunk
     /// boundary and a short seek backwards, which is all the locality there is to exploit.
@@ -244,6 +249,17 @@ struct AppState {
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
     session_resumable: Mutex<bool>,
+    /// Set before an explicit lock performs any awaited cleanup. Commands check this as well as
+    /// `session_resumable`, so new IPC cannot slip through while the lock is waiting to serialize
+    /// against an older command's final native commit.
+    session_lock_requested: AtomicBool,
+    /// Every explicit lock invalidates work that began in an earlier UI authorization epoch.
+    /// Long-running joins carry the captured value to both their reply event and durable commit.
+    ui_session_generation: AtomicU64,
+    /// Orders the externally-visible parts of a long command against explicit lock completion.
+    /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
+    /// reply event or server registration to occur after `lock_session` itself has completed.
+    ui_session_commit: Mutex<()>,
     /// The **new device's** half of an in-flight grant ceremony (multi-device M2): the device
     /// identity + single-use nonce minted by `pairing_begin`, held until the grant bundle is
     /// pasted back. One slot; starting a new ceremony abandons any previous one; and, like
@@ -561,6 +577,24 @@ struct JoinReplyApplied {
     helper: bool,
 }
 
+/// A short-lived, member-signed route repair code. Unlike a join reply this can only reconnect a
+/// device that is already in the current roster; it cannot admit a new device or replace MLS
+/// membership state.
+#[derive(Debug, Clone, Serialize)]
+struct MemberRecoveryReady {
+    code: String,
+    expires_at_ms: u64,
+    candidate_count: usize,
+}
+
+/// Result of accepting a member recovery code. `submitted_routes` reports socket attempts, not a
+/// successful connection: the ordinary Noise and signed peer-record checks remain authoritative.
+#[derive(Debug, Clone, Serialize)]
+struct MemberRecoveryAppliedEvt {
+    fingerprint: String,
+    submitted_routes: usize,
+}
+
 /// Decode-only information shown before a pasted invite is allowed to contact standing helpers.
 /// Routes stay native-side: the webview learns only that the inviter endorsed a bounded fallback
 /// set and the privacy consequence of choosing it.
@@ -710,11 +744,39 @@ struct PendingGrant {
 /// networking in the background, but that must not leave their plaintext projections callable by
 /// injected/stale frontend code behind the lock screen.
 async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
-    if *state.session_resumable.lock().await && state.store.lock().await.is_some() {
+    if state.session_lock_requested.load(Ordering::Acquire) {
+        return Err("the vault is locked".into());
+    }
+    if *state.session_resumable.lock().await
+        && state.store.lock().await.is_some()
+        && !state.session_lock_requested.load(Ordering::Acquire)
+    {
         Ok(())
     } else {
         Err("the vault is locked".into())
     }
+}
+
+/// Capture an unlocked UI epoch while serialized with the final phase of any older command.
+async fn unlocked_ui_session_generation(state: &AppState) -> Result<u64, String> {
+    let _commit = state.ui_session_commit.lock().await;
+    require_unlocked_session(state).await?;
+    Ok(state.ui_session_generation.load(Ordering::Acquire))
+}
+
+/// Permit one externally-visible step only if it still belongs to the UI session that began it.
+/// Holding the returned guard through the step orders it before a concurrently requested lock;
+/// the atomic request flag still makes all newly-started commands fail without waiting.
+async fn require_ui_session_generation(
+    state: &AppState,
+    expected: u64,
+) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+    let commit = state.ui_session_commit.lock().await;
+    require_unlocked_session(state).await?;
+    if state.ui_session_generation.load(Ordering::Acquire) != expected {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    Ok(commit)
 }
 
 /// Why a server's actor could not be handed over.
@@ -1599,6 +1661,54 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
     supervise_registered("discovery_timer", Some(server), watched, task);
 }
 
+/// Wake the per-server recovery capture worker without awaiting the actor from its event consumer.
+/// `watch` coalesces any number of flaps into one latest generation while a capture is in flight.
+fn notify_reconnect_capture(app: &AppHandle, server: u64) {
+    let state = app.state::<AppState>();
+    let Ok(signals) = state.reconnect_capture_signals.lock() else {
+        return;
+    };
+    if let Some(signal) = signals.get(&server) {
+        signal.send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+}
+
+fn spawn_reconnect_capture_worker(
+    app: AppHandle,
+    server: u64,
+    actor: ServerActor,
+    mut wake: watch::Receiver<u64>,
+) {
+    let task = tokio::spawn(async move {
+        while wake.changed().await.is_ok() {
+            persist_live_local_reconnect_routes(&app, server, &actor).await;
+        }
+    });
+    supervise("reconnect_capture", server, task);
+}
+
+fn replace_reconnect_capture_signal(
+    signals: &StdMutex<HashMap<u64, watch::Sender<u64>>>,
+    server: u64,
+) -> Option<watch::Receiver<u64>> {
+    let (signal, wake) = watch::channel(0u64);
+    signals.lock().ok()?.insert(server, signal);
+    Some(wake)
+}
+
+/// Install the single bounded recovery-capture wakeup for a registry entry. Replacing the sender
+/// closes any prior worker after its current capture, which matters when an on-disk id is restored
+/// into a process that previously held a transient entry with the same id.
+fn install_reconnect_capture_worker(app: &AppHandle, server: u64, actor: ServerActor) {
+    let Some(capture_wake) = replace_reconnect_capture_signal(
+        &app.state::<AppState>().reconnect_capture_signals,
+        server,
+    ) else {
+        return;
+    };
+    spawn_reconnect_capture_worker(app.clone(), server, actor, capture_wake);
+}
+
 fn forward_events(
     app: AppHandle,
     server: u64,
@@ -1611,6 +1721,16 @@ fn forward_events(
             // reaching the webview is provably the send that caused it rather than something that
             // happened to follow it.
             let trace = catcoms_diagnostics::TraceId(ev.trace.0);
+            // Route/authentication changes are the narrow window in which a pasted recovery route
+            // is provable. Seal it before the ordinary UI-event lock gate: actors intentionally
+            // keep networking behind the lock, and waiting for the minute timer could lose a
+            // short-lived authenticated edge before it ever became restart-safe.
+            if matches!(
+                &ev.event,
+                AppEvent::ConnectivityChanged { .. } | AppEvent::MemberRoutesChanged
+            ) {
+                notify_reconnect_capture(&app, server);
+            }
             // Actor networking stays live behind the explicit lock, but its event stream can
             // contain member fingerprints, channel ids, delivery state and call signalling.
             // Drop those notifications at the native boundary; unlock reloads fresh projections.
@@ -2634,6 +2754,7 @@ async fn register_server(
             record_seq,
         },
     );
+    install_reconnect_capture_worker(app, id, timer_actor.clone());
     // Start only after the entry exists. A zero-millisecond randomized first tick must not race
     // the registry insertion and silently skip the initial interface/discovery refresh.
     spawn_discovery_timer(app.clone(), id, timer_actor);
@@ -2724,13 +2845,30 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
 async fn persist_live_local_reconnect_routes(app: &AppHandle, server: u64, actor: &ServerActor) {
     let state = app.state::<AppState>();
     let state = state.inner();
-    let mut net = {
+    let now_ms = SystemClock.now_ms();
+    let net = {
         let guard = state.store.lock().await;
         let Some(store) = guard.as_ref() else {
             return;
         };
         match store.load_server_net(server) {
-            Ok(Some(net)) => net,
+            Ok(Some(mut net)) => {
+                if net.pending_recovery_peer.is_some()
+                    && now_ms > net.pending_recovery_expires_at_ms
+                {
+                    net.pending_recovery_peer = None;
+                    net.pending_recovery_expires_at_ms = 0;
+                    if let Err(error) = store.save_server_net(server, &net, &mut OsCryptoRng) {
+                        tracing::warn!(
+                            target: "catcoms_app",
+                            server,
+                            error = %error,
+                            "VAULT.RECONNECT_PENDING.EXPIRY_CLEAR_FAILED"
+                        );
+                    }
+                }
+                net
+            }
             Ok(None) => return,
             Err(error) => {
                 tracing::warn!(
@@ -2751,54 +2889,92 @@ async fn persist_live_local_reconnect_routes(app: &AppHandle, server: u64, actor
         return;
     };
     let member_routes = actor.member_routes().await;
-    let capture_peer = reconnect_capture_peer(
-        net.reconnect_policy,
-        member_routes.len(),
-        member_routes
-            .into_iter()
-            .filter_map(|route| route.peer_id.map(PeerId::new)),
+    let claimed_peers: Vec<_> = member_routes
+        .iter()
+        .filter_map(|route| route.peer_id.map(PeerId::new))
+        .collect();
+    // Actor and mesh observations may wait behind unrelated work. Sample again after those awaits
+    // so a code that expired while evidence was gathered cannot be selected on a stale timestamp.
+    let selection_now_ms = SystemClock.now_ms();
+    let pending_recovery_peer = pending_recovery_capture_peer(
+        net.pending_recovery_peer,
+        net.pending_recovery_expires_at_ms,
+        selection_now_ms,
+        claimed_peers.iter().copied(),
     );
+    // A recovery code grants only session-local permission to try its signer. It becomes the
+    // durable singleton contact only once present-time roster evidence and the mesh's outbound
+    // authenticated-route ledger agree. Until then the old proven contact/routes remain intact.
+    let capture_peer = pending_recovery_peer.or_else(|| {
+        reconnect_capture_peer(
+            net.reconnect_policy,
+            member_routes.len(),
+            claimed_peers.iter().copied(),
+        )
+    });
     let Some(capture_peer) = capture_peer else {
         return;
     };
+    let selected_from_pending = pending_recovery_peer == Some(capture_peer);
     let member_peers = HashSet::from([capture_peer]);
-    let routes = authenticated_member_lan_reconnect_routes(&mesh, &member_peers);
+    let routes = if selected_from_pending {
+        // Recovery codes permit safe public direct literals as well as LAN addresses. Promotion
+        // still uses only the exact outbound Noise-authenticated route for this unique member.
+        select_authenticated_reconnect_routes(
+            mesh.authenticated_dial_route_evidence(),
+            &member_peers,
+            false,
+        )
+    } else {
+        authenticated_member_lan_reconnect_routes(&mesh, &member_peers)
+    };
     if routes.is_empty() {
         return;
     }
-    if actor
-        .set_local_reconnect_routes(
-            routes
-                .iter()
-                .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
-                .collect(),
-        )
-        .await
-        .is_err()
-    {
-        return;
-    }
-
-    let next_policy = ReconnectPolicy::AuthorizedPeer(*capture_peer.as_bytes());
-    if net.reconnect_routes == routes && net.reconnect_policy == next_policy {
-        return;
-    }
-    net.reconnect_routes = routes;
-    // A legacy row migrates once. From now on only this exact member contact may refresh it;
-    // helper/switchboard admission is permanently `Disabled` and can never reach this branch.
-    net.reconnect_policy = next_policy;
+    let actor_routes = routes
+        .iter()
+        .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
+        .collect();
     let guard = state.store.lock().await;
     let Some(store) = guard.as_ref() else {
         return;
     };
-    if let Err(error) = store.save_server_net(server, &net, &mut OsCryptoRng) {
-        tracing::warn!(
-            target: "catcoms_app",
-            server,
-            error = %error,
-            "VAULT.RECONNECT_ROUTE.SEAL_FAILED"
-        );
+    // Re-read under the final write lock. A recovery-code apply can update only the pending field
+    // while discovery is awaiting member/mesh evidence; saving the earlier `net` wholesale would
+    // silently erase that newer consent.
+    let mut current = match store.load_server_net(server) {
+        Ok(Some(current)) => current,
+        _ => return,
+    };
+    // The vault lock itself may have crossed the signed deadline. This final sample is the
+    // authority boundary used by the atomic merge and durable save.
+    let final_now_ms = SystemClock.now_ms();
+    let Some(changed) = merge_live_reconnect_capture(
+        &mut current,
+        selected_from_pending,
+        capture_peer,
+        routes,
+        member_routes.len(),
+        final_now_ms,
+        claimed_peers.iter().copied(),
+    ) else {
+        return;
+    };
+    if changed {
+        if let Err(error) = store.save_server_net(server, &current, &mut OsCryptoRng) {
+            tracing::warn!(
+                target: "catcoms_app",
+                server,
+                error = %error,
+                "VAULT.RECONNECT_ROUTE.SEAL_FAILED"
+            );
+            return;
+        }
     }
+    drop(guard);
+    // The durable write is the safety boundary. Updating the live actor afterwards avoids holding
+    // the vault lock across an actor await; a failure costs only this session's proactive redial.
+    let _ = actor.set_local_reconnect_routes(actor_routes).await;
 }
 
 /// Re-seal the registry (the set of servers + their names/invites) to disk.
@@ -2834,7 +3010,10 @@ async fn persist_registry(state: &AppState) {
 /// survive the last process: the only record of what it was for died with that process, and no
 /// later upload can adopt it. This is the one place that can say so, because it runs once per
 /// server before anything has had a chance to stage something new.
-async fn attach_blob_store(state: &AppState, server: &mut Server<MeshService, OsCryptoRng>) {
+async fn attach_blob_store<T: MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    state: &AppState,
+    server: &mut Server<T, R>,
+) {
     let guard = state.store.lock().await;
     if let Some(store) = guard.as_ref() {
         let key = hex::encode(server.group_id());
@@ -3322,6 +3501,8 @@ fn new_server_net(advertise: &str, relay: &str, rendezvous: &str) -> ServerNet {
         record_seq: 0,
         reconnect_routes: Vec::new(),
         reconnect_policy: ReconnectPolicy::Disabled,
+        pending_recovery_peer: None,
+        pending_recovery_expires_at_ms: 0,
     };
     // Own a peer-record sequence block from the very first session, so the invariant "this launch
     // can only publish numbers below anything the next launch can" holds from birth rather than
@@ -4329,6 +4510,74 @@ fn reconnect_capture_peer(
     }
 }
 
+/// Apply the same unique-current-claim boundary to a recovery candidate before it may replace a
+/// proven reconnect contact. A signed recovery code proves which member requested the attempt;
+/// it does not make a transport identity claimed by two roster entries unambiguous.
+fn pending_recovery_capture_peer(
+    pending: Option<[u8; 32]>,
+    expires_at_ms: u64,
+    now_ms: u64,
+    claimed_peers: impl IntoIterator<Item = PeerId>,
+) -> Option<PeerId> {
+    if pending.is_none() || now_ms > expires_at_ms {
+        return None;
+    }
+    let unique = uniquely_claimed_member_peers(claimed_peers);
+    pending
+        .map(PeerId::new)
+        .filter(|peer| unique.contains(peer))
+}
+
+/// Merge one authenticated route observation into the *latest* sealed network record.
+///
+/// Discovery awaits actor/mesh state between its initial read and final save. Re-authorizing a
+/// different recovery peer during that gap must not be lost to a stale whole-record write. `None`
+/// means the authority that selected this capture is no longer current; `Some(changed)` preserves
+/// any unrelated newer pending consent and clears only the exact candidate being promoted.
+fn merge_live_reconnect_capture(
+    current: &mut ServerNet,
+    selected_from_pending: bool,
+    capture_peer: PeerId,
+    routes: Vec<ReconnectRoute>,
+    other_member_count: usize,
+    now_ms: u64,
+    claimed_peers: impl IntoIterator<Item = PeerId>,
+) -> Option<bool> {
+    let peer_bytes = *capture_peer.as_bytes();
+    if selected_from_pending {
+        if current.pending_recovery_peer != Some(peer_bytes)
+            || now_ms > current.pending_recovery_expires_at_ms
+        {
+            return None;
+        }
+    } else if reconnect_capture_peer(current.reconnect_policy, other_member_count, claimed_peers)
+        != Some(capture_peer)
+    {
+        return None;
+    }
+
+    let next_policy = ReconnectPolicy::AuthorizedPeer(peer_bytes);
+    let pending_is_current =
+        current.pending_recovery_peer.is_some() && now_ms <= current.pending_recovery_expires_at_ms;
+    let (next_pending, next_pending_expiry) = if selected_from_pending || !pending_is_current {
+        (None, 0)
+    } else {
+        (
+            current.pending_recovery_peer,
+            current.pending_recovery_expires_at_ms,
+        )
+    };
+    let changed = current.reconnect_routes != routes
+        || current.reconnect_policy != next_policy
+        || current.pending_recovery_peer != next_pending
+        || current.pending_recovery_expires_at_ms != next_pending_expiry;
+    current.reconnect_routes = routes;
+    current.reconnect_policy = next_policy;
+    current.pending_recovery_peer = next_pending;
+    current.pending_recovery_expires_at_ms = next_pending_expiry;
+    Some(changed)
+}
+
 /// Capture same-LAN routes for already-established servers, including records created before
 /// `ServerNet` v3 existed. Only a current member's self-signed transport claim may select a live
 /// Noise-authenticated route, and this migration path is intentionally local-only: public member
@@ -4338,7 +4587,11 @@ fn authenticated_member_lan_reconnect_routes(
     mesh: &MeshHandle,
     member_peers: &HashSet<PeerId>,
 ) -> Vec<ReconnectRoute> {
-    select_authenticated_reconnect_routes(mesh.authenticated_dial_routes(), member_peers, true)
+    select_authenticated_reconnect_routes(
+        mesh.authenticated_dial_route_evidence(),
+        member_peers,
+        true,
+    )
 }
 
 /// Schedule already set-validated rendezvous routes. The invite validator permits loopback only
@@ -4662,7 +4915,7 @@ async fn found_server(
         None,
         None,
     );
-    require_unlocked_session(&state)
+    let ui_session_generation = unlocked_ui_session_generation(&state)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e).into_message())?;
     let mut diag = Connectivity {
@@ -4681,6 +4934,7 @@ async fn found_server(
         rendezvous,
         is_dm,
         server_name,
+        ui_session_generation,
         &mut diag,
     )
     .await;
@@ -4711,6 +4965,7 @@ async fn found_server_inner(
     rendezvous: String,
     is_dm: bool,
     server_name: Option<String>,
+    ui_session_generation: u64,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
     // This server's own network identity + stable port, minted once here and sealed to disk, so
@@ -4817,6 +5072,15 @@ async fn found_server_inner(
     let (actor, events, task) = spawn(server);
     actor.open_channel(general).await;
     let channels = ui_channels(actor.channels().await);
+    let session_commit = match require_ui_session_generation(state, ui_session_generation).await {
+        Ok(commit) => commit,
+        Err(error) => {
+            actor.shutdown().await;
+            drop(events);
+            let _ = task.await;
+            return Err(error);
+        }
+    };
     let server_id = register_server(
         app,
         state,
@@ -4846,6 +5110,7 @@ async fn found_server_inner(
     persist_server(state, server_id).await;
     persist_server_net(state, server_id, &net).await;
     persist_registry(state).await;
+    drop(session_commit);
     diag.server = server_id;
     diag.advertised.clone_from(&invite.bootstrap);
     diag.steps.push(DiagStep::ok(
@@ -5012,7 +5277,7 @@ async fn join_server(
         None,
         None,
     );
-    require_unlocked_session(&state)
+    let ui_session_generation = unlocked_ui_session_generation(&state)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e).into_message())?;
     let mut diag = Connectivity {
@@ -5029,6 +5294,7 @@ async fn join_server(
         is_dm,
         allow_switchboards,
         server_name,
+        ui_session_generation,
         &mut diag,
     )
     .await;
@@ -5056,6 +5322,7 @@ async fn join_server_inner(
     is_dm: bool,
     allow_switchboards: bool,
     server_name: Option<String>,
+    ui_session_generation: u64,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
     let decoded = decode_and_verify_invite(&invite_hex).inspect_err(|e| {
@@ -5366,8 +5633,15 @@ async fn join_server_inner(
                     candidate_count: reply.candidates.len(),
                 };
                 reply_expires_at_ms = Some(reply.expires_at_ms);
-                app.emit("join-reply-ready", &ready)
-                    .map_err(|e| e.to_string())?;
+                {
+                    // The code contains this device's current listener addresses. Never publish
+                    // it into a webview session that was explicitly locked while direct dialing
+                    // was pending.
+                    let _session =
+                        require_ui_session_generation(state, ui_session_generation).await?;
+                    app.emit("join-reply-ready", &ready)
+                        .map_err(|e| e.to_string())?;
+                }
                 diag.steps.push(DiagStep::unknown(
                 "reply",
                 "",
@@ -5588,6 +5862,19 @@ async fn join_server_inner(
     // peer record. A later router mapping or relay reservation is folded into this same set.
     let joiner_bootstrap_owners =
         bootstrap_owners(&joiner_addrs, BootstrapOwner::AutomaticInterface);
+    // Catch-up can take arbitrarily longer than the UI session that initiated it. Serialize the
+    // native registration + sealing boundary with explicit lock, and abandon the transient actor
+    // if that lock already invalidated this operation. No server id, registry row, or event
+    // forwarder is installed on the stale path.
+    let session_commit = match require_ui_session_generation(state, ui_session_generation).await {
+        Ok(commit) => commit,
+        Err(error) => {
+            actor.shutdown().await;
+            drop(events);
+            let _ = task.await;
+            return Err(error);
+        }
+    };
     let server_id = register_server(
         app,
         state,
@@ -5615,6 +5902,7 @@ async fn join_server_inner(
     persist_server(state, server_id).await;
     persist_server_net(state, server_id, &net).await;
     persist_registry(state).await;
+    drop(session_commit);
     diag.server = server_id;
     if let Some(rx) = port_mapping_rx {
         state
@@ -5922,6 +6210,9 @@ fn effective_join_reply_expiry(encoded_expires_at_ms: u64, received_at_ms: u64) 
 async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), String> {
     require_unlocked_session(&state).await?;
     state.storage_health.lock().await.remove(&server);
+    if let Ok(mut signals) = state.reconnect_capture_signals.lock() {
+        signals.remove(&server);
+    }
     state.upnp.lock().await.remove(&server);
     state.autonat.lock().await.remove(&server);
     state.mesh_observations.lock().await.remove(&server);
@@ -7198,6 +7489,97 @@ async fn manual_fallback_redial(state: State<'_, AppState>, server: u64) -> Resu
         catcoms_sync::ManualRedialOutcome::DeferredBySafetyLimit => "deferred_by_safety_limit",
     }
     .into())
+}
+
+/// Produce a recovery code from this server's current listener candidates. The sync layer filters
+/// the bridge's aggregate bootstrap set down to canonical direct IP routes bound to this actor's
+/// transport identity, so relay, rendezvous, DNS and stale foreign-peer entries cannot leak into
+/// or gain authority through the out-of-band code.
+#[tauri::command]
+async fn mint_member_recovery(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<MemberRecoveryReady, String> {
+    let ui_session_generation = unlocked_ui_session_generation(&state).await?;
+    let actor = actor_of(&state, server).await?;
+    let candidates = {
+        let servers = state.servers.lock().await;
+        servers
+            .get(&server)
+            .map(|entry| entry.bootstrap.clone())
+            .ok_or_else(|| "server is not open".to_string())?
+    };
+    let recovery = actor.mint_member_recovery(candidates).await?;
+    let ready = MemberRecoveryReady {
+        code: recovery.encode(),
+        expires_at_ms: recovery.expires_at_ms,
+        candidate_count: recovery.candidates.len(),
+    };
+    // The code contains current private/LAN listener candidates. Serialize its return with an
+    // explicit lock exactly like the join-reply event; stale work must not repopulate the webview.
+    let _session = require_ui_session_generation(&state, ui_session_generation).await?;
+    Ok(ready)
+}
+
+/// Seal bounded pending permission to retain a route for the member named by a verified recovery
+/// code. Neither the pasted route nor the proven peer/routes change here: a later discovery tick
+/// atomically promotes this field only after the exact new peer authenticates live.
+async fn authorize_member_recovery_capture(
+    state: &AppState,
+    server: u64,
+    peer: PeerId,
+    expires_at_ms: u64,
+) -> Result<(), String> {
+    let guard = state.store.lock().await;
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "the vault is locked".to_string())?;
+    let mut net = store
+        .load_server_net(server)
+        .map_err(|error| format!("could not load the server network identity: {error}"))?
+        .ok_or_else(|| "the server network identity is missing".to_string())?;
+    net.pending_recovery_peer = Some(*peer.as_bytes());
+    net.pending_recovery_expires_at_ms = expires_at_ms;
+    store
+        .save_server_net(server, &net, &mut OsCryptoRng)
+        .map_err(|error| format!("could not save pending recovery permission: {error}"))
+}
+
+/// Apply a code from another current member. Verification, roster membership, expiry, canonical
+/// address filtering and shared dial limits all live inside the actor. A successful result means
+/// attempts were submitted; the UI must wait for ordinary connectivity evidence before calling
+/// the member reachable.
+#[tauri::command]
+async fn apply_member_recovery(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server: u64,
+    code: String,
+) -> Result<MemberRecoveryAppliedEvt, String> {
+    let ui_session_generation = unlocked_ui_session_generation(&state).await?;
+    let actor = actor_of(&state, server).await?;
+    // Verify without network work, then serialize the durable, expiring authority against lock.
+    // This ordering closes the short-edge race where authentication completed before the bridge
+    // had written permission for the capture worker to retain that route.
+    let verified = actor.verify_member_recovery(code.clone()).await?;
+    let _session = require_ui_session_generation(&state, ui_session_generation).await?;
+    authorize_member_recovery_capture(&state, server, verified.peer, verified.expires_at_ms)
+        .await?;
+    drop(_session);
+    // Validation is intentionally repeated inside the actor immediately before the bounded dial;
+    // a code that expired or lost its roster binding between phases does not reach the network.
+    let applied = actor.apply_member_recovery(code).await?;
+    // The bounded dial may finish after lock, but its private command result may not escape into a
+    // newer or locked UI session. Pending authority simply expires if the result is withheld.
+    let _session = require_ui_session_generation(&state, ui_session_generation).await?;
+    drop(_session);
+    // The dial submission may already have authenticated by the time the actor reply arrives.
+    // Wake the same coalesced worker used by later connectivity/member-route events.
+    notify_reconnect_capture(&app, server);
+    Ok(MemberRecoveryAppliedEvt {
+        fingerprint: fingerprint(&applied.device),
+        submitted_routes: applied.submitted_routes,
+    })
 }
 
 /// Bound a present-time diagnostic query so a busy server actor becomes an explicit unavailable
@@ -9427,6 +9809,108 @@ struct ReloadedServer {
     is_dm: bool,
 }
 
+/// Transport-independent half of vault reload. Keeping this seam below Tauri's concrete runtime
+/// lets the lifecycle test exercise the exact restore, blob attachment, route restoration and
+/// actor startup used in production with a deterministic in-memory transport.
+struct RestoredActor {
+    actor: ServerActor,
+    events: mpsc::Receiver<catcoms_app::TracedEvent>,
+    task: tokio::task::JoinHandle<()>,
+    group_id: Vec<u8>,
+    device_id: DeviceId,
+}
+
+async fn restore_server_actor<T, R>(
+    state: &AppState,
+    snapshot: &[u8],
+    record: &ServerRecord,
+    transport: T,
+    rng: R,
+    clock: Box<dyn Clock + Send>,
+    bootstrap: &[String],
+    record_seq: u64,
+    reconnect_routes: Vec<(PeerId, String)>,
+    switchboard: bool,
+) -> Result<RestoredActor, String>
+where
+    T: MeshTransport + Send + 'static,
+    R: catcoms_rt::CryptoRngCore + Send + 'static,
+{
+    let mut server = Server::restore(snapshot, transport, rng, clock, &record.display_name)
+        .map_err(|error| error.to_string())?;
+    server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
+    server.set_local_reconnect_routes(reconnect_routes);
+    server
+        .subscribe_control()
+        .await
+        .map_err(|error| error.to_string())?;
+    attach_blob_store(state, &mut server).await;
+    if let Err(error) = server.publish_self_record(bootstrap.to_vec(), record_seq) {
+        tracing::warn!(
+            target: "catcoms_app",
+            server = record.id,
+            phase = "reload",
+            error = %error,
+            "DISCOVERY.PEER_RECORD.PUBLISH_FAILED"
+        );
+    }
+    server.set_switchboard_offered(switchboard);
+
+    // Restore the cross-session address cache before the eager member redial. Invalid or missing
+    // best-effort cache data never prevents the authoritative group snapshot from opening.
+    {
+        let guard = state.store.lock().await;
+        if let Some(store) = guard.as_ref() {
+            match (
+                store.address_cache_key(),
+                store.load_address_cache(record.id),
+            ) {
+                (Ok(key), Ok(bytes)) if !bytes.is_empty() => {
+                    if !server.load_address_cache(&bytes, &key) {
+                        tracing::warn!(
+                            target: "catcoms_app",
+                            server = record.id,
+                            "VAULT.ADDRESS_CACHE.REJECTED"
+                        );
+                    }
+                }
+                (Err(error), _) | (_, Err(error)) => tracing::warn!(
+                    target: "catcoms_app",
+                    server = record.id,
+                    error = %error,
+                    "VAULT.ADDRESS_CACHE.LOAD_FAILED"
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    server.cache_known_records();
+    let local_redialled = server.dial_local_reconnect_routes().await;
+    let cached_redialled = server.dial_cached_peers().await;
+    if local_redialled + cached_redialled > 0 {
+        tracing::info!(
+            target: "catcoms_app",
+            server = record.id,
+            local_peers = local_redialled,
+            cached_peers = cached_redialled,
+            "DISCOVERY.REDIAL.STARTED"
+        );
+    }
+
+    let group_id = server.group_id();
+    let device_id = server.device_id();
+    let (actor, events, task) = spawn(server);
+    actor.open_channel(channel_id("general")).await;
+    Ok(RestoredActor {
+        actor,
+        events,
+        task,
+        group_id,
+        device_id,
+    })
+}
+
 async fn running_servers(state: &AppState) -> Vec<ReloadedServer> {
     let servers: Vec<_> = state
         .servers
@@ -9537,85 +10021,28 @@ async fn reload_one(
     }
     let rz_vec: Vec<String> = rz_target.iter().map(|t| t.addr.to_string()).collect();
 
-    let mut server = Server::restore(
+    let RestoredActor {
+        actor,
+        events,
+        task,
+        group_id,
+        device_id,
+    } = restore_server_actor(
+        state,
         snapshot,
+        record,
         mesh,
         OsCryptoRng,
         Box::new(SystemClock),
-        &record.display_name,
-    )
-    .map_err(|e| e.to_string())?;
-    // Install the process-wide endpoint budget before the eager cache redial below. Doing this
-    // after that pass would leave startup—the highest-churn moment—as the one unshared path.
-    server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
-    server.set_local_reconnect_routes(
+        &bootstrap,
+        net.record_seq,
         net.reconnect_routes
             .iter()
             .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
             .collect(),
-    );
-    server
-        .subscribe_control()
-        .await
-        .map_err(|e| e.to_string())?;
-    attach_blob_store(state, &mut server).await;
-    // Republish this device's peer record on THIS launch's reserved sequence block (defect P1 and
-    // the 1a-7 seq bug together). The identity and port are the same as last launch, but the
-    // reachable address may not be (a new relay circuit, a different UPnP mapping), and a record
-    // published from a number the peers have already seen is discarded by every one of them.
-    if let Err(e) = server.publish_self_record(bootstrap.clone(), net.record_seq) {
-        tracing::warn!(target: "catcoms_app", phase = "reload", error = %e, "DISCOVERY.PEER_RECORD.PUBLISH_FAILED");
-    }
-    server.set_switchboard_offered(net.switchboard);
-    // Restore the cross-session address cache: the previously-proven members this node can offer
-    // the dial policy immediately, before any rendezvous has had a chance to answer with Sybils.
-    // Best-effort; a missing, unreadable or tamper-detected cache just means no cached candidates.
-    {
-        let guard = state.store.lock().await;
-        if let Some(store) = guard.as_ref() {
-            match (
-                store.address_cache_key(),
-                store.load_address_cache(record.id),
-            ) {
-                (Ok(key), Ok(bytes)) if !bytes.is_empty() => {
-                    if !server.load_address_cache(&bytes, &key) {
-                        tracing::warn!(
-                            target: "catcoms_app",
-                            server = record.id,
-                            "VAULT.ADDRESS_CACHE.REJECTED"
-                        );
-                    }
-                }
-                (Err(e), _) | (_, Err(e)) => {
-                    tracing::warn!(
-                        target: "catcoms_app",
-                        server = record.id,
-                        error = %e,
-                        "VAULT.ADDRESS_CACHE.LOAD_FAILED"
-                    )
-                }
-                _ => {}
-            }
-        }
-    }
-    // Re-dial the last-known members now that the roster is loaded (the Phase 9g healing path).
-    // `cache_known_records` folds the snapshot's restored peer records into the cache, pruning
-    // anyone no longer on the roster, and `dial_cached_peers` runs the survivors through the
-    // DiscoveryPolicy: routability-checked, ranked, and capped by the dial budget. The discovery
-    // tick repeats this every minute or so; doing it eagerly here is only about reconnect latency.
-    server.cache_known_records();
-    let local_redialled = server.dial_local_reconnect_routes().await;
-    let cached_redialled = server.dial_cached_peers().await;
-    if local_redialled + cached_redialled > 0 {
-        tracing::info!(
-            target: "catcoms_app",
-            server = record.id,
-            local_peers = local_redialled,
-            cached_peers = cached_redialled,
-            "DISCOVERY.REDIAL.STARTED"
-        );
-    }
-
+        net.switchboard,
+    )
+    .await?;
     // If the persisted invite is discovery-enabled but we could NOT re-register its namespace
     // (rendezvous infra was down at reload), drop it: it would not resolve. The rail then prompts a
     // fresh invite (which re-registers). A direct (non-rendezvous) invite is presented unchanged;
@@ -9630,11 +10057,6 @@ async fn reload_one(
         Some(record.invite.clone())
     };
 
-    let general = channel_id("general");
-    let group_id = server.group_id();
-    let device_id = server.device_id();
-    let (actor, events, task) = spawn(server);
-    actor.open_channel(general).await;
     // Register under the SAME id as on disk (don't allocate a new one).
     supervise("server_actor", record.id, task);
     forward_events(app.clone(), record.id, events);
@@ -9660,6 +10082,7 @@ async fn reload_one(
             record_seq: net.record_seq,
         },
     );
+    install_reconnect_capture_worker(app, record.id, timer_actor.clone());
     spawn_discovery_timer(app.clone(), record.id, timer_actor);
     // Re-seal if the port moved. (The reserved peer-record sequence block was already sealed by
     // `load_or_init_server_net`, before the transport came up.)
@@ -10492,6 +10915,7 @@ async fn unlock(
     // transport per server. Return the servers already registered so the rail repopulates.
     if state.store.lock().await.is_some() {
         *state.session_resumable.lock().await = true;
+        state.session_lock_requested.store(false, Ordering::Release);
         // Not a fresh unlock. Worth its own outcome: a session that came back without touching
         // the disk explains why nothing was reloaded and why no restore failures appear.
         op.succeeded("VAULT.UNLOCK.ALREADY_OPEN");
@@ -10571,6 +10995,7 @@ async fn unlock(
         });
     }
     *state.session_resumable.lock().await = true;
+    state.session_lock_requested.store(false, Ordering::Release);
     // The summary that makes a partial unlock visible.
     //
     // Individual failures already log, but an unlock that returns four servers when the registry
@@ -10600,7 +11025,10 @@ async fn unlock(
 /// again. An explicit UI lock disables this path until `unlock` verifies the passphrase.
 #[tauri::command]
 async fn resume_session(state: State<'_, AppState>) -> Result<Option<Vec<ReloadedServer>>, String> {
-    if !*state.session_resumable.lock().await || state.store.lock().await.is_none() {
+    if state.session_lock_requested.load(Ordering::Acquire)
+        || !*state.session_resumable.lock().await
+        || state.store.lock().await.is_none()
+    {
         return Ok(None);
     }
     Ok(Some(running_servers(&state).await))
@@ -10618,6 +11046,12 @@ async fn lock_session(
 /// malformed continuity state or a vault write failure is reported, but must never leave the
 /// sensitive webview session open as a side effect of that error.
 async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> Result<(), String> {
+    // Invalidate old work before awaiting anything. The commit mutex is acquired next so, once
+    // this function returns, an old join can neither emit its private reply nor register/persist.
+    state.session_lock_requested.store(true, Ordering::Release);
+    state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+    *state.session_resumable.lock().await = false;
+    let _session_commit = state.ui_session_commit.lock().await;
     // Save the final draft/read snapshot and close IPC as one ordered native operation. Two
     // separate fire-and-forget commands could race, causing the save to arrive after the lock and
     // be correctly rejected by the new session gate.
@@ -10637,7 +11071,6 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
     } else {
         Ok(())
     };
-    *state.session_resumable.lock().await = false;
     // The media cache holds decrypted chunks of shared files. Locking must drop them along with
     // the rest of the session's plaintext, not leave a film resident until something evicts it.
     state.media_cache.lock().await.clear();
@@ -12628,6 +13061,8 @@ pub fn run() {
             get_online_members,
             get_member_routes,
             manual_fallback_redial,
+            mint_member_recovery,
+            apply_member_recovery,
             get_delivery,
             dm_stats,
             send_dm_invite,
@@ -12735,6 +13170,37 @@ pub fn run() {
 mod tests {
     use super::*;
     use catcoms_rt::ManualClock;
+
+    #[tokio::test]
+    async fn recovery_capture_wakes_are_bounded_replaced_and_coalesced() {
+        let signals = StdMutex::new(HashMap::new());
+        let mut old = replace_reconnect_capture_signal(&signals, 41).unwrap();
+        let mut restored = replace_reconnect_capture_signal(&signals, 41).unwrap();
+        assert!(
+            old.changed().await.is_err(),
+            "restoring an on-disk id closes its superseded capture worker"
+        );
+
+        {
+            let guard = signals.lock().unwrap();
+            let signal = guard.get(&41).expect("the restored registry entry is live");
+            for _ in 0..10_000 {
+                signal.send_modify(|generation| *generation = generation.wrapping_add(1));
+            }
+        }
+        restored.changed().await.unwrap();
+        assert_eq!(
+            *restored.borrow_and_update(),
+            10_000,
+            "a burst retains one latest wake generation rather than an event-sized queue"
+        );
+
+        signals.lock().unwrap().remove(&41);
+        assert!(
+            restored.changed().await.is_err(),
+            "leaving the server closes the capture worker"
+        );
+    }
 
     #[tokio::test]
     async fn a_stalled_member_route_query_becomes_an_unavailable_snapshot() {
@@ -13836,6 +14302,44 @@ mod tests {
         assert!(
             !*state.session_resumable.lock().await,
             "and the session closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_lock_invalidates_a_blocked_join_before_its_commit() {
+        use std::sync::atomic::AtomicBool;
+
+        let state = Arc::new(AppState::default());
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerStore::open(dir.path(), b"passphrase", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+
+        // Model the long network/reply portion of `join_server`: it captured an unlocked epoch,
+        // then remained blocked until after the user explicitly locked the UI.
+        let committed = Arc::new(AtomicBool::new(false));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let blocked_state = state.clone();
+        let blocked_committed = committed.clone();
+        let join = tokio::spawn(async move {
+            release_rx.await.unwrap();
+            let _permit = require_ui_session_generation(&blocked_state, generation).await?;
+            blocked_committed.store(true, Ordering::Release);
+            Ok::<(), String>(())
+        });
+
+        lock_session_inner(&state, None).await.unwrap();
+        release_tx.send(()).unwrap();
+        let error = join.await.unwrap().unwrap_err();
+        assert!(error.contains("locked") || error.contains("session changed"));
+        assert!(
+            !committed.load(Ordering::Acquire),
+            "stale join work must not enter the registration/persistence boundary"
+        );
+        assert_ne!(
+            state.ui_session_generation.load(Ordering::Acquire),
+            generation
         );
     }
 
@@ -14971,6 +15475,238 @@ mod tests {
         assert!(state.store.lock().await.is_some());
     }
 
+    #[tokio::test]
+    async fn vault_full_close_unlock_and_actor_reload_survives_twice() {
+        use catcoms_rt::Hub;
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+
+        const SERVER_ID: u64 = 41;
+        const PASSPHRASE: &[u8] = b"correct horse";
+        let general = channel_id("general");
+        let root = tempfile::tempdir().unwrap();
+
+        // Build exactly the durable material the Tauri bridge owns: a server snapshot, registry
+        // row and network identity in one vault. The source actor then disappears, modelling a
+        // process close rather than an in-process UI lock.
+        let hub = Hub::new();
+        let mut original = Server::found(
+            hub.join(PeerId::from_u64(1)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        original.subscribe_control().await.unwrap();
+        original.open_channel(general).await.unwrap();
+        original
+            .send_message(general, "survives a full close")
+            .await
+            .unwrap();
+        let snapshot = original.snapshot().unwrap();
+        let record = ServerRecord {
+            id: SERVER_ID,
+            display_name: "private friend".into(),
+            invite: String::new(),
+            is_dm: true,
+        };
+        let mut network = new_server_net("", "", "");
+        network.port = 22_487;
+        network.reconnect_policy = ReconnectPolicy::AuthorizedPeer([9; 32]);
+        {
+            let mut rng = ChaCha20Rng::seed_from_u64(2);
+            let store = ServerStore::open(root.path(), PASSPHRASE, &mut rng).unwrap();
+            store.save_server(SERVER_ID, &snapshot, &mut rng).unwrap();
+            store
+                .save_registry(std::slice::from_ref(&record), &mut rng)
+                .unwrap();
+            store
+                .save_server_net(SERVER_ID, &network, &mut rng)
+                .unwrap();
+        }
+        drop(original);
+        assert!(ServerStore::open(
+            root.path(),
+            b"wrong passphrase",
+            &mut ChaCha20Rng::seed_from_u64(3),
+        )
+        .is_err());
+
+        // Open and restore through the transport-independent production seam used by
+        // `reload_one`. Returning the task and receiver lets the test perform a clean full close.
+        async fn open_cycle(
+            root: &Path,
+            peer: u64,
+        ) -> (
+            AppState,
+            ServerActor,
+            mpsc::Receiver<catcoms_app::TracedEvent>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            use catcoms_rt::Hub;
+            use rand_chacha::ChaCha20Rng;
+            use rand_core::SeedableRng;
+
+            let mut rng = ChaCha20Rng::seed_from_u64(peer + 10);
+            let store = ServerStore::open(root, PASSPHRASE, &mut rng).unwrap();
+            let records = store.load_registry().unwrap();
+            assert_eq!(
+                records,
+                vec![ServerRecord {
+                    id: SERVER_ID,
+                    display_name: "private friend".into(),
+                    invite: String::new(),
+                    is_dm: true,
+                }]
+            );
+            let snapshot = store.load_server(SERVER_ID).unwrap();
+            let network = store.load_server_net(SERVER_ID).unwrap().unwrap();
+            assert_eq!(
+                network.reconnect_policy,
+                ReconnectPolicy::AuthorizedPeer([9; 32]),
+                "reconnect consent is part of the sealed lifecycle"
+            );
+            let state = AppState::default();
+            *state.store.lock().await = Some(store);
+            *state.next_id.lock().await = SERVER_ID;
+            *state.session_resumable.lock().await = true;
+            let restored = restore_server_actor(
+                &state,
+                &snapshot,
+                &records[0],
+                Hub::new().join(PeerId::from_u64(peer)),
+                ChaCha20Rng::seed_from_u64(peer + 20),
+                Box::new(ManualClock::new(2_000 + peer)),
+                &[],
+                network.record_seq,
+                network
+                    .reconnect_routes
+                    .iter()
+                    .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
+                    .collect(),
+                network.switchboard,
+            )
+            .await
+            .unwrap();
+            let actor = restored.actor.clone();
+            state.servers.lock().await.insert(
+                SERVER_ID,
+                ServerEntry {
+                    actor: restored.actor,
+                    group_id: restored.group_id,
+                    device_id: restored.device_id,
+                    invite: None,
+                    name: records[0].display_name.clone(),
+                    bootstrap: Vec::new(),
+                    bootstrap_owners: HashMap::new(),
+                    interface_routes: None,
+                    rendezvous: Vec::new(),
+                    mesh: None,
+                    is_dm: records[0].is_dm,
+                    switchboard: network.switchboard,
+                    record_seq: network.record_seq,
+                },
+            );
+            (state, actor, restored.events, restored.task)
+        }
+
+        let (first_state, first_actor, first_events, first_task) = open_cycle(root.path(), 2).await;
+        assert_eq!(
+            running_servers(&first_state).await[0].name,
+            "private friend"
+        );
+        assert!(running_servers(&first_state).await[0].is_dm);
+        assert_eq!(
+            first_actor.messages(general).await[0].text,
+            "survives a full close"
+        );
+        lock_session_inner(
+            &first_state,
+            Some(r#"{"version":1,"drafts":{},"readMarks":{}}"#.into()),
+        )
+        .await
+        .unwrap();
+        assert!(require_unlocked_session(&first_state).await.is_err());
+        assert_eq!(
+            first_actor.messages(general).await[0].text,
+            "survives a full close",
+            "the native actor remains valid behind an explicit UI lock"
+        );
+        first_actor.shutdown().await;
+        first_task.await.unwrap();
+        drop(first_events);
+        drop(first_state);
+
+        // A second independent state proves this is not HMR/resume: the vault keys, actor,
+        // transport and frontend gate all start again from sealed bytes after a full close.
+        let (second_state, second_actor, second_events, second_task) =
+            open_cycle(root.path(), 3).await;
+        assert!(require_unlocked_session(&second_state).await.is_ok());
+        assert_eq!(
+            second_actor.messages(general).await[0].text,
+            "survives a full close"
+        );
+        second_actor.shutdown().await;
+        second_task.await.unwrap();
+        drop(second_events);
+    }
+
+    #[tokio::test]
+    async fn member_recovery_preserves_a_proven_route_while_pending_consent_survives_reopen() {
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+
+        const SERVER_ID: u64 = 57;
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let mut rng = ChaCha20Rng::seed_from_u64(57);
+        let store = ServerStore::open(root.path(), b"recovery vault", &mut rng).unwrap();
+        let previous_peer = PeerId::from_u64(98);
+        let mut network = new_server_net("", "", "");
+        network.reconnect_policy = ReconnectPolicy::AuthorizedPeer(*previous_peer.as_bytes());
+        network.reconnect_routes = vec![ReconnectRoute {
+            peer_id: *previous_peer.as_bytes(),
+            address: "/ip4/192.168.1.98/tcp/22487".into(),
+        }];
+        let previous_routes = network.reconnect_routes.clone();
+        store
+            .save_server_net(SERVER_ID, &network, &mut rng)
+            .unwrap();
+        *state.store.lock().await = Some(store);
+
+        let pending_peer = PeerId::from_u64(99);
+        authorize_member_recovery_capture(&state, SERVER_ID, pending_peer, u64::MAX)
+            .await
+            .unwrap();
+
+        let guard = state.store.lock().await;
+        let sealed = guard
+            .as_ref()
+            .unwrap()
+            .load_server_net(SERVER_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sealed.reconnect_policy,
+            ReconnectPolicy::AuthorizedPeer(*previous_peer.as_bytes()),
+            "pending recovery cannot replace the last proven contact"
+        );
+        assert_eq!(sealed.reconnect_routes, previous_routes);
+        assert_eq!(
+            sealed.pending_recovery_peer,
+            Some(*pending_peer.as_bytes()),
+            "consent survives a crash while the new peer is still unreachable"
+        );
+        drop(guard);
+        drop(state);
+
+        let reopened = ServerStore::open(root.path(), b"recovery vault", &mut rng).unwrap();
+        let sealed = reopened.load_server_net(SERVER_ID).unwrap().unwrap();
+        assert_eq!(sealed.reconnect_routes, previous_routes);
+        assert_eq!(sealed.pending_recovery_peer, Some(*pending_peer.as_bytes()));
+    }
+
     /// The trap this guards: founding mints the invite immediately, UPnP answers seconds later,
     /// so the invite a user copies first is the one *without* the public address their router
     /// just opened. Their friend on another network then gets an unactionable timeout. This
@@ -15572,6 +16308,157 @@ mod tests {
     }
 
     #[test]
+    fn pending_recovery_rejects_an_ambiguously_claimed_transport_peer() {
+        let pending = PeerId::from_u64(100);
+        assert_eq!(
+            pending_recovery_capture_peer(
+                Some(*pending.as_bytes()),
+                2_000,
+                1_000,
+                [pending, pending, PeerId::from_u64(101)],
+            ),
+            None,
+            "a pasted code cannot bypass the same unique member-to-transport binding as ordinary capture"
+        );
+        assert_eq!(
+            pending_recovery_capture_peer(Some(*pending.as_bytes()), 2_000, 1_000, [pending]),
+            Some(pending)
+        );
+        assert_eq!(
+            pending_recovery_capture_peer(Some(*pending.as_bytes()), 2_000, 2_001, [pending]),
+            None,
+            "sealed pending consent cannot outlive the signed code's deadline"
+        );
+    }
+
+    #[test]
+    fn pending_recovery_cannot_promote_after_expiring_during_evidence_collection() {
+        let peer = PeerId::from_u64(106);
+        let mut current = new_server_net("", "", "");
+        current.pending_recovery_peer = Some(*peer.as_bytes());
+        current.pending_recovery_expires_at_ms = 2_000;
+        assert_eq!(
+            pending_recovery_capture_peer(Some(*peer.as_bytes()), 2_000, 1_999, [peer]),
+            Some(peer),
+            "the evidence collection began while the signed code was still valid"
+        );
+        let before = current.clone();
+        assert_eq!(
+            merge_live_reconnect_capture(
+                &mut current,
+                true,
+                peer,
+                vec![ReconnectRoute {
+                    peer_id: *peer.as_bytes(),
+                    address: "/ip4/192.168.1.106/tcp/22487".into(),
+                }],
+                1,
+                2_001,
+                [peer],
+            ),
+            None,
+            "the final vault-locked merge rechecks the deadline"
+        );
+        assert_eq!(current, before);
+    }
+
+    #[test]
+    fn pending_recovery_can_promote_an_authenticated_public_route_before_expiry() {
+        let remote = test_libp2p_peer(105);
+        let peer = phase0_peer_id(&remote);
+        let public = format!("/ip4/45.79.12.35/tcp/22487/p2p/{remote}");
+        let authenticated = vec![AuthenticatedDialRoute {
+            peer,
+            address: public.clone(),
+        }];
+        let allowed = HashSet::from([peer]);
+        assert!(
+            select_authenticated_reconnect_routes(authenticated.clone(), &allowed, true).is_empty(),
+            "ordinary legacy migration remains LAN-only"
+        );
+        let routes = select_authenticated_reconnect_routes(authenticated, &allowed, false);
+        assert_eq!(routes[0].address, public);
+
+        let mut current = new_server_net("", "", "");
+        current.pending_recovery_peer = Some(*peer.as_bytes());
+        current.pending_recovery_expires_at_ms = 2_000;
+        assert_eq!(
+            merge_live_reconnect_capture(
+                &mut current,
+                true,
+                peer,
+                routes.clone(),
+                1,
+                1_000,
+                [peer],
+            ),
+            Some(true)
+        );
+        assert_eq!(current.reconnect_routes, routes);
+        assert_eq!(
+            current.reconnect_policy,
+            ReconnectPolicy::AuthorizedPeer(*peer.as_bytes())
+        );
+        assert_eq!(current.pending_recovery_peer, None);
+        assert_eq!(current.pending_recovery_expires_at_ms, 0);
+    }
+
+    #[test]
+    fn reconnect_capture_merge_preserves_newer_pending_consent() {
+        let bob = PeerId::from_u64(102);
+        let carol = PeerId::from_u64(103);
+        let mut current = new_server_net("", "", "");
+        current.reconnect_policy = ReconnectPolicy::AuthorizedPeer(*bob.as_bytes());
+        current.pending_recovery_peer = Some(*carol.as_bytes());
+        current.pending_recovery_expires_at_ms = 2_000;
+        let bob_routes = vec![ReconnectRoute {
+            peer_id: *bob.as_bytes(),
+            address: "/ip4/192.168.1.102/tcp/22487".into(),
+        }];
+
+        assert_eq!(
+            merge_live_reconnect_capture(
+                &mut current,
+                false,
+                bob,
+                bob_routes.clone(),
+                2,
+                1_000,
+                [bob, carol],
+            ),
+            Some(true)
+        );
+        assert_eq!(current.pending_recovery_peer, Some(*carol.as_bytes()));
+        assert_eq!(current.reconnect_routes, bob_routes);
+
+        // A timer that selected an older pending Carol observation cannot overwrite a newer Dave
+        // authorization read from disk at the final merge point.
+        let dave = PeerId::from_u64(104);
+        current.pending_recovery_peer = Some(*dave.as_bytes());
+        current.pending_recovery_expires_at_ms = 3_000;
+        let before = current.clone();
+        assert_eq!(
+            merge_live_reconnect_capture(
+                &mut current,
+                true,
+                carol,
+                vec![ReconnectRoute {
+                    peer_id: *carol.as_bytes(),
+                    address: "/ip4/192.168.1.103/tcp/22487".into(),
+                }],
+                3,
+                1_000,
+                [bob, carol, dave],
+            ),
+            None
+        );
+        assert_eq!(
+            current, before,
+            "stale whole-record state must not be saved"
+        );
+    }
+
+    #[test]
     fn only_a_direct_inviter_admission_grants_durable_reconnect_authority() {
         let inviter = phase0_peer_id(&test_libp2p_peer(101));
         let helper = phase0_peer_id(&test_libp2p_peer(102));
@@ -15768,6 +16655,8 @@ mod tests {
             record_seq: 0,
             reconnect_routes: Vec::new(),
             reconnect_policy: ReconnectPolicy::Disabled,
+            pending_recovery_peer: None,
+            pending_recovery_expires_at_ms: 0,
         };
         // Nothing is holding the derived port on a test machine, so that is what gets chosen, and
         // it is chosen again on the next call: stability is the whole point.

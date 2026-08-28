@@ -88,6 +88,13 @@ pub struct ServerNet {
     /// an empty route vector prevents a helper admission from later being mistaken for a legacy
     /// record that is eligible for migration.
     pub reconnect_policy: ReconnectPolicy,
+    /// A verified recovery-code peer awaiting a live, uniquely claimed, authenticated route.
+    /// This is additive to `reconnect_policy`: the previous proven peer/routes remain usable until
+    /// one atomic save promotes this candidate, so a failed recovery cannot destroy reachability.
+    pub pending_recovery_peer: Option<[u8; 32]>,
+    /// Absolute signed-code deadline for `pending_recovery_peer`; zero when no candidate exists.
+    /// Persisting the deadline preserves the ten-minute authority boundary across restarts.
+    pub pending_recovery_expires_at_ms: u64,
 }
 
 /// One sealed same-LAN reconnect hint. `peer_id` is the Phase-0 transport identity derived from
@@ -183,10 +190,11 @@ impl Drop for ServerNet {
 const SERVER_NET_V1: u8 = 1;
 const SERVER_NET_V2: u8 = 2;
 const SERVER_NET_V3: u8 = 3;
+const SERVER_NET_V4: u8 = 4;
 
 fn encode_server_net(net: &ServerNet) -> Vec<u8> {
     let mut e = Encoder::new();
-    e.put_u8(SERVER_NET_V3);
+    e.put_u8(SERVER_NET_V4);
     e.put_bytes(&net.key_seed).expect("seed fits");
     e.put_u16(net.port);
     e.put_str(&net.advertise).expect("advertise fits");
@@ -227,6 +235,16 @@ fn encode_server_net(net: &ServerNet) -> Vec<u8> {
         e.put_bytes(&route.peer_id).expect("peer id fits");
         e.put_str(&route.address).expect("reconnect route fits");
     }
+    match net.pending_recovery_peer {
+        Some(peer) => {
+            e.put_u8(1);
+            e.put_bytes(&peer).expect("peer id fits");
+            e.put_u64(net.pending_recovery_expires_at_ms);
+        }
+        None => {
+            e.put_u8(0);
+        }
+    }
     e.finish()
 }
 
@@ -234,7 +252,11 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
     let bad = || AppError::Io("corrupt server net record".into());
     let mut d = Decoder::new(bytes);
     let version = d.get_u8().map_err(|_| bad())?;
-    if version != SERVER_NET_V1 && version != SERVER_NET_V2 && version != SERVER_NET_V3 {
+    if version != SERVER_NET_V1
+        && version != SERVER_NET_V2
+        && version != SERVER_NET_V3
+        && version != SERVER_NET_V4
+    {
         return Err(AppError::Io("unknown server net record version".into()));
     }
     let seed = d.get_bytes().map_err(|_| bad())?;
@@ -298,6 +320,23 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
     }) {
         return Err(bad());
     }
+    let (pending_recovery_peer, pending_recovery_expires_at_ms) = if version >= SERVER_NET_V4 {
+        match d.get_u8().map_err(|_| bad())? {
+            0 => (None, 0),
+            1 => (
+                Some(
+                    d.get_bytes()
+                        .map_err(|_| bad())?
+                        .try_into()
+                        .map_err(|_| bad())?,
+                ),
+                d.get_u64().map_err(|_| bad())?,
+            ),
+            _ => return Err(bad()),
+        }
+    } else {
+        (None, 0)
+    };
     d.finish().map_err(|_| bad())?;
     Ok(ServerNet {
         key_seed,
@@ -309,6 +348,8 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
         switchboard,
         reconnect_routes,
         reconnect_policy,
+        pending_recovery_peer,
+        pending_recovery_expires_at_ms,
     })
 }
 
@@ -817,6 +858,8 @@ mod tests {
                 address: "/ip4/192.168.1.40/tcp/47123/p2p/12D3KooWQYFnfXfgxT8kZ6BJZQ4wE4bFAJj7X9uKdqVPa5wYzD5X".into(),
             }],
             reconnect_policy: ReconnectPolicy::AuthorizedPeer([0x44; 32]),
+            pending_recovery_peer: Some([0x55; 32]),
+            pending_recovery_expires_at_ms: 123_456,
         };
 
         {
@@ -852,6 +895,8 @@ mod tests {
             record_seq: 0,
             reconnect_routes: Vec::new(),
             reconnect_policy: ReconnectPolicy::Disabled,
+            pending_recovery_peer: None,
+            pending_recovery_expires_at_ms: 0,
         };
         let store = ServerStore::open(dir.path(), b"pw", &mut rng).unwrap();
         store.save_server_net(7, &net, &mut rng).unwrap();
@@ -907,6 +952,8 @@ mod tests {
             record_seq: u64::MAX - 1,
             reconnect_routes: Vec::new(),
             reconnect_policy: ReconnectPolicy::Disabled,
+            pending_recovery_peer: None,
+            pending_recovery_expires_at_ms: 0,
         };
         assert_eq!(decode_server_net(&encode_server_net(&net)).unwrap(), net);
     }
@@ -992,6 +1039,8 @@ mod tests {
             record_seq: 0,
             reconnect_routes: Vec::new(),
             reconnect_policy: ReconnectPolicy::Disabled,
+            pending_recovery_peer: None,
+            pending_recovery_expires_at_ms: 0,
         };
         // Same seed, same port: this is what a port-forward and a UPnP mapping depend on.
         assert_eq!(mk([1u8; 32]).derived_port(), mk([1u8; 32]).derived_port());
@@ -1065,6 +1114,8 @@ mod tests {
             record_seq: 0,
             reconnect_routes: Vec::new(),
             reconnect_policy: ReconnectPolicy::Disabled,
+            pending_recovery_peer: None,
+            pending_recovery_expires_at_ms: 0,
         };
 
         // Simulate three launches: reserve a block, seal it, reload it.
