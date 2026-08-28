@@ -12,11 +12,10 @@
 //! node's app for real and watches the dot go out. It drives `spawn`/`ServerActor`/`AppEvent`
 //! like the rest of the product suite, not the sync layer.
 //!
-//! What is deliberately *not* here: the phase-9g cross-session re-dial over real sockets.
-//! `publish_self_record` strips non-routable addresses, and every address available in CI is
-//! loopback, so a record published here carries no dialable address by design and the address
-//! cache has nothing to hold. The re-dial's plan/policy half is covered in `product_e2e.rs`; the
-//! socket half needs a routable address and therefore a live host, not a test.
+//! This also exercises the LAN-only restart path. Private/loopback addresses remain absent from
+//! signed peer records, but a joiner now seals the exact outbound direct route that completed the
+//! Noise handshake and retries it after roster revalidation. Loopback is therefore the right
+//! deterministic stand-in: it has the same "not publishable through PEX" property as a home LAN.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,7 +53,9 @@ async fn discovery_pass(actor: &ServerActor) {
 }
 
 /// A member's presence dot follows a real connection: it lights when the two nodes have
-/// exchanged records over a live link, and it goes out when that node closes its app.
+/// exchanged records over a live link, and it goes out when that node closes its app. Both
+/// clients are then closed and restored, proving the retained LAN route survives the exact
+/// lifecycle that originally stranded an established group.
 ///
 /// Both halves shipped broken. The lighting half was dead because nothing in the product ever
 /// published or requested a peer record, so `connected_member_fingerprints` read an empty map;
@@ -65,15 +66,21 @@ async fn discovery_pass(actor: &ServerActor) {
 async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_its_app() {
     catcoms_log::init_test();
     let general = channel_id("general");
+    let reconnect = channel_id("reconnect");
 
     // --- Alice founds on a real, ephemeral TCP loopback port ---
-    let (a_mesh, _a_id) = MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[])
-        .expect("bind a TCP listener");
+    let a_key = libp2p::identity::Keypair::ed25519_from_bytes([0xA1; 32])
+        .expect("deterministic founder transport key");
+    let a_listen: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
+    let (a_mesh, a_id, _) =
+        MeshService::new_tcp_with_key(a_key.clone(), std::slice::from_ref(&a_listen), &[])
+            .expect("bind a TCP listener");
     let a_addr: Multiaddr = timeout(WAIT, a_mesh.next_listen_addr())
         .await
         .expect("listen-addr timeout")
         .expect("Alice bound a TCP address");
     let a_peer = a_mesh.local_peer();
+    assert_eq!(a_peer, catcoms_net::phase0_peer_id(&a_id));
 
     let mut alice = Server::found(
         a_mesh,
@@ -86,7 +93,14 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
     alice.subscribe_control().await.expect("subscribe control");
     let (alice, mut alice_events, alice_task) = spawn(alice);
     alice.open_channel(general).await;
+    alice.open_channel(reconnect).await;
     let alice_fp = my_fp(&alice).await;
+    // Production publishes this before minting/joining. The direct joiner immediately requests
+    // this signed descriptor so an immediate close cannot leave its sealed socket without the
+    // roster-backed transport claim required at restart.
+    alice
+        .publish_self_record(vec![a_addr.to_string()], 65_536)
+        .await;
 
     let invite = alice
         .mint_invite([7u8; 16], u64::MAX, vec![a_addr.to_string()])
@@ -95,8 +109,16 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
     let invite = InviteToken::decode(&invite).expect("the minted invite decodes");
 
     // --- Bob dials the address out of the invite and joins over the wire ---
-    let (b_mesh, _b_id) =
-        MeshService::new_tcp(None, std::slice::from_ref(&a_addr)).expect("build the joiner node");
+    let b_key = libp2p::identity::Keypair::ed25519_from_bytes([0xB2; 32])
+        .expect("deterministic test transport key");
+    let b_listen: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
+    let (b_mesh, b_id, _) = MeshService::new_tcp_with_key(
+        b_key.clone(),
+        std::slice::from_ref(&b_listen),
+        std::slice::from_ref(&a_addr),
+    )
+    .expect("build the joiner node");
+    let b_handle = b_mesh.handle();
     let b_mesh = Arc::new(b_mesh);
     timeout(WAIT, async {
         loop {
@@ -111,7 +133,7 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
     .expect("the joiner did not connect to the founder over TCP");
     let b_mesh = Arc::try_unwrap(b_mesh).expect("sole owner once the connect wait is done");
 
-    let bob = Server::join(
+    let mut bob = Server::join(
         b_mesh,
         MlsDevice::generate().expect("a fresh MLS provider per device"),
         OsCryptoRng,
@@ -122,7 +144,14 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
     )
     .await
     .expect("join over real sockets");
-    let (bob, mut bob_events, bob_task) = spawn(bob);
+    assert!(
+        bob.request_pex(a_peer).await.expect("immediate direct PEX") > 0,
+        "direct admission persists the inviter's signed transport claim before the first timer"
+    );
+    let bob_snapshot = bob
+        .snapshot()
+        .expect("snapshot Bob immediately after direct admission");
+    let (bob, _bob_events, bob_task) = spawn(bob);
     bob.open_channel(general).await;
     bob.catch_up(a_peer, general).await;
     let bob_fp = my_fp(&bob).await;
@@ -132,103 +161,32 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
         "the roster grew over the wire"
     );
 
-    // The whole product over a socket, in one line, before presence is even considered: if this
-    // does not converge nothing below means anything.
-    alice.send_message(general, "hello over tcp").await;
-    timeout(WAIT, async {
-        loop {
-            if bob
-                .messages(general)
-                .await
-                .iter()
-                .any(|m| m.text == "hello over tcp")
-            {
-                return;
-            }
-            let _ = timeout(Duration::from_millis(20), bob_events.recv()).await;
-        }
-    })
-    .await
-    .expect("the joiner never received the founder's message over TCP");
-
-    // Prove the product path is bidirectional. A one-way assertion would miss a joiner whose
-    // subscriptions work but whose own signed operations never leave its actor/transport.
-    bob.send_message(general, "reply over tcp").await;
-    timeout(WAIT, async {
+    // Give the founder an ordinary authenticated product event from Bob before checking the
+    // presence projection. This deliberately lands in `general` *after* the immediate Bob
+    // snapshot; post-restart messaging uses the separate `reconnect` document so restoring that
+    // exact snapshot cannot reuse an Automerge actor sequence.
+    bob.send_message(general, "presence proof").await;
+    let saw_bob_online_event = timeout(WAIT, async {
+        let mut saw_online = false;
         loop {
             if alice
                 .messages(general)
                 .await
                 .iter()
-                .any(|m| m.text == "reply over tcp")
+                .any(|message| message.text == "presence proof")
             {
-                return;
+                return saw_online;
             }
-            let _ = timeout(Duration::from_millis(20), alice_events.recv()).await;
+            if let Ok(Some(event)) = timeout(Duration::from_millis(20), alice_events.recv()).await {
+                saw_online |= matches!(
+                    &event.event,
+                    AppEvent::ConnectivityChanged { online } if online.contains(&bob_fp)
+                );
+            }
         }
     })
     .await
-    .expect("the founder never received the joiner's reply over TCP");
-
-    // Exercise the file-index gossip and authenticated chunk request/response over the same real
-    // socket. The bytes are deterministic and deliberately cross several ordinary data shapes;
-    // the final CID assertion detects truncation, reordering and corruption.
-    let file_bytes: Vec<u8> = (0..12_345u32)
-        .map(|i| (i.wrapping_mul(29) % 251) as u8)
-        .collect();
-    let cid_hex = alice
-        .add_file(
-            "tcp-check.bin".into(),
-            "application/octet-stream".into(),
-            "acceptance".into(),
-            file_bytes.clone(),
-        )
-        .await
-        .expect("the founder can publish the deterministic test file");
-    let entry = timeout(WAIT, async {
-        loop {
-            if let Some(entry) = bob
-                .files()
-                .await
-                .into_iter()
-                .find(|entry| entry.name == "tcp-check.bin")
-            {
-                return entry;
-            }
-            let _ = timeout(Duration::from_millis(20), bob_events.recv()).await;
-        }
-    })
-    .await
-    .expect("the joiner never received the file listing over TCP");
-    assert_eq!(
-        entry
-            .cid
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-        cid_hex,
-        "the listing carries the uploader's content address"
-    );
-    let (chunks, size) = bob
-        .file_download_plan(entry.cid.clone())
-        .await
-        .expect("the received listing has a valid download plan");
-    assert_eq!(size, file_bytes.len() as u64);
-    let mut downloaded = Vec::with_capacity(size as usize);
-    for index in 0..chunks {
-        let (bytes, provider) = bob
-            .fetch_file_chunk(entry.cid.clone(), index)
-            .await
-            .unwrap_or_else(|error| panic!("TCP file chunk {index}/{chunks} failed: {error}"));
-        assert_eq!(provider.as_deref(), Some(alice_fp.as_str()));
-        downloaded.extend_from_slice(&bytes);
-    }
-    assert_eq!(downloaded, file_bytes, "the file crosses TCP byte-for-byte");
-    assert_eq!(
-        Cid::of(&downloaded).as_bytes(),
-        entry.cid.as_slice(),
-        "the downloaded plaintext verifies against its content address"
-    );
+    .expect("the founder never received the joiner's pre-close product event");
 
     // --- presence lights up ---
     //
@@ -236,12 +194,9 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
     // stripped as non-routable, so these records carry no dialable address at all; that is the
     // documented LAN-only shape, and presence is unaffected because it matches on the `peer_id`
     // each member signed into its **own** record, not on an address.
-    alice
-        .publish_self_record(vec![a_addr.to_string()], 65_536)
-        .await;
     bob.publish_self_record(Vec::new(), 65_536).await;
-    discovery_pass(&alice).await;
     discovery_pass(&bob).await;
+    discovery_pass(&alice).await;
 
     assert_eq!(
         alice.online_members().await,
@@ -250,20 +205,38 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
     );
     assert_eq!(bob.online_members().await, vec![alice_fp.clone()]);
 
+    let reconnect_routes: Vec<_> = b_handle
+        .authenticated_dial_routes()
+        .into_iter()
+        .filter(|route| route.peer == a_peer)
+        .map(|route| (route.peer, route.address))
+        .collect();
+    assert_eq!(
+        reconnect_routes.len(),
+        1,
+        "the joiner's exact outbound Noise-authenticated route is available to seal"
+    );
+    // The desktop keeps this handle inside the same `ServerEntry` that is dropped on shutdown.
+    // Drop the test's extra clone too, or it would intentionally keep the swarm alive and prevent
+    // the founder from observing `PeerDisconnected`.
+    drop(b_handle);
+
     // The UI renders presence off the event, not off a poll, so the event has to fire too.
-    timeout(WAIT, async {
-        loop {
-            match alice_events.recv().await {
-                Some(ev) if matches!(&ev.event, AppEvent::ConnectivityChanged { online } if online.contains(&bob_fp)) => {
-                    return
+    if !saw_bob_online_event {
+        timeout(WAIT, async {
+            loop {
+                match alice_events.recv().await {
+                    Some(ev) if matches!(&ev.event, AppEvent::ConnectivityChanged { online } if online.contains(&bob_fp)) => {
+                        return
+                    }
+                    Some(_) => continue,
+                    None => panic!("the founder's actor closed"),
                 }
-                Some(_) => continue,
-                None => panic!("the founder's actor closed"),
             }
-        }
-    })
-    .await
-    .expect("no ConnectivityChanged carried the joiner's fingerprint");
+        })
+        .await
+        .expect("no ConnectivityChanged carried the joiner's fingerprint");
+    }
 
     // --- and goes out when the peer closes its app ---
     //
@@ -297,6 +270,182 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
         2,
         "going offline is not leaving: the roster is unchanged, only the dot"
     );
+
+    // Close the founder too. Rebinding its exact listener before Bob returns exercises the
+    // reported both-apps-closed case, not merely a transient joiner restart while an old actor
+    // remains alive in memory.
+    let alice_snapshot = alice.snapshot().await.expect("snapshot Alice before close");
+    alice.shutdown().await;
+    let _ = alice_task.await;
+
+    let (a_mesh, restarted_a_id, _) =
+        MeshService::new_tcp_with_key(a_key, std::slice::from_ref(&a_addr), &[])
+            .expect("rebind Alice's persisted listener without a fresh invite");
+    assert_eq!(
+        restarted_a_id, a_id,
+        "the founder transport identity survives"
+    );
+    assert_eq!(
+        timeout(WAIT, a_mesh.next_listen_addr())
+            .await
+            .expect("restarted founder listen-addr timeout")
+            .expect("restarted founder bound its persisted address"),
+        a_addr,
+        "the founder rebinds the route sealed by the joiner"
+    );
+    let mut restarted_alice = Server::restore(
+        &alice_snapshot,
+        a_mesh,
+        OsCryptoRng,
+        Box::new(SystemClock),
+        "alice",
+    )
+    .expect("restore Alice's group state");
+    restarted_alice
+        .subscribe_control()
+        .await
+        .expect("restore Alice's control subscription");
+    let (alice, mut alice_events, alice_task) = spawn(restarted_alice);
+    alice.open_channel(general).await;
+    alice.open_channel(reconnect).await;
+
+    // --- recreate the closed joiner with the same identity and no fresh invite ---
+    let (b_mesh, restarted_b_id, _) =
+        MeshService::new_tcp_with_key(b_key, std::slice::from_ref(&b_listen), &[])
+            .expect("rebuild Bob's transport without an initial dial");
+    assert_eq!(
+        restarted_b_id, b_id,
+        "the persisted transport identity survives"
+    );
+    let mut restarted_bob = Server::restore(
+        &bob_snapshot,
+        b_mesh,
+        OsCryptoRng,
+        Box::new(SystemClock),
+        "bob",
+    )
+    .expect("restore Bob's group state");
+    restarted_bob
+        .subscribe_control()
+        .await
+        .expect("restore the control subscription");
+    restarted_bob.set_local_reconnect_routes(reconnect_routes);
+    assert_eq!(
+        restarted_bob.dial_local_reconnect_routes().await,
+        1,
+        "the sealed LAN route enters a fresh peer-bound socket dial"
+    );
+    let (bob, mut restarted_events, restarted_task) = spawn(restarted_bob);
+    bob.open_channel(general).await;
+    bob.open_channel(reconnect).await;
+
+    timeout(WAIT, async {
+        loop {
+            if bob.online_members().await.contains(&alice_fp) {
+                return;
+            }
+            let _ = timeout(Duration::from_millis(20), restarted_events.recv()).await;
+        }
+    })
+    .await
+    .expect("the restored sealed route never became a roster-bound live connection");
+
+    bob.send_message(reconnect, "after reopening").await;
+    timeout(WAIT, async {
+        loop {
+            if alice
+                .messages(reconnect)
+                .await
+                .iter()
+                .any(|m| m.text == "after reopening")
+            {
+                return;
+            }
+            let _ = timeout(Duration::from_millis(20), alice_events.recv()).await;
+        }
+    })
+    .await
+    .expect("the reopened client could not send over its recovered LAN route");
+
+    alice.send_message(reconnect, "welcome back").await;
+    timeout(WAIT, async {
+        loop {
+            if bob
+                .messages(reconnect)
+                .await
+                .iter()
+                .any(|m| m.text == "welcome back")
+            {
+                return;
+            }
+            let _ = timeout(Duration::from_millis(20), restarted_events.recv()).await;
+        }
+    })
+    .await
+    .expect("the reopened client could not receive over its recovered LAN route");
+
+    // Exercise the file-index gossip and authenticated chunk request/response after the restart
+    // too. The bytes are deterministic and the final CID assertion detects truncation, reordering
+    // and corruption across the recovered connection.
+    let file_bytes: Vec<u8> = (0..12_345u32)
+        .map(|i| (i.wrapping_mul(29) % 251) as u8)
+        .collect();
+    let cid_hex = alice
+        .add_file(
+            "tcp-check.bin".into(),
+            "application/octet-stream".into(),
+            "acceptance".into(),
+            file_bytes.clone(),
+        )
+        .await
+        .expect("the restored founder can publish the deterministic test file");
+    let entry = timeout(WAIT, async {
+        loop {
+            if let Some(entry) = bob
+                .files()
+                .await
+                .into_iter()
+                .find(|entry| entry.name == "tcp-check.bin")
+            {
+                return entry;
+            }
+            let _ = timeout(Duration::from_millis(20), restarted_events.recv()).await;
+        }
+    })
+    .await
+    .expect("the restored joiner never received the file listing over TCP");
+    assert_eq!(
+        entry
+            .cid
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        cid_hex,
+        "the listing carries the uploader's content address"
+    );
+    let (chunks, size) = bob
+        .file_download_plan(entry.cid.clone())
+        .await
+        .expect("the received listing has a valid download plan");
+    assert_eq!(size, file_bytes.len() as u64);
+    let mut downloaded = Vec::with_capacity(size as usize);
+    for index in 0..chunks {
+        let (bytes, provider) = bob
+            .fetch_file_chunk(entry.cid.clone(), index)
+            .await
+            .unwrap_or_else(|error| panic!("TCP file chunk {index}/{chunks} failed: {error}"));
+        assert_eq!(provider.as_deref(), Some(alice_fp.as_str()));
+        downloaded.extend_from_slice(&bytes);
+    }
+    assert_eq!(downloaded, file_bytes, "the file crosses TCP byte-for-byte");
+    assert_eq!(
+        Cid::of(&downloaded).as_bytes(),
+        entry.cid.as_slice(),
+        "the downloaded plaintext verifies against its content address"
+    );
+
+    bob.shutdown().await;
+    let _ = restarted_task.await;
 
     alice.shutdown().await;
     let _ = alice_task.await;

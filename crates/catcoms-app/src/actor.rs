@@ -769,6 +769,9 @@ pub enum AppCommand {
     /// rendezvous configured; the PEX half always runs, because members exchange records over
     /// whatever connections they have with no infrastructure involved.
     DriveDiscovery,
+    /// Replace the transient local-only reconnect hints after the bridge observes a currently
+    /// live outbound member route. Validation and membership checks remain inside `ChannelSync`.
+    SetLocalReconnectRoutes { routes: Vec<(PeerId, String)> },
     /// Explicit user-triggered isolation repair. The sync layer retains the anti-click cooldown
     /// and every shared egress limit; the reply distinguishes no routes from safety deferral.
     ManualFallbackRedial {
@@ -2728,6 +2731,18 @@ impl ServerActor {
             .map_err(|_| ())
     }
 
+    /// Install bridge-observed, vault-sealed local reconnect hints into the running server.
+    /// The actor owns the authoritative roster and reparses every route before retaining it.
+    pub async fn set_local_reconnect_routes(
+        &self,
+        routes: Vec<(PeerId, String)>,
+    ) -> Result<(), ()> {
+        self.cmd_tx
+            .send(AppCommand::SetLocalReconnectRoutes { routes })
+            .await
+            .map_err(|_| ())
+    }
+
     /// (Re)publish this device's signed peer record. `seq` must come from this launch's reserved
     /// peer-record sequence block (see `ServerNet::reserve_record_seq_block`).
     pub async fn publish_self_record(&self, addresses: Vec<String>, seq: u64) {
@@ -3745,6 +3760,11 @@ where
                             last_eclipse = caution;
                             let _ = event_tx.send(AppEvent::EclipseChanged { caution }).await;
                         }
+                        // Same-LAN routes are deliberately absent from signed public peer records.
+                        // Retry the exact outbound routes this installation previously proved,
+                        // independent of rendezvous configuration, so simultaneous restarts heal
+                        // when the member that owns the listener comes online second.
+                        server.dial_local_reconnect_routes().await;
                         if server.has_rendezvous() {
                             server.drive_discovery().await;
                             // ONE overall timeout bounds the whole drain to a single window, so an
@@ -3818,6 +3838,17 @@ where
                         // resulting sockets remain behind the ordinary policy + endpoint budget.
                         server.drive_mesh_repair().await;
                         server.dial_cached_peers().await;
+                        // PEX can authenticate the signed descriptor for a transport identity
+                        // that was already connected before this pass. In that ordering there is
+                        // no later transport event to announce the now-resolved member as online,
+                        // so refresh presence here as well as in the transport-event arm. The UI
+                        // must not have to wait for a message or another socket transition before
+                        // it learns that the existing connection belongs to this roster member.
+                        let online = server.online_members();
+                        if online != last_online {
+                            last_online = online.clone();
+                            let _ = event_tx.send(AppEvent::ConnectivityChanged { online }).await;
+                        }
                         let route_revision = server.member_route_revision();
                         if route_revision != last_member_route_revision {
                             last_member_route_revision = route_revision;
@@ -3828,6 +3859,9 @@ where
                             last_switchboards = switchboards;
                             let _ = event_tx.send(AppEvent::SwitchboardsChanged).await;
                         }
+                    }
+                    Some(AppCommand::SetLocalReconnectRoutes { routes }) => {
+                        server.set_local_reconnect_routes(routes);
                     }
                     Some(AppCommand::ManualFallbackRedial { reply }) => {
                         let outcome = server.manual_fallback_redial().await;

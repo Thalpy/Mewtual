@@ -121,8 +121,12 @@ export function deliveryLabel(v: DeliveryVerdict, e: DeliveryEvidence): string {
   const delivered = e.delivered ?? 0;
   switch (v) {
     case "pending":
+      return "saving…";
     case "waiting":
-      return "sending…";
+      // The command already returned and the message is in the local replicated document. A
+      // quiet receiver cannot produce the causal-descendant evidence used by this protocol
+      // version, so calling this state "sending" makes a completed local send look stuck.
+      return "sent · awaiting confirmation";
     case "partial":
       // Phrased against the roster when nothing is reachable, because "1 of 0 reachable" is not a
       // sentence. The message is held by somebody either way, which is the part that matters.

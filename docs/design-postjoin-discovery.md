@@ -15,6 +15,8 @@ Adversarial review follows [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md).
 - [x] Periodic member-only rendezvous registration/discovery.
 - [x] Authenticated bounded member PEX independent of rendezvous.
 - [x] Vault-sealed, roster-reverified cross-session address cache.
+- [x] Vault-sealed authenticated direct-join route for same-LAN close/reopen, kept local rather
+  than publishing private addresses through PEX.
 - [x] Bounded redial backoff with jitter; disconnect and a newer signed address epoch bypass it.
 - [x] Fold PEX records before the same pass's cached redial, so dynamic-IP updates are immediate.
 - [x] Poll the route-selected IPv4/IPv6 interfaces on the discovery cadence; publish one fresh
@@ -111,6 +113,20 @@ detector needed from it is served by roster-backed confirmation instead (the P8 
   process handle. The local policy ranks and reserves by endpoint; the shared scheduler is the
   final gate before socket submission. A shared denial is refunded to the local window because no
   attempt happened, while the process counters are charged only for routes actually granted.
+- `local_reconnect_routes: Vec<(PeerId,String)>`; transient in `ChannelSync`, restored from the
+  desktop's version-3 `ServerNet`. Its adjacent durable `ReconnectPolicy` is `Disabled`,
+  `AuthorizedPeer(peer)`, or `LegacyPending`; a stored row is valid only for the authorized peer.
+  Direct admission authorizes only the named inviter and makes one bounded best-effort PEX request
+  before the first post-join snapshot, so reload normally has the inviter's signed transport claim.
+  Helper/reply/switchboard admission is explicitly disabled. Every retry requires an exact, unique
+  current roster claim for that peer, raw literal-IP TCP/QUIC shape, and the shared endpoint
+  scheduler. The hint is never gossiped and never mixed into the public-only `AddressCache`/PEX
+  candidate set.
+  On each discovery cadence, `AuthorizedPeer` may refresh only that peer. `LegacyPending` may
+  promote once only when there is exactly one other member and one unique live signed peer claim;
+  that captured route must be private/loopback. This excludes public infrastructure and
+  ambiguous/helper-bearing groups. An empty observation never deletes the old hint merely because
+  the remote app is currently closed.
 
 **Driver methods on `ChannelSync`** (called by `Server`, driven by the actor):
 - `drive_discovery()` (async): reconnect/discover on every cadence but register each exact
@@ -130,8 +146,9 @@ detector needed from it is served by roster-backed confirmation instead (the P8 
 live in `crates/`; the ambient-dependency gate forbids `tokio::time::interval`/`sleep` there (all
 real time must flow through the `Clock` seam, which is logical-time-only). So the **bridge**
 (`apps/`, not gate-scanned) spawns a per-server `tokio::time::interval` that sends a fire-and-forget
-`AppCommand::DriveDiscovery` every `DISCOVERY_INTERVAL_SECS` (60s); the actor handles it in its
-existing `cmd` arm: `if has_rendezvous { drive_discovery(); drain next_discovered() under one
+`AppCommand::DriveDiscovery` every `DISCOVERY_INTERVAL_SECS` (60s); the actor first tries any
+sealed local reconnect route even when no rendezvous is configured, then handles rendezvous work
+in its existing `cmd` arm: `if has_rendezvous { drive_discovery(); drain next_discovered() under one
 `tokio::time::timeout` (allowed) + a count cap }`. Putting the drain in the command handler avoids
 the `select!` borrow conflict (`sync_once` is `&mut`, `next_discovered` is `&mut`; they'd clash as
 concurrent `select!` arms; in the handler they run sequentially after the arm wins). The timer task

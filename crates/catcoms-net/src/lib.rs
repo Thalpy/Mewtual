@@ -162,6 +162,22 @@ pub struct Registered {
     pub rendezvous_node: libp2p::PeerId,
 }
 
+/// One currently-live outbound route whose terminal peer completed libp2p's Noise handshake.
+///
+/// This is intentionally separate from ordinary connection diagnostics: it contains a network
+/// address and must never be shown as membership or presence evidence. The desktop uses it only
+/// to retain the exact same-LAN route that a joiner already proved during admission, so a restart
+/// does not depend on an unimplemented local-discovery mechanism. Listener source addresses are
+/// excluded because their ephemeral source port is not a future dial target; relay circuits are
+/// excluded because their lease/consent lifecycle is managed separately.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AuthenticatedDialRoute {
+    /// The Phase-0 transport identity authenticated by Noise on this connection.
+    pub peer: PeerId,
+    /// A canonical, direct IP multiaddr ending in that peer's `/p2p/<id>` component.
+    pub address: String,
+}
+
 /// The result of one AutoNAT v2 dial-back for one candidate address.
 ///
 /// Reachability is deliberately **per address and per observer**, not a permanent property of the
@@ -780,6 +796,110 @@ fn active_connection_paths(
     active
 }
 
+/// Recover the exact future-dialable route from an authenticated outbound connection.
+///
+/// libp2p removes the terminal `/p2p` component from some established dialer endpoints. Reattach
+/// the identity that Noise actually authenticated, then run the same final direct-route guard used
+/// by reciprocal repair. Keeping only literal IP routes avoids turning a remembered DNS answer
+/// into a cross-session rebinding capability.
+fn authenticated_dial_route(
+    peer_id: libp2p::PeerId,
+    endpoint: &ConnectedPoint,
+) -> Option<AuthenticatedDialRoute> {
+    let ConnectedPoint::Dialer { address, .. } = endpoint else {
+        return None;
+    };
+    if is_relayed(address)
+        || !address
+            .iter()
+            .any(|part| matches!(part, Protocol::Ip4(_) | Protocol::Ip6(_)))
+        || address
+            .iter()
+            .any(|part| matches!(part, Protocol::Ws(_) | Protocol::Wss(_) | Protocol::Tls))
+        || address.iter().any(|part| {
+            matches!(
+                part,
+                Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_)
+            )
+        })
+    {
+        return None;
+    }
+
+    let mut route = address.clone();
+    match target_peer_in_multiaddr(&route) {
+        Some(target) if target != peer_id => return None,
+        Some(_) => {}
+        None => route.push(Protocol::P2p(peer_id)),
+    }
+    let peer = to_peer(&peer_id);
+    valid_direct_peer_batch(peer, std::slice::from_ref(&route)).then(|| AuthenticatedDialRoute {
+        peer,
+        address: route.to_string(),
+    })
+}
+
+/// Address-free dial diagnostics. Member routes can contain private LAN coordinates, so generic
+/// transport logging records only enough structure to distinguish family/transport failures.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DialLogShape {
+    ipv4: usize,
+    ipv6: usize,
+    dns: usize,
+    tcp: usize,
+    websocket: usize,
+    quic: usize,
+    relay: usize,
+}
+
+fn dial_log_shape<'a>(addresses: impl IntoIterator<Item = &'a Multiaddr>) -> DialLogShape {
+    let mut shape = DialLogShape::default();
+    for address in addresses {
+        let parts: Vec<_> = address.iter().collect();
+        if parts.iter().any(|part| matches!(part, Protocol::Ip4(_))) {
+            shape.ipv4 += 1;
+        } else if parts.iter().any(|part| matches!(part, Protocol::Ip6(_))) {
+            shape.ipv6 += 1;
+        } else if parts.iter().any(|part| {
+            matches!(
+                part,
+                Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_)
+            )
+        }) {
+            shape.dns += 1;
+        }
+        if parts.iter().any(|part| matches!(part, Protocol::QuicV1)) {
+            shape.quic += 1;
+        } else if parts
+            .iter()
+            .any(|part| matches!(part, Protocol::Ws(_) | Protocol::Wss(_) | Protocol::Tls))
+        {
+            shape.websocket += 1;
+        } else if parts.iter().any(|part| matches!(part, Protocol::Tcp(_))) {
+            shape.tcp += 1;
+        }
+        if parts
+            .iter()
+            .any(|part| matches!(part, Protocol::P2pCircuit))
+        {
+            shape.relay += 1;
+        }
+    }
+    shape
+}
+
+fn dial_error_kind(error: &libp2p::swarm::DialError) -> &'static str {
+    match error {
+        libp2p::swarm::DialError::LocalPeerId { .. } => "local-peer",
+        libp2p::swarm::DialError::NoAddresses => "no-addresses",
+        libp2p::swarm::DialError::DialPeerConditionFalse(_) => "condition",
+        libp2p::swarm::DialError::Aborted => "aborted",
+        libp2p::swarm::DialError::WrongPeerId { .. } => "wrong-peer",
+        libp2p::swarm::DialError::Denied { .. } => "denied",
+        libp2p::swarm::DialError::Transport(_) => "transport",
+    }
+}
+
 /// Apply a libp2p close edge to the path ledger. `remaining == 0` is authoritative and clears all
 /// rows for the peer, healing any missed/unknown connection id instead of stranding stale detail.
 fn forget_connection_path(
@@ -792,6 +912,49 @@ fn forget_connection_path(
     if remaining == 0 {
         paths.retain(|(candidate, _), _| candidate != &peer_id);
     }
+}
+
+/// Mirror the path ledger's authoritative final-close healing for address-bearing route state.
+fn forget_authenticated_routes(
+    routes: &mut HashMap<(libp2p::PeerId, ConnectionId), AuthenticatedDialRoute>,
+    peer: libp2p::PeerId,
+    connection: ConnectionId,
+    remaining: u32,
+) {
+    routes.remove(&(peer, connection));
+    if remaining == 0 {
+        routes.retain(|(candidate, _), _| *candidate != peer);
+    }
+}
+
+/// Build the exact deterministic value exposed through the private authenticated-route watch.
+fn authenticated_route_snapshot(
+    routes: &HashMap<(libp2p::PeerId, ConnectionId), AuthenticatedDialRoute>,
+) -> Vec<AuthenticatedDialRoute> {
+    // A peer may have parallel TCP/QUIC connections to the same socket. Collapse identical routes
+    // and retain the hard bound even if alternate swarm limits are configured in the future.
+    let mut snapshot: Vec<_> = routes.values().cloned().collect();
+    snapshot.sort();
+    snapshot.dedup();
+    snapshot.truncate(catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT * MAX_PEER_DIAL_BATCH);
+    snapshot
+}
+
+/// Apply one physical close edge and immediately publish its address-bearing result.
+///
+/// This must not be conditional on the privacy-preserving coarse path set changing: two distinct
+/// TCP connections can collapse to the same path shape while carrying different future-dialable
+/// addresses. Keeping the state transition and publication together makes that invariant directly
+/// regression-testable.
+fn forget_and_publish_authenticated_routes(
+    routes: &mut HashMap<(libp2p::PeerId, ConnectionId), AuthenticatedDialRoute>,
+    snapshots: &watch::Sender<Vec<AuthenticatedDialRoute>>,
+    peer: libp2p::PeerId,
+    connection: ConnectionId,
+    remaining: u32,
+) {
+    forget_authenticated_routes(routes, peer, connection, remaining);
+    snapshots.send_replace(authenticated_route_snapshot(routes));
 }
 
 /// The **relay**'s peer id in a circuit address `…/p2p/<relay>/p2p-circuit[/p2p/<target>]`, i.e.
@@ -2856,6 +3019,10 @@ struct Actor {
     /// Coalesced, present-time liveness/path table. Pre-actor admission and infrastructure waits
     /// observe this instead of consuming the sole ordered event stream that `ChannelSync` owns.
     connection_snapshot_tx: watch::Sender<Vec<PeerConnectionSnapshot>>,
+    /// Address-bearing companion to the privacy-preserving connection snapshot. Only current
+    /// outbound, Noise-authenticated direct routes enter this table; consumers use it to seal a
+    /// same-LAN reconnect hint after admission, never for UI presence.
+    authenticated_route_tx: watch::Sender<Vec<AuthenticatedDialRoute>>,
     listen_tx: mpsc::Sender<Multiaddr>,
     active_listeners: HashSet<Multiaddr>,
     listener_snapshot_tx: watch::Sender<ListenerSnapshot>,
@@ -2939,6 +3106,9 @@ struct Actor {
     /// load-bearing: DCUtR temporarily leaves relay and direct connections live together, and a
     /// close for either one must remove only that path rather than declaring the peer unreachable.
     connection_paths: HashMap<(libp2p::PeerId, ConnectionId), ConnectionPath>,
+    /// Exact authenticated dial endpoints, keyed by physical connection so a close removes only
+    /// its own route while a simultaneous TCP/QUIC or DCUtR connection survives.
+    authenticated_routes: HashMap<(libp2p::PeerId, ConnectionId), AuthenticatedDialRoute>,
     /// Peers **this node's own configuration** named as infrastructure or as a bootstrap: the
     /// relays it reserves on, the rendezvous nodes it registers/discovers at, and the addresses
     /// it was constructed to dial. They are never deniable by a membership action.
@@ -2966,6 +3136,9 @@ impl Actor {
             .collect();
         peers.sort_by_key(|snapshot| snapshot.peer);
         self.connection_snapshot_tx.send_replace(peers);
+
+        self.authenticated_route_tx
+            .send_replace(authenticated_route_snapshot(&self.authenticated_routes));
     }
 
     /// Publish a full, deterministic path snapshot after one connection edge.
@@ -3035,6 +3208,7 @@ impl Actor {
         // A normal command-channel shutdown has an explicit empty terminal value. A panic cannot
         // run this line, so readers additionally reject any retained value once the sender closes.
         self.connection_snapshot_tx.send_replace(Vec::new());
+        self.authenticated_route_tx.send_replace(Vec::new());
     }
 
     /// Reconcile router workers from the authoritative live listener set. This runs for both
@@ -3744,7 +3918,8 @@ impl Actor {
             self.note_infra(relay);
         }
         let Some(target) = target_peer_in_multiaddr(&addr) else {
-            tracing::warn!(%addr, "dial refused: address has no terminal peer id");
+            let shape = dial_log_shape(std::iter::once(&addr));
+            tracing::warn!(?shape, "dial refused: address has no terminal peer id");
             return catcoms_rt::DialSubmission::Suppressed;
         };
         if self.infra_peers.contains(&target) {
@@ -3763,7 +3938,8 @@ impl Actor {
             .or_default()
             .insert(addr.clone())
         {
-            tracing::trace!(%addr, peer = %target, "dial suppressed: this address is already dialing or connected");
+            let shape = dial_log_shape(std::iter::once(&addr));
+            tracing::trace!(?shape, peer = %target, "dial suppressed: route is already dialing or connected");
             return catcoms_rt::DialSubmission::Suppressed;
         }
         self.pending_dials.entry(target).or_default().push(addr);
@@ -3777,22 +3953,24 @@ impl Actor {
         addr: Multiaddr,
     ) -> catcoms_rt::DialSubmission {
         if self.swarm.is_connected(&target) {
-            tracing::trace!(%addr, peer = %target, "infra dial suppressed: already connected");
+            let shape = dial_log_shape(std::iter::once(&addr));
+            tracing::trace!(?shape, peer = %target, "infra dial suppressed: already connected");
             return catcoms_rt::DialSubmission::Suppressed;
         }
+        let shape = dial_log_shape(std::iter::once(&addr));
         let opts = DialOpts::peer_id(target)
-            .addresses(vec![addr.clone()])
+            .addresses(vec![addr])
             .condition(PeerCondition::DisconnectedAndNotDialing)
             .build();
         match self.swarm.dial(opts) {
             Ok(()) => {
-                tracing::debug!(%addr, peer = %target, "dialing infra node");
+                tracing::debug!(?shape, peer = %target, "dialing infra node");
                 return catcoms_rt::DialSubmission::Submitted;
             }
             // `DialError::DialPeerConditionFalse` is the condition doing its job (a dial to this
             // peer is already in flight), not a failure worth warning about.
             Err(libp2p::swarm::DialError::DialPeerConditionFalse(cond)) => {
-                tracing::trace!(%addr, peer = %target, ?cond, "infra dial suppressed: already dialing");
+                tracing::trace!(?shape, peer = %target, ?cond, "infra dial suppressed: already dialing");
             }
             Err(e) => {
                 // Drop the ledger entry so the next tick retries. A dial refused *before* it
@@ -3800,7 +3978,7 @@ impl Actor {
                 // `OutgoingConnectionError`, so nothing else would ever clear it and the node
                 // would stop dialing its own relay or rendezvous for the rest of the process.
                 // `flush_dials` already does this for member peers.
-                tracing::warn!(%addr, error = %e, "dial failed");
+                tracing::warn!(?shape, error_kind = dial_error_kind(&e), "dial failed");
                 self.release_failed_dial(Some(target), &e);
             }
         }
@@ -3815,25 +3993,17 @@ impl Actor {
     fn flush_dials(&mut self) {
         for (peer, addrs) in std::mem::take(&mut self.pending_dials) {
             let count = addrs.len();
-            // The addresses, not just how many. A node that spends every attempt on an address
-            // family it cannot route (an IPv6-only peer record on an IPv4-only host) looks
-            // identical to a node that is dialing nothing at all unless the log says where it
-            // went, and the answer is the whole diagnosis.
-            let attempted = addrs
-                .iter()
-                .map(|a| a.to_string())
-                .collect::<Vec<_>>()
-                .join(" ");
+            // Family/transport counts preserve the useful diagnosis without copying a member's
+            // private coordinates into the always-on diagnostic ring or optional file log.
+            let shape = dial_log_shape(&addrs);
             let opts = DialOpts::peer_id(peer)
                 .addresses(addrs)
                 .condition(PeerCondition::Always)
                 .build();
             match self.swarm.dial(opts) {
-                Ok(()) => {
-                    tracing::debug!(peer = %peer, addresses = count, %attempted, "dialing")
-                }
+                Ok(()) => tracing::debug!(peer = %peer, addresses = count, ?shape, "dialing"),
                 Err(e) => {
-                    tracing::warn!(peer = %peer, error = %e, "dial failed");
+                    tracing::warn!(peer = %peer, error_kind = dial_error_kind(&e), ?shape, "dial failed");
                     self.covered_addrs.remove(&peer);
                 }
             }
@@ -4035,6 +4205,10 @@ impl Actor {
                 );
                 let first_connection = self.peers.insert(peer, peer_id).is_none();
                 self.connection_paths.insert((peer_id, connection_id), path);
+                if let Some(route) = authenticated_dial_route(peer_id, &endpoint) {
+                    self.authenticated_routes
+                        .insert((peer_id, connection_id), route);
+                }
                 // Update the queryable state atomically before sending either ordered edge. A
                 // waiter that wakes here sees both aggregate liveness and its current path.
                 self.publish_connection_snapshot();
@@ -4058,11 +4232,16 @@ impl Actor {
                 // part worth having; the rest carry their reason in the error itself.
                 match &error {
                     libp2p::swarm::DialError::Transport(failed) => {
-                        for (addr, cause) in failed {
-                            tracing::warn!(peer = ?peer_id, %addr, error = %cause, "dial failed");
+                        for (addr, _cause) in failed {
+                            let shape = dial_log_shape(std::iter::once(addr));
+                            tracing::warn!(peer = ?peer_id, ?shape, error_kind = "transport", "dial failed");
                         }
                     }
-                    other => tracing::warn!(peer = ?peer_id, error = %other, "dial failed"),
+                    other => tracing::warn!(
+                        peer = ?peer_id,
+                        error_kind = dial_error_kind(other),
+                        "dial failed"
+                    ),
                 }
                 // The attempt is over, so a later tick may retry rather than being suppressed by a
                 // ledger entry that nothing would ever clear.
@@ -4075,6 +4254,13 @@ impl Actor {
                 ..
             } => {
                 let previous_paths = active_connection_paths(&self.connection_paths, peer_id);
+                forget_and_publish_authenticated_routes(
+                    &mut self.authenticated_routes,
+                    &self.authenticated_route_tx,
+                    peer_id,
+                    connection_id,
+                    num_established,
+                );
                 forget_connection_path(
                     &mut self.connection_paths,
                     peer_id,
@@ -4110,6 +4296,8 @@ impl Actor {
                         let _ = self.event_tx.send(paths).await;
                     }
                 } else if paths_changed {
+                    // The address-bearing watch was already published independently above. The
+                    // coarse snapshot/event need move only when their deduplicated set changed.
                     self.publish_connection_snapshot();
                     let paths = self.peer_paths_event(peer_id, None);
                     let _ = self.event_tx.send(paths).await;
@@ -4427,6 +4615,21 @@ fn current_connection_snapshot(
     }
 }
 
+/// Address-bearing counterpart to [`current_connection_snapshot`]. Reject a retained watch value
+/// after actor shutdown so a caller cannot persist a route that is no longer present-time proof.
+fn current_authenticated_routes(
+    snapshots: &mut watch::Receiver<Vec<AuthenticatedDialRoute>>,
+) -> Result<Vec<AuthenticatedDialRoute>, TransportError> {
+    loop {
+        let current = snapshots.borrow_and_update().clone();
+        match snapshots.has_changed() {
+            Ok(false) => return Ok(current),
+            Ok(true) => continue,
+            Err(_) => return Err(TransportError::Closed),
+        }
+    }
+}
+
 /// A handle to a running libp2p mesh node, implementing [`MeshTransport`].
 #[derive(Debug)]
 pub struct MeshService {
@@ -4434,6 +4637,7 @@ pub struct MeshService {
     cmd_tx: mpsc::Sender<Command>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     connection_snapshot_rx: watch::Receiver<Vec<PeerConnectionSnapshot>>,
+    authenticated_route_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
     listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
     listener_snapshot_rx: Mutex<watch::Receiver<ListenerSnapshot>>,
     /// `None` once the desktop has taken the coalesced router-mapping state.
@@ -4474,6 +4678,7 @@ impl MeshService {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
         let (connection_snapshot_tx, connection_snapshot_rx) = watch::channel(Vec::new());
+        let (authenticated_route_tx, authenticated_route_rx) = watch::channel(Vec::new());
         let (listen_tx, listen_rx) = mpsc::channel(16);
         let (listener_snapshot_tx, listener_snapshot_rx) =
             watch::channel(ListenerSnapshot::default());
@@ -4492,6 +4697,7 @@ impl MeshService {
             cmd_rx,
             event_tx,
             connection_snapshot_tx,
+            authenticated_route_tx,
             listen_tx,
             active_listeners: HashSet::new(),
             listener_snapshot_tx,
@@ -4524,6 +4730,7 @@ impl MeshService {
             covered_addrs: HashMap::new(),
             pending_dials: HashMap::new(),
             connection_paths: HashMap::new(),
+            authenticated_routes: HashMap::new(),
             protected: protected.into_iter().collect(),
         };
         tokio::spawn(actor.run());
@@ -4532,6 +4739,7 @@ impl MeshService {
             cmd_tx,
             event_rx: Mutex::new(event_rx),
             connection_snapshot_rx,
+            authenticated_route_rx,
             listen_rx: Mutex::new(listen_rx),
             listener_snapshot_rx: Mutex::new(listener_snapshot_rx),
             port_mapping_rx: Mutex::new(Some(port_mapping_rx)),
@@ -4892,6 +5100,7 @@ impl MeshService {
         MeshHandle {
             local: self.local,
             cmd_tx: self.cmd_tx.clone(),
+            authenticated_route_rx: self.authenticated_route_rx.clone(),
         }
     }
 }
@@ -4907,12 +5116,24 @@ impl MeshService {
 pub struct MeshHandle {
     local: PeerId,
     cmd_tx: mpsc::Sender<Command>,
+    authenticated_route_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
 }
 
 impl MeshHandle {
     /// This node's transport peer id.
     pub fn local_peer(&self) -> PeerId {
         self.local
+    }
+
+    /// Snapshot the currently-live outbound direct routes that completed Noise authentication.
+    ///
+    /// The values contain private network addresses and are intentionally not part of
+    /// [`MeshTransport::connection_snapshot`]. Callers should retain only routes needed for a
+    /// specific locally-authorized reconnect and must re-check application membership before a
+    /// later dial.
+    pub fn authenticated_dial_routes(&self) -> Vec<AuthenticatedDialRoute> {
+        let mut snapshot = self.authenticated_route_rx.clone();
+        current_authenticated_routes(&mut snapshot).unwrap_or_default()
     }
 
     /// See [`MeshService::rendezvous_register`].
@@ -5369,6 +5590,121 @@ mod tests {
             ConnectionFamily::Ipv4,
             "IPv4-mapped IPv6 is an IPv4 path in the canonical route model"
         );
+    }
+
+    #[test]
+    fn only_noise_authenticated_outbound_ip_routes_become_reconnect_hints() {
+        let target = libp2p_peer();
+        let peer = to_peer(&target);
+        let direct = dialled_endpoint("/ip4/192.168.1.40/tcp/22487");
+        assert_eq!(
+            authenticated_dial_route(target, &direct),
+            Some(AuthenticatedDialRoute {
+                peer,
+                address: format!("/ip4/192.168.1.40/tcp/22487/p2p/{target}"),
+            })
+        );
+
+        let inbound = ConnectedPoint::Listener {
+            local_addr: "/ip4/0.0.0.0/tcp/22487".parse().unwrap(),
+            send_back_addr: "/ip4/192.168.1.40/tcp/53122".parse().unwrap(),
+        };
+        assert_eq!(
+            authenticated_dial_route(target, &inbound),
+            None,
+            "an inbound ephemeral source port is not a future listener route"
+        );
+        assert_eq!(
+            authenticated_dial_route(
+                target,
+                &dialled_endpoint(&format!(
+                    "/ip4/192.168.1.1/tcp/4001/p2p/{target}/p2p-circuit"
+                )),
+            ),
+            None,
+            "relay lifecycle and consent are not persisted as a direct LAN hint"
+        );
+        assert_eq!(
+            authenticated_dial_route(
+                target,
+                &dialled_endpoint(&format!("/dns4/member.invalid/tcp/22487/p2p/{target}")),
+            ),
+            None,
+            "cross-session DNS rebinding is not retained"
+        );
+        assert_eq!(
+            authenticated_dial_route(
+                target,
+                &dialled_endpoint(&format!("/ip4/192.168.1.40/tcp/22487/ws/p2p/{target}")),
+            ),
+            None,
+            "persisted reconnects stay raw TCP/QUIC rather than widening to WebSocket"
+        );
+    }
+
+    #[test]
+    fn dial_diagnostics_keep_route_shape_without_private_coordinates() {
+        let private: Multiaddr = "/ip4/192.168.77.91/tcp/22487".parse().unwrap();
+        let quic: Multiaddr = "/ip6/fd00::7/udp/22487/quic-v1".parse().unwrap();
+        let rendered = format!("{:?}", dial_log_shape([&private, &quic]));
+
+        assert!(!rendered.contains("192.168.77.91"));
+        assert!(!rendered.contains("fd00::7"));
+        assert_eq!(
+            dial_log_shape([&private, &quic]),
+            DialLogShape {
+                ipv4: 1,
+                ipv6: 1,
+                tcp: 1,
+                quic: 1,
+                ..DialLogShape::default()
+            }
+        );
+    }
+
+    #[test]
+    fn final_close_clears_every_authenticated_route_for_that_peer() {
+        let peer = libp2p_peer();
+        let other = libp2p_peer();
+        let route = |target: libp2p::PeerId, port| AuthenticatedDialRoute {
+            peer: to_peer(&target),
+            address: format!("/ip4/192.168.1.40/tcp/{port}/p2p/{target}"),
+        };
+        let mut routes = HashMap::from([
+            ((peer, ConnectionId::new_unchecked(1)), route(peer, 22_487)),
+            ((peer, ConnectionId::new_unchecked(2)), route(peer, 22_488)),
+            (
+                (other, ConnectionId::new_unchecked(3)),
+                route(other, 22_489),
+            ),
+        ]);
+
+        forget_authenticated_routes(&mut routes, peer, ConnectionId::new_unchecked(999), 0);
+        assert!(routes.keys().all(|(candidate, _)| *candidate != peer));
+        assert!(routes.keys().any(|(candidate, _)| *candidate == other));
+    }
+
+    #[test]
+    fn partial_close_removes_only_its_authenticated_route_even_when_path_shape_is_unchanged() {
+        let peer = libp2p_peer();
+        let first = ConnectionId::new_unchecked(1);
+        let surviving = ConnectionId::new_unchecked(2);
+        let route = |port| AuthenticatedDialRoute {
+            peer: to_peer(&peer),
+            address: format!("/ip4/192.168.1.40/tcp/{port}/p2p/{peer}"),
+        };
+        let mut routes = HashMap::from([
+            ((peer, first), route(22_487)),
+            ((peer, surviving), route(22_488)),
+        ]);
+        let (tx, mut rx) = watch::channel(authenticated_route_snapshot(&routes));
+
+        // Both physical connections have the same coarse IPv4/TCP/dialer projection. The actor
+        // must still advance the independent address-bearing watch when one closes.
+        forget_and_publish_authenticated_routes(&mut routes, &tx, peer, first, 1);
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(rx.borrow_and_update().clone(), vec![route(22_488)]);
+        assert_eq!(routes.get(&(peer, surviving)), Some(&route(22_488)));
     }
 
     #[test]

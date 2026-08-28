@@ -64,7 +64,10 @@ pub use pairing::{
 // The companion device identity a grant is redeemed with (multi-device M3): the bridge holds one
 // `PairingSecrets` and duplicates its device per granted server.
 pub use catcoms_mls::MlsDevice as PairedDevice;
-pub use store::{ServerNet, ServerRecord, ServerStore};
+pub use store::{
+    ReconnectPolicy, ReconnectRoute, ServerNet, ServerRecord, ServerStore, MAX_RECONNECT_ROUTES,
+    MAX_RECONNECT_ROUTE_BYTES,
+};
 
 /// Errors surfaced to the UI/product layer.
 #[derive(Debug, Error)]
@@ -6365,6 +6368,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         scheduler: catcoms_discovery::EndpointDialScheduler,
     ) {
         self.sync.set_endpoint_dial_scheduler(scheduler);
+    }
+
+    /// Install this device's sealed, Noise-authenticated direct reconnect hints. Private routes
+    /// stay local and are never folded into peer exchange or the shared address cache.
+    pub fn set_local_reconnect_routes(&mut self, routes: Vec<(PeerId, String)>) {
+        self.sync.set_local_reconnect_routes(routes);
+    }
+
+    /// Retry sealed local reconnect hints after re-checking the current roster, exact peer
+    /// binding, canonical route grammar and shared endpoint budget.
+    pub async fn dial_local_reconnect_routes(&mut self) -> usize {
+        self.sync.dial_local_reconnect_routes().await
     }
 
     /// Whether steady-state rendezvous discovery is configured (so the actor drives its tick).

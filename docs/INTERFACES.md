@@ -65,6 +65,7 @@ pub enum TransportEvent {
 pub struct ConnectionPath { family: ConnectionFamily, transport: ConnectionTransport,
                              direction: ConnectionDirection }
 pub struct PeerConnectionSnapshot { peer: PeerId, active: Vec<ConnectionPath> }
+pub struct AuthenticatedDialRoute { peer: PeerId, address: String } // catcoms-net only; local-sensitive
 pub const MAX_CONNECTED_PEER_SNAPSHOT: usize = 320;
 pub const MAX_CONNECTION_PATH_SNAPSHOT: usize = 64;
 pub enum ConnectionFamily { Ipv4, Ipv6, Dns, Memory, Unknown }
@@ -103,6 +104,12 @@ Implementations:
   before draining later queued events. Because the legacy query snapshot and event stream have no
   shared revision watermark, `ChannelSync` never seeds from `connection_snapshot()` directly. A
   stopped actor returns an empty snapshot / `Closed`, never Tokio watch's retained last value.
+  `MeshHandle::authenticated_dial_routes()` is a separate, address-bearing watch over currently
+  live **outbound direct IP** connections whose remote PeerId completed Noise authentication. It
+  never contains inbound ephemeral source ports, DNS or relay circuits and is not exposed through
+  the address-free `MeshTransport` snapshot. The desktop may retain at most two routes for the
+  named inviter after successful direct admission; these values are local-sensitive reconnect
+  hints, not membership, device-to-transport binding, presence, or future reachability proof.
   `catcoms-sync` increments a session-local member-route revision only when a current member's
   path, record, dial-scheduler state, or verdict can change. `catcoms-app` compares that revision
   and emits `AppEvent::MemberRoutesChanged` / Tauri `member-routes-changed` without rebuilding the
@@ -410,6 +417,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   // epochs retry with bounded monotonic exponential backoff+jitter; a newer signed seq or a live
   // connect/disconnect lifecycle resets the delay. Old public IPs are not unioned indefinitely.
   set_endpoint_dial_scheduler(EndpointDialScheduler); // inject one process-shared final dial gate
+  set_local_reconnect_routes(Vec<(PeerId,String)>);    // sealed desktop hints; direct literal IP only, transient in ChannelSync
+  async dial_local_reconnect_routes() -> usize;        // exact current roster claim + shared scheduler rechecked before dial
   cache_known_records() -> usize;  async dial_cached_peers() -> usize;
   async drive_mesh_repair() -> usize;               // one bounded target: ≤2 connected-only probes, optional reciprocal request
   async drive_pending_reciprocal() -> usize;        // target-side exact-descriptor direct batch submission
@@ -606,6 +615,28 @@ impl ServerStore {
     fn change_passphrase(&self, current:&[u8], new:&[u8], rng:&mut impl CryptoRngCore) -> Result<(),AppError>;
 }
 ```
+
+`ServerNet` record version 3 adds a reconnect-policy tag after the version-2 switchboard flag:
+`Disabled`, `AuthorizedPeer(peer_id)`, or `LegacyPending`, followed by at most two
+`ReconnectRoute { peer_id, address }` rows. A row is valid only under `AuthorizedPeer` and must name
+that exact peer. Versions 1 and 2 decode with an empty route list and `LegacyPending`; new founders
+and helper/reply/switchboard admissions persist `Disabled`, while a successful direct admission
+persists only its named inviter as `AuthorizedPeer`. Each address is capped at 512 bytes and the
+entire record remains vault-sealed and atomically replaced.
+
+The rows are installation-local: they never enter the group snapshot, PEX, rendezvous, or webview,
+and reconnect diagnostics retain route shape rather than the private coordinate. Reload installs
+them into `ChannelSync`, which reparses the canonical terminal peer binding, permits literal-IP raw
+TCP/QUIC (including private/loopback) but rejects DNS, relay, WebSocket, link-local, multicast,
+unspecified and IPv4 0/8 or 240/4 hosts, requires exactly one current roster record to claim that
+transport peer, skips live/self peers, and spends the same process-wide endpoint scheduler as other
+untrusted recovery dials. Direct admission makes one bounded best-effort PEX request before the
+first post-join snapshot so the inviter's signed descriptor normally accompanies the sealed socket.
+On the discovery cadence, an authorized record may refresh only that inviter. `LegacyPending` may
+promote once only when the group has exactly one other member and exactly one unique live member
+claim; its captured route must additionally be private/loopback. A non-empty observation replaces
+and installs the bounded hints; an empty observation does not erase them merely because the remote
+app is closed.
 
 `storage_health` counts a chunk as verified only after its storage seal/content address and the
 file-layer decryption both succeed. `repair_storage` explicitly fetches only missing or unreadable

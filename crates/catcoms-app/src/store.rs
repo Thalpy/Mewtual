@@ -78,7 +78,42 @@ pub struct ServerNet {
     /// The highest **peer-record sequence number** this server may already have published; see
     /// [`ServerNet::reserve_record_seq_block`].
     pub record_seq: u64,
+    /// Exact direct routes that completed an outbound Noise handshake during admission or a later
+    /// live member connection. These sealed, bounded hints cover same-LAN restart recovery without
+    /// publishing private addresses into PEX. They remain dial candidates only: the sync layer
+    /// re-checks current membership, terminal peer binding, and the shared endpoint budget before
+    /// every use.
+    pub reconnect_routes: Vec<ReconnectRoute>,
+    /// Provenance/consent for capturing and retrying reconnect routes. Keeping this separate from
+    /// an empty route vector prevents a helper admission from later being mistaken for a legacy
+    /// record that is eligible for migration.
+    pub reconnect_policy: ReconnectPolicy,
 }
+
+/// One sealed same-LAN reconnect hint. `peer_id` is the Phase-0 transport identity derived from
+/// the terminal libp2p peer in `address`, not a member/device identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectRoute {
+    pub peer_id: [u8; 32],
+    pub address: String,
+}
+
+/// Durable authority for local reconnect-route capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconnectPolicy {
+    /// No route may be captured. Used for new founders and helper/reply/switchboard admission.
+    Disabled,
+    /// Direct admission authenticated this exact named inviter as the recurring contact.
+    AuthorizedPeer([u8; 32]),
+    /// A v1/v2 record may migrate once under the narrow two-member overlap rule.
+    LegacyPending,
+}
+
+/// A join races at most two useful direct transports (normally TCP and QUIC) for one peer.
+pub const MAX_RECONNECT_ROUTES: usize = 2;
+/// Canonical direct multiaddrs are tiny. This bound prevents a corrupt local record from turning
+/// reconnect setup into an oversized allocation or log value.
+pub const MAX_RECONNECT_ROUTE_BYTES: usize = 512;
 
 /// Domain separator for the derived listen port, so the port derivation can never collide with
 /// any other use of the seed.
@@ -147,10 +182,11 @@ impl Drop for ServerNet {
 /// with an explicit version so it can actually grow later.
 const SERVER_NET_V1: u8 = 1;
 const SERVER_NET_V2: u8 = 2;
+const SERVER_NET_V3: u8 = 3;
 
 fn encode_server_net(net: &ServerNet) -> Vec<u8> {
     let mut e = Encoder::new();
-    e.put_u8(SERVER_NET_V2);
+    e.put_u8(SERVER_NET_V3);
     e.put_bytes(&net.key_seed).expect("seed fits");
     e.put_u16(net.port);
     e.put_str(&net.advertise).expect("advertise fits");
@@ -158,6 +194,39 @@ fn encode_server_net(net: &ServerNet) -> Vec<u8> {
     e.put_str(&net.rendezvous).expect("rendezvous fits");
     e.put_u64(net.record_seq);
     e.put_u8(u8::from(net.switchboard));
+    match net.reconnect_policy {
+        ReconnectPolicy::Disabled => {
+            e.put_u8(0);
+        }
+        ReconnectPolicy::AuthorizedPeer(peer) => {
+            e.put_u8(1);
+            e.put_bytes(&peer).expect("peer id fits");
+        }
+        ReconnectPolicy::LegacyPending => {
+            e.put_u8(2);
+        }
+    }
+    // Keep the encoder's output inside the decoder's own bounds even if a future caller builds a
+    // `ServerNet` directly. Desktop-created routes have already passed this cap, but producing a
+    // record we would refuse on the next launch is a particularly bad failure mode here.
+    let authorized_peer = match net.reconnect_policy {
+        ReconnectPolicy::AuthorizedPeer(peer) => Some(peer),
+        ReconnectPolicy::Disabled | ReconnectPolicy::LegacyPending => None,
+    };
+    let routes: Vec<_> = net
+        .reconnect_routes
+        .iter()
+        .filter(|route| {
+            authorized_peer == Some(route.peer_id)
+                && route.address.len() <= MAX_RECONNECT_ROUTE_BYTES
+        })
+        .take(MAX_RECONNECT_ROUTES)
+        .collect();
+    e.put_u8(routes.len() as u8);
+    for route in routes {
+        e.put_bytes(&route.peer_id).expect("peer id fits");
+        e.put_str(&route.address).expect("reconnect route fits");
+    }
     e.finish()
 }
 
@@ -165,7 +234,7 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
     let bad = || AppError::Io("corrupt server net record".into());
     let mut d = Decoder::new(bytes);
     let version = d.get_u8().map_err(|_| bad())?;
-    if version != SERVER_NET_V1 && version != SERVER_NET_V2 {
+    if version != SERVER_NET_V1 && version != SERVER_NET_V2 && version != SERVER_NET_V3 {
         return Err(AppError::Io("unknown server net record version".into()));
     }
     let seed = d.get_bytes().map_err(|_| bad())?;
@@ -184,6 +253,51 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
     } else {
         false
     };
+    let reconnect_policy = if version >= SERVER_NET_V3 {
+        match d.get_u8().map_err(|_| bad())? {
+            0 => ReconnectPolicy::Disabled,
+            1 => ReconnectPolicy::AuthorizedPeer(
+                d.get_bytes()
+                    .map_err(|_| bad())?
+                    .try_into()
+                    .map_err(|_| bad())?,
+            ),
+            2 => ReconnectPolicy::LegacyPending,
+            _ => return Err(bad()),
+        }
+    } else {
+        ReconnectPolicy::LegacyPending
+    };
+    let mut reconnect_routes = Vec::new();
+    if version >= SERVER_NET_V3 {
+        let count = d.get_u8().map_err(|_| bad())? as usize;
+        if count > MAX_RECONNECT_ROUTES {
+            return Err(bad());
+        }
+        for _ in 0..count {
+            let peer_id = d
+                .get_bytes()
+                .map_err(|_| bad())?
+                .try_into()
+                .map_err(|_| bad())?;
+            let address = d.get_str().map_err(|_| bad())?;
+            if address.len() > MAX_RECONNECT_ROUTE_BYTES {
+                return Err(bad());
+            }
+            reconnect_routes.push(ReconnectRoute {
+                peer_id,
+                address: address.to_string(),
+            });
+        }
+    }
+    if reconnect_routes.iter().any(|route| {
+        !matches!(
+            reconnect_policy,
+            ReconnectPolicy::AuthorizedPeer(peer) if peer == route.peer_id
+        )
+    }) {
+        return Err(bad());
+    }
     d.finish().map_err(|_| bad())?;
     Ok(ServerNet {
         key_seed,
@@ -193,6 +307,8 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
         rendezvous,
         record_seq,
         switchboard,
+        reconnect_routes,
+        reconnect_policy,
     })
 }
 
@@ -696,6 +812,11 @@ mod tests {
             rendezvous: "/ip4/198.51.100.2/tcp/5000/p2p/RZ".into(),
             switchboard: true,
             record_seq: 131_072,
+            reconnect_routes: vec![ReconnectRoute {
+                peer_id: [0x44; 32],
+                address: "/ip4/192.168.1.40/tcp/47123/p2p/12D3KooWQYFnfXfgxT8kZ6BJZQ4wE4bFAJj7X9uKdqVPa5wYzD5X".into(),
+            }],
+            reconnect_policy: ReconnectPolicy::AuthorizedPeer([0x44; 32]),
         };
 
         {
@@ -729,6 +850,8 @@ mod tests {
             rendezvous: String::new(),
             switchboard: false,
             record_seq: 0,
+            reconnect_routes: Vec::new(),
+            reconnect_policy: ReconnectPolicy::Disabled,
         };
         let store = ServerStore::open(dir.path(), b"pw", &mut rng).unwrap();
         store.save_server_net(7, &net, &mut rng).unwrap();
@@ -782,8 +905,79 @@ mod tests {
             rendezvous: String::new(),
             switchboard: false,
             record_seq: u64::MAX - 1,
+            reconnect_routes: Vec::new(),
+            reconnect_policy: ReconnectPolicy::Disabled,
         };
         assert_eq!(decode_server_net(&encode_server_net(&net)).unwrap(), net);
+    }
+
+    #[test]
+    fn server_net_reconnect_routes_are_backward_compatible_and_bounded() {
+        let legacy = |version| {
+            let mut e = Encoder::new();
+            e.put_u8(version);
+            e.put_bytes(&[7u8; 32]).unwrap();
+            e.put_u16(22_487);
+            e.put_str("192.168.1.40:22487").unwrap();
+            e.put_str("").unwrap();
+            e.put_str("").unwrap();
+            e.put_u64(42);
+            if version >= SERVER_NET_V2 {
+                e.put_u8(1);
+            }
+            e.finish()
+        };
+        for version in [SERVER_NET_V1, SERVER_NET_V2] {
+            let decoded = decode_server_net(&legacy(version)).unwrap();
+            assert!(decoded.reconnect_routes.is_empty());
+            assert_eq!(decoded.reconnect_policy, ReconnectPolicy::LegacyPending);
+            assert_eq!(decoded.switchboard, version >= SERVER_NET_V2);
+        }
+
+        // The count is checked before allocating or reading route bodies. A corrupt sealed file
+        // cannot turn a tiny record into unbounded restore work.
+        let mut over_count = Encoder::new();
+        over_count.put_u8(SERVER_NET_V3);
+        over_count.put_bytes(&[8u8; 32]).unwrap();
+        over_count.put_u16(22_487);
+        over_count.put_str("").unwrap();
+        over_count.put_str("").unwrap();
+        over_count.put_str("").unwrap();
+        over_count.put_u64(0);
+        over_count.put_u8(0);
+        over_count.put_u8(0);
+        over_count.put_u8((MAX_RECONNECT_ROUTES + 1) as u8);
+        assert!(decode_server_net(&over_count.finish()).is_err());
+
+        // Likewise, an oversized address is rejected on decode and omitted on encode, keeping a
+        // caller-created `ServerNet` from writing a record that this version cannot reopen.
+        let mut over_address = Encoder::new();
+        over_address.put_u8(SERVER_NET_V3);
+        over_address.put_bytes(&[9u8; 32]).unwrap();
+        over_address.put_u16(22_487);
+        over_address.put_str("").unwrap();
+        over_address.put_str("").unwrap();
+        over_address.put_str("").unwrap();
+        over_address.put_u64(0);
+        over_address.put_u8(0);
+        over_address.put_u8(1);
+        over_address.put_bytes(&[10u8; 32]).unwrap();
+        over_address.put_u8(1);
+        over_address.put_bytes(&[10u8; 32]).unwrap();
+        over_address
+            .put_str(&"x".repeat(MAX_RECONNECT_ROUTE_BYTES + 1))
+            .unwrap();
+        assert!(decode_server_net(&over_address.finish()).is_err());
+
+        let mut net = decode_server_net(&legacy(SERVER_NET_V2)).unwrap();
+        net.reconnect_routes.push(ReconnectRoute {
+            peer_id: [11u8; 32],
+            address: "x".repeat(MAX_RECONNECT_ROUTE_BYTES + 1),
+        });
+        assert!(decode_server_net(&encode_server_net(&net))
+            .unwrap()
+            .reconnect_routes
+            .is_empty());
     }
 
     #[test]
@@ -796,6 +990,8 @@ mod tests {
             rendezvous: String::new(),
             switchboard: false,
             record_seq: 0,
+            reconnect_routes: Vec::new(),
+            reconnect_policy: ReconnectPolicy::Disabled,
         };
         // Same seed, same port: this is what a port-forward and a UPnP mapping depend on.
         assert_eq!(mk([1u8; 32]).derived_port(), mk([1u8; 32]).derived_port());
@@ -867,6 +1063,8 @@ mod tests {
             rendezvous: String::new(),
             switchboard: false,
             record_seq: 0,
+            reconnect_routes: Vec::new(),
+            reconnect_policy: ReconnectPolicy::Disabled,
         };
 
         // Simulate three launches: reserve a block, seal it, reload it.

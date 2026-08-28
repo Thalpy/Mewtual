@@ -20,7 +20,9 @@ new about you; a member already exchanging sync state learns no additional metad
 
 ## States (per own message)
 
-- **sending**; op committed locally; no connected peer's heads include it yet.
+- **saving**; the send has not yet been accepted by the local actor.
+- **sent; awaiting confirmation**; the op is committed locally, but no other member has yet
+  authored causal evidence that proves it holds the message.
 - **delivered n/m**; n of the m members whose self-asserted routes are connected here have heads
   that include it. This is deliberately phrased against locally claimed paths, not the full roster:
   "delivered 2/2" with four members disconnected is the honest statement (the others catch up via
@@ -47,7 +49,8 @@ they must be opt-in-per-server and symmetric (you only see read marks if you pub
 ## UI (kept minimal)
 
 A mono micro-line under one's **most recent** message only (matching the overhaul mock):
-`◌ sending…` / `✓ delivered · 3 peers` / `⚠ queued; no proven member path`, in
+`◌ saving…` / `◌ sent · awaiting confirmation` / `✓ delivered · 3 peers` /
+`⚠ queued; no proven member path`, in
 muted/ok/warn colours respectively. Older own messages show the state on hover (title
 attr) rather than a permanent line; density stays intact. The status bar's transfers
 segment pattern is the styling reference.
@@ -87,8 +90,8 @@ indistinguishable from one that never got it.** A quiet reader produces no confi
 
 | Verdict | Shown when |
 |---|---|
-| `pending` ◌ | the op has not been acknowledged locally yet |
-| `waiting` ◌ | sent, nobody has proved they hold it, and a live peer previously proved it could serve authenticated group catch-up |
+| `pending` ◌ | the op has not been acknowledged locally yet; labelled `saving…` |
+| `waiting` ◌ | sent, nobody has proved they hold it, and a live peer previously proved it could serve authenticated group catch-up; labelled `sent · awaiting confirmation`, never `sending` |
 | `partial` ~ | at least one member proved it, but not all |
 | `reachable` ✓ | every member whose self-asserted route is connected here proved it |
 | `everyone` ✓✓ | every other member of the roster proved it |
@@ -124,3 +127,9 @@ not only the newest, so the log can be read back up to see which messages landed
 the time inline after the name: a delivery state belongs in one column the eye can run down, not on
 the left of some rows and the right of others. The spelled-out receipt line stays on the newest own
 message only, which is the density argument from the original sketch.
+
+There is still no explicit receipt control frame. Consequently a quiet recipient cannot clear the
+awaiting-confirmation state; only a later signed change causally descending from this message can.
+An immediate receipt would need a new authenticated, group/document/message-bound, replay- and
+rate-bounded protocol kind (and a persistence decision). The wording above fixes the false local
+claim without pretending that protocol exists.

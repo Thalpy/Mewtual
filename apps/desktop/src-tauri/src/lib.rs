@@ -21,9 +21,10 @@ use base64::Engine;
 use catcoms_app::store::MAX_UI_STATE_BYTES;
 use catcoms_app::{
     channel_id, spawn, AppEvent, Cid, CidHasher, DeviceId, FileListing, FileRef, InviteJoinPlan,
-    Livery, PairingLedger, PairingSecrets, PerServerGrant, Profile, Server, ServerActor, ServerNet,
-    ServerRecord, ServerStore, StorageHealth, CHUNK_BYTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES,
-    MAX_FILE_BYTES, MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
+    Livery, PairingLedger, PairingSecrets, PerServerGrant, Profile, ReconnectPolicy,
+    ReconnectRoute, Server, ServerActor, ServerNet, ServerRecord, ServerStore, StorageHealth,
+    CHUNK_BYTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES, MAX_RECONNECT_ROUTES,
+    MAX_RECONNECT_ROUTE_BYTES, MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{
     parse_peer_dial_route, Candidate, DialEndpoint, DiscoveryPolicy, EndpointDialScheduler,
@@ -33,9 +34,9 @@ use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{
     addr_is_globally_routable, addr_is_loopback, addr_is_private, addr_is_undialable,
     keypair_from_seed, phase0_peer_id, target_peer_in_multiaddr, validate_invite_rendezvous_addrs,
-    validate_operator_rendezvous_addrs, AutoNatResult, AutoNatSnapshot, JoinReply, MeshHandle,
-    MeshObservationSnapshot, MeshService, PortMappingMechanism, PortMappingSnapshot,
-    PortMappingTransport, RelayAddressSnapshot, RendezvousTarget,
+    validate_operator_rendezvous_addrs, AuthenticatedDialRoute, AutoNatResult, AutoNatSnapshot,
+    JoinReply, MeshHandle, MeshObservationSnapshot, MeshService, PortMappingMechanism,
+    PortMappingSnapshot, PortMappingTransport, RelayAddressSnapshot, RendezvousTarget,
 };
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
 use catcoms_sync::{join_namespace, PreOwnerConnectionHandoff, JOIN_REPLY_PROOF_KIND};
@@ -1401,6 +1402,10 @@ const DISCOVERY_JITTER_MS: u64 = 15_000;
 /// a freshly-founded server looking dead for up to a minute. A few seconds is enough to stop the
 /// servers in one process from ticking in unison.
 const DISCOVERY_START_SPREAD_MS: u64 = 5_000;
+/// One best-effort PEX request immediately after direct admission. This is what persists the
+/// inviter's signed device-to-transport claim before an immediate close/reopen; failure does not
+/// roll back an otherwise valid MLS join.
+const DIRECT_JOIN_PEX_MS: u64 = 3_000;
 /// Extra quiet window above the platform monitor's own short coalescing delay. DHCP, route and
 /// IPv6 privacy-address changes commonly arrive as a burst; publishing a signed peer-record epoch
 /// for every callback would waste sequence numbers and make members redial transient routes.
@@ -1581,6 +1586,10 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
             // The pass just refreshed the member records; seal the cache on the same cadence, so
             // the next launch starts from the members this one actually proved.
             persist_address_cache(&app, server).await;
+            // Learn a currently connected member's private route as well. This upgrades pre-v3
+            // records after one successful overlap and updates the running actor without ever
+            // publishing the address to the group.
+            persist_live_local_reconnect_routes(&app, server, &actor).await;
             delay = jittered_delay(
                 DISCOVERY_INTERVAL_SECS * 1_000 - DISCOVERY_JITTER_MS,
                 DISCOVERY_JITTER_MS * 2,
@@ -2705,6 +2714,93 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
     }
 }
 
+/// Upgrade or refresh an admission-authorized private-address reconnect hint.
+///
+/// Direct admission may refresh only its named inviter. A legacy v1/v2 record gets one migration
+/// opportunity only for an unambiguous two-member group; new helper/reply/switchboard admissions
+/// are durably disabled so an empty route list can never be mistaken for migration consent. An
+/// empty observation never erases the last sealed hint: the normal reason for seeing no live route
+/// is precisely that the remote app is closed, when the hint is needed most.
+async fn persist_live_local_reconnect_routes(app: &AppHandle, server: u64, actor: &ServerActor) {
+    let state = app.state::<AppState>();
+    let state = state.inner();
+    let mut net = {
+        let guard = state.store.lock().await;
+        let Some(store) = guard.as_ref() else {
+            return;
+        };
+        match store.load_server_net(server) {
+            Ok(Some(net)) => net,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    target: "catcoms_app",
+                    server,
+                    error = %error,
+                    "VAULT.RECONNECT_ROUTE.LOAD_FAILED"
+                );
+                return;
+            }
+        }
+    };
+    let mesh = {
+        let servers = state.servers.lock().await;
+        servers.get(&server).and_then(|entry| entry.mesh.clone())
+    };
+    let Some(mesh) = mesh else {
+        return;
+    };
+    let member_routes = actor.member_routes().await;
+    let capture_peer = reconnect_capture_peer(
+        net.reconnect_policy,
+        member_routes.len(),
+        member_routes
+            .into_iter()
+            .filter_map(|route| route.peer_id.map(PeerId::new)),
+    );
+    let Some(capture_peer) = capture_peer else {
+        return;
+    };
+    let member_peers = HashSet::from([capture_peer]);
+    let routes = authenticated_member_lan_reconnect_routes(&mesh, &member_peers);
+    if routes.is_empty() {
+        return;
+    }
+    if actor
+        .set_local_reconnect_routes(
+            routes
+                .iter()
+                .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
+                .collect(),
+        )
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let next_policy = ReconnectPolicy::AuthorizedPeer(*capture_peer.as_bytes());
+    if net.reconnect_routes == routes && net.reconnect_policy == next_policy {
+        return;
+    }
+    net.reconnect_routes = routes;
+    // A legacy row migrates once. From now on only this exact member contact may refresh it;
+    // helper/switchboard admission is permanently `Disabled` and can never reach this branch.
+    net.reconnect_policy = next_policy;
+    let guard = state.store.lock().await;
+    let Some(store) = guard.as_ref() else {
+        return;
+    };
+    if let Err(error) = store.save_server_net(server, &net, &mut OsCryptoRng) {
+        tracing::warn!(
+            target: "catcoms_app",
+            server,
+            error = %error,
+            "VAULT.RECONNECT_ROUTE.SEAL_FAILED"
+        );
+    }
+}
+
 /// Re-seal the registry (the set of servers + their names/invites) to disk.
 async fn persist_registry(state: &AppState) {
     let records: Vec<ServerRecord> = {
@@ -3224,6 +3320,8 @@ fn new_server_net(advertise: &str, relay: &str, rendezvous: &str) -> ServerNet {
         switchboard: false,
         // Reserved just below; this session gets the first block, the next launch the second.
         record_seq: 0,
+        reconnect_routes: Vec::new(),
+        reconnect_policy: ReconnectPolicy::Disabled,
     };
     // Own a peer-record sequence block from the very first session, so the invariant "this launch
     // can only publish numbers below anything the next launch can" holds from birth rather than
@@ -4125,6 +4223,122 @@ fn invite_peer_endpoint(address: &str, expected_peer: &PeerId) -> Option<DialEnd
 fn canonical_invite_peer_endpoint(address: &Multiaddr) -> Option<DialEndpoint> {
     let target = target_peer_in_multiaddr(address)?;
     invite_peer_endpoint(&address.to_string(), &phase0_peer_id(&target))
+}
+
+/// Retain only the live outbound route that Noise authenticated for the member who completed
+/// admission. This is the local-only substitute for putting private LAN addresses into PEX: the
+/// route is sealed with `ServerNet`, capped to TCP/QUIC scale, and is roster-checked again by the
+/// sync layer before every later dial.
+fn select_authenticated_reconnect_routes(
+    routes: Vec<AuthenticatedDialRoute>,
+    member_peers: &HashSet<PeerId>,
+    local_only: bool,
+) -> Vec<ReconnectRoute> {
+    let mut routes: Vec<_> = routes
+        .into_iter()
+        .filter(|route| member_peers.contains(&route.peer))
+        .filter(|route| route.address.len() <= MAX_RECONNECT_ROUTE_BYTES)
+        .filter(|route| invite_peer_endpoint(&route.address, &route.peer).is_some())
+        .filter(|route| {
+            !local_only
+                || route
+                    .address
+                    .parse::<Multiaddr>()
+                    .is_ok_and(|addr| addr_is_private(&addr) || addr_is_loopback(&addr))
+        })
+        .map(|route| ReconnectRoute {
+            peer_id: *route.peer.as_bytes(),
+            address: route.address,
+        })
+        .collect();
+    routes.sort_by(|left, right| {
+        left.peer_id
+            .cmp(&right.peer_id)
+            .then_with(|| left.address.cmp(&right.address))
+    });
+    routes.dedup();
+    routes.truncate(MAX_RECONNECT_ROUTES);
+    routes
+}
+
+fn authenticated_reconnect_routes(mesh: &MeshHandle, contact: PeerId) -> Vec<ReconnectRoute> {
+    select_authenticated_reconnect_routes(
+        mesh.authenticated_dial_routes(),
+        &HashSet::from([contact]),
+        false,
+    )
+}
+
+/// Convert the actual admission path into durable reconnect authority.
+///
+/// A reply may ultimately authenticate the named inviter, but that path authorized a bounded
+/// inbound callback rather than indefinite future dialing. Likewise, a switchboard authorized a
+/// bounded helper ceremony. Test the path flags explicitly instead of inferring consent from the
+/// final contact identity, which is deliberately the inviter in the successful reply case.
+fn reconnect_policy_after_admission(
+    join_contact: PeerId,
+    inviter: PeerId,
+    used_reply_path: bool,
+    used_switchboard_path: bool,
+) -> ReconnectPolicy {
+    if join_contact == inviter && !used_reply_path && !used_switchboard_path {
+        ReconnectPolicy::AuthorizedPeer(*join_contact.as_bytes())
+    } else {
+        ReconnectPolicy::Disabled
+    }
+}
+
+/// A transport identity is a safe durable member target only while exactly one roster entry
+/// claims it. A duplicate claim is ambiguous even if the live Noise connection itself is valid:
+/// retaining that socket as either member's route would turn the shared transport key into a
+/// confused-deputy shortcut on the next launch. The sync layer repeats this uniqueness check at
+/// dial time; doing it here also keeps ambiguous state out of the sealed store.
+fn uniquely_claimed_member_peers(peers: impl IntoIterator<Item = PeerId>) -> HashSet<PeerId> {
+    let mut claim_counts = HashMap::<PeerId, usize>::new();
+    for peer in peers {
+        *claim_counts.entry(peer).or_default() += 1;
+    }
+    claim_counts
+        .into_iter()
+        .filter_map(|(peer, claims)| (claims == 1).then_some(peer))
+        .collect()
+}
+
+/// Apply durable admission provenance before a live route may be captured.
+///
+/// A direct admission can refresh only its named inviter. A pre-v3 record gets one conservative
+/// migration opportunity only when the roster has exactly one other member; helper and
+/// switchboard joins necessarily have a larger roster and new non-direct joins are explicitly
+/// disabled rather than inferred from an empty route vector.
+fn reconnect_capture_peer(
+    policy: ReconnectPolicy,
+    other_member_count: usize,
+    claimed_peers: impl IntoIterator<Item = PeerId>,
+) -> Option<PeerId> {
+    let unique = uniquely_claimed_member_peers(claimed_peers);
+    match policy {
+        ReconnectPolicy::Disabled => None,
+        ReconnectPolicy::AuthorizedPeer(peer) => {
+            let peer = PeerId::new(peer);
+            unique.contains(&peer).then_some(peer)
+        }
+        ReconnectPolicy::LegacyPending if other_member_count == 1 && unique.len() == 1 => {
+            unique.into_iter().next()
+        }
+        ReconnectPolicy::LegacyPending => None,
+    }
+}
+
+/// Capture same-LAN routes for already-established servers, including records created before
+/// `ServerNet` v3 existed. Only a current member's self-signed transport claim may select a live
+/// Noise-authenticated route, and this migration path is intentionally local-only: public member
+/// routes already belong in the signed PEX/cache path, while infrastructure/helper sockets must
+/// not become durable merely because they share this process.
+fn authenticated_member_lan_reconnect_routes(
+    mesh: &MeshHandle,
+    member_peers: &HashSet<PeerId>,
+) -> Vec<ReconnectRoute> {
+    select_authenticated_reconnect_routes(mesh.authenticated_dial_routes(), member_peers, true)
 }
 
 /// Schedule already set-validated rendezvous routes. The invite validator permits loopback only
@@ -5277,6 +5491,55 @@ async fn join_server_inner(
         msg
     })?;
     server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
+    // Admission has now authenticated both group membership and the live Noise peer. Persist only
+    // a direct route to the named inviter; untried invite candidates and admission-only helpers
+    // never become recurring socket work. Reply and switchboard consent is time-bounded even when
+    // the final authenticated contact is the inviter, so the path itself must remain part of this
+    // decision rather than relying on the contact identity alone.
+    net.reconnect_policy = reconnect_policy_after_admission(
+        join_contact,
+        inviter,
+        used_reply_path,
+        used_switchboard_path,
+    );
+    let direct_reconnect_authorized = matches!(
+        net.reconnect_policy,
+        ReconnectPolicy::AuthorizedPeer(peer) if peer == *join_contact.as_bytes()
+    );
+    net.reconnect_routes = if direct_reconnect_authorized {
+        authenticated_reconnect_routes(&mesh_handle, join_contact)
+    } else {
+        Vec::new()
+    };
+    server.set_local_reconnect_routes(
+        net.reconnect_routes
+            .iter()
+            .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
+            .collect(),
+    );
+    if direct_reconnect_authorized {
+        // The sealed socket is useful after a restart only when the group snapshot also contains
+        // the inviter's independently signed PeerDescriptor. Admission itself seeds merely an
+        // untrusted transport candidate, so fetch the ordinary request-bound PEX record now rather
+        // than hoping the periodic timer wins a race against the user closing the app.
+        match timeout(
+            Duration::from_millis(DIRECT_JOIN_PEX_MS),
+            server.request_pex(join_contact),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(
+                target: "catcoms_app",
+                error = %error,
+                "DISCOVERY.DIRECT_JOIN_PEX.FAILED"
+            ),
+            Err(_) => tracing::warn!(
+                target: "catcoms_app",
+                "DISCOVERY.DIRECT_JOIN_PEX.TIMED_OUT"
+            ),
+        }
+    }
     diag.steps
         .push(DiagStep::ok("join", "", "admitted to the group"));
     // A joiner has to subscribe the control topic like the founder does. Without this,
@@ -9285,6 +9548,12 @@ async fn reload_one(
     // Install the process-wide endpoint budget before the eager cache redial below. Doing this
     // after that pass would leave startup—the highest-churn moment—as the one unshared path.
     server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
+    server.set_local_reconnect_routes(
+        net.reconnect_routes
+            .iter()
+            .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
+            .collect(),
+    );
     server
         .subscribe_control()
         .await
@@ -9335,12 +9604,14 @@ async fn reload_one(
     // DiscoveryPolicy: routability-checked, ranked, and capped by the dial budget. The discovery
     // tick repeats this every minute or so; doing it eagerly here is only about reconnect latency.
     server.cache_known_records();
-    let redialled = server.dial_cached_peers().await;
-    if redialled > 0 {
+    let local_redialled = server.dial_local_reconnect_routes().await;
+    let cached_redialled = server.dial_cached_peers().await;
+    if local_redialled + cached_redialled > 0 {
         tracing::info!(
             target: "catcoms_app",
             server = record.id,
-            peers = redialled,
+            local_peers = local_redialled,
+            cached_peers = cached_redialled,
             "DISCOVERY.REDIAL.STARTED"
         );
     }
@@ -11732,9 +12003,8 @@ mod report_validation_tests {
 
     #[test]
     fn legacy_bridged_prose_requires_review_but_does_not_force_a_bypass() {
-        let review =
-            saving("LOG.TRACING.EVENT outcome=failed", CaptureMode::Safe)
-                .expect("legacy prose without a concrete sensitive shape remains exportable");
+        let review = saving("LOG.TRACING.EVENT outcome=failed", CaptureMode::Safe)
+            .expect("legacy prose without a concrete sensitive shape remains exportable");
         assert_eq!(review, vec!["bridged_prose (1)"]);
     }
 
@@ -15215,6 +15485,159 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_route_selection_is_member_bound_local_and_bounded() {
+        let member_lp = test_libp2p_peer(95);
+        let stranger_lp = test_libp2p_peer(96);
+        let member = phase0_peer_id(&member_lp);
+        let stranger = phase0_peer_id(&stranger_lp);
+        let lan_tcp = format!("/ip4/192.168.1.5/tcp/22487/p2p/{member_lp}");
+        let lan_quic = format!("/ip4/192.168.1.5/udp/22487/quic-v1/p2p/{member_lp}");
+        let public = format!("/ip4/45.79.12.34/tcp/22487/p2p/{member_lp}");
+        let wrong_member = format!("/ip4/192.168.1.6/tcp/22487/p2p/{stranger_lp}");
+        let confused_terminal = format!("/ip4/192.168.1.7/tcp/22487/p2p/{stranger_lp}");
+        let candidates = vec![
+            AuthenticatedDialRoute {
+                peer: member,
+                address: public.clone(),
+            },
+            AuthenticatedDialRoute {
+                peer: member,
+                address: lan_quic.clone(),
+            },
+            AuthenticatedDialRoute {
+                peer: stranger,
+                address: wrong_member,
+            },
+            AuthenticatedDialRoute {
+                peer: member,
+                address: confused_terminal,
+            },
+            AuthenticatedDialRoute {
+                peer: member,
+                address: lan_tcp.clone(),
+            },
+        ];
+
+        let allowed = HashSet::from([member]);
+        assert_eq!(
+            select_authenticated_reconnect_routes(candidates.clone(), &allowed, true),
+            vec![
+                ReconnectRoute {
+                    peer_id: *member.as_bytes(),
+                    address: lan_tcp,
+                },
+                ReconnectRoute {
+                    peer_id: *member.as_bytes(),
+                    address: lan_quic,
+                },
+            ],
+            "the migration path retains at most two private routes for current member peers"
+        );
+        assert!(select_authenticated_reconnect_routes(
+            vec![AuthenticatedDialRoute {
+                peer: member,
+                address: public.clone(),
+            }],
+            &allowed,
+            true,
+        )
+        .is_empty());
+        assert_eq!(
+            select_authenticated_reconnect_routes(
+                vec![AuthenticatedDialRoute {
+                    peer: member,
+                    address: public.clone(),
+                }],
+                &allowed,
+                false,
+            ),
+            vec![ReconnectRoute {
+                peer_id: *member.as_bytes(),
+                address: public,
+            }],
+            "direct admission may retain its exact authenticated public inviter route"
+        );
+    }
+
+    #[test]
+    fn reconnect_route_migration_rejects_ambiguous_member_peer_claims() {
+        let unique = phase0_peer_id(&test_libp2p_peer(97));
+        let duplicated = phase0_peer_id(&test_libp2p_peer(98));
+
+        assert_eq!(
+            uniquely_claimed_member_peers([duplicated, unique, duplicated]),
+            HashSet::from([unique]),
+            "a transport peer claimed by two roster entries must not become durable"
+        );
+    }
+
+    #[test]
+    fn only_a_direct_inviter_admission_grants_durable_reconnect_authority() {
+        let inviter = phase0_peer_id(&test_libp2p_peer(101));
+        let helper = phase0_peer_id(&test_libp2p_peer(102));
+
+        assert_eq!(
+            reconnect_policy_after_admission(inviter, inviter, false, false),
+            ReconnectPolicy::AuthorizedPeer(*inviter.as_bytes()),
+        );
+        assert_eq!(
+            reconnect_policy_after_admission(inviter, inviter, true, false),
+            ReconnectPolicy::Disabled,
+            "a reply callback stays time-bounded even when it authenticates the inviter"
+        );
+        assert_eq!(
+            reconnect_policy_after_admission(inviter, inviter, false, true),
+            ReconnectPolicy::Disabled,
+            "a switchboard ceremony cannot become indefinite inviter-dial consent"
+        );
+        assert_eq!(
+            reconnect_policy_after_admission(helper, inviter, false, false),
+            ReconnectPolicy::Disabled,
+            "an authenticated non-inviter contact is never the recurring contact"
+        );
+    }
+
+    #[test]
+    fn reconnect_capture_policy_preserves_admission_consent_and_legacy_scope() {
+        let authorized = phase0_peer_id(&test_libp2p_peer(99));
+        let helper = phase0_peer_id(&test_libp2p_peer(100));
+
+        assert_eq!(
+            reconnect_capture_peer(ReconnectPolicy::Disabled, 1, [authorized]),
+            None,
+            "helper/reply/switchboard admission may never be inferred from an empty route list"
+        );
+        assert_eq!(
+            reconnect_capture_peer(
+                ReconnectPolicy::AuthorizedPeer(*authorized.as_bytes()),
+                2,
+                [authorized, helper],
+            ),
+            Some(authorized),
+            "direct admission refreshes only its named inviter"
+        );
+        assert_eq!(
+            reconnect_capture_peer(
+                ReconnectPolicy::AuthorizedPeer(*authorized.as_bytes()),
+                1,
+                [helper],
+            ),
+            None,
+            "another member cannot replace the authorized recurring contact"
+        );
+        assert_eq!(
+            reconnect_capture_peer(ReconnectPolicy::LegacyPending, 1, [authorized]),
+            Some(authorized),
+            "a pre-v3 two-member server may migrate once after overlap"
+        );
+        assert_eq!(
+            reconnect_capture_peer(ReconnectPolicy::LegacyPending, 2, [authorized, helper]),
+            None,
+            "legacy migration stays disabled where a helper/switchboard may be involved"
+        );
+    }
+
+    #[test]
     fn the_bootstrap_validators_are_not_fooled_by_ipv4_in_ipv6_or_by_a_name() {
         const ID: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
         let a = |h: &str| format!("{h}/tcp/9/p2p/{ID}");
@@ -15343,6 +15766,8 @@ mod tests {
             rendezvous: String::new(),
             switchboard: false,
             record_seq: 0,
+            reconnect_routes: Vec::new(),
+            reconnect_policy: ReconnectPolicy::Disabled,
         };
         // Nothing is holding the derived port on a test machine, so that is what gets chosen, and
         // it is chosen again on the next call: stability is the whole point.

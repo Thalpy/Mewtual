@@ -18,7 +18,12 @@ two-way 60-second reply codes, and opt-in member switchboards are built with liv
 regression coverage. AutoNAT is still only **partial as a product rung**: Mewtual deploys no owned
 public infrastructure. Post-join recovery now drives bounded PEX/cache retries, SWIM-style helper
 observations and reciprocal direct dialing; pairwise evidence remains intentionally session-only,
-not a durable presence model. mDNS, concurrent rung racing, the port-forwarding wizard, hosted mode and a
+not a durable presence model. A successful direct join now retains one bounded, vault-sealed,
+Noise-authenticated local route to the named inviter under explicit durable admission provenance,
+and attempts PEX before the first post-join snapshot, so an established same-LAN pair can reconnect
+after close/reopen without publishing the retained private address. Helper/reply/switchboard joins
+cannot acquire that authority later; legacy migration is two-member-only. This is not discovery: it
+cannot find a never-contacted peer or a peer whose listener address changed. mDNS, concurrent rung racing, the port-forwarding wizard, hosted mode and a
 public DHT remain. **Section 11** carries the loose ends that are not defects. No Mewtual-operated
 service is deployed or required by default.
 
@@ -339,6 +344,12 @@ It is still not a menu. A choice is surfaced only when everything in flight has 
 The most common first invite is someone in the same house. v1 buried mDNS in a later step, so
 that user walked the entire ladder out to a public server to reach the next room. One
 behaviour, zero third parties, zero latency. It belongs at the top.
+
+**Still not built.** The narrower established-peer case is now covered by a vault-sealed route
+captured only after an outbound direct Noise handshake and rechecked against the current roster.
+That does not scan the LAN, advertise the group, or solve first contact. A future mDNS design must
+bound observations and avoid letting unauthenticated advertisements bypass the application dial
+scheduler; it must also disclose the LAN peer-identity privacy cost.
 
 ### Rung 0b: direct reachability
 
@@ -791,7 +802,7 @@ phase at the end: batching it is how unreviewed work reached `main` twice on 202
 |---|---:|---|---|---|
 | **[x]** | 0 | Fix pass 1a: identity, port, reload pipeline, UPnP window, IPv6+QUIC, `verify_self` in the join path, persisted `seq`, identify hardening | prerequisite for everything | yes, key persistence |
 | **[x]** | 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive. Started P8; P8 is now **closed** without P9, which is closed as a decision rather than built: see the note below | prerequisite for rungs 2, 4, 5 | **yes**: discovery and membership surface |
-| **[~]** | 2 | AutoNAT v2 client in `MeshBehaviour`, guarded opt-in server on relay/rendezvous, scoped live diagnostics, UPnP/PCP/NAT-PMP mapping and PCPv6 firewall pinholes are built; mDNS, recurring/pairwise reachability and escalation wiring remain | prerequisite for rungs 1, 2 | adversarial review complete |
+| **[~]** | 2 | AutoNAT v2 client in `MeshBehaviour`, guarded opt-in server on relay/rendezvous, scoped live diagnostics, UPnP/PCP/NAT-PMP mapping, PCPv6 firewall pinholes, recurring/pairwise repair, and sealed authenticated same-LAN re-dial for established peers are built; mDNS and concurrent escalation wiring remain | prerequisite for rungs 1, 2 | adversarial review complete |
 | **[~]** | 3 | Shared live status line/readout/diagnosis is built; concurrent rung racing, failure messaging and pre-flight self-test remain | needs 0-2 | none |
 | **[~]** | 4 | Settings / Connectivity and onboarding share the live evidence panel; the create-server mode/Advanced redesign remains | needs UI pass | none |
 | **[x]** | 5 | Two-way invite code: MAC binding, local 60s cap, four public direct candidates, retained pending join, proof before bearer disclosure, idempotent admission/replacement | needs 0-2 | adversarial review complete |

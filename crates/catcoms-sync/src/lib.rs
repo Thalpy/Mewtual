@@ -26,6 +26,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use automerge::{AutoCommit, AutomergeError, ChangeHash};
@@ -35,8 +36,9 @@ use catcoms_crypto::{
 };
 use catcoms_discovery::{
     parse_peer_dial_route, AddressCache, CacheConfig, CacheError, CachedPeer, Candidate,
-    DialEndpoint, DialRouteKind, DiscoveryPolicy, EclipseConfig, EclipseDetector, EclipseLevel,
-    EclipseObservation, EndpointDialScheduler, FreshnessPrincipal, PolicyConfig, RouteHost, Source,
+    DialEndpoint, DialRouteKind, DialRouteTransport, DiscoveryPolicy, EclipseConfig,
+    EclipseDetector, EclipseLevel, EclipseObservation, EndpointDialScheduler, FreshnessPrincipal,
+    PolicyConfig, RouteHost, Source,
 };
 use catcoms_mls::{
     key_package_signature_key, restore_server, serialize_key_package, snapshot_server, Incoming,
@@ -46,7 +48,7 @@ use catcoms_replication::{EncryptedDoc, SealedOp};
 use catcoms_rt::{
     Clock, ConnectionFamily, ConnectionPath, ConnectionTransport, CryptoRngCore, DiscoveredPeer,
     MeshTransport, PeerId, ProtocolId, RendezvousRegistration, Topic, TransportEvent,
-    MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT,
+    MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT, MAX_PEER_DIAL_BATCH,
 };
 use catcoms_storage::{
     open_file as open_file_fn, seal_file as seal_file_fn, BlobStore, Cid, FileRef, MemoryBlobStore,
@@ -2489,6 +2491,31 @@ fn peer_addr_is_routable_for(addr: &str, expected_peer: &[u8; 32]) -> bool {
     validated_peer_endpoint(addr, expected_peer).is_some()
 }
 
+/// Host policy for a route this installation already completed and sealed locally.
+///
+/// Private and loopback literals are intentional here; DNS and relay shape are rejected by the
+/// caller. Link-local addresses are not stable without an interface scope, while unspecified,
+/// multicast and broadcast addresses cannot identify a peer. IPv4-mapped IPv6 is normalized into
+/// the same decision so alternate spelling cannot bypass it.
+fn local_reconnect_ip_allowed(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            !ip.is_unspecified()
+                && !ip.is_broadcast()
+                && !ip.is_multicast()
+                && !ip.is_link_local()
+                && octets[0] != 0
+                && octets[0] < 240
+        }
+        IpAddr::V6(ip) if ip.is_loopback() => true,
+        IpAddr::V6(ip) => ip.to_ipv4().map_or_else(
+            || !ip.is_unspecified() && !ip.is_multicast() && !ip.is_unicast_link_local(),
+            |embedded| local_reconnect_ip_allowed(IpAddr::V4(embedded)),
+        ),
+    }
+}
+
 /// Fisher-Yates over the injected RNG. `rand`'s `SliceRandom` is not a dependency of this
 /// crate (and pulling one in for eight lines would be worse), and the ambient-dependency gate
 /// rules out anything that is not the injected generator.
@@ -3331,6 +3358,11 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// restarted. A new signed sequence bypasses the delay; otherwise attempts use exponential
     /// backoff and jitter. Live connections are suppressed separately by `connected_peers`.
     dial_retries: HashMap<Vec<u8>, DialRetry>,
+    /// Sealed, local-only routes that this installation previously completed as outbound Noise
+    /// connections. They deliberately do not enter PEX or the public address cache. Every dial
+    /// re-checks that exactly one current roster member still claims the authenticated transport
+    /// peer, then spends the shared endpoint budget. Transient here; the desktop owns persistence.
+    local_reconnect_routes: Vec<(PeerId, String)>,
     /// Advisory-only isolation detector (never gates anything): hysteretic over R (roster) / D
     /// (reachable member peers) / S (distinct rendezvous trust roots). Surfaced to the UI as a
     /// "verify out-of-band" hint. Transient; rebuilt on restore.
@@ -3519,6 +3551,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             discovery: DiscoveryPolicy::with_config(PolicyConfig::default()),
             endpoint_dials: EndpointDialScheduler::default(),
             dial_retries: HashMap::new(),
+            local_reconnect_routes: Vec::new(),
             eclipse: EclipseDetector::new(EclipseConfig::default()),
             pending_dm_invites: Vec::new(),
             pending_call_signals: Vec::new(),
@@ -4127,6 +4160,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.peer_records.iter().any(|(device, record)| {
             self.group.contains_device(device) && record.peer_id == *peer.as_bytes()
         })
+    }
+
+    /// Require an unambiguous current roster claim before a local reconnect hint may cause work.
+    /// `ingest_peer_record` already rejects duplicate transport claims, but this re-check is kept
+    /// at the socket boundary for restored legacy/corrupt state and future decoder changes.
+    fn peer_uniquely_claimed_by_current_member(&self, peer: PeerId) -> bool {
+        self.peer_records
+            .iter()
+            .filter(|(device, record)| {
+                self.group.contains_device(device) && record.peer_id == *peer.as_bytes()
+            })
+            .take(2)
+            .count()
+            == 1
     }
 
     /// Adopt the final connection table coalesced by an admission routine that temporarily owned
@@ -5416,6 +5463,103 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// whose counters would leak across deterministic tests and independent library applications.
     pub fn set_endpoint_dial_scheduler(&mut self, scheduler: EndpointDialScheduler) {
         self.endpoint_dials = scheduler;
+    }
+
+    /// Install the sealed routes that completed an outbound Noise handshake in an earlier launch.
+    ///
+    /// This accepts private IP literals because same-LAN recovery is its entire purpose, while
+    /// refusing DNS, relay circuits, link-local/multicast/unspecified hosts, peer substitution and
+    /// oversized sets. Membership is deliberately checked again in
+    /// [`Self::dial_local_reconnect_routes`], immediately before each socket attempt, because a
+    /// member may be removed or replace its signed transport descriptor after installation.
+    pub fn set_local_reconnect_routes(&mut self, routes: Vec<(PeerId, String)>) {
+        let mut accepted = Vec::new();
+        for (peer, address) in routes.into_iter().take(MAX_PEER_DIAL_BATCH) {
+            if address.len() > 512 {
+                continue;
+            }
+            let Some(route) = parse_peer_dial_route(&address, peer.as_bytes()) else {
+                continue;
+            };
+            let RouteHost::Ip(ip) = route.host else {
+                continue;
+            };
+            if route.kind != DialRouteKind::Direct
+                || !matches!(
+                    route.transport,
+                    DialRouteTransport::Tcp | DialRouteTransport::QuicV1
+                )
+                || !local_reconnect_ip_allowed(ip)
+            {
+                continue;
+            }
+            if !accepted.contains(&(peer, address.clone())) {
+                accepted.push((peer, address));
+            }
+        }
+        self.local_reconnect_routes = accepted;
+    }
+
+    /// Retry the prior authenticated same-LAN route under the current roster and process-wide
+    /// egress limits. Returns the number of peer batches that entered the transport dial path.
+    pub async fn dial_local_reconnect_routes(&mut self) -> usize {
+        let mut by_peer: BTreeMap<PeerId, Vec<(String, DialEndpoint)>> = BTreeMap::new();
+        for (peer, address) in self.local_reconnect_routes.clone() {
+            if peer == self.transport.local_peer()
+                || self.connected_peers.contains(&peer)
+                || !self.peer_uniquely_claimed_by_current_member(peer)
+            {
+                continue;
+            }
+            let Some(route) = parse_peer_dial_route(&address, peer.as_bytes()) else {
+                continue;
+            };
+            if !matches!(route.host, RouteHost::Ip(ip) if local_reconnect_ip_allowed(ip))
+                || route.kind != DialRouteKind::Direct
+                || !matches!(
+                    route.transport,
+                    DialRouteTransport::Tcp | DialRouteTransport::QuicV1
+                )
+            {
+                continue;
+            }
+            by_peer
+                .entry(peer)
+                .or_default()
+                .push((address, route.endpoint));
+        }
+
+        let mut dialed = 0;
+        for (peer, routes) in by_peer {
+            let endpoints: Vec<_> = routes
+                .iter()
+                .map(|(_, endpoint)| endpoint.clone())
+                .collect();
+            let permits = self.endpoint_dials.reserve_permits(
+                &self.group.group_id(),
+                &endpoints,
+                &*self.clock,
+            );
+            if permits.is_empty() {
+                continue;
+            }
+            let addresses: Vec<_> = permits
+                .iter()
+                .map(|permit| permit.address().to_string())
+                .collect();
+            let Ok(outcomes) = self.transport.dial_peer_batch(peer, &addresses).await else {
+                continue;
+            };
+            let mut submitted = false;
+            for (permit, outcome) in permits.into_iter().zip(outcomes) {
+                if outcome == catcoms_rt::DialSubmission::Submitted {
+                    permit.commit();
+                    submitted = true;
+                }
+            }
+            dialed += usize::from(submitted);
+        }
+        dialed
     }
 
     /// Whether any rendezvous is configured (so the actor knows whether to drive discovery).
@@ -11915,6 +12059,8 @@ mod tests {
         /// a forwarding switchboard measures, so this is the only place the size-quantization
         /// property (P10) can be asserted against reality rather than against an intermediate.
         published: std::sync::Mutex<Vec<Vec<u8>>>,
+        /// Peer-bound reconnect batches accepted by this fake transport.
+        dialed: std::sync::Mutex<Vec<(PeerId, Vec<String>)>>,
     }
 
     impl RecordingNet {
@@ -11925,6 +12071,7 @@ mod tests {
                 unevicted: std::sync::Mutex::new(Vec::new()),
                 denied: std::sync::Mutex::new(HashSet::new()),
                 published: std::sync::Mutex::new(Vec::new()),
+                dialed: std::sync::Mutex::new(Vec::new()),
             }
         }
         fn published(&self) -> Vec<Vec<u8>> {
@@ -11979,6 +12126,17 @@ mod tests {
                 }
                 return Some(event);
             }
+        }
+        async fn dial_peer_batch(
+            &self,
+            peer: PeerId,
+            addresses: &[String],
+        ) -> Result<Vec<catcoms_rt::DialSubmission>, TransportError> {
+            self.dialed
+                .lock()
+                .expect("mutex")
+                .push((peer, addresses.to_vec()));
+            Ok(vec![catcoms_rt::DialSubmission::Submitted; addresses.len()])
         }
         async fn evict_peer(&self, peer: PeerId) -> Result<(), TransportError> {
             self.evicted.lock().expect("mutex").push(peer);
@@ -12105,6 +12263,100 @@ mod tests {
             Some(PeerId::new([4u8; 32]))
         );
         assert_eq!(node.transport_peer_of(&other), Some(PeerId::new([5u8; 32])));
+    }
+
+    #[tokio::test]
+    async fn sealed_lan_reconnect_routes_are_roster_bound_bounded_and_retried() {
+        let hub = Hub::new();
+        let alice = MlsDevice::generate().unwrap();
+        let alice_id = alice.device_id();
+        let alice_group = ServerGroup::create(&alice).unwrap();
+        let alice_peer = PeerId::from_u64(1);
+        let mut node = ChannelSync::new(
+            RecordingNet::new(hub.join(alice_peer)),
+            alice_group,
+            alice,
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+        );
+
+        let bob = MlsDevice::generate().unwrap();
+        let bob_id = bob.device_id();
+        let invite = node.mint_invite([1u8; 16], 10_000, vec![]).unwrap();
+        let bob_net = hub.join(PeerId::from_u64(2));
+        let (joined, _) = tokio::join!(
+            request_join(&bob_net, alice_peer, &bob, &invite),
+            node.run_once(),
+        );
+        joined.unwrap();
+
+        let bob_peer = test_transport_peer(9);
+        stash_peer_record(&mut node, bob_id, *bob_peer.as_bytes());
+        let valid = test_peer_route(9, "/ip4/192.168.1.40/tcp/22487");
+        node.set_local_reconnect_routes(vec![
+            (bob_peer, test_peer_route(9, "/ip4/169.254.1.2/tcp/9")),
+            (bob_peer, test_peer_route(9, "/dns4/rebind.invalid/tcp/9")),
+        ]);
+        assert!(node.local_reconnect_routes.is_empty());
+
+        for forbidden in [
+            "/ip4/0.1.2.3/tcp/9",
+            "/ip4/240.0.0.1/tcp/9",
+            "/ip6/::ffff:0.1.2.3/tcp/9",
+            "/ip6/::ffff:240.0.0.1/tcp/9",
+            "/ip4/192.168.1.40/tcp/9/ws",
+            "/ip4/192.168.1.40/tcp/9/wss",
+            "/ip4/192.168.1.40/tcp/9/tls/ws",
+        ] {
+            let route: libp2p::Multiaddr = test_peer_route(9, forbidden).parse().unwrap();
+            node.set_local_reconnect_routes(vec![(bob_peer, route.to_string())]);
+            assert!(
+                node.local_reconnect_routes.is_empty(),
+                "reserved/wrapped reconnect route must fail closed: {forbidden}"
+            );
+        }
+
+        let second = test_peer_route(9, "/ip4/192.168.1.40/udp/22487/quic-v1");
+        node.set_local_reconnect_routes(vec![
+            (bob_peer, valid.clone()),
+            (bob_peer, second.clone()),
+            // The cap is applied before processing additional persisted entries.
+            (bob_peer, test_peer_route(9, "/ip4/192.168.1.41/tcp/22488")),
+        ]);
+        assert_eq!(
+            node.local_reconnect_routes,
+            vec![(bob_peer, valid.clone()), (bob_peer, second.clone())]
+        );
+        assert_eq!(node.dial_local_reconnect_routes().await, 1);
+        assert_eq!(
+            *node.transport.dialed.lock().unwrap(),
+            vec![(bob_peer, vec![valid, second])],
+            "the private route enters one exact peer-bound batch"
+        );
+
+        // A duplicate roster claim makes the device/transport association ambiguous. Even though
+        // the route itself was previously authenticated, it must not cause another socket.
+        stash_peer_record(&mut node, alice_id, *bob_peer.as_bytes());
+        node.set_local_reconnect_routes(vec![(
+            bob_peer,
+            test_peer_route(9, "/ip4/192.168.1.42/tcp/22487"),
+        )]);
+        assert_eq!(node.dial_local_reconnect_routes().await, 0);
+        assert_eq!(node.transport.dialed.lock().unwrap().len(), 1);
+        node.peer_records.remove(&alice_id);
+
+        // Live peers are not redialled; removed peers lose eligibility immediately even though the
+        // sealed route remains in local configuration for this actor turn.
+        node.connected_peers.insert(bob_peer);
+        assert_eq!(node.dial_local_reconnect_routes().await, 0);
+        node.connected_peers.remove(&bob_peer);
+        node.request_remove(&bob_id).await.unwrap();
+        node.set_local_reconnect_routes(vec![(
+            bob_peer,
+            test_peer_route(9, "/ip4/192.168.1.43/tcp/22487"),
+        )]);
+        assert_eq!(node.dial_local_reconnect_routes().await, 0);
+        assert_eq!(node.transport.dialed.lock().unwrap().len(), 1);
     }
 
     /// **F1, check 2.** A removed member's record naming a transport peer that a *current*

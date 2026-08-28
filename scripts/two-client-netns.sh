@@ -8,6 +8,10 @@ binary="$(pwd)/target/debug/catcomsctl"
 artifacts="$(pwd)/target/two-client-netns"
 server_port=41000
 relay_port=41001
+# The default relay accepts 8,192 inbound connections and reserves 128 descriptors for listeners
+# and transient upgrades. Keep this acceptance relay honest by giving only its child process the
+# same minimum soft limit an operator is instructed to configure; do not alter the runner shell.
+relay_nofile_limit=8320
 # A globally-routable-shaped address that exists only in a throwaway namespace in relay-only runs.
 # The production relay correctly refuses RFC 2544's 198.18.0.0/15 as an advertised endpoint, so
 # the acceptance topology needs a distinct simulated public listener rather than weakening that
@@ -232,8 +236,11 @@ if [[ "$scenario" == "relay-only" ]]; then
     }
   done
 
-  ip netns exec "$relay_ns" stdbuf -oL "$binary" relay \
-    --port "$relay_port" --host "$simulated_relay_public" >"$relay_log" 2>&1 &
+  (
+    ulimit -Sn "$relay_nofile_limit"
+    exec ip netns exec "$relay_ns" stdbuf -oL "$binary" relay \
+      --port "$relay_port" --host "$simulated_relay_public"
+  ) >"$relay_log" 2>&1 &
   relay_pid=$!
   relay_peer=""
   for _ in $(seq 1 200); do

@@ -340,6 +340,23 @@ local CYCLON age/source sampling, a manual anti-click-bounded redial, and TTL-aw
 renewal. Probe/result/forward/delivery are separate connected-only authenticated pushes, so no
 remote repair timeout is held inside the sole-owner actor; helpers never carry application
 traffic. Newer route withdrawal removes old sealed-cache addresses.
+The reported same-LAN close/reopen gap has a separate narrow repair: after a successful direct
+join, the joiner seals the exact outbound IP route that Noise authenticated for the named inviter
+in `ServerNet` v3 under an explicit `AuthorizedPeer` policy. Direct admission also attempts bounded
+PEX before the first post-join snapshot so the inviter's signed descriptor is present for the
+roster check even if the user closes immediately. Reload and the discovery cadence retry the route
+even with no rendezvous, after canonical peer binding, unique current-roster claim, raw-TCP/QUIC
+host-shape and shared scheduler checks; reconnect logs retain only route shape. New
+helper/reply/switchboard admissions persist `Disabled`. Pre-v3 records decode as `LegacyPending`
+and may migrate once only after a successful overlap in an unambiguous two-member group, using a
+private/loopback route. A real TCP regression snapshots the joiner immediately after direct
+admission, closes both clients, rebinds/restores the inviter, then restores the joiner with the same
+transport identities; they reconnect without a fresh invite and exchange messages and a file.
+The test covers the protocol/store/reload ingredients, but still assembles restore and route
+installation directly rather than exercising the complete Tauri vault unlock loop; an automated
+two-process desktop seal/close/unlock/reload test remains explicit follow-up coverage.
+This does not provide mDNS/first contact, follow a changed listener address, or
+prove the device key controls its self-asserted transport key.
 The remaining honest limits are architectural: no repair can heal complete isolation, submitted
 dials cannot be recalled through the current seam, registration grants have no request id, and
 the reciprocal control protocol is not a dual-key device↔transport ownership proof. See
@@ -351,6 +368,34 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
 > and delivery availability is stricter: the live peer must previously have served a
 > roster-verified, request-bound catch-up. This supersedes the older roadmap row's “online
 > dots/count”, “no peers online”, and “Online / Last seen” wording.
+
+### 2026-08-28 field-report triage
+
+- **Message close/reopen:** fixed for a direct join to a stable listener by the sealed authenticated
+  route described above, including immediate inviter PEX, a consent-preserving pre-v3
+  two-member-only migration, and a real TCP immediate-snapshot/shutdown/restore/two-way-message
+  plus file-transfer regression. Full Tauri vault lifecycle automation remains the test gap noted
+  above.
+- **Delivery indicator:** a send accepted by the local actor now says `sent · awaiting
+  confirmation`, not `sending…`. The present protocol still has no explicit receipt frame, so a
+  quiet recipient cannot confirm until it authors a causally-descending signed change. A genuine
+  immediate receipt remains a separate authenticated, replay/rate-bounded wire-protocol slice.
+- **DM first contact:** the reconnect route repairs an *established* two-person server. It cannot
+  make an expired two-way reply valid or discover two mutually unreachable first-time peers. Those
+  still need an overlapping reply window, a direct/rendezvous/relay route, or future mDNS.
+- **File trust policy:** not built. Explicit Download always saves locally today; other files and
+  missing media chunks are fetched on demand, and inline media may fetch automatically when it is
+  rendered. There is no trust-everyone/trust-specific/distrust-everyone selector and no automatic
+  bounded mirror. Native saves sanitize the filename, use non-overwriting verified staging, and
+  reveal rather than execute, which prevents a peer from turning the button itself into command or
+  path execution. The content remains untrusted; later opening it in another application and
+  automatic WebView media decoding retain parser/zero-day risk. See `THREAT-MODEL.md`.
+- **4K playback:** the product already serves original file bytes through bounded HTTP-style Range
+  windows and avoids whole-file IPC, but it does not transcode, recompress, negotiate a codec, or
+  adapt bitrate/resolution. Compressing the encrypted transfer would be ineffective; a real fix
+  needs pre-encryption media encoding/variants plus measured WebView decode and network-buffer
+  telemetry. H.265 is not selected or converted by this code, so support currently depends wholly
+  on the source file and installed platform media stack.
 
 Status posts now use distinct `status_post/<random-id>` root maps rather than requiring concurrent
 authors to share/create one Automerge list. Readers and all mutations enumerate every legacy list
@@ -479,7 +524,9 @@ authenticated signalling.
   **relay-circuit NAT traversal** (8q) needs no port-forward on either side;
   **rendezvous auto-discovery** works in the UI (join with *no* address in the invite) and
   **post-join steady-state discovery** re-finds the group after a restart with no fresh
-  invite; **UPnP/PCP/NAT-PMP** (11n/11n++) can make a node directly reachable with no relay at all.
+  invite; an established direct join also retains a vault-sealed, roster-rechecked same-LAN route
+  to the named inviter for unchanged-address close/reopen; **UPnP/PCP/NAT-PMP** (11n/11n++) can make
+  a node directly reachable with no relay at all.
   Successful joiners retain their own mapping/AutoNAT background results too; on a failed join
   the temporary listener is dropped, so its mapping cannot help reach the inviter. **AutoNAT v2**
   can verify one candidate from a connected relay/rendezvous, but does not create a route and has

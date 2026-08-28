@@ -212,6 +212,17 @@ pub enum DialRouteKind {
     },
 }
 
+/// Concrete direct transport encoded by a canonical route.
+///
+/// Local reconnect state deliberately accepts a narrower subset than the general discovery
+/// grammar, which also supports WebSocket infrastructure routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialRouteTransport {
+    Tcp,
+    WebSocket,
+    QuicV1,
+}
+
 /// A syntactically canonical peer-bound route and its scheduler identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedPeerRoute {
@@ -221,6 +232,8 @@ pub struct ParsedPeerRoute {
     pub principal: CanonicalDialPeer,
     /// Whether this establishes a direct connection or a logical relay circuit.
     pub kind: DialRouteKind,
+    /// The socket/wrapper shape after the host.
+    pub transport: DialRouteTransport,
     /// The endpoint accounting key and canonical address.
     pub endpoint: DialEndpoint,
 }
@@ -274,12 +287,13 @@ pub fn parse_peer_dial_route(addr: &str, expected_peer: &[u8; 32]) -> Option<Par
     };
 
     let mut index = 1;
-    let (transport_tag, port) = match parts.get(index)? {
+    let (transport, transport_tag, port) = match parts.get(index)? {
         Protocol::Tcp(port) if *port != 0 => {
             index += 1;
-            match parts.get(index) {
+            let transport = match parts.get(index) {
                 Some(Protocol::Ws(path)) | Some(Protocol::Wss(path)) if path.as_ref() == "/" => {
-                    index += 1
+                    index += 1;
+                    DialRouteTransport::WebSocket
                 }
                 Some(Protocol::Ws(_)) | Some(Protocol::Wss(_)) => return None,
                 Some(Protocol::Tls) => {
@@ -289,10 +303,11 @@ pub fn parse_peer_dial_route(addr: &str, expected_peer: &[u8; 32]) -> Option<Par
                         return None;
                     }
                     index += 1;
+                    DialRouteTransport::WebSocket
                 }
-                _ => {}
-            }
-            (6u8, *port)
+                _ => DialRouteTransport::Tcp,
+            };
+            (transport, 6u8, *port)
         }
         Protocol::Udp(port) if *port != 0 => {
             index += 1;
@@ -300,7 +315,7 @@ pub fn parse_peer_dial_route(addr: &str, expected_peer: &[u8; 32]) -> Option<Par
                 return None;
             }
             index += 1;
-            (17u8, *port)
+            (DialRouteTransport::QuicV1, 17u8, *port)
         }
         _ => return None,
     };
@@ -360,6 +375,7 @@ pub fn parse_peer_dial_route(addr: &str, expected_peer: &[u8; 32]) -> Option<Par
         host,
         principal,
         kind,
+        transport,
         endpoint: DialEndpoint {
             address: addr.to_string(),
             principal,

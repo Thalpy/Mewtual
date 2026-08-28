@@ -82,6 +82,14 @@ test("labels never say 'of 0 reachable'", () => {
   assert.equal(deliveryLabel("reachable", ev({ delivered: 2 })), "delivered · 2 peers");
 });
 
+test("a locally accepted send is not labelled as still sending", () => {
+  assert.equal(deliveryLabel("pending", ev({ pending: true })), "saving…");
+  assert.equal(
+    deliveryLabel("waiting", ev({ delivered: 0, reachable: 1 })),
+    "sent · awaiting confirmation",
+  );
+});
+
 test("a proved count only ever rises", () => {
   const report = (delivered: number, reachable: number, any_peer = true) => ({
     delivered,

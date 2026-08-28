@@ -139,6 +139,43 @@ table with the commit that closed it.
   native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
   the main-window capability reduce injection reach; the native command gate is the enforcement
   layer, not the fact that Svelte hid or cleared a control.
+- **A shared file is authenticated bytes, not trusted content.** Explicit save streams into a
+  non-overwriting `.part`, checks the declared size and whole-file content address, sanitizes the
+  peer-provided name to one leaf, atomically publishes only after verification, and reveals it in
+  the file manager without executing it or invoking a shell. This blocks path/argument injection,
+  overwrite races, corrupt-provider substitution and automatic execution; it does **not** make the
+  payload benign or protect an external application the user later opens it with from its own
+  parser vulnerabilities. Inline image/video/audio currently loads through a CSP-limited,
+  `nosniff`, range-bounded custom scheme but is still parsed by the platform WebView/media stack.
+  Per-server/per-uploader trust gating is not implemented, so malicious-media decoder risk remains
+  for automatically rendered embeds. A future trust policy must default to on-demand, make an
+  explicit Download override every policy, and keep automatic local mirroring bounded by storage
+  and bandwidth controls.
+- **A sealed local reconnect route is a narrow continuation of a completed direct join, not LAN
+  discovery or durable presence.** After direct admission, the joining installation may seal at
+  most two literal-IP TCP/QUIC routes to the named inviter that were actually used by an outbound
+  Noise-authenticated connection. Inbound ephemeral ports, DNS, relay circuits, untried invite
+  candidates, WebSocket wrappers, and admission-only helper/reply/switchboard contacts are not
+  retained. Durable `ReconnectPolicy` provenance prevents a new non-direct admission with no route
+  from later being mistaken for migration consent. On every later dial the sync layer reparses the
+  terminal peer binding, requires exactly one current roster member's signed descriptor to claim
+  that transport peer, rejects removed/replaced/ambiguous claims, and charges the shared
+  process/server/peer/endpoint/prefix budget. Direct admission therefore makes one bounded
+  best-effort PEX request while the authenticated connection is still live, so an immediate
+  post-join snapshot normally contains the inviter descriptor required by reload.
+
+  The route remains self-asserted at the device-to-transport boundary: Noise proves control of the
+  transport key, while the member's signed descriptor is the only link from that key to a device.
+  It can be stale or unreachable and does not prove the person is online. The private address is
+  vault-sealed, never put into PEX/rendezvous/the UI, and reconnect dial logs expose only address
+  family and transport shape. Broader same-LAN discovery remains absent because naive mDNS would
+  disclose peer identities and create an unauthenticated address-injection surface. Pre-v3 records
+  decode as `LegacyPending` and can learn this hint only after one successful overlap in a group
+  with exactly one other member and one unique signed transport claim. That one-time migration
+  accepts private or loopback routes only, so public rendezvous and ambiguous/helper-bearing groups
+  do not become durable by accident. If both peers are already isolated with no old hint, no local
+  state can reconstruct the missing address; one fresh invite, rendezvous/relay path, or future mDNS
+  discovery is still needed.
 
 ## Protocol- / crypto-enforced (a modified client CANNOT bypass)
 
