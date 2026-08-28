@@ -45,7 +45,8 @@ use catcoms_mls::{
 use catcoms_replication::{EncryptedDoc, SealedOp};
 use catcoms_rt::{
     Clock, ConnectionFamily, ConnectionPath, ConnectionTransport, CryptoRngCore, DiscoveredPeer,
-    MeshTransport, PeerId, ProtocolId, Topic, TransportEvent, MAX_CONNECTION_PATH_SNAPSHOT,
+    MeshTransport, PeerId, ProtocolId, Topic, TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT,
+    MAX_CONNECTION_PATH_SNAPSHOT,
 };
 use catcoms_storage::{
     open_file as open_file_fn, seal_file as seal_file_fn, BlobStore, Cid, FileRef, MemoryBlobStore,
@@ -1597,6 +1598,18 @@ struct PairwiseReachability {
     updated_at_ms: u64,
 }
 
+/// Session-local proof that one transport peer answered as a particular current MLS device.
+///
+/// Keeping both identities is necessary at a removal boundary: a bare `PeerId` says that
+/// *somebody* was a member when a request completed, but cannot tell us whether that proof belongs
+/// to the member who just left. This association is learned only from the request-bound signed
+/// catch-up response and is never persisted or treated as authorization for a later request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProvenMemberPeer {
+    peer: PeerId,
+    device: DeviceId,
+}
+
 fn advertised_route_shape(
     addresses: &[String],
 ) -> (Vec<ConnectionFamily>, Vec<ConnectionTransport>) {
@@ -2836,15 +2849,17 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// **candidates**: a Noise handshake is not group membership, so these may be
     /// Sybils. Tried only as a fallback, and a junk/unsigned reply is rejected.
     known_peers: VecDeque<PeerId>,
-    /// Peers that served a **signed** commit catch-up verifying against the roster;
-    /// proven current members (6e-3d-5). Preferred as catch-up sources, so a flood of
-    /// un-handshaked candidates cannot crowd out a known-good source (the Sybil-C1
-    /// fix). Bounded by `max_known_peers`.
-    member_peers: VecDeque<PeerId>,
+    /// Peers that served a **signed** commit catch-up verifying against the roster, paired with
+    /// the current MLS device that signed the response. The association lets a removal discard
+    /// only the departed device's proof while preserving unaffected live paths. Preferred as
+    /// catch-up sources, so a flood of un-handshaked candidates cannot crowd out a known-good
+    /// source (the Sybil-C1 fix). Bounded by `max_known_peers`.
+    member_peers: VecDeque<ProvenMemberPeer>,
     /// The set of transport peers with a **live connection right now**; maintained on both
     /// `PeerConnected` (insert) and `PeerDisconnected` (remove), unlike `known_peers`/`member_peers`
-    /// which only grow. The accurate liveness signal for presence + the file-availability hint.
-    /// Transient (connections re-establish on reload).
+    /// which only grow. This is an accurate aggregate transport fact, but membership/presence and
+    /// operational availability require their separate binding/proof checks. Transient
+    /// (connections re-establish on reload).
     connected_peers: HashSet<PeerId>,
     /// Bounded, session-only path evidence keyed by the claimed transport identity. It is never
     /// membership proof: `member_routes` attaches it only to that member's own signed record and
@@ -3714,7 +3729,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Accepted cost: a freshly restored node has an empty `member_peers` and so does not sweep on
     /// its first reconnect. It proves a member on the first successful catch-up and sweeps after.
     fn sweep_docs_on_reconnect(&mut self, peer: PeerId) {
-        if !self.member_peers.contains(&peer) {
+        if !self.member_peers.iter().any(|proof| proof.peer == peer) {
             return;
         }
         for (doc_type, doc_id) in self.docs.keys().copied().collect::<Vec<_>>() {
@@ -3802,6 +3817,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Apply the aggregate connection edge before any optional path refinement.
     fn note_peer_connected(&mut self, peer: PeerId) {
+        if !self.connected_peers.contains(&peer)
+            && self.connected_peers.len() >= MAX_CONNECTED_PEER_SNAPSHOT
+        {
+            // Production cannot exceed its 320-connection swarm limit. Enforce the same public
+            // seam bound here so a custom transport cannot grow aggregate liveness indefinitely;
+            // path detail for the refused peer is rejected by `note_peer_paths` below.
+            return;
+        }
         if !self.connected_peers.insert(peer) {
             // The seam promises one aggregate edge per peer generation. Treat a duplicate from an
             // alternate transport as a no-op instead of clearing valid path detail and amplifying
@@ -4217,29 +4240,39 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// verified response still promotes into `member_peers`, so no unproven peer becomes any
     /// easier to believe.
     fn pick_catchup_peer_avoiding(&self, avoid: Option<PeerId>) -> Option<PeerId> {
-        let eligible = |p: &&PeerId| !self.failed_catchup_peers.contains(p) && Some(**p) != avoid;
-        let live = |p: &&PeerId| eligible(p) && self.connected_peers.contains(*p);
-        self.member_peers
-            .iter()
-            .rev()
+        let eligible = |p: &PeerId| !self.failed_catchup_peers.contains(p) && Some(*p) != avoid;
+        let live = |p: &PeerId| eligible(p) && self.connected_peers.contains(p);
+        let mut proven = self.member_peers.iter().rev().map(|proof| proof.peer);
+        proven
+            .clone()
             .find(live)
-            .or_else(|| self.known_peers.iter().rev().find(live))
+            .or_else(|| self.known_peers.iter().rev().copied().find(live))
             // A newly-restored/joined synchronizer can know a usable peer before the transport's
             // public connect event reaches this loop, so retain the historical non-live fallback.
-            .or_else(|| self.member_peers.iter().rev().find(eligible))
-            .or_else(|| self.known_peers.iter().rev().find(eligible))
-            .copied()
+            .or_else(|| proven.find(eligible))
+            .or_else(|| self.known_peers.iter().rev().copied().find(eligible))
     }
 
-    /// Record `peer` as a proven current member (it served a signed catch-up that
-    /// verified against the roster). Most-recent-wins, bounded by `max_known_peers`,
-    /// and un-marked as failed so it is eligible again.
-    fn promote_member_peer(&mut self, peer: PeerId) {
+    /// Record `peer` as a proven current member after `device` served a signed catch-up that
+    /// verified against the current roster. Most-recent-wins, bounded by `max_known_peers`, and
+    /// un-marked as failed so it is eligible again.
+    fn promote_member_peer(&mut self, peer: PeerId, device: DeviceId) {
+        // Keep the invariant local even though the production caller has already performed this
+        // roster check. Tests and future call paths must not be able to mint operational proof for
+        // a non-member by calling the cache helper directly.
+        if !self.group.contains_device(&device) {
+            return;
+        }
         self.failed_catchup_peers.retain(|p| *p != peer);
-        if let Some(pos) = self.member_peers.iter().position(|p| *p == peer) {
+        if let Some(pos) = self
+            .member_peers
+            .iter()
+            .position(|proof| proof.peer == peer)
+        {
             self.member_peers.remove(pos);
         }
-        self.member_peers.push_back(peer);
+        self.member_peers
+            .push_back(ProvenMemberPeer { peer, device });
         while self.member_peers.len() > self.config.max_known_peers {
             self.member_peers.pop_front();
         }
@@ -4249,7 +4282,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// longer in the roster (a removed member), so it must stop being preferred as a
     /// catch-up source.
     fn demote_member_peer(&mut self, peer: PeerId) {
-        self.member_peers.retain(|p| *p != peer);
+        self.member_peers.retain(|proof| proof.peer != peer);
     }
 
     /// Mark `peer` as having answered a catch-up without filling the gap, so the
@@ -4622,8 +4655,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// where *this* node's own commit won: that branch used to rotate without evicting, which
     /// would have made a winning committer the one member that leaves the removed peer attached.
     fn note_removal_applied(&mut self, before: &[DeviceId]) {
-        self.rotate_routing_secret();
         let after: HashSet<DeviceId> = self.group.member_device_ids().into_iter().collect();
+        // Proof belongs to the device that signed the request-bound response. Remove only entries
+        // whose signer left the roster: retaining one would keep operational availability green
+        // for an ex-member, while clearing healthy entries would strand continuously-connected
+        // members until an unrelated future catch-up happened to re-prove them.
+        self.member_peers
+            .retain(|proof| after.contains(&proof.device));
+        self.rotate_routing_secret();
         for gone in before.iter().filter(|d| !after.contains(d)) {
             self.queue_eviction(gone);
         }
@@ -5496,21 +5535,33 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         routes
     }
 
-    /// Whether ≥1 transport peer is connected right now; the accurate liveness signal (maintained
-    /// on both connect and disconnect, unlike the catch-up source lists). Backs the file-browser
-    /// "can a fetch be tried" availability hint.
+    /// Whether ≥1 transport peer is connected right now; an aggregate transport fact maintained
+    /// on both connect and disconnect. It deliberately makes no membership or availability claim.
     pub fn has_connected_peer(&self) -> bool {
         !self.connected_peers.is_empty()
     }
 
-    /// The fingerprints of current members reachable **right now** (a live connection), sorted +
-    /// deduped; for the roster's online indicators. Each member is matched by **its own** signed
-    /// record: iterate `peer_records` by device and surface a member iff the `peer_id` it signed
-    /// into its own `PeerDescriptor` is in the live set AND it is still a roster member. Driving the
-    /// match by the keyed device (rather than searching records by `peer_id`) means a member's
-    /// record can only ever vouch for *that* member; a malicious record claiming another member's
-    /// `peer_id` can mislabel only its own dot, never another's. A member we hold no record for yet
-    /// (no PEX) just won't show until we learn it; a safe under-count, never a false positive.
+    /// Whether a peer that previously served a roster-verified, request-bound signed catch-up is
+    /// connected right now. Unlike [`Self::connected_member_fingerprints`], this does not trust a
+    /// descriptor's self-asserted transport id, so it is the conservative signal for deciding
+    /// whether an operational fetch/send attempt has a known member-capable path. The real request
+    /// is still authenticated again; this session-only hint is not authorization or proof that a
+    /// particular blob is held.
+    pub fn has_proven_connected_member_peer(&self) -> bool {
+        self.member_peers
+            .iter()
+            .any(|proof| self.connected_peers.contains(&proof.peer))
+    }
+
+    /// The fingerprints of current members whose **self-asserted** transport id has a live
+    /// connection here, sorted and deduped. This powers claimed-path presence diagnostics, not an
+    /// authenticated "online" assertion. Each member is matched by **its own** signed record:
+    /// iterate `peer_records` by device and surface a member iff the `peer_id` it signed into its
+    /// own `PeerDescriptor` is in the live set AND it is still a roster member. Driving the match
+    /// by the keyed device (rather than searching records by `peer_id`) means a member's record can
+    /// only ever label *that* member; a malicious record claiming an unrelated live `peer_id` can
+    /// create a false positive for its own row, but never another member's. A member we hold no
+    /// record for yet (no PEX) will not appear, so false negatives are also possible.
     ///
     /// **That argument is about *labelling* and does not generalise.** It holds here because this
     /// function only ever attaches a record to the device that signed it. A caller that instead
@@ -6195,11 +6246,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let me = self.transport.local_peer();
         let mut seen: HashSet<PeerId> = HashSet::new();
         let mut chosen: Vec<PeerId> = Vec::new();
-        // Deduped across tiers with a set rather than `Vec::contains`: `connected_peers` is
-        // unbounded by anything this crate owns, and the quadratic scan ran once per tick per
-        // server.
+        // Deduped across tiers with a set rather than `Vec::contains`: `connected_peers` is capped
+        // at `MAX_CONNECTED_PEER_SNAPSHOT`, but a quadratic scan across that entire cap still ran
+        // once per tick per server.
         let tiers: [Vec<PeerId>; 3] = [
-            self.member_peers.iter().copied().collect(),
+            self.member_peers.iter().map(|proof| proof.peer).collect(),
             self.known_peers.iter().copied().collect(),
             {
                 let mut live: Vec<PeerId> = self.connected_peers.iter().copied().collect();
@@ -7238,6 +7289,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// stage the Remove, capture the pre-advance keys, merge, and queue the signed
     /// commit for fan-out. Single-committer, so it cannot fork.
     fn commit_remove_now(&mut self, target: &DeviceId) {
+        let before = self.group.member_device_ids();
         let staged = match self.group.stage_remove(&self.device, target) {
             Ok(s) => s,
             Err(e) => {
@@ -7257,11 +7309,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // members being removed-from are still subscribed; *then* rotate the label
         // (the removed member cannot export the post-removal routing secret).
         let publish_topic = self.control_topic.clone();
-        self.rotate_routing_secret();
-        // Detach the member we just removed, not only re-key around it (P6). Queued rather than
-        // performed here because the transport verb is async and this path is not; drained by
-        // `request_remove` and at the top of every `run_once`.
-        self.queue_eviction(target);
+        // Use the same post-removal hook as inbound and fork-resolved commits. Besides rotation and
+        // eviction, it invalidates only the departed devices' operational peer proofs.
+        self.note_removal_applied(&before);
         self.record_commit(record.clone());
         self.stats.commits_applied += 1;
         let mut framed = vec![CTRL_COMMIT];
@@ -7617,10 +7667,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             );
             return Ok(0);
         }
-        // The responder proved current membership: trust the bundle and promote it to
-        // the verified catch-up-source pool.
-        self.promote_member_peer(peer);
+        // A member signature authenticates the bytes but does not make malformed bytes usable.
+        // Decode before promotion so operational availability means this peer completed a
+        // syntactically valid catch-up exchange, not merely that a current member signed junk.
         let records = decode_commit_bundle(&bundle)?;
+        self.promote_member_peer(peer, responder);
         let mut applied = 0;
         for record in records {
             if record.group_id != group_id {
@@ -10233,7 +10284,7 @@ mod tests {
     use super::*;
     use catcoms_rt::{Hub, ManualClock, MemNetwork, TransportError};
     use rand_chacha::ChaCha20Rng;
-    use rand_core::SeedableRng;
+    use rand_core::{RngCore, SeedableRng};
 
     #[test]
     fn catchup_request_roundtrips_through_codec() {
@@ -11402,7 +11453,9 @@ mod tests {
     fn pick_catchup_peer_prefers_a_proven_member_over_an_untrusted_candidate() {
         let mut node = solo_node();
         node.remember_peer(PeerId::from_u64(1)); // untrusted candidate
-        node.promote_member_peer(PeerId::from_u64(2)); // proven member
+        node.promote_member_peer(PeerId::from_u64(2), node.device.device_id()); // proven member
+        node.test_set_connected(PeerId::from_u64(2), true);
+        assert!(node.has_proven_connected_member_peer());
         assert_eq!(
             node.pick_catchup_peer(),
             Some(PeerId::from_u64(2)),
@@ -11419,7 +11472,7 @@ mod tests {
         // demoted (review fix), so it stops front-running honest sources every gap.
         let mut node = solo_node();
         node.remember_peer(PeerId::from_u64(1)); // candidate
-        node.promote_member_peer(PeerId::from_u64(2)); // proven member
+        node.promote_member_peer(PeerId::from_u64(2), node.device.device_id()); // proven member
         assert_eq!(node.pick_catchup_peer(), Some(PeerId::from_u64(2)));
         node.demote_member_peer(PeerId::from_u64(2));
         assert_eq!(
@@ -11427,6 +11480,36 @@ mod tests {
             Some(PeerId::from_u64(1)),
             "a demoted ex-member is no longer preferred"
         );
+    }
+
+    #[tokio::test]
+    async fn a_membership_removal_invalidates_only_the_departed_peers_proof() {
+        let (_hub, members, ids) = build_members(3).await;
+        let mut alice = members.into_iter().next().unwrap();
+        let bob_peer = test_transport_peer(2);
+        let carol_peer = test_transport_peer(3);
+        alice.promote_member_peer(bob_peer, ids[1]);
+        alice.promote_member_peer(carol_peer, ids[2]);
+        alice.test_set_connected(bob_peer, true);
+        alice.test_set_connected(carol_peer, true);
+        assert!(alice.has_proven_connected_member_peer());
+
+        // Keep both transport edges live while removing Bob through the owner's public path.
+        // Bob's proof must disappear, while Carol must remain immediately usable without
+        // reconnecting or waiting for a future membership gap to trigger another signed catch-up.
+        alice.request_remove(&ids[1]).await.unwrap();
+
+        assert!(!alice.group.contains_device(&ids[1]));
+        assert!(alice.connected_peers.contains(&bob_peer));
+        assert!(!alice
+            .member_peers
+            .iter()
+            .any(|proof| proof.peer == bob_peer));
+        assert!(alice
+            .member_peers
+            .iter()
+            .any(|proof| proof.peer == carol_peer && proof.device == ids[2]));
+        assert!(alice.has_proven_connected_member_peer());
     }
 
     #[test]
@@ -11965,7 +12048,10 @@ mod tests {
 
         // A stranger (or a joiner whose membership check has not run yet) connects.
         let stranger = PeerId::from_u64(9_999);
-        assert!(!alice.member_peers.contains(&stranger));
+        assert!(!alice
+            .member_peers
+            .iter()
+            .any(|proof| proof.peer == stranger));
         alice.sweep_docs_on_reconnect(stranger);
         assert!(
             alice.catchup_queue.is_empty(),
@@ -11973,7 +12059,7 @@ mod tests {
         );
 
         // A peer proven by a roster-verified signed catch-up is exactly who the sweep is for.
-        alice.promote_member_peer(stranger);
+        alice.promote_member_peer(stranger, alice.device.device_id());
         alice.sweep_docs_on_reconnect(stranger);
         assert!(
             !alice.catchup_queue.is_empty(),
@@ -12020,6 +12106,64 @@ mod tests {
         }
         members.insert(0, founder_sync);
         (hub, members, ids)
+    }
+
+    #[tokio::test]
+    async fn a_signed_malformed_commit_bundle_does_not_promote_its_peer() {
+        let (_hub, mut members, _ids) = build_members(2).await;
+        let bob = members.pop().expect("Bob");
+        let alice = members.pop().expect("Alice");
+        let alice_peer = alice.local_peer();
+        let group_id = bob.group.group_id();
+        let requester_pubkey = bob.device.public_key_bytes();
+        let request_epoch = bob.group.epoch();
+        let request_ts = 1_000;
+
+        // `ChannelSync::new` draws the first 32 bytes for the file-wrap key. Reproduce that draw
+        // through the injected deterministic RNG, then bind Alice's reply to the exact nonce the
+        // following catch-up request will use.
+        let mut expected_rng = ChaCha20Rng::seed_from_u64(0x0BAD_51A6);
+        let mut discarded_file_key = [0u8; 32];
+        expected_rng.fill_bytes(&mut discarded_file_key);
+        let mut request_nonce = [0u8; 16];
+        expected_rng.fill_bytes(&mut request_nonce);
+
+        let malformed_bundle = vec![0xff];
+        let transcript = catchup_resp_transcript(
+            &group_id,
+            &requester_pubkey,
+            request_ts,
+            &request_nonce,
+            request_epoch,
+            &malformed_bundle,
+        );
+        let signature = alice.device.sign(&transcript).unwrap();
+        let response = encode_signed_commit_resp(
+            &alice.device.public_key_bytes(),
+            &signature,
+            &malformed_bundle,
+        );
+        let transport = ScriptedReplyNetwork {
+            local: bob.local_peer(),
+            response: Bytes::from(response),
+            events: std::sync::Mutex::new(VecDeque::new()),
+        };
+        let mut requester = ChannelSync::new(
+            transport,
+            bob.group,
+            bob.device,
+            ChaCha20Rng::seed_from_u64(0x0BAD_51A6),
+            Box::new(ManualClock::new(request_ts)),
+        );
+
+        assert!(matches!(
+            requester.request_commit_catchup(alice_peer, 0).await,
+            Err(SyncError::Malformed)
+        ));
+        assert!(
+            requester.member_peers.is_empty(),
+            "a roster member that signed an unusable bundle did not complete a proven exchange"
+        );
     }
 
     #[test]
@@ -12143,7 +12287,7 @@ mod tests {
         // a roster-verified catch-up/self-record; seed exactly that already-tested evidence here
         // so this regression stays about the forwarding protocol rather than PEX.
         let founder_public_key = members[0].device.public_key_bytes();
-        members[1].promote_member_peer(founder_peer);
+        members[1].promote_member_peer(founder_peer, ids[0]);
         members[1].connected_peers.insert(founder_peer);
         members[1].peer_records.insert(
             ids[0],
@@ -13260,17 +13404,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn presence_reflects_live_connections_authenticated_per_member() {
-        let (_hub, mut members, ids) = build_members(3).await;
+    async fn presence_reports_self_asserted_live_claims() {
+        let (_hub, mut members, ids) = build_members(4).await;
         let mut it = members.drain(..);
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
         let mut carol = it.next().unwrap();
+        let dave = it.next().unwrap();
         drop(it);
         let bob_peer = bob.local_peer();
         let carol_peer = carol.local_peer();
         let bob_fp = roles::fingerprint(&ids[1]);
         let carol_fp = roles::fingerprint(&ids[2]);
+        let dave_fp = roles::fingerprint(&ids[3]);
 
         // Baseline: the in-memory transport reports no live connections.
         assert!(!alice.has_connected_peer());
@@ -13288,7 +13434,8 @@ mod tests {
         // Bob connects → only Bob is online; a connection we hold no record for is ignored (a safe
         // under-count, never a false positive).
         alice.test_set_connected(bob_peer, true);
-        alice.test_set_connected(PeerId::from_u64(987), true);
+        let unrelated_peer = PeerId::from_u64(987);
+        alice.test_set_connected(unrelated_peer, true);
         assert!(alice.has_connected_peer());
         assert_eq!(alice.connected_member_fingerprints(), vec![bob_fp.clone()]);
 
@@ -13359,6 +13506,24 @@ mod tests {
             "it mislabels only the dot of the device that made the claim"
         );
         alice.test_set_connected(carol_peer, false);
+
+        // Dave can sign his first record claiming an unrelated transport that nobody else has
+        // claimed. The signature authenticates Dave as the author, not ownership of that transport,
+        // so the diagnostic row must stay explicitly self-asserted and operational availability
+        // must not be enabled merely because the unrelated peer happens to be connected.
+        let unrelated_claim = signed_record_claiming(&dave, *unrelated_peer.as_bytes(), 10);
+        assert!(alice.ingest_peer_record(unrelated_claim));
+        assert!(alice.connected_member_fingerprints().contains(&dave_fp));
+        let dave_route = alice
+            .member_routes()
+            .into_iter()
+            .find(|route| route.fingerprint == dave_fp)
+            .expect("Dave remains a current roster row");
+        assert_eq!(dave_route.binding, MemberRouteBinding::SelfAsserted);
+        assert!(
+            !alice.has_proven_connected_member_peer(),
+            "a signed descriptor claiming an unrelated live peer is not an authenticated data path"
+        );
         assert!(!alice.connected_member_fingerprints().contains(&carol_fp));
     }
 
@@ -14119,6 +14284,29 @@ mod tests {
     }
 
     #[test]
+    fn custom_transport_connect_edges_cannot_grow_aggregate_liveness_without_bound() {
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let mut node = ChannelSync::new(
+            Hub::new().join(PeerId::from_u64(1)),
+            group,
+            device,
+            ChaCha20Rng::seed_from_u64(85),
+            Box::new(ManualClock::new(1_000)),
+        );
+        for n in 0..MAX_CONNECTED_PEER_SNAPSHOT {
+            node.note_peer_connected(PeerId::from_u64(200_000 + n as u64));
+        }
+        let overflow = PeerId::from_u64(999_998);
+        node.note_peer_connected(overflow);
+        node.note_peer_paths(overflow, vec![direct_v4_quic()], Some(direct_v4_quic()));
+
+        assert_eq!(node.connected_peers.len(), MAX_CONNECTED_PEER_SNAPSHOT);
+        assert!(!node.connected_peers.contains(&overflow));
+        assert!(!node.pairwise_reachability.contains_key(&overflow));
+    }
+
+    #[test]
     fn member_route_actions_only_offer_implemented_postjoin_recovery() {
         use MemberRouteActionKind as Kind;
         use MemberRouteActionScope as Scope;
@@ -14331,12 +14519,14 @@ mod tests {
         alice.note_peer_paths(peer, vec![relayed_v6()], Some(direct_v4_quic()));
         assert!(alice.member_routes()[0].last_success.is_none());
 
-        // The public transport seam may be implemented by something other than libp2p; enforce
-        // the memory cap here even if it reports more live peers than production allows.
+        // The public transport seam may be implemented by something other than libp2p. Churn
+        // through more distinct peers than production permits concurrently and prove that stale
+        // per-peer evidence remains bounded without starving the still-live member edge below.
         for n in 0..=MAX_PEER_RECORDS {
             let candidate = PeerId::from_u64(10_000 + n as u64);
-            alice.connected_peers.insert(candidate);
+            alice.note_peer_connected(candidate);
             alice.note_peer_paths(candidate, vec![direct_v4_quic()], Some(direct_v4_quic()));
+            alice.note_peer_disconnected(candidate);
         }
         assert_eq!(alice.pairwise_reachability.len(), MAX_PEER_RECORDS);
 

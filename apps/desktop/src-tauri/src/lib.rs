@@ -1012,8 +1012,8 @@ struct UiFileUsage {
     pinned: bool,
 }
 
-/// The shared file list plus whether any peer is currently reachable to fetch from; the payload
-/// of `get_files`, so the UI can color each file by availability in one round-trip.
+/// The shared file list plus whether a live peer previously proved it could serve authenticated
+/// catch-up; the payload of `get_files`, so the UI can color files conservatively in one trip.
 #[derive(Serialize, Clone)]
 struct FilesPayload {
     files: Vec<UiFile>,
@@ -1359,9 +1359,8 @@ struct DeliveryStateEvt {
     id: String,
     delivered: usize,
     reachable: usize,
-    /// Any transport peer connected at all. The only honest basis for "nothing can leave this
-    /// device": `reachable` resolves connections to members through signed peer records and can
-    /// read zero while ops are gossiping fine.
+    /// A live peer previously served roster-verified catch-up; self-asserted descriptor claims and
+    /// bare relay/rendezvous sockets do not count.
     any_peer: bool,
 }
 #[derive(Serialize, Clone)]
@@ -6730,7 +6729,8 @@ async fn repair_storage(
     })
 }
 
-/// The fingerprints of members reachable right now (presence indicators in the roster).
+/// Current members whose self-asserted peer id has a live connection here. This diagnostic
+/// projection is not proof that the member controls the peer or is personally online.
 #[tauri::command]
 async fn get_online_members(
     state: State<'_, AppState>,
@@ -11620,7 +11620,10 @@ mod report_validation_tests {
         )
         .expect_err("a local account path must block export");
         assert!(error.contains("local_path at line 2"));
-        assert!(!error.contains("C:\\Users"), "the refusal must not echo the secret text");
+        assert!(
+            !error.contains("C:\\Users"),
+            "the refusal must not echo the secret text"
+        );
     }
 
     #[test]
@@ -11632,11 +11635,9 @@ mod report_validation_tests {
 
     #[test]
     fn legacy_bridged_prose_requires_review_but_does_not_force_a_bypass() {
-        let review = validate_report_for_mode(
-            "LOG.TRACING.EVENT outcome=failed",
-            CaptureMode::Safe,
-        )
-        .expect("legacy prose without a concrete sensitive shape remains exportable");
+        let review =
+            validate_report_for_mode("LOG.TRACING.EVENT outcome=failed", CaptureMode::Safe)
+                .expect("legacy prose without a concrete sensitive shape remains exportable");
         assert_eq!(review, vec!["bridged_prose"]);
     }
 }

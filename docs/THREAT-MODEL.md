@@ -119,7 +119,10 @@ table with the commit that closed it.
   A dial-scheduler row proves only that a policy-approved batch was submitted, not that every
   candidate reached the transport or failed, and the UI does not infer outbound IPv6 capability
   from inbound/public candidate observations. Current switchboards forward admission only and are
-  not presented as a post-join repair path.
+  not presented as a post-join repair path. Operational availability instead uses request-bound
+  signed catch-up proof. That transient cache retains the current roster `DeviceId` that answered
+  on each peer connection, so a removal prunes the departed signer without invalidating unaffected
+  live member paths; every later request still authenticates independently.
 - **The desktop webview is trusted only while the UI session is unlocked.** An explicit lock keeps
   native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
   the main-window capability reduce injection reach; the native command gate is the enforcement

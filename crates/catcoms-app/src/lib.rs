@@ -353,20 +353,27 @@ pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
     if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, MESSAGES) {
         for i in 0..doc.length(&list) {
             if let Ok(Some((Value::Object(ObjType::Map), msg))) = doc.get(&list, i) {
-                out.push(ChatMessage {
-                    id: str_field(doc, &msg, MSG_ID),
-                    author: str_field(doc, &msg, AUTHOR),
-                    text: str_field(doc, &msg, TEXT),
-                    ts: int_field(doc, &msg, TS),
-                    edited: int_field(doc, &msg, EDITED),
-                    reactions: read_reactions(doc, &msg),
-                    reply_to: str_field(doc, &msg, REPLY_TO),
-                    pinned: doc.get(&msg, PINNED).ok().flatten().is_some(),
-                });
+                out.push(read_message(doc, &msg));
             }
         }
     }
     out
+}
+
+/// Decode one message map. Both the legacy channel/status list and the conflict-free status
+/// layout below use exactly this inner schema; keeping one decoder prevents compatibility fixes
+/// from making the two representations render differently.
+fn read_message(doc: &AutoCommit, msg: &ObjId) -> ChatMessage {
+    ChatMessage {
+        id: str_field(doc, msg, MSG_ID),
+        author: str_field(doc, msg, AUTHOR),
+        text: str_field(doc, msg, TEXT),
+        ts: int_field(doc, msg, TS),
+        edited: int_field(doc, msg, EDITED),
+        reactions: read_reactions(doc, msg),
+        reply_to: str_field(doc, msg, REPLY_TO),
+        pinned: doc.get(msg, PINNED).ok().flatten().is_some(),
+    }
 }
 
 /// The separator between the emoji and the reactor fingerprint in a flat reaction key. ASCII Unit
@@ -608,6 +615,211 @@ fn delete_message_in_doc(doc: &mut AutoCommit, id: &str) -> Result<bool, Automer
         }
     }
     Ok(false)
+}
+
+// --- the status feed's conflict-free post layout ----------------------------
+//
+// Early status feeds reused the channel `messages` list. If two peers made the first post before
+// either had received the other's list-creation op, Automerge retained both conflicting lists but
+// `get(ROOT, MESSAGES)` could expose only one of them. One peer's posts then appeared to vanish.
+// New status posts are child maps at distinct ROOT keys derived from their random ids. Concurrent
+// authors therefore edit disjoint keys and all posts survive. Readers and mutators retain the old
+// list path so existing documents remain fully usable; this is an additive persistence change.
+
+const STATUS_POST_PREFIX: &str = "status_post/";
+const STATUS_POST_ID_HEX_CHARS: usize = 32;
+
+fn status_post_key(id: &str) -> String {
+    format!("{STATUS_POST_PREFIX}{id}")
+}
+
+fn valid_status_post_id(id: &str) -> bool {
+    id.len() == STATUS_POST_ID_HEX_CHARS
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+#[derive(Clone)]
+enum StatusPostLocation {
+    Keyed { key: String },
+    Legacy { list: ObjId, index: usize },
+}
+
+#[derive(Clone)]
+struct StatusPostCandidate {
+    post: ChatMessage,
+    obj: ObjId,
+    location: StatusPostLocation,
+}
+
+/// Append a status post without requiring peers to agree on a shared container first.
+fn append_status_message(
+    doc: &mut AutoCommit,
+    id: &str,
+    author: &str,
+    text: &str,
+    ts: u64,
+) -> Result<(), AutomergeError> {
+    let msg = doc.put_object(ROOT, status_post_key(id), ObjType::Map)?;
+    doc.put(&msg, MSG_ID, id)?;
+    doc.put(&msg, AUTHOR, author)?;
+    doc.put(&msg, TEXT, text)?;
+    doc.put(&msg, TS, ts as i64)?;
+    Ok(())
+}
+
+/// Enumerate every status candidate, including every Automerge conflict at the legacy reserved
+/// list key and at keyed post properties. This is deliberately status-specific: channel messages
+/// retain their canonical list behavior, while the upgrade path must recover already-conflicted
+/// status lists rather than merely preventing the next conflict.
+fn status_post_candidates(doc: &AutoCommit) -> Result<Vec<StatusPostCandidate>, AutomergeError> {
+    let mut out = Vec::new();
+    for (value, list) in doc.get_all(ROOT, MESSAGES)? {
+        if !matches!(value, Value::Object(ObjType::List)) {
+            continue;
+        }
+        for index in 0..doc.length(&list) {
+            for (value, msg) in doc.get_all(&list, index)? {
+                if matches!(value, Value::Object(ObjType::Map)) {
+                    out.push(StatusPostCandidate {
+                        post: read_message(doc, &msg),
+                        obj: msg,
+                        location: StatusPostLocation::Legacy {
+                            list: list.clone(),
+                            index,
+                        },
+                    });
+                }
+            }
+        }
+    }
+    for key in doc.keys(ROOT) {
+        if !key.starts_with(STATUS_POST_PREFIX) {
+            continue;
+        }
+        for (value, msg) in doc.get_all(ROOT, &key)? {
+            if !matches!(value, Value::Object(ObjType::Map)) {
+                continue;
+            }
+            let post = read_message(doc, &msg);
+            // Empty, non-canonical, or key-mismatched ids are inert. In particular,
+            // `status_post/` + `id=""` must not create a visible row no product command can address.
+            if valid_status_post_id(&post.id) && status_post_key(&post.id) == key {
+                out.push(StatusPostCandidate {
+                    post,
+                    obj: msg,
+                    location: StatusPostLocation::Keyed { key: key.clone() },
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Read legacy list posts plus conflict-free keyed posts in one deterministic oldest-first feed.
+/// A canonical non-empty id is rendered only when it addresses exactly one object across every
+/// representation/conflict. Ambiguous rows are hidden and all mutations fail closed, preventing
+/// authorization against one author followed by mutation of another object with the same id.
+/// Truly old id-less legacy posts remain readable but intentionally non-actionable.
+fn read_status_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
+    let candidates = status_post_candidates(doc).unwrap_or_default();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for candidate in &candidates {
+        if valid_status_post_id(&candidate.post.id) {
+            *counts.entry(candidate.post.id.clone()).or_default() += 1;
+        }
+    }
+    let mut out: Vec<ChatMessage> = candidates
+        .into_iter()
+        .filter(|candidate| {
+            (candidate.post.id.is_empty()
+                && matches!(candidate.location, StatusPostLocation::Legacy { .. }))
+                || (valid_status_post_id(&candidate.post.id)
+                    && counts.get(&candidate.post.id) == Some(&1))
+        })
+        .map(|candidate| candidate.post)
+        .collect();
+    out.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.id.cmp(&b.id)));
+    out
+}
+
+/// Resolve exactly one canonical post across keyed and every legacy-conflict representation.
+/// `None` covers missing, malformed, and ambiguous ids; all three must be non-actionable.
+fn resolve_status_message(
+    doc: &AutoCommit,
+    id: &str,
+) -> Result<Option<StatusPostCandidate>, AutomergeError> {
+    if !valid_status_post_id(id) {
+        return Ok(None);
+    }
+    let mut matches = status_post_candidates(doc)?
+        .into_iter()
+        .filter(|candidate| candidate.post.id == id);
+    let first = matches.next();
+    if first.is_none() || matches.next().is_some() {
+        return Ok(None);
+    }
+    Ok(first)
+}
+
+fn edit_status_message_in_doc(
+    doc: &mut AutoCommit,
+    id: &str,
+    new_text: &str,
+    edited_ts: u64,
+) -> Result<bool, AutomergeError> {
+    let Some(candidate) = resolve_status_message(doc, id)? else {
+        return Ok(false);
+    };
+    doc.put(&candidate.obj, TEXT, new_text)?;
+    doc.put(&candidate.obj, EDITED, edited_ts as i64)?;
+    Ok(true)
+}
+
+fn delete_status_message_in_doc(doc: &mut AutoCommit, id: &str) -> Result<bool, AutomergeError> {
+    let Some(candidate) = resolve_status_message(doc, id)? else {
+        return Ok(false);
+    };
+    match candidate.location {
+        StatusPostLocation::Keyed { key } => doc.delete(ROOT, key)?,
+        StatusPostLocation::Legacy { list, index } => doc.delete(&list, index)?,
+    }
+    Ok(true)
+}
+
+fn toggle_status_reaction_in_doc(
+    doc: &mut AutoCommit,
+    id: &str,
+    emoji: &str,
+    fp: &str,
+) -> Result<bool, AutomergeError> {
+    let Some(candidate) = resolve_status_message(doc, id)? else {
+        return Ok(false);
+    };
+    let key = format!("{emoji}{REACTION_SEP}{fp}");
+    if doc.get(&candidate.obj, &key)?.is_some() {
+        doc.delete(&candidate.obj, &key)?;
+    } else {
+        doc.put(&candidate.obj, &key, true)?;
+    }
+    Ok(true)
+}
+
+fn set_status_pin_in_doc(
+    doc: &mut AutoCommit,
+    id: &str,
+    pinned: bool,
+) -> Result<bool, AutomergeError> {
+    let Some(candidate) = resolve_status_message(doc, id)? else {
+        return Ok(false);
+    };
+    if pinned {
+        doc.put(&candidate.obj, PINNED, true)?;
+    } else {
+        doc.delete(&candidate.obj, PINNED)?;
+    }
+    Ok(true)
 }
 
 fn str_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> String {
@@ -2073,14 +2285,14 @@ pub struct FileListing {
     pub total_chunks: u32,
 }
 
-/// The shared file list with per-file local-availability counts, plus whether a current member
-/// is currently reachable to fetch missing chunks from. `has_peers` is a cheap in-memory
-/// signal; it does NOT prove a given file is held by any peer, only that a fetch could be tried.
+/// The shared file list with per-file local-availability counts, plus whether a live peer has
+/// previously served roster-verified catch-up. `has_peers` is a cheap in-memory signal; it does
+/// NOT prove a given file is held by any peer, only that an authenticated fetch could be tried.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesView {
     /// The listed files with availability counts.
     pub files: Vec<FileListing>,
-    /// Whether ≥1 roster-backed current member is connected on this device.
+    /// Whether ≥1 previously proven catch-up source has a live connection on this device.
     pub has_peers: bool,
 }
 
@@ -2099,8 +2311,8 @@ pub struct StorageHealth {
     /// Bytes of verified encrypted file-chunk content (not filesystem allocation or unrelated
     /// avatar/banner blobs).
     pub verified_bytes: u64,
-    /// A live authenticated member connection exists. This means repair can be attempted, not
-    /// that the peer necessarily holds every missing chunk.
+    /// A live peer that proved it could answer a roster-authenticated catch-up earlier this
+    /// session exists. This means repair can be attempted, not that it holds every missing chunk.
     pub has_peers: bool,
 }
 
@@ -2388,17 +2600,13 @@ pub struct DeliveryState {
     /// one-sided: it only ever rises, and `0` means "no proof yet", *not* "not delivered"; so
     /// a renderer must show nothing rather than a failure for `0`.
     pub delivered: usize,
-    /// How many members are reachable right now; the same count that drives the presence
-    /// indicators ([`Server::online_members`]). Independent of `delivered`, which can exceed it
-    /// (a member that received the message and has since gone offline still holds it).
+    /// How many current members claim a transport peer connected here; the same self-asserted
+    /// projection that drives [`Server::online_members`]. Independent of `delivered`, which can
+    /// exceed it (a member that received the message and has since disconnected still holds it).
     pub reachable: usize,
-    /// Whether this node has **any** transport peer connected at all.
-    ///
-    /// Deliberately separate from `reachable`, and the only honest basis for a "nothing can leave
-    /// this device" claim. `reachable` resolves connections to member fingerprints through signed
-    /// peer records, so a peer whose record has not arrived (or whose peer id changed) is missing
-    /// from it while ops still gossip to it perfectly well. Counting that as "no peers reachable"
-    /// painted a red failure on messages that had already been received.
+    /// Whether this node has a live peer that previously served a roster-verified signed catch-up.
+    /// This is intentionally stricter than `reachable`: a self-asserted descriptor claim or bare
+    /// relay/rendezvous socket cannot suppress a queued warning.
     pub any_peer: bool,
 }
 
@@ -3959,17 +4167,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         })
     }
 
-    /// Whether ≥1 roster-backed current member is connected **right now**; a cheap proxy for "a
-    /// missing chunk could be fetched". A relay/rendezvous socket is deliberately excluded: it
-    /// cannot serve a group blob merely by being connected. This does not prove the member holds a
-    /// particular file. Zero network cost (an in-memory roster/peer-set check).
+    /// Whether ≥1 live peer previously served a roster-verified, request-bound signed catch-up;
+    /// a cheap proxy for "a missing chunk could be fetched". A self-asserted descriptor claim or
+    /// bare relay/rendezvous socket is deliberately excluded: neither proves that connection can
+    /// serve group data. This does not prove the peer holds a particular file, and every fetch is
+    /// authenticated again. Zero network cost (an in-memory session-state check).
     pub fn has_fetch_peers(&self) -> bool {
-        !self.sync.connected_member_fingerprints().is_empty()
+        self.sync.has_proven_connected_member_peer()
     }
 
-    /// The fingerprints of current members reachable right now (a live connection), for the
-    /// roster's presence indicators. Best-effort + authenticated; see
-    /// [`ChannelSync::connected_member_fingerprints`].
+    /// Current members whose self-asserted peer id has a live connection here, for local route
+    /// presence diagnostics. This is neither proof that the member controls that transport nor
+    /// that the person is online; see [`ChannelSync::connected_member_fingerprints`].
     pub fn online_members(&self) -> Vec<String> {
         self.sync.connected_member_fingerprints()
     }
@@ -4007,16 +4216,17 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// is deliberately not persisted.
     ///
     /// Read-only over state that already exists: `delivered` comes from the document's own causal
-    /// evidence ([`ChannelSync::peers_with_change`]) and `reachable` from the presence set that
-    /// drives [`Server::online_members`]. No new wire traffic, and nothing here is observable by
-    /// anyone else.
+    /// evidence ([`ChannelSync::peers_with_change`]), `reachable` from the self-asserted route
+    /// projection that drives [`Server::online_members`], and `any_peer` from a live peer that has
+    /// already served a roster-verified catch-up. No new wire traffic, and nothing here is
+    /// observable by anyone else.
     pub fn delivery_snapshot(&mut self, channel: u128) -> Vec<DeliveryState> {
         let Some(recent) = self.own_message_changes.get(&channel) else {
             return Vec::new();
         };
         let (ids, changes): (Vec<String>, Vec<ChangeHash>) = recent.iter().cloned().unzip();
         let reachable = self.online_members().len();
-        let any_peer = reachable > 0;
+        let any_peer = self.sync.has_proven_connected_member_peer();
         let holders = self
             .sync
             .peers_with_changes(DocType::Channel, channel, &changes);
@@ -4311,7 +4521,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let id = self.sync.random_id();
         self.sync
             .post(DocType::Status, STATUS_DOC, |d| {
-                append_message(d, &id, &author, text, ts, "")
+                append_status_message(d, &id, &author, text, ts)
             })
             .await?;
         Ok(())
@@ -4321,7 +4531,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     pub fn statuses(&self) -> Vec<ChatMessage> {
         self.sync
             .doc(DocType::Status, STATUS_DOC)
-            .map(|d| read_messages(d.doc()))
+            .map(|d| read_status_messages(d.doc()))
             .unwrap_or_default()
     }
 
@@ -4346,9 +4556,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// cannot happen, so the guard sits here and not in the composer: the command is reachable from
     /// the webview directly, and honest-client gating only holds while the id names one post.
     pub async fn edit_status(&mut self, id: &str, new_text: &str) -> Result<(), AppError> {
-        if id.is_empty() {
+        if !valid_status_post_id(id) {
             return Err(AppError::Invalid(
-                "a status post with no id cannot be addressed".into(),
+                "a status post with a malformed id cannot be addressed".into(),
             ));
         }
         let me = self.my_fingerprint();
@@ -4369,7 +4579,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let new_text = new_text.to_string();
         self.sync
             .post(DocType::Status, STATUS_DOC, move |d| {
-                edit_message_in_doc(d, &id, &new_text, edited).map(|_| ())
+                edit_status_message_in_doc(d, &id, &new_text, edited).map(|_| ())
             })
             .await?;
         Ok(())
@@ -4383,9 +4593,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// written before ids existed rather than one of them, so the delete would land on whichever of
     /// those the document happens to hold first.
     pub async fn delete_status(&mut self, id: &str) -> Result<(), AppError> {
-        if id.is_empty() {
+        if !valid_status_post_id(id) {
             return Err(AppError::Invalid(
-                "a status post with no id cannot be addressed".into(),
+                "a status post with a malformed id cannot be addressed".into(),
             ));
         }
         let me = self.my_fingerprint();
@@ -4401,7 +4611,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let id = id.to_string();
         self.sync
             .post(DocType::Status, STATUS_DOC, move |d| {
-                delete_message_in_doc(d, &id).map(|_| ())
+                delete_status_message_in_doc(d, &id).map(|_| ())
             })
             .await?;
         Ok(())
@@ -4419,9 +4629,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         if !valid_reaction_emoji(emoji) {
             return Err(AppError::Invalid("bad emoji".into()));
         }
-        if id.is_empty() {
+        if !valid_status_post_id(id) {
             return Err(AppError::Invalid(
-                "a status post with no id cannot be addressed".into(),
+                "a status post with a malformed id cannot be addressed".into(),
             ));
         }
         let me = self.my_fingerprint();
@@ -4432,7 +4642,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let emoji = emoji.to_string();
         self.sync
             .post(DocType::Status, STATUS_DOC, move |d| {
-                toggle_reaction_in_doc(d, &id, &emoji, &me).map(|_| ())
+                toggle_status_reaction_in_doc(d, &id, &emoji, &me).map(|_| ())
             })
             .await?;
         Ok(())
@@ -4452,9 +4662,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "only an owner/admin can pin status posts".into(),
             ));
         }
-        if id.is_empty() {
+        if !valid_status_post_id(id) {
             return Err(AppError::Invalid(
-                "a status post with no id cannot be addressed".into(),
+                "a status post with a malformed id cannot be addressed".into(),
             ));
         }
         let Some(post) = self.statuses().into_iter().find(|m| m.id == id) else {
@@ -4466,7 +4676,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let id = id.to_string();
         self.sync
             .post(DocType::Status, STATUS_DOC, move |d| {
-                set_pin_in_doc(d, &id, pinned).map(|_| ())
+                set_status_pin_in_doc(d, &id, pinned).map(|_| ())
             })
             .await?;
         Ok(())
@@ -8979,6 +9189,132 @@ mod tests {
         assert_eq!(bob.statuses()[0].text, "we open at nine");
     }
 
+    #[test]
+    fn concurrent_first_status_posts_survive_a_merge() {
+        // Neither fork has seen a status container from the other. The legacy shared-list layout
+        // lost one side in precisely this case; disjoint root keys must preserve both posts.
+        let mut base = AutoCommit::new();
+        let mut alice = base.fork();
+        let mut bob = base.fork();
+        append_status_message(
+            &mut alice,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "alice",
+            "owner notice",
+            T0,
+        )
+        .unwrap();
+        append_status_message(
+            &mut bob,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "bob",
+            "member reply",
+            T0,
+        )
+        .unwrap();
+
+        alice.merge(&mut bob).unwrap();
+        assert_eq!(
+            read_status_messages(&alice)
+                .into_iter()
+                .map(|post| post.text)
+                .collect::<Vec<_>>(),
+            vec!["owner notice".to_string(), "member reply".to_string()]
+        );
+    }
+
+    #[test]
+    fn conflicting_legacy_status_lists_are_recovered_and_independently_mutable() {
+        let alice_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let bob_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut base = AutoCommit::new();
+        let mut alice = base.fork();
+        let mut bob = base.fork();
+        append_message(&mut alice, alice_id, "alice", "old notice", T0, "").unwrap();
+        append_message(&mut bob, bob_id, "bob", "old reply", T0, "").unwrap();
+        alice.merge(&mut bob).unwrap();
+        assert_eq!(read_status_messages(&alice).len(), 2);
+
+        for (id, text, reactor) in [
+            (alice_id, "updated notice", "carol"),
+            (bob_id, "updated reply", "dave"),
+        ] {
+            assert!(edit_status_message_in_doc(&mut alice, id, text, T0 + 1).unwrap());
+            assert!(toggle_status_reaction_in_doc(&mut alice, id, "ok", reactor).unwrap());
+            assert!(set_status_pin_in_doc(&mut alice, id, true).unwrap());
+        }
+        let posts = read_status_messages(&alice);
+        assert_eq!(posts.len(), 2);
+        assert!(posts.iter().all(|post| post.edited == T0 + 1));
+        assert!(posts.iter().all(|post| post.pinned));
+        assert_eq!(posts[0].text, "updated notice");
+        assert_eq!(posts[1].text, "updated reply");
+
+        assert!(delete_status_message_in_doc(&mut alice, alice_id).unwrap());
+        assert_eq!(read_status_messages(&alice)[0].id, bob_id);
+        assert!(delete_status_message_in_doc(&mut alice, bob_id).unwrap());
+        assert!(read_status_messages(&alice).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_status_id_is_hidden_and_every_public_mutation_fails_closed() {
+        let mut alice = founder();
+        alice.open_status().await.unwrap();
+        let id = "cccccccccccccccccccccccccccccccc";
+        alice
+            .sync
+            .post(DocType::Status, STATUS_DOC, |doc| {
+                append_message(doc, id, "alice", "legacy Alice post", T0, "")?;
+                append_status_message(doc, id, "bob", "keyed Bob post", T0)
+            })
+            .await
+            .unwrap();
+        assert!(
+            alice.statuses().is_empty(),
+            "an ambiguous id is not actionable UI state"
+        );
+
+        let before: Vec<ChatMessage> =
+            status_post_candidates(alice.sync.doc(DocType::Status, STATUS_DOC).unwrap().doc())
+                .unwrap()
+                .into_iter()
+                .map(|candidate| candidate.post)
+                .collect();
+        assert!(alice.edit_status(id, "changed").await.is_err());
+        assert!(alice.delete_status(id).await.is_err());
+        assert!(alice.toggle_status_reaction(id, "ok").await.is_err());
+        assert!(alice.set_status_pin(id, true).await.is_err());
+        let after: Vec<ChatMessage> =
+            status_post_candidates(alice.sync.doc(DocType::Status, STATUS_DOC).unwrap().doc())
+                .unwrap()
+                .into_iter()
+                .map(|candidate| candidate.post)
+                .collect();
+        assert_eq!(
+            after, before,
+            "authorization failure must leave both objects untouched"
+        );
+    }
+
+    #[test]
+    fn an_empty_keyed_status_id_is_inert() {
+        let mut doc = AutoCommit::new();
+        let msg = doc
+            .put_object(ROOT, STATUS_POST_PREFIX, ObjType::Map)
+            .unwrap();
+        doc.put(&msg, MSG_ID, "").unwrap();
+        doc.put(&msg, AUTHOR, "mallory").unwrap();
+        doc.put(&msg, TEXT, "unaddressable").unwrap();
+        doc.put(&msg, TS, T0 as i64).unwrap();
+
+        assert!(read_status_messages(&doc).is_empty());
+        assert!(!edit_status_message_in_doc(&mut doc, "", "changed", T0 + 1).unwrap());
+        assert!(!toggle_status_reaction_in_doc(&mut doc, "", "ok", "mallory").unwrap());
+        assert!(!set_status_pin_in_doc(&mut doc, "", true).unwrap());
+        assert!(!delete_status_message_in_doc(&mut doc, "").unwrap());
+        assert_eq!(str_field(&doc, &msg, TEXT), "unaddressable");
+    }
+
     #[tokio::test]
     async fn a_status_post_is_deleted_by_its_author_or_a_moderator_and_nobody_else() {
         let clock = ManualClock::new(T0);
@@ -9032,7 +9368,10 @@ mod tests {
         assert_eq!(feed[0].reactions[0].emoji, "🎉");
         assert_eq!(feed[0].reactions[0].by, vec![bob.my_fingerprint()]);
         drain_sync(&mut alice).await;
-        assert_eq!(alice.statuses()[0].reactions[0].by, vec![bob.my_fingerprint()]);
+        assert_eq!(
+            alice.statuses()[0].reactions[0].by,
+            vec![bob.my_fingerprint()]
+        );
 
         bob.toggle_status_reaction(&id, "🎉").await.unwrap();
         assert!(bob.statuses()[0].reactions.is_empty());

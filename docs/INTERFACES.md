@@ -461,7 +461,10 @@ ordered replay when the gap fills) · `past_keys` (BTreeMap `(DocType,doc_id,epo
 → `Zeroizing<[u8;32]>`, captured by `snapshot_epoch_keys` *before* each advance) ·
 `routing_secrets` (BTreeMap `L → Zeroizing<[u8;32]>`, `{L-2,L-1,L}`, the source of the
 blinded topics + namespaces) · **two-pool peers:** `known_peers` (untrusted candidates)
-vs `member_peers` (promoted via a verifying *signed* catch-up; preferred) · `catchup_queue`.
+vs `member_peers` (promoted via a verifying *signed* catch-up; preferred). Each transient
+`member_peers` entry retains the roster `DeviceId` that signed its request-bound response, so an
+MLS removal invalidates the departed signer's proof without discarding unaffected live peers ·
+`catchup_queue`.
 
 ---
 
@@ -534,6 +537,20 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
 Profile=9, Livery=10, Badges=11, Devices=12, ChannelIndex=13, Moderation=14`.
 Exporter context = `u16 tag ‖ u128 doc_id` (18 bytes, fixed-width → injective). `Routing` has no content
 doc; it feeds the **metadata** exporter label to derive the per-removal `ns_secret_L`.
+
+`Status` document compatibility is additive. Older posts remain maps in the root `messages` list.
+New posts are message-schema maps stored directly at distinct root keys
+`"status_post/" ‖ random_post_id`; readers and post mutators accept both layouts. The keyed layout
+avoids concurrent first authors independently creating conflicting `messages` list objects and
+silently hiding one branch after merge. Status readers enumerate **all** legacy `messages`
+conflicts with Automerge `get_all`, so an already-conflicted old feed recovers both branches.
+Addressable ids are exactly 32 lowercase hex characters and must resolve to exactly one object
+across both layouts; ambiguous/malformed keyed rows are hidden and mutations fail closed. Feed
+order is materialized deterministically by `(timestamp, post_id)`. The root `members_may_post`
+scalar remains the posting-policy field. Mixed-version limitation: older clients know only the
+legacy list and therefore do not display posts authored in the keyed layout; clients must upgrade
+to participate in the new status feed. New clients intentionally do not dual-write, because doing
+so would recreate both the container race and cross-layout id ambiguity.
 
 ---
 

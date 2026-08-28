@@ -23,7 +23,6 @@ use catcoms_net::{
 };
 use catcoms_rt::{
     Clock, Hub, MemNetwork, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock,
-    TransportEvent,
 };
 use catcoms_sync::{join_namespace, ChannelSync, SyncStats};
 use catcoms_wire::DocType;

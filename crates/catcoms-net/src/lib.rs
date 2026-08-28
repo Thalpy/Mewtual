@@ -3726,7 +3726,11 @@ impl Actor {
     }
 
     /// Dial an infra target under the strict one-connection-per-peer condition.
-    fn dial_infra(&mut self, target: libp2p::PeerId, addr: Multiaddr) -> catcoms_rt::DialSubmission {
+    fn dial_infra(
+        &mut self,
+        target: libp2p::PeerId,
+        addr: Multiaddr,
+    ) -> catcoms_rt::DialSubmission {
         if self.swarm.is_connected(&target) {
             tracing::trace!(%addr, peer = %target, "infra dial suppressed: already connected");
             return catcoms_rt::DialSubmission::Suppressed;
@@ -4667,7 +4671,10 @@ impl MeshService {
     ) -> Result<catcoms_rt::DialSubmission, TransportError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::Dial { addr, reply: Some(reply) })
+            .send(Command::Dial {
+                addr,
+                reply: Some(reply),
+            })
             .await
             .map_err(|_| TransportError::Closed)?;
         rx.await.map_err(|_| TransportError::Closed)
@@ -4871,7 +4878,10 @@ impl MeshHandle {
     ) -> Result<(), TransportError> {
         for address in addresses.iter().take(4) {
             self.cmd_tx
-                .send(Command::Dial { addr: address.clone(), reply: None })
+                .send(Command::Dial {
+                    addr: address.clone(),
+                    reply: None,
+                })
                 .await
                 .map_err(|_| TransportError::Closed)?;
         }
@@ -6379,10 +6389,21 @@ mod tests {
         .await
         .expect("a disconnected proof is rejected immediately");
         assert!(matches!(outcome, Err(TransportError::Unreachable(peer)) if peer == server_peer));
+        // Path detail is emitted after the aggregate disconnect edge, so an empty
+        // `ConnectionPathsChanged` may still be queued here. That refinement is not a redial; the
+        // contract this regression protects is that no new aggregate connection edge appears.
+        let reconnected = tokio::time::timeout(Duration::from_millis(150), async {
+            loop {
+                match client.next_event().await {
+                    Some(TransportEvent::PeerConnected(peer)) if peer == server_peer => break,
+                    Some(_) => continue,
+                    None => std::future::pending::<()>().await,
+                }
+            }
+        })
+        .await;
         assert!(
-            tokio::time::timeout(Duration::from_millis(150), client.next_event())
-                .await
-                .is_err(),
+            reconnected.is_err(),
             "the connected-only request must not reconnect from recent_peers"
         );
     }

@@ -15,17 +15,17 @@ heads the remote has confirmed (`their_heads`; the exact field/API to be confirm
 peer X** when X's confirmed heads causally include the op's change hash.
 
 So delivery is **derived from existing sync bookkeeping**; no receipts on the wire, no
-new doc, no new metadata anyone else can observe. A member who is offline learns nothing
-new about you; a member who is online was already exchanging sync heads with you.
+new doc, no new metadata anyone else can observe. A disconnected member learns nothing
+new about you; a member already exchanging sync state learns no additional metadata.
 
 ## States (per own message)
 
 - **sending**; op committed locally; no connected peer's heads include it yet.
-- **delivered n/m**; n of the m *currently reachable* members' heads include it. This is
-  deliberately phrased against reachable peers, not the full roster: "delivered 2/2" with
-  four members offline is the honest statement (the offline two will catch up via normal
+- **delivered n/m**; n of the m members whose self-asserted routes are connected here have heads
+  that include it. This is deliberately phrased against locally claimed paths, not the full roster:
+  "delivered 2/2" with four members disconnected is the honest statement (the others catch up via
   sync/snapshot, and the count rises if they reconnect during the session).
-- **queued; no peers reachable**; the eclipse-adjacent case; pairs with the existing
+- **queued; no proven member path**; the eclipse-adjacent case; pairs with the existing
   banner and status bar rather than inventing a new alarm.
 
 **No "read" state.** Read receipts are surveillance-adjacent metadata and would need new
@@ -47,7 +47,7 @@ they must be opt-in-per-server and symmetric (you only see read marks if you pub
 ## UI (kept minimal)
 
 A mono micro-line under one's **most recent** message only (matching the overhaul mock):
-`◌ sending…` / `✓ delivered · 3 peers` / `⚠ queued; no peers reachable`, in
+`◌ sending…` / `✓ delivered · 3 peers` / `⚠ queued; no proven member path`, in
 muted/ok/warn colours respectively. Older own messages show the state on hover (title
 attr) rather than a permanent line; density stays intact. The status bar's transfers
 segment pattern is the styling reference.
@@ -55,7 +55,7 @@ segment pattern is the styling reference.
 ## Phases
 
 - **D1 (sync)**: expose a query in `catcoms-sync`; for (doc, change-hash), the set of
-  peers whose confirmed heads include it; plus "reachable member count" already known to
+  peers whose confirmed heads include it; plus the claimed-route member count already known to
   the app layer. Read-only over existing state; confirm `their_heads` availability and
   restart semantics here.
 - **D2 (actor/bridge)**: per-channel "delivery snapshot for my recent messages" in the app
@@ -88,11 +88,11 @@ indistinguishable from one that never got it.** A quiet reader produces no confi
 | Verdict | Shown when |
 |---|---|
 | `pending` ◌ | the op has not been acknowledged locally yet |
-| `waiting` ◌ | sent, nobody has proved they hold it, and the node is connected to something |
+| `waiting` ◌ | sent, nobody has proved they hold it, and a live peer previously proved it could serve authenticated group catch-up |
 | `partial` ~ | at least one member proved it, but not all |
-| `reachable` ✓ | every currently-reachable member proved it |
+| `reachable` ✓ | every member whose self-asserted route is connected here proved it |
 | `everyone` ✓✓ | every other member of the roster proved it |
-| `queued` ✕ | nobody holds it **and** the node has no transport peer connected at all |
+| `queued` ✕ | nobody holds it **and** no live peer has previously served authenticated group catch-up |
 | *(nothing)* | alone in the group, or no report exists for a message that is not the newest |
 
 Three rules keep it honest, each of which was a real false alarm before it existed:
@@ -100,10 +100,13 @@ Three rules keep it honest, each of which was a real false alarm before it exist
 1. **Evidence outranks the network.** Any `delivered > 0` result can never be shown as a failure. A
    peer that confirmed and then dropped still holds the message; letting a connection flap repaint
    a delivered message red was the loudest version of this bug.
-2. **Red rests on `any_peer`, not on `reachable`.** `reachable` resolves live connections to member
-   fingerprints through signed peer records, so it reads zero whenever a record has not arrived yet
-   while ops gossip out perfectly well. `DeliveryState::any_peer` (from
-   `ChannelSync::has_connected_peer`) is the accurate liveness signal and is the only basis for ✕.
+2. **Infrastructure and descriptor claims are not delivery paths by themselves.** `reachable`
+   resolves live connections through each member's signed but self-asserted peer record; it is a
+   diagnostic count and can be wrong until reciprocal transport ownership proof exists. `any_peer`
+   is stricter: the live peer must already have answered a request-bound, roster-verified catch-up.
+   A bare relay/rendezvous socket or a member record merely claiming one therefore cannot suppress
+   the queued warning. This deliberately undercounts during bootstrap rather than declaring an
+   unproven transport able to carry group data.
 3. **A missing measurement is not a measurement.** `delivered`/`reachable` are `null` until the
    actor reports on a message, which is distinct from reporting zero. The actor keeps only
    `MAX_TRACKED_OWN_MESSAGES` (50) per channel, in memory, so after a restart older own messages

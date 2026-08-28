@@ -2625,12 +2625,13 @@
   let pendingSendNonce = 0;
   let members = $state(1);
   let roster = $state<Member[]>([]);
-  // Fingerprints of members reachable right now (a live connection): drives the roster's online
-  // dots + the online count. Refreshed with the roster and updated live by 'connectivity-changed'.
+  // Fingerprints whose signed-but-self-asserted peer id has a live connection here. This drives
+  // claimed-path diagnostics only; it is not proof that the member controls that transport or is
+  // personally online. Refreshed with the roster and updated by 'connectivity-changed'.
   let onlineMembers = $state<Set<string>>(new Set());
   // Per-member presence timing OBSERVED this session for the active server (wall-clock ms): when we
-  // saw a member come online / go offline. Only set on a transition we witnessed, so durations are
-  // honest (a member already online at load shows "Online" with no fabricated duration). Per-server.
+  // saw a claimed path connect/disconnect. Only set on a transition we witnessed, so durations are
+  // honest (a path already connected at load gets no fabricated duration). Per-server.
   let onlineSince = $state<Record<string, number>>({});
   let lastSeen = $state<Record<string, number>>({});
   // Ticks every 60s so relative presence times ("Last seen 5m ago") stay current without a reload.
@@ -2646,14 +2647,14 @@
   // The member column is split into an "online" then an "offline" group (the offline group is
   // omitted entirely when empty). Both are filtered by the roster search first. Companion
   // devices never appear top-level: they nest under their origin (multi-device M4), and a
-  // member counts as online when ANY of their devices is reachable.
+  // member enters the claimed-path group when ANY device claims a currently-live transport.
   let memberOnline = (m: Member) =>
     m.you ||
     onlineMembers.has(m.fingerprint) ||
     Object.entries(deviceMap).some(([fp, d]) => d.origin === m.fingerprint && onlineMembers.has(fp));
   let onlineRoster = $derived(filteredRoster.filter((m) => !deviceMap[m.fingerprint] && memberOnline(m)));
   let offlineRoster = $derived(filteredRoster.filter((m) => !deviceMap[m.fingerprint] && !memberOnline(m)));
-  // Members reachable right now (self always counts): the roster header's "N online".
+  // Claimed paths connected here (self always counts), for the roster's diagnostic count.
   let onlineCount = $derived(roster.filter((m) => m.you || onlineMembers.has(m.fingerprint)).length);
   // Compact mono abbreviation for a role badge in a narrow roster row (owner → OWN, admin → ADM).
   function roleAbbr(role: string): string {
@@ -2661,8 +2662,8 @@
   }
   let profiles = $state<Record<string, Prof>>({});
   let files = $state<UiFile[]>([]);
-  // Whether ≥1 peer is currently reachable to fetch missing chunks from (a soft availability hint;
-  // refreshed alongside the file list). Distinguishes "downloadable" from "no peers online".
+  // Whether ≥1 live peer previously proved it could serve authenticated catch-up (a conservative
+  // availability hint refreshed with the file list). This is stricter than `onlineMembers`.
   let hasPeers = $state(false);
   let uploading = $state(false);
   let folder = $state(""); // current folder in the Files tab
@@ -4342,16 +4343,16 @@
     if (h < 24) return `${h}h`;
     return `${Math.round(h / 24)}d`;
   }
-  // Presence is local transport evidence, never a claim that the person is online or offline on
-  // every path. Durations only appear for transitions observed during this session.
+  // Presence is a member's self-asserted peer id plus local transport evidence, never proof that
+  // the person controls that transport or is online. Durations only use observed transitions.
   function presenceText(fp: string, you: boolean): string {
     if (you) return "You";
     if (onlineMembers.has(fp)) {
       const since = onlineSince[fp];
-      return since ? `Connected here · ${relTime(nowTick - since)}` : "Connected here";
+      return since ? `Claimed path connected · ${relTime(nowTick - since)}` : "Claimed path connected";
     }
     const ls = lastSeen[fp];
-    return ls ? `Last connected here ${relTime(nowTick - ls)} ago` : "Not connected here";
+    return ls ? `Last claimed path ${relTime(nowTick - ls)} ago` : "No claimed path connected";
   }
   function fmtSize(n: number): string {
     if (n < 1024) return `${n} B`;
@@ -5824,7 +5825,7 @@
   const isPinned = (cid: string) => wikiPinned.has(cid.toLowerCase());
 
   // The availability of a file for the browser indicator: held locally / partially downloaded /
-  // fetchable from peers / no peers online: or actively downloading. Reactive (reads files,
+  // fetchable from a previously authenticated live peer / no proven path: or actively downloading. Reactive (reads files,
   // downloads, hasPeers). The colour conveys it; `label` is the status text.
   type Avail = { cls: string; icon: string; label: string };
   function availOf(f: UiFile): Avail {
@@ -5835,13 +5836,13 @@
     if (dl && (dl.status === "queued" || dl.status === "waiting"))
       return hasPeers
         ? { cls: "downloading", icon: "↓", label: "Waiting for source" }
-        : { cls: "offline", icon: "○", label: "No peers connected here" };
+        : { cls: "offline", icon: "○", label: "No proven member path" };
     if (f.total > 0 && f.held >= f.total)
       return { cls: "local", icon: "●", label: "On this device" };
     if (f.held > 0)
       return { cls: "partial", icon: "◐", label: `Partial ${f.held}/${f.total}` };
     if (hasPeers) return { cls: "remote", icon: "○", label: "Downloadable" };
-    return { cls: "offline", icon: "○", label: "No peers connected here" };
+    return { cls: "offline", icon: "○", label: "No proven member path" };
   }
   async function refreshStatuses() {
     const gen = viewGeneration;
@@ -8765,7 +8766,7 @@
 
   function transferConnected(t: TransferRow): boolean {
     if (t.direction === "upload" || t.status === "done") return true;
-    return onlineCount > 1 || t.done >= t.total ||
+    return hasPeers || t.done >= t.total ||
       (t.status === "downloading" && transferNow - t.updatedAt < 3_000);
   }
 
@@ -8801,7 +8802,7 @@
     const pct = Math.round(t.progress * 100);
     if (t.status === "done") return t.direction === "upload" ? "✓ Available" : "✓ Saved";
     if (t.status === "failed") {
-      return t.direction === "download" && onlineCount <= 1 ? "No connection" : "✕ Failed";
+      return t.direction === "download" && !hasPeers ? "No proven member path" : "✕ Failed";
     }
     if (t.direction === "upload") {
       if (t.status === "reading") return `Preparing ${pct}%`;
@@ -8823,7 +8824,7 @@
     if (t.direction === "download") {
       lines.push(`Data ready: ${formatBytes(t.bytesDone)} / ${formatBytes(t.bytesTotal)}`);
       if (t.savedPath) lines.push(`Saved to: ${t.savedPath}`);
-      lines.push(`Source: ${t.provider ? `${nameOf(t.provider)}${transferConnected(t) ? "" : " (last source; not connected here now)"}` : transferConnected(t) ? "finding a reachable member" : "no member connected"}`);
+      lines.push(`Source: ${t.provider ? `${nameOf(t.provider)}${transferConnected(t) ? "" : " (last source; no proven path now)"}` : transferConnected(t) ? "finding an authenticated source" : "no proven member path"}`);
       if (t.speed > 0 && t.status === "downloading") lines.push(`Speed: ${formatRate(t.speed)}`);
       if (t.heldBefore > 0) lines.push(`Already held when started: ${t.heldBefore} chunk${t.heldBefore === 1 ? "" : "s"}`);
     } else {
@@ -9610,7 +9611,7 @@
         targetFp,
         payload: b64enc(JSON.stringify(msg)),
       });
-      // The incident this whole section exists for: the roster shows the peer online and the
+      // The incident this whole section exists for: the roster shows a claimed path and the
       // transport has nowhere to send to. A run of these is a call that is about to die, and it
       // used to be a console.warn nobody had open.
       if (!delivered) {
@@ -15074,7 +15075,7 @@
   {#each Object.entries(deviceMap).filter(([, d]) => d.origin === originFp) as [cfp, d] (cfp)}
     {@const conline = onlineMembers.has(cfp)}
     <li class="member-row companion" title={cfp}>
-      <span class="presence" class:online={conline} title={conline ? "Device connected here" : "Device not connected here"}>●</span>
+      <span class="presence" class:online={conline} title={conline ? "Device's claimed path is connected" : "No claimed device path is connected"}>●</span>
       <span class="dev-tag">· {d.name}</span>
     </li>
   {/each}
@@ -18019,7 +18020,7 @@
                 <div><h3>Pinned by the wiki</h3><p class="muted small">{storageHealth.pinned_files} unique file{storageHealth.pinned_files === 1 ? "" : "s"} · {fmtSize(storageHealth.pinned_local_estimated_bytes)} local estimate · {fmtSize(storageHealth.pinned_logical_bytes)} logical. Wiki embeds are retained regardless of their circulation date.</p></div>
               </section>
               <section class="repair-card">
-                <div><h3>Authenticated repair</h3><p class="muted small">Re-fetches only missing or unreadable CIDs. A peer signs the response and the bytes must hash to the requested address before they replace a corrupt local record.</p><span class:ok-t={storageHealth.has_peers} class:fail-t={!storageHealth.has_peers}>{storageHealth.has_peers ? "A member was connected at check time" : "No member was connected at check time"}</span></div>
+                <div><h3>Authenticated repair</h3><p class="muted small">Re-fetches only missing or unreadable CIDs. A peer signs the response and the bytes must hash to the requested address before they replace a corrupt local record.</p><span class:ok-t={storageHealth.has_peers} class:fail-t={!storageHealth.has_peers}>{storageHealth.has_peers ? "A proven member path was live at check time" : "No proven member path was live at check time"}</span></div>
                 <button disabled={storageRepairing || (!storageHealth.missing_chunks && !storageHealth.unreadable_chunks)} onclick={repairStorage}>{storageRepairing ? "Repairing…" : "Repair now"}</button>
               </section>
               {#if storageRepairNote}<p class="storage-note">{storageRepairNote}</p>{/if}
@@ -18036,7 +18037,7 @@
               <header>
                 <div>
                   <h3 id="connection-member-health-title">MEMBER PATHS</h3>
-                  <p class="muted small">What this device can currently reach, how the path runs, and safe next actions. “Not connected here” never means the person is offline.</p>
+                  <p class="muted small">What this device can currently reach, how the path runs, and safe next actions. “No claimed path” never means the person is offline.</p>
                 </div>
                 {#if memberRoutesUnavailable}
                   <span class="hosting-state" data-ready={false}>SNAPSHOT UNAVAILABLE</span>
@@ -18149,7 +18150,7 @@
               <header>
                 <div>
                   <h3 id="connection-hosting-title">GROUP HOSTING</h3>
-                  <p><b>{Math.max(onlineCount - 1, 0)}</b> of <b>{Math.max(members - 1, 0)}</b> other members are connected now.</p>
+                  <p><b>{Math.max(onlineCount - 1, 0)}</b> of <b>{Math.max(members - 1, 0)}</b> other members claim a peer connected here now.</p>
                 </div>
                 <span class="hosting-state" data-ready={(switchboardStatus?.online.length ?? 0) > 0}>{switchboardStatus?.online.length ?? 0} SWITCHBOARD{switchboardStatus?.online.length === 1 ? "" : "S"} ONLINE</span>
               </header>
@@ -18832,7 +18833,7 @@
 
       {#if !dmHome && cur && !cur.isDm}
         <aside class="members-col" aria-label="Members">
-          <h3><span>Members · {onlineCount}/{members}</span></h3>
+          <h3><span>Members · {onlineCount}/{members} claimed here</span></h3>
           {#if roster.length > 6}
             <input class="list-search" bind:value={rosterFilter} placeholder="Search members…" />
           {/if}
@@ -18840,7 +18841,7 @@
             <p class="muted small">{groupLoading ? "Loading members…" : rosterFilter.trim() ? "No matching members." : "No members to show."}</p>
           {/if}
           {#if onlineRoster.length}
-            <h3><span>connected here: {onlineRoster.length}</span></h3>
+            <h3><span>claimed path connected: {onlineRoster.length}</span></h3>
             <ul>
               {#each onlineRoster as m (m.fingerprint)}
                 {@render memberRow(m, true)}
@@ -18849,7 +18850,7 @@
             </ul>
           {/if}
           {#if offlineRoster.length}
-            <h3><span>not connected here: {offlineRoster.length}</span></h3>
+            <h3><span>no claimed path: {offlineRoster.length}</span></h3>
             <ul>
               {#each offlineRoster as m (m.fingerprint)}
                 {@render memberRow(m, false)}
@@ -18865,7 +18866,7 @@
     <footer class="statusbar">
       <span class="seg"><span class="sb-dot"></span><span class="ok-t">node online</span></span>
       {#if cur && !dmHome && !inboxView}
-        <span class="seg">peers <span><span class="ok-t">{Math.max(onlineCount - 1, 0)}</span>/{Math.max(members - 1, 0)}</span></span>
+        <span class="seg">claimed paths <span><span class="ok-t">{Math.max(onlineCount - 1, 0)}</span>/{Math.max(members - 1, 0)}</span></span>
       {/if}
       <button class="seg sb-lock" title="Lock now (Ctrl+L): clears everything on screen and asks for your passphrase again. The node stays online." onclick={lockScreen}>
         {@render icoLock()} vault <span class="ok-t">unlocked</span>
@@ -19404,7 +19405,7 @@
                     {@const b = badges[fp]}
                     <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""} title="Badge assigned by a server admin">{b.label}</span>
                   {/if}
-                  <span class="muted small">{fp === myFp || onlineMembers.has(fp) ? "connected here" : "not connected here"}</span>
+                  <span class="muted small">{fp === myFp ? "this device" : onlineMembers.has(fp) ? "claimed path connected" : "no claimed path"}</span>
                 </div>
               </div>
             </div>
@@ -19659,7 +19660,7 @@
                 class:sp-search-dim={!!spaceSearch && !spaceSearchMatches.some((s) => s.id === it.s.id)}
                 style={`left:${spaceVw / 2 + it.x}px; top:${spaceVh / 2 + it.y}px; --sp-s:${it.scale.toFixed(3)}; --sp-delay:${-((it.s.id % 13) * 0.17).toFixed(2)}s;${spaceAccents[it.s.id] ? ` --sp-a:${spaceAccents[it.s.id]};` : ""}`}
                 data-name={it.s.name}
-                title={`${it.s.name} · ${online} connected here${mentions ? ` · ${mentions} mention${mentions === 1 ? "" : "s"}` : ""}${voice ? ` · ${voice} in voice` : ""}${heralds ? ` · ${heralds} unread announcement${heralds === 1 ? "" : "s"}` : ""}`}
+                title={`${it.s.name} · ${online} claimed path${online === 1 ? "" : "s"} here${mentions ? ` · ${mentions} mention${mentions === 1 ? "" : "s"}` : ""}${voice ? ` · ${voice} in voice` : ""}${heralds ? ` · ${heralds} unread announcement${heralds === 1 ? "" : "s"}` : ""}`}
                 onpointerdown={(e) => onSpaceServerDown(e, it.s.id)}
                 onclick={() => spaceIconClick(it.s.id)}
                 onmouseenter={() => (spaceHeraldHover = it.s.id)}
@@ -19675,7 +19676,7 @@
                   <span class="rail-badge">{it.s.unread.length}</span>
                 {/if}
                 {#if online > 1}
-                  <span class="sp-orbiters" aria-label={`${online} connected here`}>
+                  <span class="sp-orbiters" aria-label={`${online} claimed paths here`}>
                     {#each Array(Math.min(8, online - 1)) as _, i}<i style={`--sp-dot:${i}; --sp-dots:${Math.min(8, online - 1)}`}></i>{/each}
                     {#if online > 9}<b>+{online - 9}</b>{/if}
                   </span>
@@ -21211,7 +21212,7 @@
                       {@render nameTag(d.origin)}
                       <span class="dev-tag">· {d.name}</span>
                       <span class="fp small">{cfp.slice(0, 8)}</span>
-                      <span class="muted small">{onlineMembers.has(cfp) ? "connected here" : "not connected here"}</span>
+                      <span class="muted small">{onlineMembers.has(cfp) ? "claimed path connected" : "no claimed path"}</span>
                       {#if d.origin === myFp}
                         {#if confirmRevokeFp === cfp}
                           <button class="ghost small danger-btn" onclick={() => revokeDevice(cfp)}>Confirm revoke</button>

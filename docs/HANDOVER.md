@@ -338,11 +338,20 @@ addressed reciprocal/helper protocol and actor cancellation/replay state, SWIM-s
 probes, HyParView/CYCLON active/passive maintenance, manual fallback redial, and TTL-aware
 rendezvous scheduling; see the checked backlog in `design-postjoin-discovery.md`.
 
-> **Connectivity terminology note:** current UI and diagnostics report this node's observed
-> **connected here / not connected here**, never proof that a person is online or globally
-> reachable. This supersedes the older roadmap row's “online dots/count”, “no peers online”, and
-> “Online / Last seen” wording; read those as “connected-here dots/count”, “no claimed peer
-> connected here”, and “Connected here / Last connected here”.
+> **Connectivity terminology note:** current UI and diagnostics report a member's self-asserted
+> peer as **claimed path connected / no claimed path**, never proof that the device key controls
+> that transport, that a person is online, or that they are globally reachable. Operational file
+> and delivery availability is stricter: the live peer must previously have served a
+> roster-verified, request-bound catch-up. This supersedes the older roadmap row's “online
+> dots/count”, “no peers online”, and “Online / Last seen” wording.
+
+Status posts now use distinct `status_post/<random-id>` root maps rather than requiring concurrent
+authors to share/create one Automerge list. Readers and all mutations enumerate every legacy list
+conflict, so already-split old feeds recover while simultaneous new posts converge. IDs must be one
+canonical 128-bit lowercase-hex value resolving to exactly one object across both layouts;
+ambiguous/malformed rows are hidden and non-actionable. Older clients do not understand newly keyed
+posts, so status-feed participants must upgrade rather than relying on mixed-version visibility.
+See `INTERFACES.md` §8 for the persistence contract.
 
 ### Earlier blocks (history)
 6d-1b (missed-commit recovery + past-epoch key window) and 6d-2 (fork resolution +
@@ -389,7 +398,9 @@ routing secret `ns_secret_L`:
   auto-dialed**; the dial decision (and eclipse-resistance) lives a layer up.
 - **Source trust (3d-5, done).** Commit catch-up responses are now **signed** by the
   responder's MLS leaf key, bound to the request; a **two-pool** model separates
-  untrusted candidates from verified `member_peers`. **Closed Sybil-C1.**
+  untrusted candidates from verified `member_peers`. Each session proof retains the
+  signing roster `DeviceId`, so removal drops only departed devices' proofs and does not
+  strand unaffected continuously-connected members. **Closed Sybil-C1.**
 
 **Eclipse-resistance (3d-6…9, done, each adversarially reviewed):**
 - **3d-6**; pure `catcoms-discovery` `DiscoveryPolicy` (rank candidates → bounded,

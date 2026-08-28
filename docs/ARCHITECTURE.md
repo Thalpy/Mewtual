@@ -126,8 +126,8 @@ is broken. The load-bearing fixes:
   edges they dequeue into a bounded final-state handoff, which the new sync owner adopts once;
   ordinary pre-owner connection waits use a non-consuming watch. Connectivity exposes typed
   claimed-peer health/actions, refreshes on path changes even when aggregate presence
-  is unchanged (plus a bounded visible-view refresh for time-derived expiry), and says “not
-  connected here,” never “offline.” Dial counters describe scheduler submissions/cooldown, not
+  is unchanged (plus a bounded visible-view refresh for time-derived expiry), and says “no claimed
+  path,” never “offline.” Dial counters describe scheduler submissions/cooldown, not
   unobserved per-address failures, and IPv6 candidate shape is not presented as an outbound-route
   test. A
   signed peer record is still a self-asserted device-to-transport binding, so this evidence is not

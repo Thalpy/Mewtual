@@ -1451,11 +1451,7 @@ mod tests {
             b"prefix",
             CanonicalDialPeer(phase0(PEER_A)),
         );
-        let permits = scheduler.reserve_permits(
-            b"server",
-            std::slice::from_ref(&endpoint),
-            &clock,
-        );
+        let permits = scheduler.reserve_permits(b"server", std::slice::from_ref(&endpoint), &clock);
         assert_eq!(permits.len(), 1);
         assert_eq!(permits[0].address(), "route");
         assert!(scheduler
