@@ -8,6 +8,12 @@ binary="$(pwd)/target/debug/catcomsctl"
 artifacts="$(pwd)/target/two-client-netns"
 server_port=41000
 relay_port=41001
+# A globally-routable-shaped address that exists only in a throwaway namespace in relay-only runs.
+# The production relay correctly refuses RFC 2544's 198.18.0.0/15 as an advertised endpoint, so
+# the acceptance topology needs a distinct simulated public listener rather than weakening that
+# safety check. The root namespace must never own this address or a route to it: it represents a
+# real Internet destination outside this test and must not capture unrelated runner traffic.
+simulated_relay_public="45.79.12.34"
 
 usage() {
   cat <<EOF
@@ -53,6 +59,7 @@ alice_ns="${run_id}-alice"
 bob_ns="${run_id}-bob"
 alice_router="${run_id}-ra"
 bob_router="${run_id}-rb"
+relay_ns="${run_id}-relay"
 bridge="mwbr$(( $$ % 100000 ))"
 alice_pid=""
 relay_pid=""
@@ -76,6 +83,7 @@ cleanup() {
   ip netns del "$bob_ns" 2>/dev/null
   ip netns del "$alice_router" 2>/dev/null
   ip netns del "$bob_router" 2>/dev/null
+  ip netns del "$relay_ns" 2>/dev/null
   ip link del "$bridge" 2>/dev/null
   if [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]]; then
     chown -R "$SUDO_UID:$SUDO_GID" "$artifacts" 2>/dev/null
@@ -188,7 +196,44 @@ relay_arg=()
 host_arg="198.18.0.10"
 if [[ "$scenario" == "relay-only" ]]; then
   # No inbound DNAT is used by the invite. The server reserves a circuit on a public relay.
-  stdbuf -oL "$binary" relay --port "$relay_port" --host 198.18.0.1 >"$relay_log" 2>&1 &
+  # Give that relay its own bridge-attached namespace so the public-shaped /32 never enters the
+  # root namespace's local route table. Each simulated router receives an explicit on-link route;
+  # the relay receives only the return route to this topology's RFC 2544 segment.
+  if ip -o addr show | grep -Fq "$simulated_relay_public/" \
+    || ip route show table local | grep -Fq "$simulated_relay_public"; then
+    echo "topology invalid: root namespace already owns or locally routes $simulated_relay_public" >&2
+    exit 1
+  fi
+  ip netns add "$relay_ns"
+  ip -n "$relay_ns" link set lo up
+  ip link add "${iface}rl" type veth peer name "${iface}rh"
+  ip link set "${iface}rl" netns "$relay_ns"
+  ip link set "${iface}rh" master "$bridge"
+  ip link set "${iface}rh" up
+  ip -n "$relay_ns" addr add "$simulated_relay_public/32" dev "${iface}rl"
+  ip -n "$relay_ns" link set "${iface}rl" up
+  ip -n "$relay_ns" route add 198.18.0.0/24 dev "${iface}rl"
+  ip -n "$alice_router" route add "$simulated_relay_public/32" dev "${iface}raw"
+  ip -n "$bob_router" route add "$simulated_relay_public/32" dev "${iface}rbw"
+
+  # Pin the isolation property as part of the acceptance test. Future topology edits must not
+  # accidentally move this public-shaped address back into the runner's root namespace.
+  if ip -o addr show | grep -Fq "$simulated_relay_public/" \
+    || ip route show table local | grep -Fq "$simulated_relay_public"; then
+    echo "topology invalid: simulated relay escaped into the root namespace" >&2
+    exit 1
+  fi
+
+  # Fail before starting the product if either NATed client cannot reach the isolated relay host.
+  for client in "$alice_ns" "$bob_ns"; do
+    ip netns exec "$client" ping -c 1 -W 1 "$simulated_relay_public" >/dev/null || {
+      echo "topology invalid: $client cannot reach the simulated relay" >&2
+      exit 1
+    }
+  done
+
+  ip netns exec "$relay_ns" stdbuf -oL "$binary" relay \
+    --port "$relay_port" --host "$simulated_relay_public" >"$relay_log" 2>&1 &
   relay_pid=$!
   relay_peer=""
   for _ in $(seq 1 200); do
@@ -198,7 +243,7 @@ if [[ "$scenario" == "relay-only" ]]; then
     sleep 0.05
   done
   [[ -n "$relay_peer" ]] || { echo "timed out reading relay identity; see $relay_log" >&2; exit 1; }
-  relay_arg=(--relay "/ip4/198.18.0.1/tcp/$relay_port/p2p/$relay_peer")
+  relay_arg=(--relay "/ip4/$simulated_relay_public/tcp/$relay_port/p2p/$relay_peer")
   host_arg="192.0.2.1"
 fi
 
