@@ -11609,71 +11609,153 @@ struct SavedReport {
     review: Vec<String>,
 }
 
-/// Validate the exact bytes about to leave the process and return the non-blocking categories the
-/// reader should review. This deliberately lives at the native write boundary: a compromised or
-/// stale webview must not be able to bypass it by invoking the command directly.
+use catcoms_diagnostics::export::ExportPurpose;
+
+/// Validate the exact bytes about to leave the process and return what the reader should review.
+///
+/// Deliberately native: a compromised or stale webview must not be able to bypass the check by
+/// invoking the command directly, and the capture mode consulted is the real one rather than
+/// whatever the frontend believes.
 fn validate_report_for_save(text: &str) -> Result<Vec<String>, String> {
-    validate_report_for_mode(text, catcoms_log::hub().mode())
+    validate_report_for_mode(text, catcoms_log::hub().mode(), ExportPurpose::Local)
+}
+
+/// Where the caller says these bytes are going. Anything unrecognised is treated as publishing,
+/// so a typo fails closed rather than quietly downgrading the check.
+fn export_purpose(purpose: &str) -> ExportPurpose {
+    match purpose {
+        "local" => ExportPurpose::Local,
+        _ => ExportPurpose::Publish,
+    }
 }
 
 fn validate_report_for_mode(
     text: &str,
     mode: catcoms_diagnostics::CaptureMode,
+    purpose: ExportPurpose,
 ) -> Result<Vec<String>, String> {
     let report = catcoms_diagnostics::export::validate_export(text, mode);
-    if report.blocked() {
-        let mut blocked: Vec<String> = report
-            .findings
-            .iter()
-            .filter(|finding| finding.category.blocks())
-            .map(|finding| format!("{} at line {}", finding.category.as_str(), finding.line))
-            .collect();
-        blocked.sort();
-        blocked.dedup();
+    // One row per category with a count, never one per finding. Reported verbatim this filled the
+    // window with several hundred `opaque_blob at line N` entries and told the reader nothing they
+    // could act on. The line numbers stay in the report for anyone who wants to jump to one.
+    let say = |rows: Vec<(catcoms_diagnostics::export::Category, usize)>| -> Vec<String> {
+        rows.into_iter()
+            .map(|(category, lines)| format!("{} ({lines})", category.as_str()))
+            .collect()
+    };
+    // Saving or copying is never refused. The report goes into the same folder as the log it was
+    // drawn from, so refusing to write it guards nothing, and refusing on every category is what
+    // made the first Save of a real session fail: the un-migrated networking prose narrates every
+    // address and peer id it sees, which is hundreds of findings in an ordinary report.
+    //
+    // Publishing is the boundary the review was about, in its words: "the planned next stage is
+    // GitHub issue submission. A false 'safe' label turns a local diagnostic failure into a public
+    // disclosure." An interruption is worth it there, because that one cannot be taken back.
+    if report.blocked(purpose) {
         return Err(format!(
-            "privacy check refused the report: {}. Turn on redaction, review the named lines, and try again",
-            blocked.join(", ")
+            "this report is not safe to post: it contains {}. Turn on redaction, or save it and read it first",
+            say(report.refusals(purpose)).join(", ")
         ));
     }
-    Ok(report
-        .categories()
-        .into_iter()
-        .map(|category| category.as_str().to_string())
-        .collect())
+    Ok(say(report.disclosure()))
 }
 
 #[cfg(test)]
 mod report_validation_tests {
-    use super::validate_report_for_mode;
+    use super::{export_purpose, validate_report_for_mode};
+    use catcoms_diagnostics::export::ExportPurpose;
     use catcoms_diagnostics::CaptureMode;
 
+    /// Saving and copying, the two purposes that never leave this machine.
+    fn saving(text: &str, mode: CaptureMode) -> Result<Vec<String>, String> {
+        validate_report_for_mode(text, mode, ExportPurpose::Local)
+    }
+
+    /// A caller that names no recognised purpose is treated as publishing.
+    ///
+    /// Fail closed: a typo or an older webview must not be able to downgrade the check by asking
+    /// for a purpose this build has never heard of.
     #[test]
-    fn saved_reports_refuse_known_sensitive_shapes() {
-        let error = validate_report_for_mode(
+    fn an_unrecognised_purpose_is_treated_as_publishing() {
+        assert_eq!(export_purpose("local"), ExportPurpose::Local);
+        assert_eq!(export_purpose("publish"), ExportPurpose::Publish);
+        assert_eq!(export_purpose(""), ExportPurpose::Publish);
+        assert_eq!(export_purpose("locl"), ExportPurpose::Publish);
+    }
+
+    /// Posting a report that carries an account path is refused, and says why without echoing it.
+    #[test]
+    fn publishing_refuses_what_saving_allows() {
+        let text = "Mewtual report\nerror at C:\\Users\\private\\vault.db\n";
+        let error = validate_report_for_mode(text, CaptureMode::Safe, ExportPurpose::Publish)
+            .expect_err("a local account path must not be posted in public");
+        assert!(error.contains("local_path (1)"), "{error}");
+        assert!(
+            !error.contains("C:\\Users"),
+            "the refusal must not echo the text it is refusing"
+        );
+    }
+
+    /// Saving discloses; it does not refuse.
+    ///
+    /// This asserted the opposite and shipped a Save button that could not save. The log the
+    /// report is drawn from is already in the same folder, so refusing to write the report guards
+    /// nothing, and every ordinary session trips the scanners because the un-migrated networking
+    /// prose narrates addresses and peer ids by the hundred.
+    #[test]
+    fn saving_names_what_is_in_the_report_instead_of_refusing_it() {
+        let review = saving(
             "Mewtual report\nerror at C:\\Users\\private\\vault.db\n",
             CaptureMode::Safe,
         )
-        .expect_err("a local account path must block export");
-        assert!(error.contains("local_path at line 2"));
+        .expect("writing to the user's own log folder is not disclosure");
+        assert_eq!(review, vec!["local_path (1)"]);
         assert!(
-            !error.contains("C:\\Users"),
-            "the refusal must not echo the secret text"
+            !review.iter().any(|row| row.contains("C:\\Users")),
+            "the disclosure must not echo the text it is describing"
         );
     }
 
     #[test]
     fn raw_addresses_follow_the_native_capture_mode() {
         let text = "route 203.0.113.9:443";
-        assert!(validate_report_for_mode(text, CaptureMode::Safe).is_err());
-        assert!(validate_report_for_mode(text, CaptureMode::Enhanced).is_ok());
+        assert_eq!(
+            saving(text, CaptureMode::Safe).unwrap(),
+            vec!["raw_address (1)"],
+            "safe capture promised no literal addresses, so the report says it has one"
+        );
+        assert!(
+            saving(text, CaptureMode::Enhanced).unwrap().is_empty(),
+            "enhanced was asked for addresses, so one is nothing to report"
+        );
     }
 
     #[test]
     fn legacy_bridged_prose_requires_review_but_does_not_force_a_bypass() {
         let review =
-            validate_report_for_mode("LOG.TRACING.EVENT outcome=failed", CaptureMode::Safe)
+            saving("LOG.TRACING.EVENT outcome=failed", CaptureMode::Safe)
                 .expect("legacy prose without a concrete sensitive shape remains exportable");
-        assert_eq!(review, vec!["bridged_prose"]);
+        assert_eq!(review, vec!["bridged_prose (1)"]);
+    }
+
+    /// The report from the screenshot: hundreds of findings, and a Save that has to work.
+    #[test]
+    fn a_real_session_log_saves_and_is_summarised_rather_than_enumerated() {
+        let mut body = String::from("Mewtual report\n");
+        for at in 0..200 {
+            body.push_str(&format!(
+                "LOG.TRACING.EVENT message=dialling 198.51.100.{} peer=12D3KooWQ9xTvR4bKdL2sWpAmN7zYcEfGh{:02}\n",
+                at % 250,
+                at % 100,
+            ));
+        }
+        let review =
+            saving(&body, CaptureMode::Safe).expect("a real session's own log must be savable");
+        assert!(
+            review.len() <= 4,
+            "the user gets a few counted rows, not one line per finding: {review:?}"
+        );
+        assert!(review.iter().any(|row| row.starts_with("raw_address (")));
     }
 }
 
@@ -11688,6 +11770,7 @@ struct ReportValidation {
 async fn validate_diagnostics_report(
     state: State<'_, AppState>,
     text: String,
+    purpose: String,
 ) -> Result<ReportValidation, String> {
     require_unlocked_session(&state).await?;
     if text.len() > MAX_REPORT_BYTES {
@@ -11697,7 +11780,11 @@ async fn validate_diagnostics_report(
         ));
     }
     Ok(ReportValidation {
-        review: validate_report_for_save(&text)?,
+        review: validate_report_for_mode(
+            &text,
+            catcoms_log::hub().mode(),
+            export_purpose(&purpose),
+        )?,
     })
 }
 

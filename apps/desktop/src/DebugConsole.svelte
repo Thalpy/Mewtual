@@ -500,11 +500,14 @@
     saved = "";
     try {
       const report = await buildReport(false);
+      // The clipboard is still this machine. What the check owes here is an account of what was
+      // copied, not a refusal: the log it came from is already on this disk.
       const checked = await invoke<{ review: string[] }>("validate_diagnostics_report", {
         text: report,
+        purpose: "local",
       });
       await copy("report", report);
-      if (checked.review.length) saved = `copied · review ${checked.review.join(", ")}`;
+      if (checked.review.length) saved = `copied · contains ${checked.review.join(", ")}`;
     } catch (e) {
       saved = `could not copy: ${String(e)}`;
     }
@@ -514,8 +517,12 @@
     saved = "";
     try {
       const report = await buildReport(true);
+      // This one leaves the machine for a public issue tracker, so the check refuses rather than
+      // reports. It throws, which lands in the catch below and stops the browser ever opening: a
+      // report that should not be posted must not reach a form somebody can submit by reflex.
       const checked = await invoke<{ review: string[] }>("validate_diagnostics_report", {
         text: report,
+        purpose: "publish",
       });
       const issue = buildFeedbackIssue(
         "bug",
@@ -552,8 +559,9 @@
       const written = await invoke<{ file: string; bytes: number; review: string[] }>("save_diagnostics_report", {
         text: report,
       });
+      // "contains", not "review": the file is written either way, and this says what is in it.
       saved = written.review.length
-        ? `${written.file} · review ${written.review.join(", ")}`
+        ? `${written.file} · contains ${written.review.join(", ")}`
         : written.file;
     } catch (e) {
       saved = `could not save: ${String(e)}`;

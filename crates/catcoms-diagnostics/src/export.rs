@@ -27,6 +27,19 @@
 //! which is a weaker and more honest statement than "safe to share", and the wording the user
 //! sees should stay weaker too.
 //!
+//! # Finding something is not the same as refusing
+//!
+//! Reading a report and deciding what to do about it are separate, and conflating them broke the
+//! feature outright: refusing on every category meant the first Save in a real session failed with
+//! several hundred findings, because the networking layer's un-migrated `tracing` prose narrates
+//! every address and peer id it sees. Those are the ordinary contents of today's log, not
+//! escapes.
+//!
+//! So [`ExportPurpose`] decides. Writing a file into the user's own log folder is not disclosure
+//! and nothing refuses it; what it owes the user is [`Report::disclosure`], an honest account of
+//! what they are holding. Sending the same bytes somewhere public is the boundary the review was
+//! about, and there a finding refuses.
+//!
 //! [`SessionRef`]: crate::redact::SessionRef
 //! [`SafeValue::Outcome`]: crate::redact::SafeValue::Outcome
 //! [`AddressValue`]: crate::redact::AddressValue
@@ -88,16 +101,42 @@ impl Category {
         }
     }
 
-    /// Whether a finding of this kind must stop an export rather than annotate it.
+    /// Whether a finding of this kind must stop an export for a given purpose.
     ///
-    /// [`Category::BridgedProse`] is the deliberate exception. It marks lines whose prose was
-    /// never constrained, which today is a large share of them; blocking on it would block almost
-    /// every report and teach people to bypass the check, which is worse than reporting it. When
-    /// such a line does contain something specific, the scanners below catch that specifically and
-    /// that finding blocks on its own merits.
-    pub fn blocks(self) -> bool {
-        !matches!(self, Category::BridgedProse)
+    /// The purpose is the whole question, and getting it wrong made the feature unusable. Refusing
+    /// every category made the very first Save fail with a wall of several hundred findings: the
+    /// `tracing` prose this crate has not migrated yet is written by the networking layer, which
+    /// narrates every address and peer id it sees, so raw addresses and long identifiers are not
+    /// escapes from the type system at all. They are the ordinary state of the log today, and a
+    /// check that refuses the ordinary case is one people learn to bypass.
+    ///
+    /// [`Category::BridgedProse`] never refuses. It marks the un-migrated lines rather than
+    /// anything spotted in them, and its value is as a measure of how far the migration has got.
+    pub fn refuses(self, purpose: ExportPurpose) -> bool {
+        match purpose {
+            ExportPurpose::Local => false,
+            ExportPurpose::Publish => !matches!(self, Category::BridgedProse),
+        }
     }
+}
+
+/// Where a rendered report is about to go, which is what decides whether a finding refuses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportPurpose {
+    /// Written to a file on this machine, or put on this machine's clipboard.
+    ///
+    /// Nothing refuses this. Saving a report into the log folder is not disclosure: it is drawn
+    /// from a log file already sitting on the same disk, so refusing to write it protects nobody
+    /// and costs the user the diagnostic they came for. What this purpose owes them is an honest
+    /// account of what the file contains, which is [`Report::disclosure`].
+    Local,
+    /// Sent somewhere the user does not control: an issue tracker, a paste site, a chat.
+    ///
+    /// This is the boundary the review was actually about. Its words: "the planned next stage is
+    /// GitHub issue submission. A false 'safe' label turns a local diagnostic failure into a
+    /// public disclosure." Refusing here is worth an interruption because the alternative cannot
+    /// be taken back.
+    Publish,
 }
 
 /// One thing spotted, and where.
@@ -121,9 +160,33 @@ pub struct Report {
 }
 
 impl Report {
-    /// Whether this report must not be exported without a deliberate override.
-    pub fn blocked(&self) -> bool {
-        self.findings.iter().any(|f| f.category.blocks())
+    /// Whether this report must not leave for `purpose` without a deliberate override.
+    pub fn blocked(&self, purpose: ExportPurpose) -> bool {
+        self.findings.iter().any(|f| f.category.refuses(purpose))
+    }
+
+    /// The categories that would refuse `purpose`, each with how many lines carry it.
+    pub fn refusals(&self, purpose: ExportPurpose) -> Vec<(Category, usize)> {
+        self.disclosure()
+            .into_iter()
+            .filter(|(category, _)| category.refuses(purpose))
+            .collect()
+    }
+
+    /// What is in this report, aggregated: one row per category with a line count.
+    ///
+    /// Aggregated because the per-finding list is unreadable at real sizes. Reported verbatim, a
+    /// live session produced several hundred entries of `opaque_blob at line N`, which filled the
+    /// window and told the reader nothing they could act on. A count per category is the same
+    /// information at a size somebody will actually read, and the line numbers remain in
+    /// [`Report::findings`] for anyone who wants to jump to one.
+    ///
+    /// Ordered by [`Category`]'s own declaration order, so the sharper categories lead.
+    pub fn disclosure(&self) -> Vec<(Category, usize)> {
+        self.categories()
+            .into_iter()
+            .map(|category| (category, self.count(category)))
+            .collect()
     }
 
     /// The distinct categories present, in a stable order.
@@ -609,7 +672,7 @@ mod tests {
                 for rendered in both_renderings(&event, CaptureMode::Safe) {
                     let report = validate_export(&rendered, CaptureMode::Safe);
                     assert!(
-                        report.blocked(),
+                        report.blocked(ExportPurpose::Publish),
                         "{name} reached a safe report unnoticed: {rendered}"
                     );
                 }
@@ -625,9 +688,9 @@ mod tests {
         let rendered = event_line(&event, CaptureMode::Safe);
         let report = validate_export(&rendered, CaptureMode::Safe);
         assert_eq!(report.count(Category::BridgedProse), 1);
-        // Suspicion alone does not block. Today most lines are bridged, and a check that blocks
-        // every report is a check people learn to bypass.
-        assert!(!report.blocked());
+        // Suspicion alone does not refuse, even at the publishing boundary. Today most lines are
+        // bridged, and a check that refuses every report is a check people learn to bypass.
+        assert!(!report.blocked(ExportPurpose::Publish));
         assert_eq!(report.categories(), vec![Category::BridgedProse]);
     }
 
@@ -646,7 +709,10 @@ mod tests {
                 1,
                 "missed a path in: {line}"
             );
-            assert!(report.blocked());
+            assert!(report.blocked(ExportPurpose::Publish));
+            // But it never stops the user writing the file to their own disk, which is where the
+            // log it was drawn from already lives.
+            assert!(!report.blocked(ExportPurpose::Local));
         }
     }
 
@@ -741,8 +807,47 @@ mod tests {
             "JOIN.ROUTES.EXHAUSTED attempt=4\nTRANSPORT.DIAL.OK",
             CaptureMode::Safe,
         );
-        assert!(!report.blocked());
+        assert!(!report.blocked(ExportPurpose::Publish));
         assert_eq!(report.lines, 2);
         assert!(report.categories().is_empty());
+    }
+
+    /// The case from the screenshot: a real session's log, and what it must not do.
+    ///
+    /// The networking layer's un-migrated prose narrates addresses and peer ids, so a genuine
+    /// report carries hundreds of them. Saving that to the user's own log folder has to work.
+    #[test]
+    fn a_real_session_log_still_saves_and_says_what_is_in_it() {
+        let mut body = String::from("== BACKEND ==\n");
+        for at in 0..200 {
+            body.push_str(&format!(
+                "LOG.TRACING.EVENT message=dialling 198.51.100.{} via 12D3KooWQ9xTvR4bKdL2sWpAmN7zYcEfGh{:02}\n",
+                at % 250,
+                at % 100,
+            ));
+        }
+        let report = validate_export(&body, CaptureMode::Safe);
+        assert!(
+            !report.blocked(ExportPurpose::Local),
+            "saving a real session's own log to its own disk must not be refused"
+        );
+        assert!(
+            report.blocked(ExportPurpose::Publish),
+            "but posting it is another matter"
+        );
+
+        // And what the user is told is a handful of rows, not a finding per line. The wall of
+        // several hundred entries is what made the refusal unreadable as well as wrong.
+        let disclosure = report.disclosure();
+        assert!(disclosure.len() <= 4, "{disclosure:?}");
+        assert!(
+            report.findings.len() > 200,
+            "the detail is still there to jump to"
+        );
+        let raw = disclosure
+            .iter()
+            .find(|(category, _)| *category == Category::RawAddress)
+            .expect("the addresses are disclosed rather than hidden");
+        assert!(raw.1 > 100, "and counted honestly: {raw:?}");
     }
 }
