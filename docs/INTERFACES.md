@@ -40,13 +40,17 @@ pub trait MeshTransport: Send + Sync {
     async fn unsubscribe(&self, topic: Topic) -> Result<(), TransportError>;
     async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError>;
     async fn request(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<Bytes, TransportError>;
+    async fn request_connected(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<Bytes, TransportError>; // fail-closed default
     async fn notify(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>;
+    async fn notify_connected(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>; // fail-closed default
     async fn next_event(&self) -> Option<TransportEvent>;   // single-consumer
     async fn rendezvous_register(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
     async fn rendezvous_discover(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
     async fn dial_addr(&self, addr:&str) -> Result<(),TransportError>;
+    async fn dial_peer_batch(&self, peer:PeerId, addrs:&[String]) -> Result<Vec<DialSubmission>,TransportError>; // 1..=2, direct, terminal peer-bound
     async fn add_external_addr(&self, addr:&str) -> Result<(),TransportError>;
     async fn next_discovered(&self) -> Option<DiscoveredPeer>; // default never resolves
+    async fn next_registered(&self) -> Option<RendezvousRegistration>; // exact node/ns + granted TTL; default never resolves
 }
 pub struct PeerId([u8;32]);   fn from_u64(n)->Self; fn as_bytes()->&[u8;32];
 pub struct Topic(Bytes);      fn new(impl Into<Bytes>)->Self; fn as_bytes()->&[u8];
@@ -68,17 +72,20 @@ pub enum ConnectionTransport { Tcp, QuicV1, WebSocket, CircuitRelay, Memory, Unk
 pub enum ConnectionDirection { Dialer, Listener }
 pub struct Responder;  fn respond(self, Bytes);  fn channel() -> (Responder, ResponderRx);
 pub struct ResponderRx; async fn recv(self) -> Option<Bytes>;
-pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, NoResponse }
+pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, NoResponse, InvalidDialBatch }
 ```
 Implementations:
 - **`MemNetwork`** (tests): `let hub = Hub::new(); let net = hub.join(PeerId::from_u64(n));`
 - **`MeshService`** (prod, catcoms-net): `spawn(swarm)` / `new_memory(listen, dial)` /
   `new_tcp(...)`; `build_memory_swarm()` / `build_tcp_swarm()`. Maps `PeerId`↔libp2p
   PeerId, hex-encodes topics, queues+retries publishes until a subscriber appears.
-  `MeshHandle::request_control_connected_only(peer, data)` is the deliberately narrow reciprocal-
-  proof send: the actor succeeds only when its current peer map and `Swarm::is_connected` both say
+  `request_connected` / `notify_connected` are deliberately narrow repair sends: the actor
+  succeeds only when its current peer map and `Swarm::is_connected` both say
   the transport is live. Unlike ordinary `request_control`, it never consults `recent_peers` and
   cannot implicitly redial after the shared scheduler denied a new socket attempt.
+  `dial_peer_batch` accepts one or two direct multiaddrs and revalidates inside the actor that each
+  has a terminal libp2p peer whose Phase-0 id equals the addressed `PeerId`; empty, oversized,
+  relayed, bare, or substituted batches fail before `dial_gated` can start work.
   `PeerConnected`/`PeerDisconnected` retain their legacy one-edge aggregate meaning.
   `PeerPathsChanged` follows them on the same ordered event stream and also fires when a second
   connection upgrades/refines a path without changing aggregate liveness. It carries no address or
@@ -404,6 +411,12 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   // connect/disconnect lifecycle resets the delay. Old public IPs are not unioned indefinitely.
   set_endpoint_dial_scheduler(EndpointDialScheduler); // inject one process-shared final dial gate
   cache_known_records() -> usize;  async dial_cached_peers() -> usize;
+  async drive_mesh_repair() -> usize;               // one bounded target: ≤2 connected-only probes, optional reciprocal request
+  async drive_pending_reciprocal() -> usize;        // target-side exact-descriptor direct batch submission
+  async manual_fallback_redial() -> ManualRedialOutcome; // anti-click cooldown; preserves policy/process scheduler
+  async drive_discovery();                          // periodic discovery + TTL-aware registration renewal
+  async next_postjoin_discovery_event() -> Option<PostJoinDiscoveryEvent>;
+  note_rendezvous_registered(RendezvousRegistration) -> bool;
   authorize_join_helper(joiner:PeerId, invite_nonce:[u8;16], inviter_device:DeviceId,
                         target:PeerId, expires_at_ms:u64) -> bool;
   doc(DocType, doc_id) -> Option<&EncryptedDoc>;  local_peer() -> PeerId;  transport() -> &T;  // transport(): the discovery/dial layer above ChannelSync
@@ -524,6 +537,17 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     `bytes responder_pubkey ‖ bytes sig(64) ‖ bytes bundle`, sig over `"catcoms/catchup-resp/v1" ‖ group_id ‖ requester_pubkey ‖ u64 req_ts ‖ nonce(16) ‖ u64 req_epoch ‖ bundle`.
   - `4` KIND_PEX (6e-3d-7); **authed** body (empty); response responder-signed like commit catch-up but under
     `"catcoms/pex-resp/v1"`; bundle = `u32 count(≤64) ‖ len-prefixed PeerDescriptor`s, each self-signed under `"catcoms/peer-record/v1"`.
+  - `14` KIND_RECIPROCAL_FORWARD; authed exact requester/target descriptor references + random
+    attempt + expiry. A proven connected helper checks both live paths, rate-limits, signs the
+    original frame and queues kind 15 delivery. The sender does not await the response.
+  - `15` KIND_RECIPROCAL_DELIVERY; connected-only helper-attested original kind-14 frame. The
+    target rechecks helper/requester membership, both exact current descriptors, signature,
+    expiry/replay/rate bounds, then queues a later direct peer-bound dial intent.
+  - `16` KIND_INDIRECT_PROBE; authed exact target descriptor + attempt + expiry. A connected helper
+    queues kind 17 from current proven path state and never dials.
+  - `17` KIND_INDIRECT_RESULT; separately authed exact target hash + echoed attempt + boolean. It
+    is accepted only from the pending proven helper while the target descriptor remains current.
+    Two distinct negatives are suspicion only; one positive may queue kind 14 through that helper.
   - **Authed body** (members-only gate): `bytes inner ‖ bytes requester_pubkey ‖ u64 timestamp_ms ‖ bytes nonce(16) ‖ u64 req_epoch ‖ bytes signature(64)`,
     signature over `"catcoms/catchup-auth/v1" ‖ group_id ‖ u16 kind ‖ inner ‖ requester_pubkey ‖ timestamp_ms ‖ nonce ‖ req_epoch`.
     Served only if `requester_pubkey` content-addresses a **current member**, the timestamp is fresh (`MAX_REQUEST_AGE_MS` 60s),

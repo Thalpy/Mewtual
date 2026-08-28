@@ -17,6 +17,7 @@ import {
   eventLine,
   eventParts,
   eventText,
+  exportMasksAddresses,
   filterEvents,
   formatDuration,
   inView,
@@ -31,6 +32,7 @@ import {
   routeActionLabel,
   routeActionScopeLabel,
   routeExplanation,
+  routeIndirectEvidence,
   routePathLabel,
   routeState,
   shortTrace,
@@ -121,6 +123,10 @@ const route: MemberRoute = {
   candidate_families: ["ipv4"],
   candidate_transports: ["quic_v1"],
   actions: [],
+  indirect_health: "unknown",
+  indirect_witnesses: 0,
+  indirect_age_ms: null,
+  reciprocal_pending: false,
 };
 
 /**
@@ -418,6 +424,14 @@ test("the modes that start recording addresses are the ones that ask first", () 
   assert.ok(!captureModeIsRevealing("off"));
 });
 
+test("safe exports mask address tables even when the screenshot toggle is off", () => {
+  assert.equal(exportMasksAddresses("safe", false), true);
+  assert.equal(exportMasksAddresses("off", false), true);
+  assert.equal(exportMasksAddresses("enhanced", false), false);
+  assert.equal(exportMasksAddresses("full", false), false);
+  assert.equal(exportMasksAddresses("enhanced", true), true);
+});
+
 test("appending a page never repeats what is already held and stays bounded", () => {
   const held = [ev({ seq: 1 }), ev({ seq: 2 })];
   const withOverlap = appendEvents(held, [ev({ seq: 2 }), ev({ seq: 3 })], 10);
@@ -666,6 +680,44 @@ test("connected wording preserves the self-asserted transport binding caveat", (
   assert.doesNotMatch(said, /member is (online|live)/i);
 });
 
+test("indirect member evidence never becomes a presence or delivery claim", () => {
+  const reachable = routeIndirectEvidence({
+    ...route,
+    indirect_health: "reachable_via_member",
+    indirect_witnesses: 1,
+    indirect_age_ms: 5_000,
+  });
+  assert.match(reachable ?? "", /1 authenticated member reported a live path/);
+  assert.match(reachable ?? "", /not proof the person is online/);
+
+  const reachableWhilePending = routeIndirectEvidence({
+    ...route,
+    indirect_health: "reachable_via_member",
+    indirect_witnesses: 1,
+    indirect_age_ms: 5_000,
+    reciprocal_pending: true,
+  });
+  assert.equal(
+    reachableWhilePending,
+    reachable,
+    "present evidence takes precedence without turning queued work into a delivery claim",
+  );
+
+  const suspected = routeIndirectEvidence({
+    ...route,
+    indirect_health: "suspected_unreachable",
+    indirect_witnesses: 2,
+    indirect_age_ms: 30_000,
+  });
+  assert.match(suspected ?? "", /2 authenticated members did not observe a live path/);
+  assert.match(suspected ?? "", /suspicion, not proof/);
+
+  const queued = routeIndirectEvidence({ ...route, reciprocal_pending: true });
+  assert.match(queued ?? "", /queued a bounded reciprocal-dial request/);
+  assert.match(queued ?? "", /does not prove the helper or target received it/);
+  assert.equal(routeIndirectEvidence(route), null);
+});
+
 test("an IPv6-only cooldown is surfaced as a clue, not an invented route verdict", () => {
   const v6only: MemberRoute = {
     ...route,
@@ -700,6 +752,14 @@ test("typed paths and recommended actions have safe forward-compatible labels", 
   assert.equal(
     routeActionLabel({ scope: "group", kind: "configure_fallback_node" }),
     "Configure a trusted fallback node",
+  );
+  assert.equal(
+    routeActionLabel({ scope: "device", kind: "probe_through_members" }),
+    "Check paths through connected members",
+  );
+  assert.equal(
+    routeActionLabel({ scope: "group", kind: "retry_group_now" }),
+    "Retry this group's current routes now",
   );
   assert.equal(routeActionScopeLabel({ scope: "group", kind: "configure_fallback_node" }), "group");
   assert.match(routeActionLabel({ scope: "future", kind: "future_action" }), /Update Mewtual/);
@@ -844,6 +904,29 @@ test("device lines are redacted by the same rules the screen uses", () => {
   const lines = deviceLines(device, aliases, true);
   assert.ok(lines[0].includes(shown), `${lines[0]} should carry ${shown}`);
   assert.ok(!lines[0].includes("203.0.113.9"), "the real address must not survive redaction");
+});
+
+test("a complete Safe bundle cannot leak device or member-route addresses", () => {
+  const aliases = makeAliases();
+  const masked = exportMasksAddresses("safe", false);
+  const text = copyBundle(
+    { version: "0.3.0", at: 0, redacted: masked, capture: "safe" },
+    [
+      { title: "this device", lines: deviceLines(device, aliases, masked) },
+      {
+        title: "reachability",
+        lines: routeLines(
+          [{ id: 1, name: "Studio" }],
+          { 1: [{ ...route, addresses: ["/ip4/198.51.100.7/udp/31484/quic-v1"] }] },
+          aliases,
+          masked,
+        ),
+      },
+    ],
+  );
+  assert.match(text, /redaction: on/);
+  assert.doesNotMatch(text, /203\.0\.113\.9/);
+  assert.doesNotMatch(text, /198\.51\.100\.7/);
 });
 
 /** The row lines, as distinct from the findings that now lead each server's block. */

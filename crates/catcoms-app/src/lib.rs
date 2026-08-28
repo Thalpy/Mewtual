@@ -6377,9 +6377,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.drive_discovery().await;
     }
 
-    /// Await the next rendezvous-discovered peer (inert without rendezvous configured).
-    pub async fn next_discovered(&mut self) -> Option<DiscoveredPeer> {
-        self.sync.next_discovered().await
+    /// Await the next discovered record or registration TTL grant.
+    pub async fn next_postjoin_discovery_event(
+        &mut self,
+    ) -> Option<catcoms_sync::PostJoinDiscoveryEvent> {
+        self.sync.next_postjoin_discovery_event().await
+    }
+
+    /// Apply one registration TTL grant to the renewal scheduler.
+    pub fn note_rendezvous_registered(
+        &mut self,
+        registration: catcoms_rt::RendezvousRegistration,
+    ) -> bool {
+        self.sync.note_rendezvous_registered(registration)
     }
 
     /// Dial a discovered peer if the [`DiscoveryPolicy`](catcoms_discovery::DiscoveryPolicy)
@@ -6465,6 +6475,24 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// into the trusted catch-up pool). Returns the number of peers dialed.
     pub async fn dial_cached_peers(&mut self) -> usize {
         self.sync.dial_cached_peers().await
+    }
+
+    /// Run one bounded SWIM/reciprocal/topology repair pass.
+    pub async fn drive_mesh_repair(&mut self) -> usize {
+        self.sync.drive_mesh_repair().await
+    }
+
+    pub fn has_pending_reciprocal(&self) -> bool {
+        self.sync.has_pending_reciprocal()
+    }
+
+    pub async fn drive_pending_reciprocal(&mut self) -> usize {
+        self.sync.drive_pending_reciprocal().await
+    }
+
+    /// Explicit fallback redial that preserves every shared safety budget.
+    pub async fn manual_fallback_redial(&mut self) -> catcoms_sync::ManualRedialOutcome {
+        self.sync.manual_fallback_redial().await
     }
 
     /// Serialize the address cache for sealing beside this server's snapshot.

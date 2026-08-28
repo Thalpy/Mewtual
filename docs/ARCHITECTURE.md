@@ -105,10 +105,11 @@ is broken. The load-bearing fixes:
   route-selected IPv4/IPv6 sources, while the roughly-minute pass remains a fallback. A changed
   sample republishes one address epoch; exact route ownership prevents raw-interface removal from
   withdrawing an identical mapping/manual/relay route. It intentionally does not merge
-  withdrawn public IPs forever because an ISP can reassign them. Route signatures and matching
+  withdrawn public IPs forever because an ISP can reassign them; a newer zero-route descriptor
+  also removes the prior sealed cache row, so restart cannot resurrect it. Route signatures and matching
   peer ids still do not prove ownership of an IP/port before the bounded first packet is sent.
-  Scheduler counters are transient and reset with the process; they charge submitted attempts, not
-  actor-confirmed socket creation or completion. Duplicate suppression, cancellation, and failed
+  Scheduler counters are transient and reset with the process; they charge actor-accepted
+  submissions, not socket creation or connection completion. Duplicate suppression, cancellation, and failed
   command delivery can therefore over- or under-account relative to actual sockets. A relay circuit
   has its own attempt key so unrelated targets at one relay do not starve each other, but the shared
   outer relay socket is not separately leased at the exact-socket scope; it is bounded only by the
@@ -117,6 +118,17 @@ is broken. The load-bearing fixes:
   current address is unknown to every peer still needs
   out-of-band signalling, rendezvous/relay infrastructure, or a reachable member; swarm sampling
   cannot manufacture a route from no contact.
+- Connected current members now provide a bounded baseline repair control plane. A node pushes at
+  most two session-proven active members an authenticated probe for one exact descriptor; each
+  helper answers later with a separately authenticated, exact-attempt-bound result. One positive
+  observation may queue a short reciprocal request A→C→B; every hop is a connected-only
+  asynchronous push, and B revalidates current roster, exact descriptor hashes/sequences, helper
+  signature, expiry, replay and rate limits before submitting
+  at most one IPv4 and one IPv6 direct route through the shared endpoint scheduler. Two signed
+  negatives are suspicion only. Helpers never dial during a probe and never carry application
+  traffic; switchboards remain opt-in admission-only, while general circuit relay hosting remains
+  a separate opt-in role. HyParView/CYCLON-like active/passive selection and local age/source
+  metadata improve which peers are tried but cannot repair a partition with no surviving edge.
 - Pairwise route evidence is a bounded, session-only refinement of aggregate transport liveness.
   Libp2p reports a sorted/deduplicated IPv4/IPv6/DNS/memory + TCP/QUIC/WebSocket/circuit snapshot
   after connection edges, including relay-to-direct DCUtR upgrades and partial closes. The sync
@@ -132,6 +144,8 @@ is broken. The load-bearing fixes:
   test. A
   signed peer record is still a self-asserted device-to-transport binding, so this evidence is not
   proof that the member controls that live transport key or is reachable from another network.
+  Reciprocal repair is intentionally not a dual-key ownership proof and does not strengthen that
+  binding.
 - A **fully compromised device** exposes its current keys and plaintext; PCS only heals
   *after* the device is removed.
 - **Already-fetched files cannot be un-shared.**

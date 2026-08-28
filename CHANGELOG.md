@@ -4,6 +4,8 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+## [0.3.0-alpha.9] - 2026-08-28
+
 ### Added
 
 - **Announcements became a noticeboard instead of a list of posts.** Posting belongs to the owner

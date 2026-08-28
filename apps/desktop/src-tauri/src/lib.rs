@@ -6760,6 +6760,10 @@ struct MemberRouteEvt {
     candidate_families: Vec<&'static str>,
     candidate_transports: Vec<&'static str>,
     actions: Vec<MemberRouteActionEvt>,
+    indirect_health: &'static str,
+    indirect_witnesses: usize,
+    indirect_age_ms: Option<u64>,
+    reciprocal_pending: bool,
 }
 
 #[derive(Serialize)]
@@ -6841,7 +6845,18 @@ fn member_route_action_evt(action: catcoms_sync::MemberRouteAction) -> MemberRou
             Kind::CheckMemberConnectivity => "check_member_connectivity",
             Kind::KeepAnotherMemberConnected => "keep_another_member_connected",
             Kind::ConfigureFallbackNode => "configure_fallback_node",
+            Kind::ProbeThroughMembers => "probe_through_members",
+            Kind::RetryGroupNow => "retry_group_now",
         },
+    }
+}
+
+fn indirect_route_health_name(health: catcoms_sync::IndirectRouteHealth) -> &'static str {
+    use catcoms_sync::IndirectRouteHealth::*;
+    match health {
+        Unknown => "unknown",
+        ReachableViaMember => "reachable_via_member",
+        SuspectedUnreachable => "suspected_unreachable",
     }
 }
 
@@ -6898,8 +6913,28 @@ async fn get_member_routes(
                 .map(connection_transport_name)
                 .collect(),
             actions: r.actions.into_iter().map(member_route_action_evt).collect(),
+            indirect_health: indirect_route_health_name(r.indirect_health),
+            indirect_witnesses: r.indirect_witnesses,
+            indirect_age_ms: r.indirect_age_ms,
+            reciprocal_pending: r.reciprocal_pending,
         })
         .collect())
+}
+
+/// Ask the selected server to retry every current member route once, preserving the process-wide
+/// scheduler and anti-click cooldown. The stable result id lets Connectivity explain whether work
+/// started, no route existed, or a safety limit deferred it.
+#[tauri::command]
+async fn manual_fallback_redial(state: State<'_, AppState>, server: u64) -> Result<String, String> {
+    let actor = actor_of(&state, server).await?;
+    let outcome = actor.manual_fallback_redial().await?;
+    Ok(match outcome {
+        catcoms_sync::ManualRedialOutcome::Submitted => "submitted",
+        catcoms_sync::ManualRedialOutcome::CoolingDown => "cooling_down",
+        catcoms_sync::ManualRedialOutcome::NoRoutes => "no_routes",
+        catcoms_sync::ManualRedialOutcome::DeferredBySafetyLimit => "deferred_by_safety_limit",
+    }
+    .into())
 }
 
 /// Bound a present-time diagnostic query so a busy server actor becomes an explicit unavailable
@@ -12235,6 +12270,7 @@ pub fn run() {
             repair_storage,
             get_online_members,
             get_member_routes,
+            manual_fallback_redial,
             get_delivery,
             dm_stats,
             send_dm_invite,
@@ -15601,8 +15637,8 @@ mod tests {
     fn member_route_enums_have_stable_exhaustive_webview_names() {
         use catcoms_rt::{ConnectionFamily as Family, ConnectionTransport as Transport};
         use catcoms_sync::{
-            MemberRouteAction, MemberRouteActionKind as Kind, MemberRouteActionScope as Scope,
-            MemberRouteHealth as Health,
+            IndirectRouteHealth as Indirect, MemberRouteAction, MemberRouteActionKind as Kind,
+            MemberRouteActionScope as Scope, MemberRouteHealth as Health,
         };
 
         assert_eq!(
@@ -15671,6 +15707,8 @@ mod tests {
             Kind::CheckMemberConnectivity,
             Kind::KeepAnotherMemberConnected,
             Kind::ConfigureFallbackNode,
+            Kind::ProbeThroughMembers,
+            Kind::RetryGroupNow,
         ]
         .map(|kind| {
             member_route_action_evt(MemberRouteAction {
@@ -15686,7 +15724,18 @@ mod tests {
                 "check_member_connectivity",
                 "keep_another_member_connected",
                 "configure_fallback_node",
+                "probe_through_members",
+                "retry_group_now",
             ]
+        );
+        assert_eq!(
+            [
+                Indirect::Unknown,
+                Indirect::ReachableViaMember,
+                Indirect::SuspectedUnreachable,
+            ]
+            .map(indirect_route_health_name),
+            ["unknown", "reachable_via_member", "suspected_unreachable"]
         );
     }
 }

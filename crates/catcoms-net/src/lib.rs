@@ -77,7 +77,8 @@ use bytes::Bytes;
 use catcoms_rt::{
     Clock, ConnectionDirection, ConnectionFamily, ConnectionPath, ConnectionTransport,
     CryptoRngCore, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerConnectionSnapshot, PeerId,
-    ProtocolId, Responder, SystemClock, Topic, TransportError, TransportEvent,
+    ProtocolId, RendezvousRegistration, Responder, SystemClock, Topic, TransportError,
+    TransportEvent, MAX_PEER_DIAL_BATCH,
 };
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
@@ -974,12 +975,25 @@ enum Command {
         peer: PeerId,
         data: Bytes,
     },
+    /// Fire-and-forget counterpart to `RequestConnected`: never consult `recent_peers`.
+    NotifyConnected {
+        peer: PeerId,
+        data: Bytes,
+    },
     /// Start listening on `addr` (e.g. a `…/p2p-circuit` relay reservation).
     Listen(Multiaddr),
     /// Dial `addr` (e.g. a relay, before reserving a circuit on it).
     Dial {
         addr: Multiaddr,
         reply: Option<oneshot::Sender<catcoms_rt::DialSubmission>>,
+    },
+    /// A reciprocal-repair batch whose direct routes must all terminate at `peer`.
+    /// Validation happens inside the actor, immediately before the ordinary dial gate, so an
+    /// alternate caller cannot separate a checked peer id from a substituted address.
+    DialPeerBatch {
+        peer: PeerId,
+        addrs: Vec<Multiaddr>,
+        reply: oneshot::Sender<Result<Vec<catcoms_rt::DialSubmission>, TransportError>>,
     },
     /// Advertise `addr` as an external (reachable) address; for a node with a
     /// directly-reachable address (a public IP, or a memory listener in tests) that
@@ -3484,6 +3498,26 @@ impl Actor {
                 }
                 None => tracing::warn!(?peer, "notification to unknown peer"),
             },
+            Command::NotifyConnected { peer, data } => {
+                let live = self
+                    .peers
+                    .get(&peer)
+                    .copied()
+                    .filter(|target| self.swarm.is_connected(target));
+                match live {
+                    Some(libp2p_peer) => {
+                        tracing::debug!(peer = %libp2p_peer, bytes = data.len(), "send connected-only notification");
+                        self.swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_request(&libp2p_peer, data.to_vec());
+                    }
+                    None => tracing::trace!(
+                        ?peer,
+                        "connected-only notification refused: peer is not live"
+                    ),
+                }
+            }
             Command::Listen(addr) => {
                 // Listening on a `…/p2p-circuit` address is how a reservation is requested, so the
                 // relay named in it is an infra target from here on.
@@ -3499,6 +3533,17 @@ impl Actor {
                 if let Some(reply) = reply {
                     let _ = reply.send(outcome);
                 }
+            }
+            Command::DialPeerBatch { peer, addrs, reply } => {
+                if !valid_direct_peer_batch(peer, &addrs) {
+                    let _ = reply.send(Err(TransportError::InvalidDialBatch));
+                    return;
+                }
+                let outcomes = addrs
+                    .into_iter()
+                    .map(|addr| self.dial_gated(addr))
+                    .collect();
+                let _ = reply.send(Ok(outcomes));
             }
             Command::AddExternalAddress(addr) => {
                 tracing::debug!(%addr, "add external address");
@@ -4350,6 +4395,18 @@ impl Actor {
     }
 }
 
+/// Final actor-side guard for reciprocal direct dialing. Validation lives beside command
+/// handling so every caller, including a compromised higher layer, must provide one or two
+/// direct multiaddrs whose terminal transport identity is exactly the addressed Phase-0 peer.
+fn valid_direct_peer_batch(peer: PeerId, addrs: &[Multiaddr]) -> bool {
+    !addrs.is_empty()
+        && addrs.len() <= MAX_PEER_DIAL_BATCH
+        && addrs.iter().all(|addr| {
+            !is_relayed(addr)
+                && target_peer_in_multiaddr(addr).is_some_and(|target| to_peer(&target) == peer)
+        })
+}
+
 // ----- handle ----------------------------------------------------------------
 
 /// Clone one watch value only while its actor is still alive. Tokio deliberately retains the last
@@ -4680,6 +4737,34 @@ impl MeshService {
         rx.await.map_err(|_| TransportError::Closed)
     }
 
+    /// Submit one bounded direct-route batch whose terminal identity must match `peer`.
+    ///
+    /// String parsing here is only an early rejection. The actor repeats the peer binding and
+    /// direct-route checks on the owned `Multiaddr` values immediately before its dial ledger.
+    pub async fn dial_peer_batch(
+        &self,
+        peer: PeerId,
+        addresses: &[String],
+    ) -> Result<Vec<catcoms_rt::DialSubmission>, TransportError> {
+        if addresses.is_empty() || addresses.len() > MAX_PEER_DIAL_BATCH {
+            return Err(TransportError::InvalidDialBatch);
+        }
+        let addrs = addresses
+            .iter()
+            .map(|address| {
+                address
+                    .parse::<Multiaddr>()
+                    .map_err(|_| TransportError::InvalidDialBatch)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::DialPeerBatch { peer, addrs, reply })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)?
+    }
+
     /// Advertise `addr` as an external (reachable) address, so a node with a directly-
     /// reachable address can register at a rendezvous **without** a relay circuit
     /// (a publicly-reachable server, or a memory listener in tests). Flushes any
@@ -4888,6 +4973,31 @@ impl MeshHandle {
         Ok(())
     }
 
+    /// See [`MeshService::dial_peer_batch`].
+    pub async fn dial_peer_batch(
+        &self,
+        peer: PeerId,
+        addresses: &[String],
+    ) -> Result<Vec<catcoms_rt::DialSubmission>, TransportError> {
+        if addresses.is_empty() || addresses.len() > MAX_PEER_DIAL_BATCH {
+            return Err(TransportError::InvalidDialBatch);
+        }
+        let addrs = addresses
+            .iter()
+            .map(|address| {
+                address
+                    .parse::<Multiaddr>()
+                    .map_err(|_| TransportError::InvalidDialBatch)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::DialPeerBatch { peer, addrs, reply })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)?
+    }
+
     /// Send one bounded control request without routing it through the group `ChannelSync` actor.
     /// Used by the short pre-member reply proof so a quiet joiner cannot stall every group
     /// command while the network request waits for its timeout.
@@ -4985,6 +5095,20 @@ impl MeshTransport for MeshService {
         rx.await.map_err(|_| TransportError::Closed)?
     }
 
+    async fn request_connected(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        data: Bytes,
+    ) -> Result<Bytes, TransportError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::RequestConnected { peer, data, reply })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)?
+    }
+
     /// Queue the send and return; the only wait is for room in the actor's command channel.
     async fn notify(
         &self,
@@ -4994,6 +5118,18 @@ impl MeshTransport for MeshService {
     ) -> Result<(), TransportError> {
         self.cmd_tx
             .send(Command::Notify { peer, data })
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
+    async fn notify_connected(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        data: Bytes,
+    ) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::NotifyConnected { peer, data })
             .await
             .map_err(|_| TransportError::Closed)
     }
@@ -5039,6 +5175,14 @@ impl MeshTransport for MeshService {
         MeshService::dial_outcome(self, m).await
     }
 
+    async fn dial_peer_batch(
+        &self,
+        peer: PeerId,
+        addresses: &[String],
+    ) -> Result<Vec<catcoms_rt::DialSubmission>, TransportError> {
+        MeshService::dial_peer_batch(self, peer, addresses).await
+    }
+
     async fn add_external_addr(&self, addr: &str) -> Result<(), TransportError> {
         let m: Multiaddr = addr.parse().map_err(|_| TransportError::Closed)?;
         MeshService::add_external_address(self, m).await
@@ -5051,6 +5195,15 @@ impl MeshTransport for MeshService {
             addresses: d.addresses.iter().map(|a| a.to_string()).collect(),
             namespace: d.namespace,
             seq: d.seq,
+        })
+    }
+
+    async fn next_registered(&self) -> Option<RendezvousRegistration> {
+        let registered = MeshService::next_registered(self).await?;
+        Some(RendezvousRegistration {
+            rendezvous_node: registered.rendezvous_node.to_bytes(),
+            namespace: registered.namespace,
+            ttl_secs: registered.ttl,
         })
     }
 
@@ -5108,6 +5261,37 @@ mod tests {
         libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id()
+    }
+
+    #[test]
+    fn reciprocal_batch_guard_rejects_substitution_relay_and_oversize_inputs() {
+        let target = libp2p_peer();
+        let other = libp2p_peer();
+        let peer = to_peer(&target);
+        let v4: Multiaddr = format!("/ip4/198.51.100.7/tcp/22487/p2p/{target}")
+            .parse()
+            .unwrap();
+        let v6: Multiaddr = format!("/ip6/2001:db8::7/udp/22487/quic-v1/p2p/{target}")
+            .parse()
+            .unwrap();
+        assert!(valid_direct_peer_batch(peer, &[v4.clone(), v6.clone()]));
+        assert!(!valid_direct_peer_batch(peer, &[]));
+        assert!(!valid_direct_peer_batch(
+            peer,
+            &[v4.clone(), v6.clone(), v4.clone()]
+        ));
+
+        let substituted: Multiaddr = format!("/ip4/198.51.100.7/tcp/22487/p2p/{other}")
+            .parse()
+            .unwrap();
+        assert!(!valid_direct_peer_batch(peer, &[substituted]));
+        let relay: Multiaddr =
+            format!("/ip4/198.51.100.8/tcp/4001/p2p/{other}/p2p-circuit/p2p/{target}")
+                .parse()
+                .unwrap();
+        assert!(!valid_direct_peer_batch(peer, &[relay]));
+        let unbound: Multiaddr = "/ip4/198.51.100.7/tcp/22487".parse().unwrap();
+        assert!(!valid_direct_peer_batch(peer, &[unbound]));
     }
 
     fn dialled_endpoint(address: &str) -> ConnectedPoint {

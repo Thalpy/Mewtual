@@ -5,7 +5,7 @@ substantially rewritten the same day after three adversarial reviews (privacy / 
 abuse-and-adoption) refuted several claims in v1. Sections marked **[v1 RETRACTED]** record
 what the first draft asserted and why it was wrong, so the mistake is not re-made.
 
-**Where it stands (2026-08-21):** the invite path is fixed, the two deployment-blocking
+**Where it stands (2026-08-28):** the invite path is fixed, the two deployment-blocking
 CRITICALs are closed, and **every defect P1 to P14 has been worked to a conclusion**. Nine are
 closed outright; P3 is deferred by decision (census rate-limited, not prevented); P5, P6 and P10
 are partial with their remaining gaps named in the board; and P9 is **closed as a decision**, its
@@ -16,8 +16,9 @@ it never defended P8's attacker, and "P9 blocks P8" was wrong).
 tracks the ladder. Stable direct listeners, UPnP/PCP/NAT-PMP mapping, guarded AutoNAT v2,
 two-way 60-second reply codes, and opt-in member switchboards are built with live diagnostics and
 regression coverage. AutoNAT is still only **partial as a product rung**: Mewtual deploys no owned
-public infrastructure, it does not yet drive automatic escalation, and pairwise reachability is not
-a persistent model. mDNS, concurrent rung racing, the port-forwarding wizard, hosted mode and a
+public infrastructure. Post-join recovery now drives bounded PEX/cache retries, SWIM-style helper
+observations and reciprocal direct dialing; pairwise evidence remains intentionally session-only,
+not a durable presence model. mDNS, concurrent rung racing, the port-forwarding wizard, hosted mode and a
 public DHT remain. **Section 11** carries the loose ends that are not defects. No Mewtual-operated
 service is deployed or required by default.
 

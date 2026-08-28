@@ -763,13 +763,19 @@ export type MemberRoute = {
     | "claimed_peer_dial_cooling_down"
     | "claimed_peer_dial_eligible"
     | string;
-  /** Explicitly self-asserted until a reciprocal challenge binds the device and transport keys. */
+  /** Self-asserted; reciprocal repair is not a dual-key transport-ownership proof. */
   binding: "absent" | "self_asserted" | string;
   active_paths: ConnectionPath[];
   last_success: { path: ConnectionPath; age_ms: number } | null;
   candidate_families: ConnectionFamily[];
   candidate_transports: ConnectionTransport[];
   actions: MemberRouteAction[];
+  /** Signed, request-bound observations from currently proven member paths. */
+  indirect_health: "unknown" | "reachable_via_member" | "suspected_unreachable" | string;
+  indirect_witnesses: number;
+  indirect_age_ms: number | null;
+  /** This device queued a bounded request to a live helper for this member to dial us back. */
+  reciprocal_pending: boolean;
 };
 
 export type MemberRoutePollAnswer =
@@ -850,6 +856,8 @@ export type MemberRouteAction = {
     | "check_member_connectivity"
     | "keep_another_member_connected"
     | "configure_fallback_node"
+    | "probe_through_members"
+    | "retry_group_now"
     | string;
 };
 
@@ -991,6 +999,25 @@ export function routeExplanation(r: MemberRoute, _hasPublicIpv6Observation = fal
   }
 }
 
+/**
+ * Explain helper evidence without turning a signed observation about a claimed transport peer
+ * into presence, identity-control, or internet-reachability proof.
+ */
+export function routeIndirectEvidence(r: MemberRoute): string | null {
+  const age = r.indirect_age_ms === null ? "" : ` ${formatDuration(r.indirect_age_ms)} ago`;
+  const witnesses = `${r.indirect_witnesses} authenticated member${r.indirect_witnesses === 1 ? "" : "s"}`;
+  switch (r.indirect_health) {
+    case "reachable_via_member":
+      return `${witnesses} reported a live path to this claimed peer${age}. That is indirect path evidence, not proof the person is online.`;
+    case "suspected_unreachable":
+      return `${witnesses} did not observe a live path to this claimed peer${age}. This is suspicion, not proof that the person or device is offline.`;
+    default:
+      return r.reciprocal_pending
+        ? "This device queued a bounded reciprocal-dial request to a live member. Queueing does not prove the helper or target received it or opened a path."
+        : null;
+  }
+}
+
 /** Short, stable wording for the backend-owned recommended actions. */
 export function routeActionLabel(action: MemberRouteAction): string {
   switch (action.kind) {
@@ -998,6 +1025,8 @@ export function routeActionLabel(action: MemberRouteAction): string {
     case "check_member_connectivity": return "Ask them to run Connectivity";
     case "keep_another_member_connected": return "Keep another group member connected";
     case "configure_fallback_node": return "Configure a trusted fallback node";
+    case "probe_through_members": return "Check paths through connected members";
+    case "retry_group_now": return "Retry this group's current routes now";
     default: return "Update Mewtual to understand this recommendation";
   }
 }
@@ -1322,6 +1351,26 @@ export function captureModeNote(mode: string): string {
 /** Whether a mode should be confirmed before it is entered. */
 export function captureModeIsRevealing(mode: string): boolean {
   return mode === "enhanced" || mode === "full";
+}
+
+/**
+ * Must anything leaving this console have its addresses masked, whatever the toggle says?
+ *
+ * Safe capture is documented as "no literal addresses, so a Safe report is one a user can paste in
+ * public", and the events honour that: an address value asks the mode before it renders. The
+ * reachability and device tables never did, because they are live snapshots read straight from
+ * their own commands rather than events, and they masked only when the screenshot toggle was on.
+ *
+ * So a Safe report carried this machine's public address by default, and the native validator
+ * refused to write it: the very first Save in a fresh console failed. The rule was right and the
+ * data was wrong. Deciding it here brings the tables under the same promise the events already
+ * keep, rather than lowering the promise to fit them.
+ *
+ * The screen is unaffected. An operator looking at the Network section still sees the addresses;
+ * this governs only what is copied or saved, which is the part that leaves the machine.
+ */
+export function exportMasksAddresses(capture: string, redact: boolean): boolean {
+  return redact || !captureModeIsRevealing(capture);
 }
 
 /** The CSS class that colours a feed line's level tag. */

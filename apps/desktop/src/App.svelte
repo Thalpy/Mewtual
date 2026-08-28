@@ -166,7 +166,7 @@
   // on demand; this file needs just enough to describe what it hands over.
   import {
     memberRoutesVisible, mergeMemberRouteRead, routeActionLabel, routeActionScopeLabel, routeChip,
-    routeExplanation, routeHistoricalAge, routeIsConnected, routePathLabel, routeState,
+    routeExplanation, routeHistoricalAge, routeIndirectEvidence, routeIsConnected, routePathLabel, routeState,
     shouldRefreshMemberRoutes,
     type DbgSection, type DebugVoicePeer, type MemberRoute,
   } from "./debug-console";
@@ -5094,6 +5094,7 @@
     memberRoutes = [];
     memberRoutesReceivedAt = 0;
     memberRoutesUnavailable = false;
+    manualRedialNote = "";
     profiles = {};
     // Roles gate the privileged surfaces, so the empty map is the safe transient: unprivileged
     // until this group's own roles resolve.
@@ -5983,6 +5984,8 @@
   let memberRoutesReceivedAt = $state(0);
   /** A failed local read retains the same-server snapshot but strips it of current-evidence status. */
   let memberRoutesUnavailable = $state(false);
+  let manualRedialBusy = $state(false);
+  let manualRedialNote = $state("");
   let connectedMemberRouteCount = $derived(memberRoutes.filter(routeIsConnected).length);
   const memberRouteRefreshGeneration = new Map<number, number>();
   type SwitchboardStatus = {
@@ -6096,6 +6099,28 @@
       if (!merged.applied) return;
       memberRoutes = merged.routes;
       memberRoutesUnavailable = merged.unavailable;
+    }
+  }
+  async function manualFallbackRedial() {
+    const server = activeServerId;
+    if (server === null || manualRedialBusy) return;
+    manualRedialBusy = true;
+    manualRedialNote = "";
+    try {
+      const outcome = await invoke<string>("manual_fallback_redial", { server });
+      if (activeServerId !== server) return;
+      manualRedialNote = outcome === "submitted"
+        ? "A policy-approved retry pass was submitted. This does not mean every candidate was attempted or connected."
+        : outcome === "cooling_down"
+          ? "A recent manual retry is still cooling down. Automatic recovery remains active."
+          : outcome === "no_routes"
+            ? "No current signed member record contains a policy-approved route to retry."
+            : "The shared dial-safety budget deferred this retry; automatic recovery will try later.";
+      await refreshMemberRoutes();
+    } catch (e) {
+      if (activeServerId === server) manualRedialNote = `Retry unavailable: ${String(e)}`;
+    } finally {
+      manualRedialBusy = false;
     }
   }
   // Connection/path events can arrive in bursts. Keep at most one local actor read active and one
@@ -18031,7 +18056,8 @@
             <header class="ops-head"><div><span class="stx-crumb">SERVER // OPERATIONS // CONNECTIVITY</span><h2>Connectivity assistant</h2><p class="muted small">What this device can prove, what it merely attempted, and what to try next.</p></div><button class="ghost small" onclick={() => void Promise.all([refreshConnectivity(), refreshMemberRoutes(), refreshSwitchboards()])}>Refresh</button></header>
             {#if connectivity?.action}
               {@render connDetail(connectivity)}
-              <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
+              <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" disabled={manualRedialBusy || activeServerId === null} onclick={manualFallbackRedial}>{manualRedialBusy ? "Retrying…" : "Retry group routes now"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
+              {#if manualRedialNote}<p class="muted small">{manualRedialNote}</p>{/if}
             {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Current member-path evidence below is still available.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
             <section class="connection-member-health" aria-labelledby="connection-member-health-title">
               <header>
@@ -18054,12 +18080,14 @@
                     {@const routeStatusChip = routeChip(routeState(route))}
                     {@const chip = memberRoutesUnavailable ? { label: `LAST: ${routeStatusChip.label}`, tone: "warn" } : routeStatusChip}
                     {@const historicalAge = routeHistoricalAge(route, memberRoutesReceivedAt, nowTick)}
+                    {@const indirectEvidence = memberRoutesUnavailable ? null : routeIndirectEvidence(route)}
                     <article>
                       <div class="member-route-head">
                         <b>{nameOf(route.fingerprint)}</b>
                         <span class="chip {chip.tone}">{chip.label}</span>
                       </div>
                       <p>{memberRoutesUnavailable ? "This was the last local snapshot; current claimed-peer connection state is unavailable." : routeExplanation(route, (connectivity?.advertised ?? []).some((address) => address.startsWith("/ip6/")))}</p>
+                      {#if indirectEvidence}<p class="muted small">{indirectEvidence}</p>{/if}
                       {#if route.active_paths.length}
                         <small>{memberRoutesUnavailable ? "Last snapshot" : "Now"}: {route.active_paths.map(routePathLabel).join(", ")}</small>
                       {:else if route.last_success && historicalAge !== null}

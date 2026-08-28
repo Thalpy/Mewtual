@@ -552,6 +552,10 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
               candidate_families: ["ipv4"],
               candidate_transports: ["quic_v1"],
               actions: [],
+              indirect_health: "unknown",
+              indirect_witnesses: 0,
+              indirect_age_ms: null,
+              reciprocal_pending: false,
             },
             {
               fingerprint: MOSS,
@@ -569,10 +573,18 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
               candidate_transports: ["quic_v1"],
               actions: [
                 { scope: "this_device", kind: "wait_for_automatic_recovery" },
+                { scope: "this_device", kind: "probe_through_members" },
+                { scope: "this_device", kind: "retry_group_now" },
               ],
+              indirect_health: "reachable_via_member",
+              indirect_witnesses: 1,
+              indirect_age_ms: 8_000,
+              reciprocal_pending: true,
             },
           ])
         : [];
+    case "manual_fallback_redial":
+      return "submitted";
     case "get_call_transport":
       return clone({
         public_direct: false,

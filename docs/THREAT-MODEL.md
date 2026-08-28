@@ -111,8 +111,8 @@ table with the commit that closed it.
   removed, and the UI preserves the caveat. A fresher address epoch for the same stable transport
   keeps that peer-scoped history; it is still labelled historical and carries no address. This is
   diagnostic evidence, never authorization, membership proof, “online,” or
-  public reachability. A reciprocal device-to-transport challenge remains required to strengthen
-  it. Raw active snapshots and retained history are capped, deduplicated, session-only,
+  public reachability. The implemented reciprocal-dial repair is not a device↔transport dual-key
+  challenge and does not strengthen it; a future explicit proof is required. Raw active snapshots and retained history are capped, deduplicated, session-only,
   monotonic-aged, and hidden after 24 hours. Transport churn can still backpressure the actor's
   bounded event queue; connection limits and duplicate-close suppression bound amplification but
   do not make it free. Unclaimed transport peers do not invalidate the member-only UI projection.
@@ -123,6 +123,18 @@ table with the commit that closed it.
   signed catch-up proof. That transient cache retains the current roster `DeviceId` that answered
   on each peer connection, so a removal prunes the departed signer without invalidating unaffected
   live member paths; every later request still authenticates independently.
+- **Member-assisted repair is bounded signalling, not delegation of authority or traffic.** A
+  helper answers SWIM-style probes only from its current session-proven connection table and never
+  dials the target for a probe. Forwarding requires a current authenticated requester, exact
+  current requester/target descriptor references, live proven paths to both, a short expiry and a
+  per-device budget. The helper signs the original frame and queues connected-only delivery so an
+  A→C→B cycle cannot nest actor waits. The target rechecks roster, descriptors, helper proof,
+  signature, replay and rate limits, then submits at most two direct routes through the ordinary
+  discovery and process scheduler. A descriptor replacement/removal cancels pending work; already
+  submitted transport dials cannot be recalled. Signed negatives create only time-bounded
+  suspicion and never change presence or MLS membership. The control plane reveals attempted peer
+  pairs/timing to the selected helper, but no plaintext; ordinary participation does not make that
+  helper a public listener or general relay.
 - **The desktop webview is trusted only while the UI session is unlocked.** An explicit lock keeps
   native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
   the main-window capability reduce injection reach; the native command gate is the enforcement

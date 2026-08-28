@@ -137,6 +137,14 @@ export const TAURI_COMMAND_GROUPS = {
     boundary: "Best-effort router port mappings for the active call's media sockets; exact caller-named ports, bounded leases, no other router state.",
     commands: ["map_call_port", "unmap_call_port"],
   },
+  mesh_repair_boundary: {
+    boundary: "User-triggered member-route retry; native signed-record validation, anti-click cooldown and shared endpoint/process budgets remain authoritative.",
+    commands: [
+      // The webview supplies only the registered server id. The actor selects current signed
+      // records and cannot be made to dial a caller-supplied address, peer id or descriptor.
+      "manual_fallback_redial",
+    ],
+  },
   device_pairing: {
     boundary: "Single-use, SAS-confirmed, passphrase-sealed device grant ceremony.",
     commands: [

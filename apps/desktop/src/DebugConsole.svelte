@@ -36,6 +36,7 @@
     copyBundle,
     deviceLines,
     eventLine,
+    exportMasksAddresses,
     eventParts,
     filterEvents,
     formatDuration,
@@ -166,6 +167,11 @@
   // addresses" is the whole diagnosis of the hour-long isolation, and a screenshot where both read
   // `[redacted]` no longer says it.
   const aliases = makeAliases();
+  // Addresses are masked in anything that leaves the console whenever the capture mode did not ask
+  // for them, not only when the screenshot toggle is on. Safe capture promises a report with no
+  // literal addresses in it, and the reachability and device tables are read from their own
+  // commands rather than from events, so they were the one part of a report that never kept it.
+  let maskForExport = $derived(exportMasksAddresses(stats.capture, redact));
 
   /**
    * How often reachability is re-read, as a multiple of the log tick.
@@ -471,11 +477,14 @@
     }
     const [back, net, vox, store, front] = sections;
     return copyBundle(
-      { version, at: Date.now(), redacted: redact, capture: stats.capture, session: stats.session_id },
+      // What was actually masked, not what the toggle was set to. Safe capture masks the tables
+      // whether or not the toggle is on, and a header claiming otherwise misleads the reader about
+      // what they are holding.
+      { version, at: Date.now(), redacted: maskForExport, capture: stats.capture, session: stats.session_id },
       [
-        { title: "this device", lines: deviceLines(device, aliases, redact) },
-        { title: "reachability", lines: routeLines(servers, routes, aliases, redact, hasPublicIpv6Observation, routeUnavailable) },
-        { title: "call peers", lines: voiceLines(voicePeers, aliases, redact) },
+        { title: "this device", lines: deviceLines(device, aliases, maskForExport) },
+        { title: "reachability", lines: routeLines(servers, routes, aliases, maskForExport, hasPublicIpv6Observation, routeUnavailable) },
+        { title: "call peers", lines: voiceLines(voicePeers, aliases, maskForExport) },
         // The event sections follow the console's own rail order, so a reader who has seen the
         // screen knows where to look in the file.
         { title: "network", lines: net.map(line) },
@@ -768,7 +777,7 @@
             <div class="dbg-card-h">
               <span>This device</span>
               <span class="dbg-card-actions">
-                <button class="ghost small" onclick={() => copy("device", deviceLines(device, aliases, redact).join("\n"))}>
+                <button class="ghost small" onclick={() => copy("device", deviceLines(device, aliases, maskForExport).join("\n"))}>
                   {copied === "device" ? "Copied" : "Copy"}
                 </button>
               </span>
@@ -861,7 +870,7 @@
               <div class="dbg-card-h">
                 <span>{s.name}</span>
                 <span class="dbg-card-actions">
-                  <button class="ghost small" onclick={() => copy("routes", routeLines(servers, routes, aliases, redact, hasPublicIpv6Observation, routeUnavailable).join("\n"))}>
+                  <button class="ghost small" onclick={() => copy("routes", routeLines(servers, routes, aliases, maskForExport, hasPublicIpv6Observation, routeUnavailable).join("\n"))}>
                     {copied === "routes" ? "Copied" : "Copy"}
                   </button>
                 </span>
@@ -961,7 +970,7 @@
             <div class="dbg-card-h">
               <span>Call peers</span>
               <span class="dbg-card-actions">
-                <button class="ghost small" onclick={() => copy("voice", voiceLines(voicePeers, aliases, redact).join("\n"))}>
+                <button class="ghost small" onclick={() => copy("voice", voiceLines(voicePeers, aliases, maskForExport).join("\n"))}>
                   {copied === "voice" ? "Copied" : "Copy"}
                 </button>
               </span>

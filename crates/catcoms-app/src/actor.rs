@@ -769,6 +769,11 @@ pub enum AppCommand {
     /// rendezvous configured; the PEX half always runs, because members exchange records over
     /// whatever connections they have with no infrastructure involved.
     DriveDiscovery,
+    /// Explicit user-triggered isolation repair. The sync layer retains the anti-click cooldown
+    /// and every shared egress limit; the reply distinguishes no routes from safety deferral.
+    ManualFallbackRedial {
+        reply: oneshot::Sender<catcoms_sync::ManualRedialOutcome>,
+    },
     /// (Re)publish this device's own signed peer record with `addresses` at `seq`. Sent by the
     /// bridge when this node's reachability changes (a UPnP mapping arriving, say), so members
     /// learn the new address instead of holding a dead one.
@@ -1822,6 +1827,18 @@ impl ServerActor {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(AppCommand::MemberRoutes { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())
+    }
+
+    /// Request one explicit safety-bounded fallback redial pass.
+    pub async fn manual_fallback_redial(
+        &self,
+    ) -> Result<catcoms_sync::ManualRedialOutcome, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::ManualFallbackRedial { reply })
             .await
             .map_err(|_| "server stopped".to_string())?;
         rx.await.map_err(|_| "server stopped".to_string())
@@ -3737,8 +3754,13 @@ where
                                 std::time::Duration::from_millis(DISCOVERY_DRAIN_MS),
                                 async {
                                     for _ in 0..MAX_DISCOVERED_PER_TICK {
-                                        match server.next_discovered().await {
-                                            Some(d) => server.ingest_discovered(d).await,
+                                        match server.next_postjoin_discovery_event().await {
+                                            Some(catcoms_sync::PostJoinDiscoveryEvent::Discovered(d)) => {
+                                                server.ingest_discovered(d).await;
+                                            }
+                                            Some(catcoms_sync::PostJoinDiscoveryEvent::Registered(registration)) => {
+                                                server.note_rendezvous_registered(registration);
+                                            }
                                             None => break, // transport closed
                                         }
                                     }
@@ -3791,6 +3813,10 @@ where
                         // dynamic-IP epoch until the *next* minute tick, even though its fresh
                         // signature is precisely the signal that should bypass retry backoff.
                         server.cache_known_records();
+                        // SWIM observations, reciprocal signalling and HyParView promotion share
+                        // one bounded repair pass. Helpers inspect only live proven paths; all
+                        // resulting sockets remain behind the ordinary policy + endpoint budget.
+                        server.drive_mesh_repair().await;
                         server.dial_cached_peers().await;
                         let route_revision = server.member_route_revision();
                         if route_revision != last_member_route_revision {
@@ -3801,6 +3827,15 @@ where
                         if switchboards != last_switchboards {
                             last_switchboards = switchboards;
                             let _ = event_tx.send(AppEvent::SwitchboardsChanged).await;
+                        }
+                    }
+                    Some(AppCommand::ManualFallbackRedial { reply }) => {
+                        let outcome = server.manual_fallback_redial().await;
+                        let _ = reply.send(outcome);
+                        let route_revision = server.member_route_revision();
+                        if route_revision != last_member_route_revision {
+                            last_member_route_revision = route_revision;
+                            let _ = event_tx.send(AppEvent::MemberRoutesChanged).await;
                         }
                     }
                     Some(AppCommand::PublishSelfRecord { addresses, seq }) => {
@@ -3860,6 +3895,9 @@ where
                 // reader would go on to trust.
                 cont = server.sync_once() => { event_tx.idle(); match cont {
                     Ok(true) => {
+                        if server.has_pending_reciprocal() {
+                            server.drive_pending_reciprocal().await;
+                        }
                         sync_channels(
                             &mut server,
                             &mut last_channels,

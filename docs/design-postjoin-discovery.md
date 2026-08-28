@@ -1,6 +1,6 @@
 # Design; post-join steady-state rendezvous discovery
 
-Status: **implemented; self-healing retry hardened 2026-08-22.** After joining, a member periodically re-registers itself
+Status: **implemented; swarm-inspired repair completed 2026-08-28.** After joining, a member renews its registration
 at the rendezvous under its rotation-aware namespaces and discovers + dials *other members* there;
 so members re-find each other after a restart / address change with **no fresh invite**. Built on
 the 6e-3d primitives (`rendezvous_namespaces`, the `DiscoveryPolicy`, PEX), driven by the per-server
@@ -29,19 +29,24 @@ Adversarial review follows [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md).
   server and untrusted pre-join/member-discovery path, with per-process, per-server, canonical
   Phase-0-peer, direct-socket or relay-circuit, IPv4 `/24`, and IPv6 `/48` limits on the injected
   monotonic clock. Parser-derived opaque endpoints prevent identity-domain aliases.
-- [ ] Add an optional, tightly bounded previous-address-epoch grace window (one record, minutes,
-  current routes first); never build an indefinite address history.
-- [ ] Add authenticated reciprocal-dial signalling through an already connected member.
+- [x] Close previous-address-epoch grace as a safety decision: a newer signed omission/withdrawal
+  is authoritative, and both live and sealed caches discard the old route rather than probing a
+  potentially reassigned dynamic IP.
+- [x] Add authenticated, exact-descriptor reciprocal-dial signalling through an already connected
+  proven member, with queued connected-only forwarding and shared endpoint limits.
 - [x] Track bounded, session-only pairwise reachability evidence by address family and transport;
   keep aggregate connect/disconnect authoritative, handle concurrent relay/direct paths, and expire
   historical successes after 24 hours.
-- [ ] Add SWIM-style indirect probes without equating suspicion with membership removal.
-- [ ] Split topology maintenance into HyParView-like active/passive views and randomized promotion.
-- [ ] Add CYCLON-like age-biased, source-diverse passive-view shuffles.
+- [x] Add SWIM-style indirect probes without equating suspicion with membership removal.
+- [x] Split topology maintenance into derived HyParView-like active/passive views and randomized
+  logical promotion; never close a shared libp2p connection to meet a view target.
+- [x] Add CYCLON-like local age-biased, source-diverse passive-view shuffles.
 - [x] Surface typed per-device claimed-route health and safe personal/group actions in
   Connectivity/debug output without equating local unreachability with offline presence.
-- [ ] Add an explicit manual fallback-redial action for a completely isolated member.
-- [ ] Make rendezvous renewal TTL-aware instead of re-registering every discovery tick.
+- [x] Add an explicit manual fallback-redial action with a monotonic anti-click cooldown while
+  preserving the ordinary discovery policy and process-wide endpoint scheduler.
+- [x] Make rendezvous renewal TTL-aware (renew at 75% of the bounded granted lease, with a bounded
+  retry deadline while the grant is pending).
 
 ## WebSocket boundary
 
@@ -108,10 +113,11 @@ detector needed from it is served by roster-backed confirmation instead (the P8 
   attempt happened, while the process counters are charged only for routes actually granted.
 
 **Driver methods on `ChannelSync`** (called by `Server`, driven by the actor):
-- `drive_discovery()` (async): for each rz node, for each `ns` in `rendezvous_namespaces(rz_node)`;
-  `transport.rendezvous_register(ns, rz_node)` (advertise our external addrs under the member-only
-  namespace) and `transport.rendezvous_discover(ns, rz_node)`.
-- `next_discovered()` (async): delegate to `transport.next_discovered()`.
+- `drive_discovery()` (async): reconnect/discover on every cadence but register each exact
+  rendezvous-node/namespace key only when its lease is absent or due. A successful grant schedules
+  renewal at 75% of its bounded TTL; a pending grant gets a short retry deadline.
+- `next_postjoin_discovery_event()` (async): select between `transport.next_discovered()` and
+  `transport.next_registered()` without busy-looping an inert transport.
 - `ingest_discovered(d)` (async): build a `Candidate { peer: canonical_transport_peer,
   source: Rendezvous(rz_node), freshness: Transport(canonical_transport_peer), seq,
   tag_verified: false }`, apply the retry deadline, then call
@@ -161,8 +167,10 @@ their separate validator and lifecycle rather than being claimed here.
   candidate, only ranks it; the member-only namespace + MLS + PEX are the gates). The desktop now
   seals `AddressCache` beside the server snapshot and re-verifies every row on load; SQLCipher
   remains a storage-engine refinement.
-- **Re-registration cadence:** a fixed interval (re-register every tick) rather than TTL-driven; a
-  TTL-aware schedule is a refinement.
+- **Re-registration cadence: DONE:** discovery remains periodic, while exact node/namespace
+  registrations renew from the server-granted TTL. The transport event carries no request id, so
+  commands remain serialized per key with a bounded retry deadline rather than claiming arbitrary
+  concurrent-request correlation.
 - **Ordinary interface churn; DONE:** one process-wide native monitor consumes Windows route/IP
   notifications, Linux/Android netlink, and Apple/BSD route notifications. Callback bursts are
   coalesced before every running server re-samples the kernel's route-selected IPv4/IPv6 sources.
@@ -170,14 +178,15 @@ their separate validator and lifecycle rather than being claimed here.
   signed peer-record epoch before PEX in that same pass. Exact ownership prevents a disappearing
   raw GUA from removing an identical live PCPv6/manual route. The roughly-minute discovery poll
   remains active as the portable repair path if platform monitoring fails or misses an event.
-- **Pairwise reachability: DONE; general post-join reciprocal dial signalling: not yet represented.**
+- **Pairwise reachability and post-join reciprocal repair: DONE.**
   The invite `JoinReply` proof retry now has a connected-only network command and cannot implicitly
   redial from the ordinary recent-peer cache after the endpoint scheduler refuses a pass. A
   connected member
   can distribute signed records, and each device now retains bounded local path evidence for
-  records that claim a live transport. It does not yet carry a bounded, authenticated “please dial
-  this member's fresh candidate now” signal or authenticated evidence of which address/transport
-  worked from another member's vantage point.
+  records that claim a live transport. The repair layer now carries a bounded authenticated
+  “please dial this exact current descriptor” signal and signed, exact-attempt-bound evidence that a
+  helper currently does or does not hold a proven path to that claimed transport. It deliberately
+  does not claim which advertised socket worked or that the human is online.
 
 ## Reciprocal-dial design after adversarial review
 
@@ -186,11 +195,11 @@ authorization handler, so a removed member that still knows a grandfathered topi
 stale subscriber to relay a dial request. Gossip would also disclose attempted peer pairs and timing
 to every subscriber.
 
-The zero-server design instead uses a small **addressed, capability-gated helper protocol**. If A
+The zero-server design instead uses a small **addressed, current-member helper protocol**. If A
 cannot reach B but remains connected to C, A asks C to deliver a request to B. C catches up and
 revalidates its current roster before forwarding; C never dials A and does not carry the resulting
-connection. B validates the request and then dials A's already accepted current signed record. A
-simultaneously retries B, which may help QUIC NAT traversal. This does not claim general TCP
+connection. B validates the request and then dials A's already accepted current signed record. The
+ordinary discovery loop continues A's own bounded retries. This does not claim general TCP
 simultaneous-open and cannot repair a completely partitioned group with no surviving path.
 
 The request contains references to the exact canonical hashes and sequences of A and B's already
@@ -198,25 +207,30 @@ accepted descriptors, not embedded addresses or replacement descriptors. An equa
 different hash is equivocation and is rejected. A descriptor replacement, route withdrawal, member
 removal, session change, shutdown, or server deletion cancels the corresponding pending intent.
 
-B advertises a signed reciprocal-dial capability containing a random receiver-session identifier,
-its current descriptor reference, routing label, protocol version, and a short expiry. The request
-binds the group, requester and target devices, both descriptor references, receiver session,
-attempt identifier, and expiry. One or two currently connected capable helpers may forward it and
-attach an authenticated delivery attestation. Helpers never invent or substitute routes. B applies
-the same current-roster, current-session, exact-record, replay, rate, and expiry checks regardless of
-which helper delivered it.
+Every compatible current member provides this small baseline control verb; it is not an opt-in
+hosting role. The requester-authenticated frame binds the group, requester and target devices, both
+exact descriptor hashes/sequences/peers, a random attempt id, and a short expiry. A currently
+connected helper may forward it only when it holds proven live paths to both claimed peers, and
+adds its own signature over the original frame and source/target peers. Helpers never invent or
+substitute routes. B rechecks current roster, exact descriptors, helper proof, signature, replay,
+rate, and expiry regardless of which helper delivered it.
 
 Accepted work becomes a reference-only actor intent. Immediately before dialing, the actor resolves
-A's current record again and sends at most two direct peer-bound QUIC candidates (preferably one
-IPv4 and one IPv6) through the shared endpoint scheduler. There is no bare-address fallback. The
+A's current record again and sends at most two direct peer-bound candidates (at most one IPv4 and
+one IPv6, TCP or QUIC) through the shared endpoint scheduler. There is no relay or bare-address
+fallback inside this direct repair verb. The
 scheduler accounts for every endpoint at pair, device, address/prefix, server, and process scopes;
 new address epochs and native network-change events refresh records but never directly trigger a
 reciprocal-dial storm.
 
-Rollout is capability-gated: receivers and helpers ship before automatic senders. An old client that
-does not advertise support is `feature unavailable`, not `offline`. The UI must derive presence and
-route claims from typed evidence; a transport connection alone does not prove which route, family,
-descriptor epoch, or helper path worked.
+Handlers authenticate and enqueue connected-only pushes; probes, results, reciprocal forwards and
+deliveries each arrive on separate actor turns, so no sole-owner actor waits for a remote repair
+response. Cancellation removes pending exact-descriptor intents on replacement/removal, but the
+current transport seam cannot recall a dial already submitted. An old client that does not implement the verbs times out
+as `unknown`, never as `offline`. The UI derives presence and route claims from typed evidence; a
+transport connection alone does not prove which route, family, descriptor epoch, or helper path
+worked. This reciprocal protocol is deliberately **not** a dual signature by the device and libp2p
+keys, so it does not upgrade `binding=self_asserted`.
 
 ### Baseline participation versus optional hosting
 
@@ -235,17 +249,18 @@ budgets. Opting out of those roles therefore does not turn a member into a passi
 prevents silent promotion into a public listener or general relay. A user can always cease all
 participation by disconnecting or leaving the group.
 
-Before reciprocal dialing is enabled, implementation status is:
+Implementation status:
 
 - [x] enforce one canonical direct-route grammar with a mandatory terminal `/p2p/<PeerId>` matching
   the signed descriptor and remove every discovery bare-address dial path;
 - [x] meter endpoints rather than peers through a process-wide scheduler shared by existing
   untrusted discovery paths, using parser-derived canonical transport principals; reciprocal work
-  must reuse it when implemented;
-- [ ] add a typed peer-bound batch transport API;
-- [ ] implement bounded session/replay state, addressed helper forwarding, actor cancellation, and
-  deterministic topology-aware A-to-C-to-B tests; and
-- [ ] complete another adversarial review of each later implementation slice before handoff.
+  reuses it;
+- [x] add a typed, fail-closed, direct-only peer-bound batch transport API;
+- [x] implement bounded session/replay state, addressed queued helper forwarding, pending-intent
+  cancellation, and deterministic topology-aware A-to-C-to-B tests; and
+- [x] complete another adversarial review of each later implementation slice before handoff (final
+  re-review: no remaining blocker/high/medium/low finding in this boundary).
 
 ## Address-history policy
 
@@ -255,12 +270,15 @@ it does **not** union every historical IP forever. A withdrawn dynamic public ad
 reassigned to another subscriber, and continuing to probe it leaks timing/IP metadata even though
 Noise will reject the wrong transport identity.
 
-A future history layer may retain at most one preceding signed record for a short grace period, try
-it only after the current epoch's routes fail, and discard it immediately on an explicit expiry or
-mapping withdrawal. That is a recovery hint, never an address the current record is claimed to
-endorse. Until that lifecycle exists, replacing the old record is safer and more truthful.
+A previous-address grace layer was rejected after adversarial review: this wire format cannot tell
+ordinary omission from an intentional withdrawal strongly enough to keep probing safely. The
+newest record is therefore authoritative. A zero-route replacement removes the previous live and
+sealed cache row, and cache reload accepts a row only when its descriptor equals the current epoch.
+This may lose a still-valid route an honest client accidentally omitted, but avoids probing an IP
+after dynamic reassignment. Any future grace design needs an explicit signed route-transition or
+withdrawal object; it must not infer permission from history alone.
 
-## Swarm-inspired next layer
+## Swarm-inspired repair layer
 
 The existing structures already resemble a small churn-tolerant overlay:
 
@@ -270,24 +288,30 @@ The existing structures already resemble a small churn-tolerant overlay:
 - **failure suspicion:** a missing connection/PEX answer affects presence and retry choice, never
   MLS membership.
 
-The next coherent extension is HyParView/CYCLON-like behavior: on disconnect, promote randomized
-passive candidates; exchange small age-biased record samples; retain source diversity; and age
-unconfirmed candidates without deleting the member. SWIM-style indirect probes can then ask two
-active members whether they can reach a suspect peer. “Unreachable from me” must remain distinct
-from “offline” and must never remove a member.
+The implemented HyParView/CYCLON-like layer derives a bounded active view from currently connected,
+session-proven member paths and a passive view from current roster-checked descriptors. A disconnect
+logically promotes one randomized passive descriptor plus the departed repair target, but never
+closes a shared transport connection to enforce an overlay degree. PEX increments saturating local
+record ages, resets age on a newer descriptor, records distinct authenticated PEX sources locally,
+and serves age-biased/source-diverse bounded samples. Age and source claims never arrive from wire.
+
+SWIM-style probes ask at most two active helpers about their present proven path to one exact target
+descriptor. An unanswered pending probe expires as unknown. One signed positive becomes `reachable_via_member`; two distinct
+signed negatives become `suspected_unreachable`. Neither changes local connection health, presence,
+or MLS membership. A positive helper can carry the reciprocal request described above.
 
 The product-facing model is now typed per device record: `claimed_peer_connected_direct`,
 `claimed_peer_connected_relay`, `claimed_peer_connected_other`,
 `claimed_peer_dial_cooling_down`,
 `claimed_peer_dial_eligible`, `claimed_peer_has_no_route`, and `no_peer_record`, plus current path
 families/transports, a time-bounded last successful path, candidate families/transports, and typed
-personal/member/group actions. `reachable_via_member` remains deliberately absent until an
-authenticated indirect-probe/helper protocol provides that evidence. No single peer's failed probe
-is a global health verdict.
+personal/member/group actions, plus separate `reachable_via_member` / `suspected_unreachable`
+evidence, helper-response count/age, and exact-descriptor reciprocal-pending state. No single peer's
+failed probe is a global health verdict.
 
 `claimed_peer_dial_cooling_down` means a policy-approved dial batch was submitted and its scheduler
-deadline has not elapsed. The current transport seam does not report a per-address dial result, so
-the counter is not labelled as attempts that reached the transport or failures. Likewise,
+deadline has not elapsed. The transport acknowledges actor submission but does not report a later
+per-address connection result, so the counter is not labelled as a completed attempt or failure. Likewise,
 IPv6-only candidates are shown as a clue: an advertised/public IPv6 observation is not an outbound
 route test and cannot prove why a connection did not open. Current switchboards remain bounded
 **admission-only** forwarders; they are not offered as a repair action for already-joined members.
@@ -295,8 +319,9 @@ route test and cannot prove why a connection did not open. Current switchboards 
 The `claimed_peer_` prefix and `self_asserted` binding are load-bearing. A member signs the
 `PeerDescriptor` containing its transport id, but the current protocol does not prove that its
 device key controls that libp2p key. Active path observations can therefore refine the route named
-by the member's record, but cannot yet prove the person/device is online. A later reciprocal
-challenge must bind both keys before product wording may remove that qualification.
+by the member's record, but cannot prove the person/device is online. The implemented reciprocal
+repair does not bind both keys; a future explicit dual-key proof is required before product wording
+may remove that qualification.
 
 ## Security
 Discovery only *surfaces* candidates; the `DiscoveryPolicy` ranks dials (budget-bounded,

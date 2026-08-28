@@ -48,6 +48,15 @@ test("visual fixture supplies the full degraded connectivity assistant state", (
   assert.equal(report.advertised.length, 2);
   assert.match(report.upnp, /PCP unavailable/);
   assert.equal(report.steps.length, 2);
+  const routes = visualFixtureResponse("get_member_routes", { server: 1 }) as Array<{
+    indirect_health: string;
+    indirect_witnesses: number;
+    reciprocal_pending: boolean;
+  }>;
+  assert.equal(routes[1]?.indirect_health, "reachable_via_member");
+  assert.equal(routes[1]?.indirect_witnesses, 1);
+  assert.equal(routes[1]?.reciprocal_pending, true);
+  assert.equal(visualFixtureResponse("manual_fallback_redial", { server: 1 }), "submitted");
 });
 
 test("visual fixture exposes explicit standing switchboard consent and hosts", () => {

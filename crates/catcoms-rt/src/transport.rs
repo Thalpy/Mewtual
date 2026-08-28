@@ -89,7 +89,17 @@ pub enum TransportError {
     /// The remote received a request but dropped it without replying.
     #[error("request handler dropped without responding")]
     NoResponse,
+    /// A caller supplied a peer-bound dial batch that violated the transport contract.
+    #[error("invalid peer-bound dial batch")]
+    InvalidDialBatch,
 }
+
+/// Maximum direct routes accepted by one peer-bound reciprocal-dial batch.
+///
+/// One IPv4 and one IPv6 candidate are sufficient for the repair protocol. Keeping the bound in
+/// the transport seam means an alternate implementation cannot accidentally turn one signed
+/// helper request into an arbitrarily large dial fan-out.
+pub const MAX_PEER_DIAL_BATCH: usize = 2;
 
 /// What the transport actor did with a runtime dial command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +296,21 @@ pub struct DiscoveredPeer {
     pub seq: u64,
 }
 
+/// Confirmation that this node's record was registered at one rendezvous namespace.
+///
+/// `ttl_secs` is a lease granted by the rendezvous node, not a promise that the record remains
+/// usable for that entire period. Consumers renew before it expires and stop treating a missing
+/// renewal as current registration evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RendezvousRegistration {
+    /// Opaque transport id of the rendezvous node that granted the lease.
+    pub rendezvous_node: Vec<u8>,
+    /// The exact namespace registered.
+    pub namespace: String,
+    /// Granted lease lifetime in seconds.
+    pub ttl_secs: u64,
+}
+
 /// The messaging seam. Outbound operations take `&self` so the transport can be
 /// shared (e.g. behind an `Arc`); [`MeshTransport::next_event`] is single-consumer.
 #[async_trait]
@@ -321,6 +346,21 @@ pub trait MeshTransport: Send + Sync {
         data: Bytes,
     ) -> Result<Bytes, TransportError>;
 
+    /// Send an addressed request only over a connection that is live at handling time.
+    ///
+    /// Repair helpers use this to forward authenticated control traffic without silently dialing
+    /// the target on the helper's behalf. The fail-closed default is intentional: a transport
+    /// that cannot prove this property must report the target unreachable rather than delegate to
+    /// [`MeshTransport::request`], whose implementation may consult a recent-address cache.
+    async fn request_connected(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        _data: Bytes,
+    ) -> Result<Bytes, TransportError> {
+        Err(TransportError::Unreachable(peer))
+    }
+
     /// Send an addressed message to `peer` **without waiting for a reply**, returning as soon as
     /// it is queued for sending.
     ///
@@ -342,6 +382,21 @@ pub trait MeshTransport: Send + Sync {
         data: Bytes,
     ) -> Result<(), TransportError> {
         self.request(peer, proto, data).await.map(|_| ())
+    }
+
+    /// Queue a notification only when `peer` is live at handling time.
+    ///
+    /// Addressed repair forwarding uses this form so an inbound helper request can acknowledge
+    /// immediately and cannot make the sole group actor wait on a second member. As with
+    /// [`MeshTransport::request_connected`], the default fails closed rather than implicitly
+    /// dialing through an implementation's recent-address cache.
+    async fn notify_connected(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        _data: Bytes,
+    ) -> Result<(), TransportError> {
+        Err(TransportError::Unreachable(peer))
     }
 
     /// Await the next inbound event. Returns `None` once the transport is closed.
@@ -388,6 +443,21 @@ pub trait MeshTransport: Send + Sync {
         Ok(DialSubmission::Submitted)
     }
 
+    /// Submit a small direct-route batch explicitly bound to `peer`.
+    ///
+    /// Production revalidates every terminal `/p2p` component inside its actor before any socket
+    /// can start. The default is fail-closed because a generic string-only transport cannot prove
+    /// that relationship. Callers must already have applied their discovery policy and shared
+    /// endpoint scheduler; this seam is the final confused-deputy guard, not a replacement for
+    /// those budgets.
+    async fn dial_peer_batch(
+        &self,
+        peer: PeerId,
+        _addresses: &[String],
+    ) -> Result<Vec<DialSubmission>, TransportError> {
+        Err(TransportError::Unreachable(peer))
+    }
+
     /// Advertise `addr` as an externally-reachable address, so a rendezvous registration can flush.
     async fn add_external_addr(&self, _addr: &str) -> Result<(), TransportError> {
         Ok(())
@@ -396,6 +466,12 @@ pub trait MeshTransport: Send + Sync {
     /// Await the next rendezvous-discovered peer. The default never resolves (a transport without
     /// rendezvous never surfaces one), so a `select!` arm awaiting it is inert.
     async fn next_discovered(&self) -> Option<DiscoveredPeer> {
+        std::future::pending().await
+    }
+
+    /// Await a successful rendezvous registration and its granted TTL. The inert default mirrors
+    /// [`MeshTransport::next_discovered`] for transports without rendezvous support.
+    async fn next_registered(&self) -> Option<RendezvousRegistration> {
         std::future::pending().await
     }
 
