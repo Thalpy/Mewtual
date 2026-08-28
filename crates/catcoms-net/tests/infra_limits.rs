@@ -70,13 +70,10 @@ async fn fresh_node_reaches(target: &Multiaddr, secs: u64) -> bool {
 /// circuit-reservation fixture's existing full-suite contention allowance while still bounding a
 /// genuinely dead actor or socket.
 async fn await_peer(node: &MeshService, want: catcoms_rt::PeerId) {
-    tokio::time::timeout(
-        Duration::from_secs(90),
-        node.wait_for_peer_connected(want),
-    )
-    .await
-    .expect("the target peer never connected before the CI contention deadline")
-    .expect("mesh actor stopped while waiting for the target peer");
+    tokio::time::timeout(Duration::from_secs(90), node.wait_for_peer_connected(want))
+        .await
+        .expect("the target peer never connected before the CI contention deadline")
+        .expect("mesh actor stopped while waiting for the target peer");
 }
 
 /// Reserve a circuit slot on `relay_addr` and return the granted circuit address.
