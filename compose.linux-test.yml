@@ -1,0 +1,46 @@
+name: mewtual-linux-test
+
+services:
+  # Repeatable Linux compilation, unit suites and two-process loopback acceptance. This service
+  # is intentionally unprivileged and does not receive the Docker socket or host devices.
+  full:
+    build:
+      context: .
+      dockerfile: docker/linux-test.Dockerfile
+      args:
+        MEWTUAL_TEST_UID: "${MEWTUAL_TEST_UID:-1000}"
+        MEWTUAL_TEST_GID: "${MEWTUAL_TEST_GID:-1000}"
+    command: ["bash", "scripts/linux-container-test.sh", "full", "--install"]
+    volumes:
+      - ./target/linux-container:/workspace/target/linux-container
+
+  # Network namespaces and nftables require broad kernel administration inside the container.
+  # They are therefore opt-in under the `netns` profile, and the image never mounts the Docker
+  # socket. Run these only as disposable test containers on a trusted development machine.
+  netns-direct:
+    profiles: ["netns"]
+    user: "0:0"
+    privileged: true
+    build:
+      context: .
+      dockerfile: docker/linux-test.Dockerfile
+      args:
+        MEWTUAL_TEST_UID: "${MEWTUAL_TEST_UID:-1000}"
+        MEWTUAL_TEST_GID: "${MEWTUAL_TEST_GID:-1000}"
+    command: ["bash", "scripts/linux-container-test.sh", "netns", "direct-mapped"]
+    volumes:
+      - ./target/linux-container:/workspace/target/linux-container
+
+  netns-relay:
+    profiles: ["netns"]
+    user: "0:0"
+    privileged: true
+    build:
+      context: .
+      dockerfile: docker/linux-test.Dockerfile
+      args:
+        MEWTUAL_TEST_UID: "${MEWTUAL_TEST_UID:-1000}"
+        MEWTUAL_TEST_GID: "${MEWTUAL_TEST_GID:-1000}"
+    command: ["bash", "scripts/linux-container-test.sh", "netns", "relay-only"]
+    volumes:
+      - ./target/linux-container:/workspace/target/linux-container

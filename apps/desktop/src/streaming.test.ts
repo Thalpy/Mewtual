@@ -47,6 +47,21 @@ test("stream presets have visible safe defaults and sanitize persisted values", 
   }
 });
 
+test("stream selects bind typed defaults to visible option labels", () => {
+  const app = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
+  const panel = app.match(/\{#snippet streamSettingsPanel[\s\S]*?\{\/snippet\}/)?.[0] ?? "";
+
+  // A plain `value={...}` attribute does not select an option in HTML. These bindings are the
+  // rendered contract that makes the defaults and later persisted choices visible in WebView2.
+  assert.match(panel, /<select bind:value=\{streamSettings\.resolution\}/);
+  assert.match(panel, /<select bind:value=\{streamSettings\.frameRate\}/);
+  assert.match(panel, /<select bind:value=\{receiveResolutionMode\}/);
+  assert.match(panel, /<option value=\{1080\}>1080p<\/option>/);
+  assert.match(panel, /<option value=\{30\}>30 fps<\/option>/);
+  assert.match(panel, /<option value="auto">Auto from this window<\/option>/);
+  assert.doesNotMatch(panel, /<select value=\{/);
+});
+
 test("changing audio capture interpretation revokes old source grants", () => {
   assert.equal(shouldClearScreenAudioOnModeChange("surface", "separate"), true);
   assert.equal(shouldClearScreenAudioOnModeChange("separate", "surface"), true);

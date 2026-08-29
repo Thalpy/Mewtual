@@ -406,7 +406,13 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   materialization/publication is capped at 256 rows with bounded signed fields. Fetched chunks
   already occupy one authenticated XChaCha20-Poly1305-sealed
   vault copy, so keeping a distrusted file packaged does not inherently double storage; explicit
-  export adds a separate plaintext Downloads copy. Full trust-everyone/specific automatic
+  export adds a separate plaintext Downloads copy. Storage now inventories each complete encrypted
+  local file and offers that export as “Unlock copy”; partial files remain listed only in aggregate
+  until all chunks are present. Inline media and exports compare an exact inert MIME allow-list with
+  a bounded common-container signature. SVG, mismatches and unknown formats stay out of inline
+  decoding, while exports disclose matched/mismatched/unrecognized evidence. This blocks simple
+  type disguise but is not full bitstream validation or a decoder sandbox. Full
+  trust-everyone/specific automatic
   **whole-share mirroring** remains deferred until the sealing store has a disk quota, otherwise a
   trusted member can exhaust local storage. Native saves sanitize the filename, use non-overwriting
   verified staging, and reveal rather than execute, which blocks direct command/path execution.
@@ -438,11 +444,40 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   first attachment and screen→camera invalidation, permission-prompt stop/leave/supersession,
   stream-preset sanitization/defaults, file-trust fail-closed parsing/full-identity decisions,
   jukebox/cross-server gates/index bounds, and sealed continuity/lock ordering of trust policy.
-- **Remaining high-value integration coverage:** a two-native-process Tauri test that changes the
-  listener/interface and performs the human copy/paste recovery ceremony end to end; WebView-level
-  tests against each supported platform's real `RTCRtpSender`/codec implementation (including
-  H.265 availability and rejection behavior); and abrupt process termination at each recovery
-  persistence boundary. These need native/WebRTC harnesses rather than weaker unit substitutes.
+- **Native/Linux integration coverage:** `process_recovery_e2e` now crosses actual process,
+  snapshot and TCP boundaries: Bob joins, exits, restores in a second process on a deliberately
+  different listener, reloads an explicitly persisted transport seed, atomically publishes the
+  signed recovery code through a file standing in for copy/paste, and proves two-way messaging
+  after Alice applies it. (The seed file stands in for `ServerNet`; its vault-sealed encoding has
+  separate store coverage.) Linux-only store tests abort a subprocess
+  after the staged record is synced and immediately after rename; readers observe either the
+  complete previous or complete replacement record. The persistence primitive uses unique
+  create-new siblings, rejects staging symlinks, syncs the staged file and, on Unix, its parent
+  directory; a post-rename sync failure is explicitly classified as committed-but-not-durable.
+  The root `vault.bin` now uses the same durable staging shape plus an OS-backed interprocess lock;
+  it fails lock contention promptly as `VaultBusy`, and real child-process tests prove concurrent
+  first creation cannot return mismatched DEKs or hang and conflicting rewraps cannot both succeed.
+  A separate OS session lock is now owned for each `ServerStore` lifetime, preventing two desktop
+  processes from running divergent actors over one vault; a production-constructor child-process
+  regression covers prompt contention, normal release and abort release. Already-mounted UI
+  re-unlock authenticates through a verify-only vault transaction, preserving wrong-passphrase
+  refusal without self-contending on that lifetime lock.
+  New/replacement vault secrets are capped at 4096 bytes. A legacy v1 wrapper using a
+  4097..65536-byte secret is accepted once and atomically migrated to v2 with a fixed,
+  domain-separated prehash before Argon2; larger inputs are rejected. The v2 migration is
+  forward-only, so a v1-only older build cannot reopen the migrated profile. Both wrapper versions
+  are fixed at 89 bytes and hostile lengths are rejected without file-sized allocation.
+  `compose.linux-test.yml` provides a non-root Debian full-suite/process lane plus explicitly
+  root/privileged opt-in netns NAT/relay
+  lanes; ordinary CI also compiles/tests the frontend and separate Tauri workspace on Ubuntu.
+- **Remaining high-value integration coverage:** the recovery test exercises the native core, not
+  two visible Tauri/WebView applications and their IPC/copy-paste controls. WebView-level tests are
+  still needed against each supported platform's real `RTCRtpSender`, capture portal and codec
+  implementation (including H.265 availability/rejection and application-audio choices). The
+  Linux abort test pins the shared atomic-write boundary, but a kill matrix at each Tauri recovery
+  state-machine transition remains. Decoder sandboxing/transcoding also remains architectural work;
+  a headless Docker container cannot prove graphical portal, hardware-codec or decoder isolation.
+  See `LINUX-TESTING.md`.
 
 Status posts now use distinct `status_post/<random-id>` root maps rather than requiring concurrent
 authors to share/create one Automerge list. Readers and all mutations enumerate every legacy list

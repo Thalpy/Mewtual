@@ -87,6 +87,14 @@ test("saved notices distinguish a visible folder from a reveal warning", () => {
     guideSavedNotice({ path: "/Downloads/guide.png", displayed: true }).note,
     "Saved to /Downloads/guide.png and opened in your image viewer.",
   );
+  const mismatch = downloadSavedNotice("cat.png", {
+    path: "/Downloads/cat.png",
+    displayed: true,
+    contentValidation: "mismatch",
+  });
+  assert.equal(mismatch.kind, "warn");
+  assert.match(mismatch.text, /bytes do not match/i);
+  assert.match(mismatch.text, /untrusted/i);
 });
 
 test("malformed native responses cannot falsely mark a download done", async () => {
@@ -99,6 +107,15 @@ test("malformed native responses cannot falsely mark a download done", async () 
   const badWarning = mockInvoker({ path: "/Downloads/cat.png", displayed: false, warning: 7 });
   await assert.rejects(
     saveGroupFile(badWarning.invoke, 1, "ab12", "cat.png"),
+    /invalid save result/,
+  );
+  const badValidation = mockInvoker({
+    path: "/Downloads/cat.png",
+    displayed: true,
+    contentValidation: "safe",
+  });
+  await assert.rejects(
+    saveGroupFile(badValidation.invoke, 1, "ab12", "cat.png"),
     /invalid save result/,
   );
 });

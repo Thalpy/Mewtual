@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -245,6 +245,10 @@ struct AppState {
     /// dropping the entry (call end, or the app closing) is what ends that route.
     media_mappings: Mutex<HashMap<u16, catcoms_net::MediaPortMapping>>,
     next_id: Mutex<u64>,
+    /// Serialize first mount and already-mounted authentication. A duplicate frontend unlock must
+    /// never race two reloads, while an explicitly UI-locked session must authenticate against
+    /// the existing mount rather than deadlocking itself on the lifetime vault lock.
+    vault_mount: Mutex<()>,
     store: Mutex<Option<ServerStore>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
@@ -1110,6 +1114,9 @@ struct UiStorageHealth {
     pinned_local_estimated_bytes: u64,
     categories: Vec<UiStorageCategory>,
     largest_files: Vec<UiStorageFile>,
+    /// Fully local files whose managed copy remains sealed under the vault. Exporting one creates
+    /// a separate plaintext copy; it never mutates this inventory row in place.
+    local_files: Vec<UiStorageFile>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -1209,6 +1216,7 @@ fn build_storage_report(
     }
     let mut category_map = HashMap::<String, UiStorageCategory>::new();
     let mut largest_files = Vec::with_capacity(unique.len());
+    let mut local_files = Vec::new();
     let mut logical_bytes = 0u64;
     let mut local_estimated_bytes = 0u64;
     let mut pinned_files = 0usize;
@@ -1238,7 +1246,7 @@ fn build_storage_report(
         row.logical_bytes = row.logical_bytes.saturating_add(file.size);
         row.local_estimated_bytes = row.local_estimated_bytes.saturating_add(local);
         row.pinned_files += usize::from(is_pinned);
-        largest_files.push(UiStorageFile {
+        let inventory_file = UiStorageFile {
             name: file.name.clone(),
             path: file.path.clone(),
             cid: file.cid.clone(),
@@ -1248,7 +1256,11 @@ fn build_storage_report(
             pinned: is_pinned,
             held: file.held,
             total: file.total,
-        });
+        };
+        if file.total > 0 && file.held == file.total {
+            local_files.push(inventory_file.clone());
+        }
+        largest_files.push(inventory_file);
     }
     let order = ["Images", "Video", "Audio", "Documents", "Archives", "Other"];
     let mut categories: Vec<_> = category_map.into_values().collect();
@@ -1266,6 +1278,12 @@ fn build_storage_report(
             .then_with(|| a.cid.cmp(&b.cid))
     });
     largest_files.truncate(10);
+    local_files.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.cid.cmp(&b.cid))
+    });
     UiStorageHealth {
         listed_files: health.listed_files,
         referenced_chunks: health.referenced_chunks,
@@ -1284,6 +1302,7 @@ fn build_storage_report(
         pinned_local_estimated_bytes,
         categories,
         largest_files,
+        local_files,
     }
 }
 
@@ -8891,7 +8910,21 @@ async fn media_head(
             return Some((hit.total_size, hit.mime.clone()));
         }
     }
-    let (total_size, mime) = actor.file_head(raw.to_vec()).await?;
+    let (total_size, declared) = actor.file_head(raw.to_vec()).await?;
+    let allowed = safe_media_mime(&declared);
+    let mime = if allowed == "application/octet-stream" {
+        allowed
+    } else {
+        // A member-authored MIME string is not evidence about the bytes. Open chunk zero through
+        // the normal authenticated file path once per media item, then expose a decodable type
+        // only when a conservative magic-byte classifier agrees with the declared media family.
+        let first = media_chunk(state, actor, server, cid, raw, 0).await?;
+        if media_signature_evidence(&allowed, &first) == MediaSignatureEvidence::Matched {
+            allowed
+        } else {
+            "application/octet-stream".to_string()
+        }
+    };
     let mut heads = state.media_heads.lock().await;
     heads.retain(|h| h.server != server || h.cid != cid);
     heads.push(MediaHead {
@@ -8955,14 +8988,127 @@ async fn media_chunk(
 fn safe_media_mime(declared: &str) -> String {
     let lowered = declared.trim().to_ascii_lowercase();
     let base = lowered.split(';').next().unwrap_or("").trim().to_string();
-    let ok = matches!(base.split('/').next(), Some("audio" | "video" | "image"))
-        && base
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'+' | b'.'));
+    // Explicit allowlist: notably excludes SVG/XML and playlist formats, which can contain active
+    // links or markup and are not inert merely because their top-level type says "image/audio".
+    let ok = matches!(
+        base.as_str(),
+        "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "image/avif"
+            | "image/bmp"
+            | "image/tiff"
+            | "image/x-icon"
+            | "audio/mpeg"
+            | "audio/ogg"
+            | "audio/wav"
+            | "audio/x-wav"
+            | "audio/flac"
+            | "audio/mp4"
+            | "audio/aac"
+            | "audio/webm"
+            | "video/mp4"
+            | "video/webm"
+            | "video/ogg"
+            | "video/quicktime"
+            | "video/x-msvideo"
+    );
     if ok {
         base
     } else {
         "application/octet-stream".to_string()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaSignatureEvidence {
+    /// Recognized bytes agree with the declared image/audio/video family.
+    Matched,
+    /// Recognized bytes belong to a different family than the declaration.
+    Mismatch,
+    /// The declaration is allowed media, but the bounded prefix is not a format we recognize.
+    Unrecognized,
+    /// The declaration itself is not on the inert media allowlist.
+    NotMedia,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetectedMediaFamily {
+    Image,
+    Audio,
+    Video,
+    AudioVideoContainer,
+}
+
+fn declared_media_family(mime: &str) -> Option<DetectedMediaFamily> {
+    match mime.split('/').next()? {
+        "image" => Some(DetectedMediaFamily::Image),
+        "audio" => Some(DetectedMediaFamily::Audio),
+        "video" => Some(DetectedMediaFamily::Video),
+        _ => None,
+    }
+}
+
+/// Conservative magic-byte classification for the media formats the webview is willing to decode.
+/// This validates container identity, not codec correctness or safety; malformed-but-recognizable
+/// media still reaches a decoder and must remain untrusted.
+fn detected_media_family(bytes: &[u8]) -> Option<DetectedMediaFamily> {
+    let starts = |signature: &[u8]| bytes.starts_with(signature);
+    if starts(b"\x89PNG\r\n\x1a\n")
+        || starts(b"\xff\xd8\xff")
+        || starts(b"GIF87a")
+        || starts(b"GIF89a")
+        || starts(b"BM")
+        || starts(b"II*\0")
+        || starts(b"MM\0*")
+        || starts(b"\0\0\x01\0")
+        || (bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP")
+    {
+        return Some(DetectedMediaFamily::Image);
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return match &bytes[8..12] {
+            b"avif" | b"avis" => Some(DetectedMediaFamily::Image),
+            _ => Some(DetectedMediaFamily::AudioVideoContainer),
+        };
+    }
+    if starts(b"fLaC")
+        || starts(b"ID3")
+        || (bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0)
+    {
+        return Some(DetectedMediaFamily::Audio);
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        return Some(DetectedMediaFamily::Audio);
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"AVI " {
+        return Some(DetectedMediaFamily::Video);
+    }
+    if starts(b"OggS") || starts(b"\x1a\x45\xdf\xa3") {
+        return Some(DetectedMediaFamily::AudioVideoContainer);
+    }
+    None
+}
+
+fn media_signature_evidence(declared: &str, bytes: &[u8]) -> MediaSignatureEvidence {
+    let allowed = safe_media_mime(declared);
+    let Some(declared) = declared_media_family(&allowed) else {
+        return MediaSignatureEvidence::NotMedia;
+    };
+    let Some(detected) = detected_media_family(bytes) else {
+        return MediaSignatureEvidence::Unrecognized;
+    };
+    if detected == declared
+        || (detected == DetectedMediaFamily::AudioVideoContainer
+            && matches!(
+                declared,
+                DetectedMediaFamily::Audio | DetectedMediaFamily::Video
+            ))
+    {
+        MediaSignatureEvidence::Matched
+    } else {
+        MediaSignatureEvidence::Mismatch
     }
 }
 
@@ -10409,6 +10555,9 @@ struct SavedFileResult {
     path: String,
     displayed: bool,
     warning: Option<String>,
+    /// `matched`, `mismatch`, or `unrecognized` for an allowlisted declared media type. This is
+    /// format evidence only—not a promise that a platform decoder is vulnerability-free.
+    content_validation: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -10419,6 +10568,39 @@ struct BackupResult {
     bytes: u64,
     displayed: bool,
     warning: Option<String>,
+}
+
+/// A secret change has a third outcome beyond success/failure: rename committed the new wrapper,
+/// but the directory flush could not prove it durable across sudden power loss. Reporting that as
+/// an error would falsely tell the user the old secret remained active.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct VaultSecretChangeResult {
+    changed: bool,
+    durability_confirmed: bool,
+    warning: Option<String>,
+}
+
+fn vault_secret_change_result(
+    result: Result<(), catcoms_app::AppError>,
+) -> Result<VaultSecretChangeResult, String> {
+    match result {
+        Ok(()) => Ok(VaultSecretChangeResult {
+            changed: true,
+            durability_confirmed: true,
+            warning: None,
+        }),
+        Err(catcoms_app::AppError::CommittedButNotDurable(error)) => {
+            Ok(VaultSecretChangeResult {
+                changed: true,
+                durability_confirmed: false,
+                warning: Some(format!(
+                    "The new secret is active, but the filesystem could not confirm crash durability. Keep the new secret; do not treat the old secret as current. Details: {error}"
+                )),
+            })
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// Copy one already-sealed vault tree without following links. Refusing links is important for
@@ -10578,7 +10760,7 @@ async fn change_vault_secret(
     state: State<'_, AppState>,
     current_secret: String,
     new_secret: String,
-) -> Result<(), String> {
+) -> Result<VaultSecretChangeResult, String> {
     require_unlocked_session(&state).await?;
     let current_secret = Zeroizing::new(current_secret);
     let new_secret = Zeroizing::new(new_secret);
@@ -10586,13 +10768,11 @@ async fn change_vault_secret(
     let store = guard
         .as_ref()
         .ok_or_else(|| "unlock the vault before changing its secret".to_string())?;
-    store
-        .change_passphrase(
-            current_secret.as_bytes(),
-            new_secret.as_bytes(),
-            &mut OsCryptoRng,
-        )
-        .map_err(|error| error.to_string())
+    vault_secret_change_result(store.change_passphrase(
+        current_secret.as_bytes(),
+        new_secret.as_bytes(),
+        &mut OsCryptoRng,
+    ))
 }
 
 /// Open a prefilled bug report / feature request on the tracker in the user's default browser.
@@ -10646,6 +10826,7 @@ async fn save_and_open_space_guide(
         path: path.to_string_lossy().into_owned(),
         displayed: warning.is_none(),
         warning,
+        content_validation: Some("matched".into()), // generator output passed strict PNG checks
     })
 }
 
@@ -10669,6 +10850,7 @@ async fn save_space_layout(
         path: path.to_string_lossy().into_owned(),
         displayed: warning.is_none(),
         warning,
+        content_validation: None,
     })
 }
 
@@ -10786,6 +10968,26 @@ async fn stream_download_to_disk(
     Ok(path)
 }
 
+fn exported_media_validation(path: &Path, declared_mime: &str) -> Option<String> {
+    if safe_media_mime(declared_mime) == "application/octet-stream" {
+        return None;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Some("unrecognized".into());
+    };
+    let mut prefix = [0u8; 64];
+    let Ok(read) = file.read(&mut prefix) else {
+        return Some("unrecognized".into());
+    };
+    let evidence = match media_signature_evidence(declared_mime, &prefix[..read]) {
+        MediaSignatureEvidence::Matched => "matched",
+        MediaSignatureEvidence::Mismatch => "mismatch",
+        MediaSignatureEvidence::Unrecognized => "unrecognized",
+        MediaSignatureEvidence::NotMedia => return None,
+    };
+    Some(evidence.into())
+}
+
 /// The live [`SaveSource`]: chunks from the server actor, authorization from the session gate,
 /// progress to the webview.
 struct ActorSaveSource<'a> {
@@ -10859,6 +11061,9 @@ async fn save_group_file(
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
         "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
     })?;
+    let (_, declared_mime) = actor.file_head(raw.clone()).await.ok_or_else(|| {
+        "this file can't be inspected; it isn't listed, or its reference is invalid".to_string()
+    })?;
     if size > MAX_FILE_BYTES as u64 {
         return Err(format!(
             "file is larger than the {MAX_FILE_BYTES}-byte limit"
@@ -10877,6 +11082,7 @@ async fn save_group_file(
     };
     let path =
         stream_download_to_disk(&downloads, &name, total, size, &target, &mut source).await?;
+    let content_validation = exported_media_validation(&path, &declared_mime);
     let warning = reveal_path(&path)
         .err()
         .map(|error| format!("The file was saved, but Downloads could not be opened: {error}"));
@@ -10884,6 +11090,7 @@ async fn save_group_file(
         path: path.to_string_lossy().into_owned(),
         displayed: warning.is_none(),
         warning,
+        content_validation,
     })
 }
 
@@ -10899,6 +11106,59 @@ async fn vault_exists(app: AppHandle) -> Result<bool, String> {
         .map_err(|e| e.to_string())?
         .join("vault");
     Ok(ServerStore::exists(&dir))
+}
+
+/// Re-authorize a webview against the store this native process already owns. Explicit UI lock
+/// intentionally leaves actors and decrypted store state mounted, but it still closes every IPC
+/// plaintext boundary; therefore this path must verify the supplied passphrase before restoring
+/// the session. It cannot call `ServerStore::open`: the existing store owns the lifetime mount
+/// lock by design.
+async fn authenticate_mounted_store(
+    state: &AppState,
+    passphrase: &[u8],
+) -> Result<bool, catcoms_app::AppError> {
+    let store_guard = state.store.lock().await;
+    let Some(store) = store_guard.as_ref() else {
+        return Ok(false);
+    };
+    store.verify_passphrase(passphrase)?;
+    Ok(true)
+}
+
+/// Commit a successful authentication only if no newer explicit lock began while Argon2, disk
+/// reads, or actor reloads were in flight. The generation is checked on both sides of updating the
+/// flags because `lock_session_inner` deliberately invalidates commands before awaiting this
+/// commit mutex. A racing lock therefore either wins first or makes this transition roll itself
+/// back; a completed lock can never be undone by stale unlock work.
+async fn finalize_unlock_session(
+    state: &AppState,
+    expected_generation: u64,
+    include_running_servers: bool,
+) -> Result<Option<Vec<ReloadedServer>>, String> {
+    let _commit = state.ui_session_commit.lock().await;
+    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+        return Err("unlock was superseded by a newer lock request; try again".into());
+    }
+    let servers = if include_running_servers {
+        Some(running_servers(state).await)
+    } else {
+        None
+    };
+    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+        return Err("unlock was superseded by a newer lock request; try again".into());
+    }
+
+    let mut resumable = state.session_resumable.lock().await;
+    *resumable = true;
+    state.session_lock_requested.store(false, Ordering::Release);
+    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+        // A lock request may publish its generation without this mutex so new IPC fails promptly.
+        // Restore the conservative state before releasing either transition boundary.
+        *resumable = false;
+        state.session_lock_requested.store(true, Ordering::Release);
+        return Err("unlock was superseded by a newer lock request; try again".into());
+    }
+    Ok(servers)
 }
 
 /// Unlock the on-disk store with `passphrase` and reload every persisted server. Called once
@@ -10921,6 +11181,24 @@ async fn unlock(
         None,
         None,
     );
+    // Capture before the first await. Any lock command that starts after this unlock invalidates
+    // its generation, even if the unlock was queued behind another mount or expensive KDF work.
+    let unlock_generation = state.ui_session_generation.load(Ordering::Acquire);
+    // This lock covers both the already-mounted authentication path and first reload. Without it,
+    // two concurrent webview mounts can both observe `None` and start duplicate actors.
+    let _mount = state.vault_mount.lock().await;
+    if authenticate_mounted_store(&state, passphrase.as_bytes())
+        .await
+        .map_err(|e| op.fail(codes::VAULT_LOCKED_OUT, e.to_string()))?
+    {
+        let servers = finalize_unlock_session(&state, unlock_generation, true)
+            .await
+            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?
+            .expect("the mounted-store path requests a running-server projection");
+        op.succeeded("VAULT.UNLOCK.ALREADY_OPEN");
+        return Ok(servers);
+    }
+
     let dir = app
         .path()
         .app_data_dir()
@@ -10930,18 +11208,6 @@ async fn unlock(
     // Opening the vault verifies the passphrase (the DEK won't decrypt otherwise).
     let store = ServerStore::open(&dir, passphrase.as_bytes(), &mut rng)
         .map_err(|e| op.fail(codes::VAULT_LOCKED_OUT, e.to_string()))?;
-
-    // If the vault is already unlocked (e.g. a dev HMR re-mounted the frontend while the Rust
-    // process kept running), don't reload from disk; that would spawn a duplicate actor +
-    // transport per server. Return the servers already registered so the rail repopulates.
-    if state.store.lock().await.is_some() {
-        *state.session_resumable.lock().await = true;
-        state.session_lock_requested.store(false, Ordering::Release);
-        // Not a fresh unlock. Worth its own outcome: a session that came back without touching
-        // the disk explains why nothing was reloaded and why no restore failures appear.
-        op.succeeded("VAULT.UNLOCK.ALREADY_OPEN");
-        return Ok(running_servers(&state).await);
-    }
 
     let records = store
         .load_registry()
@@ -11015,8 +11281,9 @@ async fn unlock(
             is_dm: record.is_dm,
         });
     }
-    *state.session_resumable.lock().await = true;
-    state.session_lock_requested.store(false, Ordering::Release);
+    finalize_unlock_session(&state, unlock_generation, false)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     // The summary that makes a partial unlock visible.
     //
     // Individual failures already log, but an unlock that returns four servers when the registry
@@ -11044,15 +11311,41 @@ async fn unlock(
 
 /// Restore an already-unlocked frontend after F5/HMR without asking for the vault passphrase
 /// again. An explicit UI lock disables this path until `unlock` verifies the passphrase.
+async fn resume_session_for_generation(
+    state: &AppState,
+    generation: u64,
+) -> Option<Vec<ReloadedServer>> {
+    resume_session_projection(state, generation, running_servers(state)).await
+}
+
+async fn resume_session_projection(
+    state: &AppState,
+    generation: u64,
+    projection: impl Future<Output = Vec<ReloadedServer>>,
+) -> Option<Vec<ReloadedServer>> {
+    let _commit = require_ui_session_generation(state, generation)
+        .await
+        .ok()?;
+    let servers = projection.await;
+    // Lock invalidation deliberately happens before `lock_session_inner` waits for `_commit`, so
+    // recheck after every actor await. If a lock began while channels were being projected, none
+    // of the names/invites/channels may cross back into the stale webview.
+    if state.ui_session_generation.load(Ordering::Acquire) != generation
+        || require_unlocked_session(state).await.is_err()
+    {
+        return None;
+    }
+    Some(servers)
+}
+
+async fn resume_session_inner(state: &AppState) -> Option<Vec<ReloadedServer>> {
+    let generation = unlocked_ui_session_generation(state).await.ok()?;
+    resume_session_for_generation(state, generation).await
+}
+
 #[tauri::command]
 async fn resume_session(state: State<'_, AppState>) -> Result<Option<Vec<ReloadedServer>>, String> {
-    if state.session_lock_requested.load(Ordering::Acquire)
-        || !*state.session_resumable.lock().await
-        || state.store.lock().await.is_none()
-    {
-        return Ok(None);
-    }
-    Ok(Some(running_servers(&state).await))
+    Ok(resume_session_inner(&state).await)
 }
 
 #[tauri::command]
@@ -14668,7 +14961,7 @@ mod tests {
         // an opaque download type, so a file claiming text/html cannot become same-origin script.
         assert_eq!(safe_media_mime("video/mp4"), "video/mp4");
         assert_eq!(safe_media_mime("AUDIO/MPEG"), "audio/mpeg");
-        assert_eq!(safe_media_mime("image/svg+xml"), "image/svg+xml");
+        assert_eq!(safe_media_mime("image/svg+xml"), "application/octet-stream");
         // Parameters are stripped rather than echoed.
         assert_eq!(safe_media_mime("video/mp4; codecs=\"avc1\""), "video/mp4");
         for hostile in [
@@ -14684,6 +14977,58 @@ mod tests {
                 "{hostile} must not be served as its declared type"
             );
         }
+    }
+
+    #[test]
+    fn media_magic_bytes_must_agree_with_the_declared_family() {
+        let png = b"\x89PNG\r\n\x1a\nrest";
+        let mp3 = b"ID3\x04\0\0music";
+        let mp4 = b"\0\0\0\x18ftypisomcontainer";
+        assert_eq!(
+            media_signature_evidence("image/png", png),
+            MediaSignatureEvidence::Matched
+        );
+        assert_eq!(
+            media_signature_evidence("audio/mpeg", mp3),
+            MediaSignatureEvidence::Matched
+        );
+        assert_eq!(
+            media_signature_evidence("video/mp4", mp4),
+            MediaSignatureEvidence::Matched
+        );
+        assert_eq!(
+            media_signature_evidence("audio/mp4", mp4),
+            MediaSignatureEvidence::Matched,
+            "container headers alone cannot distinguish audio-only from video MP4"
+        );
+        assert_eq!(
+            media_signature_evidence("image/png", mp3),
+            MediaSignatureEvidence::Mismatch
+        );
+        assert_eq!(
+            media_signature_evidence("image/png", b"<svg><script/></svg>"),
+            MediaSignatureEvidence::Unrecognized
+        );
+        assert_eq!(
+            media_signature_evidence("image/svg+xml", b"<svg/>"),
+            MediaSignatureEvidence::NotMedia
+        );
+    }
+
+    #[test]
+    fn exported_media_reports_format_evidence_without_claiming_decoder_safety() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("cat.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        assert_eq!(
+            exported_media_validation(&png, "image/png").as_deref(),
+            Some("matched")
+        );
+        assert_eq!(
+            exported_media_validation(&png, "audio/mpeg").as_deref(),
+            Some("mismatch")
+        );
+        assert_eq!(exported_media_validation(&png, "text/plain"), None);
     }
 
     #[test]
@@ -15494,6 +15839,131 @@ mod tests {
         );
         // The vault remains mounted so actors and persistence may continue behind the UI lock.
         assert!(state.store.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn mounted_session_unlock_verifies_the_secret_without_remounting_the_vault() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = false;
+
+        assert!(
+            authenticate_mounted_store(&state, b"wrong horse")
+                .await
+                .is_err(),
+            "an explicitly locked webview cannot regain IPC access with a wrong secret"
+        );
+        assert!(authenticate_mounted_store(&state, b"").await.is_err());
+        let oversized = vec![b'x'; 4_097];
+        assert!(authenticate_mounted_store(&state, &oversized)
+            .await
+            .is_err());
+        assert!(!*state.session_resumable.lock().await);
+
+        assert!(authenticate_mounted_store(&state, b"correct horse")
+            .await
+            .unwrap());
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let running = finalize_unlock_session(&state, generation, true)
+            .await
+            .unwrap()
+            .expect("the mounted path requests its current servers");
+        assert!(running.is_empty());
+        assert!(*state.session_resumable.lock().await);
+
+        // The successful path authenticated the existing mount; it did not release ownership or
+        // create a second ServerStore just to verify the passphrase.
+        match ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng) {
+            Err(error) => assert!(error.to_string().contains("vault is busy")),
+            Ok(_) => panic!("verify-only unlock must not release the existing mount"),
+        }
+    }
+
+    #[test]
+    fn a_committed_secret_rewrap_is_never_reported_as_unchanged() {
+        let result = vault_secret_change_result(Err(
+            catcoms_app::AppError::CommittedButNotDurable("injected directory sync failure".into()),
+        ))
+        .unwrap();
+        assert!(result.changed);
+        assert!(!result.durability_confirmed);
+        let warning = result.warning.unwrap();
+        assert!(warning.contains("new secret is active"));
+        assert!(!warning.contains("not changed"));
+    }
+
+    #[tokio::test]
+    async fn a_newer_explicit_lock_defeats_unlock_finalization_after_authentication() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = false;
+
+        let stale_generation = state.ui_session_generation.load(Ordering::Acquire);
+        assert!(
+            authenticate_mounted_store(&state, b"correct horse")
+                .await
+                .unwrap(),
+            "the test pauses the unlock after real vault authentication"
+        );
+        lock_session_inner(&state, None).await.unwrap();
+
+        assert!(
+            finalize_unlock_session(&state, stale_generation, true)
+                .await
+                .is_err(),
+            "work authenticated before a newer lock must not reopen IPC"
+        );
+        assert_eq!(
+            require_unlocked_session(&state).await.unwrap_err(),
+            "the vault is locked"
+        );
+        assert!(state.session_lock_requested.load(Ordering::Acquire));
+        assert!(!*state.session_resumable.lock().await);
+    }
+
+    #[tokio::test]
+    async fn a_stale_hmr_resume_cannot_return_server_projection_after_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+
+        // This generation is exactly what production captures before `running_servers` begins its
+        // actor awaits. The injected projection pauses after the helper owns the same commit guard
+        // production uses, so the lock invalidates immediately and then waits behind that guard.
+        let stale_generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let projection_started = Arc::new(tokio::sync::Notify::new());
+        let release_projection = Arc::new(tokio::sync::Notify::new());
+        let resume_state = Arc::clone(&state);
+        let started = Arc::clone(&projection_started);
+        let release = Arc::clone(&release_projection);
+        let resuming = tokio::spawn(async move {
+            resume_session_projection(&resume_state, stale_generation, async move {
+                started.notify_one();
+                release.notified().await;
+                Vec::new()
+            })
+            .await
+        });
+        projection_started.notified().await;
+
+        let lock_state = Arc::clone(&state);
+        let locking = tokio::spawn(async move { lock_session_inner(&lock_state, None).await });
+        while !state.session_lock_requested.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        release_projection.notify_one();
+        assert!(
+            resuming.await.unwrap().is_none(),
+            "no server names, invites, or channels may cross a completed explicit lock"
+        );
+        locking.await.unwrap().unwrap();
+        assert!(resume_session_inner(&state).await.is_none());
     }
 
     #[tokio::test]
@@ -17021,6 +17491,15 @@ mod tests {
         );
         assert_eq!(report.largest_files[0].name, "song.ogg");
         assert!(report.largest_files[1].pinned);
+        assert_eq!(
+            report
+                .local_files
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["song.ogg"],
+            "only complete local ciphertext belongs in the downloadable-on-this-device list"
+        );
     }
 
     #[test]

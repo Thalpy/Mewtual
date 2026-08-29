@@ -56,6 +56,10 @@
     completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, saveSpaceGuide,
   } from "./native-download";
   import {
+    newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
+  } from "./vault-secret-change";
+  import { safeMediaMime } from "./media-safe";
+  import {
     bufferIce, directionIdle, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState, videoSlotPlan,
     VIDEO_BITRATE, type PeerState, type SlotDirection, type VideoKind,
   } from "./voice-signaling";
@@ -995,6 +999,7 @@
   let vaultChangeMismatch = $state(false);
   let vaultChangeBusy = $state(false);
   let vaultChangeError = $state("");
+  let vaultDurabilityWarning = $state("");
   let changingVaultSecret = $derived(vaultChangeStep !== "");
 
   // --- First run --------------------------------------------------------------------------
@@ -1062,6 +1067,12 @@
       return;
     }
     if (vaultChangeStep === "new") {
+      const inputError = newVaultSecretError(secret);
+      if (inputError) {
+        vaultChangeError = inputError;
+        clearUnlockEntry();
+        return;
+      }
       if (secret === vaultChangeCurrent) {
         vaultChangeError = "Choose a different secret from the current one.";
         clearUnlockEntry();
@@ -1081,10 +1092,11 @@
     }
     vaultChangeBusy = true;
     try {
-      await invoke("change_vault_secret", {
+      const result = await invoke<VaultSecretChangeResult>("change_vault_secret", {
         currentSecret: vaultChangeCurrent,
         newSecret: vaultChangeFirst,
       });
+      const notice = vaultSecretChangeNotice(result);
       vaultChangeCurrent = "";
       vaultChangeFirst = "";
       vaultChangeMismatch = false;
@@ -1092,7 +1104,8 @@
       clearUnlockEntry();
       settingsPage = "vault";
       showSettings = true;
-      toast("Vault secret changed. Existing backups still use their old secret.", "ok", 6500);
+      vaultDurabilityWarning = notice.kind === "committed-uncertain" ? notice.message : "";
+      toast(notice.message, notice.kind === "confirmed" ? "ok" : "warn", notice.kind === "confirmed" ? 6500 : 12000);
     } catch (e) {
       // A wrong current secret is intentionally indistinguishable from a damaged wrapper here.
       // Drop both transient strings and restart authentication; never leave them in the form.
@@ -1111,6 +1124,13 @@
   function setupCapture() {
     const s = unlockSecret();
     if (!s) return;
+    const inputError = newVaultSecretError(s);
+    if (inputError) {
+      error = inputError;
+      clearUnlockEntry();
+      return;
+    }
+    error = "";
     setupFirst = s;
     setupMismatch = false;
     clearUnlockEntry();
@@ -3028,6 +3048,7 @@
     pinned_local_estimated_bytes: number;
     categories: Array<{ name: string; files: number; logical_bytes: number; local_estimated_bytes: number; pinned_files: number }>;
     largest_files: Array<{ name: string; path: string; cid: string; mime: string; logical_bytes: number; local_estimated_bytes: number; pinned: boolean; held: number; total: number }>;
+    local_files: Array<{ name: string; path: string; cid: string; mime: string; logical_bytes: number; local_estimated_bytes: number; pinned: boolean; held: number; total: number }>;
   };
   let storageHealth = $state<StorageHealth | null>(null);
   // The Rust bridge is the authoritative once-per-process cache (and survives frontend HMR).
@@ -6042,6 +6063,19 @@
       storageRepairing = false;
     }
   }
+
+  async function exportStoredFile(cid: string) {
+    let listed = files.find((file) => file.cid === cid);
+    if (!listed) {
+      await refreshFiles();
+      listed = files.find((file) => file.cid === cid);
+    }
+    if (!listed) {
+      toast("That file is no longer listed in this server.", "warn", 5000);
+      return;
+    }
+    await downloadFile(listed);
+  }
   // Lowercase-hex cids embedded in a live wiki page (the never-decay set).
   let wikiPinned = $state<Set<string>>(new Set());
   const isPinned = (cid: string) => wikiPinned.has(cid.toLowerCase());
@@ -8452,7 +8486,7 @@
 
   // Only embeddable media types render inline; anything else is shown as a download chip.
   function safeMime(mime: string): string {
-    return /^(image|video|audio)\/[a-z0-9.+-]+$/i.test(mime || "") ? mime.toLowerCase() : "";
+    return safeMediaMime(mime);
   }
 
   function fileTrustFor(server: number | null = activeServerId): FileTrustPolicy {
@@ -15562,18 +15596,20 @@
     <div class="stream-fields">
       <label>
         <span>Capture resolution</span>
-        <select value={streamSettings.resolution} onchange={(event) => setStreamResolution(event.currentTarget.value)}>
-          <option value="720" selected={streamSettings.resolution === 720}>720p</option>
-          <option value="1080" selected={streamSettings.resolution === 1080}>1080p</option>
-          <option value="1440" selected={streamSettings.resolution === 1440}>1440p</option>
-          <option value="2160" selected={streamSettings.resolution === 2160}>4K (2160p)</option>
+        <!-- A select has no useful HTML `value` attribute. Svelte must bind the DOM property
+             after its options exist or WebView2 can leave the closed control with no label. -->
+        <select bind:value={streamSettings.resolution} onchange={(event) => setStreamResolution(event.currentTarget.value)}>
+          <option value={720}>720p</option>
+          <option value={1080}>1080p</option>
+          <option value={1440}>1440p</option>
+          <option value={2160}>4K (2160p)</option>
         </select>
       </label>
       <label>
         <span>Frame rate</span>
-        <select value={streamSettings.frameRate} onchange={(event) => setStreamFrameRate(event.currentTarget.value)}>
-          <option value="15" selected={streamSettings.frameRate === 15}>15 fps</option><option value="24" selected={streamSettings.frameRate === 24}>24 fps</option>
-          <option value="30" selected={streamSettings.frameRate === 30}>30 fps</option><option value="60" selected={streamSettings.frameRate === 60}>60 fps</option>
+        <select bind:value={streamSettings.frameRate} onchange={(event) => setStreamFrameRate(event.currentTarget.value)}>
+          <option value={15}>15 fps</option><option value={24}>24 fps</option>
+          <option value={30}>30 fps</option><option value={60}>60 fps</option>
         </select>
       </label>
       <label>
@@ -15582,10 +15618,10 @@
       </label>
       <label>
         <span>My receiving resolution</span>
-        <select value={receiveResolutionMode} onchange={(event) => setReceiveResolution(event.currentTarget.value)}>
+        <select bind:value={receiveResolutionMode} onchange={(event) => setReceiveResolution(event.currentTarget.value)}>
           <option value="auto">Auto from this window</option>
-          <option value="720">720p</option><option value="1080">1080p</option>
-          <option value="1440">1440p</option><option value="2160">4K</option>
+          <option value={720}>720p</option><option value={1080}>1080p</option>
+          <option value={1440}>1440p</option><option value={2160}>4K</option>
         </select>
       </label>
     </div>
@@ -19356,6 +19392,24 @@
                   </ol>
                 </section>
               </div>
+              <section class="storage-local">
+                <header>
+                  <div><h3>ENCRYPTED ON THIS DEVICE</h3><p class="muted small">These complete files are already held as authenticated vault ciphertext. “Unlock copy” writes a separate plaintext file to Downloads for external apps; the encrypted managed copy remains, so disk use can temporarily approach twice the file size. Mewtual’s jukebox and previews do not need a plaintext export.</p></div>
+                  <span>{storageHealth.local_files.length} local</span>
+                </header>
+                <div class="storage-local-list">
+                  {#each storageHealth.local_files as file (file.cid)}
+                    <article>
+                      <span class="storage-rank">{safeMime(file.mime) ? "◉" : "◆"}</span>
+                      <div><b>{file.name}</b><small>{file.path || "root"} · {file.mime || "unknown type"} · {fmtSize(file.logical_bytes)} · vault-encrypted</small></div>
+                      <button class="ghost small" onclick={() => exportStoredFile(file.cid)}>Unlock copy…</button>
+                    </article>
+                  {:else}
+                    <p class="muted small">No complete shared files are stored on this device yet. Partial downloads remain encrypted too, but cannot be exported until every chunk is present.</p>
+                  {/each}
+                </div>
+                <p class="muted small storage-type-note"><strong>Media check:</strong> inline playback and unlocked exports compare common image/audio/video container signatures with the declared type. A match rejects simple disguise; it does not prove the file is benign or the operating-system decoder is free of vulnerabilities. SVG and unrecognized media stay out of inline decoding.</p>
+              </section>
               <section class="storage-pinned">
                 <span class="storage-pin-icon">📌</span>
                 <div><h3>Pinned by the wiki</h3><p class="muted small">{storageHealth.pinned_files} unique file{storageHealth.pinned_files === 1 ? "" : "s"} · {fmtSize(storageHealth.pinned_local_estimated_bytes)} local estimate · {fmtSize(storageHealth.pinned_logical_bytes)} logical. Wiki embeds are retained regardless of their circulation date.</p></div>
@@ -21425,6 +21479,13 @@
             {:else if settingsPage === "vault"}
               <div class="stx-crumb">SETTINGS // ACCOUNT // VAULT &amp; LOCK</div>
               <h1>Vault &amp; Lock</h1>
+              {#if vaultDurabilityWarning}
+                <section class="set-section backup-risk">
+                  <h3>New secret active — durability uncertain</h3>
+                  <p class="muted small">{vaultDurabilityWarning} Do not discard the new secret or assume the old secret still opens the live vault. Create a fresh encrypted backup once the filesystem is healthy.</p>
+                  <button class="ghost small" onclick={() => (vaultDurabilityWarning = "")}>I have kept the new secret</button>
+                </section>
+              {/if}
               <section class="set-section">
                 <p class="muted small">
                   Everything you are lives in an encrypted vault on this machine, sealed by the

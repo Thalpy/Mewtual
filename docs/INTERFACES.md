@@ -626,6 +626,8 @@ impl Server {
     async fn resolve_kick_case(&mut self, case_id:&str, remove:bool) -> Result<(),AppError>;
 }
 impl ServerStore {
+    fn open(dir:impl AsRef<Path>, passphrase:&[u8], rng:&mut impl CryptoRngCore) -> Result<Self,AppError>; // owns lifetime installation lock
+    fn verify_passphrase(&self, passphrase:&[u8]) -> Result<(),AppError>; // verify-only; no second mount
     fn save_ui_state(&self, json:&[u8], rng:&mut impl CryptoRngCore) -> Result<(),AppError>; // ≤1 MiB, vault-sealed + atomic
     fn load_ui_state(&self) -> Result<Vec<u8>,AppError>;
     fn backup_source_dir(&self) -> &Path;
@@ -659,7 +661,21 @@ absolute expiry. Versions 1 and 2 decode with an empty route list and `LegacyPen
 decodes with no pending recovery. New founders
 and helper/reply/switchboard admissions persist `Disabled`, while a successful direct admission
 persists only its named inviter as `AuthorizedPeer`. Each address is capped at 512 bytes and the
-entire record remains vault-sealed and atomically replaced.
+entire record remains vault-sealed and atomically replaced. Every `ServerStore` record uses the
+same durability primitive: write and sync a sibling staging file, rename it over the destination,
+then sync the parent directory on Unix. Abrupt termination before rename therefore retains the
+complete authenticated predecessor; after rename readers see the complete replacement. Staging
+siblings are destination-specific, unique per invocation and opened with create-new semantics, so
+concurrent record types cannot alias and a pre-planted symlink is not followed. A parent-directory
+sync failure is reported distinctly as `CommittedButNotDurable`: the replacement is already visible
+and a retry is safe. Logical read-modify-write operations still require serialization to prevent a
+stale last writer from replacing newer state. `ServerStore::open` additionally acquires a
+non-blocking OS session lock before unsealing and holds it for the store's lifetime. A second
+desktop process therefore receives `VaultBusy` instead of mounting duplicate MLS, invite-ledger
+and transport actors from the same snapshot. Normal drop and abrupt process termination release
+the OS lock. An explicitly UI-locked webview re-authenticates with `verify_passphrase`, under the
+short vault transaction lock, rather than trying to mount a second `ServerStore` in its own native
+process; a wrong passphrase still leaves the IPC boundary locked.
 
 The rows are installation-local: they never enter the group snapshot, PEX, rendezvous, or webview,
 and reconnect diagnostics retain route shape rather than the private coordinate. Reload installs
@@ -695,9 +711,20 @@ referenced chunks over the authenticated blob path and verifies again; `has()` a
 short-circuit repair.
 
 The Tauri `get_storage_health(server)` command adds a cached, deduplicated inventory projection:
-`checked_at_ms`, unique/logical/local-estimated/pinned totals, category rows, and the ten largest
-files. It performs at most one ordinary scan per server per process session. Only
+`checked_at_ms`, unique/logical/local-estimated/pinned totals, category rows, the ten largest
+files, and `local_files`, the deduplicated files whose complete encrypted chunk set is held by this
+installation. The Storage pane can pass one of those rows through the existing authenticated
+`save_group_file` path. That explicit “Unlock copy” action verifies/decrypts the managed chunks and
+creates a separate, non-overwriting plaintext Downloads file; it does not alter or remove the
+vault-encrypted copy. It performs at most one ordinary scan per server per process session. Only
 `repair_storage(server)` replaces that cache after its mandatory post-repair verification.
+
+Media presented to the WebView uses an exact inert MIME allow-list and must have a matching common
+image/audio/video container signature in authenticated chunk zero; SVG, mismatches and unrecognized
+containers are served as `application/octet-stream` instead of entering inline decoding. Plaintext
+exports report `contentValidation` as `matched`, `mismatch`, `unrecognized`, or absent for a
+non-media file after inspecting a fixed 64-byte prefix. This is bounded type evidence, not full
+bitstream validation or a claim that the platform decoder/external application is safe.
 
 Moderation uses one server-wide `DocType::Moderation` document (`doc_id=0`). Events and votes have
 their own canonical, group-bound Ed25519 signatures in addition to the replicated-op envelope.
@@ -716,8 +743,21 @@ locked with staged verification and rollback.
 
 The bridge's `change_vault_secret(current_secret,new_secret)` holds the store mutex and calls
 `ServerStore::change_passphrase`. The storage layer authenticates the current wrapper and atomically
-rewraps the unchanged root DEK under a fresh salt/nonce. Existing derived data keys do not rotate;
-older exported vaults remain bound to their old secret.
+rewraps the unchanged root DEK under a fresh salt/nonce. A sibling OS file lock serializes both
+first creation and rewrap across desktop processes; unique create-new staging, file sync, rename and
+Unix directory sync then publish the wrapper without shared-temp aliasing. Lock contention fails
+promptly as `VaultBusy` so a suspended process cannot hang another app's unlock command. This short
+transaction lock is distinct from the lifetime installation lock described above. Existing derived
+data keys do not rotate; older exported vaults remain bound to their old secret.
+
+New and replacement vault secrets are non-empty and capped at 4096 bytes before Argon2 work. Vault
+wrapper v1 feeds that bounded secret directly to Argon2. For compatibility only, an existing v1
+wrapper may be opened with a 4097..65536-byte legacy secret; the first successful open atomically
+rewrites the fixed-size wrapper as v2, which domain-separates and BLAKE3-normalizes that long secret
+to a fixed KDF input. Secrets above 64 KiB are rejected. This migration is intentionally
+forward-only: a v1-only older binary does not understand the v2 wrapper, so a user who triggers the
+legacy-long migration must return to a v2-capable build rather than roll back. Both versions are
+exactly 89 bytes; other lengths are rejected before allocation/decryption.
 
 ---
 

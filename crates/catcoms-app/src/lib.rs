@@ -89,6 +89,11 @@ pub enum AppError {
     /// A persistence I/O error (reading/writing the on-disk store).
     #[error("persistence i/o: {0}")]
     Io(String),
+    /// The destination rename committed, but flushing its directory failed. The caller must not
+    /// report a clean rollback: the new complete record is visible, although it may not survive
+    /// sudden power loss. Retrying the same save is safe and reconciles the durability state.
+    #[error("persistence committed but could not be made durable: {0}")]
+    CommittedButNotDurable(String),
     /// A product-layer validation error (e.g. an over-large avatar).
     #[error("{0}")]
     Invalid(String),
