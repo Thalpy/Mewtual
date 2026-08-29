@@ -44,6 +44,10 @@ if ! touch "$artifact_probe"; then
   exit 2
 fi
 rm -f "$artifact_probe"
+# The copied `/workspace` tree belongs to the image but its parent `target/` is root-owned after
+# Docker overlays the bind mount. Send every Cargo workspace (root and Tauri) to the one explicitly
+# mounted, write-probed directory instead of letting Cargo fall back to `/workspace/target`.
+export CARGO_TARGET_DIR="$(pwd)/$artifact_root"
 
 desktop_checks() {
   if ((install)); then
@@ -60,6 +64,7 @@ process_smoke() {
   cargo build -p catcomsctl
   bash scripts/two-client-smoke.sh \
     --skip-build \
+    --binary "$CARGO_TARGET_DIR/debug/catcomsctl" \
     --artifacts target/linux-container/process-smoke
 }
 
@@ -86,7 +91,7 @@ case "$mode" in
     cargo build -p catcomsctl
     bash scripts/two-client-netns.sh \
       --scenario "$scenario" \
-      --binary "$(pwd)/target/debug/catcomsctl" \
+      --binary "$CARGO_TARGET_DIR/debug/catcomsctl" \
       --artifacts "$(pwd)/target/linux-container/netns/$scenario"
     ;;
   *)

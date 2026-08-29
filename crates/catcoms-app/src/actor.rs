@@ -23,11 +23,11 @@ use tokio::task::JoinHandle;
 use catcoms_storage::{Cid, FileRef};
 
 use crate::{
-    ChannelHead, ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileRange,
-    FileUsage, FilesView, InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge,
+    ChannelHead, ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileMediaHead,
+    FileRange, FileUsage, FilesView, InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge,
     MemberRecoveryApplied, MemberRecoveryCode, MemberRecoveryVerified, MemberView, MessageStats,
-    ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair, SwitchboardOffer,
-    WikiPendingEdit, WikiRevision,
+    ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair, StorageSnapshot,
+    SwitchboardOffer, WikiPendingEdit, WikiRevision,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -424,6 +424,10 @@ pub enum AppCommand {
     StorageHealth {
         reply: oneshot::Sender<StorageHealth>,
     },
+    /// Capture file listings and their verified local-storage verdict in one actor turn.
+    StorageSnapshot {
+        reply: oneshot::Sender<StorageSnapshot>,
+    },
     /// Re-fetch missing/unreadable file chunks, then return the verified result.
     RepairStorage {
         reply: oneshot::Sender<Result<StorageRepair, String>>,
@@ -484,12 +488,13 @@ pub enum AppCommand {
     /// of it: what the media protocol needs before it can answer a `Range` request at all.
     FileHead {
         cid: Vec<u8>,
-        reply: oneshot::Sender<Option<(u64, String)>>,
+        reply: oneshot::Sender<Option<FileMediaHead>>,
     },
     /// Read one window of a file's plaintext, for the media protocol: whole-file reads do not fit
     /// a player that wants to start on the first chunk and seek by the second.
     ReadFileRange {
         cid: Vec<u8>,
+        expected_manifest_version: [u8; 32],
         start: u64,
         max_len: usize,
         reply: oneshot::Sender<Result<FileRange, String>>,
@@ -1809,6 +1814,20 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// Capture file listings and their cryptographic health without an index mutation window.
+    pub async fn storage_snapshot(&self) -> StorageSnapshot {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::StorageSnapshot { reply })
+            .await
+            .is_err()
+        {
+            return StorageSnapshot::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Attempt repair of missing/unreadable referenced chunks.
     pub async fn repair_storage(&self) -> Result<StorageRepair, String> {
         let (reply, rx) = oneshot::channel();
@@ -2003,7 +2022,7 @@ impl ServerActor {
     }
 
     /// The size and declared type of a listed file. See [`AppCommand::FileHead`].
-    pub async fn file_head(&self, cid: Vec<u8>) -> Option<(u64, String)> {
+    pub async fn file_head(&self, cid: Vec<u8>) -> Option<FileMediaHead> {
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -2020,6 +2039,7 @@ impl ServerActor {
     pub async fn read_file_range(
         &self,
         cid: Vec<u8>,
+        expected_manifest_version: [u8; 32],
         start: u64,
         max_len: usize,
     ) -> Result<FileRange, String> {
@@ -2028,6 +2048,7 @@ impl ServerActor {
             .cmd_tx
             .send(AppCommand::ReadFileRange {
                 cid,
+                expected_manifest_version,
                 start,
                 max_len,
                 reply,
@@ -3424,6 +3445,9 @@ where
                     Some(AppCommand::StorageHealth { reply }) => {
                         let _ = reply.send(server.storage_health());
                     }
+                    Some(AppCommand::StorageSnapshot { reply }) => {
+                        let _ = reply.send(server.storage_snapshot());
+                    }
                     Some(AppCommand::RepairStorage { reply }) => {
                         let res = server.repair_storage().await.map_err(|e| e.to_string());
                         let _ = reply.send(res);
@@ -3505,13 +3529,19 @@ where
                     }
                     Some(AppCommand::ReadFileRange {
                         cid,
+                        expected_manifest_version,
                         start,
                         max_len,
                         reply,
                     }) => {
                         let res = match <[u8; 32]>::try_from(cid.as_slice()) {
                             Ok(arr) => server
-                                .read_file_range(&Cid::from_bytes(arr), start, max_len)
+                                .read_file_range(
+                                    &Cid::from_bytes(arr),
+                                    expected_manifest_version,
+                                    start,
+                                    max_len,
+                                )
                                 .await
                                 .map_err(|e| e.to_string()),
                             Err(_) => Err("bad content address".to_string()),

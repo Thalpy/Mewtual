@@ -6799,6 +6799,11 @@ button.you-panel:hover {
   border-left-color: var(--ok);
 }
 
+.toast.warn {
+  border-left-color: var(--warn);
+  color: var(--text);
+}
+
 .toast.err {
   border-left-color: var(--danger);
   color: var(--text);
@@ -8588,6 +8593,39 @@ button.focus-leave:hover {
   background: var(--bg-0);
 }
 .stream-audio-sources p { margin: 0; }
+.stream-master-level {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) minmax(120px, 2fr) 40px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 7px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  font-size: 0.67rem;
+}
+.stream-master-level > span { display: grid; }
+.stream-master-level small { font-size: 0.58rem; }
+.stream-master-level output,
+.stream-source-list output {
+  color: var(--accent);
+  font: 0.62rem var(--mono);
+  text-align: right;
+}
+.stream-mixer {
+  display: grid;
+  gap: 5px;
+  padding: 7px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  font-size: 0.65rem;
+}
+.stream-mixer > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
 .stream-source-actions {
   display: flex;
   align-items: center;
@@ -8602,19 +8640,26 @@ button.focus-leave:hover {
   list-style: none;
 }
 .stream-source-list li {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(100px, 2fr) 36px auto;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   padding: 4px 6px;
   border: 1px solid var(--border-soft);
   border-radius: var(--r);
   font-size: 0.67rem;
 }
+.stream-source-list input[type="range"] { width: 100%; min-width: 0; }
 .stream-source-list li span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+@media (max-width: 620px) {
+  .stream-master-level { grid-template-columns: 1fr 40px; }
+  .stream-master-level > span { grid-column: 1 / -1; }
+  .stream-source-list li { grid-template-columns: minmax(80px, 1fr) 36px auto; }
+  .stream-source-list li input[type="range"] { grid-column: 1 / -1; grid-row: 2; }
 }
 .stream-open-global { align-self: flex-start; }
 .set-section .stream-panel {

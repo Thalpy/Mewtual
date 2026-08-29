@@ -70,5 +70,10 @@ test("screen-audio adoption never waits on AudioContext resume before teardown o
   const body = source.slice(start, end);
   assert.doesNotMatch(body, /await context\.resume\(\)/);
   assert.match(body, /void context\.resume\(\)\.catch/);
-  assert.match(body, /screenAudioCaptures\.set\(id, \{ id, label, stream, node \}\)/);
+  assert.match(body, /screenAudioCaptures\.set\(id, \{ id, label, stream, node, gain \}\)/);
+  assert.match(body, /node\.connect\(gain\);[\s\S]*gain\.connect\(master\)/);
+  assert.match(source, /if \(!screenAudioCaptures\.size\) disposeScreenAudioGraph\(\)/);
+  assert.match(source, /disposeStreamAudioGraph\(destination, master, context\)/);
+  assert.match(source, /screenAudioSourceSlotAvailable\(screenAudioCaptures\.size\)/);
+  assert.match(source, /MAX_STREAM_AUDIO_SOURCES/);
 });

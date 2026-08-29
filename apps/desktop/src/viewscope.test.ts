@@ -7,6 +7,7 @@ import {
   moderationSurfaceOpen,
   sessionContinuationCurrent,
   scopeCurrent,
+  unlockedScopeCurrent,
 } from "./viewscope.ts";
 
 test("a read still addressing the group on screen may write", () => {
@@ -29,6 +30,16 @@ test("no active group accepts nothing", () => {
   assert.equal(scopeCurrent({ generation: 5, server: 7 }, { generation: 5, server: null }), false);
   // And a read issued with no group cannot claim one that has since opened.
   assert.equal(scopeCurrent({ generation: 5, server: null }, { generation: 5, server: 7 }), false);
+});
+
+test("a sensitive deferred result may land only in its exact unlocked view", () => {
+  const requested = { generation: 5, server: 7 };
+  assert.equal(unlockedScopeCurrent(requested, { generation: 5, server: 7 }, false), true);
+  // Lock must win even if native work completed before the JavaScript continuation ran.
+  assert.equal(unlockedScopeCurrent(requested, { generation: 5, server: 7 }, true), false);
+  // Unlocking again does not revive work issued in the earlier session/view generation.
+  assert.equal(unlockedScopeCurrent(requested, { generation: 6, server: 7 }, false), false);
+  assert.equal(unlockedScopeCurrent(requested, { generation: 5, server: 8 }, false), false);
 });
 
 test("a deferred create or join result cannot repopulate an explicitly locked UI", () => {

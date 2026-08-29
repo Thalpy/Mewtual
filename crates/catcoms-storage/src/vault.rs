@@ -742,7 +742,7 @@ mod tests {
     #[test]
     fn every_vault_authentication_path_rejects_empty_or_oversized_secrets_before_kdf() {
         let dir = tempfile::tempdir().unwrap();
-        let mut rng = ChaCha20Rng::seed_from_u64(0x5ec2_e7);
+        let mut rng = ChaCha20Rng::seed_from_u64(0x005e_c2e7);
         let oversized = vec![b'x'; MAX_VAULT_SECRET_BYTES + 1];
 
         for invalid in [b"".as_slice(), oversized.as_slice()] {
@@ -773,7 +773,7 @@ mod tests {
     #[test]
     fn a_legacy_long_secret_opens_and_migrates_to_a_fixed_kdf_input() {
         let dir = tempfile::tempdir().unwrap();
-        let mut rng = ChaCha20Rng::seed_from_u64(0x1e9a_c7);
+        let mut rng = ChaCha20Rng::seed_from_u64(0x001e_9ac7);
         let legacy_secret = vec![b'l'; MAX_VAULT_SECRET_BYTES + 1];
         let dek = Dek::generate(&mut rng);
         let legacy =

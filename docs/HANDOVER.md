@@ -409,13 +409,21 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   export adds a separate plaintext Downloads copy. Storage now inventories each complete encrypted
   local file and offers that export as “Unlock copy”; partial files remain listed only in aggregate
   until all chunks are present. Inline media and exports compare an exact inert MIME allow-list with
-  a bounded common-container signature. SVG, mismatches and unknown formats stay out of inline
-  decoding, while exports disclose matched/mismatched/unrecognized evidence. This blocks simple
+  a bounded common-container signature. SVG, mismatches and unknown formats receive a bodyless
+  inline-scheme denial (not an octet-stream body the WebView may sniff), while exports disclose
+  matched/mismatched/unrecognized evidence. Inline head/chunk caches are bound to the exact unique
+  current manifest rather than the member-claimed plaintext CID. This blocks simple
   type disguise but is not full bitstream validation or a decoder sandbox. Full
   trust-everyone/specific automatic
   **whole-share mirroring** remains deferred until the sealing store has a disk quota, otherwise a
   trusted member can exhaust local storage. Native saves sanitize the filename, use non-overwriting
   verified staging, and reveal rather than execute, which blocks direct command/path execution.
+  The staging rename/reveal is committed only for the exact unlock generation that began it.
+  Storage verification opens at most four exact references per ciphertext CID; overflow fails the
+  CID and dependent manifests closed instead of turning one held large blob into thousands of
+  actor-blocking decryptions. Native storage cache rows are tied to a process-local server
+  incarnation and frontend promise results to the exact still-unlocked view, closing late
+  publication across lock, leave and same-id reinstall.
   Content and platform decoders remain untrusted parser/zero-day surfaces. See `THREAT-MODEL.md`.
 - **4K screen streaming:** screen capture now has a live settings panel for 720p through 4K,
   15--60 fps, quality priority and a per-full-resolution-viewer Mbps cap. Each receiver advertises
@@ -430,7 +438,12 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   Surface audio can ride the initial picker; separate mode lets the user add multiple freshly
   granted application/window sources while sharing, discards those sources' video, mixes them into
   one audio track with a requested 160-kbps-per-peer cap (shown as planned until the WebView
-  confirms it), and clears every grant on stop/camera swap/leave.
+  confirms it), and clears every grant on stop/camera swap/leave. The shared-audio track has a
+  persisted 0--200% client-wide master plus ephemeral 0--200% faders for each explicitly granted
+  source; 100% is unity and the UI warns that overlapping boosts can clip. At most eight source
+  grants can be live, and removing the last source stops the mixed output and closes its Web Audio
+  graph. The normal call
+  microphone remains a separate sender and is intentionally not relabelled as part of that mix.
   H.265/HEVC is preferred when both runtimes expose it, with AV1/VP9/H.264/VP8 fallbacks, and the UI
   reports the codec actually observed in stats. There is still no application-owned offline media
   transcoder or guarantee that a particular platform WebView offers H.265.
@@ -442,7 +455,10 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   lock-vs-deferred-command ordering; and pure streaming tests for receiver rounding/hysteresis,
   actual-source scaling, burst coalescing, frame-rate/bitrate caps, rejected-cap parking, detached
   first attachment and screen→camera invalidation, permission-prompt stop/leave/supersession,
-  stream-preset sanitization/defaults, file-trust fail-closed parsing/full-identity decisions,
+  stream-preset sanitization/defaults and bounded mixer gain, file-trust fail-closed parsing/full-identity decisions,
+  mixer source-count/graph teardown, exact-container inline-media admission, exact-manifest and
+  exact-`FileRef` inventory/cache binding and per-CID work bounds, stale media/storage publication
+  after lock or server-id reincarnation, exact-generation plaintext export publication,
   jukebox/cross-server gates/index bounds, and sealed continuity/lock ordering of trust policy.
 - **Native/Linux integration coverage:** `process_recovery_e2e` now crosses actual process,
   snapshot and TCP boundaries: Bob joins, exits, restores in a second process on a deliberately

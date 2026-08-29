@@ -158,7 +158,10 @@ table with the commit that closed it.
   the who-is-watching/timing/bitrate metadata remain trusted-endpoint and traffic-analysis risks.
   Shared audio is off by default. Surface audio is whatever the platform chooser grants and can
   accidentally include Mewtual's own playback; separate sources require a fresh chooser grant per
-  source/session, discard the picked picture, and mix only their audio into one WebRTC track. The
+  source/session, discard the picked picture, and mix only their audio into one WebRTC track. A
+  bounded 0--200% master and bounded per-source gains change that shared track only; overlapping
+  boosts can clip and never grant a new capture source. At most eight explicit application-audio
+  grants can be live, and the graph/output track is released when the last grant ends. The call microphone is a separate sender. The
   WebView/OS decides whether window/application audio is available, so this is not an OBS-equivalent
   native process-capture guarantee.
 - **A shared file is authenticated bytes, not trusted content.** Explicit save streams into a
@@ -168,7 +171,20 @@ table with the commit that closed it.
   overwrite races, corrupt-provider substitution and automatic execution; it does **not** make the
   payload benign or protect an external application the user later opens it with from its own
   parser vulnerabilities. Inline image/video/audio loads through a CSP-limited, `nosniff`,
-  range-bounded custom scheme but is still parsed by the platform WebView/media stack. Before a
+  range-bounded custom scheme but is still parsed by the platform WebView/media stack. The scheme
+  emits a body only when a bounded container signature matches the exact allowlisted MIME; SVG,
+  mismatch and unknown inputs receive a bodyless denial because an octet-stream body may still be
+  media-sniffed. Cached heads/chunks bind to the exact uniquely resolved current manifest rather
+  than only the member-claimed plaintext CID. Cache access and the synchronous URI-responder
+  publication are generation-gated, so a disk/network read that finishes after explicit lock
+  cannot refill plaintext caches, reveal a stale size, or publish its already-built body. Storage
+  inventory separately authenticates every exact encoded chunk reference and joins verdicts to an
+  atomic manifest/listing snapshot. More than four distinct exact references for one ciphertext
+  CID makes that CID and its dependent manifests unreadable without attempting unbounded repeated
+  decryption. Native cache publication is additionally bound to the process-local server
+  incarnation, while webview continuations require their exact still-unlocked view. A plaintext
+  export's verified staging rename and reveal hold the same exact unlock-generation commit guard,
+  so an older export cannot become visible after lock or a later unlock. Before a
   server is founded/joined, the user chooses local on-demand, specific-member, or everyone trust;
   the bounded per-server policy is vault-sealed. On-demand is the default. It leaves passive shared
   media, custom emoji, card thumbnails, event images and call-jukebox tracks inert;
@@ -241,7 +257,7 @@ table with the commit that closed it.
 | UI continuity and backup confidentiality | Drafts/read positions are vault-sealed and bounded; sealed records use destination-specific create-new siblings, file sync, rename and parent-directory sync on Unix, so concurrent record types cannot alias, pre-planted staging symlinks are rejected, and abrupt termination exposes a complete predecessor or replacement rather than a partial record. A failed post-rename directory flush is disclosed as committed-but-not-durable. Offline backup copies only the already-sealed vault tree without following links. Export creates another offline guessing target and exposes filesystem metadata; it does not weaken record encryption. Catastrophic filesystem/hardware failure remains outside the guarantee. | `catcoms-app::ServerStore`; desktop `create_backup` |
 | Vault creation and secret rotation | A non-blocking OS-backed sibling lock serializes first creation and rewrap across processes; contention returns `VaultBusy` for retry instead of hanging behind a suspended process. The current wrapper is authenticated; the same root DEK is published through a unique create-new, file-synced staging sibling with rename and Unix directory sync, so concurrent app instances cannot return mismatched first-run DEKs or both report a conflicting rewrap. New/replacement secrets are capped at 4096 bytes. A v1 wrapper with a legacy 4097..65536-byte secret receives one bounded compatibility open and is atomically migrated to fixed-input v2; larger inputs are rejected. This intentionally loses downgrade compatibility with v1-only builds, not ciphertext confidentiality. Wrapper reads accept exactly 89 bytes and never allocate from a hostile file length. | `catcoms-storage::{open_or_create_vault,change_vault_passphrase}`; desktop `change_vault_secret` |
 | Vault single-writer lifetime | `ServerStore::open` acquires a separate non-blocking OS session lock before unsealing and retains it until drop/process exit. A second desktop cannot start duplicate MLS, registry, invite-ledger or transport writers from the same snapshot; it receives `VaultBusy`. Normal exit and abort release the OS lock. Explicit UI lock keeps the native mount but closes IPC; re-unlock performs verify-only authentication against `vault.bin`, and a wrong secret cannot reopen the session. This is same-host installation exclusion, not distributed consensus or protection from malware with the user's OS authority. | `catcoms-storage::{acquire_vault_session,verify_vault_passphrase}`; `catcoms-app::ServerStore`; desktop `unlock` |
-| Desktop explicit-lock IPC boundary | Every non-bootstrap Tauri command requires both a mounted vault and an open UI session. Lock atomically saves bounded continuity state then closes the command boundary; actor events are dropped and long downloads re-check while actors continue native background network/persistence work | desktop `require_unlocked_session`; `lock_session`; `forward_events` |
+| Desktop explicit-lock IPC boundary | Every non-bootstrap Tauri command requires both a mounted vault and an open UI session. Lock atomically saves bounded continuity state then closes the command boundary; actor events are dropped, late frontend/native cache publications are exact-generation gated, and plaintext export publication holds the exact-generation commit guard while actors continue native background network/persistence work | desktop `require_unlocked_session`; `require_ui_session_generation`; `lock_session`; `forward_events` |
 | Moderation-record attribution and field integrity | Each event/vote has a canonical group-bound Ed25519 signature; the reader verifies signer fingerprint and linked-device origin, so records cannot be altered or replayed into another server without detection | `catcoms-app::moderation` |
 | Path traversal | Virtual file paths normalized (drops `.`/`..`/empty) so a path can't escape the share | `catcoms-app::normalize_path` |
 

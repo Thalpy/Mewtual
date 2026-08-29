@@ -4,16 +4,20 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_STREAM_SETTINGS,
+  MAX_STREAM_AUDIO_SOURCES,
   captureResolutionKnownAfterConstraint,
   PeerVideoBudgetController,
   estimatedMeshMbps,
   nearestStreamHeight,
+  normalizeStreamAudioLevel,
   parseStreamSettings,
   peerStreamPlan,
   preferEfficientVideoCodecs,
   receivingHeightForViewport,
   recommendedStreamMbps,
+  screenAudioSourceSlotAvailable,
   shouldClearScreenAudioOnModeChange,
+  streamAudioGain,
 } from "./streaming.ts";
 
 test("stream presets have visible safe defaults and sanitize persisted values", () => {
@@ -24,12 +28,14 @@ test("stream presets have visible safe defaults and sanitize persisted values", 
     quality: "motion",
     mbpsPerPeer: 500,
     audioMode: "separate",
+    audioLevel: 175,
   }), {
     resolution: 2160,
     frameRate: 60,
     quality: "motion",
     mbpsPerPeer: 50,
     audioMode: "separate",
+    audioLevel: 175,
   });
   assert.deepEqual(parseStreamSettings({
     resolution: 123,
@@ -47,6 +53,26 @@ test("stream presets have visible safe defaults and sanitize persisted values", 
   }
 });
 
+test("streamer mixer levels are finite, bounded and map to linear Web Audio gain", () => {
+  assert.equal(normalizeStreamAudioLevel(-1), 0);
+  assert.equal(normalizeStreamAudioLevel(99.6), 100);
+  assert.equal(normalizeStreamAudioLevel(201), 200);
+  assert.equal(normalizeStreamAudioLevel(Number.NaN), 100);
+  assert.equal(streamAudioGain(0), 0);
+  assert.equal(streamAudioGain(100), 1);
+  assert.equal(streamAudioGain(200), 2);
+});
+
+test("streamer application-audio fan-in has a hard source bound", () => {
+  assert.equal(MAX_STREAM_AUDIO_SOURCES, 8);
+  assert.equal(screenAudioSourceSlotAvailable(0), true);
+  assert.equal(screenAudioSourceSlotAvailable(7), true);
+  assert.equal(screenAudioSourceSlotAvailable(8), false);
+  assert.equal(screenAudioSourceSlotAvailable(9), false);
+  assert.equal(screenAudioSourceSlotAvailable(-1), false);
+  assert.equal(screenAudioSourceSlotAvailable(1.5), false);
+});
+
 test("stream selects bind typed defaults to visible option labels", () => {
   const app = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
   const panel = app.match(/\{#snippet streamSettingsPanel[\s\S]*?\{\/snippet\}/)?.[0] ?? "";
@@ -60,6 +86,16 @@ test("stream selects bind typed defaults to visible option labels", () => {
   assert.match(panel, /<option value=\{30\}>30 fps<\/option>/);
   assert.match(panel, /<option value="auto">Auto from this window<\/option>/);
   assert.doesNotMatch(panel, /<select value=\{/);
+});
+
+test("the live stream panel exposes a bounded master and per-source audio mixer", () => {
+  const app = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
+  const panel = app.match(/\{#snippet streamSettingsPanel[\s\S]*?\{\/snippet\}/)?.[0] ?? "";
+  assert.match(panel, /aria-label="Shared audio master level"[^>]*min="0" max="200"/);
+  assert.match(panel, /aria-label="Streamer audio mixer"/);
+  assert.match(panel, /setScreenAudioSourceLevel\(source\.id/);
+  assert.match(panel, /0% mutes[^<]*100% unity[^<]*boosts can clip/);
+  assert.match(app, /node\.connect\(gain\);[\s\S]*gain\.connect\(master\)/);
 });
 
 test("changing audio capture interpretation revokes old source grants", () => {

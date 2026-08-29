@@ -30,6 +30,8 @@ the image; rebuild after changing it. Evidence from the process smoke is written
 The build context is default-deny: only reviewed source, manifests, scripts and required assets are
 sent to the daemon. CI plants an untracked sentinel and builds the lightweight `context-audit`
 stage, proving required inputs survive filtering while local secret/config paths do not.
+Nested Cargo `target` and Node `node_modules` directories are explicitly denied after all source
+allow rules, preventing a developer's generated trees from being copied into the Docker context.
 
 The image defaults to the non-root `mewtual` user, and the script rejects uid 0 in this lane. Its
 build UID/GID are parameterized to match a native Linux invoker, and the script verifies the
@@ -61,6 +63,12 @@ real logged-in Linux desktop session:
 - the compositor's screen/window chooser;
 - PipeWire and `xdg-desktop-portal` permission behavior;
 - whether WebKitGTK exposes screen, system, window or per-application audio;
+- whether two separately granted audio sources reach the one outgoing track, their 0--200% source
+  and master gains are audible, muting one leaves the other live, and revoking/ending a source
+  removes its visible mixer row and capture; verify the ninth source is refused and removing the
+  last source releases the PipeWire grants and Web Audio output/context;
+- whether choosing system audio loops Mewtual's own remote voices back to peers (separate
+  application sources are the intended echo-avoidance path, but portal choices vary);
 - the installed WebKit/GStreamer codec set and any hardware encoder;
 - user cancellation, session revocation, suspend/resume and device hot-plug.
 

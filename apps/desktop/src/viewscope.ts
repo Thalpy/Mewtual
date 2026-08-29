@@ -25,6 +25,16 @@ export function scopeCurrent(captured: ViewScope, live: ViewScope): boolean {
   return captured.generation === live.generation && captured.server === live.server;
 }
 
+/// Whether sensitive group-scoped data may land in the webview after an asynchronous native call.
+///
+/// Navigation scope alone is insufficient for the lock path: native work may finish just before
+/// lock while its Promise continuation remains queued until afterward. Lock clears the visible
+/// state and caches synchronously, so a late continuation must also observe that the UI remains
+/// unlocked before it may repopulate either one.
+export function unlockedScopeCurrent(captured: ViewScope, live: ViewScope, locked: boolean): boolean {
+  return !locked && scopeCurrent(captured, live);
+}
+
 /// Whether a long create/join command may apply its result to the current frontend session.
 ///
 /// Native generation checks stop stale work from committing after lock. This separate webview

@@ -140,7 +140,7 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
   // operation's trace in one act, so a command cannot get one without the other. It reaches the
   // gate through `actor_of`, and the test below checks that it does rather than assuming it.
   const gatekeepers =
-    "actor_of|server_actor_of|require_unlocked_session|require_ui_session_generation|channel_target|op\\.actor";
+    "actor_of|actor_instance_of|server_actor_of|require_unlocked_session|require_ui_session_generation|channel_target|op\\.actor";
   for (const [command, segment] of segments) {
     if (bootstrap.has(command)) continue;
     assert.match(
@@ -161,7 +161,7 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
  */
 test("every helper the session-gate audit trusts does the checking itself", () => {
   const bridge = readFileSync(bridgePath, "utf8");
-  for (const helper of ["actor_of", "channel_target", "require_ui_session_generation"]) {
+  for (const helper of ["actor_of", "actor_instance_of", "channel_target", "require_ui_session_generation"]) {
     const start = bridge.indexOf(`async fn ${helper}(`);
     assert.ok(start > 0, `${helper} is trusted by the audit but does not exist`);
     // The body runs to the next top-level item; enough to see what it calls.

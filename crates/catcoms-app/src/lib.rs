@@ -2233,6 +2233,11 @@ pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 /// malicious member can still append CRDT rows, but rows beyond this deterministic boundary do
 /// not trigger unbounded manifest parsing or Ed25519 verification on every file-list refresh.
 pub const MAX_FILE_ENTRIES: usize = 256;
+/// Maximum number of distinct wrapped-key/reference claims storage inspection will authenticate
+/// against one ciphertext CID. Honest deduplication reuses a byte-identical reference, while a
+/// larger set can only be contradictory or adversarial. Failing that CID closed prevents one held
+/// 8 MiB blob from being decrypted thousands of times inside the single server actor.
+const MAX_FILE_REF_VARIANTS_PER_CID: usize = 4;
 const MAX_FILE_NAME_BYTES: usize = 255;
 const MAX_FILE_AUTHOR_BYTES: usize = 128;
 const MAX_FILE_PATH_BYTES: usize = 2048;
@@ -2267,6 +2272,108 @@ pub struct FileRange {
     /// The peer that served a chunk this range needed, or `None` when every chunk it touched was
     /// already held locally. This is what lets the UI say "loading" rather than "downloading".
     pub provider: Option<String>,
+}
+
+fn file_manifest_version(file_ref: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"mewtual-file-media-manifest/v1");
+    hasher.update(&(file_ref.len() as u64).to_be_bytes());
+    hasher.update(file_ref);
+    *hasher.finalize().as_bytes()
+}
+
+/// Stable identity of one exact encrypted-chunk reference, including its wrapped key, declared
+/// size and MIME. A ciphertext CID alone identifies only the sealed bytes: a hostile listing can
+/// repeat that CID with a different key/ref, so inventory authentication must bind its verdict to
+/// all of the fields that [`ChannelSync::open_file`] consumes.
+fn file_chunk_ref_version(file_ref: &FileRef) -> [u8; 32] {
+    let encoded = file_ref.encode();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"mewtual-file-chunk-ref/v1");
+    hasher.update(&(encoded.len() as u64).to_be_bytes());
+    hasher.update(&encoded);
+    *hasher.finalize().as_bytes()
+}
+
+/// Bounded exact references for one ciphertext address.
+///
+/// Once the cap is crossed all variants fail closed, including variants authenticated earlier in
+/// the scan. Which hostile row happened to arrive first must never decide which manifest the
+/// storage pane calls verified.
+#[derive(Debug)]
+enum BoundedFileRefs {
+    Exact(HashMap<[u8; 32], FileRef>),
+    Ambiguous,
+}
+
+impl Default for BoundedFileRefs {
+    fn default() -> Self {
+        Self::Exact(HashMap::new())
+    }
+}
+
+impl BoundedFileRefs {
+    fn insert(&mut self, version: [u8; 32], file_ref: FileRef) {
+        let Self::Exact(refs) = self else {
+            return;
+        };
+        if refs.contains_key(&version) {
+            return;
+        }
+        if refs.len() >= MAX_FILE_REF_VARIANTS_PER_CID {
+            *self = Self::Ambiguous;
+            return;
+        }
+        refs.insert(version, file_ref);
+    }
+}
+
+type StorageRefIndex = (
+    HashMap<Cid, BoundedFileRefs>,
+    Vec<([u8; 32], Vec<[u8; 32]>)>,
+    usize,
+);
+
+/// Parse the bounded materialized index once into exact per-CID claims and per-manifest
+/// dependencies. The returned maps are themselves bounded by `MAX_FILE_ENTRIES * MAX_CHUNKS`;
+/// contradictory claims for one CID collapse to `Ambiguous` instead of retaining attacker-sized
+/// variant sets.
+fn storage_ref_index(files: &[FileEntry]) -> StorageRefIndex {
+    let mut refs = HashMap::<Cid, BoundedFileRefs>::new();
+    let mut file_refs = Vec::<([u8; 32], Vec<[u8; 32]>)>::new();
+    let mut invalid_manifests = 0;
+    for entry in files {
+        match FileManifest::decode_or_legacy(&entry.file_ref) {
+            Ok(manifest) if manifest.total_size <= MAX_FILE_BYTES as u64 => {
+                let chunk_versions = manifest
+                    .chunks
+                    .iter()
+                    .map(file_chunk_ref_version)
+                    .collect::<Vec<_>>();
+                file_refs.push((file_manifest_version(&entry.file_ref), chunk_versions));
+                for chunk in manifest.chunks {
+                    let version = file_chunk_ref_version(&chunk);
+                    refs.entry(chunk.ciphertext_cid)
+                        .or_default()
+                        .insert(version, chunk);
+                }
+            }
+            _ => invalid_manifests += 1,
+        }
+    }
+    (refs, file_refs, invalid_manifests)
+}
+
+/// Index metadata that authorizes one inline-media representation.
+///
+/// `manifest_version` binds every later range read to the exact chunk manifest that supplied the
+/// size and MIME. The plaintext CID is member-authored until a whole-file download verifies it,
+/// so it cannot safely serve as that version by itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileMediaHead {
+    pub total_size: u64,
+    pub mime: String,
+    pub manifest_version: [u8; 32],
 }
 
 /// One shared file as the UI sees it. `cid` is the **whole-file plaintext** content address (raw
@@ -2315,12 +2422,15 @@ pub struct FileListing {
     pub held_chunks: u32,
     /// Total chunks the file is split into.
     pub total_chunks: u32,
+    /// Digest of the exact current manifest. This is kept with the listing so a storage-health
+    /// verdict can be joined to the same actor snapshot without trusting the plaintext CID.
+    pub manifest_version: [u8; 32],
 }
 
 /// The shared file list with per-file local-availability counts, plus whether a live peer has
 /// previously served roster-verified catch-up. `has_peers` is a cheap in-memory signal; it does
 /// NOT prove a given file is held by any peer, only that an authenticated fetch could be tried.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FilesView {
     /// The listed files with availability counts.
     pub files: Vec<FileListing>,
@@ -2340,12 +2450,25 @@ pub struct StorageHealth {
     pub missing_chunks: usize,
     pub unreadable_chunks: usize,
     pub invalid_manifests: usize,
+    /// Exact manifest digests whose every exact chunk reference passed sealed-record,
+    /// ciphertext-address and file-layer authentication in this scan. Plaintext CIDs are not used
+    /// here: another member can claim the same CID while supplying a different wrapped key/ref.
+    pub verified_manifest_versions: HashSet<[u8; 32]>,
     /// Bytes of verified encrypted file-chunk content (not filesystem allocation or unrelated
     /// avatar/banner blobs).
     pub verified_bytes: u64,
     /// A live peer that proved it could answer a roster-authenticated catch-up earlier this
     /// session exists. This means repair can be attempted, not that it holds every missing chunk.
     pub has_peers: bool,
+}
+
+/// One atomic actor snapshot used by the storage pane. The health verdict and listing metadata
+/// must be captured from the same index revision; two separate actor commands leave a mutation
+/// window in which a verified old manifest can be paired with an unverified replacement row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StorageSnapshot {
+    pub health: StorageHealth,
+    pub files: FilesView,
 }
 
 /// Result of one explicit storage repair pass.
@@ -4192,18 +4315,38 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// walking a long track re-read chunk 0, dropped the chunk it was playing, and re-read that
     /// too: a file every byte of which was already on this disk could still stall the deck. This
     /// touches no blob, no disk and no network.
-    pub fn file_head(&self, cid: &Cid) -> Option<(u64, String)> {
-        let entry = self
+    pub fn file_head(&self, cid: &Cid) -> Option<FileMediaHead> {
+        let (entry, manifest, manifest_version) = self.unique_media_entry(cid)?;
+        Some(FileMediaHead {
+            total_size: manifest.total_size,
+            mime: entry.mime,
+            manifest_version,
+        })
+    }
+
+    /// Resolve one CID to exactly one current chunk manifest.
+    ///
+    /// A replicated index may contain several legitimate names/paths for identical content, but
+    /// every such row must carry byte-identical `file_ref` bytes. A malicious member can otherwise
+    /// repeat a benign plaintext CID while naming different encrypted chunks; treating the CID as
+    /// the cache identity would authorize those replacement bytes under a stale MIME decision.
+    fn unique_media_entry(&self, cid: &Cid) -> Option<(FileEntry, FileManifest, [u8; 32])> {
+        let mut entries = self
             .files()
             .into_iter()
-            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])?;
+            .filter(|entry| entry.cid.as_slice() == &cid.as_bytes()[..]);
+        let entry = entries.next()?;
+        let manifest_version = file_manifest_version(&entry.file_ref);
+        if entries.any(|candidate| file_manifest_version(&candidate.file_ref) != manifest_version) {
+            return None;
+        }
         let manifest = FileManifest::decode_or_legacy(&entry.file_ref).ok()?;
         // The same guard `read_file_range` applies: a member authors the manifest, so an absurd
         // declared size must not become a `Content-Range` the player then chases.
         if manifest.total_size > MAX_FILE_BYTES as u64 {
             return None;
         }
-        Some((manifest.total_size, entry.mime))
+        Some((entry, manifest, manifest_version))
     }
 
     /// Read a byte range of a listed file's plaintext.
@@ -4220,21 +4363,21 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     pub async fn read_file_range(
         &mut self,
         cid: &Cid,
+        expected_manifest_version: [u8; 32],
         start: u64,
         max_len: usize,
     ) -> Result<FileRange, AppError> {
-        let Some(entry) = self
-            .files()
-            .into_iter()
-            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
-        else {
+        let Some((entry, manifest, manifest_version)) = self.unique_media_entry(cid) else {
             return Err(AppError::Invalid(
-                "no such file in this server's index".into(),
+                "no unique file manifest in this server's index".into(),
             ));
         };
+        if manifest_version != expected_manifest_version {
+            return Err(AppError::Invalid(
+                "file manifest changed after media authorization".into(),
+            ));
+        }
         let mime = entry.mime.clone();
-        let manifest = FileManifest::decode_or_legacy(&entry.file_ref)
-            .map_err(|_| AppError::Invalid("corrupt file reference".into()))?;
         let total_size = manifest.total_size;
         if total_size > MAX_FILE_BYTES as u64 {
             return Err(AppError::Invalid(
@@ -4349,15 +4492,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// reachable" flag, for the file browser's availability indicator. Zero network cost; purely
     /// local blob-store + in-memory peer-set checks. See [`FilesView`].
     pub fn files_view(&self) -> FilesView {
-        let files = self
-            .files()
+        self.files_view_from_entries(self.files())
+    }
+
+    fn files_view_from_entries(&self, entries: Vec<FileEntry>) -> FilesView {
+        let files = entries
             .into_iter()
             .map(|entry| {
                 let (held_chunks, total_chunks) = self.chunk_holding(&entry);
+                let manifest_version = file_manifest_version(&entry.file_ref);
                 FileListing {
                     entry,
                     held_chunks,
                     total_chunks,
+                    manifest_version,
                 }
             })
             .collect();
@@ -4371,18 +4519,37 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// cryptographic checks but no network requests and no mutation.
     pub fn storage_health(&self) -> StorageHealth {
         let files = self.files();
-        let mut refs: HashMap<Cid, FileRef> = HashMap::new();
-        let mut invalid_manifests = 0;
-        for entry in &files {
-            match FileManifest::decode_or_legacy(&entry.file_ref) {
-                Ok(manifest) if manifest.total_size <= MAX_FILE_BYTES as u64 => {
-                    for chunk in manifest.chunks {
-                        refs.entry(chunk.ciphertext_cid).or_insert(chunk);
-                    }
-                }
-                _ => invalid_manifests += 1,
-            }
+        self.storage_health_for_entries(&files)
+    }
+
+    /// Capture the exact file rows and their cryptographic local-health verdict in one actor turn.
+    pub fn storage_snapshot(&self) -> StorageSnapshot {
+        let files = self.files();
+        StorageSnapshot {
+            health: self.storage_health_for_entries(&files),
+            files: self.files_view_from_entries(files),
         }
+    }
+
+    fn storage_health_for_entries(&self, files: &[FileEntry]) -> StorageHealth {
+        self.storage_health_for_entries_with(files, |ciphertext, file_ref| {
+            self.sync.open_file(ciphertext, file_ref).is_ok()
+        })
+    }
+
+    fn storage_health_for_entries_with<F>(
+        &self,
+        files: &[FileEntry],
+        mut open_file: F,
+    ) -> StorageHealth
+    where
+        F: FnMut(&[u8], &FileRef) -> bool,
+    {
+        // Aggregate byte counts remain deduplicated by ciphertext CID, but authentication work and
+        // whole-file verdicts are keyed by the exact FileRef. Those identities cannot be merged:
+        // the same sealed bytes paired with a different wrapped key are a different claim. More
+        // than the small exact-ref cap is treated as ambiguity, not multiplied crypto work.
+        let (refs, file_refs, invalid_manifests) = storage_ref_index(files);
 
         let mut health = StorageHealth {
             listed_files: files.len(),
@@ -4391,47 +4558,71 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             has_peers: self.has_fetch_peers(),
             ..StorageHealth::default()
         };
-        for (cid, file_ref) in refs {
-            match self.sync.get_blob(&cid) {
-                Some(ciphertext) => match self.sync.open_file(&ciphertext, &file_ref) {
-                    Ok(_) => {
-                        health.verified_chunks += 1;
-                        health.verified_bytes = health
-                            .verified_bytes
-                            .saturating_add(ciphertext.len() as u64);
+        let mut verified_refs = HashSet::new();
+        for (cid, exact_refs) in refs {
+            match exact_refs {
+                BoundedFileRefs::Ambiguous => health.unreadable_chunks += 1,
+                BoundedFileRefs::Exact(exact_refs) => match self.sync.get_blob(&cid) {
+                    Some(ciphertext) => {
+                        let mut all_refs_verified = true;
+                        for (version, file_ref) in exact_refs {
+                            if open_file(&ciphertext, &file_ref) {
+                                verified_refs.insert(version);
+                            } else {
+                                all_refs_verified = false;
+                            }
+                        }
+                        if all_refs_verified {
+                            health.verified_chunks += 1;
+                            health.verified_bytes = health
+                                .verified_bytes
+                                .saturating_add(ciphertext.len() as u64);
+                        } else {
+                            health.unreadable_chunks += 1;
+                        }
                     }
-                    Err(_) => health.unreadable_chunks += 1,
+                    None if self.sync.has_blob(&cid) => health.unreadable_chunks += 1,
+                    None => health.missing_chunks += 1,
                 },
-                None if self.sync.has_blob(&cid) => health.unreadable_chunks += 1,
-                None => health.missing_chunks += 1,
             }
         }
+        health.verified_manifest_versions = file_refs
+            .into_iter()
+            .filter_map(|(manifest, refs)| {
+                (!refs.is_empty() && refs.iter().all(|version| verified_refs.contains(version)))
+                    .then_some(manifest)
+            })
+            .collect();
         health
     }
 
-    /// Re-fetch every missing or unreadable referenced chunk from the best connected member, then
-    /// verify the whole set again. The sync/storage path authenticates the responder and CID before
-    /// replacing an unreadable record; no unreferenced blob is garbage-collected here.
+    /// Re-fetch every repairable missing or unreadable referenced chunk from the best connected
+    /// member, then verify the whole set again. Contradictory over-cap exact references remain
+    /// visibly unreadable without a fetch: content addressing would return the same ciphertext and
+    /// cannot reconcile different wrapped keys. The sync/storage path authenticates the responder
+    /// and CID before replacing an unreadable record; no unreferenced blob is garbage-collected.
     pub async fn repair_storage(&mut self) -> Result<StorageRepair, AppError> {
         let before = self.storage_health();
         let mut candidates = HashSet::new();
-        for entry in self.files() {
-            let Ok(manifest) = FileManifest::decode_or_legacy(&entry.file_ref) else {
+        let files = self.files();
+        let (refs, _, _) = storage_ref_index(&files);
+        for (cid, exact_refs) in refs {
+            let BoundedFileRefs::Exact(exact_refs) = exact_refs else {
+                // Fetching the same content-addressed ciphertext cannot reconcile contradictory
+                // wrapped keys. Leave this CID visibly unreadable without wasting peer traffic.
                 continue;
             };
-            if manifest.total_size > MAX_FILE_BYTES as u64 {
-                continue;
-            }
-            for chunk in manifest.chunks {
-                let cid = chunk.ciphertext_cid;
-                let readable = self
-                    .sync
-                    .get_blob(&cid)
-                    .and_then(|bytes| self.sync.open_file(&bytes, &chunk).ok())
-                    .is_some();
-                if !readable {
-                    candidates.insert(cid);
-                }
+            let readable = self
+                .sync
+                .get_blob(&cid)
+                .map(|bytes| {
+                    exact_refs
+                        .values()
+                        .all(|chunk| self.sync.open_file(&bytes, chunk).is_ok())
+                })
+                .unwrap_or(false);
+            if !readable {
+                candidates.insert(cid);
             }
         }
         for cid in &candidates {
@@ -9315,6 +9506,179 @@ mod tests {
         assert_eq!(repair.health.missing_chunks, 0);
         assert_eq!(repair.health.unreadable_chunks, 0);
         assert_eq!(repair.health.verified_chunks, 1);
+        assert_eq!(repair.health.verified_manifest_versions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn storage_health_binds_completeness_to_the_exact_chunk_reference() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        alice
+            .add_file(
+                "safe.png",
+                "image/png",
+                "safe",
+                b"authenticated image bytes",
+            )
+            .await
+            .unwrap();
+        let original = alice.files().remove(0);
+        let original_version = file_manifest_version(&original.file_ref);
+        let original_manifest = FileManifest::decode_or_legacy(&original.file_ref).unwrap();
+
+        // Repeat the exact ciphertext address but alter the wrapped key. Presence checks report
+        // both rows as held; only an exact-FileRef open distinguishes this unreadable claim.
+        let mut hostile_manifest = original_manifest.clone();
+        hostile_manifest.chunks[0].wrapped_key.ciphertext[0] ^= 1;
+        let hostile_ref = hostile_manifest.encode();
+        let hostile_version = file_manifest_version(&hostile_ref);
+        let author = alice.my_fingerprint();
+        let (public_key, signature) = alice
+            .file_entry_attestation("hostile.png", &author, "hostile", &hostile_ref)
+            .unwrap();
+        alice
+            .sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |doc| {
+                write_file_entry(
+                    doc,
+                    "hostile.png",
+                    &author,
+                    "hostile",
+                    &hostile_ref,
+                    FileExpiry::Never,
+                    Some((&public_key, &signature)),
+                )
+            })
+            .await
+            .unwrap();
+
+        let snapshot = alice.storage_snapshot();
+        assert_eq!(snapshot.files.files.len(), 2);
+        assert!(snapshot
+            .files
+            .files
+            .iter()
+            .all(|listing| listing.held_chunks == listing.total_chunks));
+        assert_eq!(snapshot.health.referenced_chunks, 1);
+        assert_eq!(snapshot.health.verified_chunks, 0);
+        assert_eq!(snapshot.health.unreadable_chunks, 1);
+        assert!(snapshot
+            .health
+            .verified_manifest_versions
+            .contains(&original_version));
+        assert!(!snapshot
+            .health
+            .verified_manifest_versions
+            .contains(&hostile_version));
+    }
+
+    #[tokio::test]
+    async fn storage_health_bounds_same_cid_exact_reference_work() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        alice
+            .add_file("seed.bin", "application/octet-stream", "", b"held")
+            .await
+            .unwrap();
+        let seed = alice.files().remove(0);
+        let seed_manifest = FileManifest::decode_or_legacy(&seed.file_ref).unwrap();
+        let seed_chunk = seed_manifest.chunks[0].clone();
+        let mut hostile_entries = Vec::with_capacity(MAX_FILE_ENTRIES);
+
+        // Exercise the materialized index's full 256 rows × 32 chunks. Every chunk points at the
+        // same held ciphertext but carries a distinct wrapped-key claim. Without the per-CID cap,
+        // a storage-pane read would perform 8,192 opens of the same (potentially 8 MiB) blob while
+        // the server actor could process no messages or sync work.
+        for row in 0..MAX_FILE_ENTRIES {
+            let mut chunks = Vec::with_capacity(catcoms_storage::MAX_CHUNKS as usize);
+            for index in 0..catcoms_storage::MAX_CHUNKS as usize {
+                let ordinal = row * catcoms_storage::MAX_CHUNKS as usize + index;
+                let mut chunk = seed_chunk.clone();
+                chunk.size = CHUNK_BYTES as u64;
+                chunk.wrapped_key.ciphertext[..4].copy_from_slice(&(ordinal as u32).to_be_bytes());
+                chunks.push(chunk);
+            }
+            let manifest = FileManifest {
+                plaintext_cid: Cid::of(&(row as u64).to_be_bytes()),
+                total_size: MAX_FILE_BYTES as u64,
+                mime: "application/octet-stream".into(),
+                chunks,
+            };
+            let mut entry = seed.clone();
+            entry.name = format!("hostile-{row}.bin");
+            entry.size = MAX_FILE_BYTES as u64;
+            entry.cid = manifest.plaintext_cid.as_bytes().to_vec();
+            entry.file_ref = manifest.encode();
+            hostile_entries.push(entry);
+        }
+
+        let mut open_count = 0usize;
+        let health =
+            alice.storage_health_for_entries_with(&hostile_entries, |_ciphertext, _file_ref| {
+                open_count += 1;
+                true
+            });
+        assert!(open_count <= MAX_FILE_REF_VARIANTS_PER_CID);
+        assert_eq!(
+            open_count, 0,
+            "an over-cap CID fails closed before decryption"
+        );
+        assert_eq!(health.referenced_chunks, 1);
+        assert_eq!(health.unreadable_chunks, 1);
+        assert_eq!(health.verified_chunks, 0);
+        assert!(health.verified_manifest_versions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn storage_repair_leaves_over_cap_exact_references_visibly_unrepairable() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        alice
+            .add_file("seed.bin", "application/octet-stream", "", b"held")
+            .await
+            .unwrap();
+        let seed = alice.files().remove(0);
+        let seed_manifest = FileManifest::decode_or_legacy(&seed.file_ref).unwrap();
+        let author = alice.my_fingerprint();
+
+        // The original plus four distinct variants crosses the cap. Fetching cannot help: all
+        // five claims name the same already-held ciphertext, so repair must do no peer work and
+        // must retain the unreadable verdict instead of reporting a false recovery.
+        for index in 0..MAX_FILE_REF_VARIANTS_PER_CID {
+            let mut hostile = seed_manifest.clone();
+            hostile.chunks[0].wrapped_key.ciphertext[..4]
+                .copy_from_slice(&(index as u32 + 1).to_be_bytes());
+            let hostile_ref = hostile.encode();
+            let name = format!("hostile-{index}.bin");
+            let (public_key, signature) = alice
+                .file_entry_attestation(&name, &author, "hostile", &hostile_ref)
+                .unwrap();
+            alice
+                .sync
+                .post(DocType::FileIndex, FILE_INDEX_DOC, |doc| {
+                    write_file_entry(
+                        doc,
+                        &name,
+                        &author,
+                        "hostile",
+                        &hostile_ref,
+                        FileExpiry::Never,
+                        Some((&public_key, &signature)),
+                    )
+                })
+                .await
+                .unwrap();
+        }
+
+        let before = alice.storage_health();
+        assert_eq!(before.unreadable_chunks, 1);
+        assert_eq!(before.verified_chunks, 0);
+        let repair = alice.repair_storage().await.unwrap();
+        assert_eq!(repair.attempted_chunks, 0);
+        assert_eq!(repair.recovered_chunks, 0);
+        assert_eq!(repair.health.unreadable_chunks, 1);
+        assert_eq!(repair.health.verified_chunks, 0);
+        assert!(repair.health.verified_manifest_versions.is_empty());
     }
 
     #[tokio::test]
@@ -10619,9 +10983,13 @@ mod tests {
             .add_file("clip.bin", "video/mp4", "", &data)
             .await
             .unwrap();
+        let manifest_version = alice.file_head(&cid).unwrap().manifest_version;
 
         // A window wholly inside the first chunk.
-        let head = alice.read_file_range(&cid, 0, 1024).await.unwrap();
+        let head = alice
+            .read_file_range(&cid, manifest_version, 0, 1024)
+            .await
+            .unwrap();
         assert_eq!(head.bytes, data[..1024]);
         assert_eq!(head.total_size, n as u64);
         assert_eq!(head.mime, "video/mp4");
@@ -10633,18 +11001,24 @@ mod tests {
         // A window straddling the first/second chunk boundary: the case plain chunk indexing
         // gets wrong.
         let start = CHUNK_BYTES as u64 - 10;
-        let span = alice.read_file_range(&cid, start, 20).await.unwrap();
+        let span = alice
+            .read_file_range(&cid, manifest_version, start, 20)
+            .await
+            .unwrap();
         assert_eq!(span.bytes, data[start as usize..start as usize + 20]);
 
         // A window in the short tail chunk, clamped to the end of the file.
         let tail_start = (CHUNK_BYTES * 2) as u64 + 4000;
-        let tail = alice.read_file_range(&cid, tail_start, 8192).await.unwrap();
+        let tail = alice
+            .read_file_range(&cid, manifest_version, tail_start, 8192)
+            .await
+            .unwrap();
         assert_eq!(tail.bytes, data[tail_start as usize..]);
         assert_eq!(tail.bytes.len(), 242, "the read stops at the end of file");
 
         // Seeking past the end is a normal thing for a player to probe; it is not an error.
         let past = alice
-            .read_file_range(&cid, n as u64 + 99, 512)
+            .read_file_range(&cid, manifest_version, n as u64 + 99, 512)
             .await
             .unwrap();
         assert!(past.bytes.is_empty());
@@ -10652,11 +11026,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn media_reads_reject_ambiguous_and_stale_manifest_versions() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let safe = b"\x89PNG\r\n\x1a\nsafe image";
+        let replacement = b"ID3replacement audio";
+        let cid = alice
+            .add_file("safe.png", "image/png", "safe", safe)
+            .await
+            .unwrap();
+        let old_version = alice.file_head(&cid).unwrap().manifest_version;
+        let donor_cid = alice
+            .add_file("donor.mp3", "audio/mpeg", "donor", replacement)
+            .await
+            .unwrap();
+        let donor = alice
+            .files()
+            .into_iter()
+            .find(|entry| entry.cid == donor_cid.as_bytes().to_vec())
+            .unwrap();
+        let mut forged = FileManifest::decode_or_legacy(&donor.file_ref).unwrap();
+        forged.plaintext_cid = cid;
+        let forged_ref = forged.encode();
+        let author = alice.my_fingerprint();
+        let (public_key, signature) = alice
+            .file_entry_attestation("replacement.mp3", &author, "forged", &forged_ref)
+            .unwrap();
+        alice
+            .sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |doc| {
+                write_file_entry(
+                    doc,
+                    "replacement.mp3",
+                    &author,
+                    "forged",
+                    &forged_ref,
+                    FileExpiry::Never,
+                    Some((&public_key, &signature)),
+                )
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            alice.file_head(&cid).is_none(),
+            "the same claimed plaintext CID with two manifests must be denied as ambiguous"
+        );
+
+        alice.delete_file_at(&cid, "safe").await.unwrap();
+        let replacement_head = alice.file_head(&cid).expect("forged row remains current");
+        assert_ne!(replacement_head.manifest_version, old_version);
+        assert!(
+            alice
+                .read_file_range(&cid, old_version, 0, 64)
+                .await
+                .is_err(),
+            "a MIME decision captured for the removed manifest cannot authorize replacement bytes"
+        );
+        assert_eq!(
+            alice
+                .read_file_range(&cid, replacement_head.manifest_version, 0, 64)
+                .await
+                .unwrap()
+                .bytes,
+            replacement
+        );
+    }
+
+    #[tokio::test]
     async fn a_media_range_refuses_a_file_that_is_not_listed() {
         let mut alice = founder();
         alice.open_files().await.unwrap();
         let missing = Cid::of(b"nothing here");
-        assert!(alice.read_file_range(&missing, 0, 16).await.is_err());
+        assert!(alice
+            .read_file_range(&missing, [0; 32], 0, 16)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

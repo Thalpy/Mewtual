@@ -706,9 +706,10 @@ while ordinary legacy migration remains private/loopback-only. The Tauri command
 means bounded dial attempts were submitted, not that the member is connected.
 
 `storage_health` counts a chunk as verified only after its storage seal/content address and the
-file-layer decryption both succeed. `repair_storage` explicitly fetches only missing or unreadable
-referenced chunks over the authenticated blob path and verifies again; `has()` alone must never
-short-circuit repair.
+file-layer decryption both succeed. `repair_storage` explicitly fetches repairable missing or
+unreadable referenced chunks over the authenticated blob path and verifies again; `has()` alone
+must never short-circuit repair. Over-cap contradictory exact references remain unreadable without
+a fetch because the same content address cannot reconcile different wrapped keys.
 
 The Tauri `get_storage_health(server)` command adds a cached, deduplicated inventory projection:
 `checked_at_ms`, unique/logical/local-estimated/pinned totals, category rows, the ten largest
@@ -716,13 +717,30 @@ files, and `local_files`, the deduplicated files whose complete encrypted chunk 
 installation. The Storage pane can pass one of those rows through the existing authenticated
 `save_group_file` path. That explicit “Unlock copy” action verifies/decrypts the managed chunks and
 creates a separate, non-overwriting plaintext Downloads file; it does not alter or remove the
-vault-encrypted copy. It performs at most one ordinary scan per server per process session. Only
-`repair_storage(server)` replaces that cache after its mandatory post-repair verification.
+vault-encrypted copy. Its final staging-file rename and reveal are authorized by the exact unlock
+generation that began the export; locking, then unlocking again, cannot revive the old operation.
+Chunk health is keyed by the exact encoded `FileRef`, and the inventory joins
+that verdict to the exact manifest in one actor snapshot; a reused ciphertext or plaintext CID
+cannot borrow another row's successful verification, and ambiguous same-CID manifests stay out of
+`local_files`. Authentication attempts are capped at four distinct exact references per ciphertext
+CID; a larger contradictory set fails that CID and every dependent manifest closed instead of
+multiplying large-blob decryption work. It performs at most one ordinary scan per server per
+unlocked UI session (the cache survives HMR but explicit lock clears it). Cache publication is
+bound to both the exact UI generation and process-local server incarnation; a removed/reinstalled
+server id cannot inherit a late old scan. The webview applies the same unlocked exact-view gate to
+deferred results. Only `repair_storage(server)` replaces that cache after its mandatory post-repair
+verification.
 
 Media presented to the WebView uses an exact inert MIME allow-list and must have a matching common
 image/audio/video container signature in authenticated chunk zero; SVG, mismatches and unrecognized
-containers are served as `application/octet-stream` instead of entering inline decoding. Plaintext
-exports report `contentValidation` as `matched`, `mismatch`, `unrecognized`, or absent for a
+containers receive a bodyless scheme denial instead of relying on `application/octet-stream` or
+`nosniff`, because media elements may still sniff an opaque response. The validated head and each
+decrypted chunk cache are bound to an exact manifest digest, and every request re-resolves a unique
+current manifest before serving, so reusing a claimed plaintext CID cannot inherit a stale MIME.
+Every head/chunk cache access and URI-responder publication is bound to the initiating unlocked UI
+generation; explicit lock clears cached plaintext and a delayed actor read can publish only a
+bodyless denial afterward. Plaintext exports report `contentValidation` as `matched`, `mismatch`,
+`unrecognized`, or absent for a
 non-media file after inspecting a fixed 64-byte prefix. This is bounded type evidence, not full
 bitstream validation or a claim that the platform decoder/external application is safe.
 

@@ -41,6 +41,7 @@
     moderationSurfaceOpen,
     sessionContinuationCurrent,
     scopeCurrent,
+    unlockedScopeCurrent,
   } from "./viewscope";
   import { pastedImageUrl, safeRemoteUrl } from "./remote-media";
   import { scheduleNewsChime } from "./news-chime";
@@ -59,16 +60,18 @@
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
   import { safeMediaMime } from "./media-safe";
+  import { storageRepairNotice } from "./storage-local";
+  import { disposeStreamAudioGraph } from "./stream-audio";
   import {
     bufferIce, directionIdle, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState, videoSlotPlan,
     VIDEO_BITRATE, type PeerState, type SlotDirection, type VideoKind,
   } from "./voice-signaling";
   import {
-    DEFAULT_STREAM_SETTINGS, PeerVideoBudgetController, captureResolutionKnownAfterConstraint,
+    DEFAULT_STREAM_SETTINGS, MAX_STREAM_AUDIO_SOURCES, PeerVideoBudgetController, captureResolutionKnownAfterConstraint,
     estimatedMeshMbps, isStreamHeight,
-    nearestStreamHeight, parseStreamSettings, peerStreamPlan, preferEfficientVideoCodecs,
-    receivingHeightForViewport, recommendedStreamMbps, streamResolutionLabel,
-    shouldClearScreenAudioOnModeChange,
+    nearestStreamHeight, normalizeStreamAudioLevel, parseStreamSettings, peerStreamPlan, preferEfficientVideoCodecs,
+    receivingHeightForViewport, recommendedStreamMbps, screenAudioSourceSlotAvailable, streamResolutionLabel,
+    shouldClearScreenAudioOnModeChange, streamAudioGain,
     type PeerBudgetResult, type PeerStreamPlan, type StreamFrameRate, type StreamHeight,
     type StreamAudioMode, type StreamQuality, type StreamSettings,
   } from "./streaming";
@@ -246,6 +249,16 @@
   // generation (event-driven refreshes do not bump anything).
   function viewCurrent(gen: number, server: number | null): boolean {
     return scopeCurrent({ generation: gen, server }, { generation: viewGeneration, server: activeServerId });
+  }
+  // Sensitive storage results need a stronger continuation gate than ordinary view data: a native
+  // result can resolve immediately before lock while its Promise callback remains queued until the
+  // lock has already cleared every visible value and cache.
+  function unlockedViewCurrent(gen: number, server: number | null): boolean {
+    return unlockedScopeCurrent(
+      { generation: gen, server },
+      { generation: viewGeneration, server: activeServerId },
+      locked,
+    );
   }
   // DM-home mode: the rail's DMs circle is active and the sidebar shows the friends/DM list. Kept in
   // sync with the active group's kind by switchServer (a DM ⇒ dmHome, a server ⇒ not).
@@ -4847,6 +4860,7 @@
     videoCaptureSession.invalidate();
     mediaUrls = {};
     emojiUrls = {};
+    storageHealthCache.clear();
     if (locked) return;
     // Lock wins over an in-progress secret change and drops every transient secret first.
     vaultChangeCurrent = "";
@@ -5286,6 +5300,8 @@
     caseEvidence = new Set();
     moderationUserFilter = "";
     storageHealth = null;
+    storageChecking = false;
+    storageRepairing = false;
     storageRepairNote = "";
     messages = [];
     messageRenderCache.clear();
@@ -6022,45 +6038,47 @@
     }
   }
   async function refreshStorageHealth() {
-    if (activeServerId === null) return;
+    if (activeServerId === null || locked) return;
+    const gen = viewGeneration;
     const server = activeServerId;
     const cached = storageHealthCache.get(server);
     if (cached) {
-      storageHealth = cached;
+      if (unlockedViewCurrent(gen, server)) storageHealth = cached;
       return;
     }
     storageChecking = true;
     try {
       const report = await invoke<StorageHealth>("get_storage_health", { server });
+      if (!unlockedViewCurrent(gen, server)) return;
       storageHealthCache.set(server, report);
-      if (activeServerId === server) storageHealth = report;
+      storageHealth = report;
     } catch (e) {
-      if (activeServerId === server) error = String(e);
+      if (unlockedViewCurrent(gen, server)) error = String(e);
     } finally {
-      // Keyed: a late probe from the server you left must not clear the spinner for the one you
-      // opened, which is still reading.
-      if (activeServerId === server) storageChecking = false;
+      // Exact-scope and unlock gated: stale work may neither refill cleared state after lock nor
+      // clear the spinner for a newer probe in another visit to this server.
+      if (unlockedViewCurrent(gen, server)) storageChecking = false;
     }
   }
   async function repairStorage() {
-    if (activeServerId === null || storageRepairing) return;
+    if (activeServerId === null || storageRepairing || locked) return;
+    const gen = viewGeneration;
+    const server = activeServerId;
     storageRepairing = true;
     storageRepairNote = "";
     try {
-      const server = activeServerId;
       const result = await invoke<{ attempted_chunks: number; recovered_chunks: number; health: StorageHealth }>(
         "repair_storage", { server },
       );
+      if (!unlockedViewCurrent(gen, server)) return;
       storageHealthCache.set(server, result.health);
-      if (activeServerId === server) storageHealth = result.health;
-      storageRepairNote = result.attempted_chunks
-        ? `Checked ${result.attempted_chunks} damaged or missing chunks; recovered ${result.recovered_chunks}.`
-        : "Everything referenced by this server already verifies.";
+      storageHealth = result.health;
+      storageRepairNote = storageRepairNotice(result);
       await refreshFiles();
     } catch (e) {
-      error = String(e);
+      if (unlockedViewCurrent(gen, server)) error = String(e);
     } finally {
-      storageRepairing = false;
+      if (unlockedViewCurrent(gen, server)) storageRepairing = false;
     }
   }
 
@@ -9449,7 +9467,7 @@
   }
 
   // --- toasts: visible feedback for otherwise-silent work (uploads, saves, renames) --------------
-  type Toast = { id: number; kind: "info" | "ok" | "err"; text: string };
+  type Toast = { id: number; kind: "info" | "ok" | "warn" | "err"; text: string };
   let toasts = $state<Toast[]>([]);
   let toastSeq = 0;
   const toastTimers = new Map<number, ReturnType<typeof setTimeout>>();
@@ -10387,6 +10405,17 @@
       // getDisplayMedia must make the user choose again; a settings toggle cannot silently grant
       // a different capture source or reinterpret separately selected application audio.
       screenAudioError = "Restart sharing to choose screen/window audio under this mode.";
+    }
+  }
+  function setStreamAudioMasterLevel(value: string) {
+    const audioLevel = normalizeStreamAudioLevel(Number(value), streamSettings.audioLevel);
+    saveStreamSettings({ ...streamSettings, audioLevel });
+    if (screenAudioMaster && screenAudioContext) {
+      try {
+        screenAudioMaster.gain.setTargetAtTime(streamAudioGain(audioLevel), screenAudioContext.currentTime, 0.015);
+      } catch {
+        screenAudioMaster.gain.value = streamAudioGain(audioLevel);
+      }
     }
   }
   function setReceiveResolution(value: string) {
@@ -12251,12 +12280,14 @@
     label: string;
     stream: MediaStream;
     node: MediaStreamAudioSourceNode;
+    gain: GainNode;
   };
-  let screenAudioSources = $state<{ id: string; label: string }[]>([]);
+  let screenAudioSources = $state<{ id: string; label: string; level: number }[]>([]);
   let screenAudioError = $state("");
   const screenAudioCaptures = new Map<string, ScreenAudioCapture>();
   let screenAudioContext: AudioContext | null = null;
   let screenAudioDestination: MediaStreamAudioDestinationNode | null = null;
+  let screenAudioMaster: GainNode | null = null;
   let screenAudioSourceId = 0;
   const screenAudioCaptureSession = new MediaCaptureSession();
 
@@ -12305,15 +12336,34 @@
     stillWanted: () => boolean = () => true,
     syncNow = true,
   ) {
+    if (!screenAudioSourceSlotAvailable(screenAudioCaptures.size)) {
+      for (const track of stream.getTracks()) track.stop();
+      screenAudioError = `At most ${MAX_STREAM_AUDIO_SOURCES} application-audio sources can be mixed at once.`;
+      return false;
+    }
     const tracks = stream.getAudioTracks();
     if (!tracks.length) {
       for (const track of stream.getTracks()) track.stop();
       screenAudioError = "That source did not provide audio. Choose a tab/window with audio enabled in the picker.";
       return false;
     }
+    // A permission prompt can resolve after stop/leave/mode-change invalidates the lease. Reject it
+    // before creating an AudioContext or destination, otherwise a capture with no registered row
+    // could strand an invisible live graph outside ordinary teardown.
+    if (!stillWanted()) {
+      for (const track of stream.getTracks()) track.stop();
+      return false;
+    }
     try {
       const context = screenAudioContext ??= new AudioContext();
       const destination = screenAudioDestination ??= context.createMediaStreamDestination();
+      let master = screenAudioMaster;
+      if (!master) {
+        master = context.createGain();
+        master.connect(destination);
+        screenAudioMaster = master;
+      }
+      master.gain.value = streamAudioGain(streamSettings.audioLevel);
       // Do not await `resume()`: an OS prompt has already handed us live capture tracks, and an
       // unresolved WebView promise here would leave both these tracks and the calling screen-video
       // stream outside the teardown registries. Build/register the graph synchronously so stop,
@@ -12325,16 +12375,20 @@
           }
         });
       }
-      if (!stillWanted() || screenAudioContext !== context || screenAudioDestination !== destination) {
+      if (!stillWanted() || screenAudioContext !== context || screenAudioDestination !== destination || screenAudioMaster !== master) {
         for (const track of stream.getTracks()) track.stop();
+        if (!screenAudioCaptures.size) disposeScreenAudioGraph();
         return false;
       }
       const id = `source-${++screenAudioSourceId}`;
       const node = context.createMediaStreamSource(stream);
-      node.connect(destination);
+      const gain = context.createGain();
+      gain.gain.value = 1;
+      node.connect(gain);
+      gain.connect(master);
       const label = tracks[0].label || fallbackLabel;
-      screenAudioCaptures.set(id, { id, label, stream, node });
-      screenAudioSources = [...screenAudioSources, { id, label }];
+      screenAudioCaptures.set(id, { id, label, stream, node, gain });
+      screenAudioSources = [...screenAudioSources, { id, label, level: 100 }];
       screenAudioError = "";
       for (const track of tracks) {
         // One granted source may expose multiple audio tracks. The first one ending retires and
@@ -12345,9 +12399,23 @@
       return true;
     } catch (e) {
       for (const track of stream.getTracks()) track.stop();
+      if (!screenAudioCaptures.size) disposeScreenAudioGraph();
       screenAudioError = `This WebView could not mix that audio source: ${String(e)}`;
       return false;
     }
+  }
+
+  function setScreenAudioSourceLevel(id: string, value: string) {
+    const capture = screenAudioCaptures.get(id);
+    if (!capture || !screenAudioContext) return;
+    const current = screenAudioSources.find((source) => source.id === id)?.level ?? 100;
+    const level = normalizeStreamAudioLevel(Number(value), current);
+    try {
+      capture.gain.gain.setTargetAtTime(streamAudioGain(level), screenAudioContext.currentTime, 0.015);
+    } catch {
+      capture.gain.gain.value = streamAudioGain(level);
+    }
+    screenAudioSources = screenAudioSources.map((source) => source.id === id ? { ...source, level } : source);
   }
 
   function removeScreenAudioSource(id: string, stop = true) {
@@ -12355,9 +12423,21 @@
     if (!capture) return;
     screenAudioCaptures.delete(id);
     try { capture.node.disconnect(); } catch { /* already disconnected */ }
+    try { capture.gain.disconnect(); } catch { /* already disconnected */ }
     if (stop) for (const track of capture.stream.getTracks()) track.stop();
     screenAudioSources = screenAudioSources.filter((source) => source.id !== id);
     syncScreenAudioPeers();
+    if (!screenAudioCaptures.size) disposeScreenAudioGraph();
+  }
+
+  function disposeScreenAudioGraph() {
+    const context = screenAudioContext;
+    const destination = screenAudioDestination;
+    const master = screenAudioMaster;
+    screenAudioContext = null;
+    screenAudioDestination = null;
+    screenAudioMaster = null;
+    disposeStreamAudioGraph(destination, master, context);
   }
 
   function clearScreenAudioSources() {
@@ -12366,13 +12446,11 @@
     screenAudioSources = [];
     for (const capture of captures) {
       try { capture.node.disconnect(); } catch { /* already disconnected */ }
+      try { capture.gain.disconnect(); } catch { /* already disconnected */ }
       for (const track of capture.stream.getTracks()) track.stop();
     }
     syncScreenAudioPeers();
-    const context = screenAudioContext;
-    screenAudioContext = null;
-    screenAudioDestination = null;
-    if (context) void context.close().catch(() => {});
+    disposeScreenAudioGraph();
   }
 
   /**
@@ -12382,6 +12460,10 @@
    */
   async function addSeparateScreenAudioSource() {
     if (myVideo !== "screen") return;
+    if (!screenAudioSourceSlotAvailable(screenAudioCaptures.size)) {
+      screenAudioError = `Remove a source before adding another (maximum ${MAX_STREAM_AUDIO_SOURCES}).`;
+      return;
+    }
     const videoLease = videoCaptureSession.current();
     const audioLease = screenAudioCaptureSession.begin();
     const server = callServer;
@@ -15637,21 +15719,22 @@
       <button type="button" class:active={streamSettings.audioMode === "surface"} onclick={() => setStreamAudioMode("surface")}>With screen/window</button>
       <button type="button" class:active={streamSettings.audioMode === "separate"} onclick={() => setStreamAudioMode("separate")}>Separate sources</button>
     </fieldset>
+    {#if streamSettings.audioMode !== "none"}
+      <label class="stream-master-level">
+        <span><b>Shared-audio master</b><small>Applies to the stream audio track, not your call microphone</small></span>
+        <input aria-label="Shared audio master level" type="range" min="0" max="200" step="1" value={streamSettings.audioLevel} oninput={(event) => setStreamAudioMasterLevel(event.currentTarget.value)} />
+        <output>{streamSettings.audioLevel}%</output>
+      </label>
+    {/if}
     {#if streamSettings.audioMode === "separate"}
       <div class="stream-audio-sources">
         <p class="muted small">Choose applications independently from the shared picture. Add game, browser, or other audio one at a time; Mewtual mixes them into one stream track and never saves the grants.</p>
         {#if myVideo === "screen"}
           <div class="stream-source-actions">
-            <button type="button" class="ghost small" onclick={addSeparateScreenAudioSource}>+ Add audio source</button>
-            <span class="muted small">The chooser may show a picture too; only its audio is sent.</span>
+            <button type="button" class="ghost small" disabled={!screenAudioSourceSlotAvailable(screenAudioSources.length)} onclick={addSeparateScreenAudioSource}>+ Add audio source</button>
+            <span class="muted small">{screenAudioSources.length}/{MAX_STREAM_AUDIO_SOURCES} sources · the chooser may show a picture too; only its audio is sent.</span>
           </div>
-          {#if screenAudioSources.length}
-            <ul class="stream-source-list">
-              {#each screenAudioSources as source (source.id)}
-                <li><span>{source.label}</span><button type="button" class="ghost small" aria-label={`Remove ${source.label}`} onclick={() => removeScreenAudioSource(source.id)}>Remove</button></li>
-              {/each}
-            </ul>
-          {:else}
+          {#if !screenAudioSources.length}
             <p class="muted small">No application audio selected. The screen share is silent apart from your normal call microphone.</p>
           {/if}
         {:else}
@@ -15660,6 +15743,21 @@
       </div>
     {:else if streamSettings.audioMode === "surface"}
       <p class="muted small">The capture chooser will offer audio from the selected tab, window, or system where the WebView supports it. System audio can include Mewtual voices; separate application sources avoid that echo.</p>
+    {/if}
+    {#if screenAudioSources.length}
+      <div class="stream-mixer" aria-label="Streamer audio mixer">
+        <div><b>STREAMER AUDIO MIXER</b><span class="muted small">0% mutes · 100% unity · boosts can clip when sources overlap</span></div>
+        <ul class="stream-source-list">
+          {#each screenAudioSources as source (source.id)}
+            <li>
+              <span title={source.label}>{source.label}</span>
+              <input aria-label={`${source.label} level`} type="range" min="0" max="200" step="1" value={source.level} oninput={(event) => setScreenAudioSourceLevel(source.id, event.currentTarget.value)} />
+              <output>{source.level}%</output>
+              <button type="button" class="ghost small" aria-label={`Remove ${source.label}`} onclick={() => removeScreenAudioSource(source.id)}>Remove</button>
+            </li>
+          {/each}
+        </ul>
+      </div>
     {/if}
     {#if screenAudioError}<p class="stream-warning">{screenAudioError}</p>{/if}
     <div class="stream-summary">

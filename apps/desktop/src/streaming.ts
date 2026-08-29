@@ -8,6 +8,9 @@ export type StreamQuality = "motion" | "balanced" | "detail";
  * the Screen Capture API requires a fresh, visible user choice for every capture session.
  */
 export type StreamAudioMode = "none" | "surface" | "separate";
+export const DEFAULT_STREAM_AUDIO_LEVEL = 100;
+/** Hard UI/runtime bound on simultaneous OS capture grants and Web Audio graph fan-in. */
+export const MAX_STREAM_AUDIO_SOURCES = 8;
 
 export type StreamSettings = {
   resolution: StreamHeight;
@@ -17,6 +20,8 @@ export type StreamSettings = {
   mbpsPerPeer: number;
   /** Whether the share is silent, uses its selected surface, or accepts separate picked sources. */
   audioMode: StreamAudioMode;
+  /** Persisted master gain for shared (not microphone) audio, expressed as 0..200 percent. */
+  audioLevel: number;
 };
 
 export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
@@ -25,7 +30,29 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   quality: "balanced",
   mbpsPerPeer: 6,
   audioMode: "none",
+  audioLevel: DEFAULT_STREAM_AUDIO_LEVEL,
 };
+
+/** Sanitize a UI/persistence mixer level without admitting NaN or unbounded gain. */
+export function normalizeStreamAudioLevel(
+  value: unknown,
+  fallback = DEFAULT_STREAM_AUDIO_LEVEL,
+): number {
+  const numeric = typeof value === "number" ? value : Number.NaN;
+  return Number.isFinite(numeric) ? Math.round(Math.min(200, Math.max(0, numeric))) : fallback;
+}
+
+/** Web Audio gain is linear: 100% is unity, 0% is mute, and 200% is a bounded +6 dB boost. */
+export function streamAudioGain(level: unknown): number {
+  return normalizeStreamAudioLevel(level) / 100;
+}
+
+/** Keep source creation bounded even when several permission prompts resolve out of order. */
+export function screenAudioSourceSlotAvailable(currentSources: number): boolean {
+  return Number.isInteger(currentSources)
+    && currentSources >= 0
+    && currentSources < MAX_STREAM_AUDIO_SOURCES;
+}
 
 /** Parse the installation-wide persisted preset without allowing stale/invalid values into UI. */
 export function parseStreamSettings(value: unknown): StreamSettings {
@@ -47,7 +74,8 @@ export function parseStreamSettings(value: unknown): StreamSettings {
   const audioMode = parsed.audioMode === "surface" || parsed.audioMode === "separate"
     ? parsed.audioMode
     : "none";
-  return { resolution, frameRate, quality, mbpsPerPeer, audioMode };
+  const audioLevel = normalizeStreamAudioLevel(parsed.audioLevel);
+  return { resolution, frameRate, quality, mbpsPerPeer, audioMode, audioLevel };
 }
 
 /** Existing grants belong to the old capture interpretation and never cross a mode change. */

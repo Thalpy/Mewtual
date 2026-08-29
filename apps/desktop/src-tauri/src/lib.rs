@@ -24,8 +24,9 @@ use catcoms_app::{
     channel_id, spawn, AppEvent, Cid, CidHasher, DeviceId, FileListing, FileRef, InviteJoinPlan,
     Livery, PairingLedger, PairingSecrets, PerServerGrant, Profile, ReconnectPolicy,
     ReconnectRoute, Server, ServerActor, ServerNet, ServerRecord, ServerStore, StorageHealth,
-    CHUNK_BYTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES, MAX_RECONNECT_ROUTES,
-    MAX_RECONNECT_ROUTE_BYTES, MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
+    StorageSnapshot, CHUNK_BYTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES,
+    MAX_RECONNECT_ROUTES, MAX_RECONNECT_ROUTE_BYTES, MAX_SERVER_CURSOR_BYTES,
+    MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{
     parse_peer_dial_route, Candidate, DialEndpoint, DiscoveryPolicy, EndpointDialScheduler,
@@ -74,6 +75,10 @@ struct InterfaceRouteIdentity {
 /// its display name (kept here too so the registry can be re-sealed on disk, Phase 9f).
 struct ServerEntry {
     actor: ServerActor,
+    /// Process-local incarnation of this registry row. Persisted ids are intentionally reused on
+    /// reload, so the id alone cannot stop a scan begun for a removed actor from populating a new
+    /// actor's cache after that id is installed again.
+    instance: u64,
     /// Stable MLS identity checks for old signed invite permits embedded in two-way reply codes.
     group_id: Vec<u8>,
     device_id: DeviceId,
@@ -119,17 +124,17 @@ struct ServerEntry {
 struct MediaChunk {
     server: u64,
     cid: String,
+    manifest_version: [u8; 32],
     index: usize,
     bytes: Arc<Vec<u8>>,
 }
 
-/// A file's size and declared type, remembered so the media protocol asks the actor for them once
-/// per track instead of once per response. Neither can change for a content address, so there is
-/// nothing here to invalidate.
+/// A file's size and validated type, bound to the exact current encrypted chunk manifest.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct MediaHead {
     server: u64,
     cid: String,
+    manifest_version: [u8; 32],
     total_size: u64,
     mime: String,
 }
@@ -138,6 +143,7 @@ struct MediaHead {
 /// and a short seek back, and it is 16 MiB of plaintext: the cache exists to keep the actor free,
 /// not to hold the film.
 const MEDIA_CACHE_CHUNKS: usize = 2;
+const STORAGE_SCAN_STRIPES: usize = 16;
 /// How many file heads stay remembered. Tiny (two integers and a mime each), and more than one
 /// because a queue moves between tracks.
 const MEDIA_HEAD_ENTRIES: usize = 8;
@@ -152,11 +158,15 @@ fn media_cache_take(
     cache: &mut Vec<MediaChunk>,
     server: u64,
     cid: &str,
+    manifest_version: [u8; 32],
     index: usize,
 ) -> Option<Arc<Vec<u8>>> {
-    let at = cache
-        .iter()
-        .position(|c| c.server == server && c.cid == cid && c.index == index)?;
+    let at = cache.iter().position(|c| {
+        c.server == server
+            && c.cid == cid
+            && c.manifest_version == manifest_version
+            && c.index == index
+    })?;
     let hit = cache.remove(at);
     let bytes = Arc::clone(&hit.bytes);
     cache.push(hit);
@@ -167,13 +177,14 @@ fn media_cache_take(
 fn media_cache_put(cache: &mut Vec<MediaChunk>, chunk: MediaChunk) {
     // A different track displaces the whole cache: nothing about the old one will be asked for
     // again, and holding two tracks' plaintext to serve one is the wrong trade.
-    if cache
-        .iter()
-        .any(|c| c.cid != chunk.cid || c.server != chunk.server)
-    {
+    if cache.iter().any(|c| {
+        c.cid != chunk.cid
+            || c.server != chunk.server
+            || c.manifest_version != chunk.manifest_version
+    }) {
         cache.clear();
     }
-    cache.retain(|c| c.index != chunk.index);
+    cache.retain(|c| c.index != chunk.index || c.manifest_version != chunk.manifest_version);
     cache.push(chunk);
     while cache.len() > MEDIA_CACHE_CHUNKS {
         cache.remove(0);
@@ -215,6 +226,10 @@ impl NetworkChangeSignal {
 #[derive(Default)]
 struct AppState {
     servers: Mutex<HashMap<u64, ServerEntry>>,
+    /// Monotonic process-local source for [`ServerEntry::instance`]. Wrapping would require more
+    /// actor installations than the process can perform in its lifetime; zero has no special
+    /// meaning and is permitted after that theoretical wrap.
+    next_server_instance: AtomicU64,
     /// One endpoint budget shared by every server swarm and pre-join discovery attempt in this
     /// desktop process. Per-server ranking remains inside each actor; this is the final bound on
     /// actual socket fan-out across groups.
@@ -304,15 +319,39 @@ struct AppState {
     /// Connected peers' low-trust Identify observations of our outbound socket. Diagnostic only;
     /// these are never folded into bootstrap, rendezvous registration or AutoNAT candidates.
     mesh_observations: Mutex<HashMap<u64, Vec<String>>>,
-    /// One integrity/inventory scan per server per process session. Health is a point-in-time
+    /// One integrity/inventory scan per server per unlocked UI session. Health is a point-in-time
     /// observation, so file events deliberately do not invalidate it behind the user's back;
-    /// explicit authenticated repair is the only operation that replaces a cached report.
-    storage_health: Mutex<HashMap<u64, UiStorageHealth>>,
+    /// explicit lock clears the metadata, and repair replaces it after re-verification.
+    storage_health: Mutex<HashMap<u64, CachedStorageHealth>>,
+    /// Per-server singleflight gates for expensive storage scans/repairs. These are deliberately
+    /// separate from the plaintext result cache: explicit lock must clear that cache immediately,
+    /// without waiting for local decryption or peer-fetch timeouts to finish.
+    storage_scans: StorageScanGates,
     /// One native monitor fans a coalesced generation out to every per-server discovery loop.
     /// Polling remains active, so monitor initialization failure affects latency, not correctness.
     network_changes: NetworkChangeSignal,
     /// Streamed uploads in flight, keyed by `(server, upload id)`. See [`PendingUpload`].
     uploads: Mutex<HashMap<UploadKey, PendingUpload>>,
+}
+
+/// Fixed-size keyed singleflight. Hash collisions only serialize two explicit scans; unlike a map
+/// keyed by webview-provided server ids, this cannot become an unbounded allocation surface.
+struct StorageScanGates {
+    stripes: [Mutex<()>; STORAGE_SCAN_STRIPES],
+}
+
+impl Default for StorageScanGates {
+    fn default() -> Self {
+        Self {
+            stripes: std::array::from_fn(|_| Mutex::new(())),
+        }
+    }
+}
+
+impl StorageScanGates {
+    fn for_server(&self, server: u64) -> &Mutex<()> {
+        &self.stripes[(server as usize) % STORAGE_SCAN_STRIPES]
+    }
 }
 
 /// Identity of one streamed upload: the server, and a **backend-minted** generation token.
@@ -854,6 +893,24 @@ async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, ActorLoo
     actor_of_unchecked(state, server).await
 }
 
+/// Clone the actor together with its process-local registry incarnation. Long operations must
+/// carry both: a persisted server id may legitimately be removed and reinstalled in one process.
+async fn actor_instance_of(
+    state: &AppState,
+    server: u64,
+) -> Result<(ServerActor, u64), ActorLookup> {
+    require_unlocked_session(state)
+        .await
+        .map_err(|_| ActorLookup::Locked)?;
+    state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|entry| (entry.actor.clone(), entry.instance))
+        .ok_or(ActorLookup::NotOpen)
+}
+
 /// Clone the actor and DM marker together. Moderation is server-wide and intentionally absent
 /// from 1:1 DM spaces, so its bridge commands use this helper to enforce that boundary before
 /// invoking the actor.
@@ -1060,6 +1117,10 @@ struct UiFile {
     held: u32,
     /// Total chunks the file is split into.
     total: u32,
+    /// Internal join key for the exact actor snapshot. The webview neither needs nor gets this
+    /// digest; it only sees whether the native verified-inventory policy admitted the row.
+    #[serde(skip_serializing)]
+    manifest_version: [u8; 32],
     /// When this listing drops out of circulation, ms epoch. `null` means either "keep forever"
     /// or "never recorded"; `expires_known` tells those apart. Recorded metadata only: nothing
     /// enforces it yet (see `catcoms_app::FileExpiry`).
@@ -1119,6 +1180,12 @@ struct UiStorageHealth {
     local_files: Vec<UiStorageFile>,
 }
 
+#[derive(Clone)]
+struct CachedStorageHealth {
+    server_instance: u64,
+    report: UiStorageHealth,
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 struct UiStorageCategory {
     name: String,
@@ -1160,6 +1227,7 @@ fn ui_file(listing: FileListing) -> UiFile {
         path: listing.entry.path,
         held: listing.held_chunks,
         total: listing.total_chunks,
+        manifest_version: listing.manifest_version,
         expires: listing.entry.expires.deadline_ms(),
         expires_known: listing.entry.expires.is_recorded(),
     }
@@ -1211,8 +1279,18 @@ fn build_storage_report(
     checked_at_ms: u64,
 ) -> UiStorageHealth {
     let mut unique = HashMap::<String, UiFile>::new();
+    let mut ambiguous = HashSet::<String>::new();
     for file in files {
-        unique.entry(file.cid.clone()).or_insert(file);
+        match unique.entry(file.cid.clone()) {
+            std::collections::hash_map::Entry::Occupied(existing) => {
+                if existing.get().manifest_version != file.manifest_version {
+                    ambiguous.insert(file.cid);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(file);
+            }
+        }
     }
     let mut category_map = HashMap::<String, UiStorageCategory>::new();
     let mut largest_files = Vec::with_capacity(unique.len());
@@ -1257,7 +1335,13 @@ fn build_storage_report(
             held: file.held,
             total: file.total,
         };
-        if file.total > 0 && file.held == file.total {
+        if file.total > 0
+            && file.held == file.total
+            && !ambiguous.contains(&file.cid)
+            && health
+                .verified_manifest_versions
+                .contains(&file.manifest_version)
+        {
             local_files.push(inventory_file.clone());
         }
         largest_files.push(inventory_file);
@@ -1308,14 +1392,13 @@ fn build_storage_report(
 
 async fn storage_report(
     actor: &ServerActor,
-    health: StorageHealth,
+    snapshot: StorageSnapshot,
     checked_at_ms: u64,
 ) -> UiStorageHealth {
-    let view = actor.files_view().await;
     let pins = actor.wiki_pinned_cids().await.into_iter().collect();
     build_storage_report(
-        health,
-        view.files.into_iter().map(ui_file).collect(),
+        snapshot.health,
+        snapshot.files.files.into_iter().map(ui_file).collect(),
         &pins,
         checked_at_ms,
     )
@@ -2760,6 +2843,7 @@ async fn register_server(
         *n += 1;
         *n
     };
+    let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
     supervise("server_actor", id, task);
     forward_events(app.clone(), id, events);
     let timer_actor = actor.clone();
@@ -2767,6 +2851,7 @@ async fn register_server(
         id,
         ServerEntry {
             actor,
+            instance,
             group_id,
             device_id,
             invite,
@@ -6236,6 +6321,10 @@ fn effective_join_reply_expiry(encoded_expires_at_ms: u64, received_at_ms: u64) 
 #[tauri::command]
 async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), String> {
     require_unlocked_session(&state).await?;
+    // Remove the registry row first. Cache publication holds that same registry lock through its
+    // insertion: either publication wins and this subsequent remove clears it, or removal wins
+    // and the old actor incarnation can no longer publish at all.
+    let removed = state.servers.lock().await.remove(&server);
     state.storage_health.lock().await.remove(&server);
     if let Ok(mut signals) = state.reconnect_capture_signals.lock() {
         signals.remove(&server);
@@ -6248,7 +6337,7 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
         .lock()
         .await
         .retain(|(candidate_server, _), _| *candidate_server != server);
-    if let Some(entry) = state.servers.lock().await.remove(&server) {
+    if let Some(entry) = removed {
         entry.actor.shutdown().await;
     }
     // Drop the sealed snapshot + re-seal the (now smaller) registry.
@@ -7280,35 +7369,108 @@ async fn get_storage_health(
     state: State<'_, AppState>,
     server: u64,
 ) -> Result<UiStorageHealth, String> {
-    // Hold the dedicated cache lock across the actor round-trip. Simultaneous callers therefore
-    // coalesce into one scan instead of both missing the cache and hammering the blob store.
-    let mut cache = state.storage_health.lock().await;
-    if let Some(report) = cache.get(&server) {
-        return Ok(report.clone());
+    let generation = unlocked_ui_session_generation(&state).await?;
+    // Validate the webview-provided id before touching the singleflight. The gate itself is fixed
+    // size, but stale cache rows for a departed/nonexistent server must not be returned either.
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    if let Some(report) = storage_health_cache_get(&state, server, instance, generation).await? {
+        return Ok(report);
     }
-    let actor = actor_of(&state, server).await?;
-    let health = actor.storage_health().await;
-    let report = storage_report(&actor, health, SystemClock.now_ms()).await;
-    cache.insert(server, report.clone());
+    // Coalesce expensive work without blocking explicit lock's short cache-clear operation.
+    let _scan = state.storage_scans.for_server(server).lock().await;
+    if let Some(report) = storage_health_cache_get(&state, server, instance, generation).await? {
+        return Ok(report);
+    }
+    let snapshot = actor.storage_snapshot().await;
+    let report = storage_report(&actor, snapshot, SystemClock.now_ms()).await;
+    storage_health_cache_publish(&state, server, instance, generation, report.clone()).await?;
     Ok(report)
 }
 
-/// Ask authenticated peers for every missing/unreadable chunk, then verify the complete set.
+/// Ask authenticated peers for every repairable missing/unreadable chunk, then verify the set.
+/// Contradictory exact references remain unreadable without a pointless same-CID fetch.
 #[tauri::command]
 async fn repair_storage(
     state: State<'_, AppState>,
     server: u64,
 ) -> Result<UiStorageRepair, String> {
-    let mut cache = state.storage_health.lock().await;
-    let actor = actor_of(&state, server).await?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let _scan = state.storage_scans.for_server(server).lock().await;
+    let generation_check = require_ui_session_generation(&state, generation).await?;
+    // Do not retain the UI commit guard across peer fetches: lock closes the command boundary
+    // immediately and a late result is independently rejected by the guarded publish below.
+    drop(generation_check);
     let repaired = actor.repair_storage().await?;
-    let health = storage_report(&actor, repaired.health, SystemClock.now_ms()).await;
-    cache.insert(server, health.clone());
+    // The repair result records work counts. Re-snapshot afterward so the inventory rows and
+    // exact-manifest health verdict are paired atomically even if a replicated index update landed
+    // while the repair was fetching chunks.
+    let snapshot = actor.storage_snapshot().await;
+    let health = storage_report(&actor, snapshot, SystemClock.now_ms()).await;
+    storage_health_cache_publish(&state, server, instance, generation, health.clone()).await?;
     Ok(UiStorageRepair {
         attempted_chunks: repaired.attempted_chunks,
         recovered_chunks: repaired.recovered_chunks,
         health,
     })
+}
+
+/// Clone a cache row, then prove the original UI generation still owns the native commit boundary
+/// before returning it. Explicit lock can therefore clear promptly and no stale clone escapes
+/// after that lock operation completes.
+async fn storage_health_cache_get(
+    state: &AppState,
+    server: u64,
+    server_instance: u64,
+    generation: u64,
+) -> Result<Option<UiStorageHealth>, String> {
+    let cached = state
+        .storage_health
+        .lock()
+        .await
+        .get(&server)
+        .filter(|cached| cached.server_instance == server_instance)
+        .map(|cached| cached.report.clone());
+    let _commit = require_ui_session_generation(state, generation).await?;
+    let current = state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .is_some_and(|entry| entry.instance == server_instance);
+    if !current {
+        return Err("the server changed while storage inspection was in progress".into());
+    }
+    Ok(cached)
+}
+
+/// Publish expensive work only if it still belongs to the unlocked UI generation that requested
+/// it. Lock does not await the scan gate, and a scan that finishes later cannot refill the cache.
+async fn storage_health_cache_publish(
+    state: &AppState,
+    server: u64,
+    server_instance: u64,
+    generation: u64,
+    report: UiStorageHealth,
+) -> Result<(), String> {
+    let _commit = require_ui_session_generation(state, generation).await?;
+    // Hold the registry row through cache insertion. `leave_server` removes this row before
+    // clearing the cache, which makes its ordering with this publication atomic.
+    let servers = state.servers.lock().await;
+    if !servers
+        .get(&server)
+        .is_some_and(|entry| entry.instance == server_instance)
+    {
+        return Err("the server changed while storage inspection was in progress".into());
+    }
+    state.storage_health.lock().await.insert(
+        server,
+        CachedStorageHealth {
+            server_instance,
+            report,
+        },
+    );
+    Ok(())
 }
 
 /// Current members whose self-asserted peer id has a live connection here. This diagnostic
@@ -8742,6 +8904,72 @@ fn parse_media_path(path: &str) -> Option<(u64, String)> {
     Some((server, cid.to_ascii_lowercase()))
 }
 
+/// Authorize every head-derived response, including bodyless range errors, against the UI
+/// generation that began the request. File size is plaintext metadata too: a delayed request must
+/// not return `Content-Range: */size` after explicit lock has completed.
+async fn authorized_media_range(
+    state: &AppState,
+    generation: u64,
+    total: u64,
+    range: Option<String>,
+) -> Result<(u64, usize), http::Response<Vec<u8>>> {
+    let deny = |code: http::StatusCode| {
+        http::Response::builder()
+            .status(code)
+            .header("Access-Control-Allow-Origin", "null")
+            .body(Vec::new())
+            .expect("static response builds")
+    };
+    let _commit = require_ui_session_generation(state, generation)
+        .await
+        .map_err(|_| deny(http::StatusCode::FORBIDDEN))?;
+    let (start, len) = match range
+        .as_deref()
+        .and_then(|value| parse_range_header(value, total))
+    {
+        Some(parsed) => parsed,
+        None if range.is_some() => return Err(deny(http::StatusCode::RANGE_NOT_SATISFIABLE)),
+        None => (0, MEDIA_WINDOW_BYTES),
+    };
+    if start >= total {
+        return Err(http::Response::builder()
+            .status(http::StatusCode::RANGE_NOT_SATISFIABLE)
+            .header("Content-Range", format!("bytes */{total}"))
+            .body(Vec::new())
+            .expect("static response builds"));
+    }
+    Ok((start, len))
+}
+
+fn bodyless_media_denial(code: http::StatusCode) -> http::Response<Vec<u8>> {
+    http::Response::builder()
+        .status(code)
+        .header("Access-Control-Allow-Origin", "null")
+        .body(Vec::new())
+        .expect("static response builds")
+}
+
+/// Publish the scheme response while owning the same native commit guard explicit lock waits on.
+/// Building a response under the guard is insufficient: the responder is the externally-visible
+/// step, and another runtime thread could otherwise complete lock between return and `respond`.
+async fn publish_media_response<F>(
+    state: &AppState,
+    generation: Option<u64>,
+    response: http::Response<Vec<u8>>,
+    publish: F,
+) where
+    F: FnOnce(http::Response<Vec<u8>>),
+{
+    let Some(generation) = generation else {
+        publish(bodyless_media_denial(http::StatusCode::FORBIDDEN));
+        return;
+    };
+    match require_ui_session_generation(state, generation).await {
+        Ok(_commit) => publish(response),
+        Err(_) => publish(bodyless_media_denial(http::StatusCode::FORBIDDEN)),
+    }
+}
+
 /// Parse a single-range `bytes=start-[end]` header into a start offset and a length cap.
 ///
 /// Only the first range of a possibly-multi-range header is honoured, and a multipart response is
@@ -8782,18 +9010,16 @@ async fn serve_media(
     path: &str,
     range: Option<String>,
 ) -> http::Response<Vec<u8>> {
-    let deny = |code: http::StatusCode| {
-        http::Response::builder()
-            .status(code)
-            .header("Access-Control-Allow-Origin", "null")
-            .body(Vec::new())
-            .expect("static response builds")
-    };
+    let deny = |code: http::StatusCode| bodyless_media_denial(code);
     let Some((server, cid)) = parse_media_path(path) else {
         return deny(http::StatusCode::BAD_REQUEST);
     };
     // The same boundary every native command sits behind: a locked vault serves no plaintext,
     // and a media element left in the DOM must not keep pulling bytes after an explicit lock.
+    let generation = match unlocked_ui_session_generation(state).await {
+        Ok(generation) => generation,
+        Err(_) => return deny(http::StatusCode::FORBIDDEN),
+    };
     if require_unlocked_session(state).await.is_err() {
         return deny(http::StatusCode::FORBIDDEN);
     }
@@ -8813,26 +9039,30 @@ async fn serve_media(
     // The head comes from the index rather than from chunk 0 for the same reason: reading a whole
     // chunk to learn a size and a mime put a second decrypt on every response and, because the
     // cache is small, evicted the chunk the player was actually reading.
-    let (total, declared) = match media_head(state, &actor, server, &cid, &raw).await {
+    let head = match media_head(state, &actor, server, &cid, &raw, generation).await {
         Some(head) => head,
         None => return deny(http::StatusCode::NOT_FOUND),
     };
-    let mime = safe_media_mime(&declared);
+    let total = head.total_size;
+    let mime = safe_media_mime(&head.mime);
 
-    let (start, len) = match range.as_deref().and_then(|r| parse_range_header(r, total)) {
-        Some(parsed) => parsed,
-        None if range.is_some() => return deny(http::StatusCode::RANGE_NOT_SATISFIABLE),
-        None => (0, MEDIA_WINDOW_BYTES),
+    let (start, len) = match authorized_media_range(state, generation, total, range).await {
+        Ok(plan) => plan,
+        Err(response) => return response,
     };
-    if start >= total {
-        return http::Response::builder()
-            .status(http::StatusCode::RANGE_NOT_SATISFIABLE)
-            .header("Content-Range", format!("bytes */{total}"))
-            .body(Vec::new())
-            .expect("static response builds");
-    }
     let plan = media_window(start, len);
-    let bytes = match media_chunk(state, &actor, server, &cid, &raw, plan.index).await {
+    let bytes = match media_chunk(
+        state,
+        &actor,
+        server,
+        &cid,
+        &raw,
+        head.manifest_version,
+        plan.index,
+        generation,
+    )
+    .await
+    {
         Some(bytes) => bytes,
         None => return deny(http::StatusCode::SERVICE_UNAVAILABLE),
     };
@@ -8840,6 +9070,13 @@ async fn serve_media(
     let hi = (lo + plan.len).min(bytes.len());
     let body = bytes[lo..hi].to_vec();
     let end = start + body.len() as u64;
+    // This is the last authorization point and remains held through response construction. If an
+    // explicit lock completed during either actor read, no plaintext crosses the scheme boundary;
+    // if lock begins after this guard, it cannot complete until this response has been built.
+    let _response_commit = match require_ui_session_generation(state, generation).await {
+        Ok(commit) => commit,
+        Err(_) => return deny(http::StatusCode::FORBIDDEN),
+    };
     // Always a 206 with an explicit Content-Range: the response is a window by construction, and
     // claiming 200 for a partial body is what makes a player think the file is truncated.
     http::Response::builder()
@@ -8903,40 +9140,77 @@ async fn media_head(
     server: u64,
     cid: &str,
     raw: &[u8],
-) -> Option<(u64, String)> {
-    {
+    generation: u64,
+) -> Option<MediaHead> {
+    // Re-resolve the cheap index metadata on every request. The claimed plaintext CID is not a
+    // trustworthy manifest identity until a full export hashes every byte, and another member may
+    // replace or ambiguously repeat it while the media element remains mounted.
+    let live = actor.file_head(raw.to_vec()).await?;
+    let cached = {
         let heads = state.media_heads.lock().await;
-        if let Some(hit) = heads.iter().find(|h| h.server == server && h.cid == cid) {
-            return Some((hit.total_size, hit.mime.clone()));
-        }
-    }
-    let (total_size, declared) = actor.file_head(raw.to_vec()).await?;
-    let allowed = safe_media_mime(&declared);
-    let mime = if allowed == "application/octet-stream" {
-        allowed
-    } else {
-        // A member-authored MIME string is not evidence about the bytes. Open chunk zero through
-        // the normal authenticated file path once per media item, then expose a decodable type
-        // only when a conservative magic-byte classifier agrees with the declared media family.
-        let first = media_chunk(state, actor, server, cid, raw, 0).await?;
-        if media_signature_evidence(&allowed, &first) == MediaSignatureEvidence::Matched {
-            allowed
-        } else {
-            "application/octet-stream".to_string()
-        }
+        heads
+            .iter()
+            .find(|h| {
+                h.server == server && h.cid == cid && h.manifest_version == live.manifest_version
+            })
+            .cloned()
     };
-    let mut heads = state.media_heads.lock().await;
-    heads.retain(|h| h.server != server || h.cid != cid);
-    heads.push(MediaHead {
+    if let Some(hit) = cached {
+        let _commit = require_ui_session_generation(state, generation)
+            .await
+            .ok()?;
+        return Some(hit);
+    }
+    let total_size = live.total_size;
+    let declared = live.mime;
+    // A member-authored MIME string is not evidence about the bytes. Open chunk zero through the
+    // normal authenticated file path once per exact manifest and authorize the scheme only when
+    // the conservative classifier agrees. Returning octet-stream with a body is not a denial:
+    // media elements may still sniff and decode it despite `nosniff`.
+    if safe_media_mime(&declared) == "application/octet-stream" {
+        return None;
+    }
+    let first = media_chunk(
+        state,
+        actor,
         server,
-        cid: cid.to_string(),
-        total_size,
-        mime: mime.clone(),
-    });
+        cid,
+        raw,
+        live.manifest_version,
+        0,
+        generation,
+    )
+    .await?;
+    let mime = validated_inline_media_mime(&declared, &first)?;
+    media_head_put_for_generation(
+        state,
+        generation,
+        MediaHead {
+            server,
+            cid: cid.to_string(),
+            manifest_version: live.manifest_version,
+            total_size,
+            mime: mime.clone(),
+        },
+    )
+    .await
+}
+
+async fn media_head_put_for_generation(
+    state: &AppState,
+    generation: u64,
+    head: MediaHead,
+) -> Option<MediaHead> {
+    let _commit = require_ui_session_generation(state, generation)
+        .await
+        .ok()?;
+    let mut heads = state.media_heads.lock().await;
+    heads.retain(|existing| existing.server != head.server || existing.cid != head.cid);
+    heads.push(head);
     while heads.len() > MEDIA_HEAD_ENTRIES {
         heads.remove(0);
     }
-    Some((total_size, mime))
+    heads.last().cloned()
 }
 
 /// Fetch one whole decrypted chunk, from the cache when possible.
@@ -8950,17 +9224,23 @@ async fn media_chunk(
     server: u64,
     cid: &str,
     raw: &[u8],
+    manifest_version: [u8; 32],
     index: usize,
+    generation: u64,
 ) -> Option<Arc<Vec<u8>>> {
-    {
+    let cached = {
         let mut cache = state.media_cache.lock().await;
-        if let Some(bytes) = media_cache_take(&mut cache, server, cid, index) {
-            return Some(bytes);
-        }
+        media_cache_take(&mut cache, server, cid, manifest_version, index)
+    };
+    if let Some(bytes) = cached {
+        let _commit = require_ui_session_generation(state, generation)
+            .await
+            .ok()?;
+        return Some(bytes);
     }
     let start = index as u64 * CHUNK_BYTES as u64;
     let range = actor
-        .read_file_range(raw.to_vec(), start, CHUNK_BYTES)
+        .read_file_range(raw.to_vec(), manifest_version, start, CHUNK_BYTES)
         .await
         .ok()?;
     // A read past the end is how the caller learns the file is shorter than it guessed; it is not
@@ -8969,17 +9249,32 @@ async fn media_chunk(
         return Some(Arc::new(Vec::new()));
     }
     let bytes = Arc::new(range.bytes);
-    let mut cache = state.media_cache.lock().await;
-    media_cache_put(
-        &mut cache,
+    media_cache_put_for_generation(
+        state,
+        generation,
         MediaChunk {
             server,
             cid: cid.to_string(),
+            manifest_version,
             index,
             bytes: Arc::clone(&bytes),
         },
-    );
-    Some(bytes)
+    )
+    .await
+    .then_some(bytes)
+}
+
+async fn media_cache_put_for_generation(
+    state: &AppState,
+    generation: u64,
+    chunk: MediaChunk,
+) -> bool {
+    let Ok(_commit) = require_ui_session_generation(state, generation).await else {
+        return false;
+    };
+    let mut cache = state.media_cache.lock().await;
+    media_cache_put(&mut cache, chunk);
+    true
 }
 
 /// Constrain what a shared file's declared MIME may become on a media response. The value is
@@ -9023,9 +9318,9 @@ fn safe_media_mime(declared: &str) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MediaSignatureEvidence {
-    /// Recognized bytes agree with the declared image/audio/video family.
+    /// Recognized bytes agree with the exact declared container (or an explicit alias).
     Matched,
-    /// Recognized bytes belong to a different family than the declaration.
+    /// Recognized bytes belong to a different container than the declaration.
     Mismatch,
     /// The declaration is allowed media, but the bounded prefix is not a format we recognize.
     Unrecognized,
@@ -9034,82 +9329,155 @@ enum MediaSignatureEvidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DetectedMediaFamily {
-    Image,
-    Audio,
-    Video,
-    AudioVideoContainer,
+enum DetectedMediaContainer {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    Avif,
+    Bmp,
+    Tiff,
+    Ico,
+    Mp3,
+    Wav,
+    Flac,
+    Aac,
+    Mp4,
+    Ogg,
+    Webm,
+    QuickTime,
+    Avi,
 }
 
-fn declared_media_family(mime: &str) -> Option<DetectedMediaFamily> {
-    match mime.split('/').next()? {
-        "image" => Some(DetectedMediaFamily::Image),
-        "audio" => Some(DetectedMediaFamily::Audio),
-        "video" => Some(DetectedMediaFamily::Video),
-        _ => None,
+fn container_matches_mime(container: DetectedMediaContainer, mime: &str) -> bool {
+    match container {
+        DetectedMediaContainer::Png => mime == "image/png",
+        DetectedMediaContainer::Jpeg => mime == "image/jpeg",
+        DetectedMediaContainer::Gif => mime == "image/gif",
+        DetectedMediaContainer::Webp => mime == "image/webp",
+        DetectedMediaContainer::Avif => mime == "image/avif",
+        DetectedMediaContainer::Bmp => mime == "image/bmp",
+        DetectedMediaContainer::Tiff => mime == "image/tiff",
+        DetectedMediaContainer::Ico => mime == "image/x-icon",
+        DetectedMediaContainer::Mp3 => mime == "audio/mpeg",
+        DetectedMediaContainer::Wav => matches!(mime, "audio/wav" | "audio/x-wav"),
+        DetectedMediaContainer::Flac => mime == "audio/flac",
+        DetectedMediaContainer::Aac => mime == "audio/aac",
+        // These containers do not reveal whether their tracks are audio-only from the bounded
+        // header evidence. Both explicitly allowlisted top-level aliases are therefore honest.
+        DetectedMediaContainer::Mp4 => matches!(mime, "audio/mp4" | "video/mp4"),
+        DetectedMediaContainer::Ogg => matches!(mime, "audio/ogg" | "video/ogg"),
+        DetectedMediaContainer::Webm => matches!(mime, "audio/webm" | "video/webm"),
+        DetectedMediaContainer::QuickTime => mime == "video/quicktime",
+        DetectedMediaContainer::Avi => mime == "video/x-msvideo",
     }
 }
 
 /// Conservative magic-byte classification for the media formats the webview is willing to decode.
 /// This validates container identity, not codec correctness or safety; malformed-but-recognizable
 /// media still reaches a decoder and must remain untrusted.
-fn detected_media_family(bytes: &[u8]) -> Option<DetectedMediaFamily> {
+fn detected_media_container(bytes: &[u8]) -> Option<DetectedMediaContainer> {
     let starts = |signature: &[u8]| bytes.starts_with(signature);
-    if starts(b"\x89PNG\r\n\x1a\n")
-        || starts(b"\xff\xd8\xff")
-        || starts(b"GIF87a")
-        || starts(b"GIF89a")
-        || starts(b"BM")
-        || starts(b"II*\0")
-        || starts(b"MM\0*")
-        || starts(b"\0\0\x01\0")
-        || (bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP")
-    {
-        return Some(DetectedMediaFamily::Image);
+    if starts(b"\x89PNG\r\n\x1a\n") {
+        return Some(DetectedMediaContainer::Png);
+    }
+    if starts(b"\xff\xd8\xff") {
+        return Some(DetectedMediaContainer::Jpeg);
+    }
+    if starts(b"GIF87a") || starts(b"GIF89a") {
+        return Some(DetectedMediaContainer::Gif);
+    }
+    if starts(b"BM") {
+        return Some(DetectedMediaContainer::Bmp);
+    }
+    if starts(b"II*\0") || starts(b"MM\0*") {
+        return Some(DetectedMediaContainer::Tiff);
+    }
+    if starts(b"\0\0\x01\0") {
+        return Some(DetectedMediaContainer::Ico);
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some(DetectedMediaContainer::Webp);
     }
     if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
-        return match &bytes[8..12] {
-            b"avif" | b"avis" => Some(DetectedMediaFamily::Image),
-            _ => Some(DetectedMediaFamily::AudioVideoContainer),
+        let declared_box_len = u32::from_be_bytes(bytes[..4].try_into().ok()?) as usize;
+        if declared_box_len < 12 {
+            return None;
+        }
+        let end = declared_box_len.min(bytes.len());
+        let has_brand = |wanted: &[u8; 4]| {
+            &bytes[8..12] == wanted
+                || (end >= 20 && bytes[16..end].chunks_exact(4).any(|brand| brand == wanted))
         };
+        if has_brand(b"avif") || has_brand(b"avis") {
+            return Some(DetectedMediaContainer::Avif);
+        }
+        if has_brand(b"qt  ") {
+            return Some(DetectedMediaContainer::QuickTime);
+        }
+        if [
+            b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"M4A ",
+            b"M4V ", b"avc1", b"dash", b"cmfc",
+        ]
+        .iter()
+        .any(|brand| has_brand(brand))
+        {
+            return Some(DetectedMediaContainer::Mp4);
+        }
+        return None;
     }
-    if starts(b"fLaC")
-        || starts(b"ID3")
-        || (bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0)
-    {
-        return Some(DetectedMediaFamily::Audio);
+    if starts(b"fLaC") {
+        return Some(DetectedMediaContainer::Flac);
+    }
+    if starts(b"ID3") {
+        return Some(DetectedMediaContainer::Mp3);
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xf6 == 0xf0 {
+        return Some(DetectedMediaContainer::Aac);
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0 && bytes[1] & 0x06 != 0 {
+        return Some(DetectedMediaContainer::Mp3);
     }
     if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
-        return Some(DetectedMediaFamily::Audio);
+        return Some(DetectedMediaContainer::Wav);
     }
     if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"AVI " {
-        return Some(DetectedMediaFamily::Video);
+        return Some(DetectedMediaContainer::Avi);
     }
-    if starts(b"OggS") || starts(b"\x1a\x45\xdf\xa3") {
-        return Some(DetectedMediaFamily::AudioVideoContainer);
+    if starts(b"OggS") {
+        return Some(DetectedMediaContainer::Ogg);
+    }
+    if starts(b"\x1a\x45\xdf\xa3")
+        && bytes
+            .windows(4)
+            .any(|window| window.eq_ignore_ascii_case(b"webm"))
+    {
+        return Some(DetectedMediaContainer::Webm);
     }
     None
 }
 
 fn media_signature_evidence(declared: &str, bytes: &[u8]) -> MediaSignatureEvidence {
     let allowed = safe_media_mime(declared);
-    let Some(declared) = declared_media_family(&allowed) else {
+    if allowed == "application/octet-stream" {
         return MediaSignatureEvidence::NotMedia;
-    };
-    let Some(detected) = detected_media_family(bytes) else {
+    }
+    let Some(detected) = detected_media_container(bytes) else {
         return MediaSignatureEvidence::Unrecognized;
     };
-    if detected == declared
-        || (detected == DetectedMediaFamily::AudioVideoContainer
-            && matches!(
-                declared,
-                DetectedMediaFamily::Audio | DetectedMediaFamily::Video
-            ))
-    {
+    if container_matches_mime(detected, &allowed) {
         MediaSignatureEvidence::Matched
     } else {
         MediaSignatureEvidence::Mismatch
     }
+}
+
+/// Return a decoder-facing MIME only for a recognized, agreeing inert media container.
+/// Mismatch, unknown media, SVG and non-media declarations receive no response body at all.
+fn validated_inline_media_mime(declared: &str, bytes: &[u8]) -> Option<String> {
+    let allowed = safe_media_mime(declared);
+    (media_signature_evidence(&allowed, bytes) == MediaSignatureEvidence::Matched)
+        .then_some(allowed)
 }
 
 fn validate_ui_state_json(json: &str) -> Result<(), String> {
@@ -10232,6 +10600,7 @@ async fn reload_one(
         record.id,
         ServerEntry {
             actor,
+            instance: state.next_server_instance.fetch_add(1, Ordering::Relaxed),
             group_id,
             device_id,
             invite: presented_invite,
@@ -10870,6 +11239,11 @@ trait SaveSource {
     /// answer from before a network round-trip says nothing about the state after it.
     async fn still_unlocked(&self) -> Result<(), String>;
 
+    /// Atomically cross from verified staging bytes to a visible plaintext file under the
+    /// authorization epoch that started this save. Implementations must not split their final
+    /// session check from the rename.
+    async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String>;
+
     /// Report progress. Purely informational; a dropped update never changes the outcome.
     fn progress(
         &self,
@@ -10956,13 +11330,10 @@ async fn stream_download_to_disk(
             "the reassembled file failed its integrity check".into(),
         ));
     }
-    // Last gate before the file becomes visible under its real name and Downloads is opened.
-    // Pinned by `a_lock_after_the_last_chunk_still_stops_the_rename`: once the loop is done there
-    // is no next iteration left to notice a lock, so removing this publishes the file anyway.
-    if let Err(e) = source.still_unlocked().await {
-        return Err(failed(e));
-    }
-    if let Err(e) = publish_staged_download(&staging, &path) {
+    // The source owns one indivisible authorization+rename step. A plain check followed by this
+    // rename has a lock TOCTOU: explicit lock can complete in the gap and the old command then
+    // publishes plaintext under its final name.
+    if let Err(e) = source.publish_verified(&staging, &path).await {
         return Err(failed(e));
     }
     Ok(path)
@@ -10999,6 +11370,7 @@ struct ActorSaveSource<'a> {
     raw: Vec<u8>,
     total: usize,
     size: u64,
+    generation: u64,
 }
 
 impl SaveSource for ActorSaveSource<'_> {
@@ -11007,7 +11379,13 @@ impl SaveSource for ActorSaveSource<'_> {
     }
 
     async fn still_unlocked(&self) -> Result<(), String> {
-        require_unlocked_session(self.state).await
+        let generation_check = require_ui_session_generation(self.state, self.generation).await?;
+        drop(generation_check);
+        Ok(())
+    }
+
+    async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
+        publish_download_for_generation(self.state, self.generation, staging, final_path).await
     }
 
     fn progress(
@@ -11033,6 +11411,16 @@ impl SaveSource for ActorSaveSource<'_> {
     }
 }
 
+async fn publish_download_for_generation(
+    state: &AppState,
+    generation: u64,
+    staging: &Path,
+    final_path: &Path,
+) -> Result<(), String> {
+    let _commit = require_ui_session_generation(state, generation).await?;
+    publish_staged_download(staging, final_path)
+}
+
 /// Download a listed group file straight into Downloads, one chunk at a time, and reveal it.
 ///
 /// The plaintext never enters the webview. Saving a file used to mean `download_file` handing the
@@ -11052,6 +11440,7 @@ async fn save_group_file(
     cid: String,
     name: String,
 ) -> Result<SavedFileResult, String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
     let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
     let target: [u8; 32] = raw
         .clone()
@@ -11061,9 +11450,13 @@ async fn save_group_file(
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
         "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
     })?;
-    let (_, declared_mime) = actor.file_head(raw.clone()).await.ok_or_else(|| {
-        "this file can't be inspected; it isn't listed, or its reference is invalid".to_string()
-    })?;
+    let declared_mime = actor
+        .file_head(raw.clone())
+        .await
+        .ok_or_else(|| {
+            "this file can't be inspected; it isn't listed, or its reference is invalid".to_string()
+        })?
+        .mime;
     if size > MAX_FILE_BYTES as u64 {
         return Err(format!(
             "file is larger than the {MAX_FILE_BYTES}-byte limit"
@@ -11079,9 +11472,14 @@ async fn save_group_file(
         raw,
         total,
         size,
+        generation,
     };
     let path =
         stream_download_to_disk(&downloads, &name, total, size, &target, &mut source).await?;
+    // Keep inspection and the OS reveal in the same initiating UI epoch as publication. If lock
+    // won after the rename guard was released, the verified file may remain in Downloads, but the
+    // stale command cannot inspect/reveal it or report success behind the lock screen.
+    let _commit = require_ui_session_generation(&state, generation).await?;
     let content_validation = exported_media_validation(&path, &declared_mime);
     let warning = reveal_path(&path)
         .err()
@@ -11391,6 +11789,9 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
     // The heads are only sizes and types, but they name what was being played: a locked vault
     // should not still be able to answer that.
     state.media_heads.lock().await.clear();
+    // Storage reports contain plaintext metadata even though the managed file bytes remain
+    // sealed. Clear them at the same boundary and require a fresh authenticated scan after unlock.
+    state.storage_health.lock().await.clear();
     // An upload in flight is session state too. Dropping the reservations frees their slots and
     // garbage-collects the chunks they had sealed but will now never publish.
     let abandoned: Vec<PendingUpload> =
@@ -13301,7 +13702,15 @@ pub fn run() {
                 .map(str::to_string);
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
-                responder.respond(serve_media(&state, &path, range).await);
+                // Capture authorization before any actor/disk await, then hold its native commit
+                // boundary through the synchronous responder publication. A stale response is
+                // replaced by a bodyless denial rather than escaping after explicit lock.
+                let generation = unlocked_ui_session_generation(&state).await.ok();
+                let response = serve_media(&state, &path, range).await;
+                publish_media_response(&state, generation, response, |response| {
+                    responder.respond(response);
+                })
+                .await;
             });
         })
         // Install the tracing subscriber before anything interesting happens. Until this landed
@@ -14388,6 +14797,11 @@ mod tests {
             }
         }
 
+        async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
+            self.still_unlocked().await?;
+            publish_staged_download(staging, final_path)
+        }
+
         fn progress(&self, done: usize, bytes_done: u64, _network: u64, _provider: Option<String>) {
             self.progress.borrow_mut().push((done, bytes_done));
             if Some(done) == self.lock_after_writes && done > 0 {
@@ -14487,6 +14901,52 @@ mod tests {
             downloads_empty(dir.path()),
             "but the final name never appeared and the staging file was removed"
         );
+    }
+
+    #[tokio::test]
+    async fn verified_export_publication_is_bound_to_its_exact_unlock_generation() {
+        let vault = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(vault.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let old_generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let (mut file, staging, final_path) =
+            create_staged_download(downloads.path(), "verified.txt").unwrap();
+        file.write_all(b"verified plaintext").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        // This is the deterministic post-verification/pre-rename pause: lock completes before the
+        // old worker tries to publish its already-synced plaintext staging file.
+        lock_session_inner(&state, None).await.unwrap();
+        assert!(
+            publish_download_for_generation(&state, old_generation, &staging, &final_path,)
+                .await
+                .is_err()
+        );
+        assert!(staging.exists());
+        assert_eq!(std::fs::metadata(&final_path).unwrap().len(), 0);
+
+        assert!(authenticate_mounted_store(&state, b"correct horse")
+            .await
+            .unwrap());
+        let new_generation = state.ui_session_generation.load(Ordering::Acquire);
+        finalize_unlock_session(&state, new_generation, true)
+            .await
+            .unwrap();
+        assert_ne!(old_generation, new_generation);
+        assert!(
+            publish_download_for_generation(&state, old_generation, &staging, &final_path,)
+                .await
+                .is_err(),
+            "unlocking again must not revive an export authorized by the older session"
+        );
+        publish_download_for_generation(&state, new_generation, &staging, &final_path)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(final_path).unwrap(), b"verified plaintext");
     }
 
     #[tokio::test]
@@ -14813,9 +15273,75 @@ mod tests {
         MediaChunk {
             server,
             cid: cid.to_string(),
+            manifest_version: [7; 32],
             index,
             bytes: Arc::new(vec![index as u8; 8]),
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_lock_rejects_late_media_cache_publication_and_serves_no_body() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+        state.media_cache.lock().await.push(cached(1, "cid", 0));
+        state.media_heads.lock().await.push(MediaHead {
+            server: 1,
+            cid: "cid".into(),
+            manifest_version: [7; 32],
+            total_size: 8,
+            mime: "image/png".into(),
+        });
+
+        lock_session_inner(&state, None).await.unwrap();
+        assert!(state.media_cache.lock().await.is_empty());
+        assert!(state.media_heads.lock().await.is_empty());
+        assert!(!media_cache_put_for_generation(&state, generation, cached(1, "cid", 1),).await);
+        assert!(media_head_put_for_generation(
+            &state,
+            generation,
+            MediaHead {
+                server: 1,
+                cid: "cid".into(),
+                manifest_version: [8; 32],
+                total_size: 8,
+                mime: "image/png".into(),
+            },
+        )
+        .await
+        .is_none());
+        assert!(state.media_cache.lock().await.is_empty());
+        assert!(state.media_heads.lock().await.is_empty());
+
+        // Model a worker paused after constructing plaintext but before the URI responder call.
+        // Lock has already completed, so publication must replace it with a bodyless denial.
+        let plaintext = http::Response::builder()
+            .status(http::StatusCode::PARTIAL_CONTENT)
+            .body(b"must not escape".to_vec())
+            .unwrap();
+        let mut published = None;
+        publish_media_response(&state, Some(generation), plaintext, |response| {
+            published = Some(response);
+        })
+        .await;
+        let published = published.unwrap();
+        assert_eq!(published.status(), http::StatusCode::FORBIDDEN);
+        assert!(published.body().is_empty());
+
+        let stale_range = authorized_media_range(&state, generation, 8, Some("bytes=99-".into()))
+            .await
+            .expect_err("a head resolved before lock cannot reveal its size afterward");
+        assert_eq!(stale_range.status(), http::StatusCode::FORBIDDEN);
+        assert!(stale_range.headers().get("Content-Range").is_none());
+        assert!(stale_range.body().is_empty());
+
+        let cid = Cid::of(b"locked media").to_hex();
+        let response = serve_media(&state, &format!("/1/{cid}"), None).await;
+        assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+        assert!(response.body().is_empty());
     }
 
     /// Walk a file the way a player does and report which chunks had to be decrypted.
@@ -14825,7 +15351,7 @@ mod tests {
         let mut at = 0u64;
         while at < total {
             let w = media_window(at, MEDIA_WINDOW_BYTES);
-            if media_cache_take(&mut cache, 1, "cid", w.index).is_none() {
+            if media_cache_take(&mut cache, 1, "cid", [7; 32], w.index).is_none() {
                 decrypts.push(w.index);
                 media_cache_put(&mut cache, cached(1, "cid", w.index));
             }
@@ -14852,14 +15378,14 @@ mod tests {
         let mut cache = Vec::new();
         media_cache_put(&mut cache, cached(1, "cid", 0));
         media_cache_put(&mut cache, cached(1, "cid", 1));
-        assert!(media_cache_take(&mut cache, 1, "cid", 0).is_some());
+        assert!(media_cache_take(&mut cache, 1, "cid", [7; 32], 0).is_some());
         media_cache_put(&mut cache, cached(1, "cid", 2));
         assert!(
-            media_cache_take(&mut cache, 1, "cid", 0).is_some(),
+            media_cache_take(&mut cache, 1, "cid", [7; 32], 0).is_some(),
             "the chunk that was just read must survive the next admission"
         );
         assert!(
-            media_cache_take(&mut cache, 1, "cid", 1).is_none(),
+            media_cache_take(&mut cache, 1, "cid", [7; 32], 1).is_none(),
             "the idle one is the one that goes"
         );
     }
@@ -14883,10 +15409,10 @@ mod tests {
         media_cache_put(&mut cache, cached(1, "aaa", 1));
         media_cache_put(&mut cache, cached(1, "bbb", 0));
         assert_eq!(cache.len(), 1, "nothing of the old track is kept");
-        assert!(media_cache_take(&mut cache, 1, "aaa", 0).is_none());
+        assert!(media_cache_take(&mut cache, 1, "aaa", [7; 32], 0).is_none());
         // The same content address on another server is another track, and must not be served
         // from this one's cache.
-        assert!(media_cache_take(&mut cache, 2, "bbb", 0).is_none());
+        assert!(media_cache_take(&mut cache, 2, "bbb", [7; 32], 0).is_none());
         media_cache_put(&mut cache, cached(2, "bbb", 0));
         assert_eq!(cache.len(), 1);
     }
@@ -14957,8 +15483,8 @@ mod tests {
 
     #[test]
     fn a_declared_mime_cannot_become_a_script_vector() {
-        // The value is author-controlled. Only media types survive; everything else is served as
-        // an opaque download type, so a file claiming text/html cannot become same-origin script.
+        // The value is author-controlled. Only media types may proceed to byte validation;
+        // everything else ultimately receives a bodyless denial from the scheme handler.
         assert_eq!(safe_media_mime("video/mp4"), "video/mp4");
         assert_eq!(safe_media_mime("AUDIO/MPEG"), "audio/mpeg");
         assert_eq!(safe_media_mime("image/svg+xml"), "application/octet-stream");
@@ -14980,10 +15506,13 @@ mod tests {
     }
 
     #[test]
-    fn media_magic_bytes_must_agree_with_the_declared_family() {
+    fn media_magic_bytes_must_agree_with_the_exact_declared_container() {
         let png = b"\x89PNG\r\n\x1a\nrest";
+        let jpeg = b"\xff\xd8\xff\xe0jpeg";
         let mp3 = b"ID3\x04\0\0music";
+        let wav = b"RIFF\x10\0\0\0WAVEdata";
         let mp4 = b"\0\0\0\x18ftypisomcontainer";
+        let avi = b"RIFF\x10\0\0\0AVI data";
         assert_eq!(
             media_signature_evidence("image/png", png),
             MediaSignatureEvidence::Matched
@@ -15005,6 +15534,22 @@ mod tests {
             media_signature_evidence("image/png", mp3),
             MediaSignatureEvidence::Mismatch
         );
+        for (declared, bytes) in [
+            ("image/png", jpeg.as_slice()),
+            ("audio/mpeg", wav.as_slice()),
+            ("video/mp4", avi.as_slice()),
+        ] {
+            assert_eq!(
+                media_signature_evidence(declared, bytes),
+                MediaSignatureEvidence::Mismatch,
+                "same-family container swaps must not inherit the declared decoder path"
+            );
+        }
+        assert_eq!(
+            media_signature_evidence("audio/x-wav", wav),
+            MediaSignatureEvidence::Matched,
+            "the explicit WAV alias is supported"
+        );
         assert_eq!(
             media_signature_evidence("image/png", b"<svg><script/></svg>"),
             MediaSignatureEvidence::Unrecognized
@@ -15013,6 +15558,13 @@ mod tests {
             media_signature_evidence("image/svg+xml", b"<svg/>"),
             MediaSignatureEvidence::NotMedia
         );
+        assert_eq!(
+            validated_inline_media_mime("image/png", png).as_deref(),
+            Some("image/png")
+        );
+        assert!(validated_inline_media_mime("image/png", mp3).is_none());
+        assert!(validated_inline_media_mime("image/png", b"unknown").is_none());
+        assert!(validated_inline_media_mime("image/svg+xml", b"<svg/>").is_none());
     }
 
     #[test]
@@ -15808,6 +16360,18 @@ mod tests {
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
         *state.store.lock().await = Some(store);
         *state.session_resumable.lock().await = true;
+        state.storage_health.lock().await.insert(
+            7,
+            CachedStorageHealth {
+                server_instance: 1,
+                report: build_storage_report(
+                    StorageHealth::default(),
+                    Vec::new(),
+                    &HashSet::new(),
+                    41,
+                ),
+            },
+        );
         assert!(require_unlocked_session(&state).await.is_ok());
 
         let continuity = r#"{"version":1,"drafts":{"1:2":"latest"},"readMarks":{"1:2":9}}"#;
@@ -15827,6 +16391,10 @@ mod tests {
             .load_ui_state()
             .unwrap();
         assert_eq!(saved, continuity.as_bytes());
+        assert!(
+            state.storage_health.lock().await.is_empty(),
+            "explicit lock must purge cached plaintext file metadata"
+        );
 
         // Validation errors are returned to the caller, but the security boundary still closes.
         *state.session_resumable.lock().await = true;
@@ -15839,6 +16407,129 @@ mod tests {
         );
         // The vault remains mounted so actors and persistence may continue behind the UI lock.
         assert!(state.store.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn locked_session_cannot_read_a_preexisting_storage_health_cache_entry() {
+        let state = AppState::default();
+        state.storage_health.lock().await.insert(
+            9,
+            CachedStorageHealth {
+                server_instance: 1,
+                report: build_storage_report(
+                    StorageHealth::default(),
+                    Vec::new(),
+                    &HashSet::new(),
+                    99,
+                ),
+            },
+        );
+
+        assert_eq!(
+            storage_health_cache_get(&state, 9, 1, 0)
+                .await
+                .err()
+                .as_deref(),
+            Some("the vault is locked"),
+            "the session gate must run before a cache hit can expose names or content addresses"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_storage_scan_finishing_after_lock_cannot_repopulate_plaintext_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let late_report =
+            build_storage_report(StorageHealth::default(), Vec::new(), &HashSet::new(), 123);
+
+        lock_session_inner(&state, None).await.unwrap();
+        assert!(
+            storage_health_cache_publish(&state, 12, 1, generation, late_report)
+                .await
+                .is_err(),
+            "a scan authorized before lock must not publish after the UI generation changes"
+        );
+        assert!(state.storage_health.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_removed_server_incarnation_cannot_publish_into_a_reused_id() {
+        use catcoms_rt::Hub;
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(91)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(91),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        let group_id = server.group_id();
+        let device_id = server.device_id();
+        let (actor, events, task) = spawn(server);
+        let entry = |instance| ServerEntry {
+            actor: actor.clone(),
+            instance,
+            group_id: group_id.clone(),
+            device_id: device_id.clone(),
+            invite: None,
+            name: "test".into(),
+            bootstrap: Vec::new(),
+            bootstrap_owners: HashMap::new(),
+            interface_routes: None,
+            rendezvous: Vec::new(),
+            mesh: None,
+            is_dm: false,
+            switchboard: false,
+            record_seq: 0,
+        };
+        const SERVER: u64 = 12;
+        const OLD: u64 = 40;
+        const NEW: u64 = 41;
+        state.servers.lock().await.insert(SERVER, entry(OLD));
+        let stale_report =
+            build_storage_report(StorageHealth::default(), Vec::new(), &HashSet::new(), 123);
+
+        // Model a scan paused after producing its report: leave removes its registry incarnation,
+        // then a reload installs a new actor row under the same persisted id before it resumes.
+        state.servers.lock().await.remove(&SERVER);
+        state.storage_health.lock().await.remove(&SERVER);
+        state.servers.lock().await.insert(SERVER, entry(NEW));
+        assert!(storage_health_cache_publish(
+            &state,
+            SERVER,
+            OLD,
+            generation,
+            stale_report.clone()
+        )
+        .await
+        .is_err());
+        assert!(state.storage_health.lock().await.is_empty());
+
+        storage_health_cache_publish(&state, SERVER, NEW, generation, stale_report)
+            .await
+            .unwrap();
+        assert!(storage_health_cache_get(&state, SERVER, NEW, generation)
+            .await
+            .unwrap()
+            .is_some());
+
+        actor.shutdown().await;
+        task.await.unwrap();
+        drop(events);
     }
 
     #[tokio::test]
@@ -16134,6 +16825,7 @@ mod tests {
                 SERVER_ID,
                 ServerEntry {
                     actor: restored.actor,
+                    instance: state.next_server_instance.fetch_add(1, Ordering::Relaxed),
                     group_id: restored.group_id,
                     device_id: restored.device_id,
                     invite: None,
@@ -17436,7 +18128,15 @@ mod tests {
 
     #[test]
     fn storage_inventory_deduplicates_content_and_breaks_out_pinned_space() {
-        let file = |name: &str, cid: &str, mime: &str, size: u64, held: u32, total: u32| UiFile {
+        let cat_cid = Cid::of(b"cat").to_hex();
+        let song_cid = Cid::of(b"song").to_hex();
+        let file = |name: &str,
+                    cid: &str,
+                    mime: &str,
+                    size: u64,
+                    held: u32,
+                    total: u32,
+                    manifest_version: [u8; 32]| UiFile {
             name: name.into(),
             size,
             mime: mime.into(),
@@ -17447,6 +18147,7 @@ mod tests {
             path: "shared".into(),
             held,
             total,
+            manifest_version,
             expires: None,
             expires_known: false,
         };
@@ -17456,14 +18157,15 @@ mod tests {
                 referenced_chunks: 3,
                 verified_chunks: 3,
                 verified_bytes: 512,
+                verified_manifest_versions: HashSet::from([[2; 32]]),
                 ..StorageHealth::default()
             },
             vec![
-                file("cat.png", "aa", "image/png", 100, 1, 2),
-                file("same-cat.png", "aa", "image/png", 100, 1, 2),
-                file("song.ogg", "bb", "audio/ogg", 400, 2, 2),
+                file("cat.png", &cat_cid, "image/png", 100, 1, 2, [1; 32]),
+                file("same-cat.png", &cat_cid, "image/png", 100, 1, 2, [1; 32]),
+                file("song.ogg", &song_cid, "audio/ogg", 400, 2, 2, [2; 32]),
             ],
-            &HashSet::from(["aa".to_string()]),
+            &HashSet::from([cat_cid]),
             42,
         );
 
@@ -17500,6 +18202,60 @@ mod tests {
             vec!["song.ogg"],
             "only complete local ciphertext belongs in the downloadable-on-this-device list"
         );
+    }
+
+    #[test]
+    fn storage_inventory_denies_ambiguous_or_unverified_manifest_rows() {
+        let cid = Cid::of(b"same claimed content").to_hex();
+        let file = |name: &str, manifest_version: [u8; 32]| UiFile {
+            name: name.into(),
+            size: 20,
+            mime: "image/png".into(),
+            cid: cid.clone(),
+            author: "member".into(),
+            author_identity: "full-member-device-id".into(),
+            author_verified: true,
+            path: name.into(),
+            held: 1,
+            total: 1,
+            manifest_version,
+            expires: None,
+            expires_known: false,
+        };
+        let report = build_storage_report(
+            StorageHealth {
+                verified_manifest_versions: HashSet::from([[3; 32], [4; 32]]),
+                ..StorageHealth::default()
+            },
+            vec![file("safe", [3; 32]), file("replacement", [4; 32])],
+            &HashSet::new(),
+            1,
+        );
+        assert!(
+            report.local_files.is_empty(),
+            "two exact manifests sharing one claimed plaintext CID are not one unlockable file"
+        );
+
+        let unverified = build_storage_report(
+            StorageHealth::default(),
+            vec![file("present-but-unreadable", [5; 32])],
+            &HashSet::new(),
+            2,
+        );
+        assert!(
+            unverified.local_files.is_empty(),
+            "held-chunk existence alone must not admit a file into local inventory"
+        );
+    }
+
+    #[test]
+    fn storage_scan_singleflight_has_fixed_bounded_cardinality() {
+        let gates = StorageScanGates::default();
+        assert_eq!(gates.stripes.len(), STORAGE_SCAN_STRIPES);
+        assert!(std::ptr::eq(
+            gates.for_server(3),
+            gates.for_server(3 + STORAGE_SCAN_STRIPES as u64),
+        ));
     }
 
     #[test]

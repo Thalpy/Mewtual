@@ -68,6 +68,19 @@
 !apps/desktop/src-tauri/icons/**/*.png
 !apps/desktop/src-tauri/icons/**/*.xml
 
+# Re-assert generated/private trees after the parent-directory allow rules above. Docker's
+# negation traversal semantics otherwise let an allowed parent expose a nested Cargo target; on a
+# development checkout that can turn a sub-megabyte source context into hundreds of gigabytes.
+.git/
+.agents/
+.claude/
+.codex/
+logs/
+target/
+**/target/
+node_modules/
+**/node_modules/
+
 # Test entrypoints used from inside the image.
 !scripts/
 !scripts/check-no-ambient.sh
