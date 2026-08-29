@@ -1,5 +1,6 @@
 import { sanitizeStatusCursor, type StatusCursors } from "./statusread.ts";
 import type { ReadMark } from "./unread";
+import { sanitizeFileTrustPolicies, type FileTrustPolicies } from "./file-trust.ts";
 
 export type UiContinuity = {
   version: 1;
@@ -14,6 +15,8 @@ export type UiContinuity = {
    * `readMarks`, so this field rides along without a Rust change.
    */
   statusCursors: StatusCursors;
+  /** Per-server automatic-fetch policy; sealed because it names member relationships. */
+  fileTrustPolicies: FileTrustPolicies;
 };
 
 const MAX_ENTRIES = 2_000;
@@ -54,7 +57,8 @@ export function sanitizeUiContinuity(value: unknown): UiContinuity {
     // A cursor at zero is indistinguishable from having no cursor, so it is not worth sealing.
     if (cursor.ts > 0 || cursor.ids.length) statusCursors[server] = cursor;
   }
-  return { version: 1, drafts, readMarks, statusCursors };
+  const fileTrustPolicies = sanitizeFileTrustPolicies(root.fileTrustPolicies);
+  return { version: 1, drafts, readMarks, statusCursors, fileTrustPolicies };
 }
 
 /**
@@ -105,6 +109,7 @@ export function planLegacyReadMarkMigration(
       drafts: current.drafts,
       readMarks: parsed,
       statusCursors: current.statusCursors,
+      fileTrustPolicies: current.fileTrustPolicies,
     });
     return { state: migrated, saveBeforeRemoval: true, removeLegacy: true };
   } catch {

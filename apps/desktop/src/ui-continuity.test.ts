@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity.ts";
 
 test("continuity sanitization keeps only bounded drafts and safe read positions", () => {
@@ -15,10 +17,10 @@ test("continuity sanitization keeps only bounded drafts and safe read positions"
     },
   });
   assert.deepEqual(state, {
-    version: 1, drafts: { good: "draft" }, readMarks: { good: { ts: 42, id: "m1" } }, statusCursors: {},
+    version: 1, drafts: { good: "draft" }, readMarks: { good: { ts: 42, id: "m1" } }, statusCursors: {}, fileTrustPolicies: {},
   });
   assert.deepEqual(sanitizeUiContinuity({ drafts: [], readMarks: null }), {
-    version: 1, drafts: {}, readMarks: {}, statusCursors: {},
+    version: 1, drafts: {}, readMarks: {}, statusCursors: {}, fileTrustPolicies: {},
   });
 });
 
@@ -45,6 +47,32 @@ test("announcement read cursors are sealed here too, keyed by a real server id",
   assert.deepEqual(sanitizeUiContinuity({ drafts: {}, readMarks: {} }).statusCursors, {});
 });
 
+test("file trust policies are vault continuity and fail closed when malformed", () => {
+  const state = sanitizeUiContinuity({
+    drafts: {},
+    readMarks: {},
+    fileTrustPolicies: {
+      4: { mode: "specific", trustedAuthors: ["member-a", "member-a", "member-b"] },
+      5: { mode: "not-a-mode", trustedAuthors: "everyone" },
+    },
+  });
+  assert.deepEqual(state.fileTrustPolicies, {
+    4: { mode: "specific", trustedAuthors: ["member-a", "member-b"] },
+    5: { mode: "on-demand", trustedAuthors: [] },
+  });
+});
+
+test("ordinary window close awaits the native final vault snapshot before destruction", () => {
+  const source = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
+  const start = source.indexOf("appWindow.onCloseRequested(async (event) => {");
+  const end = source.indexOf("// Capture is a native setting", start);
+  assert.ok(start >= 0 && end > start);
+  const handler = source.slice(start, end);
+  assert.match(handler, /event\.preventDefault\(\)/);
+  assert.ok(handler.indexOf('await invoke("lock_session"') < handler.indexOf("await appWindow.destroy()"));
+  assert.match(handler, /if \(nativeLocked\) lockScreen\(true\)/);
+});
+
 test("a read mark from a build that only stored a timestamp upgrades in place", () => {
   // Discarding these would un-clear every badge people had already read. The empty id is not a
   // gap: it is exactly the state the unread scan reads as "fall back to the timestamp", and the
@@ -59,6 +87,7 @@ test("a read mark from a build that only stored a timestamp upgrades in place", 
 test("a valid legacy map is saved before its plaintext key is removed", () => {
   const current = sanitizeUiContinuity({
     drafts: { room: "hello" }, readMarks: {}, statusCursors: { 3: { ts: 7, ids: [] } },
+    fileTrustPolicies: { 3: { mode: "everyone", trustedAuthors: [] } },
   });
   const plan = planLegacyReadMarkMigration(current, '{"server:channel":123}');
   assert.equal(plan.saveBeforeRemoval, true);
@@ -67,6 +96,7 @@ test("a valid legacy map is saved before its plaintext key is removed", () => {
   assert.deepEqual(plan.state.drafts, { room: "hello" });
   // The legacy key only ever held chat marks, so adopting it must not drop what sits beside them.
   assert.deepEqual(plan.state.statusCursors, { 3: { ts: 7, ids: [] } });
+  assert.deepEqual(plan.state.fileTrustPolicies, { 3: { mode: "everyone", trustedAuthors: [] } });
 });
 
 test("sealed state wins over stale legacy data and malformed legacy data is preserved", () => {

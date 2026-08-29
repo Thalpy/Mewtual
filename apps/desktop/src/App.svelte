@@ -60,11 +60,13 @@
     VIDEO_BITRATE, type PeerState, type SlotDirection, type VideoKind,
   } from "./voice-signaling";
   import {
-    DEFAULT_STREAM_SETTINGS, PeerVideoBudgetController, estimatedMeshMbps, isStreamHeight,
-    nearestStreamHeight, peerStreamPlan, preferEfficientVideoCodecs, receivingHeightForViewport,
-    recommendedStreamMbps, streamResolutionLabel,
+    DEFAULT_STREAM_SETTINGS, PeerVideoBudgetController, captureResolutionKnownAfterConstraint,
+    estimatedMeshMbps, isStreamHeight,
+    nearestStreamHeight, parseStreamSettings, peerStreamPlan, preferEfficientVideoCodecs,
+    receivingHeightForViewport, recommendedStreamMbps, streamResolutionLabel,
+    shouldClearScreenAudioOnModeChange,
     type PeerBudgetResult, type PeerStreamPlan, type StreamFrameRate, type StreamHeight,
-    type StreamQuality, type StreamSettings,
+    type StreamAudioMode, type StreamQuality, type StreamSettings,
   } from "./streaming";
   import {
     deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, jukeClaimWins, mediaChoices,
@@ -129,6 +131,12 @@
   } from "./moderation";
   import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
   import {
+    DEFAULT_FILE_TRUST_POLICY, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
+    mayLoadJukeboxFile, scopedMediaKey, toggleTrustedAuthor,
+    type FileTrustMode, type FileTrustPolicies, type FileTrustPolicy,
+  } from "./file-trust";
+  import { acceptCapture, chooseMicrophoneSender, MediaCaptureSession } from "./media-capture";
+  import {
     type NameEffect, type NameEffectId, type NameEffectOptions, animatedEffect,
     decodeNameEffects, defaultNameEffect, effectConfigured, effectEnabled, effectOptions, encodeNameEffects,
     nameEffectClasses, nameEffectStyle,
@@ -189,11 +197,11 @@
   };
   const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "😮", "😢", "🔥", "👀"];
   type Channel = { id: string; name: string };
-  type Member = { fingerprint: string; you: boolean };
+  type Member = { fingerprint: string; identity: string; you: boolean };
   type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; description: string; bubble: string; avatar: string; banner: string };
   // `expires`: ms-epoch deadline for this listing's CIRCULATION, or null. `expires_known` tells
   // "explicitly kept forever" (known + null) from "recorded before expiry existed" (!known).
-  type UiFile = { name: string; size: number; mime: string; cid: string; author: string; path: string; held: number; total: number; expires: number | null; expires_known: boolean };
+  type UiFile = { name: string; size: number; mime: string; cid: string; author: string; author_identity: string; author_verified: boolean; path: string; held: number; total: number; expires: number | null; expires_known: boolean };
   // Where a file is referenced across the server (Properties → "Used in"). `pinned` mirrors
   // `wiki_pages.length > 0`: a wiki-embedded file never drops out of circulation.
   type UiFileUsage = { wiki_pages: string[]; status_count: number; chat_count: number; event_count: number; pinned: boolean };
@@ -269,6 +277,10 @@
   });
   let showAdd = $state(false); // showing the found/join form to add a server
   let startTab = $state<"join" | "found">("join"); // which start-surface tab is open; join is the common case
+  // Chosen before founding/joining so no newly opened server can render shared media under an
+  // implicit policy. Specific-member trust starts empty until the roster is authenticated.
+  let onboardingFileTrust = $state<FileTrustMode>("on-demand");
+  let fileTrustPolicies = $state<FileTrustPolicies>({});
   // Roving-tabindex arrows for the start tabs: with two tabs, either arrow means "the other one".
   function startTabArrows(e: KeyboardEvent) {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
@@ -335,6 +347,7 @@
     { id: "invites", label: "Invites", cat: "People" },
     { id: "joinlog", label: "Join Log", cat: "People" },
     { id: "emoji", label: "Emoji & Stickers", cat: "Content" },
+    { id: "filetrust", label: "File Trust", cat: "Content" },
     { id: "calls", label: "Calls & Relay", cat: "Voice" },
     { id: "leave", label: "Leave Server", cat: "Danger", danger: true },
   ];
@@ -2498,21 +2511,60 @@
   }
   let dividerTs = $state(Number.POSITIVE_INFINITY);
   let uiStateSaveTimer: ReturnType<typeof setTimeout> | undefined;
-  let uiStateReady = false;
-  let uiStateSaveFailed = false;
+  let uiStateSaveChain: Promise<void> = Promise.resolve();
+  // Server actions remain hidden until the sealed continuity snapshot (including
+  // file-trust policy) has been restored. This must be reactive: the load
+  // completes asynchronously after unlock.
+  let uiStateReady = $state(false);
+  let uiStateSaveFailed = $state(false);
+  let uiStateFailureToast = 0;
   let uiStateLoadGeneration = 0;
+  function queueUiStateSave(json: string): Promise<void> {
+    // Native lock/generation checks order this queue against a final lock snapshot. This local
+    // chain additionally prevents two ordinary same-session saves from overtaking one another.
+    const generation = uiStateLoadGeneration;
+    const save = uiStateSaveChain.then(() => {
+      if (locked || generation !== uiStateLoadGeneration) {
+        throw new Error("the UI session changed before continuity could be saved");
+      }
+      return invoke<void>("save_ui_state", { json });
+    });
+    uiStateSaveChain = save.catch(() => {});
+    return save;
+  }
+  function continuityJson(): string {
+    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies });
+  }
+  /**
+   * Seal the current continuity snapshot without the ordinary typing/read-position debounce.
+   * Security-sensitive trust changes use this path so an immediate normal close cannot silently
+   * restore a more permissive policy. A hard process/OS failure can still interrupt any disk write.
+   */
+  async function saveUiStateImmediately(): Promise<boolean> {
+    if (!uiStateReady || locked) return false;
+    clearTimeout(uiStateSaveTimer);
+    try {
+      await queueUiStateSave(continuityJson());
+      uiStateSaveFailed = false;
+      if (uiStateFailureToast) {
+        updateToast(uiStateFailureToast, "Vault preferences saved", "ok", 2500);
+        uiStateFailureToast = 0;
+      }
+      return true;
+    } catch (e) {
+      console.warn("UI continuity save failed", e);
+      const message = "Vault preferences, drafts, and read positions were not saved; retry before closing";
+      if (uiStateFailureToast) updateToast(uiStateFailureToast, message, "err", 0);
+      else uiStateFailureToast = toast(message, "err", 0);
+      uiStateSaveFailed = true;
+      return false;
+    }
+  }
   function scheduleUiStateSave() {
     if (!uiStateReady || locked) return;
     clearTimeout(uiStateSaveTimer);
     uiStateSaveTimer = setTimeout(() => {
-      const json = JSON.stringify({ version: 1, drafts, readMarks, statusCursors });
-      void invoke("save_ui_state", { json }).then(() => {
-        uiStateSaveFailed = false;
-      }).catch((e) => {
-        console.warn("UI continuity save failed", e);
-        if (!uiStateSaveFailed) toast("Draft/read-position save failed; this session is still usable", "err", 8000);
-        uiStateSaveFailed = true;
-      });
+      void saveUiStateImmediately();
     }, 250);
   }
   async function loadUiContinuity(generation: number) {
@@ -2525,9 +2577,7 @@
       try {
         const migration = planLegacyReadMarkMigration(next, localStorage.getItem("catcoms.readmarks"));
         if (migration.saveBeforeRemoval) {
-          await invoke("save_ui_state", {
-            json: JSON.stringify(migration.state),
-          });
+          await queueUiStateSave(JSON.stringify(migration.state));
         }
         if (migration.removeLegacy) {
           localStorage.removeItem("catcoms.readmarks");
@@ -2540,12 +2590,14 @@
       drafts = next.drafts;
       readMarks = next.readMarks;
       statusCursors = next.statusCursors;
+      fileTrustPolicies = next.fileTrustPolicies;
     } catch (e) {
       if (generation !== uiStateLoadGeneration || locked) return;
       console.warn("UI continuity load failed", e);
       drafts = {};
       readMarks = {};
       statusCursors = {};
+      fileTrustPolicies = {};
       error = `Durable history could not be authenticated and was not loaded: ${e}`;
     } finally {
       if (generation === uiStateLoadGeneration && !locked) {
@@ -4612,6 +4664,8 @@
   // 200 MB file cannot be turned into a JS string by the act of rendering a message.
   function loadEmoji(code: string, cid: string) {
     if (activeServerId === null) return;
+    const file = files.find((candidate) => candidate.cid === cid);
+    if (!file || !mayAutoLoadSharedFile(file)) return;
     emojiUrls = { ...emojiUrls, [code]: sharedMediaUrl(cid, activeServerId) };
   }
 
@@ -4764,7 +4818,14 @@
   // but every window onto the vault's contents is cleared and getting back in costs the
   // passphrase again. Re-entering calls `unlock`, which no-ops on an already-open vault and hands
   // back the registered servers, so no actor or transport is duplicated.
-  function lockScreen() {
+  function lockScreen(nativeAlreadyLocked = false) {
+    // Lock also cancels calls still waiting on a native permission prompt; those have not yet set
+    // `inCall`, so the ordinary leave path alone cannot see or invalidate them.
+    callLifecycleSession.invalidate();
+    micCaptureSession.invalidate();
+    videoCaptureSession.invalidate();
+    mediaUrls = {};
+    emojiUrls = {};
     if (locked) return;
     // Lock wins over an in-progress secret change and drops every transient secret first.
     vaultChangeCurrent = "";
@@ -4786,7 +4847,7 @@
     clearTimeout(newsAggregateTimer); // a pending re-aggregation must not read feeds behind the lock
     if (inboxIdle !== undefined && "cancelIdleCallback" in window) window.cancelIdleCallback(inboxIdle);
     inboxIdle = undefined;
-    const continuityJson = uiStateReady ? JSON.stringify({ version: 1, drafts, readMarks, statusCursors }) : null;
+    const finalContinuityJson = uiStateReady ? continuityJson() : null;
     try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
     if (inCall) leaveVoice(); // never leave a hot mic behind a lock screen
     // Reply/recovery codes carry current listener routes. Clear them synchronously and ignore any
@@ -4802,7 +4863,9 @@
     memberRecoveryServer = null;
     memberRecoveryInput = "";
     memberRecoveryBusy = false;
-    void invoke("lock_session", { uiStateJson: continuityJson }).catch((e) => console.warn("Session locked; final UI continuity save failed", e));
+    if (!nativeAlreadyLocked) {
+      void invoke("lock_session", { uiStateJson: finalContinuityJson }).catch((e) => console.warn("Session locked; final UI continuity save failed", e));
+    }
     spaceOpen = false; // and no server names floating behind it either
     showSettings = false;
     showServerSettings = false;
@@ -4839,6 +4902,7 @@
     drafts = {};
     readMarks = {};
     statusCursors = {}; // a reading habit, sealed beside the marks above and dropped with them
+    fileTrustPolicies = {}; // member trust choices name relationships and leave the screen too
     pendingStatusMarks.clear(); // and a mark still waiting on hydration is not replayed behind a lock
     uiStateReady = false;
     uiStateSaveFailed = false;
@@ -5043,7 +5107,17 @@
       ...servers,
       { id: r.server, name, channels, active: r.channel, unread: [], invite: "", isDm: r.is_dm },
     ];
+    if (!r.is_dm) {
+      // A numeric native id can be reused after a leave + restart. Onboarding is authoritative for
+      // this newly joined group and must overwrite any orphaned policy rather than inherit it.
+      fileTrustPolicies = {
+        ...fileTrustPolicies,
+        [r.server]: { mode: onboardingFileTrust, trustedAuthors: [] },
+      };
+      void saveUiStateImmediately();
+    }
     showAdd = false;
+    onboardingFileTrust = "on-demand";
     // A server adopts the name as your profile (existing behaviour); a DM's label is the friend's
     // name, so leave your profile alone.
     if (!r.is_dm) pName = name;
@@ -5264,6 +5338,7 @@
     // Custom emoji are per-server but emojiUrls is keyed by CODE, so two servers defining the same
     // :code: would show the first one's image on the second.
     emojiUrls = {};
+    mediaUrls = {};
     joinAttempts = []; // who tried to join THIS server: never carried to the next one
     // The wiki editor and the chat/fileshare affordances below used to be reset only by
     // switchServer, so the paths that end with no active group (leaving your last server, empty
@@ -5398,11 +5473,19 @@
   }
 
   async function leaveServer(id: number) {
+    // Leaving a server is also a privacy boundary. End its independent WebRTC session before the
+    // native request can hang or fail so a forgotten server can never retain a hot mic, display or
+    // separately granted application-audio source.
+    if (inCall && callServer === id) leaveVoice();
     try {
       await invoke("leave_server", { server: id });
     } catch (e) {
       error = String(e);
+      return;
     }
+    const { [id]: _removedTrust, ...remainingTrust } = fileTrustPolicies;
+    fileTrustPolicies = remainingTrust;
+    void saveUiStateImmediately();
     servers = servers.filter((s) => s.id !== id);
     if (activeServerId === id) {
       if (servers.length) switchServer(servers[0].id);
@@ -5873,6 +5956,23 @@
     } catch {
       // A missing profile renders as a fingerprint, which is honest and still identifies the
       // peer. Surfacing an error banner over a cosmetic lookup would be worse than the gap.
+    }
+  }
+  async function refreshCallFiles() {
+    const server = callServer;
+    const channel = callChannel;
+    const lease = activeCallLease;
+    if (!inCall || server === null || !channel || !callLifecycleSession.isCurrent(lease)) return;
+    try {
+      const listing = await invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", { server });
+      if (!inCall || callServer !== server || callChannel !== channel ||
+        activeCallLease !== lease || !callLifecycleSession.isCurrent(lease)) return;
+      callFiles = listing.files;
+      if (jukeNow) void jukeApply(false);
+    } catch {
+      // Absence of a current authenticated listing fails closed in jukeApply. The room transport
+      // may continue; this listener simply cannot fetch or decode the referenced track.
+      if (inCall && callServer === server && callChannel === channel && activeCallLease === lease) callFiles = [];
     }
   }
   async function refreshFiles() {
@@ -8355,6 +8455,114 @@
     return /^(image|video|audio)\/[a-z0-9.+-]+$/i.test(mime || "") ? mime.toLowerCase() : "";
   }
 
+  function fileTrustFor(server: number | null = activeServerId): FileTrustPolicy {
+    return server === null
+      ? DEFAULT_FILE_TRUST_POLICY
+      : fileTrustPolicyFor(fileTrustPolicies, server);
+  }
+
+  function mayAutoLoadSharedFile(file: UiFile, server: number | null = activeServerId): boolean {
+    return server !== null && mayAutoLoadFile(fileTrustFor(server), file.author_identity, file.author_verified);
+  }
+
+  function setFileTrustMode(mode: FileTrustMode) {
+    if (activeServerId === null) return;
+    const current = fileTrustFor(activeServerId);
+    fileTrustPolicies = {
+      ...fileTrustPolicies,
+      [activeServerId]: { ...current, mode },
+    };
+    revokePassiveMedia();
+    void saveUiStateImmediately();
+  }
+
+  function toggleTrustedFileAuthor(identity: string) {
+    if (activeServerId === null) return;
+    const current = fileTrustFor(activeServerId);
+    fileTrustPolicies = {
+      ...fileTrustPolicies,
+      [activeServerId]: toggleTrustedAuthor(current, identity),
+    };
+    revokePassiveMedia();
+    void saveUiStateImmediately();
+  }
+
+  /**
+   * Revoke already-mounted passive decoder/network capabilities when local trust is tightened.
+   * Imperatively resolved chat markup does not rerender merely because a policy object changed,
+   * so it must be returned to an inert button/text placeholder here as well as clearing caches.
+   */
+  function revokePassiveMedia() {
+    mediaUrls = {};
+    emojiUrls = {};
+    if (typeof document === "undefined" || activeServerId === null) return;
+    const server = activeServerId;
+    for (const element of Array.from(document.querySelectorAll<HTMLElement>("[data-embed-cid][data-resolved]"))) {
+      const cid = element.dataset.embedCid ?? "";
+      const file = files.find((candidate) => candidate.cid === cid);
+      if (!file || mayAutoLoadSharedFile(file, server)) continue;
+      if (element instanceof HTMLMediaElement) {
+        element.pause();
+        element.removeAttribute("src");
+        element.load();
+      } else if (element instanceof HTMLImageElement) {
+        element.removeAttribute("src");
+      }
+      const mime = safeMime(file.mime);
+      if (mime) element.replaceWith(mediaLoadChip(file, mime, element.getAttribute("alt") || file.name, server));
+    }
+    for (const image of Array.from(document.querySelectorAll<HTMLImageElement>("img.remote-image"))) {
+      if (mayAutoLoadRemoteUrl(fileTrustFor(server))) continue;
+      const url = safeRemoteUrl(image.dataset.remoteUrl ?? image.src);
+      image.removeAttribute("src");
+      if (url && !mayAutoLoadRemoteUrl(fileTrustFor(server))) {
+        image.replaceWith(remoteImageLoadChip(url, image.alt || "Remote image"));
+      }
+    }
+    for (const image of Array.from(document.querySelectorAll<HTMLImageElement>("img.ref-card-thumb[data-thumb-cid]"))) {
+      const cid = image.dataset.thumbCid ?? "";
+      const file = files.find((candidate) => candidate.cid === cid);
+      if (file && mayAutoLoadSharedFile(file, server)) continue;
+      const card = image.closest<HTMLElement>(".ref-card");
+      image.removeAttribute("src");
+      image.remove();
+      card?.classList.remove("has-thumb");
+    }
+    for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>("button.media-load-chip[data-load-cid]"))) {
+      const cid = button.dataset.loadCid ?? "";
+      const file = files.find((candidate) => candidate.cid === cid);
+      if (!file || !mayAutoLoadSharedFile(file, server)) continue;
+      const mime = safeMime(button.dataset.loadMime ?? file.mime);
+      if (mime) button.replaceWith(buildMediaEl(mime, mediaUrl(server, cid), button.dataset.loadAlt ?? file.name, cid));
+    }
+    if (mayAutoLoadRemoteUrl(fileTrustFor(server))) {
+      for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>("button.media-load-chip[data-remote-url]"))) {
+        const url = safeRemoteUrl(button.dataset.remoteUrl ?? "");
+        if (url) button.replaceWith(remoteImage(url, button.dataset.remoteAlt ?? "Remote image"));
+      }
+    }
+    for (const card of Array.from(document.querySelectorAll<HTMLElement>(".ref-card:not(.has-thumb)"))) {
+      const cid = (card.getAttribute("data-file-cid") ?? "").toLowerCase();
+      const status = card.getAttribute("data-status-id") ?? "";
+      const event = card.getAttribute("data-event-id") ?? "";
+      const page = card.getAttribute("data-wikilink") ?? "";
+      const spec = cid ? fileCardSpec(cid) : status ? statusCardSpec(status) : event ? eventCardSpec(event) : wikiCardSpec(page);
+      if (spec?.thumb) attachCardThumb(card, spec.thumb, server);
+    }
+    // Inline custom emoji were created imperatively. Recreate the original placeholder so the
+    // ordinary resolver can load it again only if the new policy permits the attested file.
+    for (const image of Array.from(document.querySelectorAll<HTMLImageElement>("img.emoji[data-emoji-code]"))) {
+      const code = image.dataset.emojiCode ?? "";
+      const placeholder = document.createElement("span");
+      placeholder.dataset.emoji = code;
+      placeholder.textContent = `:${code}:`;
+      image.removeAttribute("src");
+      image.replaceWith(placeholder);
+    }
+    for (const cid of [...events.map((event) => event.image), evImage].filter(Boolean)) ensureMedia(cid);
+    if (jukeNow) void jukeApply(false);
+  }
+
   function buildMediaEl(mime: string, url: string, alt: string, cid: string): HTMLElement {
     let el: HTMLImageElement | HTMLVideoElement | HTMLAudioElement;
     if (mime.startsWith("video/")) {
@@ -8387,6 +8595,20 @@
     return b;
   }
 
+  /** Passive embeds stay inert under on-demand trust; this click is the explicit fetch grant. */
+  function mediaLoadChip(file: UiFile, mime: string, alt: string, server: number): HTMLElement {
+    const button = document.createElement("button");
+    button.className = "embed-chip media-load-chip";
+    button.textContent = `Load ${mime.startsWith("image/") ? "image" : mime.startsWith("video/") ? "video" : "audio"} from ${nameOf(file.author)}`;
+    button.title = "This fetches authenticated bytes into Mewtual's encrypted vault, then lets the platform media decoder open them.";
+    button.dataset.loadCid = file.cid;
+    button.dataset.loadMime = mime;
+    button.dataset.loadAlt = alt;
+    button.dataset.loadServer = String(server);
+    button.onclick = () => button.replaceWith(buildMediaEl(mime, mediaUrl(server, file.cid), alt, file.cid));
+    return button;
+  }
+
   // Shared media renders straight from the catcoms-media: protocol rather than being pulled into
   // the webview first. The old path fetched the whole decrypted file over IPC, turned it into a
   // base64 data: URL, and kept up to 48 of those alive at once: one embedded 200 MB video was
@@ -8398,15 +8620,25 @@
   }
 
   // Stream URLs for markup that binds a `src` (the events tab's poster images) rather than
-  // building its own element the way the embed/card resolvers do. Keyed by cid. Filling these is
+  // building its own element the way the embed/card resolvers do. Keyed by server + cid: a CID
+  // learned in one group must never become a native media capability in another group. Filling is
   // now just address arithmetic: the element streams from the protocol handler, so there is
   // nothing to fetch here and nothing to fail. A poster only needs to be a listed media file.
   let mediaUrls = $state<Record<string, string>>({});
+  function preparedMedia(cid: string): string {
+    if (activeServerId === null) return "";
+    const file = files.find((candidate) => candidate.cid === cid);
+    if (!file || !safeMime(file.mime) || !mayAutoLoadSharedFile(file, activeServerId)) return "";
+    return mediaUrls[scopedMediaKey(activeServerId, cid)] ?? "";
+  }
   function ensureMedia(cid: string) {
-    if (!cid || mediaUrls[cid] || activeServerId === null) return;
+    if (!cid || activeServerId === null) return;
+    const server = activeServerId;
     const file = files.find((f) => f.cid === cid);
-    if (!file || !safeMime(file.mime)) return; // not in the file index yet: retried on update
-    mediaUrls = { ...mediaUrls, [cid]: sharedMediaUrl(cid, activeServerId) };
+    if (!file || !safeMime(file.mime) || !mayAutoLoadSharedFile(file)) return; // retried on index/policy update
+    const key = scopedMediaKey(server, cid);
+    if (mediaUrls[key]) return;
+    mediaUrls = { ...mediaUrls, [key]: sharedMediaUrl(cid, server) };
   }
   $effect(() => {
     const wanted = [...events.map((e) => e.image), evImage].filter(Boolean);
@@ -8438,6 +8670,10 @@
         span.replaceWith(downloadChip(file));
         continue;
       }
+      if (!mayAutoLoadSharedFile(file, server)) {
+        span.replaceWith(mediaLoadChip(file, mime, alt, server));
+        continue;
+      }
       span.replaceWith(buildMediaEl(mime, mediaUrl(server, cid), alt, cid));
     }
   }
@@ -8451,7 +8687,19 @@
     img.className = "embed-media embed-image remote-image";
     img.title = "Remote image · click to view full size";
     img.dataset.remoteImage = "1";
+    img.dataset.remoteUrl = url;
     return img;
+  }
+
+  function remoteImageLoadChip(url: string, alt: string): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.className = "embed-chip media-load-chip";
+    button.textContent = "Load remote image";
+    button.title = "Remote images disclose your IP to their host and are decoded by the platform image stack.";
+    button.dataset.remoteUrl = url;
+    button.dataset.remoteAlt = alt;
+    button.onclick = () => button.replaceWith(remoteImage(url, alt));
+    return button;
   }
 
   // Resolve explicit remote-image markdown and bare direct image/Giphy links. The renderer emits
@@ -8461,13 +8709,24 @@
     for (const span of Array.from(container.querySelectorAll<HTMLElement>("[data-remote-url]:not([data-resolved])"))) {
       span.dataset.resolved = "1";
       const url = safeRemoteUrl(span.dataset.remoteUrl ?? "");
-      if (url) span.replaceWith(remoteImage(url, span.dataset.alt ?? "Remote image"));
+      if (url) {
+        // Message author labels are display metadata, not a signed origin proof. Specific-member
+        // file trust therefore cannot authorize a third-party URL, even if the label is forged to
+        // look like a selected member.
+        const allowed = mayAutoLoadRemoteUrl(fileTrustFor());
+        span.replaceWith(allowed
+          ? remoteImage(url, span.dataset.alt ?? "Remote image")
+          : remoteImageLoadChip(url, span.dataset.alt ?? "Remote image"));
+      }
     }
     for (const a of Array.from(container.querySelectorAll<HTMLAnchorElement>("a[href]:not([data-remote-checked])"))) {
       a.dataset.remoteChecked = "1";
       const url = pastedImageUrl(a.href);
       if (!url) continue;
-      a.replaceWith(remoteImage(url, a.textContent?.trim() || "Remote image"));
+      const allowed = mayAutoLoadRemoteUrl(fileTrustFor());
+      a.replaceWith(allowed
+        ? remoteImage(url, a.textContent?.trim() || "Remote image")
+        : remoteImageLoadChip(url, a.textContent?.trim() || "Remote image"));
     }
   }
 
@@ -8610,10 +8869,13 @@
 
   /** Hang an image on a card; a card whose picture cannot be fetched just reads as text. */
   function attachCardThumb(card: HTMLElement, cid: string, server: number) {
-    const mime = safeMime(files.find((f) => f.cid === cid)?.mime ?? "");
-    if (!mime.startsWith("image/")) return;
+    const file = files.find((f) => f.cid === cid);
+    const mime = safeMime(file?.mime ?? "");
+    if (!file || !mime.startsWith("image/") || !mayAutoLoadSharedFile(file, server)) return;
     const img = document.createElement("img");
     img.className = "ref-card-thumb";
+    img.dataset.thumbCid = cid;
+    img.dataset.thumbServer = String(server);
     img.src = sharedMediaUrl(cid, server);
     img.alt = "";
     // The element does the fetching now, so a picture nobody is sharing fails here rather than in
@@ -9558,6 +9820,12 @@
     // This peer's one video slot. Held rather than looked up, because once a video stops the
     // sender has no track to recognise it by and searching for one finds nothing.
     vidSender: RTCRtpSender | null;
+    // Microphone ownership is explicit because a parked audio sender is indistinguishable from
+    // other empty slots, and screen audio is a separate audio sender that must never be replaced.
+    micSender: RTCRtpSender | null;
+    // Screen audio is one mixed track regardless of how many applications the user adds. Keeping
+    // its sender parked lets a source be added/removed without multiplying SDP sections forever.
+    screenAudioSender: RTCRtpSender | null;
   };
   let inCall = $state(false);
   let callMuted = $state(false);
@@ -9575,12 +9843,16 @@
   let callServer = $state<number | null>(null); // the server the room is on
   let callServerName = $state(""); // the room's server, for chrome that must not say "here"
   let callSelfFp = $state(""); // identity on callServer; the viewed server may change mid-call
+  let activeCallLease = 0; // binds async call-only caches to this exact room lifecycle
   // Names and avatars on the call surfaces MUST resolve against the room's server, never the
   // viewed one. `profiles` is replaced wholesale on every server switch (see refreshProfiles),
   // so reading it from the call bar re-labelled you and every peer the moment you clicked
   // another server: your own name changed under you, and the dock read as though the call had
   // moved with you. This map is fetched once for callServer and is cleared only on leave.
   let callProfiles = $state<Record<string, Prof>>({});
+  // Calls survive navigation to another server, so the jukebox must never consult `files`, which
+  // belongs to the currently viewed server. This index is pinned to callServer for its full life.
+  let callFiles = $state<UiFile[]>([]);
   // True while the user is looking at a different server from the one the call is on. The dock
   // uses it to say where the call actually is instead of silently implying "here".
   let callElsewhere = $derived(inCall && callServer !== null && callServer !== activeServerId);
@@ -9617,6 +9889,8 @@
     return known.includes("relayed") ? "relayed" : "direct";
   });
   let localStream: MediaStream | null = null;
+  const micCaptureSession = new MediaCaptureSession();
+  const callLifecycleSession = new MediaCaptureSession();
   const callPeers: Record<string, CallPeer> = {};
   // Trickle ICE may beat the offer over independent Tauri invokes. Hold it until that peer has a
   // remote description instead of throwing it away and making the call depend on event timing.
@@ -9845,6 +10119,9 @@
     micDev = id;
     try { localStorage.setItem("catcoms.call.micDev", id); } catch { /* ignore */ }
     if (!inCall) return;
+    const lease = micCaptureSession.begin();
+    const server = callServer;
+    const channel = callChannel;
     let next: MediaStream;
     try {
       next = await navigator.mediaDevices.getUserMedia({
@@ -9855,32 +10132,72 @@
       error = "Couldn't switch to that microphone.";
       return;
     }
+    const accepted = acceptCapture(
+      micCaptureSession,
+      lease,
+      next,
+      inCall && server !== null && callServer === server && !!channel && callChannel === channel,
+    );
+    if (!accepted) return;
+    next = accepted;
     const track = next.getAudioTracks()[0];
-    if (!track) return;
+    if (!track) {
+      for (const capturedTrack of next.getTracks()) capturedTrack.stop();
+      return;
+    }
     track.enabled = !callMuted; // a hot swap must never quietly un-mute you
+    const previous = localStream;
+    localStream = next;
+    if (previous) for (const previousTrack of previous.getTracks()) previousTrack.stop();
+    addAnalyser("me", next); // leaveVoice can now stop this track during any sender await below
     for (const p of Object.values(callPeers)) {
       // An empty sender is a fair target (a swap while muted), but never the video slot: parked
       // or not, handing it an audio track is a kind mismatch that throws.
-      const s = p.pc.getSenders().find((x) => x.track?.kind === "audio")
-        ?? p.pc.getSenders().find((x) => !x.track && x !== p.vidSender);
-      if (s) { try { await s.replaceTrack(track); } catch { /* edge gone */ } }
+      const s = chooseMicrophoneSender(
+        p.pc.getSenders(), p.micSender, p.vidSender, p.screenAudioSender,
+      );
+      if (s) {
+        p.micSender = s;
+        try { await s.replaceTrack(track); } catch { /* edge gone */ }
+      } else {
+        try { p.micSender = p.pc.addTrack(track, next); } catch { /* edge gone */ }
+      }
     }
-    if (localStream) for (const t of localStream.getTracks()) t.stop();
-    localStream = next;
-    addAnalyser("me", next); // the meter was watching the track that just went away
   }
-  async function ensureMic(announce = true): Promise<MediaStream | null> {
+  async function ensureMic(
+    announce = true,
+    adopt = true,
+    joiningContext: { server: number; channel: string; callLease: number } | null = null,
+  ): Promise<MediaStream | null> {
     if (localStream) return localStream;
+    const lease = micCaptureSession.begin();
+    const server = joiningContext?.server ?? callServer;
+    const channel = joiningContext?.channel ?? callChannel;
+    const stillWanted = () => micCaptureSession.isCurrent(lease) && (
+      joiningContext
+        ? callLifecycleSession.isCurrent(joiningContext.callLease)
+        : inCall && callServer === server && callChannel === channel
+    );
     // Try the remembered input first; a device that has since vanished must not block the call.
     const tries: (MediaTrackConstraints | boolean)[] = micDev
       ? [{ deviceId: { exact: micDev } }, true]
       : [true];
     for (const audio of tries) {
+      if (!stillWanted()) return null;
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
+        const captured = await navigator.mediaDevices.getUserMedia({ audio, video: false });
+        const accepted = acceptCapture(
+          micCaptureSession,
+          lease,
+          captured,
+          stillWanted(),
+        );
+        if (!accepted) return null;
+        if (adopt) localStream = accepted;
         void refreshAudioDevices();
-        return localStream;
+        return accepted;
       } catch {
+        if (!stillWanted()) return null;
         /* remembered device gone: fall back to the system default */
       }
     }
@@ -9903,7 +10220,7 @@
     for (const t of stream.getAudioTracks()) t.enabled = true;
     for (const p of Object.values(callPeers)) {
       for (const t of stream.getTracks()) {
-        try { p.pc.addTrack(t, stream); } catch { /* already added on this edge */ }
+        try { p.micSender = p.pc.addTrack(t, stream); } catch { /* already added on this edge */ }
       }
     }
     addAnalyser("me", stream);
@@ -9918,7 +10235,20 @@
       el.autoplay = true;
       document.body.appendChild(el);
     }
-    el.srcObject = stream;
+    // A peer can send its microphone and one separately mixed screen-audio track. Feeding the
+    // latest arriving stream straight to the element would replace (and silence) the earlier one,
+    // so aggregate all of that peer's live audio tracks into one local playback stream.
+    let aggregate = remoteAudioStreams[fp];
+    if (!aggregate) {
+      aggregate = new MediaStream();
+      remoteAudioStreams[fp] = aggregate;
+    }
+    for (const track of stream.getAudioTracks()) {
+      if (aggregate.getTracks().some((candidate) => candidate.id === track.id)) continue;
+      aggregate.addTrack(track);
+      track.addEventListener("ended", () => aggregate?.removeTrack(track), { once: true });
+    }
+    el.srcObject = aggregate;
     el.muted = callDeafened || !!voiceMutedPeers[fp];
     const v = loadPeerVol(fp);
     el.volume = v;
@@ -9941,19 +10271,7 @@
   let peerMeta = $state<Record<string, PeerState>>({}); // mute/video plus their coarse receive bucket
   function loadStreamSettings(): StreamSettings {
     try {
-      const parsed = JSON.parse(localStorage.getItem("catcoms.call.stream.v1") ?? "{}") as Partial<StreamSettings>;
-      const resolution = isStreamHeight(parsed.resolution) ? parsed.resolution : DEFAULT_STREAM_SETTINGS.resolution;
-      const frameRate = [15, 24, 30, 60].includes(Number(parsed.frameRate))
-        ? (Number(parsed.frameRate) as StreamFrameRate)
-        : DEFAULT_STREAM_SETTINGS.frameRate;
-      const quality = ["motion", "balanced", "detail"].includes(String(parsed.quality))
-        ? (parsed.quality as StreamQuality)
-        : DEFAULT_STREAM_SETTINGS.quality;
-      const rawMbps = Number(parsed.mbpsPerPeer);
-      const mbpsPerPeer = Number.isFinite(rawMbps)
-        ? Math.min(50, Math.max(0.5, rawMbps))
-        : DEFAULT_STREAM_SETTINGS.mbpsPerPeer;
-      return { resolution, frameRate, quality, mbpsPerPeer };
+      return parseStreamSettings(JSON.parse(localStorage.getItem("catcoms.call.stream.v1") ?? "{}"));
     } catch {
       return { ...DEFAULT_STREAM_SETTINGS };
     }
@@ -10021,6 +10339,20 @@
     const parsed = Number(value);
     if (Number.isFinite(parsed)) {
       saveStreamSettings({ ...streamSettings, mbpsPerPeer: Math.min(50, Math.max(0.5, parsed)) });
+    }
+  }
+  function setStreamAudioMode(audioMode: StreamAudioMode) {
+    const previousMode = streamSettings.audioMode;
+    saveStreamSettings({ ...streamSettings, audioMode });
+    if (shouldClearScreenAudioOnModeChange(previousMode, audioMode)) {
+      screenAudioCaptureSession.invalidate();
+    }
+    if (myVideo !== "screen") return;
+    if (shouldClearScreenAudioOnModeChange(previousMode, audioMode)) clearScreenAudioSources();
+    if (audioMode === "surface") {
+      // getDisplayMedia must make the user choose again; a settings toggle cannot silently grant
+      // a different capture source or reinterpret separately selected application audio.
+      screenAudioError = "Restart sharing to choose screen/window audio under this mode.";
     }
   }
   function setReceiveResolution(value: string) {
@@ -11220,12 +11552,16 @@
   // perfectly in sync while THIS machine is silent, and the deck has to be able to say which.
   let jukeBlocked = $state(false); // the webview refuses to start audio without a gesture
   let jukeLocalFail = $state(""); // this listener could not fetch or decode the current track
+  let jukeTrustBlocked = $state<"" | "consent" | "unavailable">("");
+  // Explicit playback approval is local and call-scoped. It is not persisted as a silent trust
+  // expansion and is still useful only when callServer has an authenticated safe-media listing.
+  const jukeExplicitApprovals = new Set<string>();
   let bufferTimer: ReturnType<typeof setTimeout> | undefined; // debounce for the chip above
   let jukeNudging = $state(false); // easing back onto the DJ's clock rather than snapping
   // Audio or video, from the current track's name (a queue entry carries no mime) and the share's
   // declared type when the share is the one in view.
   let jukeKind = $derived<MediaKind>(
-    jukeNow ? mediaKind(jukeNow.name, files.find((f) => f.cid === jukeNow?.cid)?.mime ?? "") : "other",
+    jukeNow ? mediaKind(jukeNow.name, callFiles.find((f) => f.cid === jukeNow?.cid)?.mime ?? "") : "other",
   );
   const JUKE_DJ_GONE_MS = 15000; // silence longer than three pings means the DJ walked away
 
@@ -11450,7 +11786,10 @@
     jukeHeard = jukeAdopted.at;
     jukeStale = false;
     // Local health is per track: moving the room on clears whatever this machine could not play.
-    if (!same) jukeLocalFail = "";
+    if (!same) {
+      jukeLocalFail = "";
+      jukeTrustBlocked = "";
+    }
     jukeNow = entry || cid ? { entry, cid, name, paused, dj: fromFp === callSelfFp ? "" : fromFp } : null;
     if (!jukeNow) {
       jukeDur = 0;
@@ -11468,6 +11807,23 @@
     const cid = now.cid;
     const server = callServer;
     if (server === null) return;
+    const file = callFiles.find((candidate) => candidate.cid === cid);
+    const mime = file ? safeMime(file.mime) : "";
+    if (!file || !(mime.startsWith("audio/") || mime.startsWith("video/"))) {
+      jukeTrustBlocked = "unavailable";
+      parkJukeboxMedia();
+      return;
+    }
+    const approvalKey = scopedMediaKey(server, cid);
+    if (!mayLoadJukeboxFile(
+      fileTrustFor(server), file.author_identity, file.author_verified,
+      jukeExplicitApprovals.has(approvalKey),
+    )) {
+      jukeTrustBlocked = "consent";
+      parkJukeboxMedia();
+      return;
+    }
+    jukeTrustBlocked = "";
     // The element streams straight out of the vault, so there is no fetch-then-play step any
     // more: playback starts on the first chunk instead of the last, and a seek costs one chunk.
     // A track nobody can serve now surfaces as an element error rather than a thrown fetch,
@@ -11509,6 +11865,22 @@
     const live = jukeNow;
     if (!live || live.paused) jukePause(el);
     else void jukeStart(el);
+  }
+  function parkJukeboxMedia() {
+    if (!jukeAudio) return;
+    jukeAudio.pause();
+    jukeAudio.removeAttribute("src");
+    jukeAudio.load();
+    jukeDur = 0;
+    jukeFetch = null;
+    jukeBuffering = false;
+    jukeBlocked = false;
+  }
+  function approveCurrentJukeboxTrack() {
+    if (!jukeNow || callServer === null) return;
+    jukeExplicitApprovals.add(scopedMediaKey(callServer, jukeNow.cid));
+    jukeTrustBlocked = "";
+    void jukeApply(false);
   }
   /**
    * Start the deck, and remember if the webview would not let us.
@@ -11749,6 +12121,9 @@
     jukeFetch = null;
     jukeBlocked = false;
     jukeLocalFail = "";
+    jukeTrustBlocked = "";
+    jukeExplicitApprovals.clear();
+    callFiles = [];
     clearTimeout(bufferTimer);
     jukeBuffering = false;
     jukeNudging = false;
@@ -11832,15 +12207,192 @@
   // check: every sender uploads its video once per peer, so this is for small rooms; the SFU
   // hookup is the scale path.
   let camStream: MediaStream | null = null; // whatever the slot currently captures
+  const videoCaptureSession = new MediaCaptureSession();
   let myVideo = $state<"" | "cam" | "screen">("");
   let localVideoStream = $state<MediaStream | null>(null); // the self-preview tile reads this
   let remoteStreams = $state<Record<string, MediaStream>>({}); // fp -> their video stream
+  const remoteAudioStreams: Record<string, MediaStream> = {};
+  type ScreenAudioCapture = {
+    id: string;
+    label: string;
+    stream: MediaStream;
+    node: MediaStreamAudioSourceNode;
+  };
+  let screenAudioSources = $state<{ id: string; label: string }[]>([]);
+  let screenAudioError = $state("");
+  const screenAudioCaptures = new Map<string, ScreenAudioCapture>();
+  let screenAudioContext: AudioContext | null = null;
+  let screenAudioDestination: MediaStreamAudioDestinationNode | null = null;
+  let screenAudioSourceId = 0;
+  const screenAudioCaptureSession = new MediaCaptureSession();
+
+  /** The one Opus input sent to every peer, no matter how many application sources feed it. */
+  function screenAudioTrack(): MediaStreamTrack | null {
+    return screenAudioSources.length ? screenAudioDestination?.stream.getAudioTracks()[0] ?? null : null;
+  }
+
+  async function capScreenAudio(sender: RTCRtpSender) {
+    try {
+      const parameters = sender.getParameters();
+      parameters.encodings = parameters.encodings?.length
+        ? parameters.encodings.map((encoding) => ({ ...encoding, maxBitrate: 160_000 }))
+        : [{ maxBitrate: 160_000 }];
+      await sender.setParameters(parameters);
+    } catch {
+      // WebViews may reject a pre-negotiation audio parameter change. Opus remains bounded by its
+      // negotiated defaults; unlike video, this does not risk an unbounded 4K-class encode.
+    }
+  }
+
+  function syncScreenAudioPeer(peer: CallPeer) {
+    const track = myVideo === "screen" ? screenAudioTrack() : null;
+    if (peer.screenAudioSender) {
+      void peer.screenAudioSender.replaceTrack(track).then(() => {
+        if (track && peer.screenAudioSender) void capScreenAudio(peer.screenAudioSender);
+      }).catch(() => { /* the edge is closing */ });
+      return;
+    }
+    if (!track || !screenAudioDestination) return;
+    try {
+      peer.screenAudioSender = peer.pc.addTrack(track, screenAudioDestination.stream);
+      void capScreenAudio(peer.screenAudioSender);
+    } catch (e) {
+      console.warn("voice: could not add mixed screen audio", { peer: peer.fp, error: String(e) });
+    }
+  }
+
+  function syncScreenAudioPeers() {
+    for (const peer of Object.values(callPeers)) syncScreenAudioPeer(peer);
+  }
+
+  async function addScreenAudioStream(
+    stream: MediaStream,
+    fallbackLabel: string,
+    stillWanted: () => boolean = () => true,
+    syncNow = true,
+  ) {
+    const tracks = stream.getAudioTracks();
+    if (!tracks.length) {
+      for (const track of stream.getTracks()) track.stop();
+      screenAudioError = "That source did not provide audio. Choose a tab/window with audio enabled in the picker.";
+      return false;
+    }
+    try {
+      const context = screenAudioContext ??= new AudioContext();
+      const destination = screenAudioDestination ??= context.createMediaStreamDestination();
+      // Do not await `resume()`: an OS prompt has already handed us live capture tracks, and an
+      // unresolved WebView promise here would leave both these tracks and the calling screen-video
+      // stream outside the teardown registries. Build/register the graph synchronously so stop,
+      // leave and lock always own the capture before another UI event can run.
+      if (context.state === "suspended") {
+        void context.resume().catch((e) => {
+          if (screenAudioContext === context) {
+            screenAudioError = `This WebView could not start the audio mix: ${String(e)}`;
+          }
+        });
+      }
+      if (!stillWanted() || screenAudioContext !== context || screenAudioDestination !== destination) {
+        for (const track of stream.getTracks()) track.stop();
+        return false;
+      }
+      const id = `source-${++screenAudioSourceId}`;
+      const node = context.createMediaStreamSource(stream);
+      node.connect(destination);
+      const label = tracks[0].label || fallbackLabel;
+      screenAudioCaptures.set(id, { id, label, stream, node });
+      screenAudioSources = [...screenAudioSources, { id, label }];
+      screenAudioError = "";
+      for (const track of tracks) {
+        // One granted source may expose multiple audio tracks. The first one ending retires and
+        // stops the whole grant so no surviving track can continue capturing without a visible row.
+        track.addEventListener("ended", () => removeScreenAudioSource(id), { once: true });
+      }
+      if (syncNow) syncScreenAudioPeers();
+      return true;
+    } catch (e) {
+      for (const track of stream.getTracks()) track.stop();
+      screenAudioError = `This WebView could not mix that audio source: ${String(e)}`;
+      return false;
+    }
+  }
+
+  function removeScreenAudioSource(id: string, stop = true) {
+    const capture = screenAudioCaptures.get(id);
+    if (!capture) return;
+    screenAudioCaptures.delete(id);
+    try { capture.node.disconnect(); } catch { /* already disconnected */ }
+    if (stop) for (const track of capture.stream.getTracks()) track.stop();
+    screenAudioSources = screenAudioSources.filter((source) => source.id !== id);
+    syncScreenAudioPeers();
+  }
+
+  function clearScreenAudioSources() {
+    const captures = [...screenAudioCaptures.values()];
+    screenAudioCaptures.clear();
+    screenAudioSources = [];
+    for (const capture of captures) {
+      try { capture.node.disconnect(); } catch { /* already disconnected */ }
+      for (const track of capture.stream.getTracks()) track.stop();
+    }
+    syncScreenAudioPeers();
+    const context = screenAudioContext;
+    screenAudioContext = null;
+    screenAudioDestination = null;
+    if (context) void context.close().catch(() => {});
+  }
+
+  /**
+   * Browser APIs cannot enumerate arbitrary application audio for privacy reasons. Each press
+   * opens the platform capture chooser; Mewtual discards its picture and mixes only the granted
+   * audio. Repeating it is the portable approximation of OBS's per-application source list.
+   */
+  async function addSeparateScreenAudioSource() {
+    if (myVideo !== "screen") return;
+    const videoLease = videoCaptureSession.current();
+    const audioLease = screenAudioCaptureSession.begin();
+    const server = callServer;
+    const channel = callChannel;
+    screenAudioError = "";
+    try {
+      const captured = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true,
+        systemAudio: "include",
+        windowAudio: "window",
+      } as DisplayMediaStreamOptions);
+      const picked = acceptCapture(
+        screenAudioCaptureSession,
+        audioLease,
+        captured,
+        videoCaptureSession.isCurrent(videoLease) && inCall && callServer === server && callChannel === channel && myVideo === "screen" &&
+          streamSettings.audioMode === "separate",
+      );
+      if (!picked) return;
+      for (const track of picked.getVideoTracks()) {
+        picked.removeTrack(track);
+        track.stop();
+      }
+      await addScreenAudioStream(
+        picked,
+        `Audio source ${screenAudioSources.length + 1}`,
+        () => videoCaptureSession.isCurrent(videoLease) && screenAudioCaptureSession.isCurrent(audioLease) && inCall && callServer === server &&
+          callChannel === channel && myVideo === "screen" && streamSettings.audioMode === "separate",
+      );
+    } catch {
+      screenAudioError = "Audio-source selection was cancelled or is not supported by this WebView.";
+    }
+  }
   function dropRemoteVideo(fp: string, stream: MediaStream) {
     if (remoteStreams[fp] !== stream) return; // an ended track from a replaced, older stream
     const { [fp]: _s, ...rest } = remoteStreams;
     remoteStreams = rest;
   }
   async function startVideo(kind: "cam" | "screen") {
+    const lease = videoCaptureSession.begin();
+    const audioLease = screenAudioCaptureSession.begin();
+    const requestedAudioMode = streamSettings.audioMode;
+    const server = callServer;
+    const channel = callChannel;
     let s: MediaStream;
     try {
       s = kind === "cam"
@@ -11857,20 +12409,52 @@
               height: { ideal: streamSettings.resolution, max: streamSettings.resolution },
               frameRate: { ideal: streamSettings.frameRate, max: streamSettings.frameRate },
             },
-            audio: false,
-          });
+            audio: requestedAudioMode === "surface",
+            systemAudio: requestedAudioMode === "surface" ? "include" : "exclude",
+            windowAudio: requestedAudioMode === "surface" ? "window" : "exclude",
+          } as DisplayMediaStreamOptions);
     } catch {
-      error = kind === "cam" ? "Couldn't access the camera (permission denied or no device)." : "Screen share was cancelled or unavailable.";
+      if (videoCaptureSession.isCurrent(lease)) {
+        error = kind === "cam" ? "Couldn't access the camera (permission denied or no device)." : "Screen share was cancelled or unavailable.";
+      }
       return;
     }
+    const accepted = acceptCapture(
+      videoCaptureSession,
+      lease,
+      s,
+      inCall && server !== null && callServer === server && !!channel && callChannel === channel,
+    );
+    if (!accepted) return;
+    s = accepted;
     const track = s.getVideoTracks()[0];
-    if (!track) return;
-    const old = camStream;
-    camStream = s;
-    localVideoStream = s;
-    myVideo = kind;
+    if (!track) {
+      for (const capturedTrack of s.getTracks()) capturedTrack.stop();
+      error = "That capture source did not provide video.";
+      return;
+    }
+    // A camera swap or a fresh screen picker must end the previous session's independently granted
+    // application audio. Otherwise changing the picture could leave an invisible old source live.
+    if (screenAudioSources.length) clearScreenAudioSources();
     if (kind === "screen") {
       peerVideoBudget = {};
+      const surfaceAudio = s.getAudioTracks();
+      if (surfaceAudio.length) {
+        for (const audio of surfaceAudio) s.removeTrack(audio);
+        if (requestedAudioMode === "surface" && screenAudioCaptureSession.isCurrent(audioLease) && streamSettings.audioMode === "surface") {
+          await addScreenAudioStream(
+            new MediaStream(surfaceAudio),
+            "Selected surface audio",
+            () => videoCaptureSession.isCurrent(lease) && screenAudioCaptureSession.isCurrent(audioLease) && inCall && callServer === server &&
+              callChannel === channel && streamSettings.audioMode === "surface",
+            false,
+          );
+        } else {
+          for (const audio of surfaceAudio) audio.stop();
+        }
+      } else if (requestedAudioMode === "surface" && screenAudioCaptureSession.isCurrent(audioLease)) {
+        screenAudioError = "The selected surface did not provide audio. You can switch to separate sources and add one explicitly.";
+      }
       // Text/edges benefit from the browser's screen-content encoder path where supported.
       try { track.contentHint = streamSettings.quality === "motion" ? "motion" : "detail"; } catch { /* advisory */ }
       const settings = track.getSettings();
@@ -11881,8 +12465,17 @@
         constraintError: "",
       };
     }
+    if (!videoCaptureSession.isCurrent(lease) || !inCall || callServer !== server || callChannel !== channel) {
+      for (const capturedTrack of s.getTracks()) capturedTrack.stop();
+      return;
+    }
+    const old = camStream;
+    camStream = s;
+    localVideoStream = s;
+    myVideo = kind;
     track.onended = () => stopVideo(); // the browser's own "stop sharing" chrome ends the track
     for (const p of Object.values(callPeers)) fillVideoSlot(p, track, s, kind);
+    if (kind === "screen") syncScreenAudioPeers();
     if (old) for (const t of old.getTracks()) t.stop();
     pushInstState(); // vid state rides the same channel as the mute states
   }
@@ -11926,6 +12519,11 @@
     // Read this even on failure. Capture constraints are advisory; peer scaling must start from
     // what the browser is actually producing, not what the settings panel requested.
     const settings = track.getSettings();
+    if (!captureResolutionKnownAfterConstraint(!!constraintError, settings.height)) {
+      error = "Screen sharing stopped because this WebView rejected the requested resolution and did not report the actual capture size.";
+      stopVideo();
+      return;
+    }
     const sourceHeight = settings.height || actualStream?.height || requested.resolution;
     actualStream = {
       width: settings.width ?? 0,
@@ -12086,6 +12684,8 @@
     }
   }
   function stopVideo() {
+    videoCaptureSession.invalidate();
+    screenAudioCaptureSession.invalidate();
     if (!camStream) return;
     for (const p of Object.values(callPeers)) {
       if (!p.vidSender) continue;
@@ -12101,6 +12701,7 @@
         if (idle && slot.tr) slot.tr.direction = idle;
       } catch { /* edge closing: the slot goes with it */ }
     }
+    clearScreenAudioSources();
     for (const t of camStream.getTracks()) t.stop();
     camStream = null;
     localVideoStream = null;
@@ -12341,14 +12942,19 @@
       ignoreOffer: false,
       lastRetry: 0,
       vidSender: null,
+      micSender: null,
+      screenAudioSender: null,
     };
-    if (localStream) for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
+    if (localStream) {
+      for (const t of localStream.getAudioTracks()) peer.micSender = pc.addTrack(t, localStream);
+    }
     // A joiner arriving while my video is live gets it in the very first offer. It goes through
     // the same slot bookkeeping as everyone else's, so their edge is capped and reusable from the
     // start rather than being the one edge that behaves differently.
     if (camStream && myVideo) {
       const vt = camStream.getVideoTracks()[0];
       if (vt) fillVideoSlot(peer, vt, camStream, myVideo);
+      if (myVideo === "screen") syncScreenAudioPeer(peer);
     }
     // The instrument channel: negotiated (same id on both ends) and created BEFORE the offer, so
     // the SCTP section rides the first SDP exchange and nothing ever renegotiates for it. An old
@@ -12407,6 +13013,7 @@
     }
     delete waitingIce[fp];
     document.getElementById(`call-audio-${fp}`)?.remove();
+    delete remoteAudioStreams[fp];
     callParticipants = Object.keys(callPeers);
     const { [fp]: _drop, ...rest } = callPeerStates;
     callPeerStates = rest;
@@ -12586,9 +13193,14 @@
   async function joinVoice(channel: string, server: number, name: string) {
     if (inCall && callChannel === channel && callServer === server) return;
     if (inCall) leaveVoice();
+    const joinLease = callLifecycleSession.begin();
+    micCaptureSession.invalidate();
+    callFiles = [];
+    jukeExplicitApprovals.clear();
     let selfFp = "";
     try {
       const membersHere = await invoke<Member[]>("get_members", { server });
+      if (!callLifecycleSession.isCurrent(joinLease)) return;
       selfFp = membersHere.find((m) => m.you)?.fingerprint ?? "";
     } catch (e) {
       error = `Couldn't read the voice room's member list: ${String(e)}`;
@@ -12598,20 +13210,28 @@
       error = "Couldn't identify this device on the voice room's server.";
       return;
     }
-    callServer = server;
-    callSelfFp = selfFp;
     // A missing or refused microphone is no longer a reason not to join. The room is also where
     // the jukebox and the instruments live, and neither needs one: the data channel carries the
     // instruments and the deck rides the mesh, so a peer with no mic is a full participant in
     // everything except talking. The dock offers the mic in place if one turns up later.
-    micOn = (await ensureMic(false)) !== null;
+    const joinedMic = await ensureMic(false, false, { server, channel, callLease: joinLease });
+    if (!callLifecycleSession.isCurrent(joinLease)) {
+      if (joinedMic) for (const track of joinedMic.getTracks()) track.stop();
+      return;
+    }
+    localStream = joinedMic;
+    micOn = joinedMic !== null;
+    callServer = server;
+    callSelfFp = selfFp;
     callChannel = channel;
     callChannelName = name;
     // Snapshot the room's server identity now, while we are certainly on it. Everything the
     // dock renders afterwards has to survive the user walking off to another server.
     callServerName = servers.find((s) => s.id === server)?.name ?? "";
-    void refreshCallProfiles();
     inCall = true;
+    activeCallLease = joinLease;
+    void refreshCallProfiles();
+    void refreshCallFiles();
     callMuted = false;
     focusOpen = false;
     focusDismissed = false; // a new call earns a fresh chance to take the window
@@ -12640,6 +13260,12 @@
     }, 5000);
   }
   function leaveVoice() {
+    // Permission prompts are not cancellable. Invalidate before any teardown so a chooser that
+    // resolves after this point can only stop its returned tracks, never adopt them.
+    videoCaptureSession.invalidate();
+    screenAudioCaptureSession.invalidate();
+    micCaptureSession.invalidate();
+    callLifecycleSession.invalidate();
     if (callChannel) broadcast({ callId: callChannel, type: "bye" });
     releaseMappedCallPorts(); // give the router its ports back; the lease is bounded regardless
     instReleaseAll(); // lift my own notes (and tell peers) before the edges go down
@@ -12647,6 +13273,8 @@
       for (const t of camStream.getTracks()) t.stop();
       camStream = null;
     }
+    clearScreenAudioSources();
+    screenAudioError = "";
     localVideoStream = null;
     myVideo = "";
     remoteStreams = {};
@@ -12678,6 +13306,7 @@
     callServer = null;
     callServerName = "";
     callSelfFp = "";
+    activeCallLease = 0;
     callProfiles = {};
     peerTransport = {};
     peerVideoCodec = {};
@@ -13863,6 +14492,7 @@
   // to follow the real window state, which also changes by snap, double-click and the OS.
   const appWindow = getCurrentWindow();
   let winMaximized = $state(false);
+  let windowCloseInFlight = false;
   // The live frontend-logging installation, kept so unmount can stop it. Not reactive state: it is
   // held purely so the teardown has something to call.
   let uiLogging: UiLogging | null = null;
@@ -14092,6 +14722,37 @@
     const subs: Promise<UnlistenFn>[] = [
       appWindow.onResized(() => syncMaximized()),
       appWindow.onFocusChanged(({ payload }) => (windowFocused = payload)),
+      appWindow.onCloseRequested(async (event) => {
+        // The WebView debounce is not a durability boundary. Hold an ordinary window close until
+        // native code has committed the latest vault continuity snapshot and closed the UI session;
+        // `destroy()` then bypasses a second close-request event. A hard process/OS failure can
+        // still interrupt storage and is intentionally not presented as transactionally safe.
+        event.preventDefault();
+        if (windowCloseInFlight) return;
+        windowCloseInFlight = true;
+        callLifecycleSession.invalidate();
+        micCaptureSession.invalidate();
+        videoCaptureSession.invalidate();
+        screenAudioCaptureSession.invalidate();
+        if (inCall) leaveVoice();
+        clearTimeout(uiStateSaveTimer);
+        const finalContinuityJson = !locked && uiStateReady ? continuityJson() : null;
+        let nativeLocked = false;
+        try {
+          if (!locked) {
+            await invoke("lock_session", { uiStateJson: finalContinuityJson });
+            nativeLocked = true;
+          }
+          await appWindow.destroy();
+        } catch (e) {
+          // `destroy()` can fail after native locking succeeded. In that case the WebView remains
+          // visible but can no longer read the vault, so immediately apply the same plaintext/UI
+          // teardown as Ctrl+L without issuing a redundant native lock command.
+          if (nativeLocked) lockScreen(true);
+          windowCloseInFlight = false;
+          error = `Could not safely close the vault: ${e}`;
+        }
+      }),
       // Capture is a native setting, and the webview is one of the things that feeds it. Told
       // rather than polled: the mode only moves when somebody moves it.
       listen<{ mode: string }>("capture-changed", (e) => {
@@ -14229,6 +14890,7 @@
           refreshFiles();
           if (view === "storage" || view === "downloads") refreshStorageHealth();
         }
+        if (inCall && e.payload.server === callServer) void refreshCallFiles();
       }),
       listen<{
         server: number;
@@ -14888,27 +15550,30 @@
 
 <!-- One stream panel, rendered in the compact stage and the full-window focus view. The sender
      controls capture/quality; every receiver independently advertises only a rounded bucket. -->
-{#snippet streamSettingsPanel()}
+{#snippet streamSettingsPanel(global: boolean)}
   <section class="stream-panel" aria-label="Screen stream settings">
     <header class="stream-panel-head">
-      <div><span class="stage-label">SCREEN STREAM</span><strong>Per-viewer adaptive encode</strong></div>
-      <button class="ghost small" aria-label="Close stream settings" onclick={() => (streamSettingsOpen = false)}>x</button>
+      <div><span class="stage-label">SCREEN STREAM</span><strong>{global ? "Client-wide defaults" : "Per-viewer adaptive encode"}</strong></div>
+      {#if !global}<button class="ghost small" aria-label="Close stream settings" onclick={() => (streamSettingsOpen = false)}>x</button>{/if}
     </header>
+    {#if global}
+      <p class="muted small stream-global-note">These defaults belong to this Mewtual client and apply in every server. The in-call cog edits the same values.</p>
+    {/if}
     <div class="stream-fields">
       <label>
         <span>Capture resolution</span>
         <select value={streamSettings.resolution} onchange={(event) => setStreamResolution(event.currentTarget.value)}>
-          <option value="720">720p</option>
-          <option value="1080">1080p</option>
-          <option value="1440">1440p</option>
-          <option value="2160">4K (2160p)</option>
+          <option value="720" selected={streamSettings.resolution === 720}>720p</option>
+          <option value="1080" selected={streamSettings.resolution === 1080}>1080p</option>
+          <option value="1440" selected={streamSettings.resolution === 1440}>1440p</option>
+          <option value="2160" selected={streamSettings.resolution === 2160}>4K (2160p)</option>
         </select>
       </label>
       <label>
         <span>Frame rate</span>
         <select value={streamSettings.frameRate} onchange={(event) => setStreamFrameRate(event.currentTarget.value)}>
-          <option value="15">15 fps</option><option value="24">24 fps</option>
-          <option value="30">30 fps</option><option value="60">60 fps</option>
+          <option value="15" selected={streamSettings.frameRate === 15}>15 fps</option><option value="24" selected={streamSettings.frameRate === 24}>24 fps</option>
+          <option value="30" selected={streamSettings.frameRate === 30}>30 fps</option><option value="60" selected={streamSettings.frameRate === 60}>60 fps</option>
         </select>
       </label>
       <label>
@@ -14930,9 +15595,41 @@
       <button class:active={streamSettings.quality === "balanced"} onclick={() => setStreamQuality("balanced")}>Balanced</button>
       <button class:active={streamSettings.quality === "detail"} onclick={() => setStreamQuality("detail")}>Sharp detail</button>
     </fieldset>
+    <fieldset class="stream-quality stream-audio-mode">
+      <legend>Shared audio</legend>
+      <button type="button" class:active={streamSettings.audioMode === "none"} onclick={() => setStreamAudioMode("none")}>No shared audio</button>
+      <button type="button" class:active={streamSettings.audioMode === "surface"} onclick={() => setStreamAudioMode("surface")}>With screen/window</button>
+      <button type="button" class:active={streamSettings.audioMode === "separate"} onclick={() => setStreamAudioMode("separate")}>Separate sources</button>
+    </fieldset>
+    {#if streamSettings.audioMode === "separate"}
+      <div class="stream-audio-sources">
+        <p class="muted small">Choose applications independently from the shared picture. Add game, browser, or other audio one at a time; Mewtual mixes them into one stream track and never saves the grants.</p>
+        {#if myVideo === "screen"}
+          <div class="stream-source-actions">
+            <button type="button" class="ghost small" onclick={addSeparateScreenAudioSource}>+ Add audio source</button>
+            <span class="muted small">The chooser may show a picture too; only its audio is sent.</span>
+          </div>
+          {#if screenAudioSources.length}
+            <ul class="stream-source-list">
+              {#each screenAudioSources as source (source.id)}
+                <li><span>{source.label}</span><button type="button" class="ghost small" aria-label={`Remove ${source.label}`} onclick={() => removeScreenAudioSource(source.id)}>Remove</button></li>
+              {/each}
+            </ul>
+          {:else}
+            <p class="muted small">No application audio selected. The screen share is silent apart from your normal call microphone.</p>
+          {/if}
+        {:else}
+          <p class="muted small">Start sharing, then use the in-call cog to add each audio source. Browsers require a fresh visible choice every session.</p>
+        {/if}
+      </div>
+    {:else if streamSettings.audioMode === "surface"}
+      <p class="muted small">The capture chooser will offer audio from the selected tab, window, or system where the WebView supports it. System audio can include Mewtual voices; separate application sources avoid that echo.</p>
+    {/if}
+    {#if screenAudioError}<p class="stream-warning">{screenAudioError}</p>{/if}
     <div class="stream-summary">
       <span><b>{streamResolutionLabel(receiveHeight)}</b> my advertised receive bucket{receiveResolutionMode === "auto" ? " - window-derived" : " - fixed"}</span>
       <span><b>{streamEstimatedTotal.toFixed(1)} Mbps</b> planned screen upload for {callParticipants.length} {callParticipants.length === 1 ? "viewer" : "viewers"}, plus audio and overhead</span>
+      {#if screenAudioSources.length}<span><b>One mixed audio track</b> from {screenAudioSources.length} selected {screenAudioSources.length === 1 ? "source" : "sources"}; {(callParticipants.length * 0.16).toFixed(2)} Mbps is the planned total cap, but the negotiated WebView default may differ</span>{/if}
       {#if actualStream}
         <span><b>{actualStream.width}x{actualStream.height} @ {actualStream.fps || "?"} fps</b> actual browser capture</span>
       {:else}
@@ -14962,6 +15659,7 @@
       </ul>
     {/if}
     <p class="muted small">WebRTC compresses each peer encode independently. Mewtual prefers H.265 when both WebViews offer it, then AV1, VP9, H.264 and VP8; the row shows the codec actually negotiated. Exact window and monitor dimensions are never shared.</p>
+    {#if !global}<button type="button" class="ghost small stream-open-global" onclick={() => { streamSettingsOpen = false; openSettings("voice"); }}>Open client-wide Voice &amp; Calls settings</button>{/if}
   </section>
 {/snippet}
 
@@ -16249,7 +16947,15 @@
            thing the chip must never say. Reading a held file off this disk and pulling one off a
            peer feel completely different to wait through, so they are named differently rather
            than both being "FETCHING". -->
-      {#if jukeBlocked}
+      {#if jukeTrustBlocked === "consent"}
+        <button
+          class="juke-chip warn juke-chip-btn"
+          title="This track is not trusted for automatic playback on this device. Click to allow it for this call."
+          onclick={approveCurrentJukeboxTrack}
+        >LOAD TRACK</button>
+      {:else if jukeTrustBlocked === "unavailable"}
+        <span class="juke-chip gone" title="The call server has no authenticated safe-media listing for this track.">TRACK UNAVAILABLE</span>
+      {:else if jukeBlocked}
         <button
           class="juke-chip warn juke-chip-btn"
           title="This webview will not start audio until you interact with it. Click to start playing."
@@ -17267,6 +17973,11 @@
       {/if}
       {/if}
     </div>
+  {:else if !uiStateReady}
+    <div class="start gate" aria-busy="true">
+      {@render brandMark("opening your vault")}
+      <p class="muted small">Loading encrypted preferences before servers can fetch shared content.</p>
+    </div>
   {:else if servers.length === 0 || showAdd}
     <div class="start">
       {@render brandMark(servers.length ? "" : "your vault is ready")}
@@ -17283,6 +17994,22 @@
         <span class="muted">Display name</span>
         <input bind:value={displayName} placeholder="display name" />
       </label>
+      <fieldset class="file-trust-onboarding">
+        <legend>Before this server can fetch shared media automatically</legend>
+        <label class:selected={onboardingFileTrust === "on-demand"}>
+          <input type="radio" name="onboarding-file-trust" value="on-demand" bind:group={onboardingFileTrust} />
+          <span><b>On demand</b><small>Fetch only after I press Load, Play, Open, or Download.</small></span>
+        </label>
+        <label class:selected={onboardingFileTrust === "specific"}>
+          <input type="radio" name="onboarding-file-trust" value="specific" bind:group={onboardingFileTrust} />
+          <span><b>Specific people</b><small>Start blocked; choose trusted members after the authenticated roster arrives.</small></span>
+        </label>
+        <label class:selected={onboardingFileTrust === "everyone"}>
+          <input type="radio" name="onboarding-file-trust" value="everyone" bind:group={onboardingFileTrust} />
+          <span><b>Everyone here</b><small>Allow every member's authenticated shared media to load automatically. External URLs still require a click.</small></span>
+        </label>
+        <p class="muted small">Files fetched into Mewtual stay encrypted in its vault. Opening or exporting content still hands untrusted bytes to a decoder or another app.</p>
+      </fieldset>
       <div class="start-tabs" role="tablist" aria-label="Join or found a server">
         <button
           type="button"
@@ -18191,6 +18918,7 @@
               <li
                 class="frame-{messageFrame.shape}"
                 data-mi={mi}
+                data-author={m.author}
                 class:own={m.author === myFp}
                 class:grouped
                 class:unread={isUnread(m)}
@@ -19299,8 +20027,8 @@
               <div class="ev-image-row">
                 {#if evImage}
                   <span class="ev-image-pick">
-                    {#if mediaUrls[evImage]}
-                      <img class="ev-image-preview" src={mediaUrls[evImage]} alt="The event's poster" />
+                    {#if preparedMedia(evImage)}
+                      <img class="ev-image-preview" src={preparedMedia(evImage)} alt="The event's poster" />
                     {:else}
                       <span class="muted small">Image attached</span>
                     {/if}
@@ -19331,8 +20059,8 @@
                     {#if e.body}<div class="ev-body">{@html renderMessage(e.body, "")}</div>{/if}
                     <div class="ev-meta">by {@render nameTag(e.author)}</div>
                   </div>
-                  {#if e.image && mediaUrls[e.image]}
-                    <img class="ev-poster" src={mediaUrls[e.image]} alt={`Poster for ${plainSummary(e.title, 100)}`} />
+                  {#if e.image && preparedMedia(e.image)}
+                    <img class="ev-poster" src={preparedMedia(e.image)} alt={`Poster for ${plainSummary(e.title, 100)}`} />
                   {/if}
                   {#if e.author === myFp || canModerate}
                     {#if confirmDeleteEventId === e.id}
@@ -19485,7 +20213,7 @@
       {#if cur && !dmHome && !inboxView}
         <span class="seg">claimed paths <span><span class="ok-t">{Math.max(onlineCount - 1, 0)}</span>/{Math.max(members - 1, 0)}</span></span>
       {/if}
-      <button class="seg sb-lock" title="Lock now (Ctrl+L): clears everything on screen and asks for your passphrase again. The node stays online." onclick={lockScreen}>
+      <button class="seg sb-lock" title="Lock now (Ctrl+L): clears everything on screen and asks for your passphrase again. The node stays online." onclick={() => lockScreen()}>
         {@render icoLock()} vault <span class="ok-t">unlocked</span>
       </button>
       {#if rendezvous.trim()}<span class="seg">rendezvous <span class="ok-t">set</span></span>{/if}
@@ -19695,10 +20423,6 @@
               {@render icoScreen()}
               <span class="stage-act-lbl">Share</span>
             </button>
-            <button class="ghost stage-act" class:on={streamSettingsOpen} aria-expanded={streamSettingsOpen} title="Screen stream resolution, quality and per-peer bitrate" onclick={() => (streamSettingsOpen = !streamSettingsOpen)}>
-              {@render icoGear()}
-              <span class="stage-act-lbl">Stream</span>
-            </button>
             <button class="ghost stage-act" class:on={instOpen} aria-expanded={instOpen} title="Instrument drawer" onclick={toggleInstDrawer}>
               {@render icoNote()}
               <span class="stage-act-lbl">Inst</span>
@@ -19708,7 +20432,6 @@
               <span class="stage-act-lbl">Leave</span>
             </button>
           </div>
-          {#if streamSettingsOpen}{@render streamSettingsPanel()}{/if}
           <div class="stage-devs">
             <label class="stage-dev">
               <span class="stage-label">IN</span>
@@ -19726,7 +20449,17 @@
                 </select>
               </label>
             {/if}
+            <button
+              type="button"
+              class="ghost stage-stream-cog"
+              class:on={streamSettingsOpen}
+              aria-expanded={streamSettingsOpen}
+              aria-label="Screen stream settings"
+              title="Screen stream resolution, quality, bitrate and audio sources"
+              onclick={() => (streamSettingsOpen = !streamSettingsOpen)}
+            >{@render icoGear()}</button>
           </div>
+          {#if streamSettingsOpen}{@render streamSettingsPanel(false)}{/if}
         </div>
 
         <!-- The deck sits between what you do and what you play: it is the room's, not yours. -->
@@ -19857,7 +20590,7 @@
           </button>
         </div>
 
-        {#if streamSettingsOpen}<div class="focus-stream-panel">{@render streamSettingsPanel()}</div>{/if}
+        {#if streamSettingsOpen}<div class="focus-stream-panel">{@render streamSettingsPanel(false)}</div>{/if}
 
         <div class="focus-dock juke-dock-slot">{@render jukeDock()}</div>
 
@@ -20698,7 +21431,7 @@
                   secret you chose at setup (passphrase, spell, or melody). Locking clears the
                   screen and asks for it again; the node stays online underneath.
                 </p>
-                <button class="ghost" onclick={lockScreen}>Lock now [Ctrl+L]</button>
+                <button class="ghost" onclick={() => lockScreen()}>Lock now [Ctrl+L]</button>
               </section>
               <section class="set-section">
                 <h3>Change vault secret</h3>
@@ -21132,6 +21865,10 @@
                 <p class="muted small">Microphone and output pickers live on the call stage (they swap live, mid-call) and are remembered here between calls.</p>
                 <p class="muted small">A MIDI keyboard for the call instrument is set up in Settings → Devices, along with a monitor for checking one that is not behaving.</p>
                 <button type="button" class="ghost small" onclick={() => (settingsPage = "devices")}>Open Devices</button>
+              </section>
+              <section class="set-section">
+                <h3>Screen sharing</h3>
+                {@render streamSettingsPanel(true)}
               </section>
               <section class="set-section">
                 <h3>NAT traversal</h3>
@@ -21594,6 +22331,41 @@
                   <label><span class="muted small">Credential</span><input type="password" bind:value={srvTurnCred} onchange={saveSrvTurn} /></label>
                 </div>
               </div>
+              </section>
+            {:else if serverSettingsPage === "filetrust"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // FILE TRUST</div>
+              <h1>File Trust</h1>
+              <section class="set-section file-trust-settings">
+                <h3>Automatic fetch and decoding on this device</h3>
+                <p class="muted small">This is your local, vault-sealed choice. It does not endorse a member to anyone else and it never blocks an explicit Load, Play, Open, or Download click.</p>
+                {#if uiStateSaveFailed}
+                  <div class="warn-box" role="alert">
+                    <b>File trust has not been saved to the vault.</b>
+                    <p class="muted small">This screen enforces your new choice now, but a restart could restore the previous policy.</p>
+                    <button type="button" class="ghost small" onclick={scheduleUiStateSave}>Retry saving</button>
+                  </div>
+                {/if}
+                <div class="file-trust-modes">
+                  <button type="button" class:active={fileTrustFor().mode === "on-demand"} onclick={() => setFileTrustMode("on-demand")}><b>On demand</b><small>Nothing passive</small></button>
+                  <button type="button" class:active={fileTrustFor().mode === "specific"} onclick={() => setFileTrustMode("specific")}><b>Specific people</b><small>Only selected origins</small></button>
+                  <button type="button" class:active={fileTrustFor().mode === "everyone"} onclick={() => setFileTrustMode("everyone")}><b>Everyone</b><small>All authenticated member media; external URLs stay click-only</small></button>
+                </div>
+                {#if fileTrustFor().mode === "specific"}
+                  <div class="file-trust-members">
+                    {#each roster as member (member.identity)}
+                      <label>
+                        <input type="checkbox" checked={fileTrustFor().trustedAuthors.includes(member.identity)} onchange={() => toggleTrustedFileAuthor(member.identity)} />
+                        <span>
+                          {@render nameTag(member.fingerprint)}
+                          <small class="fp" title={`Full device identity: ${member.identity}`}>{member.identity}</small>
+                        </span>
+                      </label>
+                    {:else}
+                      <p class="muted small">No authenticated members are available to choose yet.</p>
+                    {/each}
+                  </div>
+                {/if}
+                <p class="muted small"><b>At-rest protection:</b> fetched chunks are authenticated and encrypted as one vault copy. An explicit export creates a separate plaintext copy in Downloads. This policy does not sandbox a media decoder.</p>
               </section>
             {:else if serverSettingsPage === "livery"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // LIVERY</div>

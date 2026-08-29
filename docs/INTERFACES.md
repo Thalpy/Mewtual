@@ -633,6 +633,24 @@ impl ServerStore {
 }
 ```
 
+The version-1 UI-continuity JSON retains the required `drafts` and `readMarks` objects and may also
+carry `statusCursors` plus bounded per-server `fileTrustPolicies`. Each file policy is local to this
+installation (`on-demand`, `specific` with exact authenticated full device identities, or `everyone`),
+vault-sealed with the other continuity state, and never enters group replication or the wire.
+Missing/malformed policy data decodes to on-demand. It governs passive media fetch/decoding only;
+an explicit Load/Play/Open/Download action is a separate user grant. Third-party HTTP(S) image
+URLs always require that explicit grant because they have no authenticated file origin.
+
+New file-index rows append `signer_key` and `signature` fields. The signature domain
+`catcoms/file-entry-attestation/v1` length-prefixes the stable group id, name, claimed author,
+normalized path, and encoded `FileManifest`/legacy `FileRef`. Readers recompute the signer device
+fingerprint, require it to equal `author`, and verify the signature before exposing
+`author_verified=true` plus the signer's full `DeviceId`. The eight-hex-character fingerprint is
+display-only; `specific` authorization compares the full identity. Missing fields are the
+backward-compatible legacy shape and remain downloadable, but a `specific` local trust policy must
+not auto-load them. Readers and writers cap the index at 256 rows and bound each signed field before
+clone/decode/verification, containing malicious replicated-index work.
+
 `ServerNet` record version 3 adds a reconnect-policy tag after the version-2 switchboard flag:
 `Disabled`, `AuthorizedPeer(peer_id)`, or `LegacyPending`, followed by at most two
 `ReconnectRoute { peer_id, address }` rows. A row is valid only under `AuthorizedPeer` and must name

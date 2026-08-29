@@ -216,13 +216,13 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
       return clone(
         server === 2
           ? [
-              { fingerprint: ME, you: true },
-              { fingerprint: JUNIPER, you: false },
+              { fingerprint: ME, identity: `${ME}-full-device-id`, you: true },
+              { fingerprint: JUNIPER, identity: `${JUNIPER}-full-device-id`, you: false },
             ]
           : [
-              { fingerprint: ME, you: true },
-              { fingerprint: JUNIPER, you: false },
-              { fingerprint: MOSS, you: false },
+              { fingerprint: ME, identity: `${ME}-full-device-id`, you: true },
+              { fingerprint: JUNIPER, identity: `${JUNIPER}-full-device-id`, you: false },
+              { fingerprint: MOSS, identity: `${MOSS}-full-device-id`, you: false },
             ],
       );
     case "get_online_members":
@@ -239,6 +239,8 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
             mime: "text/markdown",
             cid: "55aabbeeff0011223344556677889900",
             author: JUNIPER,
+            author_verified: true,
+            author_identity: `${JUNIPER}-full-device-id`,
             path: "reviews/visual-review-notes.md",
             held: 1,
             total: 1,

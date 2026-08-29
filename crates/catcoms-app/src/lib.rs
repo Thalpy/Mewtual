@@ -2158,6 +2158,11 @@ const F_PATH: &str = "path";
 // mime). The file's bytes are stored/shared as ciphertext keyed by the ciphertext CID; only
 // members with the group file-wrap key can open it. Size/mime/cid are read back from here.
 const F_REF: &str = "ref";
+// Optional v2 origin attestation. Older listings remain readable but are not eligible for
+// specific-uploader automatic media trust, because their author label was only CRDT metadata.
+const F_SIGNER_KEY: &str = "signer_key";
+const F_SIGNATURE: &str = "signature";
+const FILE_ENTRY_ATTEST_DOMAIN: &[u8] = b"catcoms/file-entry-attestation/v1";
 // Circulation expiry for THIS listing (see [`FileExpiry`]): absent = never recorded (a listing
 // written before expiry existed), an explicit `null` = keep forever, an integer = the absolute
 // ms-epoch deadline. Additive: a reader that predates the field ignores it, and a listing
@@ -2219,6 +2224,16 @@ impl FileExpiry {
 /// transport limit. (GB-scale + background/streaming download is a follow-up.)
 pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 
+/// Maximum number of file-index rows this implementation publishes or materializes. A current
+/// malicious member can still append CRDT rows, but rows beyond this deterministic boundary do
+/// not trigger unbounded manifest parsing or Ed25519 verification on every file-list refresh.
+pub const MAX_FILE_ENTRIES: usize = 256;
+const MAX_FILE_NAME_BYTES: usize = 255;
+const MAX_FILE_AUTHOR_BYTES: usize = 128;
+const MAX_FILE_PATH_BYTES: usize = 2048;
+const MAX_FILE_MIME_BYTES: usize = 255;
+const MAX_FILE_REF_BYTES: usize = 64 * 1024;
+
 /// Plaintext chunk size for large-file transfer. Chosen well under the blob-fetch response cap
 /// (`MAX_BLOB_RESPONSE` = 16 MiB) so each *sealed* chunk (≈ chunk + ~44 B) fits one response.
 ///
@@ -2251,7 +2266,8 @@ pub struct FileRange {
 
 /// One shared file as the UI sees it. `cid` is the **whole-file plaintext** content address (raw
 /// bytes); the file's stable identity / download+embed handle (a chunked file has no single
-/// ciphertext blob); `author` is the uploader's device fingerprint. The file's bytes are
+/// ciphertext blob); `author` is the uploader's short display fingerprint, while
+/// `author_identity` is the full device identity used for authorization. The file's bytes are
 /// end-to-end encrypted under the group file-wrap key (Phase 9h), chunk by chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
@@ -2265,6 +2281,12 @@ pub struct FileEntry {
     pub cid: Vec<u8>,
     /// The uploader's device fingerprint.
     pub author: String,
+    /// Full content-addressed device identity of the valid attestation signer, or empty for a
+    /// legacy/invalid listing. Never authorize with the 32-bit display fingerprint above.
+    pub author_identity: String,
+    /// Whether the signer is bound to this exact group/name/path/file reference and its short
+    /// display fingerprint matches `author`.
+    pub author_verified: bool,
     /// A virtual folder path for organisation (`""` = root). Embeds live under
     /// `embed/<fp>`, wiki media under `wiki/<page>`, custom emoji under `emoji` (10c–10f).
     pub path: String,
@@ -2339,6 +2361,41 @@ fn normalize_path(path: &str) -> String {
         .join("/")
 }
 
+fn push_attested_part(out: &mut Vec<u8>, part: &[u8]) {
+    out.extend_from_slice(&(part.len() as u64).to_be_bytes());
+    out.extend_from_slice(part);
+}
+
+/// Canonical, group-bound statement proving which device created one exact file listing.
+fn file_entry_attestation_payload(
+    group_id: &[u8],
+    name: &str,
+    author: &str,
+    path: &str,
+    file_ref: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        FILE_ENTRY_ATTEST_DOMAIN.len()
+            + group_id.len()
+            + name.len()
+            + author.len()
+            + path.len()
+            + file_ref.len()
+            + 5 * 8,
+    );
+    out.extend_from_slice(FILE_ENTRY_ATTEST_DOMAIN);
+    for part in [
+        group_id,
+        name.as_bytes(),
+        author.as_bytes(),
+        path.as_bytes(),
+        file_ref,
+    ] {
+        push_attested_part(&mut out, part);
+    }
+    out
+}
+
 /// Append a file entry (name + author + folder path + encoded `FileRef` + circulation expiry)
 /// to the index doc.
 fn write_file_entry(
@@ -2348,6 +2405,7 @@ fn write_file_entry(
     path: &str,
     file_ref: &[u8],
     expires: FileExpiry,
+    attestation: Option<(&[u8], &[u8])>,
 ) -> Result<(), AutomergeError> {
     let list = match doc.get(ROOT, FILES)? {
         Some((Value::Object(ObjType::List), id)) => id,
@@ -2359,6 +2417,14 @@ fn write_file_entry(
     doc.put(&entry, F_AUTHOR, author)?;
     doc.put(&entry, F_PATH, path)?;
     doc.put(&entry, F_REF, ScalarValue::Bytes(file_ref.to_vec()))?;
+    if let Some((public_key, signature)) = attestation {
+        doc.put(
+            &entry,
+            F_SIGNER_KEY,
+            ScalarValue::Bytes(public_key.to_vec()),
+        )?;
+        doc.put(&entry, F_SIGNATURE, ScalarValue::Bytes(signature.to_vec()))?;
+    }
     put_expiry(doc, &entry, expires)?;
     Ok(())
 }
@@ -2396,24 +2462,97 @@ fn expiry_field(doc: &AutoCommit, obj: &ObjId) -> FileExpiry {
     }
 }
 
+/// Read a string without cloning a hostile oversized scalar out of the Automerge document.
+/// Absent/wrong-type fields retain the legacy empty-string behavior; oversized fields reject the
+/// row because they would make repeated materialization unbounded.
+fn bounded_file_string(doc: &AutoCommit, obj: &ObjId, key: &str, max: usize) -> Option<String> {
+    match doc.get(obj, key) {
+        Ok(Some((Value::Scalar(value), _))) => match value.as_ref() {
+            ScalarValue::Str(text) if text.len() <= max => Some(text.to_string()),
+            ScalarValue::Str(_) => None,
+            _ => Some(String::new()),
+        },
+        _ => Some(String::new()),
+    }
+}
+
+/// Read bytes only after checking their borrowed length, avoiding an attacker-sized clone.
+fn bounded_file_bytes(doc: &AutoCommit, obj: &ObjId, key: &str, max: usize) -> Option<Vec<u8>> {
+    match doc.get(obj, key) {
+        Ok(Some((Value::Scalar(value), _))) => match value.as_ref() {
+            ScalarValue::Bytes(bytes) if bytes.len() <= max => Some(bytes.clone()),
+            ScalarValue::Bytes(_) => None,
+            _ => Some(Vec::new()),
+        },
+        _ => Some(Vec::new()),
+    }
+}
+
 /// Materialize the file index document into the UI's file list (size/mime/cid come from the
 /// decoded `FileRef`; entries with a malformed ref are skipped).
-fn read_file_entries(doc: &AutoCommit) -> Vec<FileEntry> {
+fn read_file_entries(doc: &AutoCommit, group_id: &[u8]) -> Vec<FileEntry> {
     let mut out = Vec::new();
     if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, FILES) {
-        for i in 0..doc.length(&list) {
+        for i in 0..doc.length(&list).min(MAX_FILE_ENTRIES) {
             if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&list, i) {
-                let ref_bytes = bytes_field(doc, &entry, F_REF);
+                let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES)
+                else {
+                    continue;
+                };
                 if let Ok(manifest) = FileManifest::decode_or_legacy(&ref_bytes) {
+                    if manifest.mime.len() > MAX_FILE_MIME_BYTES {
+                        continue;
+                    }
+                    let Some(name) = bounded_file_string(doc, &entry, F_NAME, MAX_FILE_NAME_BYTES)
+                    else {
+                        continue;
+                    };
+                    let Some(author) =
+                        bounded_file_string(doc, &entry, F_AUTHOR, MAX_FILE_AUTHOR_BYTES)
+                    else {
+                        continue;
+                    };
+                    let Some(path) = bounded_file_string(doc, &entry, F_PATH, MAX_FILE_PATH_BYTES)
+                    else {
+                        continue;
+                    };
+                    let public_key = bounded_file_bytes(doc, &entry, F_SIGNER_KEY, 32)
+                        .filter(|bytes| bytes.len() == 32)
+                        .unwrap_or_default();
+                    let signature = bounded_file_bytes(doc, &entry, F_SIGNATURE, 64)
+                        .filter(|bytes| bytes.len() == 64)
+                        .unwrap_or_default();
+                    let signer_id = DeviceId::from_public_key_bytes(&public_key);
+                    let author_verified = public_key.len() == 32
+                        && signature.len() == 64
+                        && fingerprint(&signer_id) == author
+                        && signature
+                            .as_slice()
+                            .try_into()
+                            .is_ok_and(|signature: &[u8; 64]| {
+                                verify_with_public_bytes(
+                                    &public_key,
+                                    &file_entry_attestation_payload(
+                                        group_id, &name, &author, &path, &ref_bytes,
+                                    ),
+                                    signature,
+                                )
+                            });
                     out.push(FileEntry {
-                        name: str_field(doc, &entry, F_NAME),
-                        author: str_field(doc, &entry, F_AUTHOR),
+                        name,
+                        author,
+                        author_identity: if author_verified {
+                            hex::encode(signer_id.as_bytes())
+                        } else {
+                            String::new()
+                        },
+                        author_verified,
                         size: manifest.total_size,
                         mime: manifest.mime.clone(),
                         // The file's identity is the whole-file PLAINTEXT cid (a chunked file has
                         // no single ciphertext blob); this is the download/embed handle.
                         cid: manifest.plaintext_cid.as_bytes().to_vec(),
-                        path: str_field(doc, &entry, F_PATH),
+                        path,
                         file_ref: ref_bytes,
                         expires: expiry_field(doc, &entry),
                     });
@@ -2422,6 +2561,13 @@ fn read_file_entries(doc: &AutoCommit) -> Vec<FileEntry> {
         }
     }
     out
+}
+
+fn raw_file_index_row_count(doc: &AutoCommit) -> usize {
+    match doc.get(ROOT, FILES) {
+        Ok(Some((Value::Object(ObjType::List), list))) => doc.length(&list),
+        _ => 0,
+    }
 }
 
 /// Remove the index entries whose whole-file plaintext CID matches `cid` (a no-op if none do),
@@ -2441,12 +2587,17 @@ fn delete_file_entry(
         Some((Value::Object(ObjType::List), id)) => id,
         _ => return Ok(()),
     };
-    for i in (0..doc.length(&list)).rev() {
+    for i in (0..doc.length(&list).min(MAX_FILE_ENTRIES)).rev() {
         if let Some((Value::Object(ObjType::Map), entry)) = doc.get(&list, i)? {
-            let ref_bytes = bytes_field(doc, &entry, F_REF);
+            let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES) else {
+                continue;
+            };
             if let Ok(manifest) = FileManifest::decode_or_legacy(&ref_bytes) {
-                let folder_matches =
-                    folder.is_none_or(|f| str_field(doc, &entry, F_PATH).as_str() == f);
+                let Some(path) = bounded_file_string(doc, &entry, F_PATH, MAX_FILE_PATH_BYTES)
+                else {
+                    continue;
+                };
+                let folder_matches = folder.is_none_or(|expected| path == expected);
                 if manifest.plaintext_cid.as_bytes() == cid && folder_matches {
                     doc.delete(&list, i)?;
                 }
@@ -2470,13 +2621,17 @@ fn set_file_entry_expiry(
         Some((Value::Object(ObjType::List), id)) => id,
         _ => return Ok(()),
     };
-    for i in 0..doc.length(&list) {
+    for i in 0..doc.length(&list).min(MAX_FILE_ENTRIES) {
         if let Some((Value::Object(ObjType::Map), entry)) = doc.get(&list, i)? {
-            let ref_bytes = bytes_field(doc, &entry, F_REF);
+            let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES) else {
+                continue;
+            };
             if let Ok(manifest) = FileManifest::decode_or_legacy(&ref_bytes) {
-                if manifest.plaintext_cid.as_bytes() == cid
-                    && str_field(doc, &entry, F_PATH).as_str() == folder
-                {
+                let Some(path) = bounded_file_string(doc, &entry, F_PATH, MAX_FILE_PATH_BYTES)
+                else {
+                    continue;
+                };
+                if manifest.plaintext_cid.as_bytes() == cid && path == folder {
                     put_expiry(doc, &entry, expires)?;
                 }
             }
@@ -2615,13 +2770,14 @@ pub struct DeliveryState {
     pub any_peer: bool,
 }
 
-/// A UI-facing view of one member: a short device-id **fingerprint** (display names are
-/// not shared on the wire yet, so the roster identifies members by their content-
-/// addressed device id) and whether it is **this** device.
+/// A UI-facing view of one member: a short device-id **fingerprint** for display, the full
+/// content-addressed identity for authorization, and whether it is **this** device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberView {
     /// Short hex fingerprint of the member's device id (first 4 bytes).
     pub fingerprint: String,
+    /// Full device id. This is the value security-sensitive local policy must retain and compare.
+    pub identity: String,
     /// Whether this is the local device.
     pub is_self: bool,
 }
@@ -3519,6 +3675,37 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// gets its **own fresh** deadline rather than inheriting the twin's; re-sharing the same
     /// bytes under a new name is a new act of sharing. Nothing enforces the deadline yet; see
     /// [`FileExpiry`].
+    /// Sign the exact listing fields that a local trust policy later treats as uploader identity.
+    /// The replicated op already authenticates who posted a CRDT change, but its materialized
+    /// `author` scalar could otherwise be rewritten independently by a modified client.
+    fn file_entry_attestation(
+        &self,
+        name: &str,
+        author: &str,
+        path: &str,
+        file_ref: &[u8],
+    ) -> Result<(Vec<u8>, [u8; 64]), AppError> {
+        if name.len() > MAX_FILE_NAME_BYTES
+            || author.len() > MAX_FILE_AUTHOR_BYTES
+            || path.len() > MAX_FILE_PATH_BYTES
+            || file_ref.len() > MAX_FILE_REF_BYTES
+        {
+            return Err(AppError::Invalid(
+                "file listing metadata is too large".into(),
+            ));
+        }
+        let public_key = self.sync.my_public_key();
+        if fingerprint(&DeviceId::from_public_key_bytes(&public_key)) != author {
+            return Err(AppError::Invalid(
+                "local file author does not match this device key".into(),
+            ));
+        }
+        let payload =
+            file_entry_attestation_payload(&self.sync.group_id(), name, author, path, file_ref);
+        let signature = self.sync.sign_blob(&payload)?;
+        Ok((public_key, signature))
+    }
+
     pub async fn add_file(
         &mut self,
         name: &str,
@@ -3560,9 +3747,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // file's identity is its whole-file plaintext cid.
         let author = self.my_fingerprint();
         let folder = normalize_path(path);
+        if name.len() > MAX_FILE_NAME_BYTES
+            || mime.len() > MAX_FILE_MIME_BYTES
+            || folder.len() > MAX_FILE_PATH_BYTES
+        {
+            return Err(AppError::Invalid(
+                "file listing metadata is too large".into(),
+            ));
+        }
         // Clock-injected (never ambient): the default one-month circulation deadline.
         let expires = FileExpiry::At(self.sync.now_ms().saturating_add(FILE_EXPIRY_DEFAULT_MS));
         let plaintext_cid = Cid::of(bytes);
+        let index_rows = self.file_index_row_count();
         // Dedup on the plaintext cid against the live index (a deleted entry is removed from the
         // list, so only still-shared files match; re-storing after a delete is harmless anyway).
         let listed = self.files();
@@ -3580,18 +3776,38 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 }
                 return Ok(plaintext_cid); // already shared under this exact name + folder
             }
+            if index_rows >= MAX_FILE_ENTRIES {
+                return Err(AppError::Invalid(format!(
+                    "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
+                )));
+            }
             // Same content, new name/folder: list it again against the SAME sealed blobs; but
             // with its own fresh deadline, not the twin's.
             let ref_bytes = twin.file_ref.clone();
+            let (public_key, signature) =
+                self.file_entry_attestation(name, &author, &folder, &ref_bytes)?;
             self.sync
                 .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                    write_file_entry(d, name, &author, &folder, &ref_bytes, expires)
+                    write_file_entry(
+                        d,
+                        name,
+                        &author,
+                        &folder,
+                        &ref_bytes,
+                        expires,
+                        Some((&public_key, &signature)),
+                    )
                 })
                 .await?;
             if let Some(p) = progress {
                 let _ = p.send((1, 1)).await;
             }
             return Ok(plaintext_cid);
+        }
+        if index_rows >= MAX_FILE_ENTRIES {
+            return Err(AppError::Invalid(format!(
+                "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
+            )));
         }
         let chunk_count = bytes.len().max(1).div_ceil(CHUNK_BYTES);
         let total_steps = chunk_count + 1; // the final step publishes the index entry
@@ -3703,8 +3919,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let author = self.my_fingerprint();
         let folder = normalize_path(path);
+        if name.len() > MAX_FILE_NAME_BYTES
+            || mime.len() > MAX_FILE_MIME_BYTES
+            || folder.len() > MAX_FILE_PATH_BYTES
+        {
+            self.discard_upload_chunks(&chunks);
+            return Err(AppError::Invalid(
+                "file listing metadata is too large".into(),
+            ));
+        }
         // Clock-injected (never ambient): the default one-month circulation deadline.
         let expires = FileExpiry::At(self.sync.now_ms().saturating_add(FILE_EXPIRY_DEFAULT_MS));
+        let index_rows = self.file_index_row_count();
         let listed = self.files();
         let twin = listed
             .iter()
@@ -3722,14 +3948,35 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             if already_here {
                 return Ok(plaintext_cid); // already shared under this exact name + folder
             }
+            if index_rows >= MAX_FILE_ENTRIES {
+                return Err(AppError::Invalid(format!(
+                    "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
+                )));
+            }
             // Same content, new name/folder: list it again against the SAME sealed blobs; but
             // with its own fresh deadline, not the twin's.
+            let (public_key, signature) =
+                self.file_entry_attestation(name, &author, &folder, &twin_ref)?;
             self.sync
                 .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                    write_file_entry(d, name, &author, &folder, &twin_ref, expires)
+                    write_file_entry(
+                        d,
+                        name,
+                        &author,
+                        &folder,
+                        &twin_ref,
+                        expires,
+                        Some((&public_key, &signature)),
+                    )
                 })
                 .await?;
             return Ok(plaintext_cid);
+        }
+        if index_rows >= MAX_FILE_ENTRIES {
+            self.discard_upload_chunks(&chunks);
+            return Err(AppError::Invalid(format!(
+                "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
+            )));
         }
         let manifest = FileManifest {
             plaintext_cid,
@@ -3752,9 +3999,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             self.sync.promote_staged_blob(&chunk.ciphertext_cid)?;
         }
         let ref_bytes = manifest.encode();
+        let (public_key, signature) =
+            self.file_entry_attestation(name, &author, &folder, &ref_bytes)?;
         self.sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                write_file_entry(d, name, &author, &folder, &ref_bytes, expires)
+                write_file_entry(
+                    d,
+                    name,
+                    &author,
+                    &folder,
+                    &ref_bytes,
+                    expires,
+                    Some((&public_key, &signature)),
+                )
             })
             .await?;
         Ok(plaintext_cid)
@@ -3794,9 +4051,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// The shared files listed in the index (metadata only; bytes are fetched on download).
     pub fn files(&self) -> Vec<FileEntry> {
+        let group_id = self.sync.group_id();
         self.sync
             .doc(DocType::FileIndex, FILE_INDEX_DOC)
-            .map(|d| read_file_entries(d.doc()))
+            .map(|d| read_file_entries(d.doc(), &group_id))
+            .unwrap_or_default()
+    }
+
+    /// Raw replicated row count, including malformed rows that fail materialization. Publication
+    /// must use this rather than `files().len()`: otherwise hostile invalid rows can push a newly
+    /// published honest entry beyond the reader cap and make a successful upload invisible.
+    fn file_index_row_count(&self) -> usize {
+        self.sync
+            .doc(DocType::FileIndex, FILE_INDEX_DOC)
+            .map(|encrypted| raw_file_index_row_count(encrypted.doc()))
             .unwrap_or_default()
     }
 
@@ -6324,6 +6592,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .into_iter()
             .map(|id| MemberView {
                 fingerprint: fingerprint(&id),
+                identity: hex::encode(id.as_bytes()),
                 is_self: id == me,
             })
             .collect()
@@ -11019,6 +11288,10 @@ mod tests {
             .unwrap();
 
         let entry = alice.files().remove(0);
+        assert!(
+            entry.author_verified,
+            "new listings bind their origin device"
+        );
         assert_eq!(
             entry.expires,
             FileExpiry::At(T0 + FILE_EXPIRY_DEFAULT_MS),
@@ -11057,6 +11330,7 @@ mod tests {
                     "docs",
                     &legacy_ref,
                     FileExpiry::Unrecorded,
+                    None,
                 )
             })
             .await
@@ -11072,11 +11346,264 @@ mod tests {
         // content is still downloadable through the legacy listing.
         assert_eq!(legacy.path, "docs");
         assert_eq!(legacy.author, author);
+        assert!(
+            !legacy.author_verified,
+            "legacy author labels are not cryptographic proof"
+        );
         assert_eq!(legacy.cid, cid.as_bytes().to_vec());
         assert_eq!(alice.download_file(&cid).await.unwrap(), b"hello".to_vec());
         // The modern entry alongside it is unaffected.
         let modern = files.iter().find(|e| e.name == "doc.txt").unwrap();
         assert_eq!(modern.expires, FileExpiry::At(T0 + FILE_EXPIRY_DEFAULT_MS));
+        assert!(modern.author_verified);
+    }
+
+    #[tokio::test]
+    async fn a_file_origin_attestation_rejects_relabelled_metadata() {
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_with_clock(&clock);
+        alice.open_files().await.unwrap();
+        alice
+            .add_file("safe.png", "image/png", "embed", b"image bytes")
+            .await
+            .unwrap();
+        let original = alice.files().remove(0);
+        let (public_key, signature) = alice
+            .file_entry_attestation(
+                &original.name,
+                &original.author,
+                &original.path,
+                &original.file_ref,
+            )
+            .unwrap();
+        let group_id = alice.sync.group_id();
+        let canonical = file_entry_attestation_payload(
+            &group_id,
+            &original.name,
+            &original.author,
+            &original.path,
+            &original.file_ref,
+        );
+        assert!(verify_with_public_bytes(
+            &public_key,
+            &canonical,
+            &signature
+        ));
+        let mut changed_ref = original.file_ref.clone();
+        changed_ref.push(0);
+        for (field, payload) in [
+            (
+                "group",
+                file_entry_attestation_payload(
+                    b"another group",
+                    &original.name,
+                    &original.author,
+                    &original.path,
+                    &original.file_ref,
+                ),
+            ),
+            (
+                "name",
+                file_entry_attestation_payload(
+                    &group_id,
+                    "renamed.png",
+                    &original.author,
+                    &original.path,
+                    &original.file_ref,
+                ),
+            ),
+            (
+                "author",
+                file_entry_attestation_payload(
+                    &group_id,
+                    &original.name,
+                    "ffffffff",
+                    &original.path,
+                    &original.file_ref,
+                ),
+            ),
+            (
+                "path",
+                file_entry_attestation_payload(
+                    &group_id,
+                    &original.name,
+                    &original.author,
+                    "another-folder",
+                    &original.file_ref,
+                ),
+            ),
+            (
+                "file reference",
+                file_entry_attestation_payload(
+                    &group_id,
+                    &original.name,
+                    &original.author,
+                    &original.path,
+                    &changed_ref,
+                ),
+            ),
+        ] {
+            assert!(
+                !verify_with_public_bytes(&public_key, &payload, &signature),
+                "changing {field} must invalidate the listing attestation"
+            );
+        }
+        let mut changed_key = public_key.clone();
+        changed_key[0] ^= 1;
+        assert!(!verify_with_public_bytes(
+            &changed_key,
+            &canonical,
+            &signature
+        ));
+        let mut changed_signature = signature;
+        changed_signature[0] ^= 1;
+        assert!(!verify_with_public_bytes(
+            &public_key,
+            &canonical,
+            &changed_signature
+        ));
+        let author = original.author.clone();
+        let file_ref = original.file_ref.clone();
+        alice
+            .sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                // A modified client copied a valid attestation but changed the displayed name.
+                write_file_entry(
+                    d,
+                    "malicious.png",
+                    &author,
+                    "embed",
+                    &file_ref,
+                    FileExpiry::Never,
+                    Some((&public_key, &signature)),
+                )
+            })
+            .await
+            .unwrap();
+
+        let tampered = alice
+            .files()
+            .into_iter()
+            .find(|entry| entry.name == "malicious.png")
+            .unwrap();
+        assert!(!tampered.author_verified);
+    }
+
+    #[tokio::test]
+    async fn file_index_materialization_and_publication_capacity_are_deterministically_bounded() {
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_with_clock(&clock);
+        alice.open_files().await.unwrap();
+        alice
+            .add_file("safe.png", "image/png", "embed", b"image bytes")
+            .await
+            .unwrap();
+        let original = alice.files().remove(0);
+        let (public_key, signature) = alice
+            .file_entry_attestation(
+                &original.name,
+                &original.author,
+                &original.path,
+                &original.file_ref,
+            )
+            .unwrap();
+        let group_id = alice.sync.group_id();
+
+        let mut hostile = AutoCommit::new();
+        for _ in 0..(MAX_FILE_ENTRIES + 7) {
+            write_file_entry(
+                &mut hostile,
+                &original.name,
+                &original.author,
+                &original.path,
+                &original.file_ref,
+                FileExpiry::Never,
+                Some((&public_key, &signature)),
+            )
+            .unwrap();
+        }
+        assert_eq!(raw_file_index_row_count(&hostile), MAX_FILE_ENTRIES + 7);
+        let materialized = read_file_entries(&hostile, &group_id);
+        assert_eq!(materialized.len(), MAX_FILE_ENTRIES);
+        assert!(materialized.iter().all(|entry| entry.author_verified));
+
+        let mut malformed = AutoCommit::new();
+        let list = malformed.put_object(ROOT, FILES, ObjType::List).unwrap();
+        for i in 0..MAX_FILE_ENTRIES {
+            malformed.insert_object(&list, i, ObjType::Map).unwrap();
+        }
+        assert_eq!(raw_file_index_row_count(&malformed), MAX_FILE_ENTRIES);
+        assert!(read_file_entries(&malformed, &group_id).is_empty());
+    }
+
+    #[test]
+    fn file_index_mutations_never_scan_or_change_the_unbounded_tail() {
+        let bytes = b"bounded mutation";
+        let (chunk, _) = catcoms_storage::seal_file(
+            bytes,
+            "text/plain",
+            &[9u8; 32],
+            &mut ChaCha20Rng::seed_from_u64(88),
+        )
+        .unwrap();
+        let manifest = FileManifest {
+            plaintext_cid: Cid::of(bytes),
+            total_size: bytes.len() as u64,
+            mime: "text/plain".into(),
+            chunks: vec![chunk],
+        };
+        manifest.validate_layout().unwrap();
+        let file_ref = manifest.encode();
+        let cid = manifest.plaintext_cid;
+        let mut doc = AutoCommit::new();
+        for _ in 0..(MAX_FILE_ENTRIES + 7) {
+            write_file_entry(
+                &mut doc,
+                "bounded.txt",
+                "author",
+                "docs",
+                &file_ref,
+                FileExpiry::Never,
+                None,
+            )
+            .unwrap();
+        }
+
+        set_file_entry_expiry(&mut doc, cid.as_bytes(), "docs", FileExpiry::At(T0 + 1)).unwrap();
+        let (_, list) = doc.get(ROOT, FILES).unwrap().unwrap();
+        for index in 0..MAX_FILE_ENTRIES {
+            let (_, entry) = doc.get(&list, index).unwrap().unwrap();
+            assert_eq!(expiry_field(&doc, &entry), FileExpiry::At(T0 + 1));
+        }
+        for index in MAX_FILE_ENTRIES..(MAX_FILE_ENTRIES + 7) {
+            let (_, entry) = doc.get(&list, index).unwrap().unwrap();
+            assert_eq!(expiry_field(&doc, &entry), FileExpiry::Never);
+        }
+
+        delete_file_entry(&mut doc, cid.as_bytes(), Some("docs")).unwrap();
+        assert_eq!(raw_file_index_row_count(&doc), 7);
+        let (_, list) = doc.get(ROOT, FILES).unwrap().unwrap();
+        for index in 0..7 {
+            let (_, entry) = doc.get(&list, index).unwrap().unwrap();
+            assert_eq!(expiry_field(&doc, &entry), FileExpiry::Never);
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_file_listing_fields_fail_closed() {
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_with_clock(&clock);
+        alice.open_files().await.unwrap();
+        let oversized_name = "n".repeat(MAX_FILE_NAME_BYTES + 1);
+        assert!(alice
+            .add_file(&oversized_name, "image/png", "embed", b"bytes")
+            .await
+            .is_err());
+        assert_eq!(
+            alice.clear_staged_uploads(),
+            0,
+            "bounds are checked before sealing"
+        );
     }
 
     #[tokio::test]

@@ -7812,15 +7812,30 @@ button.stage-leave:hover {
 
 /* Device pickers: two compact rows; OUT is absent where setSinkId is. */
 .stage-devs {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
+  align-items: center;
   gap: 6px;
 }
 .stage-dev {
+  flex: 1 1 0;
   display: flex;
   align-items: center;
   gap: 5px;
   min-width: 0;
+}
+.stage-stream-cog {
+  flex: 0 0 30px;
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  border-color: var(--border);
+}
+.stage-stream-cog.on {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent);
 }
 .stage-dev select {
   flex: 1;
@@ -8486,9 +8501,9 @@ button.focus-leave:hover {
   border-top: none;
 }
 
-/* Seven actions now share the stage's self row, so the grid and its labels both tighten. */
+/* The stream cog moved beside IN/OUT, leaving the six call actions in the self row. */
 .stage-acts {
-  grid-template-columns: repeat(7, 1fr);
+  grid-template-columns: repeat(6, 1fr);
 }
 .stage-acts .stage-act-lbl {
   font-size: 0.52rem;
@@ -8517,6 +8532,7 @@ button.focus-leave:hover {
 }
 .stream-panel-head { justify-content: space-between; }
 .stream-panel-head strong { color: var(--text); font-size: 0.75rem; }
+.stream-global-note { margin: 0; }
 .stream-fields {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -8562,6 +8578,124 @@ button.focus-leave:hover {
   border-color: var(--accent);
   background: var(--accent-dim);
   color: var(--accent);
+}
+.stream-audio-sources {
+  display: grid;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-0);
+}
+.stream-audio-sources p { margin: 0; }
+.stream-source-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.stream-source-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.stream-source-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  font-size: 0.67rem;
+}
+.stream-source-list li span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stream-open-global { align-self: flex-start; }
+.set-section .stream-panel {
+  max-width: 760px;
+  background: var(--bg-0);
+}
+
+.file-trust-onboarding {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+}
+.file-trust-onboarding legend {
+  padding: 0 4px;
+  color: var(--text-2);
+  font-size: 0.75rem;
+}
+.file-trust-onboarding > label {
+  display: flex;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  cursor: pointer;
+}
+.file-trust-onboarding > label.selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.file-trust-onboarding > label span,
+.file-trust-modes button,
+.file-trust-members label span {
+  display: grid;
+  gap: 3px;
+  text-align: left;
+}
+.file-trust-onboarding small,
+.file-trust-modes small,
+.file-trust-members small {
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 400;
+}
+.file-trust-onboarding > p { grid-column: 1 / -1; margin: 0; }
+.file-trust-modes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 7px;
+}
+.file-trust-modes button {
+  padding: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-2);
+}
+.file-trust-modes button.active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.file-trust-members {
+  display: grid;
+  gap: 5px;
+  padding: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+}
+.file-trust-members label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 760px) {
+  .file-trust-onboarding,
+  .file-trust-modes { grid-template-columns: 1fr; }
+  .file-trust-onboarding > p { grid-column: 1; }
 }
 .stream-summary {
   display: grid;

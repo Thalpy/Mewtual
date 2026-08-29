@@ -4,14 +4,61 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_STREAM_SETTINGS,
+  captureResolutionKnownAfterConstraint,
   PeerVideoBudgetController,
   estimatedMeshMbps,
   nearestStreamHeight,
+  parseStreamSettings,
   peerStreamPlan,
   preferEfficientVideoCodecs,
   receivingHeightForViewport,
   recommendedStreamMbps,
+  shouldClearScreenAudioOnModeChange,
 } from "./streaming.ts";
+
+test("stream presets have visible safe defaults and sanitize persisted values", () => {
+  assert.deepEqual(parseStreamSettings(null), DEFAULT_STREAM_SETTINGS);
+  assert.deepEqual(parseStreamSettings({
+    resolution: 2160,
+    frameRate: 60,
+    quality: "motion",
+    mbpsPerPeer: 500,
+    audioMode: "separate",
+  }), {
+    resolution: 2160,
+    frameRate: 60,
+    quality: "motion",
+    mbpsPerPeer: 50,
+    audioMode: "separate",
+  });
+  assert.deepEqual(parseStreamSettings({
+    resolution: 123,
+    frameRate: 99,
+    quality: "maximum",
+    mbpsPerPeer: Number.NaN,
+    audioMode: "system",
+  }), DEFAULT_STREAM_SETTINGS);
+  for (const mbpsPerPeer of [null, "", false, true]) {
+    assert.equal(
+      parseStreamSettings({ mbpsPerPeer }).mbpsPerPeer,
+      DEFAULT_STREAM_SETTINGS.mbpsPerPeer,
+      `non-number ${JSON.stringify(mbpsPerPeer)} must not become the minimum cap`,
+    );
+  }
+});
+
+test("changing audio capture interpretation revokes old source grants", () => {
+  assert.equal(shouldClearScreenAudioOnModeChange("surface", "separate"), true);
+  assert.equal(shouldClearScreenAudioOnModeChange("separate", "surface"), true);
+  assert.equal(shouldClearScreenAudioOnModeChange("separate", "none"), true);
+  assert.equal(shouldClearScreenAudioOnModeChange("separate", "separate"), false);
+});
+
+test("a rejected capture constraint fails closed when source dimensions are unknown", () => {
+  assert.equal(captureResolutionKnownAfterConstraint(true, undefined), false);
+  assert.equal(captureResolutionKnownAfterConstraint(true, 2160), true);
+  assert.equal(captureResolutionKnownAfterConstraint(false, undefined), true);
+});
 
 test("receiver surfaces round to the nearest supported resolution", () => {
   assert.equal(nearestStreamHeight(719), 720);

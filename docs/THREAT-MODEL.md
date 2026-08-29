@@ -156,18 +156,32 @@ table with the commit that closed it.
   H.265 and other efficient codecs remain runtime-negotiated capabilities, not security
   guarantees. WebRTC encryption protects media in transit, while endpoint capture, decoding and
   the who-is-watching/timing/bitrate metadata remain trusted-endpoint and traffic-analysis risks.
+  Shared audio is off by default. Surface audio is whatever the platform chooser grants and can
+  accidentally include Mewtual's own playback; separate sources require a fresh chooser grant per
+  source/session, discard the picked picture, and mix only their audio into one WebRTC track. The
+  WebView/OS decides whether window/application audio is available, so this is not an OBS-equivalent
+  native process-capture guarantee.
 - **A shared file is authenticated bytes, not trusted content.** Explicit save streams into a
   non-overwriting `.part`, checks the declared size and whole-file content address, sanitizes the
   peer-provided name to one leaf, atomically publishes only after verification, and reveals it in
   the file manager without executing it or invoking a shell. This blocks path/argument injection,
   overwrite races, corrupt-provider substitution and automatic execution; it does **not** make the
   payload benign or protect an external application the user later opens it with from its own
-  parser vulnerabilities. Inline image/video/audio currently loads through a CSP-limited,
-  `nosniff`, range-bounded custom scheme but is still parsed by the platform WebView/media stack.
-  Per-server/per-uploader trust gating is not implemented, so malicious-media decoder risk remains
-  for automatically rendered embeds. A future trust policy must default to on-demand, make an
-  explicit Download override every policy, and keep automatic local mirroring bounded by storage
-  and bandwidth controls.
+  parser vulnerabilities. Inline image/video/audio loads through a CSP-limited, `nosniff`,
+  range-bounded custom scheme but is still parsed by the platform WebView/media stack. Before a
+  server is founded/joined, the user chooses local on-demand, specific-member, or everyone trust;
+  the bounded per-server policy is vault-sealed. On-demand is the default. It leaves passive shared
+  media, custom emoji, card thumbnails, event images and call-jukebox tracks inert;
+  specific-member trust checks the file's authenticated full device identity. The short 32-bit
+  fingerprint remains display-only. An explicit Load/Play/Open/Download click overrides the
+  passive-fetch policy. Bytes fetched into the blob store occupy one authenticated,
+  XChaCha20-Poly1305-sealed vault copy; explicit export creates a separate plaintext Downloads copy.
+  This reduces unsolicited decoder exposure but does **not** sandbox a decoder or make a trusted
+  member's file benign. Automatic whole-share mirroring remains unimplemented because the sealing
+  disk store has no quota; enabling it first would permit storage exhaustion even by an opted-in
+  trusted member.
+  Third-party HTTP(S) images always require a click, even under everyone mode: they have no file
+  attestation, disclose the client address, and may target loopback/private-network services.
 - **A sealed local reconnect route is a narrow continuation of a completed direct join, not LAN
   discovery or durable presence.** After direct admission, the joining installation may seal at
   most two literal-IP TCP/QUIC routes to the named inviter that were actually used by an outbound

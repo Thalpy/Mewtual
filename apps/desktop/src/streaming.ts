@@ -3,6 +3,11 @@ export const STREAM_HEIGHTS = [720, 1080, 1440, 2160] as const;
 export type StreamHeight = (typeof STREAM_HEIGHTS)[number];
 export type StreamFrameRate = 15 | 24 | 30 | 60;
 export type StreamQuality = "motion" | "balanced" | "detail";
+/**
+ * How a screen share obtains audio. Source grants themselves are intentionally never persisted:
+ * the Screen Capture API requires a fresh, visible user choice for every capture session.
+ */
+export type StreamAudioMode = "none" | "surface" | "separate";
 
 export type StreamSettings = {
   resolution: StreamHeight;
@@ -10,6 +15,8 @@ export type StreamSettings = {
   quality: StreamQuality;
   /** Maximum upload budget for a full-resolution viewer, in megabits per second. */
   mbpsPerPeer: number;
+  /** Whether the share is silent, uses its selected surface, or accepts separate picked sources. */
+  audioMode: StreamAudioMode;
 };
 
 export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
@@ -17,7 +24,47 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   frameRate: 30,
   quality: "balanced",
   mbpsPerPeer: 6,
+  audioMode: "none",
 };
+
+/** Parse the installation-wide persisted preset without allowing stale/invalid values into UI. */
+export function parseStreamSettings(value: unknown): StreamSettings {
+  const parsed = value && typeof value === "object" ? value as Partial<StreamSettings> : {};
+  const resolution = isStreamHeight(parsed.resolution)
+    ? parsed.resolution
+    : DEFAULT_STREAM_SETTINGS.resolution;
+  const rawFrameRate = Number(parsed.frameRate);
+  const frameRate = rawFrameRate === 15 || rawFrameRate === 24 || rawFrameRate === 30 || rawFrameRate === 60
+    ? rawFrameRate
+    : DEFAULT_STREAM_SETTINGS.frameRate;
+  const quality = parsed.quality === "motion" || parsed.quality === "balanced" || parsed.quality === "detail"
+    ? parsed.quality
+    : DEFAULT_STREAM_SETTINGS.quality;
+  const rawMbps = parsed.mbpsPerPeer;
+  const mbpsPerPeer = typeof rawMbps === "number" && Number.isFinite(rawMbps)
+    ? Math.min(50, Math.max(0.5, rawMbps))
+    : DEFAULT_STREAM_SETTINGS.mbpsPerPeer;
+  const audioMode = parsed.audioMode === "surface" || parsed.audioMode === "separate"
+    ? parsed.audioMode
+    : "none";
+  return { resolution, frameRate, quality, mbpsPerPeer, audioMode };
+}
+
+/** Existing grants belong to the old capture interpretation and never cross a mode change. */
+export function shouldClearScreenAudioOnModeChange(
+  previous: StreamAudioMode,
+  next: StreamAudioMode,
+): boolean {
+  return previous !== next;
+}
+
+/** A rejected constraint may only keep sending when the browser reports the real source height. */
+export function captureResolutionKnownAfterConstraint(
+  constraintFailed: boolean,
+  actualHeight: number | undefined,
+): boolean {
+  return !constraintFailed || (actualHeight !== undefined && actualHeight > 0);
+}
 
 /** Clamp an untrusted signaling value to one of the four values the UI and encoder understand. */
 export function isStreamHeight(value: unknown): value is StreamHeight {

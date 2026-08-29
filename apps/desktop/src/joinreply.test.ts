@@ -47,7 +47,7 @@ test("the DM surface exposes fresh reply codes and both repair paths", () => {
   const app = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
   assert.match(app, /listen<JoinReplyReady>\("join-reply-ready"/);
   assert.match(app, /listen<JoinReplyReady>\("join-reply-ready", \(e\) => \{[\s\S]*if \(locked \|\| !joinAttemptPending\) return;[\s\S]*joinReplyReady = e\.payload/);
-  assert.match(app, /function lockScreen\(\)[\s\S]*joinReplyReady = null;[\s\S]*memberRecoveryReady = null;[\s\S]*invoke\("lock_session"/);
+  assert.match(app, /function lockScreen\([^)]*\)[\s\S]*joinReplyReady = null;[\s\S]*memberRecoveryReady = null;[\s\S]*invoke\("lock_session"/);
   assert.match(app, /async function mintMemberRecovery\(\)[\s\S]*operationGeneration = viewGeneration;[\s\S]*await invoke<MemberRecoveryReady>[\s\S]*sessionContinuationCurrent\(operationGeneration, viewGeneration, locked\)[\s\S]*memberRecoveryReady = ready/);
   assert.match(app, /async function applyMemberRecovery\(\)[\s\S]*operationGeneration = viewGeneration;[\s\S]*await invoke<MemberRecoveryApplied>[\s\S]*sessionContinuationCurrent\(operationGeneration, viewGeneration, locked\)[\s\S]*memberRecoveryInput = ""/);
   assert.match(app, /memberRecoveryExpired = \$derived\([\s\S]*joinReplyIsExpired\(memberRecoveryReady\.expires_at_ms, joinReplyNow\)/);

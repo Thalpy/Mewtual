@@ -951,6 +951,8 @@ fn ui_message(m: catcoms_app::ChatMessage) -> UiMessage {
 #[derive(Serialize, Clone)]
 struct UiMember {
     fingerprint: String,
+    /// Full device id for authorization; the short fingerprint is display-only.
+    identity: String,
     you: bool,
 }
 
@@ -1045,6 +1047,10 @@ struct UiFile {
     mime: String,
     cid: String,
     author: String,
+    /// Full attested signer identity. Empty for unsigned/invalid legacy listings.
+    author_identity: String,
+    /// Cryptographic group-bound proof for the uploader label; legacy listings are false.
+    author_verified: bool,
     path: String,
     /// Chunks of this file already held locally (availability indicator).
     held: u32,
@@ -1142,6 +1148,8 @@ fn ui_file(listing: FileListing) -> UiFile {
         mime: listing.entry.mime,
         cid: hex::encode(&listing.entry.cid),
         author: listing.entry.author,
+        author_identity: listing.entry.author_identity,
+        author_verified: listing.entry.author_verified,
         path: listing.entry.path,
         held: listing.held_chunks,
         total: listing.total_chunks,
@@ -6574,6 +6582,7 @@ async fn get_members(state: State<'_, AppState>, server: u64) -> Result<Vec<UiMe
         .into_iter()
         .map(|m| UiMember {
             fingerprint: m.fingerprint,
+            identity: m.identity,
             you: m.is_self,
         })
         .collect())
@@ -8999,8 +9008,20 @@ async fn get_ui_state(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn save_ui_state(state: State<'_, AppState>, json: String) -> Result<(), String> {
-    require_unlocked_session(&state).await?;
     validate_ui_state_json(&json)?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    save_ui_state_for_generation(&state, &json, generation).await
+}
+
+/// Serialize continuity writes with the lock snapshot. If lock was requested after the caller
+/// captured its JSON, the generation recheck rejects it; if this write already owns the commit
+/// mutex, lock waits and its newer final snapshot necessarily wins afterward.
+async fn save_ui_state_for_generation(
+    state: &AppState,
+    json: &str,
+    generation: u64,
+) -> Result<(), String> {
+    let _session_commit = require_ui_session_generation(state, generation).await?;
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
@@ -15476,6 +15497,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_continuity_save_queued_before_lock_cannot_overwrite_the_lock_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+
+        // Hold the common commit boundary so the old debounced save is definitely queued before
+        // lock invalidates its UI generation. Releasing it then exercises the dangerous ordering:
+        // old command first, final lock snapshot second.
+        let boundary = state.ui_session_commit.lock().await;
+        let stale_state = Arc::clone(&state);
+        let stale = tokio::spawn(async move {
+            save_ui_state_for_generation(
+                &stale_state,
+                r#"{"version":1,"drafts":{},"readMarks":{},"fileTrustPolicies":{"1":{"mode":"everyone","trustedAuthors":[]}}}"#,
+                generation,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        let latest = r#"{"version":1,"drafts":{},"readMarks":{},"fileTrustPolicies":{"1":{"mode":"on-demand","trustedAuthors":[]}}}"#;
+        let lock_state = Arc::clone(&state);
+        let locking =
+            tokio::spawn(async move { lock_session_inner(&lock_state, Some(latest.into())).await });
+        while !state.session_lock_requested.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        drop(boundary);
+
+        assert!(
+            stale.await.unwrap().is_err(),
+            "the stale generation must be rejected"
+        );
+        locking.await.unwrap().unwrap();
+        let saved = state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .load_ui_state()
+            .unwrap();
+        assert_eq!(saved, latest.as_bytes());
+    }
+
+    #[tokio::test]
     async fn vault_full_close_unlock_and_actor_reload_survives_twice() {
         use catcoms_rt::Hub;
         use rand_chacha::ChaCha20Rng;
@@ -16902,6 +16972,8 @@ mod tests {
             mime: mime.into(),
             cid: cid.into(),
             author: "member".into(),
+            author_identity: "full-member-device-id".into(),
+            author_verified: true,
             path: "shared".into(),
             held,
             total,

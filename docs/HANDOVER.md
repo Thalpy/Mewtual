@@ -391,13 +391,26 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   replacement flow. An expired reply is not revived: retry Connect to create a fresh overlapping
   60-second window. Member recovery remains only for an already-established server; it does not
   grant membership or repair an expired first-contact reply.
-- **File trust policy:** not built. Explicit Download always saves locally today; other files and
-  missing media chunks are fetched on demand, and inline media may fetch automatically when it is
-  rendered. There is no trust-everyone/trust-specific/distrust-everyone selector and no automatic
-  bounded mirror. Native saves sanitize the filename, use non-overwriting verified staging, and
-  reveal rather than execute, which prevents a peer from turning the button itself into command or
-  path execution. The content remains untrusted; later opening it in another application and
-  automatic WebView media decoding retain parser/zero-day risk. See `THREAT-MODEL.md`.
+- **File trust policy:** the found/join onboarding now requires a local on-demand (default),
+  specific-member, or everyone choice before the new server view can issue passive media requests.
+  The per-server policy and exact trusted full device identities are bounded and vault-sealed; the
+  short 32-bit fingerprint is display-only. Server Settings -> File Trust edits them. Passive shared
+  media trust changes bypass the ordinary read-position/draft debounce, and a normal window close
+  waits for the native final continuity snapshot before destroying the WebView. A hard process or
+  operating-system failure can still interrupt the disk write.
+  Passive shared
+  embeds, custom emoji, event images, card thumbnails and call-jukebox tracks obey the policy,
+  while an explicit Load/Play/Open/Download click is always an override. Third-party HTTP(S)
+  images stay click-only in every mode because they can disclose the client address or target
+  loopback/private services. File-index
+  materialization/publication is capped at 256 rows with bounded signed fields. Fetched chunks
+  already occupy one authenticated XChaCha20-Poly1305-sealed
+  vault copy, so keeping a distrusted file packaged does not inherently double storage; explicit
+  export adds a separate plaintext Downloads copy. Full trust-everyone/specific automatic
+  **whole-share mirroring** remains deferred until the sealing store has a disk quota, otherwise a
+  trusted member can exhaust local storage. Native saves sanitize the filename, use non-overwriting
+  verified staging, and reveal rather than execute, which blocks direct command/path execution.
+  Content and platform decoders remain untrusted parser/zero-day surfaces. See `THREAT-MODEL.md`.
 - **4K screen streaming:** screen capture now has a live settings panel for 720p through 4K,
   15--60 fps, quality priority and a per-full-resolution-viewer Mbps cap. Each receiver advertises
   only the nearest display bucket (720/1080/1440/2160), dynamically derived from its Mewtual window
@@ -405,7 +418,13 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   per-peer plus aggregate upload estimates. A screen edge stays parked until its resolution,
   bitrate and frame-rate cap applies; rejection pauses that edge or stops sharing if it cannot be
   parked. Resize bursts are bounded to one active plus one latest pending mutation per peer. The
-  WebView performs the compressed WebRTC encode.
+  WebView performs the compressed WebRTC encode. The same installation-wide preset is now visible
+  in Settings -> Voice & Calls and behind the cog beside the call-stage IN/OUT selectors; numeric
+  resolution/FPS choices explicitly select their persisted defaults. Shared audio defaults off.
+  Surface audio can ride the initial picker; separate mode lets the user add multiple freshly
+  granted application/window sources while sharing, discards those sources' video, mixes them into
+  one audio track with a requested 160-kbps-per-peer cap (shown as planned until the WebView
+  confirms it), and clears every grant on stop/camera swap/leave.
   H.265/HEVC is preferred when both runtimes expose it, with AV1/VP9/H.264/VP8 fallbacks, and the UI
   reports the codec actually observed in stats. There is still no application-owned offline media
   transcoder or guarantee that a particular platform WebView offers H.265.
@@ -416,7 +435,9 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   replacement; two independent sealed-vault restore/shutdown cycles with wrong-passphrase refusal;
   lock-vs-deferred-command ordering; and pure streaming tests for receiver rounding/hysteresis,
   actual-source scaling, burst coalescing, frame-rate/bitrate caps, rejected-cap parking, detached
-  first attachment and screen→camera invalidation.
+  first attachment and screen→camera invalidation, permission-prompt stop/leave/supersession,
+  stream-preset sanitization/defaults, file-trust fail-closed parsing/full-identity decisions,
+  jukebox/cross-server gates/index bounds, and sealed continuity/lock ordering of trust policy.
 - **Remaining high-value integration coverage:** a two-native-process Tauri test that changes the
   listener/interface and performs the human copy/paste recovery ceremony end to end; WebView-level
   tests against each supported platform's real `RTCRtpSender`/codec implementation (including
