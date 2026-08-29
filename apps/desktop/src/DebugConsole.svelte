@@ -326,11 +326,10 @@
     pendingMode = "";
     try {
       capture = await invoke<CaptureConfig>("set_capture_mode", { mode });
-      // The mode decides how every value is rendered, so what is already on screen was drawn under
-      // the old one. Re-reading from the start is the only honest answer: leaving the old lines
-      // would show two modes' output in one feed with nothing saying which was which.
+      // Each native event retains its capture-time mode and epoch. Bump the poll generation so a
+      // response started before this choice cannot be mistaken for the refresh it triggered, but
+      // keep the mixed-mode history: changing the viewer cannot rewrite what was captured.
       captureGeneration += 1;
-      events = [];
       await pollLog();
     } catch (e) {
       captureError = String(e);
@@ -344,6 +343,15 @@
         section: id,
         level: level === "off" ? null : level,
       });
+    } catch (e) {
+      captureError = String(e);
+    }
+  }
+
+  async function resetSectionLevels() {
+    captureError = "";
+    try {
+      capture = await invoke<CaptureConfig>("reset_section_capture");
     } catch (e) {
       captureError = String(e);
     }
@@ -487,11 +495,11 @@
         { title: "call peers", lines: voiceLines(voicePeers, aliases, maskForExport) },
         // The event sections follow the console's own rail order, so a reader who has seen the
         // screen knows where to look in the file.
-        { title: "network", lines: net.map(line) },
-        { title: "voice", lines: vox.map(line) },
-        { title: "backend", lines: back.map(line) },
-        { title: "frontend", lines: front.map(line) },
-        { title: "storage", lines: store.map(line) },
+        { title: "network", lines: net.map((event) => eventLine(event, aliases, maskForExport)) },
+        { title: "voice", lines: vox.map((event) => eventLine(event, aliases, maskForExport)) },
+        { title: "backend", lines: back.map((event) => eventLine(event, aliases, maskForExport)) },
+        { title: "frontend", lines: front.map((event) => eventLine(event, aliases, maskForExport)) },
+        { title: "storage", lines: store.map((event) => eventLine(event, aliases, maskForExport)) },
       ],
     );
   }
@@ -516,20 +524,18 @@
   async function prepareIssue() {
     saved = "";
     try {
-      const report = await buildReport(true);
-      // This one leaves the machine for a public issue tracker, so the check refuses rather than
-      // reports. It throws, which lands in the catch below and stops the browser ever opening: a
-      // report that should not be posted must not reach a form somebody can submit by reflex.
-      const checked = await invoke<{ review: string[] }>("validate_diagnostics_report", {
-        text: report,
-        purpose: "publish",
-      });
+      // Public issue text comes from a native allowlist over canonical event kinds. It omits the
+      // local report's tables, names, addresses, arbitrary prose and bridged tracing.
+      const report = await invoke<string>("build_public_diagnostics_report");
       const issue = buildFeedbackIssue(
         "bug",
         "Diagnostic report",
         report,
         version,
-        navigator.userAgent,
+        // Unlike the ordinary feedback form, this path claims to contain only allowlisted
+        // diagnostics. A browser-provided user-agent is arbitrary prose, so keep the envelope
+        // fixed as well as the native report body.
+        "Mewtual desktop",
       );
       if (!isAllowedIssueUrl(issue.url)) throw new Error("issue destination failed its local check");
       if (issue.truncated) await oncopy(issue.report);
@@ -537,7 +543,6 @@
       saved = issue.truncated
         ? "issue opened · full report copied for review"
         : "issue opened for review";
-      if (checked.review.length) saved += ` · review ${checked.review.join(", ")}`;
     } catch (e) {
       saved = `could not prepare issue: ${String(e)}`;
     }
@@ -704,6 +709,11 @@
                 <p class="dbg-finding danger"><span class="chip danger">REFUSED</span>{captureError}</p>
               {/if}
               {#if showSections}
+                <div class="dbg-card-actions">
+                  <button class="ghost small" onclick={resetSectionLevels}>
+                    Reset levels for {capture.mode.toUpperCase()}
+                  </button>
+                </div>
                 <div class="dbg-table-wrap dbg-capture-sections">
                   <table class="dbg-table">
                     <thead><tr><th>Section</th><th>Shows in</th><th>Captured at</th></tr></thead>

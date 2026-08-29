@@ -110,6 +110,30 @@ pub enum DialSubmission {
     Suppressed,
 }
 
+/// A single-use, generation-bound authorization to submit one exact endpoint.
+///
+/// The object crosses the transport command boundary with the address it authorizes. Production
+/// transports must keep it owned by their actor until duplicate/already-connected checks have
+/// finished, then call [`DialPermit::commit_if_current`] immediately before the endpoint enters
+/// the pending/socket-start path. Dropping it before that point refunds the reservation in the
+/// scheduler that minted it.
+///
+/// Keeping this seam in `catcoms-rt` avoids making transports depend on the discovery crate while
+/// still preventing a cancelled caller from reclaiming a command that is already queued.
+pub trait DialPermit: Send + fmt::Debug {
+    /// The exact canonical address this permit authorizes.
+    fn address(&self) -> &str;
+
+    /// Consume the permit if its accounting window is still current.
+    ///
+    /// `None` means the scheduler advanced to a new generation while the command was queued. The
+    /// transport must suppress that stale command; it must not submit the endpoint uncharged.
+    fn commit_if_current(self: Box<Self>) -> Option<String>;
+}
+
+/// Owned permit passed through an object-safe transport seam.
+pub type BoxedDialPermit = Box<dyn DialPermit>;
+
 /// Reply handle handed to a request handler. Dropping it without calling
 /// [`Responder::respond`] surfaces [`TransportError::NoResponse`] to the caller.
 #[derive(Debug)]
@@ -443,6 +467,19 @@ pub trait MeshTransport: Send + Sync {
         Ok(DialSubmission::Submitted)
     }
 
+    /// Submit one scheduler permit through this transport's dial boundary.
+    ///
+    /// Actor-backed transports override this and transfer ownership into the actor. The fallback
+    /// commits before awaiting the legacy dial call. That may conservatively spend a permit when
+    /// an alternate transport later suppresses or rejects it, but it can never refund a queued
+    /// attempt after caller cancellation.
+    async fn dial_permit(&self, permit: BoxedDialPermit) -> Result<DialSubmission, TransportError> {
+        let Some(address) = permit.commit_if_current() else {
+            return Ok(DialSubmission::Suppressed);
+        };
+        self.dial_addr_outcome(&address).await
+    }
+
     /// Submit a small direct-route batch explicitly bound to `peer`.
     ///
     /// Production revalidates every terminal `/p2p` component inside its actor before any socket
@@ -456,6 +493,47 @@ pub trait MeshTransport: Send + Sync {
         _addresses: &[String],
     ) -> Result<Vec<DialSubmission>, TransportError> {
         Err(TransportError::Unreachable(peer))
+    }
+
+    /// Submit a small peer-bound batch while retaining each scheduler permit across the transport
+    /// ownership boundary.
+    ///
+    /// The fallback commits before its first await and then calls the legacy batch seam. It is
+    /// intentionally conservative; production overrides this so actor-side suppression refunds
+    /// permits. A stale permit is represented as `Suppressed` in its original result position.
+    async fn dial_peer_permits(
+        &self,
+        peer: PeerId,
+        permits: Vec<BoxedDialPermit>,
+    ) -> Result<Vec<DialSubmission>, TransportError> {
+        if permits.is_empty() || permits.len() > MAX_PEER_DIAL_BATCH {
+            return Err(TransportError::InvalidDialBatch);
+        }
+        let mut addresses = Vec::with_capacity(permits.len());
+        let mut current = Vec::with_capacity(permits.len());
+        for permit in permits {
+            match permit.commit_if_current() {
+                Some(address) => {
+                    current.push(true);
+                    addresses.push(address);
+                }
+                None => current.push(false),
+            }
+        }
+        if addresses.is_empty() {
+            return Ok(vec![DialSubmission::Suppressed; current.len()]);
+        }
+        let mut submitted = self.dial_peer_batch(peer, &addresses).await?.into_iter();
+        Ok(current
+            .into_iter()
+            .map(|is_current| {
+                if is_current {
+                    submitted.next().unwrap_or(DialSubmission::Suppressed)
+                } else {
+                    DialSubmission::Suppressed
+                }
+            })
+            .collect())
     }
 
     /// Advertise `addr` as an externally-reachable address, so a rendezvous registration can flush.

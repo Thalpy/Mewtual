@@ -23,11 +23,11 @@ use tokio::task::JoinHandle;
 use catcoms_storage::{Cid, FileRef};
 
 use crate::{
-    ChannelHead, ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileMediaHead,
-    FileRange, FileUsage, FilesView, InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge,
-    MemberRecoveryApplied, MemberRecoveryCode, MemberRecoveryVerified, MemberView, MessageStats,
-    ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair, StorageSnapshot,
-    SwitchboardOffer, WikiPendingEdit, WikiRevision,
+    ChannelHead, ChannelInfo, ChatMessage, DeliverySnapshot, DeliveryState, DeviceEntry, FileEntry,
+    FileMediaHead, FileRange, FileUsage, FilesView, InboxItem, JoinAttempt, JukeEntry, Livery,
+    MemberBadge, MemberRecoveryApplied, MemberRecoveryCode, MemberRecoveryVerified, MemberView,
+    MessageStats, ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair,
+    StorageSnapshot, SwitchboardOffer, WikiPendingEdit, WikiRevision,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -447,7 +447,7 @@ pub enum AppCommand {
     /// on open instead of waiting for the next throttled `DeliveryChanged`.
     DeliverySnapshot {
         channel: u128,
-        reply: oneshot::Sender<Vec<DeliveryState>>,
+        reply: oneshot::Sender<DeliverySnapshot>,
     },
     /// Query pending incoming DM (friend) requests: `(sender fp, sender name, invite bytes)`.
     DmRequests {
@@ -899,7 +899,7 @@ pub enum AppEvent {
     /// can render it directly without polling.
     DeliveryChanged {
         channel: u128,
-        states: Vec<DeliveryState>,
+        snapshot: DeliverySnapshot,
     },
     /// The set of pending incoming DM (friend) requests changed; the UI should re-fetch them.
     DmRequestsChanged,
@@ -1902,17 +1902,13 @@ impl ServerActor {
     }
 
     /// Fetch delivery state for this device's recent messages in a channel (oldest first).
-    pub async fn delivery_snapshot(&self, channel: u128) -> Vec<DeliveryState> {
+    pub async fn delivery_snapshot(&self, channel: u128) -> Result<DeliverySnapshot, String> {
         let (reply, rx) = oneshot::channel();
-        if self
-            .cmd_tx
+        self.cmd_tx
             .send(AppCommand::DeliverySnapshot { channel, reply })
             .await
-            .is_err()
-        {
-            return Vec::new();
-        }
-        rx.await.unwrap_or_default()
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())
     }
 
     /// Fetch pending incoming DM (friend) requests: `(sender fp, sender name, invite bytes)`.
@@ -2883,7 +2879,7 @@ fn recompute_due_delivery<T, R>(
     server: &mut Server<T, R>,
     delivery: &mut HashMap<u128, (u64, Vec<DeliveryState>)>,
     dirty: &mut HashSet<u128>,
-) -> Vec<(u128, Vec<DeliveryState>)>
+) -> Vec<(u128, DeliverySnapshot)>
 where
     T: MeshTransport,
     R: CryptoRngCore,
@@ -2901,14 +2897,14 @@ where
             continue;
         }
 
-        let states = server.delivery_snapshot(channel);
+        let snapshot = server.delivery_snapshot(channel);
         dirty.remove(&channel);
-        let did_change = match delivery.insert(channel, (now_ms, states.clone())) {
-            Some((_, previous)) => previous != states,
-            None => !states.is_empty(),
+        let did_change = match delivery.insert(channel, (now_ms, snapshot.states.clone())) {
+            Some((_, previous)) => previous != snapshot.states,
+            None => !snapshot.states.is_empty(),
         };
         if did_change {
-            changed.push((channel, states));
+            changed.push((channel, snapshot));
         }
     }
     changed
@@ -4120,13 +4116,13 @@ where
                 // surfaced without waiting for unrelated traffic.
                 _ = &mut delivery_wake => {
                     event_tx.idle();
-                    for (channel, states) in recompute_due_delivery(
+                    for (channel, snapshot) in recompute_due_delivery(
                         &mut server,
                         &mut delivery,
                         &mut delivery_dirty,
                     ) {
                         let _ = event_tx
-                            .send(AppEvent::DeliveryChanged { channel, states })
+                            .send(AppEvent::DeliveryChanged { channel, snapshot })
                             .await;
                     }
                 },
@@ -4217,13 +4213,13 @@ where
                         // rate-limited per channel; throttled channels remain dirty and receive a
                         // deterministic timer wake if no later network event arrives.
                         delivery_dirty.extend(counts.keys().copied());
-                        for (channel, states) in recompute_due_delivery(
+                        for (channel, snapshot) in recompute_due_delivery(
                             &mut server,
                             &mut delivery,
                             &mut delivery_dirty,
                         ) {
                             let _ = event_tx
-                                .send(AppEvent::DeliveryChanged { channel, states })
+                                .send(AppEvent::DeliveryChanged { channel, snapshot })
                                 .await;
                         }
                         // A DM (friend) request may have arrived over this group; surface a change.
@@ -5234,6 +5230,8 @@ mod tests {
                 if alice
                     .delivery_snapshot(GENERAL)
                     .await
+                    .expect("Alice actor is live")
+                    .states
                     .first()
                     .is_some_and(|state| state.delivered == 2)
                 {
@@ -5248,9 +5246,9 @@ mod tests {
         .expect("Alice did not authenticate both receipts");
 
         while let Ok(event) = alice_events.try_recv() {
-            if let AppEvent::DeliveryChanged { channel, states } = event.event {
+            if let AppEvent::DeliveryChanged { channel, snapshot } = event.event {
                 if channel == GENERAL {
-                    let delivered = states.first().map_or(0, |state| state.delivered);
+                    let delivered = snapshot.states.first().map_or(0, |state| state.delivered);
                     assert_ne!(delivered, 2, "the throttle elapsed before clock advance");
                 }
             }
@@ -5261,10 +5259,10 @@ mod tests {
             loop {
                 match alice_events.recv().await {
                     Some(TracedEvent {
-                        event: AppEvent::DeliveryChanged { channel, states },
+                        event: AppEvent::DeliveryChanged { channel, snapshot },
                         ..
                     }) if channel == GENERAL => {
-                        if let Some(state) = states.first() {
+                        if let Some(state) = snapshot.states.first() {
                             if state.delivered == 2 {
                                 return state.delivered;
                             }

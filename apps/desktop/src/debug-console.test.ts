@@ -92,6 +92,7 @@ function ev(over: Partial<LogEvent> = {}): LogEvent {
     fields: [],
     fields_dropped: 0,
     capture: "safe",
+    capture_epoch: 1,
     ...over,
   };
 }
@@ -101,12 +102,12 @@ function bridged(message: string, over: Partial<LogEvent> = {}): LogEvent {
   return ev({
     code: BRIDGED_CODE,
     ...over,
-    fields: [{ name: "message", value: message, sensitive: false }, ...(over.fields ?? [])],
+    fields: [{ name: "message", value: message, kind: "bridged", sensitive: false }, ...(over.fields ?? [])],
   });
 }
 
 /** A rendered field, for the shape `LogEvent.fields` takes. */
-const f = (name: string, value: string, sensitive = false) => ({ name, value, sensitive });
+const f = (name: string, value: string, sensitive = false) => ({ name, value, kind: "text", sensitive });
 
 const route: MemberRoute = {
   fingerprint: "741af9ff",
@@ -276,6 +277,35 @@ test("an IPv6 literal is masked whole, not chewed into hex pieces", () => {
   assert.match(out, /\[ip [0-9a-f]{6}\]/);
 });
 
+test("compressed, zoned, bracketed and mapped IPv6 forms are parsed and masked", () => {
+  const a = makeAliases("ipv6-parser");
+  for (const input of [
+    "loopback ::1 failed",
+    "route 2001:db8::1 unreachable",
+    "link fe80::1%eth0 closed",
+    "socket [2001:db8::1]:443 refused",
+    "mapped ::ffff:192.0.2.128 refused",
+    "multiaddr /ip6/2001:db8::1/tcp/443/p2p/12D3KooWHp1hLNjWf4ZM4eLaiUdMGTbGnXDDDkhnE56P9CRbHx8E",
+  ]) {
+    const out = redactText(input, a);
+    assert.match(out, /\[ip [0-9a-f]{6}\]/, out);
+    assert.doesNotMatch(out, /2001:db8|fe80::|::ffff|192\.0\.2\.128/, out);
+  }
+});
+
+test("valid Qm peer ids and both peer ids in a relay multiaddr are parser-masked", () => {
+  const a = makeAliases("peer-parser");
+  const qm = "QmYwAPJzv5CZsnAzt8auVZRnGi2C5DLp8KjN6Jw2eZP9hK";
+  const relay = "12D3KooWBGfsSWvGFAJeTz3oBPeRFbSadCwedBJvJ6AFAJtfkSD2";
+  const target = "12D3KooWPiZxJceHKQBZcd79cYdqybt5ijzRGHveTKa3CaEESxVb";
+  const out = redactText(
+    `${qm} /ip4/203.0.113.9/tcp/443/p2p/${relay}/p2p-circuit/p2p/${target}`,
+    a,
+  );
+  assert.doesNotMatch(out, /QmYw|12D3Koo|203\.0\.113\.9/, out);
+  assert.equal(out.match(/\[peer [0-9a-f]{6}\]/g)?.length, 3, out);
+});
+
 test("peer ids are masked in both the shapes the app prints them in", () => {
   const a = makeAliases();
   const b58 = redactText("local_peer_id=12D3KooWSaXFXMFgkGxgBF6UPEojspeSj2KaDiP4ks5poLzieKKN", a);
@@ -411,8 +441,9 @@ test("every capture mode says what choosing it does, in the terms of the decisio
   for (const mode of CAPTURE_MODES) {
     assert.ok(captureModeNote(mode).length > 40, `${mode} explains itself`);
   }
-  assert.match(captureModeNote("safe"), /pasted in public/);
-  assert.match(captureModeNote("enhanced"), /Read a report before sharing it/);
+  assert.match(captureModeNote("safe"), /discarded at capture time/);
+  assert.match(captureModeNote("safe"), /separate native allowlist report/);
+  assert.match(captureModeNote("enhanced"), /Read local reports before sharing them/);
   assert.match(captureModeNote("full"), /forgotten at the next launch/);
   assert.equal(captureModeNote("nonsense"), "");
 });
@@ -850,7 +881,10 @@ test("a copied bundle states its redaction mode and carries the privacy contract
     { version: "0.3.0", at: Date.UTC(2026, 7, 23), redacted: true, capture: "safe", session: "eb887278" },
     [{ title: "network", lines: ["a", "b"] }],
   );
-  assert.match(text, /redaction: on/);
+  assert.match(text, /display masking: on/);
+  assert.match(text, /privacy\.addresses: aliased where recognized/);
+  assert.match(text, /privacy\.user_content: may be present/);
+  assert.match(text, /privacy\.legacy_prose: included/);
   // Safe and Enhanced reports look alike and mean very different things, so a report says which it
   // is rather than leaving the reader to infer it from whether an address looks complete.
   assert.match(text, /capture: safe/);
@@ -862,7 +896,7 @@ test("a copied bundle states its redaction mode and carries the privacy contract
   // into a public issue and someone not bothering.
   assert.match(text, /Read it before you share it/);
   assert.ok(!/never includes/.test(text), "a report must not promise what it cannot enforce");
-  assert.match(copyBundle({ version: "0.3.0", at: 0, redacted: false }, []), /redaction: off/);
+  assert.match(copyBundle({ version: "0.3.0", at: 0, redacted: false }, []), /display masking: off/);
 });
 
 test("an empty section is labelled rather than silently missing from a report", () => {
@@ -924,9 +958,10 @@ test("a complete Safe bundle cannot leak device or member-route addresses", () =
       },
     ],
   );
-  assert.match(text, /redaction: on/);
+  assert.match(text, /display masking: on/);
   assert.doesNotMatch(text, /203\.0\.113\.9/);
   assert.doesNotMatch(text, /198\.51\.100\.7/);
+  assert.doesNotMatch(text, /Studio/, "server names are user content and must be aliased too");
 });
 
 /** The row lines, as distinct from the findings that now lead each server's block. */

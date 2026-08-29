@@ -431,6 +431,9 @@ impl Default for EndpointDialConfig {
 
 #[derive(Debug, Default)]
 struct EndpointDialState {
+    /// Identifies the accounting window. A permit from an older generation can neither start an
+    /// uncharged dial nor decrement counters belonging to the replacement window.
+    generation: u64,
     window_start_ms: Option<u64>,
     process_spent: u32,
     server_spent: HashMap<[u8; 32], u32>,
@@ -454,10 +457,10 @@ pub struct EndpointDialScheduler {
 
 /// A single-use reservation for one exact canonical endpoint.
 ///
-/// Dropping it before [`EndpointDialPermit::start`] returns every counter it consumed. This makes
-/// cancellation and duplicate suppression safe by default: only the code immediately about to
-/// submit a socket-starting operation can commit the charge. The permit is intentionally not
-/// `Clone`; one plan cannot be replayed into several attempts.
+/// Dropping it before [`catcoms_rt::DialPermit::commit_if_current`] returns every counter it
+/// consumed. The permit is intentionally not `Clone`; one plan cannot be replayed into several
+/// attempts. Actor-backed transports own it across their command boundary, so caller cancellation
+/// cannot refund work that will still run.
 #[derive(Debug)]
 pub struct EndpointDialPermit {
     scheduler: EndpointDialScheduler,
@@ -466,25 +469,45 @@ pub struct EndpointDialPermit {
     peer_key: [u8; 32],
     endpoint_key: [u8; 32],
     prefix_key: [u8; 32],
+    generation: u64,
     started: bool,
 }
 
 impl EndpointDialPermit {
     /// Commit this reservation immediately before submitting the exact endpoint to the transport.
     /// Consumes the permit, so a caller cannot start it twice.
-    pub fn start(mut self) -> String {
-        self.started = true;
-        std::mem::take(&mut self.address)
-    }
-
-    /// Commit after the transport actor acknowledges that this endpoint entered its dial path.
-    pub fn commit(mut self) {
-        self.started = true;
+    pub fn start(self) -> Option<String> {
+        self.commit_current()
     }
 
     /// The exact canonical endpoint this permit owns, for duplicate/already-connected checks.
     pub fn address(&self) -> &str {
         &self.address
+    }
+
+    /// Atomically bind this reservation to the window that is still current.
+    fn commit_current(mut self) -> Option<String> {
+        let state = self
+            .scheduler
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.generation != self.generation {
+            return None;
+        }
+        drop(state);
+        self.started = true;
+        Some(std::mem::take(&mut self.address))
+    }
+}
+
+impl catcoms_rt::DialPermit for EndpointDialPermit {
+    fn address(&self) -> &str {
+        self.address()
+    }
+
+    fn commit_if_current(self: Box<Self>) -> Option<String> {
+        (*self).commit_current()
     }
 }
 
@@ -498,6 +521,11 @@ impl Drop for EndpointDialPermit {
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        if state.generation != self.generation {
+            // The whole old window was discarded at rollover. Refunding its reservation into the
+            // replacement window would create fresh capacity for every delayed/cancelled command.
+            return;
+        }
         state.process_spent = state.process_spent.saturating_sub(1);
         decrement(&mut state.server_spent, self.server_key);
         decrement(&mut state.peer_spent, self.peer_key);
@@ -529,7 +557,7 @@ impl EndpointDialScheduler {
     ) -> Vec<String> {
         self.reserve_permits(server, endpoints, clock)
             .into_iter()
-            .map(EndpointDialPermit::start)
+            .filter_map(EndpointDialPermit::start)
             .collect()
     }
 
@@ -552,7 +580,15 @@ impl EndpointDialScheduler {
             // reservation in the same actor drain. Clamp it to the smallest monotonic window.
             .is_none_or(|start| now.saturating_sub(start) >= self.config.window_ms.max(1));
         if expired {
+            // At u64::MAX, retaining the exhausted counters is safer than reusing a generation
+            // while old permits of that generation might exist. Reaching it requires more
+            // windows than the process can physically observe.
+            let generation = state.generation.saturating_add(1);
+            if generation == state.generation {
+                return Vec::new();
+            }
             *state = EndpointDialState {
+                generation,
                 window_start_ms: Some(now),
                 ..EndpointDialState::default()
             };
@@ -596,6 +632,7 @@ impl EndpointDialScheduler {
                 peer_key,
                 endpoint_key: endpoint.attempt_key,
                 prefix_key: endpoint.prefix_key,
+                generation: state.generation,
                 started: false,
             });
         }
@@ -1477,8 +1514,46 @@ mod tests {
         drop(permits);
         let replacement = scheduler.reserve_permits(b"server", &[endpoint], &clock);
         assert_eq!(replacement.len(), 1, "drop returned every charged scope");
-        assert_eq!(replacement.into_iter().next().unwrap().start(), "route");
+        assert_eq!(
+            replacement.into_iter().next().unwrap().start(),
+            Some("route".into())
+        );
         assert_eq!(scheduler.state.lock().unwrap().process_spent, 1);
+    }
+
+    #[test]
+    fn an_old_permit_cannot_refund_or_start_in_the_replacement_window() {
+        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
+            window_ms: 100,
+            process_limit: 1,
+            server_limit: 1,
+            peer_limit: 1,
+            endpoint_limit: 1,
+            prefix_limit: 1,
+        });
+        let clock = ManualClock::new(0);
+        let endpoint = |address: &str, key: &[u8]| {
+            DialEndpoint::from_key_material(address, key, key, CanonicalDialPeer(phase0(PEER_A)))
+        };
+        let old = scheduler
+            .reserve_permits(b"server", &[endpoint("old", b"old")], &clock)
+            .pop()
+            .unwrap();
+        clock.advance_ms(100);
+        let current = scheduler
+            .reserve_permits(b"server", &[endpoint("current", b"current")], &clock)
+            .pop()
+            .unwrap();
+
+        assert_eq!(old.start(), None, "a queued old-window dial is stale");
+        assert_eq!(scheduler.state.lock().unwrap().process_spent, 1);
+        assert!(
+            scheduler
+                .reserve_permits(b"server", &[endpoint("extra", b"extra")], &clock)
+                .is_empty(),
+            "dropping the old generation must not mint capacity in the current one"
+        );
+        assert_eq!(current.start(), Some("current".into()));
     }
 
     #[test]

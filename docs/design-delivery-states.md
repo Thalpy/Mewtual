@@ -58,7 +58,9 @@ segment pattern is the styling reference.
   restart semantics here.
 - **D2 (actor/bridge)**: per-channel "delivery snapshot for my recent messages" in the app
   actor, pushed with a throttle (≤1 event/s per channel) via a `delivery-changed` event;
-  message ids ↔ change hashes mapped where ops are authored.
+  message ids ↔ change hashes mapped where ops are authored. Queries and events share an
+  actor-issued monotonic snapshot revision; the webview ignores a completion older than the newest
+  revision already accepted for the current server/channel view.
 - **D3 (UI)**: the micro-line + hover states, driven by the D2 event; no polling.
 
 The implementation discovered that Mewtual does not run Automerge's sync protocol and therefore

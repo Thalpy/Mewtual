@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  clearDeliverySnapshotAfterFailedQuery,
   deliveryClass,
   deliveryGlyph,
   deliveryLabel,
@@ -124,7 +125,39 @@ test("a full actor snapshot removes evicted delivery rows", () => {
     any_peer: true,
   });
   const previous = { a: report("a", 1), b: report("b", 1) };
-  assert.deepEqual(replaceDeliverySnapshot(previous, [report("b", 0)]), {
-    b: report("b", 0),
+  assert.deepEqual(replaceDeliverySnapshot(
+    { revision: 4, reports: previous },
+    { revision: 5, states: [report("b", 0)] },
+  ), {
+    revision: 5,
+    reports: { b: report("b", 0) },
   });
+});
+
+test("a delayed delivery query cannot overwrite a newer event", () => {
+  const report = (id: string, delivered: number): import("./delivery.ts").DeliveryReport => ({
+    id,
+    delivered,
+    reachable: 1,
+    any_peer: true,
+  });
+  const newer = replaceDeliverySnapshot(
+    { revision: 0, reports: {} },
+    { revision: 12, states: [report("message", 1)] },
+  );
+  const afterLateQuery = replaceDeliverySnapshot(
+    newer,
+    { revision: 11, states: [report("message", 0)] },
+  );
+  assert.strictEqual(afterLateQuery, newer, "stale completions leave the accepted object untouched");
+
+  assert.strictEqual(
+    clearDeliverySnapshotAfterFailedQuery(newer, 11),
+    newer,
+    "a stale failed query cannot erase a newer event either",
+  );
+  assert.deepEqual(clearDeliverySnapshotAfterFailedQuery(newer, 12), {
+    revision: 12,
+    reports: {},
+  }, "an unavailable current actor clears rows but keeps the anti-stale watermark");
 });

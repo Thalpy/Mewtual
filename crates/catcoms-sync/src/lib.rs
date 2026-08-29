@@ -5852,22 +5852,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if permits.is_empty() {
             return Err(MemberRecoveryError::Deferred);
         }
-        let addresses: Vec<_> = permits
-            .iter()
-            .map(|permit| permit.address().to_string())
-            .collect();
         let outcomes = self
             .transport
-            .dial_peer_batch(code.peer, &addresses)
+            .dial_peer_permits(
+                code.peer,
+                permits
+                    .into_iter()
+                    .map(|permit| Box::new(permit) as catcoms_rt::BoxedDialPermit)
+                    .collect(),
+            )
             .await
             .map_err(|_| MemberRecoveryError::Transport)?;
-        let mut submitted_routes = 0;
-        for (permit, outcome) in permits.into_iter().zip(outcomes) {
-            if outcome == catcoms_rt::DialSubmission::Submitted {
-                permit.commit();
-                submitted_routes += 1;
-            }
-        }
+        let submitted_routes = outcomes
+            .into_iter()
+            .filter(|outcome| *outcome == catcoms_rt::DialSubmission::Submitted)
+            .count();
         if submitted_routes == 0 {
             return Err(MemberRecoveryError::Deferred);
         }
@@ -5987,20 +5986,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             if permits.is_empty() {
                 continue;
             }
-            let addresses: Vec<_> = permits
-                .iter()
-                .map(|permit| permit.address().to_string())
-                .collect();
-            let Ok(outcomes) = self.transport.dial_peer_batch(peer, &addresses).await else {
+            let Ok(outcomes) = self
+                .transport
+                .dial_peer_permits(
+                    peer,
+                    permits
+                        .into_iter()
+                        .map(|permit| Box::new(permit) as catcoms_rt::BoxedDialPermit)
+                        .collect(),
+                )
+                .await
+            else {
                 continue;
             };
-            let mut submitted = false;
-            for (permit, outcome) in permits.into_iter().zip(outcomes) {
-                if outcome == catcoms_rt::DialSubmission::Submitted {
-                    permit.commit();
-                    submitted = true;
-                }
-            }
+            let submitted = outcomes
+                .into_iter()
+                .any(|outcome| outcome == catcoms_rt::DialSubmission::Submitted);
             dialed += usize::from(submitted);
         }
         dialed
@@ -6022,13 +6023,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // reloaded member re-establishes the link without the bridge re-dialing it.
             let expected = *transport_peer_from_raw(&rz_node).as_bytes();
             if let Some(route) = parse_peer_dial_route(&addr, &expected) {
-                let granted = self.endpoint_dials.reserve(
+                let granted = self.endpoint_dials.reserve_permits(
                     &self.group.group_id(),
                     std::slice::from_ref(&route.endpoint),
                     &*self.clock,
                 );
-                for address in granted {
-                    let _ = self.transport.dial_addr(&address).await;
+                for permit in granted {
+                    let _ = self.transport.dial_permit(Box::new(permit)).await;
                 }
             } else {
                 tracing::warn!("configured rendezvous route lost its peer binding; dial refused");
@@ -6341,10 +6342,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             let mut submitted = 0usize;
             for permit in granted {
                 if matches!(
-                    self.transport.dial_addr_outcome(permit.address()).await,
+                    self.transport.dial_permit(Box::new(permit)).await,
                     Ok(catcoms_rt::DialSubmission::Submitted)
                 ) {
-                    permit.commit();
                     submitted += 1;
                 }
             }
@@ -8034,26 +8034,28 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if permits.is_empty() {
             return false;
         }
-        let addresses: Vec<String> = permits
-            .iter()
-            .map(|permit| permit.address().to_string())
-            .collect();
+        let permit_count = permits.len();
         let outcomes = match self
             .transport
-            .dial_peer_batch(intent.requester.peer, &addresses)
+            .dial_peer_permits(
+                intent.requester.peer,
+                permits
+                    .into_iter()
+                    .map(|permit| Box::new(permit) as catcoms_rt::BoxedDialPermit)
+                    .collect(),
+            )
             .await
         {
-            Ok(outcomes) if outcomes.len() == permits.len() => outcomes,
+            Ok(outcomes) if outcomes.len() == permit_count => outcomes,
             _ => {
-                self.discovery.refund_endpoint_budget(permits.len());
+                self.discovery.refund_endpoint_budget(permit_count);
                 return false;
             }
         };
         let mut submitted = false;
         let mut rejected = 0usize;
-        for (permit, outcome) in permits.into_iter().zip(outcomes) {
+        for outcome in outcomes {
             if matches!(outcome, catcoms_rt::DialSubmission::Submitted) {
-                permit.commit();
                 submitted = true;
             } else {
                 rejected += 1;
@@ -8722,10 +8724,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             let mut submitted = 0usize;
             for permit in granted {
                 if matches!(
-                    self.transport.dial_addr_outcome(permit.address()).await,
+                    self.transport.dial_permit(Box::new(permit)).await,
                     Ok(catcoms_rt::DialSubmission::Submitted)
                 ) {
-                    permit.commit();
                     submitted += 1;
                 }
             }

@@ -34,7 +34,7 @@ export const TAURI_COMMAND_GROUPS = {
       // literal addresses are rendered at all, so being able to set them is being able to widen
       // what every later export contains; that is not a decision a locked machine may make. The
       // setting is never persisted, so nothing here survives a restart.
-      "get_capture_config", "set_capture_mode", "set_section_capture",
+      "get_capture_config", "set_capture_mode", "set_section_capture", "reset_section_capture",
       // set_capture_mode also emits `capture-changed`, so the webview stops producing records when
       // capture is off rather than sending them over for the native side to discard.
       //
@@ -50,6 +50,10 @@ export const TAURI_COMMAND_GROUPS = {
       // the file matches what was on screen, redaction included; the file NAME is built natively
       // and never taken from the webview, because a caller-supplied name is a path traversal.
       "save_diagnostics_report", "validate_diagnostics_report",
+      // The webview supplies no report body. Native code reads the bounded ring and emits only
+      // canonical allowlisted fields before applying the publication validator. The result may
+      // leave through the separately reviewed exact issue-tracker URL command.
+      "build_public_diagnostics_report",
     ],
   },
   server_lifecycle_and_membership: {

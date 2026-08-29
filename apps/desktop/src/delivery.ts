@@ -173,12 +173,40 @@ export type DeliveryReport = {
   any_peer: boolean;
 };
 
-/** Reconcile an actor event/query that is explicitly a complete bounded snapshot. */
+export type DeliverySnapshot = {
+  revision: number;
+  states: readonly DeliveryReport[];
+};
+
+export type DeliverySnapshotView = {
+  revision: number;
+  reports: Readonly<Record<string, DeliveryReport>>;
+};
+
+/**
+ * Reconcile a complete actor snapshot without allowing a delayed query to overwrite a newer
+ * event. Revisions are issued by the sole-owner Rust actor, so they order both IPC paths.
+ */
 export function replaceDeliverySnapshot(
-  _previous: Readonly<Record<string, DeliveryReport>>,
-  states: readonly DeliveryReport[],
-): Record<string, DeliveryReport> {
+  previous: DeliverySnapshotView,
+  snapshot: DeliverySnapshot,
+): DeliverySnapshotView {
+  if (snapshot.revision <= previous.revision) return previous;
   const next: Record<string, DeliveryReport> = {};
-  for (const state of states) next[state.id] = { id: state.id, ...mergeDelivery(undefined, state) };
-  return next;
+  for (const state of snapshot.states) {
+    next[state.id] = { id: state.id, ...mergeDelivery(undefined, state) };
+  }
+  return { revision: snapshot.revision, reports: next };
+}
+
+/**
+ * Clear an unavailable actor's rows only if no newer query/event landed while the failed request
+ * was in flight. Keep the accepted revision so a delayed older event cannot repopulate the view.
+ */
+export function clearDeliverySnapshotAfterFailedQuery(
+  current: DeliverySnapshotView,
+  requestedAtRevision: number,
+): DeliverySnapshotView {
+  if (current.revision !== requestedAtRevision) return current;
+  return { revision: current.revision, reports: {} };
 }

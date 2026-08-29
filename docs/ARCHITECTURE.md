@@ -109,13 +109,17 @@ is broken. The load-bearing fixes:
   withdrawn public IPs forever because an ISP can reassign them; a newer zero-route descriptor
   also removes the prior sealed cache row, so restart cannot resurrect it. Route signatures and matching
   peer ids still do not prove ownership of an IP/port before the bounded first packet is sent.
-  Scheduler counters are transient and reset with the process; they charge actor-accepted
-  submissions, not socket creation or connection completion. Duplicate suppression, cancellation, and failed
-  command delivery can therefore over- or under-account relative to actual sockets. A relay circuit
+  Scheduler counters are transient and reset with the process. A generation-bound, non-cloneable
+  permit moves into the network actor with each discovery dial command; actor-side duplicate or
+  already-connected suppression drops/refunds it, while the actor commits it immediately before
+  the endpoint enters the pending/socket-start path. Caller cancellation after enqueue therefore
+  cannot refund work the actor will still perform, and an old-window command cannot decrement a
+  replacement window. A failure after commit is conservatively spent even if libp2p rejects before
+  a socket completes. A relay circuit
   has its own attempt key so unrelated targets at one relay do not starve each other, but the shared
   outer relay socket is not separately leased at the exact-socket scope; it is bounded only by the
   relay-host prefix and process caps. Libp2p's pending-outgoing cap is still per swarm, so this slice
-  does not yet provide a process-wide actor-consumed in-flight lease. A fully isolated device whose
+  does not yet provide a process-wide in-flight/concurrency lease. A fully isolated device whose
   current address is unknown to every peer still needs
   out-of-band signalling, rendezvous/relay infrastructure, or a reachable member; swarm sampling
   cannot manufacture a route from no contact.

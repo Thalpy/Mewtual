@@ -148,6 +148,11 @@ impl FieldName {
             FieldName::Owned(name) => name,
         }
     }
+
+    /// Whether this name is a compile-time literal owned by the application.
+    pub fn is_static(&self) -> bool {
+        matches!(self, FieldName::Static(_))
+    }
 }
 
 impl From<&'static str> for FieldName {
@@ -236,6 +241,12 @@ pub struct DiagnosticEvent {
     pub at_ms: u64,
     /// Milliseconds from a process-local origin that never moves backwards.
     pub monotonic_ms: u64,
+    /// Privacy mode in force when the hub admitted this event. Rendering must use this value,
+    /// never the viewer's later mode.
+    pub capture_mode: crate::config::CaptureMode,
+    /// Hub-local mode generation. Changes only when capture mode changes and makes mixed-mode
+    /// excerpts explicit without relying on sequence or wall-clock inference.
+    pub capture_epoch: u64,
     pub section: Section,
     pub level: Level,
     /// A stable `AREA.COMPONENT.OUTCOME` identifier, e.g. `JOIN.ROUTES.EXHAUSTED`.
@@ -277,6 +288,8 @@ impl DiagnosticEvent {
             seq: 0,
             at_ms: 0,
             monotonic_ms: 0,
+            capture_mode: crate::config::CaptureMode::Safe,
+            capture_epoch: 0,
             section,
             level,
             code,
@@ -372,6 +385,15 @@ impl DiagnosticEvent {
     /// anything that only a deliberately chosen mode reveals.
     pub fn is_mode_sensitive(&self) -> bool {
         self.fields.iter().any(|(_, v)| v.is_mode_sensitive())
+    }
+
+    /// Stamp and irreversibly minimize an event at the hub's capture boundary.
+    pub(crate) fn prepare_for_capture(&mut self, mode: crate::config::CaptureMode, epoch: u64) {
+        self.capture_mode = mode;
+        self.capture_epoch = epoch;
+        for (_, value) in &mut self.fields {
+            value.minimize_for_capture(mode);
+        }
     }
 }
 

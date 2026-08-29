@@ -571,10 +571,11 @@ mod tests {
 
         let _held = capture_lock();
         let hub = hub();
-        let restore = hub.mode();
+        let restore = hub.config();
         let subscriber = tracing_subscriber::registry().with(ring_layer());
         tracing::subscriber::with_default(subscriber, || {
             hub.set_mode(catcoms_diagnostics::CaptureMode::Safe);
+            hub.reset_section_levels();
             tracing::debug!(target: "catcoms_app", payload = ?Counted, "ON");
             assert_eq!(
                 RENDERED.load(Ordering::Relaxed),
@@ -602,6 +603,12 @@ mod tests {
             // narrating every connection right now". If that only stopped events being kept, the
             // section a user turned down would still be the most expensive one in the process.
             hub.set_mode(catcoms_diagnostics::CaptureMode::Enhanced);
+            // Mode changes preserve the user's section choices. Opening the transport firehose is
+            // therefore its own explicit section-level decision, exactly as the UI presents it.
+            hub.set_section_level(
+                catcoms_diagnostics::Section::Transport,
+                Some(catcoms_diagnostics::Level::Debug),
+            );
             tracing::debug!(target: "catcoms_net", payload = ?Counted, "DIAL");
             assert_eq!(RENDERED.load(Ordering::Relaxed), 3);
 
@@ -615,7 +622,10 @@ mod tests {
             tracing::debug!(target: "catcoms_sync", payload = ?Counted, "POST");
             assert_eq!(RENDERED.load(Ordering::Relaxed), 4);
         });
-        hub.set_mode(restore);
+        hub.set_mode(restore.mode);
+        for section in catcoms_diagnostics::SECTIONS {
+            hub.set_section_level(section, restore.level(section));
+        }
     }
 
     /// One query has to recover the whole operation, across the bridge.

@@ -95,6 +95,7 @@
     type StatusReadCursor,
   } from "./statusread.ts";
   import {
+    clearDeliverySnapshotAfterFailedQuery,
     deliveryClass, deliveryGlyph, deliveryLabel, deliveryTip, deliveryVerdict,
     replaceDeliverySnapshot,
     type DeliveryEvidence,
@@ -4932,7 +4933,7 @@
     inboxItems = [];
     newsItems = [];
     serverIcons = {};
-    delivery = {};
+    deliverySnapshot = { revision: 0, reports: {} };
     draft = "";
     drafts = {};
     readMarks = {};
@@ -5309,7 +5310,7 @@
     messageWindowScope = "";
     chatStickToBottom = true;
     channelTopic = "";
-    delivery = {};
+    deliverySnapshot = { revision: 0, reports: {} };
     roster = [];
     members = 0;
     onlineMembers = new Set();
@@ -5582,7 +5583,7 @@
     messageWindowScope = "";
     chatStickToBottom = true;
     channelTopic = "";
-    delivery = {};
+    deliverySnapshot = { revision: 0, reports: {} };
     cur.active = id;
     loadDraftFor(chanKey()); // restore the target channel's draft
     if (showSearch && !keepSearch) closeSearch();
@@ -5884,22 +5885,30 @@
   // membership changes or bounded evidence eviction; 0 still means "no present proof", never
   // "failed". Red is reserved for the one true negative signal: no peers reachable at all.
   type DeliveryState = { id: string; delivered: number; reachable: number; any_peer: boolean };
-  let delivery = $state<Record<string, DeliveryState>>({});
+  type DeliverySnapshot = { revision: number; states: DeliveryState[] };
+  let deliverySnapshot = $state({ revision: 0, reports: {} as Record<string, DeliveryState> });
+  let delivery = $derived(deliverySnapshot.reports);
   async function refreshDelivery() {
     const gen = viewGeneration;
     const server = activeServerId;
     const channel = cur?.active;
+    // A failed request may only clear the view it was sent for. A delivery event that advances
+    // this watermark while the request is in flight wins over that older failure.
+    const requestedAtRevision = deliverySnapshot.revision;
     if (server === null || !channel) {
-      delivery = {};
+      deliverySnapshot = { revision: 0, reports: {} };
       return;
     }
     try {
-      const list = await invoke<DeliveryState[]>("get_delivery", { server, channel });
+      const snapshot = await invoke<DeliverySnapshot>("get_delivery", { server, channel });
       if (!viewCurrent(gen, server) || cur?.active !== channel) return;
-      delivery = replaceDeliverySnapshot(delivery, list);
+      deliverySnapshot = replaceDeliverySnapshot(deliverySnapshot, snapshot);
     } catch {
       if (!viewCurrent(gen, server) || cur?.active !== channel) return;
-      delivery = {}; // older backend or closed actor: ticks simply don't render
+      deliverySnapshot = clearDeliverySnapshotAfterFailedQuery(
+        deliverySnapshot,
+        requestedAtRevision,
+      ); // closed actor: ticks simply don't render
     }
   }
   // Index of your most recent message in the log (-1 if none): the one message whose state is
@@ -15097,11 +15106,11 @@
         refreshServerIconFor(e.payload.server); // rail icon may have changed for any server
         if (e.payload.server === activeServerId) refreshLivery();
       }),
-      listen<{ server: number; channel: string; states: DeliveryState[] }>("delivery-changed", (e) => {
+      listen<{ server: number; channel: string; revision: number; states: DeliveryState[] }>("delivery-changed", (e) => {
         if (e.payload.server !== activeServerId || e.payload.channel !== cur?.active) return;
         // The actor reports receipts filtered through the current roster. A removed holder must
         // not remain as an anonymous count that can stand in for a newly-added member.
-        delivery = replaceDeliverySnapshot(delivery, e.payload.states);
+        deliverySnapshot = replaceDeliverySnapshot(deliverySnapshot, e.payload);
       }),
       listen<{ server: number }>("badges-changed", (e) => {
         if (e.payload.server === activeServerId) refreshBadges();

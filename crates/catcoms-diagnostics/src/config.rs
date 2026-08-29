@@ -426,15 +426,17 @@ impl CaptureConfig {
     /// speaks is the per-section levels, which the user can move separately.
     pub fn for_mode(mode: CaptureMode) -> Self {
         let base = match mode {
-            CaptureMode::Off => None,
-            CaptureMode::Safe | CaptureMode::Enhanced => Some(Level::Debug),
+            // Off is a privacy gate, not destructive storage for the user's section choices.
+            // Keeping Safe's recommended levels underneath it means Off -> Safe restores useful
+            // capture while `admits` below still rejects every event while mode is Off.
+            CaptureMode::Off | CaptureMode::Safe | CaptureMode::Enhanced => Some(Level::Debug),
             CaptureMode::Full => Some(Level::Trace),
         };
         let mut config = CaptureConfig {
             mode,
             levels: [base; 22],
         };
-        if mode == CaptureMode::Safe {
+        if matches!(mode, CaptureMode::Off | CaptureMode::Safe) {
             // The one section a Safe report holds back, and the whole of what Safe costs in
             // coverage. Its warnings still speak, so a dial failure is recorded; what is dropped is
             // the per-connection churn, which is both the bulk of the volume and the most

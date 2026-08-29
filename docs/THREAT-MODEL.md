@@ -82,8 +82,10 @@ table with the commit that closed it.
   terminal target so unrelated circuits sharing a relay do not consume one two-attempt bucket; the
   relay host is instead bounded by prefix and process caps. Scheduler state is bounded and transient;
   restart resets it. It accounts submitted dial commands rather than actor-confirmed socket starts,
-  and relay outer sockets have no separate exact-socket permit, so an opaque actor-consumed permit,
-  cancellation/refund path, and process-wide in-flight/concurrency lease remain future hardening.
+  and relay outer sockets have no separate exact-socket permit. Discovery endpoint permits are now
+  actor-consumed, single-use and accounting-generation-bound: cancellation after command enqueue
+  cannot refund queued work, actor suppression refunds, and a late old-window drop cannot decrement
+  current counters. A process-wide in-flight/concurrency lease remains future hardening.
   Direct routes carried by companion grants use the same canonical invite policy, must name one
   unambiguous contact, and spend this process budget across every grant in a bundle. Pre-join
   rendezvous uses at most two validated seeds so infrastructure routes cannot consume the entire

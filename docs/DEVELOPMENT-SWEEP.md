@@ -48,7 +48,7 @@ These were checked against implementation and tests after the first sweep:
    exposes `call_media_key`, but the frontend has no call site or encoded-frame transform. Added an
    explicit status correction to the design.
 4. **Diagnostics scoreboard:** P3-018, P3-019 and P3-020 were fixed by later work and have focused
-   regression tests. Updated their stale rows; the named M6 export-validator and early-`main.ts`
+   regression tests. Updated their stale rows; the early-`main.ts`
    capture remainders stay open.
 
 ## Activity log
@@ -77,14 +77,16 @@ These were checked against implementation and tests after the first sweep:
   parser-first script, timed no-script panel, CSP-compatible) and corrected the tracker rather than
   duplicating it.
 - Wired the existing independent diagnostics export validator into `save_diagnostics_report`.
-  Reports with paths, URLs, credential-shaped values, unsafe raw addresses, or opaque blobs are now
-  refused before disk write; non-blocking legacy-prose categories are returned and shown by the UI.
-  Rust/desktop verification is intentionally queued for the later verification pass.
+  Local reports with paths, URLs, credential-shaped values, unsafe raw addresses, opaque blobs, or
+  legacy prose are disclosed for review without pretending they are publication-safe. The public
+  issue path now uses a separate native canonical allowlist that excludes prose, names, addresses,
+  runtime field names and bridge events, then validates the result as defence in depth.
 - Added `validate_diagnostics_report` and made the report-copy action pass it before touching the
   clipboard, closing the unchecked Copy-vs-checked-Save split. Added the command to the IPC security
   ledger; compile and command-ledger verification remain queued.
-- Added focused native regression tests for local-path refusal without echoing the offending bytes,
-  Safe-vs-Enhanced raw-address handling, and non-blocking bridged-prose review disclosure.
+- Added focused native regression tests for local-path findings without echoing the offending bytes,
+  Safe-vs-Enhanced raw-address handling, publication refusal for bridged prose, and a public-renderer
+  canary covering prose, names, addresses, runtime field names and legacy events.
 - Added debug-console “Prepare issue” through the existing reviewed feedback composer and native
   exact-destination allowlist. It validates first, opens only a prefilled browser page, copies the
   full report when URL bounds require truncation, and leaves submission to the user.

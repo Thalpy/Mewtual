@@ -2868,6 +2868,9 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// mapping is gone, so older messages report no delivery state at all rather than a wrong
     /// one. Only own messages are tracked; a peer's delivery is not ours to display.
     own_message_changes: HashMap<u128, VecDeque<(String, ChangeHash)>>,
+    /// Total order of delivery snapshots issued by this actor session. Queries and emitted events
+    /// share it, so a delayed IPC query can never overwrite a newer event in the webview.
+    delivery_snapshot_revision: u64,
     /// A cheap (crypto-free) content signature of the `Devices` document at the last reconcile.
     /// Re-validating that registry costs one signature check per entry, so it is rebuilt only
     /// when the document actually changed; not on every tick. `None` = never reconciled.
@@ -2898,6 +2901,13 @@ pub struct DeliveryState {
     pub any_peer: bool,
 }
 
+/// One complete delivery view plus its actor-issued order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeliverySnapshot {
+    pub revision: u64,
+    pub states: Vec<DeliveryState>,
+}
+
 /// A UI-facing view of one member: a short device-id **fingerprint** for display, the full
 /// content-addressed identity for authorization, and whether it is **this** device.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2926,6 +2936,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            delivery_snapshot_revision: 0,
             devices_sig: None,
         })
     }
@@ -2971,6 +2982,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            delivery_snapshot_revision: 0,
             devices_sig: None,
         })
     }
@@ -3016,6 +3028,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            delivery_snapshot_revision: 0,
             devices_sig: None,
         })
     }
@@ -3094,6 +3107,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 display_name: display_name.into(),
                 device_id,
                 own_message_changes: HashMap::new(),
+                delivery_snapshot_revision: 0,
                 devices_sig: None,
             },
             contact,
@@ -3143,6 +3157,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 display_name: display_name.into(),
                 device_id,
                 own_message_changes: HashMap::new(),
+                delivery_snapshot_revision: 0,
                 devices_sig: None,
             },
             contact,
@@ -3234,6 +3249,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            delivery_snapshot_revision: 0,
             devices_sig: None,
         })
     }
@@ -3262,6 +3278,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            delivery_snapshot_revision: 0,
             devices_sig: None,
         })
     }
@@ -4699,25 +4716,33 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// the self-asserted route projection that drives [`Server::online_members`], and `any_peer`
     /// from a live peer that has already served a roster-verified catch-up. This query creates no
     /// wire traffic; receipt frames are sent separately when remote changes are applied.
-    pub fn delivery_snapshot(&mut self, channel: u128) -> Vec<DeliveryState> {
-        let Some(recent) = self.own_message_changes.get(&channel) else {
-            return Vec::new();
-        };
-        let (ids, changes): (Vec<String>, Vec<ChangeHash>) = recent.iter().cloned().unzip();
-        let reachable = self.online_members().len();
-        let any_peer = self.sync.has_proven_connected_member_peer();
-        let holders = self
-            .sync
-            .peers_with_changes(DocType::Channel, channel, &changes);
-        ids.into_iter()
-            .zip(holders)
-            .map(|(id, peers)| DeliveryState {
-                id,
-                delivered: peers.len(),
-                reachable,
-                any_peer,
+    pub fn delivery_snapshot(&mut self, channel: u128) -> DeliverySnapshot {
+        self.delivery_snapshot_revision = self.delivery_snapshot_revision.saturating_add(1);
+        let revision = self.delivery_snapshot_revision;
+        // Clone the bounded (<= 50) row list before querying sync, whose evidence lookup requires
+        // mutable access. Holding a map borrow across that lookup would either be rejected by Rust
+        // or invite a future refactor to split one coherent actor snapshot into two turns.
+        let recent = self.own_message_changes.get(&channel).cloned();
+        let states = recent
+            .map(|recent| {
+                let (ids, changes): (Vec<String>, Vec<ChangeHash>) = recent.into_iter().unzip();
+                let reachable = self.online_members().len();
+                let any_peer = self.sync.has_proven_connected_member_peer();
+                let holders = self
+                    .sync
+                    .peers_with_changes(DocType::Channel, channel, &changes);
+                ids.into_iter()
+                    .zip(holders)
+                    .map(|(id, peers)| DeliveryState {
+                        id,
+                        delivered: peers.len(),
+                        reachable,
+                        any_peer,
+                    })
+                    .collect()
             })
-            .collect()
+            .unwrap_or_default();
+        DeliverySnapshot { revision, states }
     }
 
     /// Pending incoming DM (friend) requests, each as `(sender fingerprint, sender display name,
@@ -8824,11 +8849,12 @@ mod tests {
         // proves it yet; so her snapshot still reports no delivery, which the UI must render as
         // "unknown" rather than as a failure.
         let snapshot = alice.delivery_snapshot(GENERAL);
-        assert_eq!(snapshot.len(), 1, "only own messages are tracked");
-        assert_eq!(snapshot[0].id, msgs[0].id);
-        assert_eq!(snapshot[0].delivered, 0);
+        let first_delivery_revision = snapshot.revision;
+        assert_eq!(snapshot.states.len(), 1, "only own messages are tracked");
+        assert_eq!(snapshot.states[0].id, msgs[0].id);
+        assert_eq!(snapshot.states[0].delivered, 0);
         assert!(
-            bob.delivery_snapshot(GENERAL).is_empty(),
+            bob.delivery_snapshot(GENERAL).states.is_empty(),
             "Bob has sent nothing, so he has nothing to report"
         );
 
@@ -8844,11 +8870,15 @@ mod tests {
         assert!(alice.sync_once().await.unwrap());
         assert_eq!(alice.channel_topic(GENERAL), "bob was here");
         let snapshot = alice.delivery_snapshot(GENERAL);
-        assert_eq!(snapshot[0].delivered, 1, "Bob provably holds the message");
+        assert!(snapshot.revision > first_delivery_revision);
+        assert_eq!(
+            snapshot.states[0].delivered, 1,
+            "Bob provably holds the message"
+        );
         // `reachable` is the presence count, tracked independently; the in-memory hub models no
         // connect/disconnect, so it stays 0 here even though delivery is proven. The two are not
         // a fraction: a member can hold a message and be offline.
-        assert_eq!(snapshot[0].reachable, alice.online_members().len());
+        assert_eq!(snapshot.states[0].reachable, alice.online_members().len());
 
         // The calendar is its own document (`DocType::Calendar`), caught up exactly like the
         // channel; so an event Alice created reaches the joiner.

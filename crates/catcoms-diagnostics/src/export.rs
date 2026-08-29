@@ -47,6 +47,8 @@
 //! [`BridgedMessage`]: crate::redact::BridgedMessage
 
 use crate::config::CaptureMode;
+use crate::event::DiagnosticEvent;
+use crate::redact::SafeValue;
 
 /// The code every un-migrated `tracing` event carries.
 ///
@@ -110,12 +112,114 @@ impl Category {
     /// escapes from the type system at all. They are the ordinary state of the log today, and a
     /// check that refuses the ordinary case is one people learn to bypass.
     ///
-    /// [`Category::BridgedProse`] never refuses. It marks the un-migrated lines rather than
-    /// anything spotted in them, and its value is as a measure of how far the migration has got.
     pub fn refuses(self, purpose: ExportPurpose) -> bool {
         match purpose {
             ExportPurpose::Local => false,
-            ExportPurpose::Publish => !matches!(self, Category::BridgedProse),
+            ExportPurpose::Publish => true,
+        }
+    }
+}
+
+/// Build the only report intended for automatic publication.
+///
+/// This is an allowlist renderer over canonical native events, not a redactor over a local report.
+/// It deliberately excludes targets, wall-clock times, addresses, `SafeText`, runtime field names,
+/// and every event containing bridged prose. Consequently a new string-carrying field kind is
+/// private by default until this match is reviewed and extended.
+pub fn render_public_report<'a>(events: impl IntoIterator<Item = &'a DiagnosticEvent>) -> String {
+    let mut out = String::from(
+        "MEWTUAL PUBLIC DIAGNOSTICS\n\
+privacy.addresses: excluded\n\
+privacy.stable_identifiers: session-scoped references only\n\
+privacy.user_content: excluded\n\
+privacy.legacy_prose: excluded\n\
+format: canonical allowlist v1\n\n",
+    );
+    for event in events {
+        // The bridge code is itself a stable signal that the event originated as arbitrary
+        // tracing prose. Do not rely only on the field shape: an older producer, compatibility
+        // adapter, or partially populated event may carry the code without a `Bridged` field.
+        if event.code == BRIDGED_CODE
+            || event
+                .fields
+                .iter()
+                .any(|(_, value)| matches!(value, SafeValue::Bridged(_)))
+        {
+            continue;
+        }
+        out.push_str(&format!("{:07}  ", event.seq));
+        push_public_token(event.level.as_str(), &mut out);
+        out.push(' ');
+        push_public_token(event.section.as_str(), &mut out);
+        out.push(' ');
+        push_public_token(event.code, &mut out);
+        out.push_str(" phase=");
+        push_public_token(event.phase.as_str(), &mut out);
+        out.push_str(" elapsed_ms=");
+        out.push_str(&event.monotonic_ms.to_string());
+        out.push_str(" capture_epoch=");
+        out.push_str(&event.capture_epoch.to_string());
+        if !event.operation.is_empty() {
+            out.push_str(" operation=");
+            push_public_token(event.operation, &mut out);
+        }
+        if let Some(duration) = event.duration_ms {
+            out.push_str(" duration_ms=");
+            out.push_str(&duration.to_string());
+        }
+        if let Some(attempt) = event.attempt {
+            out.push_str(" attempt=");
+            out.push_str(&attempt.to_string());
+        }
+        for (name, reference) in [
+            ("server", &event.refs.server),
+            ("channel", &event.refs.channel),
+            ("peer", &event.refs.peer),
+            ("document", &event.refs.document),
+            ("transfer", &event.refs.transfer),
+        ] {
+            if let Some(reference) = reference {
+                out.push(' ');
+                out.push_str(name);
+                out.push('=');
+                push_public_token(reference.as_str(), &mut out);
+            }
+        }
+        for (name, value) in &event.fields {
+            if !name.is_static() {
+                continue;
+            }
+            let rendered = match value {
+                SafeValue::Bool(value) => value.to_string(),
+                SafeValue::Count(value) => value.to_string(),
+                SafeValue::Delta(value) => value.to_string(),
+                SafeValue::Duration(value) => value.to_string(),
+                SafeValue::Outcome(value) => (*value).to_string(),
+                SafeValue::Ref(value) => value.as_str().to_string(),
+                // Privacy boundary: prose and addresses are excluded regardless of capture mode.
+                SafeValue::Text(_) | SafeValue::Address(_) | SafeValue::Bridged(_) => continue,
+            };
+            out.push(' ');
+            push_public_token(name.as_str(), &mut out);
+            out.push('=');
+            push_public_token(&rendered, &mut out);
+        }
+        if event.fields_dropped > 0 {
+            out.push_str(" fields_dropped=");
+            out.push_str(&event.fields_dropped.to_string());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Render a compile-time or already-reduced token without letting punctuation forge another row.
+fn push_public_token(value: &str, out: &mut String) {
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+            out.push(char::from(byte));
+        } else {
+            out.push('_');
         }
     }
 }
@@ -659,8 +763,9 @@ mod tests {
     fn anything_prose_can_carry_is_something_the_validator_catches() {
         for (name, canary) in CANARIES {
             // Only the canaries that are meant to be identifiable in free text. A bare server
-            // name is prose and cannot be distinguished from prose, which is why the footer must
-            // not promise that names are absent: see the wording note in P3-002.
+            // name cannot be distinguished from ordinary prose by the validator. That is why the
+            // publication path uses the typed allowlist renderer below instead of trusting this
+            // scanner to prove arbitrary prose safe.
             if matches!(*name, "message_text" | "server_name" | "channel_name") {
                 continue;
             }
@@ -688,10 +793,61 @@ mod tests {
         let rendered = event_line(&event, CaptureMode::Safe);
         let report = validate_export(&rendered, CaptureMode::Safe);
         assert_eq!(report.count(Category::BridgedProse), 1);
-        // Suspicion alone does not refuse, even at the publishing boundary. Today most lines are
-        // bridged, and a check that refuses every report is a check people learn to bypass.
-        assert!(!report.blocked(ExportPurpose::Publish));
+        // Arbitrary prose is not eligible for automatic publication. Local Save remains allowed;
+        // the public-issue path uses `render_public_report` and omits this event entirely.
+        assert!(report.blocked(ExportPurpose::Publish));
+        assert!(!report.blocked(ExportPurpose::Local));
         assert_eq!(report.categories(), vec![Category::BridgedProse]);
+    }
+
+    #[test]
+    fn the_public_renderer_excludes_prose_names_addresses_and_legacy_events_by_construction() {
+        let salt = SessionSalt::for_tests(4);
+        let mut structured = DiagnosticEvent::info(Section::Join, "JOIN.ROUTES.CHECKED")
+            .target("Private Support")
+            .refs(crate::Refs {
+                server: Some(salt.reference(RefDomain::Server, b"Private Support")),
+                ..crate::Refs::default()
+            })
+            .field("attempts", 2u64)
+            .field("result", SafeValue::Outcome("deferred"))
+            .field("server_name", SafeText::describe("Private Support"))
+            .field("address", AddressValue::new("/ip6/2001:db8::99/tcp/443"))
+            .field(
+                "runtime secret field".to_string(),
+                SafeText::describe("hunter2"),
+            );
+        structured.capture_mode = CaptureMode::Full;
+        structured.capture_epoch = 9;
+        structured.seq = 1;
+        let mut bridged = DiagnosticEvent::warn(Section::Transport, BRIDGED_CODE)
+            .field("message", BridgedMessage::new("Alice at C:\\Users\\Alice"));
+        bridged.seq = 2;
+        // Compatibility producers may identify a bridge event by code without populating the
+        // current `Bridged` field shape. The code alone must keep the whole event private.
+        let mut legacy_bridge =
+            DiagnosticEvent::warn(Section::Transport, BRIDGED_CODE).field("attempts", 99u64);
+        legacy_bridge.seq = 3;
+
+        let report = render_public_report([&structured, &bridged, &legacy_bridge]);
+        assert!(report.contains("privacy.addresses: excluded"));
+        assert!(report.contains("JOIN.ROUTES.CHECKED"));
+        assert!(report.contains("attempts=2"));
+        assert!(!report.contains("attempts=99"));
+        for canary in [
+            "Private Support",
+            "2001:db8",
+            "hunter2",
+            "Alice",
+            "C:\\Users",
+            BRIDGED_CODE,
+        ] {
+            assert!(
+                !report.contains(canary),
+                "public report leaked {canary}: {report}"
+            );
+        }
+        assert!(!validate_export(&report, CaptureMode::Safe).blocked(ExportPurpose::Publish));
     }
 
     #[test]

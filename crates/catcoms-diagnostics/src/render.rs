@@ -93,13 +93,15 @@ fn json_value(value: &SafeValue, mode: CaptureMode, out: &mut String) {
 /// Optional fields are omitted rather than emitted as null. A reader can tell "no duration was
 /// recorded" from an absent key just as well, and every omitted key is a byte a bug report does
 /// not carry.
-pub fn event_json(event: &DiagnosticEvent, mode: CaptureMode) -> String {
+pub fn event_json(event: &DiagnosticEvent, _requested_mode: CaptureMode) -> String {
+    let mode = event.capture_mode;
     let mut out = String::with_capacity(256);
     out.push('{');
     out.push_str(&format!("\"schema\":{SCHEMA_VERSION}"));
     out.push_str(&format!(",\"seq\":{}", event.seq));
     out.push_str(&format!(",\"at_ms\":{}", event.at_ms));
     out.push_str(&format!(",\"monotonic_ms\":{}", event.monotonic_ms));
+    out.push_str(&format!(",\"capture_epoch\":{}", event.capture_epoch));
     out.push_str(",\"section\":");
     json_string(event.section.as_str(), &mut out);
     out.push_str(",\"level\":");
@@ -230,7 +232,8 @@ fn push_row_escaped(text: &str, out: &mut String) {
 /// The console renders from this, and copy uses it too. That is the point: if copy had its own
 /// formatting the two could disagree, and a pasted report that does not match the screenshot it
 /// came with makes the reader work out which one is lying before they can start on the bug.
-pub fn event_line(event: &DiagnosticEvent, mode: CaptureMode) -> String {
+pub fn event_line(event: &DiagnosticEvent, _requested_mode: CaptureMode) -> String {
+    let mode = event.capture_mode;
     let mut out = String::with_capacity(160);
     out.push_str(&format!("{:07}  ", event.seq));
     out.push_str(&format!("{:<5} ", event.level.as_str()));
@@ -285,6 +288,8 @@ fn ref_slots(event: &DiagnosticEvent) -> [(&'static str, &Option<crate::redact::
 pub struct ViewField {
     pub name: String,
     pub value: String,
+    /// Closed native value kind. Public export uses this as an allowlist, never as a blacklist.
+    pub kind: &'static str,
     /// Whether this value would say more under a higher capture mode.
     ///
     /// Carried so a reader can be told what they are *not* seeing. A console that renders a
@@ -334,6 +339,7 @@ pub struct EventView {
     /// very different things, and an excerpt that has been separated from its header must still say
     /// which it is.
     pub capture: &'static str,
+    pub capture_epoch: u64,
 }
 
 /// One event as the debug console reads it.
@@ -341,7 +347,8 @@ pub struct EventView {
 /// The mode is a parameter, never a constant. The projection this replaced hard-coded Enhanced,
 /// which meant the console showed literal addresses whatever the user had chosen and the mode
 /// control could not have worked even once it existed.
-pub fn event_view(event: &DiagnosticEvent, mode: CaptureMode) -> EventView {
+pub fn event_view(event: &DiagnosticEvent, _requested_mode: CaptureMode) -> EventView {
+    let mode = event.capture_mode;
     EventView {
         seq: event.seq,
         at_ms: event.at_ms,
@@ -380,11 +387,13 @@ pub fn event_view(event: &DiagnosticEvent, mode: CaptureMode) -> EventView {
             .map(|(name, value)| ViewField {
                 name: name.as_str().to_string(),
                 value: value.render(mode),
+                kind: value.kind(),
                 sensitive: value.is_mode_sensitive(),
             })
             .collect(),
         fields_dropped: event.fields_dropped,
         capture: mode.as_str(),
+        capture_epoch: event.capture_epoch,
     }
 }
 
@@ -444,7 +453,8 @@ mod tests {
     /// into a mode a user did not deliberately choose, in either output.
     #[test]
     fn a_safe_report_carries_no_literal_address() {
-        let event = sample();
+        let mut event = sample();
+        event.prepare_for_capture(CaptureMode::Safe, 3);
         let json = event_json(&event, CaptureMode::Safe);
         let line = event_line(&event, CaptureMode::Safe);
         for rendered in [&json, &line] {
@@ -455,8 +465,12 @@ mod tests {
                 "the shape still has to survive: {rendered}"
             );
         }
-        // And it does appear once the user has asked for it.
-        assert!(event_json(&event, CaptureMode::Full).contains("2001:db8"));
+        // A later viewer-mode change cannot recover bytes destroyed at capture time.
+        assert!(!event_json(&event, CaptureMode::Full).contains("2001:db8"));
+
+        let mut full = sample();
+        full.prepare_for_capture(CaptureMode::Full, 4);
+        assert!(event_json(&full, CaptureMode::Safe).contains("2001:db8"));
     }
 
     #[test]
@@ -582,10 +596,13 @@ mod tests {
     /// The half of P3-005 that was a privacy bug rather than a fidelity one: the projection
     /// hard-coded Enhanced, so the console showed literal addresses whatever mode was chosen.
     #[test]
-    fn the_same_event_renders_differently_at_each_mode() {
-        let event = sample();
-        let safe = event_view(&event, CaptureMode::Safe);
-        let enhanced = event_view(&event, CaptureMode::Enhanced);
+    fn capture_mode_is_fixed_per_event_instead_of_by_the_later_viewer() {
+        let mut safe_event = sample();
+        safe_event.prepare_for_capture(CaptureMode::Safe, 7);
+        let mut enhanced_event = sample();
+        enhanced_event.prepare_for_capture(CaptureMode::Enhanced, 8);
+        let safe = event_view(&safe_event, CaptureMode::Full);
+        let enhanced = event_view(&enhanced_event, CaptureMode::Safe);
 
         let address_of = |v: &EventView| {
             v.fields
@@ -601,10 +618,12 @@ mod tests {
         );
         assert_eq!(safe.capture, "safe");
         assert_eq!(enhanced.capture, "enhanced");
+        assert_eq!(safe.capture_epoch, 7);
+        assert_eq!(enhanced.capture_epoch, 8);
 
         // And the console can say what it is not showing, rather than leaving a reader to find out
         // by switching modes and comparing.
-        assert!(address_of(&safe).sensitive);
+        assert!(!address_of(&safe).sensitive);
         assert!(
             !safe
                 .fields
@@ -720,20 +739,22 @@ mod tests {
 
         // The same hole by the other route: a literal address is rendered verbatim under a mode
         // that allows it, and nothing on the way in strips its control characters.
-        let addressed = DiagnosticEvent::info(Section::Transport, "NET.DIAL.FAILED").field(
+        let mut addressed = DiagnosticEvent::info(Section::Transport, "NET.DIAL.FAILED").field(
             "address",
             AddressValue::new(
                 "/ip4/203.0.113.9/tcp/1\n0001235  ERROR  security      MLS.KEY.LEAKED",
             ),
         );
+        addressed.prepare_for_capture(CaptureMode::Full, 1);
         let line = event_line(&addressed, CaptureMode::Full);
         assert_eq!(line.lines().count(), 1, "{line}");
 
         // A carriage return is the same forgery against a reader watching a terminal rather than
         // parsing a file: it returns the cursor and the rest of the value overwrites the row.
         // A bridged message loses one on the way in, but an address keeps everything it was given.
-        let returned = DiagnosticEvent::info(Section::Transport, "NET.DIAL.FAILED")
+        let mut returned = DiagnosticEvent::info(Section::Transport, "NET.DIAL.FAILED")
             .field("address", AddressValue::new("/ip4/203.0.113.9\rtcp"));
+        returned.prepare_for_capture(CaptureMode::Full, 1);
         assert!(
             event_line(&returned, CaptureMode::Full).contains(r"203.0.113.9\rtcp"),
             "a control character reads as itself rather than acting"

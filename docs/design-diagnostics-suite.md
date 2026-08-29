@@ -37,9 +37,10 @@ rendered in the clear while the screen claimed to be safe to share.
 
 Identifiers now enter an event only as a `SessionRef`, a keyed hash under a salt that is random per
 diagnostic session. A peer id cannot leak however careless a call site is, and a report correlates
-internally without becoming a stable cross-session tracking token. The old regex survives as the
-console's render-time screenshot redaction and, later, as the export validator's second pass. It is
-a backstop, not the primary defence.
+internally without becoming a stable cross-session tracking token. The console's screenshot/local-
+copy mask validates IPv4/IPv6 forms and base58 multihashes rather than keying only on current
+prefixes; the export validator is a second pass. Neither is the primary publication defence:
+automatic issue text comes from a native allowlist that excludes arbitrary prose and addresses.
 
 **Known and deliberate hole:** `BridgedMessage` carries un-migrated `tracing` messages, which are
 arbitrary text. It is a distinct type precisely so it stays greppable, and counting them measures
@@ -66,7 +67,12 @@ per stage of every command and none of them is interesting until something goes 
 default mode threw all of them away before anything could ask: the record could say a send failed
 and never which stage. The base level is now the same for Safe and Enhanced. What a mode changes is
 whether values render literally and whether the transport firehose is on; how much of the app speaks
-is the per-section levels, which move separately.
+is the per-section levels, which move separately and survive mode changes. An explicit Reset action
+restores the current mode's recommended levels.
+
+Literal address minimization happens when the hub admits the event. Every ring row carries its
+capture mode and a monotonic mode epoch; a later viewer mode is never used to reinterpret stored
+bytes. Safe destroys the literal rather than merely hiding it.
 
 Safe therefore costs exactly one thing: transport *debug*, which is not captured at all and so
 cannot be recovered by raising the mode afterwards. The console says how many events the settings
@@ -104,7 +110,7 @@ Default on, one click to turn off permanently. Revisit before general release, n
 | M3 | Correlation, typed errors, task supervision, invoke migration | done |
 | M4 | Rebuild the console on the hub | reading and capture control done; findings, checks and virtualised list outstanding |
 | M5 | Findings and checks | not started |
-| M6 | Export bundle and GitHub issue flow | mostly done: native validation gates Copy/Save/issue preparation; bounded browser issue flow reuses the reviewed feedback destination; source-typed frontend references remain |
+| M6 | Export bundle and GitHub issue flow | mostly done: local Copy/Save receive native disclosure findings; public issue preparation uses a native canonical allowlist plus validation; bounded browser flow reuses the reviewed destination; richer source-typed frontend references remain |
 | M7 | Hardening, privacy property tests, performance budgets, CI gates | not started |
 
 ### M3, as delivered
@@ -174,8 +180,9 @@ plausible. Left out rather than faked.
 
 The console reads the canonical record now (P3-005). `catcoms-log`'s `LogRing` and its `project()`
 are **deleted** rather than deprecated, so nothing can reach for the flattening again;
-`catcoms_diagnostics::event_view` renders an event at a mode passed in by the caller, and the
-desktop bridge carries every field of it across.
+`catcoms_diagnostics::event_view` renders an event at its capture-time mode (the legacy mode
+argument cannot elevate it), and the desktop bridge carries every field, capture mode and epoch
+across.
 
 What that buys, concretely:
 
@@ -185,7 +192,7 @@ What that buys, concretely:
 * A line shows its section, its trace and, for a migrated call site, its code, phase, duration,
   attempt and references. Previously four characters of the trace survived and the rest did not.
 * The mode is a real control with a confirmation on the two modes that start writing this device's
-  addresses down, and every page and every event says which mode it was rendered at.
+  addresses into future events, and every event says which mode and epoch captured it.
 * Per-section levels are adjustable, which is the half of decision 2.3 that had no user interface.
 * Storage gained a feed, so an integrity failure or an abandoned upload has somewhere to appear.
 * A trace filter, so pasting four characters off an error banner narrows every feed to that one
@@ -195,10 +202,12 @@ Still outstanding for M4: the findings panel, the checks panel, the notes pad, a
 list the review asks for. The current feeds render a capped slice, which is bounded but is not the
 same thing.
 
-**Two renderers now describe one event.** `eventText` in `debug-console.ts` deliberately mirrors
-`event_line` in `render.rs`, because the console composes the report text today and M6's bundle will
-be written natively. They agree by inspection and by the comment on each; that is weaker than a
-shared implementation, and M6 should collapse them rather than add a third.
+**Two renderers describe the local interactive event.** `eventText` in `debug-console.ts`
+deliberately mirrors `event_line` in `render.rs`, because the console composes the local report.
+Public issue text has a narrower native renderer over typed event fields; it is intentionally not a
+third equivalent renderer because it excludes whole private field kinds and legacy events by
+construction. The local/native display renderers still agree only by inspection and comments;
+future work should share that presentation contract where practical.
 
 ### Corrections made after review
 
@@ -207,11 +216,13 @@ shared implementation, and M6 should collapse them rather than add a third.
   leak the typed model was built to prevent, produced by the most ordinary input in the system, and
   missed by every test written alongside it. It matches a closed set of transport names now, so an
   unrecognised address shape renders nothing rather than whatever sat in the last segment.
-* **P3-002 (critical), partly fixed.** The report footer promised it "never includes message text,
-  file contents, names or key material" while the report writes every server name and the `tracing`
-  bridge carries arbitrary prose. The wording now describes what a report may contain and asks the
-  reader to check. The real fix is the export validator, which is M6's work; until it exists the
-  honest sentence is the fix, because a false safety label is worse than none.
+* **P3-002 (critical), fixed.** A local report remains an honestly labelled diagnostic containing
+  whatever its selected capture mode retained. The public-issue action no longer redacts that
+  report and hopes every private shape was recognised: native code constructs a separate canonical
+  allowlist report. It excludes addresses, wall-clock time, targets, runtime field names, user
+  prose, server/member labels, and every legacy tracing-bridge event. A canary regression places all
+  of those values in one event set and proves none reaches the public report. The general validator
+  remains defence in depth and refuses every finding for a publication destination.
 * **P3-005 (high), fixed.** See "M4, as far as it goes" above.
 * **P3-011 (medium), fixed.** A trace minted in the webview arrived as a *field* called `trace`, so
   it rendered as text, never reached `DiagnosticHub::trace`, and could not gather the webview's half
@@ -414,8 +425,8 @@ Neither was in a review, and both are the kind of thing a passing suite says not
 - **Structured detail on `AppError`.** Removed rather than carried unused.
 
 ## 4a. Every finding from the Part 3 review
-<!-- The original Part 3 findings are resolved except for the named P3-002/M6 and P3-016 startup
-     remainders. P3-018 through P3-020 were closed by later P-fixes work; keep the table aligned
+<!-- The original Part 3 findings are resolved except for the named P3-016 startup remainder.
+     P3-018 through P3-020 were closed by later P-fixes work; keep the table aligned
      with the implementation and regression tests rather than with the pinned historical review. -->
 
 
@@ -435,7 +446,7 @@ can be read.
 | ID | Sev | Finding | Status |
 |---|---|---|---|
 | P3-001 | Critical | Safe multiaddr rendering can expose a raw peer id | Fixed, `dbf965f` |
-| P3-002 | Critical | The exported-report privacy promise is false and unvalidated | Validator implemented in `catcoms-diagnostics::export` and now enforced natively before both saved-report writes and report clipboard copies; blocking findings refuse export and non-blocking legacy-prose categories are returned to the UI. Source-typed migration remains M6 work. |
+| P3-002 | Critical | The exported-report privacy promise is false and unvalidated | Fixed: local exports use honest disclosure wording; publication uses a separate native canonical allowlist that omits prose, names, addresses and bridge events, then applies the validator as defence in depth. A hostile-value canary regression pins the boundary. |
 | P3-003 | High | Saved reports bypass retention and can fill the log directory | Fixed, `cfbead6` |
 | P3-004 | High | Trace correlation stops before the actor and event pipeline | Fixed, `74166bf` |
 | P3-005 | High | The console consumes a lossy, hard-coded Enhanced projection | Fixed, `dde528d` |

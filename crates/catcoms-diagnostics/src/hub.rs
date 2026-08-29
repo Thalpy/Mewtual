@@ -37,6 +37,7 @@ pub const DEFAULT_CAPACITY: usize = 8192;
 struct HubInner {
     ring: Ring,
     config: CaptureConfig,
+    capture_epoch: u64,
     /// Where this session's monotonic clock started, so elapsed time is measured from process
     /// start rather than from an arbitrary origin.
     origin_ms: u64,
@@ -119,6 +120,7 @@ impl DiagnosticHub {
             inner: Arc::new(Mutex::new(HubInner {
                 ring: Ring::new(capacity),
                 config,
+                capture_epoch: 1,
                 origin_ms,
             })),
             gate,
@@ -153,9 +155,17 @@ impl DiagnosticHub {
         let at_ms = self.clock.now_ms();
         let monotonic = self.clock.monotonic_ms();
         let mut inner = self.lock();
+        // The lock-free gate is a fast rejection hint. A mode/level change can race between that
+        // hint and this lock, so the authoritative config is checked again before any bytes enter
+        // the ring.
+        if !inner.config.admits(event.section, event.level) {
+            self.filtered.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
         let mut event = event;
         event.at_ms = at_ms;
         event.monotonic_ms = monotonic.saturating_sub(inner.origin_ms);
+        event.prepare_for_capture(inner.config.mode, inner.capture_epoch);
         Some(inner.ring.push(event))
     }
 
@@ -251,9 +261,19 @@ impl DiagnosticHub {
     /// and a user who wanted to stop being recorded had to quit the app to do it.
     pub fn set_mode(&self, mode: CaptureMode) {
         let mut inner = self.lock();
-        inner.config = CaptureConfig::for_mode(mode);
+        if inner.config.mode != mode {
+            inner.config.mode = mode;
+            inner.capture_epoch = inner.capture_epoch.saturating_add(1);
+        }
         // Published while the lock is held, so the gate and the config can never disagree about
         // what the current setting is.
+        self.gate.store(&inner.config);
+    }
+
+    /// Restore the current mode's recommended section levels as an explicit, separate action.
+    pub fn reset_section_levels(&self) {
+        let mut inner = self.lock();
+        inner.config = CaptureConfig::for_mode(inner.config.mode);
         self.gate.store(&inner.config);
     }
 
@@ -577,6 +597,46 @@ mod tests {
             .is_none(),
             "the others keep the mode's default"
         );
+    }
+
+    #[test]
+    fn mode_changes_preserve_section_choices_until_an_explicit_reset() {
+        let (hub, _) = hub(CaptureMode::Safe);
+        hub.set_section_level(Section::Sync, Some(Level::Trace));
+        hub.set_section_level(Section::Transport, None);
+        for mode in [CaptureMode::Enhanced, CaptureMode::Full, CaptureMode::Safe] {
+            hub.set_mode(mode);
+            let config = hub.config();
+            assert_eq!(config.level(Section::Sync), Some(Level::Trace));
+            assert_eq!(config.level(Section::Transport), None);
+        }
+        hub.reset_section_levels();
+        assert_eq!(hub.config().level(Section::Sync), Some(Level::Debug));
+        assert_eq!(hub.config().level(Section::Transport), Some(Level::Warn));
+    }
+
+    #[test]
+    fn safe_capture_discards_an_address_before_a_later_full_mode_can_render_it() {
+        let (hub, _) = hub(CaptureMode::Safe);
+        hub.record(DiagnosticEvent::info(Section::Sync, "NET.DIAL").field(
+            "address",
+            crate::AddressValue::new("/ip6/2001:db8::1/tcp/443"),
+        ));
+        hub.set_mode(CaptureMode::Full);
+        hub.record(DiagnosticEvent::info(Section::Sync, "NET.DIAL").field(
+            "address",
+            crate::AddressValue::new("/ip6/2001:db8::2/tcp/443"),
+        ));
+        let events = hub.since(0, 10);
+        assert_eq!(events.len(), 2);
+        let first = crate::event_view(&events[0], CaptureMode::Full);
+        let second = crate::event_view(&events[1], CaptureMode::Safe);
+        assert_eq!(first.fields[0].value, "ip6/tcp");
+        assert_eq!(first.capture, "safe");
+        assert!(!first.fields[0].sensitive, "the literal no longer exists");
+        assert_eq!(second.fields[0].value, "/ip6/2001:db8::2/tcp/443");
+        assert_eq!(second.capture, "full");
+        assert!(second.capture_epoch > first.capture_epoch);
     }
 
     /// A salt in a log lets a reader recompute every reference in it, and a `Debug` impl on a

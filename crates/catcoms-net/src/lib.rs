@@ -1183,6 +1183,9 @@ enum Command {
     /// Dial `addr` (e.g. a relay, before reserving a circuit on it).
     Dial {
         addr: Multiaddr,
+        /// Present for discovery-policy dials. Ownership must remain in this command until the
+        /// actor either suppresses the endpoint or commits it at socket submission.
+        permit: Option<catcoms_rt::BoxedDialPermit>,
         reply: Option<oneshot::Sender<catcoms_rt::DialSubmission>>,
     },
     /// A reciprocal-repair batch whose direct routes must all terminate at `peer`.
@@ -1191,6 +1194,7 @@ enum Command {
     DialPeerBatch {
         peer: PeerId,
         addrs: Vec<Multiaddr>,
+        permits: Option<Vec<catcoms_rt::BoxedDialPermit>>,
         reply: oneshot::Sender<Result<Vec<catcoms_rt::DialSubmission>, TransportError>>,
     },
     /// Advertise `addr` as an external (reachable) address; for a node with a
@@ -1222,6 +1226,24 @@ enum Command {
     /// ex-member who is later re-invited dials the founder, is refused at the connection handler,
     /// and the join times out with nothing to diagnose.
     Unevict(PeerId),
+}
+
+/// Commit an optional scheduler permit for this exact actor-owned endpoint.
+///
+/// A command without a permit is a locally configured/bootstrap dial and follows the legacy path.
+/// A command with a stale permit is suppressed. The exact-address comparison is repeated here,
+/// next to submission, even though the sender parsed the same string before enqueueing.
+fn commit_dial_permit(permit: Option<catcoms_rt::BoxedDialPermit>, addr: &Multiaddr) -> bool {
+    let Some(permit) = permit else {
+        return true;
+    };
+    let canonical = addr.to_string();
+    if permit.address() != canonical {
+        return false;
+    }
+    permit
+        .commit_if_current()
+        .is_some_and(|authorized| authorized == canonical)
 }
 
 /// Cap on the eviction deny list.
@@ -3744,21 +3766,39 @@ impl Actor {
                     tracing::warn!(%addr, error = %e, "listen failed");
                 }
             }
-            Command::Dial { addr, reply } => {
-                let outcome = self.dial_gated(addr);
+            Command::Dial {
+                addr,
+                permit,
+                reply,
+            } => {
+                let outcome = self.dial_gated(addr, permit);
                 if let Some(reply) = reply {
                     let _ = reply.send(outcome);
                 }
             }
-            Command::DialPeerBatch { peer, addrs, reply } => {
-                if !valid_direct_peer_batch(peer, &addrs) {
+            Command::DialPeerBatch {
+                peer,
+                addrs,
+                permits,
+                reply,
+            } => {
+                if !valid_direct_peer_batch(peer, &addrs)
+                    || permits.as_ref().is_some_and(|p| p.len() != addrs.len())
+                {
                     let _ = reply.send(Err(TransportError::InvalidDialBatch));
                     return;
                 }
-                let outcomes = addrs
-                    .into_iter()
-                    .map(|addr| self.dial_gated(addr))
-                    .collect();
+                let outcomes = match permits {
+                    Some(permits) => addrs
+                        .into_iter()
+                        .zip(permits)
+                        .map(|(addr, permit)| self.dial_gated(addr, Some(permit)))
+                        .collect(),
+                    None => addrs
+                        .into_iter()
+                        .map(|addr| self.dial_gated(addr, None))
+                        .collect(),
+                };
                 let _ = reply.send(Ok(outcomes));
             }
             Command::AddExternalAddress(addr) => {
@@ -3948,7 +3988,20 @@ impl Actor {
     /// PEX validate the terminal id against the signed record before this point; retaining a bare
     /// fallback here would silently turn a malformed record back into an arbitrary socket dial.
     /// (The jitter half of P11 lives in the caller that drives the timer.)
-    fn dial_gated(&mut self, addr: Multiaddr) -> catcoms_rt::DialSubmission {
+    fn dial_gated(
+        &mut self,
+        addr: Multiaddr,
+        permit: Option<catcoms_rt::BoxedDialPermit>,
+    ) -> catcoms_rt::DialSubmission {
+        // A permit is authority for one canonical endpoint, not merely one peer. Check the owned
+        // command data before any actor ledger mutation; a mismatched permit drops and refunds.
+        if permit
+            .as_ref()
+            .is_some_and(|permit| permit.address() != addr.to_string())
+        {
+            tracing::warn!("dial refused: scheduler permit/address mismatch");
+            return catcoms_rt::DialSubmission::Suppressed;
+        }
         // Routing *through* a relay makes it this node's infrastructure just as surely as
         // reserving on it does, and only the reservation path was noting it. The gate below
         // resolves the LAST `/p2p/` component, which for `…/p2p/RELAY/p2p-circuit/p2p/TARGET` is
@@ -3965,7 +4018,7 @@ impl Actor {
             return catcoms_rt::DialSubmission::Suppressed;
         };
         if self.infra_peers.contains(&target) {
-            return self.dial_infra(target, addr);
+            return self.dial_infra(target, addr, permit);
         }
         if self.covered_addrs.len() > MAX_DIAL_LEDGER_PEERS {
             // Entries are dropped when a peer disconnects or a dial fails, so this is the
@@ -3974,16 +4027,23 @@ impl Actor {
             tracing::debug!("dial ledger over its cap; clearing");
             self.covered_addrs.clear();
         }
-        if !self
+        if self
             .covered_addrs
-            .entry(target)
-            .or_default()
-            .insert(addr.clone())
+            .get(&target)
+            .is_some_and(|covered| covered.contains(&addr))
         {
             let shape = dial_log_shape(std::iter::once(&addr));
             tracing::trace!(?shape, peer = %target, "dial suppressed: route is already dialing or connected");
             return catcoms_rt::DialSubmission::Suppressed;
         }
+        if !commit_dial_permit(permit, &addr) {
+            tracing::trace!(peer = %target, "dial suppressed: scheduler permit expired");
+            return catcoms_rt::DialSubmission::Suppressed;
+        }
+        self.covered_addrs
+            .entry(target)
+            .or_default()
+            .insert(addr.clone());
         self.pending_dials.entry(target).or_default().push(addr);
         catcoms_rt::DialSubmission::Submitted
     }
@@ -3993,10 +4053,15 @@ impl Actor {
         &mut self,
         target: libp2p::PeerId,
         addr: Multiaddr,
+        permit: Option<catcoms_rt::BoxedDialPermit>,
     ) -> catcoms_rt::DialSubmission {
         if self.swarm.is_connected(&target) {
             let shape = dial_log_shape(std::iter::once(&addr));
             tracing::trace!(?shape, peer = %target, "infra dial suppressed: already connected");
+            return catcoms_rt::DialSubmission::Suppressed;
+        }
+        if !commit_dial_permit(permit, &addr) {
+            tracing::trace!(peer = %target, "infra dial suppressed: scheduler permit expired");
             return catcoms_rt::DialSubmission::Suppressed;
         }
         let shape = dial_log_shape(std::iter::once(&addr));
@@ -4992,6 +5057,28 @@ impl MeshService {
         self.cmd_tx
             .send(Command::Dial {
                 addr,
+                permit: None,
+                reply: Some(reply),
+            })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)
+    }
+
+    /// Transfer a discovery scheduler permit into the actor before awaiting its decision.
+    pub async fn dial_permit(
+        &self,
+        permit: catcoms_rt::BoxedDialPermit,
+    ) -> Result<catcoms_rt::DialSubmission, TransportError> {
+        let addr = permit
+            .address()
+            .parse::<Multiaddr>()
+            .map_err(|_| TransportError::InvalidDialBatch)?;
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Dial {
+                addr,
+                permit: Some(permit),
                 reply: Some(reply),
             })
             .await
@@ -5021,7 +5108,43 @@ impl MeshService {
             .collect::<Result<Vec<_>, _>>()?;
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::DialPeerBatch { peer, addrs, reply })
+            .send(Command::DialPeerBatch {
+                peer,
+                addrs,
+                permits: None,
+                reply,
+            })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)?
+    }
+
+    /// Transfer a peer-bound discovery batch into the actor as one owned command.
+    pub async fn dial_peer_permits(
+        &self,
+        peer: PeerId,
+        permits: Vec<catcoms_rt::BoxedDialPermit>,
+    ) -> Result<Vec<catcoms_rt::DialSubmission>, TransportError> {
+        if permits.is_empty() || permits.len() > MAX_PEER_DIAL_BATCH {
+            return Err(TransportError::InvalidDialBatch);
+        }
+        let addrs = permits
+            .iter()
+            .map(|permit| {
+                permit
+                    .address()
+                    .parse::<Multiaddr>()
+                    .map_err(|_| TransportError::InvalidDialBatch)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::DialPeerBatch {
+                peer,
+                addrs,
+                permits: Some(permits),
+                reply,
+            })
             .await
             .map_err(|_| TransportError::Closed)?;
         rx.await.map_err(|_| TransportError::Closed)?
@@ -5233,7 +5356,11 @@ impl MeshHandle {
     /// See [`MeshService::dial`].
     pub async fn dial(&self, addr: Multiaddr) -> Result<(), TransportError> {
         self.cmd_tx
-            .send(Command::Dial { addr, reply: None })
+            .send(Command::Dial {
+                addr,
+                permit: None,
+                reply: None,
+            })
             .await
             .map_err(|_| TransportError::Closed)
     }
@@ -5252,6 +5379,7 @@ impl MeshHandle {
             self.cmd_tx
                 .send(Command::Dial {
                     addr: address.clone(),
+                    permit: None,
                     reply: None,
                 })
                 .await
@@ -5279,7 +5407,12 @@ impl MeshHandle {
             .collect::<Result<Vec<_>, _>>()?;
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::DialPeerBatch { peer, addrs, reply })
+            .send(Command::DialPeerBatch {
+                peer,
+                addrs,
+                permits: None,
+                reply,
+            })
             .await
             .map_err(|_| TransportError::Closed)?;
         rx.await.map_err(|_| TransportError::Closed)?
@@ -5462,12 +5595,27 @@ impl MeshTransport for MeshService {
         MeshService::dial_outcome(self, m).await
     }
 
+    async fn dial_permit(
+        &self,
+        permit: catcoms_rt::BoxedDialPermit,
+    ) -> Result<catcoms_rt::DialSubmission, TransportError> {
+        MeshService::dial_permit(self, permit).await
+    }
+
     async fn dial_peer_batch(
         &self,
         peer: PeerId,
         addresses: &[String],
     ) -> Result<Vec<catcoms_rt::DialSubmission>, TransportError> {
         MeshService::dial_peer_batch(self, peer, addresses).await
+    }
+
+    async fn dial_peer_permits(
+        &self,
+        peer: PeerId,
+        permits: Vec<catcoms_rt::BoxedDialPermit>,
+    ) -> Result<Vec<catcoms_rt::DialSubmission>, TransportError> {
+        MeshService::dial_peer_permits(self, peer, permits).await
     }
 
     async fn add_external_addr(&self, addr: &str) -> Result<(), TransportError> {
@@ -5514,6 +5662,30 @@ mod tests {
     use super::*;
     use catcoms_rt::rng::RngError;
     use catcoms_rt::{CryptoRng, ManualClock, RngCore};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct DropObservedPermit {
+        address: String,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for DropObservedPermit {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl catcoms_rt::DialPermit for DropObservedPermit {
+        fn address(&self) -> &str {
+            &self.address
+        }
+
+        fn commit_if_current(self: Box<Self>) -> Option<String> {
+            Some(self.address.clone())
+        }
+    }
 
     #[derive(Debug, Clone, Copy)]
     struct FixedRng(u8);
@@ -5579,6 +5751,36 @@ mod tests {
         assert!(!valid_direct_peer_batch(peer, &[relay]));
         let unbound: Multiaddr = "/ip4/198.51.100.7/tcp/22487".parse().unwrap();
         assert!(!valid_direct_peer_batch(peer, &[unbound]));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_reply_receiver_cannot_reclaim_a_queued_dial_permit() {
+        let target = libp2p_peer();
+        let address = format!("/ip4/198.51.100.7/tcp/22487/p2p/{target}");
+        let drops = Arc::new(AtomicUsize::new(0));
+        let permit = DropObservedPermit {
+            address: address.clone(),
+            drops: drops.clone(),
+        };
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let (reply, reply_rx) = oneshot::channel();
+        command_tx
+            .send(Command::Dial {
+                addr: address.parse().unwrap(),
+                permit: Some(Box::new(permit)),
+                reply: Some(reply),
+            })
+            .await
+            .unwrap();
+
+        // This is the original failure window: the calling future disappears after enqueue but
+        // before the actor replies. The permit must remain owned by the queued command.
+        drop(reply_rx);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let queued = command_rx.recv().await.expect("command remained queued");
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(queued);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     fn dialled_endpoint(address: &str) -> ConnectedPoint {

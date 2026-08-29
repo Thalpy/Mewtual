@@ -1540,19 +1540,30 @@ struct DeliveryStateEvt {
 struct DeliveryEvt {
     server: u64,
     channel: String,
+    revision: u64,
     states: Vec<DeliveryStateEvt>,
 }
 
-fn delivery_payload(states: Vec<catcoms_app::DeliveryState>) -> Vec<DeliveryStateEvt> {
-    states
-        .into_iter()
-        .map(|s| DeliveryStateEvt {
-            id: s.id,
-            delivered: s.delivered,
-            reachable: s.reachable,
-            any_peer: s.any_peer,
-        })
-        .collect()
+#[derive(Serialize, Clone)]
+struct DeliverySnapshotEvt {
+    revision: u64,
+    states: Vec<DeliveryStateEvt>,
+}
+
+fn delivery_payload(snapshot: catcoms_app::DeliverySnapshot) -> DeliverySnapshotEvt {
+    DeliverySnapshotEvt {
+        revision: snapshot.revision,
+        states: snapshot
+            .states
+            .into_iter()
+            .map(|s| DeliveryStateEvt {
+                id: s.id,
+                delivered: s.delivered,
+                reachable: s.reachable,
+                any_peer: s.any_peer,
+            })
+            .collect(),
+    }
 }
 
 /// Forward one server actor's event stream to the frontend, tagging each with `server`.
@@ -1941,14 +1952,16 @@ fn forward_events(
                 AppEvent::SwitchboardsChanged => {
                     emit_tracked(&app, "switchboard-changed", ServerEvt { server }, trace);
                 }
-                AppEvent::DeliveryChanged { channel, states } => {
+                AppEvent::DeliveryChanged { channel, snapshot } => {
+                    let snapshot = delivery_payload(snapshot);
                     emit_tracked(
                         &app,
                         "delivery-changed",
                         DeliveryEvt {
                             server,
                             channel: channel.to_string(),
-                            states: delivery_payload(states),
+                            revision: snapshot.revision,
+                            states: snapshot.states,
                         },
                         trace,
                     );
@@ -7795,10 +7808,10 @@ async fn get_delivery(
     state: State<'_, AppState>,
     server: u64,
     channel: String,
-) -> Result<Vec<DeliveryStateEvt>, String> {
+) -> Result<DeliverySnapshotEvt, String> {
     let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
     let actor = actor_of(&state, server).await?;
-    Ok(delivery_payload(actor.delivery_snapshot(id).await))
+    Ok(delivery_payload(actor.delivery_snapshot(id).await?))
 }
 
 /// Per-DM activity stats (no message text) for the friends-list sortings, one entry per DM group.
@@ -12587,6 +12600,7 @@ const MAX_UI_LOG_BYTES: usize = 2000;
 struct ConsoleField {
     name: String,
     value: String,
+    kind: &'static str,
     /// Whether a higher capture mode would show more of this value. Lets the console tell a reader
     /// what they are *not* seeing, instead of leaving them to find out by switching and comparing.
     sensitive: bool,
@@ -12638,6 +12652,8 @@ struct ConsoleLogEvent {
     /// The mode this line was rendered at. On every event rather than only in the page header,
     /// because an excerpt someone pastes gets separated from its header immediately.
     capture: &'static str,
+    /// Mode generation assigned when the event entered the native ring.
+    capture_epoch: u64,
 }
 
 impl From<catcoms_diagnostics::EventView> for ConsoleLogEvent {
@@ -12665,11 +12681,13 @@ impl From<catcoms_diagnostics::EventView> for ConsoleLogEvent {
                 .map(|f| ConsoleField {
                     name: f.name,
                     value: f.value,
+                    kind: f.kind,
                     sensitive: f.sensitive,
                 })
                 .collect(),
             fields_dropped: view.fields_dropped,
             capture: view.capture,
+            capture_epoch: view.capture_epoch,
         }
     }
 }
@@ -12707,9 +12725,8 @@ const MAX_CONSOLE_LOG_PAGE: usize = 500;
 /// message per tick and a freshly opened one gets the backlog the ring still has. The ring is
 /// in-memory only: this reads it, and nothing here writes it anywhere.
 ///
-/// Rendered at the hub's current capture mode, read once per page so every event on it agrees
-/// about what it is. Never at a constant: the mode is the user's decision about how much of their
-/// own network detail to look at, and a viewer that ignored it made the setting a decoration.
+/// Each event renders at its capture-time mode and carries its mode generation. Changing the
+/// viewer later cannot recover address bytes that Safe capture destroyed before ring insertion.
 ///
 /// Gated on an unlocked session, unlike `log_ui` below. The ring holds peer addresses and stable
 /// identifiers, and a locked app must not show those to whoever picks the machine up. Someone
@@ -12944,6 +12961,39 @@ async fn set_section_capture(
     };
     catcoms_log::hub().set_section_level(section, level);
     Ok(capture_config_view())
+}
+
+/// Explicitly restore the recommended section levels for the current privacy mode.
+#[tauri::command]
+async fn reset_section_capture(state: State<'_, AppState>) -> Result<CaptureConfigView, String> {
+    require_unlocked_session(&state).await?;
+    catcoms_log::hub().reset_section_levels();
+    Ok(capture_config_view())
+}
+
+/// Build the public-issue attachment from a native allowlist.
+///
+/// The webview supplies no report bytes. This prevents server names, table prose, literal
+/// addresses, and legacy tracing messages from being smuggled through a caller-controlled local
+/// bundle whose header happens to claim redaction.
+#[tauri::command]
+async fn build_public_diagnostics_report(state: State<'_, AppState>) -> Result<String, String> {
+    require_unlocked_session(&state).await?;
+    let hub = catcoms_log::hub();
+    let events = hub.since(0, catcoms_log::LOG_RING_CAPACITY);
+    let report =
+        catcoms_diagnostics::export::render_public_report(events.iter().map(|event| &**event));
+    if report.len() > MAX_REPORT_BYTES {
+        return Err("public diagnostics report exceeds the bounded export size".into());
+    }
+    // Defense in depth: the allowlist is the privacy proof; the scanner catches regressions in
+    // its output contract before any future issue-submission command receives the bytes.
+    validate_report_for_mode(
+        &report,
+        catcoms_diagnostics::CaptureMode::Safe,
+        ExportPurpose::Publish,
+    )?;
+    Ok(report)
 }
 
 /// The largest diagnostics report that will be written.
@@ -13850,6 +13900,8 @@ pub fn run() {
             get_capture_config,
             set_capture_mode,
             set_section_capture,
+            reset_section_capture,
+            build_public_diagnostics_report,
             get_event_cursor,
             get_task_health,
             save_diagnostics_report,
@@ -13954,12 +14006,14 @@ mod tests {
     #[test]
     fn every_canonical_field_reaches_the_webview() {
         use catcoms_diagnostics::{
-            AddressValue, CaptureMode, DiagnosticEvent, Phase, RefDomain, Refs, Section,
-            SessionSalt, SpanId, TraceId,
+            AddressValue, CaptureMode, DiagnosticEvent, DiagnosticHub, Phase, RefDomain, Refs,
+            Section, SessionSalt, SpanId, TraceId,
         };
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
 
         let salt = SessionSalt::for_tests(3);
-        let mut event = DiagnosticEvent::warn(Section::Join, "JOIN.ROUTES.EXHAUSTED")
+        let event = DiagnosticEvent::warn(Section::Join, "JOIN.ROUTES.EXHAUSTED")
             .phase(Phase::Failure)
             .operation("join_server")
             .trace(TraceId(0x7f2c_0000_0000_0001))
@@ -13976,17 +14030,28 @@ mod tests {
                 "address",
                 AddressValue::new("/ip6/2001:db8::1/udp/31484/quic-v1"),
             );
-        event.seq = 4812;
-        event.at_ms = 1_787_000_000_000;
-        event.monotonic_ms = 12_443;
+        // Exercise the real capture boundary. Constructing an event alone still retains its raw
+        // address so a Full-mode hub could admit it; only the hub irreversibly minimises Safe
+        // capture before the webview can read the event.
+        let clock = Arc::new(ManualClock::new(1_787_000_000_000));
+        let mut rng = ChaCha20Rng::from_seed([7; 32]);
+        let safe_hub = DiagnosticHub::with_capacity(
+            clock,
+            SessionSalt::for_tests(11),
+            CaptureMode::Safe,
+            2,
+            &mut rng,
+        );
+        assert_eq!(safe_hub.record(event.clone()), Some(1));
+        let safe_event = safe_hub.since(0, 1).pop().unwrap();
 
         let bridged: ConsoleLogEvent =
-            catcoms_diagnostics::event_view(&event, CaptureMode::Safe).into();
+            catcoms_diagnostics::event_view(&safe_event, CaptureMode::Full).into();
         let json = serde_json::to_value(&bridged).expect("the console event serialises");
 
-        assert_eq!(json["seq"], 4812);
+        assert_eq!(json["seq"], 1);
         assert_eq!(json["at_ms"], 1_787_000_000_000u64);
-        assert_eq!(json["monotonic_ms"], 12_443);
+        assert_eq!(json["monotonic_ms"], 0);
         assert_eq!(json["section"], "join");
         assert_eq!(
             json["view"], "network",
@@ -14022,20 +14087,32 @@ mod tests {
         // Safe is Safe all the way to the webview. The projection this replaced hard-coded
         // Enhanced, so the console rendered a literal address whatever the user had chosen.
         assert_eq!(json["fields"][1]["name"], "address");
+        assert_eq!(json["fields"][1]["kind"], "address");
         assert_eq!(json["fields"][1]["value"], "ip6/quic-v1");
         assert_eq!(
-            json["fields"][1]["sensitive"], true,
-            "and it says a higher mode would show more"
+            json["fields"][1]["sensitive"], false,
+            "Safe capture destroyed the literal rather than merely hiding it"
         );
 
+        let clock = Arc::new(ManualClock::new(1_787_000_000_000));
+        let enhanced_hub = DiagnosticHub::with_capacity(
+            clock,
+            SessionSalt::for_tests(12),
+            CaptureMode::Enhanced,
+            2,
+            &mut rng,
+        );
+        assert_eq!(enhanced_hub.record(event), Some(1));
+        let enhanced_event = enhanced_hub.since(0, 1).pop().unwrap();
         let enhanced: ConsoleLogEvent =
-            catcoms_diagnostics::event_view(&event, CaptureMode::Enhanced).into();
+            catcoms_diagnostics::event_view(&enhanced_event, CaptureMode::Safe).into();
         let json = serde_json::to_value(&enhanced).expect("the console event serialises");
         assert_eq!(
             json["fields"][1]["value"],
             "/ip6/2001:db8::1/udp/31484/quic-v1"
         );
         assert_eq!(json["capture"], "enhanced");
+        assert_eq!(json["capture_epoch"], 1);
     }
 
     /// The webview's fields keep the order it wrote them in.

@@ -22,6 +22,8 @@ import { formatBytes } from "./transfer-visual.ts";
 export type LogField = {
   name: string;
   value: string;
+  /** Closed native value kind; public exports allowlist kinds rather than scanning prose. */
+  kind: string;
   /** Whether a higher capture mode would show more of this value. */
   sensitive: boolean;
 };
@@ -66,6 +68,8 @@ export type LogEvent = {
   fields_dropped: number;
   /** The capture mode this event was rendered at. */
   capture: string;
+  /** Native mode generation in force when this event entered the ring. */
+  capture_epoch: number;
 };
 
 /** The counters behind the header roll-up and the rail badges. */
@@ -235,8 +239,132 @@ export function alias(aliases: Aliases, kind: string, value: string): string {
 }
 
 /** IPv4, and IPv6 in the forms a multiaddr or a socket error actually prints. */
-const IPV4 = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g;
-const IPV6 = /\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b/gi;
+const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const BASE58_INDEX = new Map([...BASE58].map((char, index) => [char, index]));
+
+function isIpv4(value: string): boolean {
+  const parts = value.split(".");
+  return parts.length === 4 && parts.every((part) =>
+    /^\d{1,3}$/.test(part) && (part === "0" || !part.startsWith("0")) && Number(part) <= 255
+  );
+}
+
+/** Parse compressed IPv6, including IPv4-mapped forms and an optional zone id. */
+function isIpv6(value: string): boolean {
+  const zoneAt = value.indexOf("%");
+  if (zoneAt >= 0) {
+    const zone = value.slice(zoneAt + 1);
+    if (!zone || ![...zone].every((c) => /[A-Za-z0-9_.-]/.test(c))) return false;
+    value = value.slice(0, zoneAt);
+  }
+  if (!value.includes(":")) return false;
+  const firstGap = value.indexOf("::");
+  if (firstGap !== value.lastIndexOf("::")) return false;
+  const groups = (side: string) => {
+    if (!side) return 0;
+    const parts = side.split(":");
+    if (parts.some((part) => !part)) return -1;
+    let count = 0;
+    for (const [index, part] of parts.entries()) {
+      if (part.includes(".")) {
+        if (index !== parts.length - 1 || !isIpv4(part)) return -1;
+        count += 2;
+      } else {
+        if (part.length > 4 || ![...part].every((c) => /[0-9A-Fa-f]/.test(c))) return -1;
+        count += 1;
+      }
+    }
+    return count;
+  };
+  if (firstGap >= 0) {
+    const left = groups(value.slice(0, firstGap));
+    const right = groups(value.slice(firstGap + 2));
+    return left >= 0 && right >= 0 && left + right < 8;
+  }
+  return groups(value) === 8;
+}
+
+function decodeBase58(value: string): Uint8Array | null {
+  let number = 0n;
+  for (const char of value) {
+    const digit = BASE58_INDEX.get(char);
+    if (digit === undefined) return null;
+    number = number * 58n + BigInt(digit);
+  }
+  const reversed: number[] = [];
+  while (number > 0n) {
+    reversed.push(Number(number & 0xffn));
+    number >>= 8n;
+  }
+  for (const char of value) {
+    if (char !== "1") break;
+    reversed.push(0);
+  }
+  return Uint8Array.from(reversed.reverse());
+}
+
+function readVarint(bytes: Uint8Array, start: number): [number, number] | null {
+  let value = 0;
+  let shift = 0;
+  for (let index = start; index < bytes.length && index < start + 10; index += 1) {
+    const byte = bytes[index];
+    value += (byte & 0x7f) * 2 ** shift;
+    if ((byte & 0x80) === 0) return [value, index + 1];
+    shift += 7;
+  }
+  return null;
+}
+
+/** A complete base58 PeerId is a multihash, independent of its current key-code prefix. */
+function isPeerId(value: string): boolean {
+  const bytes = decodeBase58(value);
+  if (!bytes || bytes.length < 3) return false;
+  const code = readVarint(bytes, 0);
+  if (!code) return false;
+  const length = readVarint(bytes, code[1]);
+  return !!length && length[0] > 0 && length[1] + length[0] === bytes.length;
+}
+
+type ParsedToken = { end: number; normalized: string };
+
+function ipToken(text: string, start: number, ipv6: boolean): ParsedToken | null {
+  const before = text[start - 1] ?? "";
+  if (before && /[0-9A-Za-z:.%_-]/.test(before)) return null;
+  let end = start;
+  while (end < text.length && /[0-9A-Fa-f:.]/.test(text[end])) end += 1;
+  if (text[end] === "%") {
+    end += 1;
+    while (end < text.length && /[A-Za-z0-9_.-]/.test(text[end])) end += 1;
+  }
+  const value = text.slice(start, end);
+  if (!value || (ipv6 ? !isIpv6(value) : !isIpv4(value))) return null;
+  const after = text[end] ?? "";
+  if (after && /[0-9A-Za-z.%_-]/.test(after)) return null;
+  return { end, normalized: value.toLowerCase() };
+}
+
+function peerToken(text: string, start: number): ParsedToken | null {
+  if (start > 0 && BASE58_INDEX.has(text[start - 1])) return null;
+  let end = start;
+  while (end < text.length && BASE58_INDEX.has(text[end])) end += 1;
+  const value = text.slice(start, end);
+  if (!value) return null;
+  const complete = isPeerId(value);
+  // Explicitly truncated modern IDs stay masked as a display-safety fallback. Complete Qm,
+  // 12D3 and future base58 multihashes are accepted by the parser above, not by a prefix regex.
+  if (!complete && !value.startsWith("12D3Koo")) return null;
+  return { end, normalized: value };
+}
+
+function hexToken(text: string, start: number): ParsedToken | null {
+  const before = text[start - 1] ?? "";
+  if (before && /[0-9A-Fa-f]/.test(before)) return null;
+  let end = start;
+  while (end < text.length && /[0-9A-Fa-f]/.test(text[end])) end += 1;
+  const value = text.slice(start, end);
+  if (value.length < 8 || (text[end] && /[0-9A-Za-z]/.test(text[end]))) return null;
+  return { end, normalized: value.toLowerCase() };
+}
 /**
  * A libp2p peer id (base58btc, `12D3Koo…`) or a hex fingerprint of 8 or more digits.
  *
@@ -246,8 +374,6 @@ const IPV6 = /\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b/gi;
  * toggle claimed the screen was safe to share. The prefix alone is the giveaway, so the rule
  * masks on it and over-masks rather than leaks.
  */
-const PEER_B58 = /\b12D3Koo[1-9A-HJ-NP-Za-km-z]*/g;
-const PEER_HEX = /\b[0-9a-f]{8,}\b/gi;
 
 /**
  * Replace every identifying value in one line with its alias.
@@ -261,11 +387,32 @@ const PEER_HEX = /\b[0-9a-f]{8,}\b/gi;
  * is supposed to prevent.
  */
 export function redactText(text: string, aliases: Aliases): string {
-  return text
-    .replace(IPV6, (m) => alias(aliases, "ip", m.toLowerCase()))
-    .replace(IPV4, (m) => alias(aliases, "ip", m))
-    .replace(PEER_B58, (m) => alias(aliases, "peer", m))
-    .replace(PEER_HEX, (m) => alias(aliases, "peer", m.toLowerCase()));
+  let out = "";
+  for (let index = 0; index < text.length;) {
+    // IPv6 first: IPv4-mapped literals contain a valid IPv4 tail that must not be aliased as a
+    // second, unrelated address. Multiaddrs work naturally because `/` is a token boundary.
+    const parsedIp = ipToken(text, index, true) ?? ipToken(text, index, false);
+    if (parsedIp) {
+      out += alias(aliases, "ip", parsedIp.normalized);
+      index = parsedIp.end;
+      continue;
+    }
+    const parsedPeer = peerToken(text, index);
+    if (parsedPeer) {
+      out += alias(aliases, "peer", parsedPeer.normalized);
+      index = parsedPeer.end;
+      continue;
+    }
+    const parsedHex = hexToken(text, index);
+    if (parsedHex) {
+      out += alias(aliases, "peer", parsedHex.normalized);
+      index = parsedHex.end;
+      continue;
+    }
+    out += text[index];
+    index += 1;
+  }
+  return out;
 }
 
 /** `redactText` when redaction is on, the original text when it is off. */
@@ -1338,11 +1485,11 @@ export function captureModeNote(mode: string): string {
     case "off":
       return "Nothing is recorded and nothing accumulates. The console will stay empty, and there will be no evidence if something goes wrong while it is off.";
     case "safe":
-      return "Stable codes, counts and durations. Identifiers become per-session references and addresses keep only their family and transport, so a Safe report can be pasted in public.";
+      return "Stable codes, counts and durations. Identifiers become per-session references and address bytes are discarded at capture time. Section levels stay as you set them; public issues use a separate native allowlist report.";
     case "enhanced":
-      return "Safe, plus literal addresses and transport detail. Choose this for a connection or multi-peer problem that cannot be located without knowing which address was actually tried. Read a report before sharing it.";
+      return "Safe, plus literal addresses in future events. Section levels stay as you set them; turn up Transport separately when a connection problem needs it. Read local reports before sharing them.";
     case "full":
-      return "Enhanced, plus per-span protocol detail. Maintainer reproduction only: it is loud, it reveals the most, and it is forgotten at the next launch rather than left running.";
+      return "Enhanced privacy rules with permission for the most detailed future events. Section levels stay as you set them. Maintainer reproduction only, and forgotten at the next launch.";
     default:
       return "";
   }
@@ -1356,14 +1503,13 @@ export function captureModeIsRevealing(mode: string): boolean {
 /**
  * Must anything leaving this console have its addresses masked, whatever the toggle says?
  *
- * Safe capture is documented as "no literal addresses, so a Safe report is one a user can paste in
- * public", and the events honour that: an address value asks the mode before it renders. The
- * reachability and device tables never did, because they are live snapshots read straight from
- * their own commands rather than events, and they masked only when the screenshot toggle was on.
+ * Safe capture destroys literal event addresses before they enter the ring. Local reports still
+ * include live reachability/device tables from separate commands, so those tables must be masked
+ * independently even when the screenshot toggle is off. Public issues do not use this local report
+ * at all; native code builds their body from a narrower typed allowlist.
  *
- * So a Safe report carried this machine's public address by default, and the native validator
- * refused to write it: the very first Save in a fresh console failed. The rule was right and the
- * data was wrong. Deciding it here brings the tables under the same promise the events already
+ * Before this rule, a Safe local report carried this machine's public address by default. Deciding
+ * it here brings the tables under the same display-masking rule the events already
  * keep, rather than lowering the promise to fit them.
  *
  * The screen is unaffected. An operator looking at the Network section still sees the addresses;
@@ -1443,12 +1589,13 @@ export function routeLines(
 ): string[] {
   const mask = (s: string) => maybeRedact(s, aliases, redact);
   return servers.flatMap((s) => {
+    const server = redact ? alias(aliases, "server", String(s.id)) : s.name;
     if (unavailable.has(s.id)) {
-      return [`${s.name} [UNAVAILABLE] member-route refresh failed; retained rows were omitted because they are only a last snapshot.`];
+      return [`${server} [UNAVAILABLE] member-route refresh failed; retained rows were omitted because they are only a last snapshot.`];
     }
     return [
       ...routeFindings(routes[s.id] ?? [], hasIpv6).map(
-        (f) => `${s.name} [${f.severity.toUpperCase()}] ${f.code} (${f.affected}) ${f.detail}`,
+        (f) => `${server} [${f.severity.toUpperCase()}] ${f.code} (${f.affected}) ${f.detail}`,
       ),
       ...(routes[s.id] ?? []).map((r) => {
       const chip = routeChip(routeState(r));
@@ -1458,7 +1605,7 @@ export function routeLines(
       const actions = r.actions
         .map((action) => `${action.scope}:${action.kind}`)
         .join(",") || "(none)";
-      return `${s.name} ${mask(r.fingerprint)} ${chip.label} binding=${r.binding} peer=${mask(r.peer) || "(none)"} seq=${r.seq} submits=${r.dial_attempts} next=${next} paths=${paths} actions=${actions} ${addresses}`;
+      return `${server} ${mask(r.fingerprint)} ${chip.label} binding=${r.binding} peer=${mask(r.peer) || "(none)"} seq=${r.seq} submits=${r.dial_attempts} next=${next} paths=${paths} actions=${actions} ${addresses}`;
       }),
     ];
   });
@@ -1556,7 +1703,11 @@ export function copyBundle(
     `captured: ${new Date(meta.at).toISOString()}`,
     ...(meta.session ? [`session: ${meta.session}`] : []),
     ...(meta.capture ? [`capture: ${meta.capture}`] : []),
-    `redaction: ${meta.redacted ? "on" : "off"}`,
+    `display masking: ${meta.redacted ? "on" : "off"}`,
+    `privacy.addresses: ${meta.redacted ? "aliased where recognized" : "may be literal"}`,
+    `privacy.stable_identifiers: ${meta.redacted ? "aliased where recognized" : "may be literal"}`,
+    `privacy.user_content: may be present`,
+    `privacy.legacy_prose: included`,
   ].join("\n");
   const body = sections.map((s) => copySection(s.title, s.lines)).join("\n\n");
   return `${head}\n\n${body}\n\n${PRIVACY_NOTE}\n`;

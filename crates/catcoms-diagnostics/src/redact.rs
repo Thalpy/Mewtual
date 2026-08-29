@@ -285,7 +285,9 @@ const TRANSPORTS: [&str; 12] = [
 pub struct AddressValue {
     family: AddressFamily,
     transport: SafeText,
-    raw: String,
+    /// Present only when the event was admitted under a capture mode that explicitly permits
+    /// literal addresses. Safe capture destroys these bytes before the event enters the ring.
+    raw: Option<String>,
 }
 
 /// The most of a literal address that is kept.
@@ -348,7 +350,7 @@ impl AddressValue {
             // this is a `&str` from a caller and nothing about the type says so: an address-shaped
             // field carrying a megabyte would sit in the ring at full size and reach the file at
             // full size. Found by adversarial review (P3-008).
-            raw: addr.chars().take(MAX_ADDRESS_CHARS).collect(),
+            raw: Some(addr.chars().take(MAX_ADDRESS_CHARS).collect()),
         }
     }
 
@@ -362,10 +364,22 @@ impl AddressValue {
     /// between a report a user can paste into a public issue and one they cannot.
     pub fn render(&self, mode: CaptureMode) -> String {
         if mode.allows_raw_addresses() {
-            self.raw.clone()
-        } else {
-            format!("{}/{}", self.family.as_str(), self.transport)
+            if let Some(raw) = &self.raw {
+                return raw.clone();
+            }
         }
+        format!("{}/{}", self.family.as_str(), self.transport)
+    }
+
+    /// Apply the irreversible capture-time privacy boundary.
+    pub(crate) fn minimize_for_capture(&mut self, mode: CaptureMode) {
+        if !mode.allows_raw_addresses() {
+            self.raw = None;
+        }
+    }
+
+    pub(crate) fn retains_literal(&self) -> bool {
+        self.raw.is_some()
     }
 }
 
@@ -417,7 +431,28 @@ impl SafeValue {
     /// Used by the export preview to say what a mode change would actually reveal, rather than
     /// making the user find out by doing it.
     pub fn is_mode_sensitive(&self) -> bool {
-        matches!(self, SafeValue::Address(_))
+        matches!(self, SafeValue::Address(address) if address.retains_literal())
+    }
+
+    /// Closed field kind used by the public-export allowlist and structured console view.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SafeValue::Bool(_) => "bool",
+            SafeValue::Count(_) => "count",
+            SafeValue::Delta(_) => "delta",
+            SafeValue::Duration(_) => "duration",
+            SafeValue::Outcome(_) => "outcome",
+            SafeValue::Text(_) => "text",
+            SafeValue::Ref(_) => "ref",
+            SafeValue::Address(_) => "address",
+            SafeValue::Bridged(_) => "bridged",
+        }
+    }
+
+    pub(crate) fn minimize_for_capture(&mut self, mode: CaptureMode) {
+        if let SafeValue::Address(address) = self {
+            address.minimize_for_capture(mode);
+        }
     }
 
     /// Whether this value came through the un-migrated `tracing` path.

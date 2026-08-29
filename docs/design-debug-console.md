@@ -102,12 +102,14 @@ Four bands, top to bottom:
 
 ### 4.1 Capture model (drives the roll-up)
 
-Capture is always on; rendering is only live while the console is open.
+Capture starts in Safe mode and can be changed or switched off at runtime.
 
-- Backend: a `tracing` layer keeps a bounded in-memory ring (see sizes below) and
-  increments session error/warn counters from app start. When the console opens, the
-  frontend subscribes (Tauri event channel) and receives the ring as a snapshot plus a
-  live tail. When it closes, the subscription drops; the ring keeps filling.
+- Backend: a `tracing` layer keeps one bounded in-memory ring and increments session
+  counters from app start for admitted events. Every accepted event is stamped with its
+  capture mode and mode epoch. Safe capture destroys literal address bytes before ring
+  insertion, so later selecting Full cannot reveal historical Safe values. Per-section
+  levels survive mode changes; restoring a mode's recommended levels is a separate action.
+  When the console opens, the frontend pages the existing ring and then polls its live tail.
 - Frontend: `console.error/warn/info`, `window.onerror` and `unhandledrejection` are
   wrapped once at boot into a ring in JS. Wrapping must preserve the original console
   behaviour (call through) so the on-disk log keeps working.
@@ -175,12 +177,12 @@ sink's state directly, so the note's "check the file" has somewhere to point.
   still show "it keeps dialling the same two addresses".
 - Implementation rule: redaction swaps the actual rendered text (a `redact(value)`
   helper at render time), never a CSS overlay, so text selection and every copy action
-  copy exactly what is on screen. Copy while redacted copies redacted text; the copied
-  bundle states `redaction: on` in its header.
-- Member display names are not redacted (they are already excluded from log content per
-  the privacy contract, but where the console shows a member name next to a peer, the
-  name column stays; users can turn redact on and crop if needed). Peer ids and
-  fingerprints next to the name are still masked.
+  copy exactly what is on screen. The parser recognizes complete base58 multihash PeerIds
+  plus IPv4 and compressed/zoned/bracketed/IPv4-mapped IPv6, including values embedded in
+  direct and relay multiaddrs. Copy while masked uses the same masking setting for event
+  lines and tables; server names in route tables become per-session server aliases.
+- A local bundle does not claim publication safety. Its header states address/identifier
+  masking separately and explicitly says user content and legacy prose may be present.
 - Markup hook: every redactable value is wrapped in `<span class="dbg-pii" data-kind="ip|peer|addr|fp">`.
 
 ### 4.6 Copy
@@ -191,9 +193,11 @@ Three granularities, all `ghost small` or the tiny per-row `dbg-copy` button:
   Copies that row as one plain-text line.
 - Section: in each card header (`dbg-card-actions`) and each feed bar. Copies the card
   or feed as labelled plain text, including the drop note when present.
-- Everything: the header's "Copy report" copies a bundle: app version, timestamp,
-  redaction state, then every section in order, each under a `== SECTION ==` heading,
-  feeds capped at their ring contents. Ends with the privacy sentence.
+- Everything: the header's "Copy report" copies a local bundle: app version, timestamp,
+  display-masking state and explicit privacy claims, then every section in order under a
+  `== SECTION ==` heading. It ends with the review-before-sharing sentence. "Prepare issue"
+  is a different native path: an allowlist renderer excludes tables, targets, wall-clock time,
+  addresses, user prose, runtime field names and bridged tracing before publication validation.
 
 Copy buttons flash "Copied" for ~1.5s (same convention as the invite/copy buttons in
 settings).

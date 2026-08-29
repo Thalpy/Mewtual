@@ -137,9 +137,15 @@ const dbgEvent = (e: {
   duration_ms: e.duration_ms ?? null,
   attempt: null,
   target: e.target,
-  fields: (e.fields ?? []).map((f) => ({ name: f.name, value: f.value, sensitive: f.sensitive ?? false })),
+  fields: (e.fields ?? []).map((f) => ({
+    name: f.name,
+    value: f.value,
+    kind: "bridged",
+    sensitive: f.sensitive ?? false,
+  })),
   fields_dropped: 0,
   capture: "enhanced",
+  capture_epoch: 1,
 });
 
 /** The code an un-migrated `tracing` event carries. Matches `BRIDGED_CODE` in `debug-console.ts`. */
@@ -264,10 +270,13 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
     case "get_channel_topic":
       return channel === "general" ? "A calm place to build and review Mewtual together" : "";
     case "get_delivery":
-      return clone([
-        { id: "msg-2", delivered: 2, reachable: 2 },
-        { id: "msg-5", delivered: 1, reachable: 1 },
-      ]);
+      return clone({
+        revision: 1,
+        states: [
+          { id: "msg-2", delivered: 2, reachable: 2, any_peer: true },
+          { id: "msg-5", delivered: 1, reachable: 1, any_peer: true },
+        ],
+      });
     case "get_badges":
       return server === 1 ? { [MOSS]: { label: "release", color: "#e6a85c" } } : {};
     case "get_events":

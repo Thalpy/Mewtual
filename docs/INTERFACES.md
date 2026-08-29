@@ -47,7 +47,9 @@ pub trait MeshTransport: Send + Sync {
     async fn rendezvous_register(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
     async fn rendezvous_discover(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
     async fn dial_addr(&self, addr:&str) -> Result<(),TransportError>;
+    async fn dial_permit(&self, permit:BoxedDialPermit) -> Result<DialSubmission,TransportError>;
     async fn dial_peer_batch(&self, peer:PeerId, addrs:&[String]) -> Result<Vec<DialSubmission>,TransportError>; // 1..=2, direct, terminal peer-bound
+    async fn dial_peer_permits(&self, peer:PeerId, permits:Vec<BoxedDialPermit>) -> Result<Vec<DialSubmission>,TransportError>;
     async fn add_external_addr(&self, addr:&str) -> Result<(),TransportError>;
     async fn next_discovered(&self) -> Option<DiscoveredPeer>; // default never resolves
     async fn next_registered(&self) -> Option<RendezvousRegistration>; // exact node/ns + granted TTL; default never resolves
@@ -74,6 +76,8 @@ pub enum ConnectionDirection { Dialer, Listener }
 pub struct Responder;  fn respond(self, Bytes);  fn channel() -> (Responder, ResponderRx);
 pub struct ResponderRx; async fn recv(self) -> Option<Bytes>;
 pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, NoResponse, InvalidDialBatch }
+pub trait DialPermit: Send + Debug { fn address(&self)->&str; fn commit_if_current(self:Box<Self>)->Option<String>; }
+pub type BoxedDialPermit = Box<dyn DialPermit>;
 ```
 Implementations:
 - **`MemNetwork`** (tests): `let hub = Hub::new(); let net = hub.join(PeerId::from_u64(n));`
@@ -87,6 +91,14 @@ Implementations:
   `dial_peer_batch` accepts one or two direct multiaddrs and revalidates inside the actor that each
   has a terminal libp2p peer whose Phase-0 id equals the addressed `PeerId`; empty, oversized,
   relayed, bare, or substituted batches fail before `dial_gated` can start work.
+  Discovery- and recovery-policy dials use `dial_permit` / `dial_peer_permits` instead. Production
+  transfers each non-cloneable generation-bound permit into the actor command before awaiting a
+  reply. Already-connected/duplicate suppression drops and refunds it there; the actor commits it
+  only immediately before inserting the exact member endpoint into the pending path or calling
+  `Swarm::dial` for infrastructure. Caller cancellation therefore cannot refund a queued command,
+  and a permit from a replaced scheduler window can neither start nor alter the new counters.
+  A transport using the default fallback commits before its first await and may conservatively
+  spend on later failure, but cannot over-refund work that escaped the caller.
   `PeerConnected`/`PeerDisconnected` retain their legacy one-edge aggregate meaning.
   `PeerPathsChanged` follows them on the same ordered event stream and also fires when a second
   connection upgrades/refines a path without changing aggregate liveness. It carries no address or
@@ -199,6 +211,15 @@ pub struct EndpointDialScheduler; // cloneable; clones share one bounded transie
   new(EndpointDialConfig) -> Self;
   reserve(&self, server:&[u8], endpoints:&[DialEndpoint], clock:&dyn Clock)
     -> Vec<String>;
+  reserve_permits(&self, server:&[u8], endpoints:&[DialEndpoint], clock:&dyn Clock)
+    -> Vec<EndpointDialPermit>; // non-cloneable and bound to one accounting generation
+
+pub trait DialPermit { // `catcoms-rt`; object-safe transport ownership seam
+  address(&self) -> &str;
+  commit_if_current(self:Box<Self>) -> Option<String>;
+}
+MeshTransport::dial_permit(BoxedDialPermit) -> DialSubmission;
+MeshTransport::dial_peer_permits(PeerId, Vec<BoxedDialPermit>) -> Vec<DialSubmission>;
 ```
 
 The parser accepts only canonical, non-zero raw TCP or root-path WebSocket TCP (exactly `/ws`,
@@ -224,9 +245,12 @@ endpoint; callers cannot supply a device id or raw libp2p id as an accounting al
 and prefix keys exclude the claimed PeerId and descriptor sequence. Separate relay-circuit keys keep
 unrelated targets at one relay from exhausting each other's two-attempt cap; the shared relay host is
 bounded at prefix/process scope rather than by a separate outer-socket lease. A shared denial is
-refunded to the local policy because no dial command was submitted. Scheduler state is session-only,
-uses `Clock::monotonic_ms`, and accounts submissions rather than actor-confirmed sockets; opaque
-single-use permits/refunds and process-wide in-flight leases remain future hardening. Pre-join invite
+refunded to the local policy because no dial command was submitted. Scheduler state is session-only
+and uses `Clock::monotonic_ms`. A permit is transferred into the production transport actor before
+the caller awaits; duplicate/already-connected suppression refunds it, while current-generation
+commit happens immediately before pending/socket submission. Failed work after that point remains
+conservatively charged. Generation checks prevent delayed command drops from refunding a newer
+window. A process-wide in-flight/concurrency lease remains future hardening. Pre-join invite
 rendezvous seeds are capped at two distinct validated nodes so infrastructure cannot exhaust the
 per-server window before the discovered inviter is dialed.
 
@@ -624,7 +648,9 @@ impl Server {
     async fn create_kick_case(&mut self, target:&str, reason:&str, evidence_ids:&[String]) -> Result<String,AppError>;
     async fn cast_kick_vote(&mut self, case_id:&str, yes:bool) -> Result<(),AppError>;
     async fn resolve_kick_case(&mut self, case_id:&str, remove:bool) -> Result<(),AppError>;
+    fn delivery_snapshot(&mut self, channel:u128) -> DeliverySnapshot;
 }
+pub struct DeliverySnapshot { revision:u64, states:Vec<DeliveryState> }
 impl ServerStore {
     fn open(dir:impl AsRef<Path>, passphrase:&[u8], rng:&mut impl CryptoRngCore) -> Result<Self,AppError>; // owns lifetime installation lock
     fn verify_passphrase(&self, passphrase:&[u8]) -> Result<(),AppError>; // verify-only; no second mount
@@ -634,6 +660,20 @@ impl ServerStore {
     fn change_passphrase(&self, current:&[u8], new:&[u8], rng:&mut impl CryptoRngCore) -> Result<(),AppError>;
 }
 ```
+
+`get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
+the complete bounded `states` array. The webview accepts only a strictly newer revision for its
+current server/channel view, so a delayed query completion or event cannot replace fresher receipt
+evidence. Revisions are process-local ordering tokens, not persisted delivery evidence.
+
+Diagnostic events similarly carry their capture-time `capture_mode` and `capture_epoch`. The hub
+irreversibly removes an `AddressValue` literal before inserting an event captured under Safe/Off;
+later viewer changes cannot reveal it. `set_capture_mode` preserves per-section levels, while the
+separate `reset_section_capture` command restores recommended levels. Local Copy/Save reports are
+honestly labelled and receive validator disclosure findings. `build_public_diagnostics_report`
+instead renders the native ring through a canonical allowlist: targets, wall-clock time, addresses,
+runtime field names, user prose and legacy tracing events are absent by construction, after which
+the publication validator runs as defence in depth.
 
 The version-1 UI-continuity JSON retains the required `drafts` and `readMarks` objects and may also
 carry `statusCursors` plus bounded per-server `fileTrustPolicies`. Each file policy is local to this

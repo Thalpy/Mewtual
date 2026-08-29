@@ -319,9 +319,12 @@ a physical-socket key; relay routes use a relay/target circuit key so distinct t
 do not starve one another, with the shared relay host still bounded by prefix/process caps. Two-way
 proof retries use a live-connected-only actor command and cannot redial from `recent_peers`. The
 default process window is 32 endpoints per minute; counters are bounded, monotonic and session-only.
-Trusted operator-infrastructure connections are not all mediated by this scheduler. It also does not
-yet own actor-consumed/refundable permits, a separate exact relay-outer-socket lease, or process-wide
-in-flight leases, and endpoint signatures still do not prove IP/port ownership.
+Discovery calls transfer generation-bound, non-cloneable permits into the network actor. Duplicate
+and already-connected suppression refunds before commit; pending/socket submission commits, so a
+cancelled caller cannot reclaim queued work and an old permit cannot refund a replacement window.
+Post-commit failures are conservatively spent. Trusted operator-infrastructure connections are not
+all mediated by this scheduler. It still has no separate exact relay-outer-socket lease or
+process-wide in-flight lease, and endpoint signatures do not prove IP/port ownership.
 
 Pairwise path evidence and typed claimed-peer health/actions are now complete. The transport tracks
 concurrent connection ids so relay-to-direct upgrades and partial closes remain truthful; the sync
@@ -385,7 +388,9 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
 - **Delivery indicator:** a send accepted by the local actor now says `sent · awaiting
   confirmation`, not `sending…`. A newly applied remote op now generates a connected-only,
   authenticated kind-18 receipt for the exact bounded document/change target, so a quiet recipient
-  can confirm without replying. It is a delivery receipt, never a read receipt.
+  can confirm without replying. Actor queries and `delivery-changed` events share one monotonic
+  snapshot revision, and the webview refuses an older completion, so a delayed query cannot replace
+  fresher receipt evidence. It is a delivery receipt, never a read receipt.
 - **DM first contact:** the frontend now surfaces the native `join-reply-ready` code while Add
   friend or Accept is still waiting, explains its deadline, and gives the inviter an in-DM paste/
   replacement flow. An expired reply is not revived: retry Connect to create a fresh overlapping
