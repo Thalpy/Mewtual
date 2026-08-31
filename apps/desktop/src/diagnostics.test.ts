@@ -5,6 +5,7 @@ import {
   classifyInvokeFailure,
   describeError,
   errorText,
+  eventCorrelation,
   makeInvokeDebugged,
   makeOutbox,
   makeRecorder,
@@ -29,6 +30,21 @@ test("a trace is unique within a session and quotable in a bug report", () => {
 
 test("two sessions do not mint traces that look like each other's", () => {
   assert.notEqual(makeTraceSource(1).next(), makeTraceSource(2).next());
+});
+
+test("native trace provenance is returned unchanged and never invented by the webview", () => {
+  assert.deepEqual(
+    eventCorrelation({
+      __trace: "7f2c000000000001",
+      __trace_proof: "session-proof",
+    }),
+    { trace: "7f2c000000000001", trace_proof: "session-proof" },
+  );
+  assert.deepEqual(
+    eventCorrelation({ __trace_proof: "orphan-proof" }),
+    {},
+    "a proof without its native trace cannot become diagnostic metadata",
+  );
 });
 
 // --- sequence gaps ----------------------------------------------------------------------------

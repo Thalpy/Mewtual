@@ -105,6 +105,7 @@
   import {
     classifyInvokeFailure,
     errorText,
+    eventCorrelation,
     makeInvokeDebugged,
     makeRecorder,
     makeResync,
@@ -112,6 +113,7 @@
     makeTraceSource,
     needsResync,
     type EventCursor,
+    type EventCorrelation,
     type EventEnvelope,
     // Aliased: this file already has a `UiEvent`, which is a calendar entry.
     type UiEvent as DiagEvent,
@@ -5758,7 +5760,7 @@
     pending: PendingUnread | null,
     server: number,
     channel: string,
-    trace: string = "",
+    correlation: EventCorrelation = {},
   ) {
     if (!pending) return;
     const after = unreadStateOf(server, channel);
@@ -5771,7 +5773,7 @@
       // The decision joins the operation that caused it. "I sent a message and no badge appeared"
       // and "someone sent me one and no badge appeared" are different bugs, and the trace is what
       // separates them without guessing from timestamps.
-      trace: trace || undefined,
+      ...correlation,
       fields: {
         decision: pending.decision.decision,
         reason: pending.decision.reason,
@@ -7340,6 +7342,17 @@
       toast("Copied to clipboard", "ok", 1800);
     } catch {
       toast("Clipboard unavailable: select and copy the text manually", "err", 3500);
+    }
+  }
+
+  /** Clipboard boundary for callers whose success message depends on a real write. */
+  async function copyTextRequired(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Copied to clipboard", "ok", 1800);
+    } catch (error) {
+      toast("Clipboard unavailable: select and copy the text manually", "err", 3500);
+      throw error;
     }
   }
 
@@ -14677,10 +14690,6 @@
    * separate records that had to be lined up by wall clock, which is the correlation-by-timestamp
    * the trace exists to replace.
    */
-  function eventTrace(payload: { __trace?: string }): string {
-    return payload.__trace ?? "";
-  }
-
   // A default rather than an optional parameter. This file's TypeScript is stripped by annotation
   // removal, which leaves the `?` of `trace?: string` behind as a syntax error the browser only
   // reports at load, as "Mewtual failed to start" with a stack of no frames. A default reads the
@@ -14725,16 +14734,16 @@
    */
   function noteEvent(name: string, payload: unknown) {
     const envelope = (payload ?? undefined) as EventEnvelope | undefined;
-    const trace = envelope?.__trace ?? "";
+    const correlation = envelope ? eventCorrelation(envelope) : {};
     // The stage that proves the webview received what the backend sent. A backend that emitted and
     // a webview that never heard used to look identical from either side, and that is precisely
     // the shape of a stale unread badge.
-    if (trace) {
+    if (correlation.trace) {
       diagRecord({
         section: "ipc",
         code: "UI.EVENT.RECEIVED",
         level: "debug",
-        trace,
+        ...correlation,
         fields: { event: name },
       });
     }
@@ -14751,7 +14760,7 @@
               ? "IPC.EVENT.UNSTAMPED"
               : "IPC.EVENT.SEQUENCE_GAP",
       level: "warn",
-      trace: trace || undefined,
+      ...correlation,
       fields: {
         event: anomaly.event,
         anomaly: anomaly.kind,
@@ -14895,11 +14904,12 @@
         jukebox: boolean;
         __seq?: number;
         __trace?: string;
+        __trace_proof?: string;
       }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
         // Which operation this update belongs to, when a local one caused it. An arrival from
         // somebody else carries none, which is itself the answer to "was this mine".
-        const trace = eventTrace(e.payload);
+        const correlation = eventCorrelation(e.payload);
         // One channel document holds the message log, the topic and the jukebox queue, so the
         // event says which of them moved. Only an arrival may raise an unread badge or ring:
         // reacting to an old message, renaming the topic and queueing a track all used to look
@@ -14929,12 +14939,12 @@
             // send whose trace ends at TAURI.COMMAND.PERSISTED reached the disk; a send whose trace
             // ends here reached the screen, and until this existed there was no way to tell those
             // apart from the record.
-            if (trace) {
+            if (correlation.trace) {
               diagRecord({
                 section: "channels",
                 code: "UI.REFRESH.APPLIED",
                 level: "debug",
-                trace,
+                ...correlation,
                 fields: {
                   rows: messages.length,
                   // Whether the rows on screen are this conversation's at all. A refresh that
@@ -14946,7 +14956,7 @@
             // The refresh settles read state for us: seen if the log is genuinely on screen,
             // unread if this channel is merely selected behind something else. Which of those it
             // did is only knowable now, which is why the record waits until here.
-            finishUnreadDecision(pendingUnread, server, channel, trace);
+            finishUnreadDecision(pendingUnread, server, channel, correlation);
             if (!change.messagesAppended) return; // an edit or a reaction never announces itself
             // Announce unless the log is on screen. Focus alone was not enough: the window can be
             // focused with Files, the wiki or a call surface over the channel. Scrolled-up counts
@@ -14991,7 +15001,7 @@
         // Outside the guard on purpose. An arrival for a channel the catalog does not list falls
         // straight through it and raises nothing, and a record written before that point would
         // have claimed the badge went up.
-        finishUnreadDecision(pendingUnread, server, channel, trace);
+        finishUnreadDecision(pendingUnread, server, channel, correlation);
       }),
       listen<{ server: number; count: number }>("members-changed", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
@@ -22373,7 +22383,7 @@
           voice={debugVoicePeers}
           onclose={closeDebugConsole}
           onrefreshdevice={() => void refreshCallTransport()}
-          oncopy={(text) => copyText(text)}
+          oncopy={(text) => copyTextRequired(text)}
         />
       {:else if debugConsoleError}
         <div class="dbg" role="dialog" aria-label="Debug console">

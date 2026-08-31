@@ -1837,11 +1837,15 @@ fn forward_events(
 ) {
     let task = tokio::spawn(async move {
         while let Some(ev) = events.recv().await {
-            // The operation the actor was handling when it produced this, or none for work that
-            // arrived from a peer. Carried across as the canonical trace so a `channel-updated`
-            // reaching the webview is provably the send that caused it rather than something that
-            // happened to follow it.
-            let trace = catcoms_diagnostics::TraceId(ev.trace.0);
+            // The actor carries the boundary token rather than the normalized diagnostic id: its
+            // `tracing` stages and this returned event both cross through native normalization.
+            // Keeping that rule uniform means an arbitrary runtime `trace` field can never bypass
+            // Safe capture, while both actor outputs still join the command's canonical trace.
+            let actor_trace = catcoms_diagnostics::TraceId(ev.trace.0);
+            let trace = actor_trace
+                .is_set()
+                .then(|| catcoms_log::hub().external_trace(actor_trace))
+                .unwrap_or_default();
             // Route/authentication changes are the narrow window in which a pasted recovery route
             // is provable. Seal it before the ordinary UI-event lock gate: actors intentionally
             // keep networking behind the lock, and waiting for the minute timer could lose a
@@ -2298,7 +2302,10 @@ fn choose_port(net: &ServerNet) -> u16 {
 /// call, which costs two atomic loads when the section is not being captured. Instrumentation that
 /// slows a command becomes a cause of the latency it was added to explain.
 struct Operation {
+    /// Session-normalized id used by every canonical native diagnostic and user-facing error.
     trace: catcoms_diagnostics::TraceId,
+    /// Boundary token passed through library actors and normalized when their logs/events return.
+    actor_trace: catcoms_diagnostics::TraceId,
     section: catcoms_diagnostics::Section,
     operation: &'static str,
     server: Option<catcoms_diagnostics::SessionRef>,
@@ -2335,12 +2342,14 @@ impl Operation {
         channel: Option<&str>,
     ) -> Self {
         let hub = catcoms_log::hub();
-        let trace = trace
+        let actor_trace = trace
             .as_deref()
             .and_then(parse_trace)
             .unwrap_or_else(|| hub.new_trace());
+        let trace = hub.external_trace(actor_trace);
         let op = Operation {
             trace,
+            actor_trace,
             section,
             operation,
             server: server.map(|id| {
@@ -2367,10 +2376,19 @@ impl Operation {
     async fn actor(&self, state: &AppState, server: u64) -> Result<ServerActor, AppError> {
         actor_of(state, server)
             .await
-            .map(|actor| actor.with_trace(self.trace.0))
+            .map(|actor| self.bind_actor(actor))
             // The lookup's own answer, not a blanket one. A locked vault used to arrive here as
             // "the server is unavailable, restart the app".
             .map_err(|failure| self.fail(failure.code(), failure.message()))
+    }
+
+    /// Bind an already-authorized actor clone to this operation's boundary token.
+    ///
+    /// Most commands use [`Operation::actor`]. Multi-server operations such as backup acquire a
+    /// whole actor set under one state lock and use this narrower half so every actor command still
+    /// joins the canonical trace after it crosses the logging/event boundary.
+    fn bind_actor(&self, actor: ServerActor) -> ServerActor {
+        actor.with_trace(self.actor_trace.0)
     }
 
     /// Note that the operation reached a stage, without ending it.
@@ -2534,6 +2552,46 @@ fn parse_trace(text: &str) -> Option<catcoms_diagnostics::TraceId> {
         .filter(|t| t.is_set())
 }
 
+/// Parse and immediately session-normalize a trace supplied by the webview.
+///
+/// The UI needs repeated values to join its events to native command stages, but it does not get to
+/// choose the bytes that Safe capture later displays or copies. Keeping this separate from
+/// `parse_trace` makes tests of the wire spelling independent from the privacy boundary.
+fn parse_external_trace(text: &str) -> Option<catcoms_diagnostics::TraceId> {
+    parse_trace(text).map(|trace| catcoms_log::hub().external_trace(trace))
+}
+
+/// Normalize the optional trace on the chunk-upload fast path.
+///
+/// `push_file_chunk` predates `Operation`, but its trace is still renderer-controlled command data.
+/// Keeping this tiny boundary helper testable prevents that exceptional path from accidentally
+/// blessing raw UI hex as a native trace when it emits progress.
+fn external_progress_trace(text: Option<&str>) -> catcoms_diagnostics::TraceId {
+    text.and_then(parse_external_trace).unwrap_or_default()
+}
+
+/// Accept a native-normalized trace only when it carries this session's unforgeable return proof.
+///
+/// A webview-origin trace has no proof and is normalized exactly once. Native event envelopes carry
+/// both the already-normalized trace and a proof; accepting that pair unchanged preserves
+/// correlation across native -> webview -> native without letting a compromised renderer mark its
+/// own caller-controlled hex as safe.
+fn parse_returned_ui_trace(text: &str, proof: &str) -> Option<catcoms_diagnostics::TraceId> {
+    let trace = parse_trace(text)?;
+    let decoded = (proof.len() == 32)
+        .then(|| hex::decode(proof).ok())
+        .flatten();
+    let hub = catcoms_log::hub();
+    if decoded
+        .as_deref()
+        .is_some_and(|bytes| hub.verifies_trace_proof(trace, bytes))
+    {
+        Some(trace)
+    } else {
+        Some(hub.external_trace(trace))
+    }
+}
+
 /// Per-name sequence numbers for emitted events.
 ///
 /// Guarded by a mutex, which is affordable here in a way it would not be on the logging path:
@@ -2572,7 +2630,7 @@ fn event_generation() -> u64 {
 }
 
 /// The envelope keys, which a payload may not define for itself.
-const ENVELOPE_KEYS: [&str; 4] = ["__seq", "__ord", "__gen", "__trace"];
+const ENVELOPE_KEYS: [&str; 5] = ["__seq", "__ord", "__gen", "__trace", "__trace_proof"];
 
 /// Attach the stream envelope to an event payload, if it can carry one.
 ///
@@ -2584,6 +2642,7 @@ fn stamp_payload(
     seq: u64,
     ord: u64,
     trace: catcoms_diagnostics::TraceId,
+    trace_proof: Option<&str>,
 ) -> Option<serde_json::Value> {
     let object = value.as_object_mut()?;
     object.insert("__seq".to_string(), serde_json::json!(seq));
@@ -2594,6 +2653,12 @@ fn stamp_payload(
     // operation and belongs to none.
     if trace.is_set() {
         object.insert("__trace".to_string(), serde_json::json!(trace.as_hex()));
+        // A proof never appears without its trace and is neither rendered nor persisted. It lets
+        // the native ingress recognise this already-normalized value after the untrusted webview
+        // returns it, instead of double-hashing it or trusting a renderer-controlled provenance bit.
+        if let Some(proof) = trace_proof {
+            object.insert("__trace_proof".to_string(), serde_json::json!(proof));
+        }
     }
     Some(value)
 }
@@ -2638,7 +2703,11 @@ fn emit_tracked<S: Serialize + Clone>(
     let ord = EVENT_ORD.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     let raw = serde_json::to_value(&payload).ok();
     let collision = raw.as_ref().is_some_and(collides_with_envelope);
-    let numbered = raw.and_then(|value| stamp_payload(value, seq, ord, trace));
+    let trace_proof = trace
+        .is_set()
+        .then(|| hex::encode(catcoms_log::hub().trace_proof(trace)));
+    let numbered =
+        raw.and_then(|value| stamp_payload(value, seq, ord, trace, trace_proof.as_deref()));
 
     let carried = numbered.is_some();
     if collision {
@@ -4424,7 +4493,6 @@ fn schedule_switchboard_candidates(
     group_id: &[u8],
     mut allowed: HashMap<PeerId, u64>,
     candidates: Vec<Multiaddr>,
-    clock: &dyn Clock,
 ) -> (HashMap<PeerId, u64>, Vec<Multiaddr>) {
     let mut granted = Vec::new();
     let mut granted_peers = HashSet::new();
@@ -4441,7 +4509,7 @@ fn schedule_switchboard_candidates(
             continue;
         };
         if !scheduler
-            .reserve(group_id, std::slice::from_ref(&endpoint), clock)
+            .reserve(group_id, std::slice::from_ref(&endpoint))
             .is_empty()
         {
             granted_peers.insert(peer);
@@ -4463,7 +4531,6 @@ fn schedule_join_reply_candidates(
     group_id: &[u8],
     joiner: &libp2p::PeerId,
     candidates: &[Multiaddr],
-    clock: &dyn Clock,
 ) -> Vec<Multiaddr> {
     let phase_peer = phase0_peer_id(joiner);
     let endpoints: Vec<_> = candidates
@@ -4471,7 +4538,7 @@ fn schedule_join_reply_candidates(
         .filter_map(|candidate| untrusted_peer_endpoint(&candidate.to_string(), &phase_peer))
         .collect();
     scheduler
-        .reserve(group_id, &endpoints, clock)
+        .reserve(group_id, &endpoints)
         .into_iter()
         .filter_map(|address| address.parse().ok())
         .collect()
@@ -4726,7 +4793,6 @@ fn schedule_invite_rendezvous_targets(
     scheduler: &EndpointDialScheduler,
     group_id: &[u8],
     targets: Vec<RendezvousTarget>,
-    clock: &dyn Clock,
 ) -> Vec<RendezvousTarget> {
     targets
         .into_iter()
@@ -4736,7 +4802,7 @@ fn schedule_invite_rendezvous_targets(
                 return false;
             };
             !scheduler
-                .reserve(group_id, std::slice::from_ref(&endpoint), clock)
+                .reserve(group_id, std::slice::from_ref(&endpoint))
                 .is_empty()
         })
         // Cap actual grants, not merely entries considered: a structurally valid but unsupported
@@ -4790,7 +4856,6 @@ fn schedule_grant_bootstrap(
     scheduler: &EndpointDialScheduler,
     group_id: &[u8],
     bootstrap: &[String],
-    clock: &dyn Clock,
 ) -> Result<(PeerId, Vec<Multiaddr>), String> {
     let candidates = dialable_bootstrap(bootstrap);
     if candidates.is_empty() {
@@ -4810,7 +4875,7 @@ fn schedule_grant_bootstrap(
         .filter_map(|address| invite_peer_endpoint(&address.to_string(), &contact))
         .collect();
     let granted: Vec<_> = scheduler
-        .reserve(group_id, &endpoints, clock)
+        .reserve(group_id, &endpoints)
         .into_iter()
         .filter_map(|address| address.parse().ok())
         .collect();
@@ -4841,8 +4906,7 @@ async fn discover_and_connect(
     // trim invite-selected rendezvous endpoints before construction. Charging only the member
     // records discovered afterwards would leave the first (and easiest) scanner seam outside the
     // process cap.
-    let targets =
-        schedule_invite_rendezvous_targets(endpoint_dials, &invite.group_id, targets, &SystemClock);
+    let targets = schedule_invite_rendezvous_targets(endpoint_dials, &invite.group_id, targets);
     if targets.is_empty() {
         return Err(
             "the process-wide discovery dial budget deferred every rendezvous endpoint".into(),
@@ -4969,7 +5033,7 @@ async fn discover_and_connect(
         .map(|m| m.to_string())
         .collect();
     let endpoints = join_candidate_endpoints(&dialed.addresses, &fallbacks, &inviter);
-    let granted = endpoint_dials.reserve(&invite.group_id, &endpoints, &SystemClock);
+    let granted = endpoint_dials.reserve(&invite.group_id, &endpoints);
     if granted.is_empty() {
         return Err(
             "the process-wide discovery dial budget deferred every inviter endpoint".into(),
@@ -5590,9 +5654,7 @@ async fn join_server_inner(
             .iter()
             .map(|(_, endpoint)| endpoint.clone())
             .collect();
-        let granted = state
-            .endpoint_dials
-            .reserve(&invite.group_id, &endpoints, &SystemClock);
+        let granted = state.endpoint_dials.reserve(&invite.group_id, &endpoints);
         let addrs: Vec<Multiaddr> = granted
             .iter()
             .filter_map(|address| address.parse().ok())
@@ -5679,7 +5741,6 @@ async fn join_server_inner(
                     &invite.group_id,
                     allowed,
                     candidates,
-                    &SystemClock,
                 );
                 let latest_deadline = allowed.values().copied().max().unwrap_or(now);
                 if !candidates.is_empty() {
@@ -6269,13 +6330,8 @@ async fn apply_join_reply(
                 if !current {
                     return;
                 }
-                let scheduled = schedule_join_reply_candidates(
-                    &endpoint_dials,
-                    &group_id,
-                    &joiner,
-                    &targets,
-                    &clock,
-                );
+                let scheduled =
+                    schedule_join_reply_candidates(&endpoint_dials, &group_id, &joiner, &targets);
                 if !scheduled.is_empty() && mesh.dial_join_candidates(&scheduled).await.is_err() {
                     return;
                 }
@@ -7145,7 +7201,7 @@ async fn push_file_chunk(
             // actually see the file rather than that this device has finished copying it.
             total: chunk_total + 1,
         },
-        trace.as_deref().and_then(parse_trace).unwrap_or_default(),
+        external_progress_trace(trace.as_deref()),
     );
     Ok(())
 }
@@ -9977,7 +10033,10 @@ async fn channel_target(
     // Bound to this operation here rather than at each caller, which is what makes it impossible
     // for a new channel command to forget. Everything the actor does in response, and every event
     // that work produces, then lands under the same trace as the command that asked for it.
-    Ok((id, actor.with_trace(op.trace.0)))
+    // Library actors carry the pre-normalization boundary token. Their `tracing` records and
+    // returned events are normalized when they cross back into diagnostics; passing `op.trace`
+    // here would compute H(H(raw)) and split channel operations from every actor stage.
+    Ok((id, op.bind_actor(actor)))
 }
 
 /// Send a chat message to a channel (by id).
@@ -10672,6 +10731,9 @@ async fn reload_one(
 /// is a constant here rather than anything the webview can influence.
 const ISSUE_URL_PREFIX: &str = "https://github.com/Thalpy/Mewtual/issues/new?";
 const ISSUE_URL_MAX_BYTES: usize = 6_000;
+const PUBLIC_ISSUE_TITLE: &str = "Diagnostic report";
+const PUBLIC_ISSUE_TRUNCATION_NOTE: &str =
+    "\n\n_(Report truncated in this URL; return to Mewtual for the full text.)_";
 
 /// Is this a new-issue URL on our own tracker? Split out from the command so the allowlist
 /// itself is testable without launching a browser.
@@ -10681,6 +10743,104 @@ fn is_tracker_url(url: &str) -> bool {
             .chars()
             .any(|character| character.is_control() || character.is_whitespace())
         && url.starts_with(ISSUE_URL_PREFIX)
+}
+
+/// Percent-encode one query value from its UTF-8 bytes.
+///
+/// A tiny local encoder keeps the launch boundary dependency-free and, unlike string slicing on a
+/// finished URL, can never cut a `%HH` escape or a Unicode scalar. Only RFC 3986 unreserved bytes
+/// survive literally; every other byte becomes ASCII, so URL byte accounting is exact.
+fn encode_issue_query(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(*byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[(byte >> 4) as usize]));
+            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+    }
+    encoded
+}
+
+fn encoded_issue_query_len(value: &str) -> usize {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                1
+            } else {
+                3
+            }
+        })
+        .sum()
+}
+
+/// Native-owned public issue output. `report` is the exact publication envelope for clipboard
+/// fallback; only the browser URL may receive a shortened excerpt.
+#[derive(Serialize)]
+struct PublicDiagnosticsIssue {
+    report: String,
+    truncated: bool,
+}
+
+struct PreparedPublicDiagnosticsIssue {
+    url: String,
+    report: String,
+    truncated: bool,
+}
+
+fn public_issue_url(body: &str) -> String {
+    format!(
+        "{ISSUE_URL_PREFIX}labels=bug&title={}&body={}",
+        encode_issue_query(PUBLIC_ISSUE_TITLE),
+        encode_issue_query(body),
+    )
+}
+
+/// Build a bounded tracker URL while retaining the exact full report separately.
+fn prepare_public_diagnostics_issue(native_report: &str) -> PreparedPublicDiagnosticsIssue {
+    let report = format!(
+        "**Type:** Bug report\n**App:** Mewtual desktop {}\n**Environment:** Mewtual desktop\n\n{}",
+        env!("CARGO_PKG_VERSION"),
+        native_report,
+    );
+    let complete = public_issue_url(&report);
+    if complete.len() <= ISSUE_URL_MAX_BYTES {
+        return PreparedPublicDiagnosticsIssue {
+            url: complete,
+            report,
+            truncated: false,
+        };
+    }
+
+    let empty_url = public_issue_url("");
+    let note_len = encoded_issue_query_len(PUBLIC_ISSUE_TRUNCATION_NOTE);
+    let body_budget = ISSUE_URL_MAX_BYTES
+        .saturating_sub(empty_url.len())
+        .saturating_sub(note_len);
+    let mut excerpt = String::new();
+    let mut encoded_len = 0usize;
+    for character in report.chars() {
+        let mut utf8 = [0; 4];
+        let char_len = encoded_issue_query_len(character.encode_utf8(&mut utf8));
+        if encoded_len.saturating_add(char_len) > body_budget {
+            break;
+        }
+        excerpt.push(character);
+        encoded_len += char_len;
+    }
+    excerpt.push_str(PUBLIC_ISSUE_TRUNCATION_NOTE);
+    let url = public_issue_url(&excerpt);
+    debug_assert!(url.len() <= ISSUE_URL_MAX_BYTES);
+    PreparedPublicDiagnosticsIssue {
+        url,
+        report,
+        truncated: true,
+    }
 }
 
 fn is_external_http_url(url: &str) -> bool {
@@ -11067,7 +11227,7 @@ async fn create_backup(
             .map(|(id, entry)| {
                 (
                     *id,
-                    entry.actor.clone(),
+                    op.bind_actor(entry.actor.clone()),
                     ServerRecord {
                         id: *id,
                         display_name: entry.name.clone(),
@@ -12247,19 +12407,16 @@ async fn join_one_grant(
     // nonce* (`join_namespace(group_id, invite_nonce, …)`), and a grant carries a certificate
     // instead. A companion whose grant has only rendezvous hints therefore cannot discover the
     // group yet; that needs a certificate-keyed pre-join namespace (M4 backlog).
-    let (contact, addrs) = schedule_grant_bootstrap(
-        &state.endpoint_dials,
-        &grant.group_id,
-        &grant.bootstrap,
-        &SystemClock,
-    )
-    .map_err(|error| {
-        if grant.bootstrap.is_empty() && !grant.rendezvous.is_empty() {
-            "this grant is rendezvous-only; pairing needs a directly-dialable server".to_string()
-        } else {
-            error
-        }
-    })?;
+    let (contact, addrs) =
+        schedule_grant_bootstrap(&state.endpoint_dials, &grant.group_id, &grant.bootstrap)
+            .map_err(|error| {
+                if grant.bootstrap.is_empty() && !grant.rendezvous.is_empty() {
+                    "this grant is rendezvous-only; pairing needs a directly-dialable server"
+                        .to_string()
+                } else {
+                    error
+                }
+            })?;
     let (mesh, _id) = MeshService::new_tcp(None, &addrs).map_err(|e| e.to_string())?;
     let mesh_handle = mesh.handle();
     timeout(
@@ -12792,8 +12949,8 @@ struct CaptureConfigView {
     /// revealing, and somebody who turned it on to reproduce one bug should not still be running it
     /// a fortnight later because they forgot.
     expires_at_restart: bool,
-    /// Whether this mode may render literal addresses. The single question that decides whether a
-    /// report is publishable, answered natively rather than re-derived by the UI.
+    /// Whether this mode may render literal addresses. This is an address-display decision, not a
+    /// publication verdict: automatic public diagnostics use a separate native allowlist.
     reveals_addresses: bool,
     sections: Vec<SectionCapture>,
 }
@@ -12973,12 +13130,10 @@ async fn reset_section_capture(state: State<'_, AppState>) -> Result<CaptureConf
 
 /// Build the public-issue attachment from a native allowlist.
 ///
-/// The webview supplies no report bytes. This prevents server names, table prose, literal
-/// addresses, and legacy tracing messages from being smuggled through a caller-controlled local
-/// bundle whose header happens to claim redaction.
-#[tauri::command]
-async fn build_public_diagnostics_report(state: State<'_, AppState>) -> Result<String, String> {
-    require_unlocked_session(&state).await?;
+/// Kept as a private helper rather than an IPC command: the webview must never receive a report
+/// and then hand caller-authored title/body/URL bytes back across the operating-system launcher
+/// boundary. [`open_public_diagnostics_issue`] performs that sequence atomically in native code.
+fn build_public_diagnostics_report() -> Result<String, String> {
     let hub = catcoms_log::hub();
     let events = hub.since(0, catcoms_log::LOG_RING_CAPACITY);
     let report =
@@ -12994,6 +13149,29 @@ async fn build_public_diagnostics_report(state: State<'_, AppState>) -> Result<S
         ExportPurpose::Publish,
     )?;
     Ok(report)
+}
+
+/// Open a public diagnostics issue using only native-owned report, title and destination bytes.
+///
+/// The command intentionally accepts no webview payload. A compromised renderer can ask for this
+/// fixed disclosure after unlock, but cannot append another report, swap the title, or turn the
+/// launcher into a confused deputy for a different URL. The browser still presents the GitHub form
+/// for the user to review and submit; Mewtual posts nothing itself.
+#[tauri::command]
+async fn open_public_diagnostics_issue(
+    state: State<'_, AppState>,
+) -> Result<PublicDiagnosticsIssue, String> {
+    require_unlocked_session(&state).await?;
+    let native_report = build_public_diagnostics_report()?;
+    let prepared = prepare_public_diagnostics_issue(&native_report);
+    if !is_tracker_url(&prepared.url) {
+        return Err("native diagnostics issue URL failed its fixed tracker boundary".into());
+    }
+    launch_url(&prepared.url)?;
+    Ok(PublicDiagnosticsIssue {
+        report: prepared.report,
+        truncated: prepared.truncated,
+    })
 }
 
 /// The largest diagnostics report that will be written.
@@ -13518,14 +13696,28 @@ fn ui_log_allowance(channel: UiLogChannel, now_ms: i64) -> (bool, Option<u64>) {
 /// `serde` will not map an object onto a `Vec` of pairs on its own: it wants a sequence, and says
 /// so. A visitor gets the entries in the order the parser met them, which is the order the webview
 /// wrote them.
-fn ordered_fields<'de, D>(deserializer: D) -> Result<Vec<(String, serde_json::Value)>, D::Error>
+#[derive(Default)]
+struct BoundedUiFields {
+    values: Vec<(String, serde_json::Value)>,
+    dropped: u32,
+}
+
+impl From<Vec<(String, serde_json::Value)>> for BoundedUiFields {
+    fn from(mut values: Vec<(String, serde_json::Value)>) -> Self {
+        let dropped = values.len().saturating_sub(catcoms_diagnostics::MAX_FIELDS) as u32;
+        values.truncate(catcoms_diagnostics::MAX_FIELDS);
+        BoundedUiFields { values, dropped }
+    }
+}
+
+fn ordered_fields<'de, D>(deserializer: D) -> Result<BoundedUiFields, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     struct InDocumentOrder;
 
     impl<'de> serde::de::Visitor<'de> for InDocumentOrder {
-        type Value = Vec<(String, serde_json::Value)>;
+        type Value = BoundedUiFields;
 
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str("an object of diagnostic fields")
@@ -13535,13 +13727,28 @@ where
         where
             A: serde::de::MapAccess<'de>,
         {
-            // Bounded by the caller: `record_ui_events` drops everything past the event's field
-            // cap, and the batch itself is capped before that.
-            let mut fields = Vec::with_capacity(map.size_hint().unwrap_or(0).min(64));
-            while let Some(pair) = map.next_entry()? {
-                fields.push(pair);
+            let mut fields = Vec::with_capacity(
+                map.size_hint()
+                    .unwrap_or(0)
+                    .min(catcoms_diagnostics::MAX_FIELDS),
+            );
+            let mut dropped = 0u32;
+            while let Some(name) = map.next_key::<String>()? {
+                if fields.len() < catcoms_diagnostics::MAX_FIELDS {
+                    fields.push((name, map.next_value()?));
+                } else {
+                    // Drain the rest without retaining it in the command/event. Tauri has already
+                    // materialized the outer JSON `Value`, so this is deliberately a post-decode
+                    // work/ring bound rather than a claim that the IPC request was never allocated.
+                    // The loss remains explicit on the event.
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                    dropped = dropped.saturating_add(1);
+                }
             }
-            Ok(fields)
+            Ok(BoundedUiFields {
+                values: fields,
+                dropped,
+            })
         }
     }
 
@@ -13556,6 +13763,10 @@ struct UiDiagnosticEvent {
     level: String,
     #[serde(default)]
     trace: String,
+    /// Session-local proof returned beside a native event trace. This is bridge metadata, never a
+    /// diagnostic field: persisting it would turn a short-lived provenance check into report data.
+    #[serde(default)]
+    trace_proof: String,
     #[serde(default)]
     phase: String,
     #[serde(default)]
@@ -13571,7 +13782,64 @@ struct UiDiagnosticEvent {
     /// own fields and what `render.rs` promises. Sorting would also be deterministic, and would
     /// throw away the order the producer meant.
     #[serde(default, deserialize_with = "ordered_fields")]
-    fields: Vec<(String, serde_json::Value)>,
+    fields: BoundedUiFields,
+}
+
+/// The bounded subset retained after Tauri has decoded the invoke's JSON body.
+///
+/// This limits command/ring work and drops the decoded excess promptly; it is not a raw IPC byte
+/// cap. Tauri materializes `InvokeBody::Json` before command argument deserialization, so a
+/// compromised renderer can still spend process memory and parsing time on an oversized request.
+struct RetainedUiDiagnosticEvents {
+    offered: usize,
+    values: Vec<UiDiagnosticEvent>,
+}
+
+impl<'de> Deserialize<'de> for RetainedUiDiagnosticEvents {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct BoundedBatch;
+
+        impl<'de> serde::de::Visitor<'de> for BoundedBatch {
+            type Value = RetainedUiDiagnosticEvents;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an array of structured UI diagnostic events")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut values =
+                    Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX_UI_LOG_BATCH));
+                while values.len() < MAX_UI_LOG_BATCH {
+                    let Some(event) = seq.next_element::<UiDiagnosticEvent>()? else {
+                        let offered = values.len();
+                        return Ok(RetainedUiDiagnosticEvents { offered, values });
+                    };
+                    values.push(event);
+                }
+                let mut offered = values.len();
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    offered = offered.saturating_add(1);
+                }
+                Ok(RetainedUiDiagnosticEvents { offered, values })
+            }
+        }
+
+        deserializer.deserialize_seq(BoundedBatch)
+    }
+}
+
+impl From<Vec<UiDiagnosticEvent>> for RetainedUiDiagnosticEvents {
+    fn from(mut values: Vec<UiDiagnosticEvent>) -> Self {
+        let offered = values.len();
+        values.truncate(MAX_UI_LOG_BATCH);
+        RetainedUiDiagnosticEvents { offered, values }
+    }
 }
 
 /// Record structured observations from the webview.
@@ -13586,12 +13854,12 @@ struct UiDiagnosticEvent {
 /// trustworthy producer this process has, and a render loop must cost a counter rather than a disk.
 /// Also shares its reason for being outside the unlocked-session gate.
 #[tauri::command]
-async fn record_ui_events(events: Vec<UiDiagnosticEvent>) -> SendOutcome {
+async fn record_ui_events(events: RetainedUiDiagnosticEvents) -> SendOutcome {
     use catcoms_diagnostics::{DiagnosticEvent, Level, Phase, SafeText, Section};
 
-    let offered = events.len();
+    let offered = events.offered;
     let mut accepted = 0usize;
-    for event in events.into_iter().take(MAX_UI_LOG_BATCH) {
+    for event in events.values {
         let (allowed, suppressed) = ui_log_allowance(UiLogChannel::Structured, wall_ms());
         if let Some(count) = suppressed {
             tracing::warn!(
@@ -13627,10 +13895,11 @@ async fn record_ui_events(events: Vec<UiDiagnosticEvent>) -> SendOutcome {
             // could not gather the webview's half of an operation with the native half: the
             // correlation the whole mechanism exists for stopped exactly at the bridge. Found by
             // adversarial review (P3-011).
-            if let Some(trace) = parse_trace(&event.trace) {
+            if let Some(trace) = parse_returned_ui_trace(&event.trace, &event.trace_proof) {
                 recorded = recorded.trace(trace);
             }
-            for (name, value) in event.fields {
+            recorded.fields_dropped = recorded.fields_dropped.saturating_add(event.fields.dropped);
+            for (name, value) in event.fields.values {
                 recorded = recorded.field(name, ui_field(&value));
             }
             recorded
@@ -13901,7 +14170,7 @@ pub fn run() {
             set_capture_mode,
             set_section_capture,
             reset_section_capture,
-            build_public_diagnostics_report,
+            open_public_diagnostics_issue,
             get_event_cursor,
             get_task_health,
             save_diagnostics_report,
@@ -14132,14 +14401,126 @@ mod tests {
             "fields": { "zulu": 1, "alpha": 2, "mike": 3 }
         }"#;
         let event: UiDiagnosticEvent = serde_json::from_str(json).expect("the webview's shape");
-        let names: Vec<&str> = event.fields.iter().map(|(name, _)| name.as_str()).collect();
+        let names: Vec<&str> = event
+            .fields
+            .values
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
         assert_eq!(names, ["zulu", "alpha", "mike"]);
 
         // And it is the same on every parse, which a hashed container is not.
         for _ in 0..8 {
             let again: UiDiagnosticEvent = serde_json::from_str(json).unwrap();
-            let order: Vec<&str> = again.fields.iter().map(|(n, _)| n.as_str()).collect();
+            let order: Vec<&str> = again
+                .fields
+                .values
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect();
             assert_eq!(order, names);
+        }
+    }
+
+    #[test]
+    fn ui_diagnostic_command_retains_only_bounded_events_and_fields_after_ipc_decode() {
+        let fields: serde_json::Map<String, serde_json::Value> = (0
+            ..(catcoms_diagnostics::MAX_FIELDS + 5))
+            .map(|index| (format!("field_{index}"), serde_json::json!(index)))
+            .collect();
+        let event = serde_json::json!({
+            "section": "ui",
+            "code": "UI.BOUNDED",
+            "level": "warn",
+            "fields": fields,
+        });
+        let offered = MAX_UI_LOG_BATCH + 3;
+        let wire = serde_json::Value::Array((0..offered).map(|_| event.clone()).collect());
+
+        let batch: RetainedUiDiagnosticEvents = serde_json::from_value(wire).unwrap();
+        assert_eq!(batch.offered, offered);
+        assert_eq!(batch.values.len(), MAX_UI_LOG_BATCH);
+        assert!(batch.values.iter().all(|event| {
+            event.fields.values.len() == catcoms_diagnostics::MAX_FIELDS
+                && event.fields.dropped == 5
+        }));
+    }
+
+    #[tokio::test]
+    async fn the_ui_recording_bridge_cannot_retain_address_or_peer_text_under_safe_capture() {
+        use catcoms_diagnostics::CaptureMode;
+
+        const IPV6: &str = "2001:db8:feed::42";
+        const PEER: &str = "12D3KooWDoNotRetainThisPeerIdentifier";
+        // Sixteen caller-controlled hex digits can encode an address/identifier just as readily as
+        // an arbitrary string field. Repeating it also proves normalization preserves correlation.
+        const TRACE: &str = "20010db8feed0042";
+
+        let hub = catcoms_log::hub();
+        let restore = hub.config();
+        hub.set_mode(CaptureMode::Safe);
+        hub.reset_section_levels();
+        let before = hub.stats().latest_seq;
+        let outcome = record_ui_events(
+            (0..2)
+                .map(|_| UiDiagnosticEvent {
+                    section: "join".into(),
+                    code: format!("UI route {IPV6} {PEER}"),
+                    level: "warn".into(),
+                    trace: TRACE.into(),
+                    trace_proof: String::new(),
+                    phase: "failure".into(),
+                    duration_ms: None,
+                    fields: vec![(
+                        format!("route_{IPV6}_{PEER}"),
+                        serde_json::Value::String(format!("/ip6/{IPV6}/tcp/22487/p2p/{PEER}")),
+                    )]
+                    .into(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        )
+        .await;
+        assert_eq!((outcome.offered, outcome.accepted), (2, 2));
+
+        let events: Vec<_> = hub
+            .since(before, 16)
+            .into_iter()
+            .filter(|event| event.code == "UI.EVENT")
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_ne!(
+            events[0].trace.as_hex(),
+            TRACE,
+            "raw external trace retained"
+        );
+        assert_eq!(
+            events[0].trace, events[1].trace,
+            "repeated external traces must still correlate inside one session"
+        );
+        let event = &events[0];
+        let later_full = catcoms_diagnostics::event_view(event, CaptureMode::Full);
+        let rendered = format!(
+            "{} {} {:?}",
+            later_full.target,
+            later_full.trace,
+            later_full
+                .fields
+                .iter()
+                .map(|field| (&field.name, &field.value))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(later_full.capture, "safe");
+        for canary in [IPV6, PEER, TRACE] {
+            assert!(
+                !rendered.contains(canary),
+                "Safe-captured UI text reappeared in a later Full view: {rendered}"
+            );
+        }
+
+        hub.set_mode(restore.mode);
+        for section in catcoms_diagnostics::SECTIONS {
+            hub.set_section_level(section, restore.level(section));
         }
     }
 
@@ -14257,8 +14638,14 @@ mod tests {
     #[test]
     fn an_emitted_payload_carries_the_operation_that_caused_it() {
         let trace = catcoms_diagnostics::TraceId(0x7f2c_0000_0000_0001);
-        let stamped = stamp_payload(serde_json::json!({ "server": 1 }), 1198, 44_012, trace)
-            .expect("an object payload can carry the envelope");
+        let stamped = stamp_payload(
+            serde_json::json!({ "server": 1 }),
+            1198,
+            44_012,
+            trace,
+            Some("native-proof"),
+        )
+        .expect("an object payload can carry the envelope");
         assert_eq!(stamped["__seq"], 1198, "this event name's own sequence");
         assert_eq!(
             stamped["__ord"], 44_012,
@@ -14266,6 +14653,7 @@ mod tests {
         );
         assert_eq!(stamped["__gen"], event_generation());
         assert_eq!(stamped["__trace"], "7f2c000000000001");
+        assert_eq!(stamped["__trace_proof"], "native-proof");
         assert_eq!(stamped["server"], 1, "and the payload itself is untouched");
 
         // An arrival from a peer belongs to no local operation. Left off entirely rather than sent
@@ -14276,6 +14664,7 @@ mod tests {
             1199,
             44_013,
             catcoms_diagnostics::TraceId::default(),
+            None,
         )
         .expect("still numbered");
         assert_eq!(spontaneous["__seq"], 1199);
@@ -14283,7 +14672,7 @@ mod tests {
 
         // A payload that is not an object can carry none of it, and says so by refusing rather
         // than by silently dropping the sequence the frontend checks for gaps with.
-        assert!(stamp_payload(serde_json::json!(7), 1200, 44_014, trace).is_none());
+        assert!(stamp_payload(serde_json::json!(7), 1200, 44_014, trace, None).is_none());
     }
 
     /// A payload field that shadows the envelope must be noticed, not silently overwritten.
@@ -14301,6 +14690,9 @@ mod tests {
         assert!(collides_with_envelope(
             &serde_json::json!({ "__trace": "x" })
         ));
+        assert!(collides_with_envelope(
+            &serde_json::json!({ "__trace_proof": "x" })
+        ));
         assert!(!collides_with_envelope(
             &serde_json::json!({ "server": 1, "seq": 5 })
         ));
@@ -14309,8 +14701,14 @@ mod tests {
 
         // Every envelope key is checked. One added to `stamp_payload` and forgotten here would be
         // one the collision test does not cover.
-        let stamped =
-            stamp_payload(serde_json::json!({}), 1, 2, catcoms_diagnostics::TraceId(9)).unwrap();
+        let stamped = stamp_payload(
+            serde_json::json!({}),
+            1,
+            2,
+            catcoms_diagnostics::TraceId(9),
+            Some("proof"),
+        )
+        .unwrap();
         for key in stamped.as_object().unwrap().keys() {
             assert!(
                 ENVELOPE_KEYS.contains(&key.as_str()),
@@ -14319,9 +14717,7 @@ mod tests {
         }
     }
 
-    /// A trace minted in the webview has to be the *same* trace natively, or the two halves of an
-    /// operation are two records that have to be lined up by timestamp. Both doors the webview can
-    /// knock on parse it the same way, which is why they share this function.
+    /// Pin the external trace's canonical wire spelling independently from its privacy reduction.
     #[test]
     fn a_webview_trace_is_the_same_trace_natively() {
         assert_eq!(
@@ -14334,6 +14730,68 @@ mod tests {
             parse_trace("0000000000000000"),
             None,
             "an all-zero trace is what unset renders as; correlating on it would gather everything"
+        );
+    }
+
+    #[test]
+    fn a_native_event_round_trip_normalizes_an_external_trace_exactly_once() {
+        const RAW: &str = "20010db8feed0042";
+        let raw = parse_trace(RAW).unwrap();
+        let operation = Operation::start_maybe(
+            Some(RAW.into()),
+            catcoms_diagnostics::Section::Ipc,
+            "trace-proof-test",
+            None,
+            None,
+        );
+        assert_ne!(
+            operation.trace, raw,
+            "caller-controlled trace bytes entered native state"
+        );
+
+        // This is the same pair `emit_tracked` places in an event envelope after an actor carries
+        // the normalized trace. The webview returns both unchanged on its UI diagnostic stage.
+        let proof = hex::encode(catcoms_log::hub().trace_proof(operation.trace));
+        let stamped = stamp_payload(
+            serde_json::json!({ "server": 1 }),
+            1,
+            2,
+            operation.trace,
+            Some(&proof),
+        )
+        .unwrap();
+        let returned = parse_returned_ui_trace(
+            stamped["__trace"].as_str().unwrap(),
+            stamped["__trace_proof"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            returned, operation.trace,
+            "the return path must not compute H(H(raw))"
+        );
+
+        let unproved = parse_returned_ui_trace(stamped["__trace"].as_str().unwrap(), "").unwrap();
+        assert_ne!(
+            unproved, operation.trace,
+            "the webview cannot claim arbitrary hex was already normalized without a valid proof"
+        );
+    }
+
+    #[test]
+    fn upload_progress_never_blesses_a_renderer_controlled_trace_as_native() {
+        const RAW: &str = "20010db8feed0042";
+        let raw = parse_trace(RAW).unwrap();
+        let first = external_progress_trace(Some(RAW));
+        let repeated = external_progress_trace(Some(RAW));
+
+        assert_ne!(first, raw);
+        assert_eq!(
+            first, repeated,
+            "upload stages still need session-local correlation"
+        );
+        assert_eq!(
+            external_progress_trace(None),
+            catcoms_diagnostics::TraceId::default()
         );
     }
 
@@ -15869,15 +16327,18 @@ mod tests {
         let wrong_peer: Multiaddr = format!("/ip4/8.8.8.8/tcp/22487/p2p/{other}")
             .parse()
             .unwrap();
-        let scheduler = EndpointDialScheduler::new(catcoms_discovery::EndpointDialConfig {
-            window_ms: 1_000,
-            process_limit: 4,
-            server_limit: 4,
-            peer_limit: 4,
-            endpoint_limit: 2,
-            prefix_limit: 4,
-        });
         let clock = ManualClock::new(0);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            catcoms_discovery::EndpointDialConfig {
+                window_ms: 1_000,
+                process_limit: 4,
+                server_limit: 4,
+                peer_limit: 4,
+                endpoint_limit: 2,
+                prefix_limit: 4,
+            },
+            Arc::new(clock.clone()),
+        );
 
         assert_eq!(
             schedule_join_reply_candidates(
@@ -15885,7 +16346,6 @@ mod tests {
                 b"group-a",
                 &joiner,
                 &[route.clone(), wrong_peer],
-                &clock,
             ),
             vec![route.clone()],
             "a candidate bound to another peer must never consume a grant or reach the dialer"
@@ -15896,7 +16356,6 @@ mod tests {
                 b"group-a",
                 &joiner,
                 std::slice::from_ref(&route),
-                &clock,
             ),
             vec![route.clone()]
         );
@@ -15905,7 +16364,6 @@ mod tests {
             b"group-b",
             &joiner,
             std::slice::from_ref(&route),
-            &clock,
         )
         .is_empty());
 
@@ -15916,7 +16374,6 @@ mod tests {
                 b"group-b",
                 &joiner,
                 std::slice::from_ref(&route),
-                &clock,
             ),
             vec![route]
         );
@@ -15929,19 +16386,21 @@ mod tests {
         let first_route = format!("/ip4/45.79.12.34/tcp/22487/p2p/{first}");
         let second_route = format!("/ip4/8.8.8.8/tcp/22487/p2p/{other}");
         let bare = "/ip4/1.1.1.1/tcp/53".to_string();
-        let scheduler = EndpointDialScheduler::new(catcoms_discovery::EndpointDialConfig {
-            window_ms: 1_000,
-            process_limit: 1,
-            server_limit: 2,
-            peer_limit: 2,
-            endpoint_limit: 1,
-            prefix_limit: 2,
-        });
         let clock = ManualClock::new(0);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            catcoms_discovery::EndpointDialConfig {
+                window_ms: 1_000,
+                process_limit: 1,
+                server_limit: 2,
+                peer_limit: 2,
+                endpoint_limit: 1,
+                prefix_limit: 2,
+            },
+            Arc::new(clock),
+        );
 
         let (contact, granted) =
-            schedule_grant_bootstrap(&scheduler, b"group-a", &[first_route.clone(), bare], &clock)
-                .unwrap();
+            schedule_grant_bootstrap(&scheduler, b"group-a", &[first_route.clone(), bare]).unwrap();
         assert_eq!(contact, phase0_peer_id(&first));
         assert_eq!(granted, vec![first_route.parse::<Multiaddr>().unwrap()]);
 
@@ -15949,18 +16408,13 @@ mod tests {
             &EndpointDialScheduler::default(),
             b"group-confused",
             &[first_route, second_route.clone()],
-            &clock,
         )
         .unwrap_err();
         assert!(confused.contains("one unambiguous server peer"));
 
-        let capped = schedule_grant_bootstrap(
-            &scheduler,
-            b"group-b",
-            std::slice::from_ref(&second_route),
-            &clock,
-        )
-        .unwrap_err();
+        let capped =
+            schedule_grant_bootstrap(&scheduler, b"group-b", std::slice::from_ref(&second_route))
+                .unwrap_err();
         assert!(capped.contains("process-wide"));
     }
 
@@ -16027,17 +16481,20 @@ mod tests {
             target_peer_in_multiaddr(address).is_some_and(|peer| peer == first || peer == second)
         }));
 
-        let scheduler = EndpointDialScheduler::new(catcoms_discovery::EndpointDialConfig {
-            window_ms: 1_000,
-            process_limit: 2,
-            server_limit: 2,
-            peer_limit: 2,
-            endpoint_limit: 1,
-            prefix_limit: 2,
-        });
         let clock = ManualClock::new(1_000);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            catcoms_discovery::EndpointDialConfig {
+                window_ms: 1_000,
+                process_limit: 2,
+                server_limit: 2,
+                peer_limit: 2,
+                endpoint_limit: 1,
+                prefix_limit: 2,
+            },
+            Arc::new(clock),
+        );
         let (scheduled_allowed, scheduled) =
-            schedule_switchboard_candidates(&scheduler, &group_id, allowed, addresses, &clock);
+            schedule_switchboard_candidates(&scheduler, &group_id, allowed, addresses);
         assert_eq!(scheduled.len(), 2, "helper routes spend endpoint tokens");
         assert_eq!(scheduled_allowed.len(), 2);
 
@@ -16046,7 +16503,6 @@ mod tests {
             b"another-group",
             HashMap::from([(first_phase, 3_000), (second_phase, 4_000)]),
             scheduled,
-            &clock,
         );
         assert!(denied.is_empty(), "the process cap is shared across groups");
         assert!(denied_allowed.is_empty());
@@ -17446,12 +17902,8 @@ mod tests {
         let address = format!("/ip4/127.0.0.1/tcp/22487/p2p/{peer}");
         let targets = validate_invite_rendezvous_addrs(std::slice::from_ref(&address)).unwrap();
         let scheduler = EndpointDialScheduler::default();
-        let scheduled = schedule_invite_rendezvous_targets(
-            &scheduler,
-            b"same-machine-group",
-            targets,
-            &ManualClock::new(0),
-        );
+        let scheduled =
+            schedule_invite_rendezvous_targets(&scheduler, b"same-machine-group", targets);
         assert_eq!(scheduled.len(), 1);
         assert_eq!(scheduled[0].addr.to_string(), address);
     }
@@ -17468,10 +17920,13 @@ mod tests {
             })
             .collect();
         let targets = validate_invite_rendezvous_addrs(&routes).unwrap();
-        let scheduler = EndpointDialScheduler::default();
         let clock = ManualClock::new(0);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            catcoms_discovery::EndpointDialConfig::default(),
+            Arc::new(clock),
+        );
         let scheduled =
-            schedule_invite_rendezvous_targets(&scheduler, b"rendezvous-headroom", targets, &clock);
+            schedule_invite_rendezvous_targets(&scheduler, b"rendezvous-headroom", targets);
         assert_eq!(scheduled.len(), MAX_INVITE_RENDEZVOUS_DIALS);
 
         let inviter = test_libp2p_peer(120);
@@ -17479,7 +17934,7 @@ mod tests {
         let inviter_route = format!("/ip4/8.8.8.8/tcp/22487/p2p/{inviter}");
         let endpoint = untrusted_peer_endpoint(&inviter_route, &inviter_phase).unwrap();
         assert_eq!(
-            scheduler.reserve(b"rendezvous-headroom", &[endpoint], &clock,),
+            scheduler.reserve(b"rendezvous-headroom", &[endpoint]),
             vec![inviter_route]
         );
     }
@@ -17502,7 +17957,6 @@ mod tests {
             &EndpointDialScheduler::default(),
             b"supported-seeds",
             targets,
-            &ManualClock::new(0),
         );
         assert_eq!(scheduled.len(), 1);
         assert_eq!(scheduled[0].addr.to_string(), usable);
@@ -18100,6 +18554,40 @@ mod tests {
             ISSUE_URL_PREFIX,
             "x".repeat(ISSUE_URL_MAX_BYTES)
         )));
+    }
+
+    #[test]
+    fn native_public_issue_keeps_the_exact_report_and_bounds_only_the_url_excerpt() {
+        let native = "Mewtual public diagnostics v1\n\nJOIN.TEST count=1 \u{1f408}";
+        let small = prepare_public_diagnostics_issue(native);
+        let expected = format!(
+            "**Type:** Bug report\n**App:** Mewtual desktop {}\n**Environment:** Mewtual desktop\n\n{native}",
+            env!("CARGO_PKG_VERSION"),
+        );
+        assert_eq!(small.report, expected);
+        assert!(!small.truncated);
+        assert!(is_tracker_url(&small.url));
+        assert_eq!(
+            encoded_issue_query_len(&small.report),
+            encode_issue_query(&small.report).len(),
+            "the URL budget and encoder must count the same UTF-8 bytes"
+        );
+
+        let large_native = format!("{}\u{1f408}", "bounded-public-event\n".repeat(20_000));
+        let large = prepare_public_diagnostics_issue(&large_native);
+        assert!(large.truncated);
+        assert!(large.url.len() <= ISSUE_URL_MAX_BYTES);
+        assert!(is_tracker_url(&large.url));
+        assert!(
+            large.report.ends_with(&large_native),
+            "the exact native report survives for clipboard fallback"
+        );
+        assert!(
+            large
+                .url
+                .contains(&encode_issue_query(PUBLIC_ISSUE_TRUNCATION_NOTE)),
+            "only the launched URL is explicitly shortened"
+        );
     }
 
     #[test]

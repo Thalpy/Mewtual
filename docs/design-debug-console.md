@@ -106,10 +106,14 @@ Capture starts in Safe mode and can be changed or switched off at runtime.
 
 - Backend: a `tracing` layer keeps one bounded in-memory ring and increments session
   counters from app start for admitted events. Every accepted event is stamped with its
-  capture mode and mode epoch. Safe capture destroys literal address bytes before ring
-  insertion, so later selecting Full cannot reveal historical Safe values. Per-section
-  levels survive mode changes; restoring a mode's recommended levels is a separate action.
-  When the console opens, the frontend pages the existing ring and then polls its live tail.
+  capture mode and mode epoch, and every displayed/copied event line includes that stamp.
+  Safe capture destroys literal addresses, arbitrary prose, runtime field names, and
+  non-allowlisted target text before ring insertion, so later selecting Full cannot reveal
+  historical Safe values. A mixed-history report labels the current setting separately from all
+  capture epochs present. Per-section levels survive mode changes; restoring a mode's recommended
+  levels is a separate action. Turning capture Off stops new admission without claiming to erase
+  existing bounded history. When the console opens, the frontend pages the existing ring and then
+  polls its live tail; a mode change queues a follow-up poll if one is already in flight.
 - Frontend: `console.error/warn/info`, `window.onerror` and `unhandledrejection` are
   wrapped once at boot into a ring in JS. Wrapping must preserve the original console
   behaviour (call through) so the on-disk log keeps working.

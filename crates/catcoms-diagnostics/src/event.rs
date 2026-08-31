@@ -56,6 +56,27 @@ pub const MAX_FIELD_NAME: usize = 64;
 /// an event that can hold an unbounded one holds it in the ring and writes it to the file.
 pub const MAX_TARGET: usize = 200;
 
+/// Reduce a runtime target to a closed application-owned crate label for Safe capture.
+///
+/// Keeping only the root preserves useful ownership (`catcoms_net` versus `catcoms_ui`) while a
+/// custom target such as `catcoms_net::<address>` cannot smuggle its suffix into stored history.
+fn safe_target_root(target: &str) -> Option<&'static str> {
+    match target.split("::").next().unwrap_or(target) {
+        "catcoms_app" => Some("catcoms_app"),
+        "catcoms_ui" => Some("catcoms_ui"),
+        "catcoms_net" => Some("catcoms_net"),
+        "catcoms_discovery" => Some("catcoms_discovery"),
+        "catcoms_sync" => Some("catcoms_sync"),
+        "catcoms_mls" => Some("catcoms_mls"),
+        "catcoms_storage" => Some("catcoms_storage"),
+        "catcoms_replication" => Some("catcoms_replication"),
+        "catcoms_crypto" => Some("catcoms_crypto"),
+        "catcoms_log" => Some("catcoms_log"),
+        "catcoms_diagnostics" => Some("catcoms_diagnostics"),
+        _ => None,
+    }
+}
+
 /// Ties every stage of one user-visible operation together.
 ///
 /// The thing whose absence made concurrent sends, reconnects, server switches and retries
@@ -152,6 +173,17 @@ impl FieldName {
     /// Whether this name is a compile-time literal owned by the application.
     pub fn is_static(&self) -> bool {
         matches!(self, FieldName::Static(_))
+    }
+
+    /// Remove a runtime-provided field name at the Safe capture boundary.
+    ///
+    /// Owned names come from `tracing` metadata or the webview and can contain an address or
+    /// identifier just as readily as a value can. The ordinal preserves deterministic field
+    /// structure without keeping attacker- or user-controlled bytes for a later mode to reveal.
+    fn minimize_for_safe_capture(&mut self, ordinal: usize) {
+        if matches!(self, FieldName::Owned(_)) {
+            *self = FieldName::Owned(format!("field_{ordinal}").into_boxed_str());
+        }
     }
 }
 
@@ -391,7 +423,19 @@ impl DiagnosticEvent {
     pub(crate) fn prepare_for_capture(&mut self, mode: crate::config::CaptureMode, epoch: u64) {
         self.capture_mode = mode;
         self.capture_epoch = epoch;
-        for (_, value) in &mut self.fields {
+        if !mode.allows_raw_addresses() {
+            // `target` is an owned string even when most producers fill it from static tracing
+            // metadata. Treating provenance as a convention here would leave a second arbitrary-
+            // string ingress beside fields, so Safe retains the already-classified `section` and
+            // drops the original target bytes.
+            self.target = safe_target_root(&self.target)
+                .unwrap_or_default()
+                .to_string();
+        }
+        for (ordinal, (name, value)) in self.fields.iter_mut().enumerate() {
+            if !mode.allows_raw_addresses() {
+                name.minimize_for_safe_capture(ordinal + 1);
+            }
             value.minimize_for_capture(mode);
         }
     }
@@ -402,7 +446,8 @@ mod tests {
     use super::*;
     use crate::config::CaptureMode;
     use crate::redact::{
-        AddressValue, RefDomain, SafeText, SessionSalt, MAX_ADDRESS_CHARS, MAX_SAFE_TEXT,
+        AddressValue, BridgedMessage, RefDomain, SafeText, SessionSalt, MAX_ADDRESS_CHARS,
+        MAX_SAFE_TEXT,
     };
 
     #[test]
@@ -429,6 +474,50 @@ mod tests {
         // And the loss is admitted, or the reader of the resulting report has thirty-two fields
         // and no reason to suspect there were ninety-six. Found by adversarial review (P3-013).
         assert_eq!(event.fields_dropped, (MAX_FIELDS * 3) as u32);
+    }
+
+    #[test]
+    fn safe_capture_destroys_every_arbitrary_string_ingress_before_storage() {
+        const IPV6: &str = "2001:db8:feed::42";
+        const PEER: &str = "12D3KooWDoNotRetainThisPeerIdentifier";
+        let mut event = DiagnosticEvent::info(Section::Transport, "NET.TEST")
+            .target(format!("private::{IPV6}::{PEER}"))
+            .field(
+                format!("route_{IPV6}_{PEER}"),
+                SafeText::describe(&format!("safe text {IPV6} {PEER}")),
+            )
+            .field(
+                "message",
+                BridgedMessage::new(&format!("legacy text {IPV6} {PEER}")),
+            )
+            .field(
+                "address",
+                AddressValue::new(&format!("/ip6/{IPV6}/tcp/22487/p2p/{PEER}")),
+            );
+
+        event.prepare_for_capture(CaptureMode::Safe, 9);
+        assert!(event.target.is_empty());
+        assert_eq!(event.fields[0].0.as_str(), "field_1");
+        let later_full_view = format!(
+            "{} {} {}",
+            event.fields[0].1.render(CaptureMode::Full),
+            event.fields[1].1.render(CaptureMode::Full),
+            event.fields[2].1.render(CaptureMode::Full),
+        );
+        for canary in [IPV6, PEER] {
+            assert!(
+                !later_full_view.contains(canary)
+                    && event
+                        .fields
+                        .iter()
+                        .all(|(name, _)| !name.as_str().contains(canary)),
+                "Safe-captured bytes reappeared after a later Full view: {later_full_view}"
+            );
+        }
+        assert!(
+            event.fields[1].1.is_bridged(),
+            "migration accounting remains typed"
+        );
     }
 
     /// A field name arrives from the `tracing` bridge and from the webview as a runtime string, and

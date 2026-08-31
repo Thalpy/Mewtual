@@ -108,6 +108,28 @@ pub enum DialSubmission {
     Submitted,
     /// No socket will start because the actor already has this endpoint covered.
     Suppressed,
+    /// The permit was committed, but the transport rejected the dial immediately afterwards.
+    ///
+    /// This is deliberately distinct from [`DialSubmission::Suppressed`]. The caller must keep
+    /// both its shared scheduler spend and its local policy spend charged, while also avoiding a
+    /// success/cooldown claim for socket work that never started.
+    FailedAfterCommit,
+}
+
+impl DialSubmission {
+    /// Whether the transport accepted actual pending/socket work for this command.
+    pub const fn is_submitted(self) -> bool {
+        matches!(self, Self::Submitted)
+    }
+
+    /// Whether a caller may return its matching local policy reservation.
+    ///
+    /// Scheduler permits refund themselves when dropped before commit. This parallel local
+    /// refund is valid only for the same pre-commit suppression case; an immediate transport
+    /// failure after commit remains conservatively charged at both layers.
+    pub const fn refunds_local_budget(self) -> bool {
+        matches!(self, Self::Suppressed)
+    }
 }
 
 /// A single-use, generation-bound authorization to submit one exact endpoint.
@@ -477,7 +499,16 @@ pub trait MeshTransport: Send + Sync {
         let Some(address) = permit.commit_if_current() else {
             return Ok(DialSubmission::Suppressed);
         };
-        self.dial_addr_outcome(&address).await
+        // The scheduler spend became irreversible above. Preserve that fact even when a legacy
+        // transport reports suppression or an error after the commit; returning `Suppressed`
+        // would make the caller refund a second, local policy budget for work that is already
+        // charged globally.
+        Ok(match self.dial_addr_outcome(&address).await {
+            Ok(DialSubmission::Submitted) => DialSubmission::Submitted,
+            Ok(DialSubmission::Suppressed | DialSubmission::FailedAfterCommit) | Err(_) => {
+                DialSubmission::FailedAfterCommit
+            }
+        })
     }
 
     /// Submit a small direct-route batch explicitly bound to `peer`.
@@ -523,12 +554,23 @@ pub trait MeshTransport: Send + Sync {
         if addresses.is_empty() {
             return Ok(vec![DialSubmission::Suppressed; current.len()]);
         }
-        let mut submitted = self.dial_peer_batch(peer, &addresses).await?.into_iter();
+        // Every address in this downstream call has already committed its permit. A transport
+        // error, a shorter-than-promised outcome vector, or downstream suppression must therefore
+        // remain charged rather than being rewritten as pre-commit `Suppressed`.
+        let mut submitted = self
+            .dial_peer_batch(peer, &addresses)
+            .await
+            .ok()
+            .map(Vec::into_iter);
         Ok(current
             .into_iter()
             .map(|is_current| {
                 if is_current {
-                    submitted.next().unwrap_or(DialSubmission::Suppressed)
+                    match submitted.as_mut().and_then(Iterator::next) {
+                        Some(DialSubmission::Submitted) => DialSubmission::Submitted,
+                        Some(DialSubmission::Suppressed | DialSubmission::FailedAfterCommit)
+                        | None => DialSubmission::FailedAfterCommit,
+                    }
                 } else {
                     DialSubmission::Suppressed
                 }

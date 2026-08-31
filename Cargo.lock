@@ -568,6 +568,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "bytes",
+ "catcoms-discovery",
  "catcoms-rt",
  "either",
  "futures",

@@ -157,6 +157,8 @@ format: canonical allowlist v1\n\n",
         push_public_token(event.phase.as_str(), &mut out);
         out.push_str(" elapsed_ms=");
         out.push_str(&event.monotonic_ms.to_string());
+        out.push_str(" capture_mode=");
+        push_public_token(event.capture_mode.as_str(), &mut out);
         out.push_str(" capture_epoch=");
         out.push_str(&event.capture_epoch.to_string());
         if !event.operation.is_empty() {
@@ -828,11 +830,17 @@ mod tests {
         let mut legacy_bridge =
             DiagnosticEvent::warn(Section::Transport, BRIDGED_CODE).field("attempts", 99u64);
         legacy_bridge.seq = 3;
+        let mut safe = DiagnosticEvent::info(Section::Ipc, "IPC.EVENT.EMITTED");
+        safe.capture_mode = CaptureMode::Safe;
+        safe.capture_epoch = 10;
+        safe.seq = 4;
 
-        let report = render_public_report([&structured, &bridged, &legacy_bridge]);
+        let report = render_public_report([&structured, &bridged, &legacy_bridge, &safe]);
         assert!(report.contains("privacy.addresses: excluded"));
         assert!(report.contains("JOIN.ROUTES.CHECKED"));
         assert!(report.contains("attempts=2"));
+        assert!(report.contains("capture_mode=full capture_epoch=9"));
+        assert!(report.contains("capture_mode=safe capture_epoch=10"));
         assert!(!report.contains("attempts=99"));
         for canary in [
             "Private Support",

@@ -68,7 +68,22 @@ export type EventEnvelope = {
   __ord?: number;
   __gen?: number;
   __trace?: string;
+  /** Native/session proof for returning an already-normalized trace across the UI bridge. */
+  __trace_proof?: string;
 };
+
+/** Correlation metadata returned unchanged from a native event to the diagnostics bridge. */
+export type EventCorrelation = { trace?: TraceId; trace_proof?: string };
+
+export function eventCorrelation(envelope: EventEnvelope): EventCorrelation {
+  if (!envelope.__trace) return {};
+  return {
+    trace: envelope.__trace,
+    // Opaque and never minted by the webview. Native ingress authenticates this before accepting
+    // the trace as already normalized, so preserving it is correlation—not a trust decision here.
+    trace_proof: envelope.__trace_proof,
+  };
+}
 
 /** What a missing event looks like once it has been noticed. */
 export type SeqAnomaly =
@@ -475,13 +490,12 @@ export function makeOutbox<T>(
 // --- recording -------------------------------------------------------------------------------
 
 /** One structured observation from the webview. */
-export type UiEvent = {
+export type UiEvent = EventCorrelation & {
   /** The section it belongs to, as `catcoms-diagnostics` names them: `ui`, `ipc`, `channels`. */
   section: string;
   /** A stable `AREA.COMPONENT.OUTCOME` code. Never assembled from runtime data. */
   code: string;
   level: "error" | "warn" | "info" | "debug";
-  trace?: TraceId;
   /** `start`, `success`, `failure`, `cancel`, `timeout`, or omitted for a bare observation. */
   phase?: string;
   duration_ms?: number;

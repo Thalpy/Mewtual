@@ -14260,6 +14260,26 @@ button.dbg-rail-item.active {
   color: var(--ok);
   margin-left: 6px;
 }
+.dbg-issue-fallback {
+  flex: none;
+  padding: 8px 18px 12px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-2);
+  font-size: 0.72rem;
+}
+.dbg-issue-fallback textarea {
+  display: block;
+  width: 100%;
+  min-height: 96px;
+  max-height: 180px;
+  margin-top: 8px;
+  resize: vertical;
+  font: 0.68rem/1.45 var(--mono);
+  color: var(--text-1);
+  background: var(--bg-0);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+}
 /* A conclusion, above the table it was drawn from. Coloured by job like every other status here:
    danger means retrying will not fix it, warn means it may resolve on its own. */
 .dbg-finding {

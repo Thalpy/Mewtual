@@ -65,6 +65,7 @@ libp2p = { version = "0.56", features = [
 ] }
 
 [dev-dependencies]
+catcoms-discovery = { path = "../catcoms-discovery" }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 
 [lints]

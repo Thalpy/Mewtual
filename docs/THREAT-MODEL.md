@@ -83,9 +83,12 @@ table with the commit that closed it.
   relay host is instead bounded by prefix and process caps. Scheduler state is bounded and transient;
   restart resets it. It accounts submitted dial commands rather than actor-confirmed socket starts,
   and relay outer sockets have no separate exact-socket permit. Discovery endpoint permits are now
-  actor-consumed, single-use and accounting-generation-bound: cancellation after command enqueue
-  cannot refund queued work, actor suppression refunds, and a late old-window drop cannot decrement
-  current counters. A process-wide in-flight/concurrency lease remains future hardening.
+  actor-consumed, single-use, deadline-checked, and accounting-generation-bound. Reservation and
+  commit share one injected monotonic clock; queued work cannot start after its window merely because
+  no later reservation rolled the counters. Cancellation after command enqueue cannot refund queued
+  work; actor-owned connected, member-duplicate, and pending-infrastructure checks refund before
+  commit; and a late old-window drop cannot decrement current counters. A process-wide
+  in-flight/concurrency lease remains future hardening.
   Direct routes carried by companion grants use the same canonical invite policy, must name one
   unambiguous contact, and spend this process budget across every grant in a bundle. Pre-join
   rendezvous uses at most two validated seeds so infrastructure routes cannot consume the entire
@@ -141,6 +144,22 @@ table with the commit that closed it.
   native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
   the main-window capability reduce injection reach; the native command gate is the enforcement
   layer, not the fact that Svelte hid or cleared a control.
+- **Diagnostics have separate local-capture and public-disclosure boundaries.** Safe capture
+  destructively replaces literal addresses, arbitrary runtime prose, runtime field names, and
+  non-allowlisted targets before bounded ring storage; Enhanced and Full intentionally retain more
+  local detail and still require review before sharing. Webview-origin trace ids are normalized
+  under the process-local diagnostic salt; a native trace crossing back through the renderer is
+  accepted unchanged only with its session/trace-bound proof, which is never stored or rendered.
+  After Tauri decodes an invoke body, structured UI commands retain at most 256 events and 32 fields
+  per event. This does not impose a byte cap on Tauri's already-materialized JSON request: a compromised unlocked
+  webview can still spend native parsing time/memory with an oversized request body, so a transport-
+  level command payload cap remains an availability hardening item. An unlocked or compromised webview may ask
+  native code to open the fixed public-diagnostics issue, but supplies no report, title, or URL:
+  native code renders its closed allowlist, validates it, constructs the bounded tracker URL, and
+  launches that exact value. A truncated URL does not claim the later clipboard attempt succeeded;
+  the UI reports copy success only when the clipboard promise resolves. Ordinary user-authored
+  feedback remains a separate exact-tracker launcher path and is not presented as automatic safe
+  diagnostics.
 - **Delivery receipts prove receipt by a member device, not attention by a person.** Only a newly
   applied, signature-verified op can queue a receipt, and it is sent as a connected-only
   member-authenticated request. The author records it only when its exact document/change hash is

@@ -93,10 +93,11 @@ Implementations:
   relayed, bare, or substituted batches fail before `dial_gated` can start work.
   Discovery- and recovery-policy dials use `dial_permit` / `dial_peer_permits` instead. Production
   transfers each non-cloneable generation-bound permit into the actor command before awaiting a
-  reply. Already-connected/duplicate suppression drops and refunds it there; the actor commits it
-  only immediately before inserting the exact member endpoint into the pending path or calling
-  `Swarm::dial` for infrastructure. Caller cancellation therefore cannot refund a queued command,
-  and a permit from a replaced scheduler window can neither start nor alter the new counters.
+  reply. Already-connected, duplicate, or already-dialling suppression drops and refunds it there;
+  the actor owns the pending-infrastructure ledger and commits only immediately before inserting the
+  exact member endpoint into the pending path or calling `Swarm::dial` for infrastructure. Caller
+  cancellation therefore cannot refund a queued command, and a permit whose monotonic deadline has
+  passed or whose scheduler window was replaced can neither start nor alter the new counters.
   A transport using the default fallback commits before its first await and may conservatively
   spend on later failure, but cannot over-refund work that escaped the caller.
   `PeerConnected`/`PeerDisconnected` retain their legacy one-edge aggregate meaning.
@@ -209,9 +210,9 @@ pub struct EndpointDialConfig {
 }
 pub struct EndpointDialScheduler; // cloneable; clones share one bounded transient counter set
   new(EndpointDialConfig) -> Self;
-  reserve(&self, server:&[u8], endpoints:&[DialEndpoint], clock:&dyn Clock)
-    -> Vec<String>;
-  reserve_permits(&self, server:&[u8], endpoints:&[DialEndpoint], clock:&dyn Clock)
+  new_with_clock(EndpointDialConfig, Arc<dyn Clock>) -> Self;
+  reserve(&self, server:&[u8], endpoints:&[DialEndpoint]) -> Vec<String>;
+  reserve_permits(&self, server:&[u8], endpoints:&[DialEndpoint])
     -> Vec<EndpointDialPermit>; // non-cloneable and bound to one accounting generation
 
 pub trait DialPermit { // `catcoms-rt`; object-safe transport ownership seam
@@ -246,11 +247,18 @@ and prefix keys exclude the claimed PeerId and descriptor sequence. Separate rel
 unrelated targets at one relay from exhausting each other's two-attempt cap; the shared relay host is
 bounded at prefix/process scope rather than by a separate outer-socket lease. A shared denial is
 refunded to the local policy because no dial command was submitted. Scheduler state is session-only
-and uses `Clock::monotonic_ms`. A permit is transferred into the production transport actor before
-the caller awaits; duplicate/already-connected suppression refunds it, while current-generation
-commit happens immediately before pending/socket submission. Failed work after that point remains
-conservatively charged. Generation checks prevent delayed command drops from refunding a newer
-window. A process-wide in-flight/concurrency lease remains future hardening. Pre-join invite
+and uses one scheduler-owned `Clock::monotonic_ms` timeline. A permit is transferred into the
+production transport actor before the caller awaits; duplicate/already-connected/already-dialling
+  pre-commit suppression refunds it, while a deadline- and generation-current commit happens immediately before
+pending/socket submission. Infrastructure targets have an actor-owned pending ledger that is
+shared with member routes later reclassified as infrastructure and released on immediate refusal,
+connection, or outgoing failure. Constructor routes are grouped by terminal peer into one
+known-peer address race and seed that ledger before the actor starts. Immediate transport refusal
+after commit is reported separately from suppression: it remains conservatively charged in both the
+shared scheduler and local discovery policy, but does not manufacture a successful attempt/cooldown.
+Deadline and generation checks prevent queued expired work from starting and
+delayed command drops from refunding a newer window. A process-wide in-flight/concurrency lease
+remains future hardening. Pre-join invite
 rendezvous seeds are capped at two distinct validated nodes so infrastructure cannot exhaust the
 per-server window before the discovered inviter is dialed.
 
@@ -666,14 +674,31 @@ the complete bounded `states` array. The webview accepts only a strictly newer r
 current server/channel view, so a delayed query completion or event cannot replace fresher receipt
 evidence. Revisions are process-local ordering tokens, not persisted delivery evidence.
 
-Diagnostic events similarly carry their capture-time `capture_mode` and `capture_epoch`. The hub
-irreversibly removes an `AddressValue` literal before inserting an event captured under Safe/Off;
-later viewer changes cannot reveal it. `set_capture_mode` preserves per-section levels, while the
-separate `reset_section_capture` command restores recommended levels. Local Copy/Save reports are
-honestly labelled and receive validator disclosure findings. `build_public_diagnostics_report`
-instead renders the native ring through a canonical allowlist: targets, wall-clock time, addresses,
-runtime field names, user prose and legacy tracing events are absent by construction, after which
-the publication validator runs as defence in depth.
+Diagnostic events similarly carry their capture-time `capture_mode` and `capture_epoch`. Before a
+Safe event enters the hub, literal `AddressValue` bytes are removed, arbitrary `SafeText` and legacy
+`BridgedMessage` values are replaced by fixed typed placeholders, runtime field names become ordinal
+slots, and targets are reduced to a closed component-root allowlist. Later viewer changes therefore
+cannot recover those discarded strings. Every rendered row carries its capture mode and epoch;
+mixed-history reports name both the current setting and all epochs actually present.
+Native event envelopes use `__seq`, `__ord`, `__gen`, optional `__trace`, and optional
+`__trace_proof`. Webview-origin trace hex is untrusted and is reduced to a session-local token before
+ring admission. `__trace_proof` is an opaque, trace-bound MAC under the diagnostic session salt; it
+allows an unchanged native trace to return through `record_ui_events` without becoming
+`H(H(trace))`. It is neither diagnostic data nor authority, is never persisted/rendered, and a
+missing/invalid proof causes normalization rather than trust. After Tauri has decoded an invoke's
+JSON body, structured UI commands retain at most 256 events and 32 ordered fields per event;
+omitted fields increment the canonical row's dropped-field count. This is a ring/command work bound,
+not a pre-parse IPC byte limit.
+`set_capture_mode` preserves per-section levels, while the separate `reset_section_capture` command
+restores recommended levels. Turning capture Off stops new admission but does not retroactively erase
+bounded history. Local Copy/Save reports are honestly labelled and receive validator disclosure
+findings. `open_public_diagnostics_issue` accepts no webview payload: native code renders the ring
+through a canonical allowlist, validates it, builds the fixed tracker title/body/URL, and launches
+that exact URL atomically. Targets, wall-clock time, addresses, runtime field names, user prose and
+legacy tracing events are absent from its report by construction. Each included public row states
+its capture mode and epoch, so a mixed-history clipboard fallback cannot imply one privacy setting
+for bytes admitted under another. Only the URL excerpt is bounded;
+when it is shortened, the exact full publication envelope is returned for clipboard review.
 
 The version-1 UI-continuity JSON retains the required `drafts` and `readMarks` objects and may also
 carry `statusCursors` plus bounded per-server `fileTrustPolicies`. Each file policy is local to this

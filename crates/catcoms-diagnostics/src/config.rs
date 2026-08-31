@@ -14,10 +14,12 @@
 /// How much of a diagnostic session exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum CaptureMode {
-    /// No history is retained. Live health gauges still read, but nothing accumulates.
+    /// Stop admitting new history. Existing bounded history stays available until it ages out or
+    /// is cleared, so turning capture off is not presented as retroactive deletion.
     Off,
     /// The default. Stable codes, counts, durations, and identifiers reduced to session
-    /// references. No literal addresses, so a Safe report is one a user can paste in public.
+    /// references. Literal addresses, runtime field names/targets, and arbitrary prose are
+    /// irreversibly removed before storage, so later mode changes cannot reveal them.
     #[default]
     Safe,
     /// Safe, plus literal addresses and transport detail. For network and multi-peer failures
@@ -31,8 +33,9 @@ pub enum CaptureMode {
 impl CaptureMode {
     /// Whether literal network addresses may be rendered.
     ///
-    /// The single question that decides whether a report is publishable, so it is one function
-    /// rather than a comparison repeated at each call site where it could drift.
+    /// This controls address rendering only. It is not a publication verdict: Enhanced and Full
+    /// may also contain arbitrary prose, and automatic publication uses a separate native
+    /// allowlist plus validation.
     pub fn allows_raw_addresses(self) -> bool {
         matches!(self, CaptureMode::Enhanced | CaptureMode::Full)
     }

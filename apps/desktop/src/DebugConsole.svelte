@@ -19,7 +19,6 @@
    */
   import { onMount, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { buildFeedbackIssue, isAllowedIssueUrl } from "./feedback";
   import {
     BRIDGED_CODE,
     CAPTURE_LEVELS,
@@ -32,12 +31,16 @@
     appendEvents,
     captureModeIsRevealing,
     captureModeNote,
+    captureHistory,
     collectAllEvents,
     copyBundle,
+    createRepollingTask,
+    createSerialTaskQueue,
     deviceLines,
     eventLine,
     exportMasksAddresses,
     eventParts,
+    finishPublicDiagnosticsIssue,
     filterEvents,
     formatDuration,
     inView,
@@ -160,8 +163,10 @@
   let expanded = $state("");
   let copied = $state("");
   let saving = $state(false);
-  /** The file the last save produced, or why it did not. Shown in the footer, not as a toast. */
+  /** Latest copy/save/public-issue outcome. Shown persistently in the footer, not as a toast. */
   let saved = $state("");
+  /** Exact native public envelope retained when the browser opened but clipboard access failed. */
+  let issueFallback = $state("");
   // Aliases live for the console's lifetime rather than per render, so the same address is the same
   // `[ip 2]` every time it appears. Correlation is the evidence: "it keeps dialling the same two
   // addresses" is the whole diagnosis of the hour-long isolation, and a screenshot where both read
@@ -171,7 +176,8 @@
   // for them, not only when the screenshot toggle is on. Safe capture promises a report with no
   // literal addresses in it, and the reachability and device tables are read from their own
   // commands rather than from events, so they were the one part of a report that never kept it.
-  let maskForExport = $derived(exportMasksAddresses(stats.capture, redact));
+  let currentCaptureMode = $derived(capture?.mode || stats.capture);
+  let maskForExport = $derived(exportMasksAddresses(currentCaptureMode, redact));
 
   /**
    * How often reachability is re-read, as a multiple of the log tick.
@@ -193,7 +199,6 @@
    * previous version could stack them without limit, which is worst precisely when the app is
    * already struggling: the console would then be adding to the load it exists to explain.
    */
-  let pollingLog = false;
   let pollingRoutes = false;
   let tick = 0;
   /**
@@ -205,10 +210,10 @@
    * which, which is the confusion the whole mode-on-every-event design exists to prevent.
    */
   let captureGeneration = 0;
+  /** Native capture mutations and their UI application share one request-ordered lane. */
+  const captureMutations = createSerialTaskQueue();
 
-  async function pollLog() {
-    if (pollingLog) return;
-    pollingLog = true;
+  const pollLog = createRepollingTask(async () => {
     const generation = captureGeneration;
     try {
       const page = await invoke<{ events: LogEvent[] } & LogStats>("get_console_log", {
@@ -220,10 +225,8 @@
       stats = page;
     } catch {
       /* the console must never be able to break the app it is observing */
-    } finally {
-      pollingLog = false;
     }
-  }
+  });
 
   async function pollRoutes() {
     if (pollingRoutes) return;
@@ -325,12 +328,15 @@
   async function applyMode(mode: string) {
     pendingMode = "";
     try {
-      capture = await invoke<CaptureConfig>("set_capture_mode", { mode });
-      // Each native event retains its capture-time mode and epoch. Bump the poll generation so a
-      // response started before this choice cannot be mistaken for the refresh it triggered, but
-      // keep the mixed-mode history: changing the viewer cannot rewrite what was captured.
-      captureGeneration += 1;
-      await pollLog();
+      await captureMutations(async () => {
+        captureError = "";
+        capture = await invoke<CaptureConfig>("set_capture_mode", { mode });
+        // Each native event retains its capture-time mode and epoch. Bump the poll generation so a
+        // response started before this choice cannot be mistaken for the refresh it triggered, but
+        // keep the mixed-mode history: changing the viewer cannot rewrite what was captured.
+        captureGeneration += 1;
+        await pollLog();
+      });
     } catch (e) {
       captureError = String(e);
     }
@@ -339,9 +345,12 @@
   async function setSectionLevel(id: string, level: string) {
     captureError = "";
     try {
-      capture = await invoke<CaptureConfig>("set_section_capture", {
-        section: id,
-        level: level === "off" ? null : level,
+      await captureMutations(async () => {
+        captureError = "";
+        capture = await invoke<CaptureConfig>("set_section_capture", {
+          section: id,
+          level: level === "off" ? null : level,
+        });
       });
     } catch (e) {
       captureError = String(e);
@@ -351,7 +360,10 @@
   async function resetSectionLevels() {
     captureError = "";
     try {
-      capture = await invoke<CaptureConfig>("reset_section_capture");
+      await captureMutations(async () => {
+        captureError = "";
+        capture = await invoke<CaptureConfig>("reset_section_capture");
+      });
     } catch (e) {
       captureError = String(e);
     }
@@ -484,11 +496,19 @@
       );
     }
     const [back, net, vox, store, front] = sections;
+    const history = captureHistory(sections.flat());
     return copyBundle(
       // What was actually masked, not what the toggle was set to. Safe capture masks the tables
       // whether or not the toggle is on, and a header claiming otherwise misleads the reader about
       // what they are holding.
-      { version, at: Date.now(), redacted: maskForExport, capture: stats.capture, session: stats.session_id },
+      {
+        version,
+        at: Date.now(),
+        redacted: maskForExport,
+        capture: currentCaptureMode,
+        captureHistory: history,
+        session: stats.session_id,
+      },
       [
         { title: "this device", lines: deviceLines(device, aliases, maskForExport) },
         { title: "reachability", lines: routeLines(servers, routes, aliases, maskForExport, hasPublicIpv6Observation, routeUnavailable) },
@@ -523,26 +543,14 @@
 
   async function prepareIssue() {
     saved = "";
+    issueFallback = "";
     try {
-      // Public issue text comes from a native allowlist over canonical event kinds. It omits the
-      // local report's tables, names, addresses, arbitrary prose and bridged tracing.
-      const report = await invoke<string>("build_public_diagnostics_report");
-      const issue = buildFeedbackIssue(
-        "bug",
-        "Diagnostic report",
-        report,
-        version,
-        // Unlike the ordinary feedback form, this path claims to contain only allowlisted
-        // diagnostics. A browser-provided user-agent is arbitrary prose, so keep the envelope
-        // fixed as well as the native report body.
-        "Mewtual desktop",
-      );
-      if (!isAllowedIssueUrl(issue.url)) throw new Error("issue destination failed its local check");
-      if (issue.truncated) await oncopy(issue.report);
-      await invoke("open_issue_url", { url: issue.url });
-      saved = issue.truncated
-        ? "issue opened · full report copied for review"
-        : "issue opened for review";
+      // Native code atomically reads the allowlisted ring, constructs the fixed tracker URL and
+      // launches that exact value. The webview supplies no report, title or destination bytes.
+      const issue = await invoke<{ report: string; truncated: boolean }>("open_public_diagnostics_issue");
+      const finished = await finishPublicDiagnosticsIssue(issue, oncopy);
+      saved = finished.status;
+      issueFallback = finished.manualReport;
     } catch (e) {
       saved = `could not prepare issue: ${String(e)}`;
     }
@@ -594,9 +602,9 @@
       <!-- What is being recorded, next to what has been recorded. A Safe view and an Enhanced one
            look alike and mean very different things, so the screen says which it is rather than
            leaving a reader to infer it from whether an address looks complete. -->
-      {#if stats.capture}
+      {#if currentCaptureMode}
         <span class="dbg-sev-chip" class:warn={capture?.reveals_addresses} class:quiet={!capture?.reveals_addresses}>
-          {stats.capture.toUpperCase()} CAPTURE
+          {currentCaptureMode.toUpperCase()} CURRENT CAPTURE
         </span>
       {/if}
     </div>
@@ -1194,9 +1202,9 @@
     <p class="muted small">
       {PRIVACY_NOTE}
       {#if saved}
-        <!-- Named rather than announced and gone: the point of saving is that the file is still
-             there tomorrow, so the name has to survive long enough to be written down. -->
-        <span class="dbg-saved">Saved as <span class="fp">{saved}</span>, in the log folder.</span>
+        <!-- Persistent rather than announced and gone: file names, partial issue success, and copy
+             failures must remain readable long enough for the user to act on them. -->
+        <span class="dbg-saved">{saved}</span>
       {/if}
     </p>
     <label class="dbg-redact">
@@ -1207,4 +1215,10 @@
       <span>REDACT ADDRESSES AND IDS</span>
     </label>
   </div>
+  {#if issueFallback}
+    <details class="dbg-issue-fallback" open>
+      <summary>Full report (select and copy manually)</summary>
+      <textarea readonly aria-label="Full diagnostics issue report">{issueFallback}</textarea>
+    </details>
+  {/if}
 </div>

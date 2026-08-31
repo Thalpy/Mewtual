@@ -221,6 +221,26 @@ impl DiagnosticHub {
         TraceId(self.next_id.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
+    /// Normalize an untrusted externally minted trace into this diagnostic session's namespace.
+    /// Repeated inputs still correlate, but their caller-chosen hex bytes never enter the ring.
+    pub fn external_trace(&self, trace: TraceId) -> TraceId {
+        TraceId(self.salt.external_trace(trace.0))
+    }
+
+    /// Produce a process/session-local proof that `trace` came from this native diagnostics hub.
+    ///
+    /// The desktop event bridge sends this beside a normalized trace. If the untrusted webview
+    /// returns both unchanged, its diagnostic stage can rejoin the native trace without hashing the
+    /// already-normalized value a second time. Callers must not persist or render the proof.
+    pub fn trace_proof(&self, trace: TraceId) -> [u8; 16] {
+        self.salt.trace_proof(trace.0)
+    }
+
+    /// Verify a proof produced by [`DiagnosticHub::trace_proof`] for this session and trace.
+    pub fn verifies_trace_proof(&self, trace: TraceId, proof: &[u8]) -> bool {
+        self.salt.verifies_trace_proof(trace.0, proof)
+    }
+
     /// A fresh span, for one stage inside a trace.
     pub fn new_span(&self) -> SpanId {
         SpanId(self.next_id.fetch_add(1, Ordering::Relaxed) + 1)
@@ -403,6 +423,16 @@ mod tests {
         );
         assert_eq!(hub.held(), 0);
         assert_eq!(hub.stats().errors, 0);
+    }
+
+    #[test]
+    fn a_native_trace_proof_cannot_be_reused_for_another_trace() {
+        let (hub, _) = hub(CaptureMode::Safe);
+        let trace = hub.external_trace(TraceId(0x2001_0db8_feed_0042));
+        let proof = hub.trace_proof(trace);
+
+        assert!(hub.verifies_trace_proof(trace, &proof));
+        assert!(!hub.verifies_trace_proof(TraceId(trace.0 + 1), &proof));
     }
 
     /// Off has to mean the app stops *paying*, not just stops keeping the results.

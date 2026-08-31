@@ -21,11 +21,13 @@
 //!   puts a raw one into an event, so no amount of carelessness at a call site produces one.
 //! * **Keys and credentials cannot be encoded.** [`SafeValue`] has no bytes variant and no
 //!   `From<String>`, so key material has no representation to travel in.
-//! * **Content is discouraged structurally, not prevented absolutely.** Rust has no taint
-//!   tracking, so somebody determined to write `SafeText::describe(&message.body)` can. What this
-//!   does is remove every accidental route: there is no `impl From<String>`, the constructor is
-//!   named for what it is for, and the value is bounded to a length no message body survives.
-//!   The export validator is the second line, and the CI rules the review calls for are the third.
+//! * **Safe capture irreversibly removes arbitrary prose.** Rust has no taint tracking, so both
+//!   [`SafeText`] and the legacy [`BridgedMessage`] can be constructed from sensitive runtime
+//!   strings. Under Safe capture their bytes are replaced before the event enters the hub. A
+//!   later switch to Enhanced or Full therefore cannot resurrect content captured while Safe.
+//! * **Enhanced and Full retain bounded prose.** Those modes are explicitly non-public capture
+//!   modes. Their output still needs review before sharing; the public renderer applies a stricter
+//!   allowlist and never includes prose values.
 //!
 //! # Why references are per-session
 //!
@@ -132,6 +134,60 @@ impl SessionSalt {
             .collect();
         SessionRef(format!("{}-{}", domain.prefix(), &hex[..REF_CHARS]))
     }
+
+    /// Reduce a caller-supplied trace id to a session-local correlation token.
+    ///
+    /// Trace ids from the webview are untrusted bytes despite their structural 16-hex spelling: a
+    /// compromised renderer can encode an address or identifier across them. Native traces are
+    /// already random counters and stay untouched; only an explicit external boundary calls this
+    /// function. Domain separation prevents a trace token from matching any rendered reference.
+    pub(crate) fn external_trace(&self, raw: u64) -> u64 {
+        let mut input = [0u8; 14];
+        input[..6].copy_from_slice(b"trace\0");
+        input[6..].copy_from_slice(&raw.to_be_bytes());
+        let digest = blake3::keyed_hash(&self.0, &input);
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&digest.as_bytes()[..8]);
+        let mut reduced = u64::from_be_bytes(bytes);
+        // Zero means "no trace", and retaining the input would violate the destructive boundary.
+        // Both cases are cryptographically negligible but are cheap to make impossible.
+        if reduced == 0 || reduced == raw {
+            reduced ^= 0xa5a5_a5a5_a5a5_a5a5;
+            if reduced == 0 {
+                reduced = 1;
+            }
+        }
+        reduced
+    }
+
+    /// Authenticate a native/session-normalized trace crossing an untrusted UI boundary.
+    ///
+    /// This is not an identity or authorization credential. It only lets the native diagnostics
+    /// ingress distinguish a trace it previously emitted from arbitrary hex chosen by a compromised
+    /// webview. The proof is session-local, domain-separated, and deliberately never persisted.
+    pub(crate) fn trace_proof(&self, trace: u64) -> [u8; 16] {
+        let mut input = [0u8; 20];
+        input[..12].copy_from_slice(b"trace-proof\0");
+        input[12..].copy_from_slice(&trace.to_be_bytes());
+        let digest = blake3::keyed_hash(&self.0, &input);
+        let mut proof = [0u8; 16];
+        proof.copy_from_slice(&digest.as_bytes()[..16]);
+        proof
+    }
+
+    /// Verify a trace proof without exposing the session salt or using an early-exit comparison.
+    pub(crate) fn verifies_trace_proof(&self, trace: u64, proof: &[u8]) -> bool {
+        if proof.len() != 16 {
+            return false;
+        }
+        self.trace_proof(trace)
+            .iter()
+            .zip(proof)
+            .fold(0u8, |difference, (expected, supplied)| {
+                difference | (expected ^ supplied)
+            })
+            == 0
+    }
 }
 
 /// One identifier, reduced to something safe to write down.
@@ -196,14 +252,19 @@ impl std::fmt::Display for SafeText {
 /// migration look tidier.
 pub const MAX_BRIDGED_MESSAGE: usize = 4000;
 
+/// Capture-time replacements preserve field shape without retaining arbitrary bytes. Keeping
+/// separate labels makes the migration count (`is_bridged`) meaningful while ensuring neither
+/// value can reappear after the capture mode changes.
+const SAFE_TEXT_OMITTED: &str = "[text omitted by safe capture]";
+const SAFE_BRIDGED_OMITTED: &str = "[legacy log text omitted by safe capture]";
+
 /// A message from a `tracing` event that has not been converted to a structured code yet.
-///
-/// **This is the known hole in the guarantee at the top of this module, and it is deliberate.**
 ///
 /// The app emits thousands of `tracing` events written long before this crate existed, whose
 /// messages are ordinary format strings. Refusing to carry them would mean either a flag-day
 /// rewrite of every call site or a debug log that sees less than the old one did, and both are
-/// worse than an explicit, greppable exception.
+/// worse than an explicit, greppable exception in Enhanced/Full capture. Safe capture replaces
+/// the bytes before storage, so this compatibility path does not weaken Safe's public boundary.
 ///
 /// It is a distinct type from [`SafeText`] precisely so it stays visible: every place a bridged
 /// message can reach is a place the export validator treats as suspect, and the count of them is a
@@ -450,8 +511,15 @@ impl SafeValue {
     }
 
     pub(crate) fn minimize_for_capture(&mut self, mode: CaptureMode) {
-        if let SafeValue::Address(address) = self {
-            address.minimize_for_capture(mode);
+        match self {
+            SafeValue::Address(address) => address.minimize_for_capture(mode),
+            SafeValue::Text(text) if !mode.allows_raw_addresses() => {
+                *text = SafeText::describe(SAFE_TEXT_OMITTED);
+            }
+            SafeValue::Bridged(message) if !mode.allows_raw_addresses() => {
+                *message = BridgedMessage::new(SAFE_BRIDGED_OMITTED);
+            }
+            _ => {}
         }
     }
 
@@ -553,6 +621,17 @@ mod tests {
         let rendered = format!("{:?}", SessionSalt::for_tests(0xAB));
         assert_eq!(rendered, "SessionSalt(..)");
         assert!(!rendered.contains("ab"));
+    }
+
+    #[test]
+    fn a_trace_proof_is_session_and_trace_bound() {
+        let session = SessionSalt::for_tests(7);
+        let proof = session.trace_proof(42);
+
+        assert!(session.verifies_trace_proof(42, &proof));
+        assert!(!session.verifies_trace_proof(43, &proof));
+        assert!(!SessionSalt::for_tests(8).verifies_trace_proof(42, &proof));
+        assert!(!session.verifies_trace_proof(42, &proof[..15]));
     }
 
     #[test]

@@ -42,9 +42,11 @@ copy mask validates IPv4/IPv6 forms and base58 multihashes rather than keying on
 prefixes; the export validator is a second pass. Neither is the primary publication defence:
 automatic issue text comes from a native allowlist that excludes arbitrary prose and addresses.
 
-**Known and deliberate hole:** `BridgedMessage` carries un-migrated `tracing` messages, which are
-arbitrary text. It is a distinct type precisely so it stays greppable, and counting them measures
-how far the migration to structured codes has got.
+`BridgedMessage` still carries un-migrated `tracing` messages as arbitrary text in Enhanced and Full,
+and its distinct type keeps that migration debt greppable. Under Safe capture, however, both bridged
+prose and unclassified frontend/runtime `SafeText` are replaced before ring insertion by fixed typed
+placeholders; runtime field names and targets are minimized as well. This is destructive admission,
+not a display mask, so a later switch to Enhanced or Full cannot reveal a string captured under Safe.
 
 ### 2.3 Capture mode and section level are separate axes
 
@@ -162,9 +164,12 @@ Three mechanisms carry it, one per boundary, each chosen so the crossing could n
   observing it, so `catcoms-app` states its operation as a field and the bridge makes it structure.
   One `hub.trace(id)` then recovers both sides.
 
-The emit carries `__trace` beside `__seq` in the payload, so the webview's stages join the same
-operation: `UI.EVENT.RECEIVED`, the unread decision, and `UI.REFRESH.APPLIED` when the rows are on
-screen. A send whose trace ends at `CHANNEL.SEND.PERSISTED` reached the disk; one that ends at
+The emit carries `__trace` and an opaque, session-local `__trace_proof` beside `__seq` in the
+payload, so the webview's stages join the same operation: `UI.EVENT.RECEIVED`, the unread decision,
+and `UI.REFRESH.APPLIED` when the rows are on screen. Caller-supplied trace hex is normalized under
+the diagnostic session salt before storage. A returned native trace is accepted without a second
+normalization only when its trace-bound proof verifies; the proof is never rendered or persisted.
+A send whose trace ends at `CHANNEL.SEND.PERSISTED` reached the disk; one that ends at
 `UI.REFRESH.APPLIED` reached the eye, and until this existed there was no way to tell those apart.
 
 **Not done: `UI.RENDER.SETTLED`.** The review lists it as a final stage. `UI.REFRESH.APPLIED` fires
@@ -227,8 +232,12 @@ future work should share that presentation contract where practical.
 * **P3-011 (medium), fixed.** A trace minted in the webview arrived as a *field* called `trace`, so
   it rendered as text, never reached `DiagnosticHub::trace`, and could not gather the webview's half
   of an operation with the native half. Correlation stopped precisely at the bridge it exists to
-  cross. Both doors the webview can knock on now share one `parse_trace`, and an all-zero trace is
-  treated as absent rather than as something to correlate on.
+  cross. Command traces and legacy upload-progress traces now share the destructive external-trace
+  normalization boundary. Native event traces return with a session-local proof so they are not
+  normalized twice; missing/invalid proofs fail closed by normalizing again. An all-zero trace is
+  absent. After Tauri has decoded the invoke JSON, the structured command retains at most 256
+  events and 32 ordered fields per event, counting omitted fields on the canonical event. This
+  bounds ring/command work, not the transport's earlier request allocation.
 * **P3-007 (high), fixed.** The console's poll ran the log read and one `get_member_routes` per
   server on the same one-second tick, with no guard, so five servers meant five round trips a second
   and a tick that overran simply had another started on top of it. The two polls are separate now,

@@ -9,6 +9,7 @@ import {
   belowFileFilter,
   captureModeIsRevealing,
   captureModeNote,
+  captureHistory,
   copyBundle,
   dropNote,
   retentionStatus,
@@ -41,7 +42,10 @@ import {
   taskConsequence,
   traceEvents,
   collectAllEvents,
+  createRepollingTask,
+  createSerialTaskQueue,
   deviceLines,
+  finishPublicDiagnosticsIssue,
   levelClass,
   mediaPathChip,
   memberRoutesVisible,
@@ -164,6 +168,92 @@ test("a line carries its time, level, section, trace and structured fields", () 
   assert.match(line, /WARN /);
   assert.match(line, /transport/);
   assert.match(line, /dial failed error=network unreachable/);
+  assert.match(line, /capture=safe#1/);
+});
+
+test("mixed capture history is explicit per row and in report metadata", () => {
+  const events = [
+    ev({ seq: 1, capture: "safe", capture_epoch: 4 }),
+    ev({ seq: 2, capture: "enhanced", capture_epoch: 5 }),
+    ev({ seq: 3, capture: "safe", capture_epoch: 4 }),
+  ];
+  assert.deepEqual(captureHistory(events), ["safe#4", "enhanced#5"]);
+  const report = copyBundle(
+    {
+      version: "1",
+      at: 0,
+      redacted: true,
+      capture: "enhanced",
+      captureHistory: captureHistory(events),
+    },
+    [{ title: "network", lines: events.map((event) => eventLine(event, makeAliases("fixed"), false)) }],
+  );
+  assert.match(report, /current capture: enhanced/);
+  assert.match(report, /capture history: safe#4, enhanced#5/);
+  assert.match(report, /capture=safe#4/);
+  assert.match(report, /capture=enhanced#5/);
+});
+
+test("an overlapping refresh waits for one guaranteed follow-up poll", async () => {
+  let finishFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => (finishFirst = resolve));
+  let runs = 0;
+  const poll = createRepollingTask(async () => {
+    runs += 1;
+    if (runs === 1) await firstGate;
+  });
+
+  const first = poll();
+  const refresh = poll();
+  assert.equal(runs, 1, "the overlap coalesces while the first native read is active");
+  finishFirst();
+  await refresh;
+  await first;
+  assert.equal(runs, 2, "the mode-change refresh receives one post-flight read");
+});
+
+test("capture mutations execute and apply in request order", async () => {
+  let finishFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => (finishFirst = resolve));
+  const queue = createSerialTaskQueue();
+  const started: string[] = [];
+  let applied = "safe";
+
+  const enhanced = queue(async () => {
+    started.push("enhanced");
+    await firstGate;
+    applied = "enhanced";
+  });
+  const off = queue(async () => {
+    started.push("off");
+    applied = "off";
+  });
+
+  await Promise.resolve();
+  assert.deepEqual(started, ["enhanced"], "the later native mutation cannot overtake the first");
+  finishFirst();
+  await Promise.all([enhanced, off]);
+  assert.deepEqual(started, ["enhanced", "off"]);
+  assert.equal(applied, "off", "the newest requested native mode drives the final UI state");
+});
+
+test("a failed public-issue clipboard write never produces a copied confirmation", async () => {
+  const failure = new Error("clipboard denied");
+  assert.deepEqual(
+    await finishPublicDiagnosticsIssue({ report: "exact native envelope", truncated: true }, async () => {
+      throw failure;
+    }),
+    {
+      status: "issue opened; full report could not be copied: Error: clipboard denied",
+      manualReport: "exact native envelope",
+    },
+  );
+  assert.deepEqual(
+    await finishPublicDiagnosticsIssue({ report: "already fits", truncated: false }, () => {
+      assert.fail("an untruncated issue needs no clipboard fallback");
+    }),
+    { status: "issue opened for review", manualReport: "" },
+  );
 });
 
 /**
@@ -199,13 +289,16 @@ test("an un-migrated line still reads as its prose, and is tellable apart from a
   // Most of the record is still bridged, so the console has to stay readable against it. The
   // substitution keys on the bridge's code, not on "has a message field", so a structured event
   // that happened to carry one would still show what it is.
-  assert.equal(eventText(bridged("dial failed", { fields: [f("peer", "abc")] })), "dial failed peer=abc");
+  assert.equal(
+    eventText(bridged("dial failed", { fields: [f("peer", "abc")] })),
+    "dial failed peer=abc capture=safe#1",
+  );
   const structured = ev({ code: "NET.DIAL.FAILED", fields: [f("message", "ignore me")] });
-  assert.match(eventText(structured), /^NET\.DIAL\.FAILED message=ignore me$/);
+  assert.match(eventText(structured), /^NET\.DIAL\.FAILED message=ignore me capture=safe#1$/);
 });
 
 test("a phase of observation is not printed, because every bare event would carry it", () => {
-  assert.equal(eventText(ev({ code: "NET.LISTEN" })), "NET.LISTEN");
+  assert.equal(eventText(ev({ code: "NET.LISTEN" })), "NET.LISTEN capture=safe#1");
 });
 
 /**
@@ -215,9 +308,9 @@ test("a phase of observation is not printed, because every bare event would carr
  */
 test("a line whose event lost fields to the cap says so", () => {
   const kept = ev({ code: "NET.X", fields: [f("a", "1")] });
-  assert.equal(eventText(kept), "NET.X a=1", "and says nothing when nothing was lost");
+  assert.equal(eventText(kept), "NET.X a=1 capture=safe#1", "and says nothing when nothing was lost");
   const trimmed = ev({ code: "NET.X", fields: [f("a", "1")], fields_dropped: 9 });
-  assert.equal(eventText(trimmed), "NET.X a=1 fields_dropped=9");
+  assert.equal(eventText(trimmed), "NET.X a=1 fields_dropped=9 capture=safe#1");
 });
 
 test("a frontend line drops the target, which would read catcoms_ui on every row", () => {
@@ -239,7 +332,7 @@ test("the rendered parts are the source of truth and the joined line agrees with
   assert.equal(p.level, "WARN");
   assert.equal(p.target, "catcoms_net");
   assert.equal(p.section, "transport");
-  assert.equal(p.text, "dial failed addr=/ip6/2601::1/udp/1");
+  assert.equal(p.text, "dial failed addr=/ip6/2601::1/udp/1 capture=safe#1");
   const line = eventLine(e, a, false);
   assert.ok(line.includes(p.ts) && line.includes(p.target) && line.includes(p.text), line);
   assert.equal(line.match(/WARN/g)?.length, 1, "the level appears exactly once");
@@ -249,11 +342,14 @@ test("parts redact their text and drop the target for a frontend event", () => {
   const a = makeAliases();
   const p = eventParts(bridged("dial 203.0.113.9", { section: "ui", view: "frontend", target: "catcoms_ui" }), a, true);
   assert.equal(p.target, "");
-  assert.match(p.text, /^dial \[ip [0-9a-f]{6}\]$/);
+  assert.match(p.text, /^dial \[ip [0-9a-f]{6}\] capture=safe#1$/);
 });
 
 test("fields alone still render when an event has nothing but its code", () => {
-  assert.equal(eventText(ev({ code: "NET.X", fields: [f("peer", "abc")] })), "NET.X peer=abc");
+  assert.equal(
+    eventText(ev({ code: "NET.X", fields: [f("peer", "abc")] })),
+    "NET.X peer=abc capture=safe#1",
+  );
 });
 
 test("redaction gives each distinct value a stable alias, so correlation survives", () => {
@@ -887,7 +983,7 @@ test("a copied bundle states its redaction mode and carries the privacy contract
   assert.match(text, /privacy\.legacy_prose: included/);
   // Safe and Enhanced reports look alike and mean very different things, so a report says which it
   // is rather than leaving the reader to infer it from whether an address looks complete.
-  assert.match(text, /capture: safe/);
+  assert.match(text, /current capture: safe/);
   assert.match(text, /session: eb887278/, "so an excerpt can be matched back to its report");
   assert.match(text, /== NETWORK ==/);
   // Describes what a report may contain rather than promising what it does not. The old sentence

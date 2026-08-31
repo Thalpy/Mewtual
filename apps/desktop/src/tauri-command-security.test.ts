@@ -187,3 +187,22 @@ test("every helper the session-gate audit trusts does the checking itself", () =
     "op.actor is trusted to gate commands but never reaches a helper that checks the session",
   );
 });
+
+test("instrumented actor handles can only be trace-bound through Operation", () => {
+  const bridge = readFileSync(bridgePath, "utf8");
+  const calls = [...bridge.matchAll(/\.with_trace\s*\(/g)];
+  assert.equal(
+    calls.length,
+    1,
+    "a direct with_trace call can pass the canonical H(raw) instead of the actor token and split correlation",
+  );
+  const method = bridge.indexOf("    fn bind_actor(&self, actor: ServerActor)");
+  assert.ok(method > 0, "Operation.bind_actor is the single trace-binding gateway");
+  const body = bridge.slice(method, bridge.indexOf("\n    }", method));
+  assert.match(body, /actor\.with_trace\(self\.actor_trace\.0\)/);
+  assert.match(
+    bridge,
+    /op\.bind_actor\(entry\.actor\.clone\(\)\)/,
+    "multi-server backup snapshots must bind each actor to the operation",
+  );
+});

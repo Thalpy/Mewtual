@@ -214,6 +214,7 @@ impl<S: tracing::Subscriber> Layer<S> for RingLayer {
         // structured code yet. The section is inferred from the emitting crate, which is coarse
         // but places each one somewhere a person would look for it; a converted call site states
         // its own section and overrides this entirely.
+        let diagnostics = hub();
         let mut recorded = DiagnosticEvent::new(
             Section::from_target(target),
             Level::from_tracing(metadata.level().as_str()),
@@ -228,7 +229,12 @@ impl<S: tracing::Subscriber> Layer<S> for RingLayer {
             // at the bridge, and "did the actor ever handle my send" stays unanswerable.
             if name == TRACE_FIELD {
                 if let Some(trace) = parse_trace(&value) {
-                    recorded = recorded.trace(trace);
+                    // `tracing` is an untyped facade: any runtime field can be named `trace`, so
+                    // parsing its hex does not make it a native diagnostic id. Library actors carry
+                    // the pre-normalization boundary token deliberately; arbitrary producers get
+                    // the same treatment. Both become a session-local id here and raw/covert bytes
+                    // never enter a Safe-captured event.
+                    recorded = recorded.trace(diagnostics.external_trace(trace));
                     // Not also kept as a field. It is structure now, and a duplicate would render
                     // on every line and be one more thing that could disagree with itself.
                     continue;
@@ -239,7 +245,7 @@ impl<S: tracing::Subscriber> Layer<S> for RingLayer {
             // have been a move is a cost the app pays for being observed.
             recorded = recorded.field(name, BridgedMessage::from_owned(value));
         }
-        catcoms_diagnostics::DiagnosticHub::record(&hub(), recorded);
+        catcoms_diagnostics::DiagnosticHub::record(&diagnostics, recorded);
     }
 }
 
@@ -628,6 +634,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_real_ring_bridge_cannot_retain_address_or_peer_text_under_safe_capture() {
+        const IPV6: &str = "2001:db8:feed::42";
+        const PEER: &str = "12D3KooWDoNotRetainThisPeerIdentifier";
+        const TRACE: &str = "20010db8feed0042";
+
+        let _held = capture_lock();
+        let hub = hub();
+        let restore = hub.config();
+        hub.set_mode(catcoms_diagnostics::CaptureMode::Safe);
+        hub.reset_section_levels();
+        let before = hub.stats().latest_seq;
+        let subscriber = tracing_subscriber::registry().with(ring_layer());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                target: "catcoms_net::2001:db8:feed::42",
+                route = %format!("/ip6/{IPV6}/tcp/22487/p2p/{PEER}"),
+                peer_id = PEER,
+                trace = TRACE,
+                "connect failed for {IPV6} via {PEER}"
+            );
+        });
+
+        let event = hub
+            .since(before, 8)
+            .into_iter()
+            .find(|event| event.code == BRIDGED_CODE)
+            .expect("the tracing event reached the actual RingLayer and hub");
+        let later_full =
+            catcoms_diagnostics::event_view(&event, catcoms_diagnostics::CaptureMode::Full);
+        let rendered = format!(
+            "{} {:?} {:?}",
+            later_full.target,
+            later_full.trace,
+            later_full
+                .fields
+                .iter()
+                .map(|field| (&field.name, &field.value))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(later_full.capture, "safe");
+        assert_eq!(later_full.target, "catcoms_net");
+        assert_ne!(
+            event.trace.as_hex(),
+            TRACE,
+            "raw tracing trace entered the Safe ring"
+        );
+        for canary in [IPV6, PEER, TRACE] {
+            assert!(
+                !rendered.contains(canary),
+                "Safe-captured RingLayer text reappeared in a later Full view: {rendered}"
+            );
+        }
+
+        hub.set_mode(restore.mode);
+        for section in catcoms_diagnostics::SECTIONS {
+            hub.set_section_level(section, restore.level(section));
+        }
+    }
+
     /// One query has to recover the whole operation, across the bridge.
     ///
     /// This is the property P3-004 is about. A command's stages are recorded natively as canonical
@@ -640,7 +706,8 @@ mod tests {
         use catcoms_diagnostics::{DiagnosticEvent, Level, Phase, Section, TraceId};
 
         let _held = capture_lock();
-        let trace = TraceId(0x7f2c_0000_0000_00a1);
+        let actor_trace = TraceId(0x7f2c_0000_0000_00a1);
+        let trace = hub().external_trace(actor_trace);
         // Scoped to this thread rather than installed globally. A `tracing` subscriber can be
         // installed once per process, and claiming it here would make whichever other test wanted
         // it fail depending on the order they happened to run in.
@@ -649,7 +716,7 @@ mod tests {
             // The bridge's side: what a library crate can say about its own work.
             tracing::debug!(
                 target: "catcoms_app",
-                trace = %trace.as_hex(),
+                trace = %actor_trace.as_hex(),
                 "ACTOR.COMMAND.RECEIVED"
             );
             // And an unrelated operation, so "gathers everything" cannot pass by gathering
@@ -740,6 +807,13 @@ mod tests {
     fn debug_mode_writes_a_timestamped_file_and_reports_it_healthy() {
         // Reads the hub, so it must not run while another test has capture turned off.
         let _held = capture_lock();
+        let hub = hub();
+        let restore = hub.config();
+        // This test verifies fidelity between the legacy file and ring sinks. Safe capture now
+        // intentionally destroys legacy prose, so use the explicit non-public mode whose contract
+        // is to retain that bounded text.
+        hub.set_mode(catcoms_diagnostics::CaptureMode::Enhanced);
+        hub.reset_section_levels();
         let dir = tempfile::tempdir().unwrap();
         let path;
         {
@@ -761,7 +835,7 @@ mod tests {
             // the file that gets pasted to somebody and the in-memory record the console reads.
             // They are separate on purpose (different filters, different privacy exposure), and
             // an event landing in one but not the other is the bug this asserts against.
-            let captured = hub().since(0, 100);
+            let captured = hub.since(0, 100);
             let mine = captured
                 .iter()
                 .map(|e| catcoms_diagnostics::event_view(e, catcoms_diagnostics::CaptureMode::Safe))
@@ -796,6 +870,10 @@ mod tests {
             contents.contains("hello from the debug log test"),
             "{contents}"
         );
+        hub.set_mode(restore.mode);
+        for section in catcoms_diagnostics::SECTIONS {
+            hub.set_section_level(section, restore.level(section));
+        }
     }
 
     /// A file that could not be opened must reach the caller as an error. The previous version

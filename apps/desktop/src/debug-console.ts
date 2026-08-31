@@ -460,7 +460,25 @@ export function eventText(e: LogEvent): string {
   // without this the shortening is the one thing the line does not mention: a reader would take
   // what is there for the whole of it. The native renderings say the same.
   if (e.fields_dropped > 0) bits.push(`fields_dropped=${e.fields_dropped}`);
+  // Capture attribution belongs on every row, not only in a present-time header. A ring can
+  // legitimately contain Safe and Enhanced events at once, and a later mode change cannot rewrite
+  // what an older event retained. Without this suffix identical-looking rows make a mixed history
+  // indistinguishable from a single-mode one in both the screen and copied text.
+  bits.push(`capture=${e.capture || "unknown"}#${e.capture_epoch}`);
   return bits.join(" ");
+}
+
+/** The distinct capture generations represented by an event set, oldest generation first. */
+export function captureHistory(events: readonly LogEvent[]): string[] {
+  const seen = new Map<string, { mode: string; epoch: number }>();
+  for (const event of events) {
+    const mode = event.capture || "unknown";
+    const key = `${event.capture_epoch}\u0000${mode}`;
+    if (!seen.has(key)) seen.set(key, { mode, epoch: event.capture_epoch });
+  }
+  return [...seen.values()]
+    .sort((left, right) => left.epoch - right.epoch || left.mode.localeCompare(right.mode))
+    .map(({ mode, epoch }) => `${mode}#${epoch}`);
 }
 
 /**
@@ -572,6 +590,82 @@ export function appendEvents(
   const fresh = incoming.filter((e) => e.seq > highest);
   const next = held.concat(fresh);
   return next.length > cap ? next.slice(next.length - cap) : next;
+}
+
+/**
+ * Coalesce overlapping polls while guaranteeing one follow-up pass.
+ *
+ * An interval tick may share a slow native read with a mode-change refresh. Returning early from
+ * the second call strands the view on the old generation; this helper instead marks one rerun and
+ * makes every waiter resolve only after that rerun has finished. More overlap still costs at most
+ * one additional pass per active pass.
+ */
+export function createRepollingTask(run: () => Promise<void>): () => Promise<void> {
+  let active: Promise<void> | null = null;
+  let requested = false;
+  return function poll(): Promise<void> {
+    if (active) {
+      requested = true;
+      return active;
+    }
+    active = (async () => {
+      try {
+        do {
+          requested = false;
+          await run();
+        } while (requested);
+      } finally {
+        active = null;
+      }
+    })();
+    return active;
+  };
+}
+
+/**
+ * Run state-changing native commands strictly in the order the user requested them.
+ *
+ * Tauri commands may execute and return independently. Capture controls cannot tolerate that:
+ * applying an older response after a newer one can make the UI's export mask disagree with the
+ * native capture mode. A rejected command does not poison the tail; the next requested change still
+ * gets its turn.
+ */
+export function createSerialTaskQueue(): <T>(task: () => Promise<T>) => Promise<T> {
+  let tail: Promise<void> = Promise.resolve();
+  return function enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const result = tail.then(task);
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+}
+
+export type PublicDiagnosticsIssue = { report: string; truncated: boolean };
+export type PublicDiagnosticsIssueFinish = { status: string; manualReport: string };
+
+/**
+ * Finish the public-issue UX without claiming a failed clipboard write succeeded.
+ *
+ * Native code has already opened the exact fixed tracker URL when this runs. A shortened URL needs
+ * the full native-owned envelope copied separately; propagating a rejected copy lets the console
+ * report that failure instead of displaying the previous false "copied" confirmation.
+ */
+export async function finishPublicDiagnosticsIssue(
+  issue: PublicDiagnosticsIssue,
+  copy: (text: string) => Promise<void> | void,
+): Promise<PublicDiagnosticsIssueFinish> {
+  if (!issue.truncated) return { status: "issue opened for review", manualReport: "" };
+  try {
+    await copy(issue.report);
+    return { status: "issue opened · full report copied for review", manualReport: "" };
+  } catch (error) {
+    return {
+      status: `issue opened; full report could not be copied: ${String(error)}`,
+      manualReport: issue.report,
+    };
+  }
 }
 
 /** The highest sequence held, which is what the next poll asks from. */
@@ -1483,9 +1577,9 @@ export type CaptureConfig = {
 export function captureModeNote(mode: string): string {
   switch (mode) {
     case "off":
-      return "Nothing is recorded and nothing accumulates. The console will stay empty, and there will be no evidence if something goes wrong while it is off.";
+      return "No new events are recorded while capture is off. Existing bounded history remains until it ages out or is cleared, so turning capture off is not retroactive deletion.";
     case "safe":
-      return "Stable codes, counts and durations. Identifiers become per-session references and address bytes are discarded at capture time. Section levels stay as you set them; public issues use a separate native allowlist report.";
+      return "Stable codes, counts and durations. Identifiers become per-session references; address bytes and arbitrary runtime prose are discarded at capture time. Section levels stay as you set them; public issues use a separate native allowlist report.";
     case "enhanced":
       return "Safe, plus literal addresses in future events. Section levels stay as you set them; turn up Transport separately when a connection problem needs it. Read local reports before sharing them.";
     case "full":
@@ -1694,7 +1788,16 @@ export async function collectAllEvents(
  * taken from, which is otherwise guesswork once two of them exist.
  */
 export function copyBundle(
-  meta: { version: string; at: number; redacted: boolean; capture?: string; session?: string },
+  meta: {
+    version: string;
+    at: number;
+    redacted: boolean;
+    /** Present-time capture setting, not an assertion about every retained event. */
+    capture?: string;
+    /** Capture mode/epoch pairs actually represented by the event sections. */
+    captureHistory?: readonly string[];
+    session?: string;
+  },
   sections: readonly { title: string; lines: string[] }[],
 ): string {
   const head = [
@@ -1702,7 +1805,8 @@ export function copyBundle(
     `version: ${meta.version}`,
     `captured: ${new Date(meta.at).toISOString()}`,
     ...(meta.session ? [`session: ${meta.session}`] : []),
-    ...(meta.capture ? [`capture: ${meta.capture}`] : []),
+    ...(meta.capture ? [`current capture: ${meta.capture}`] : []),
+    ...(meta.captureHistory?.length ? [`capture history: ${meta.captureHistory.join(", ")}`] : []),
     `display masking: ${meta.redacted ? "on" : "off"}`,
     `privacy.addresses: ${meta.redacted ? "aliased where recognized" : "may be literal"}`,
     `privacy.stable_identifiers: ${meta.redacted ? "aliased where recognized" : "may be literal"}`,

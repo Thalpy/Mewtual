@@ -43,7 +43,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use catcoms_rt::{Clock, CryptoRngCore};
+use catcoms_rt::{Clock, CryptoRngCore, SystemClock};
 use multiaddr::{Multiaddr, Protocol};
 
 mod cache;
@@ -453,6 +453,11 @@ struct EndpointDialState {
 pub struct EndpointDialScheduler {
     config: EndpointDialConfig,
     state: Arc<Mutex<EndpointDialState>>,
+    /// The one monotonic timeline governing reservations and commits. Keeping the clock on the
+    /// scheduler prevents callers from minting a permit under one timeline and committing it
+    /// under another, and lets a queued permit enforce its deadline without another reservation
+    /// having to roll the window first.
+    clock: Arc<dyn Clock>,
 }
 
 /// A single-use reservation for one exact canonical endpoint.
@@ -470,6 +475,7 @@ pub struct EndpointDialPermit {
     endpoint_key: [u8; 32],
     prefix_key: [u8; 32],
     generation: u64,
+    window_start_ms: u64,
     started: bool,
 }
 
@@ -492,7 +498,10 @@ impl EndpointDialPermit {
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if state.generation != self.generation {
+        let now = self.scheduler.clock.monotonic_ms();
+        if state.generation != self.generation
+            || now.saturating_sub(self.window_start_ms) >= self.scheduler.config.window_ms.max(1)
+        {
             return None;
         }
         drop(state);
@@ -538,9 +547,18 @@ impl EndpointDialScheduler {
     /// Construct an isolated scheduler. Production creates one and clones it into every server;
     /// tests can construct isolated handles without process-global cross-test interference.
     pub fn new(config: EndpointDialConfig) -> Self {
+        Self::new_with_clock(config, Arc::new(SystemClock))
+    }
+
+    /// Construct an isolated scheduler on an injected monotonic timeline.
+    ///
+    /// The clock is retained for the scheduler's whole lifetime because permit expiry is checked
+    /// at the actor commit boundary, potentially long after the caller that reserved it returned.
+    pub fn new_with_clock(config: EndpointDialConfig, clock: Arc<dyn Clock>) -> Self {
         Self {
             config,
             state: Arc::new(Mutex::new(EndpointDialState::default())),
+            clock,
         }
     }
 
@@ -549,13 +567,8 @@ impl EndpointDialScheduler {
     /// The canonical peer principal is embedded by the parser in every endpoint. Accepting it as
     /// a separate byte slice previously allowed cache, rendezvous, and pre-join callers to charge
     /// the same transport under three unrelated identity representations.
-    pub fn reserve(
-        &self,
-        server: &[u8],
-        endpoints: &[DialEndpoint],
-        clock: &dyn Clock,
-    ) -> Vec<String> {
-        self.reserve_permits(server, endpoints, clock)
+    pub fn reserve(&self, server: &[u8], endpoints: &[DialEndpoint]) -> Vec<String> {
+        self.reserve_permits(server, endpoints)
             .into_iter()
             .filter_map(EndpointDialPermit::start)
             .collect()
@@ -567,13 +580,12 @@ impl EndpointDialScheduler {
         &self,
         server: &[u8],
         endpoints: &[DialEndpoint],
-        clock: &dyn Clock,
     ) -> Vec<EndpointDialPermit> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let now = clock.monotonic_ms();
+        let now = self.clock.monotonic_ms();
         let expired = state
             .window_start_ms
             // A zero duration is a configuration mistake, not permission to refill on every
@@ -633,6 +645,9 @@ impl EndpointDialScheduler {
                 endpoint_key: endpoint.attempt_key,
                 prefix_key: endpoint.prefix_key,
                 generation: state.generation,
+                window_start_ms: state
+                    .window_start_ms
+                    .expect("an active generation always has a window start"),
                 started: false,
             });
         }
@@ -1439,16 +1454,19 @@ mod tests {
 
     #[test]
     fn cloned_schedulers_share_process_and_socket_budgets() {
-        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
-            window_ms: 1_000,
-            process_limit: 3,
-            server_limit: 3,
-            peer_limit: 3,
-            endpoint_limit: 1,
-            prefix_limit: 3,
-        });
-        let other_server = scheduler.clone();
         let clock = ManualClock::new(0);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            EndpointDialConfig {
+                window_ms: 1_000,
+                process_limit: 3,
+                server_limit: 3,
+                peer_limit: 3,
+                endpoint_limit: 1,
+                prefix_limit: 3,
+            },
+            Arc::new(clock.clone()),
+        );
+        let other_server = scheduler.clone();
         let route_a = format!("/ip4/203.0.113.9/tcp/4001/p2p/{PEER_A}");
         let route_b = format!("/ip6/::ffff:203.0.113.9/tcp/4001/p2p/{PEER_B}");
         let same_socket_a = parse_peer_dial_route(&route_a, &phase0(PEER_A))
@@ -1471,17 +1489,17 @@ mod tests {
         );
 
         assert_eq!(
-            scheduler.reserve(b"server-a", &[same_socket_a], &clock),
+            scheduler.reserve(b"server-a", &[same_socket_a]),
             vec![route_a]
         );
         assert!(
             other_server
-                .reserve(b"server-b", &[same_socket_b], &clock)
+                .reserve(b"server-b", &[same_socket_b])
                 .is_empty(),
             "peer/server rotation and IPv4-mapped spelling must not bypass the socket cap"
         );
         assert_eq!(
-            other_server.reserve(b"server-b", &[socket_c, socket_d], &clock),
+            other_server.reserve(b"server-b", &[socket_c, socket_d]),
             vec!["c", "d"]
         );
         assert_eq!(scheduler.state.lock().unwrap().process_spent, 3);
@@ -1489,30 +1507,33 @@ mod tests {
 
     #[test]
     fn unused_endpoint_permits_refund_every_scope_exactly_once() {
-        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
-            window_ms: 1_000,
-            process_limit: 1,
-            server_limit: 1,
-            peer_limit: 1,
-            endpoint_limit: 1,
-            prefix_limit: 1,
-        });
         let clock = ManualClock::new(0);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            EndpointDialConfig {
+                window_ms: 1_000,
+                process_limit: 1,
+                server_limit: 1,
+                peer_limit: 1,
+                endpoint_limit: 1,
+                prefix_limit: 1,
+            },
+            Arc::new(clock),
+        );
         let endpoint = DialEndpoint::from_key_material(
             "route",
             b"socket",
             b"prefix",
             CanonicalDialPeer(phase0(PEER_A)),
         );
-        let permits = scheduler.reserve_permits(b"server", std::slice::from_ref(&endpoint), &clock);
+        let permits = scheduler.reserve_permits(b"server", std::slice::from_ref(&endpoint));
         assert_eq!(permits.len(), 1);
         assert_eq!(permits[0].address(), "route");
         assert!(scheduler
-            .reserve_permits(b"server", std::slice::from_ref(&endpoint), &clock)
+            .reserve_permits(b"server", std::slice::from_ref(&endpoint))
             .is_empty());
 
         drop(permits);
-        let replacement = scheduler.reserve_permits(b"server", &[endpoint], &clock);
+        let replacement = scheduler.reserve_permits(b"server", &[endpoint]);
         assert_eq!(replacement.len(), 1, "drop returned every charged scope");
         assert_eq!(
             replacement.into_iter().next().unwrap().start(),
@@ -1523,25 +1544,28 @@ mod tests {
 
     #[test]
     fn an_old_permit_cannot_refund_or_start_in_the_replacement_window() {
-        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
-            window_ms: 100,
-            process_limit: 1,
-            server_limit: 1,
-            peer_limit: 1,
-            endpoint_limit: 1,
-            prefix_limit: 1,
-        });
         let clock = ManualClock::new(0);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            EndpointDialConfig {
+                window_ms: 100,
+                process_limit: 1,
+                server_limit: 1,
+                peer_limit: 1,
+                endpoint_limit: 1,
+                prefix_limit: 1,
+            },
+            Arc::new(clock.clone()),
+        );
         let endpoint = |address: &str, key: &[u8]| {
             DialEndpoint::from_key_material(address, key, key, CanonicalDialPeer(phase0(PEER_A)))
         };
         let old = scheduler
-            .reserve_permits(b"server", &[endpoint("old", b"old")], &clock)
+            .reserve_permits(b"server", &[endpoint("old", b"old")])
             .pop()
             .unwrap();
         clock.advance_ms(100);
         let current = scheduler
-            .reserve_permits(b"server", &[endpoint("current", b"current")], &clock)
+            .reserve_permits(b"server", &[endpoint("current", b"current")])
             .pop()
             .unwrap();
 
@@ -1549,7 +1573,7 @@ mod tests {
         assert_eq!(scheduler.state.lock().unwrap().process_spent, 1);
         assert!(
             scheduler
-                .reserve_permits(b"server", &[endpoint("extra", b"extra")], &clock)
+                .reserve_permits(b"server", &[endpoint("extra", b"extra")])
                 .is_empty(),
             "dropping the old generation must not mint capacity in the current one"
         );
@@ -1557,16 +1581,52 @@ mod tests {
     }
 
     #[test]
+    fn queued_permit_cannot_commit_after_window_deadline_without_an_intervening_reservation() {
+        let clock = ManualClock::new(7_000);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            EndpointDialConfig {
+                window_ms: 100,
+                process_limit: 1,
+                server_limit: 1,
+                peer_limit: 1,
+                endpoint_limit: 1,
+                prefix_limit: 1,
+            },
+            Arc::new(clock.clone()),
+        );
+        let endpoint = DialEndpoint::from_key_material(
+            "queued",
+            b"queued-socket",
+            b"queued-prefix",
+            CanonicalDialPeer(phase0(PEER_A)),
+        );
+        let permit = scheduler
+            .reserve_permits(b"server", &[endpoint])
+            .pop()
+            .expect("initial window grants one permit");
+
+        // No scheduler call happens between the deadline and commit. The permit itself must read
+        // the scheduler's retained monotonic clock; relying on lazy rollover would start this old
+        // attempt and then replenish the new window on the next reservation.
+        clock.advance_ms(100);
+        assert_eq!(permit.start(), None);
+        assert_eq!(scheduler.state.lock().unwrap().process_spent, 0);
+    }
+
+    #[test]
     fn scheduler_windows_use_monotonic_time_and_reset_all_scopes() {
-        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
-            window_ms: 100,
-            process_limit: 1,
-            server_limit: 1,
-            peer_limit: 1,
-            endpoint_limit: 1,
-            prefix_limit: 1,
-        });
         let clock = ManualClock::new(10_000);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            EndpointDialConfig {
+                window_ms: 100,
+                process_limit: 1,
+                server_limit: 1,
+                peer_limit: 1,
+                endpoint_limit: 1,
+                prefix_limit: 1,
+            },
+            Arc::new(clock.clone()),
+        );
         let endpoint = DialEndpoint::from_key_material(
             "route",
             b"socket",
@@ -1574,34 +1634,34 @@ mod tests {
             CanonicalDialPeer(phase0(PEER_A)),
         );
         assert_eq!(
-            scheduler.reserve(b"server", std::slice::from_ref(&endpoint), &clock),
+            scheduler.reserve(b"server", std::slice::from_ref(&endpoint)),
             vec!["route"]
         );
         clock.set_wall_ms(1);
         assert!(
             scheduler
-                .reserve(b"server", std::slice::from_ref(&endpoint), &clock)
+                .reserve(b"server", std::slice::from_ref(&endpoint))
                 .is_empty(),
             "wall-clock correction must not refill the window"
         );
         clock.advance_ms(100);
-        assert_eq!(
-            scheduler.reserve(b"server", &[endpoint], &clock),
-            vec!["route"]
-        );
+        assert_eq!(scheduler.reserve(b"server", &[endpoint]), vec!["route"]);
     }
 
     #[test]
     fn zero_length_scheduler_window_cannot_refill_at_one_instant() {
-        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
-            window_ms: 0,
-            process_limit: 1,
-            server_limit: 1,
-            peer_limit: 1,
-            endpoint_limit: 1,
-            prefix_limit: 1,
-        });
         let clock = ManualClock::new(50);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            EndpointDialConfig {
+                window_ms: 0,
+                process_limit: 1,
+                server_limit: 1,
+                peer_limit: 1,
+                endpoint_limit: 1,
+                prefix_limit: 1,
+            },
+            Arc::new(clock.clone()),
+        );
         let endpoint = DialEndpoint::from_key_material(
             "route",
             b"socket",
@@ -1609,30 +1669,30 @@ mod tests {
             CanonicalDialPeer(phase0(PEER_A)),
         );
         assert_eq!(
-            scheduler.reserve(b"server", std::slice::from_ref(&endpoint), &clock,),
+            scheduler.reserve(b"server", std::slice::from_ref(&endpoint)),
             vec!["route"]
         );
         assert!(scheduler
-            .reserve(b"server", std::slice::from_ref(&endpoint), &clock)
+            .reserve(b"server", std::slice::from_ref(&endpoint))
             .is_empty());
         clock.advance_ms(1);
-        assert_eq!(
-            scheduler.reserve(b"server", &[endpoint], &clock),
-            vec!["route"]
-        );
+        assert_eq!(scheduler.reserve(b"server", &[endpoint]), vec!["route"]);
     }
 
     #[test]
     fn prefix_accounting_is_independent_of_transport_and_peer_identity() {
-        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
-            window_ms: 1_000,
-            process_limit: 4,
-            server_limit: 4,
-            peer_limit: 4,
-            endpoint_limit: 4,
-            prefix_limit: 1,
-        });
         let clock = ManualClock::new(0);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            EndpointDialConfig {
+                window_ms: 1_000,
+                process_limit: 4,
+                server_limit: 4,
+                peer_limit: 4,
+                endpoint_limit: 4,
+                prefix_limit: 1,
+            },
+            Arc::new(clock),
+        );
         let tcp_route = format!("/ip4/203.0.113.9/tcp/4001/p2p/{PEER_A}");
         let quic_route = format!("/ip4/203.0.113.10/udp/4002/quic-v1/p2p/{PEER_B}");
         let tcp = parse_peer_dial_route(&tcp_route, &phase0(PEER_A))
@@ -1642,12 +1702,9 @@ mod tests {
             .unwrap()
             .endpoint;
 
-        assert_eq!(
-            scheduler.reserve(b"server-a", &[tcp], &clock),
-            vec![tcp_route]
-        );
+        assert_eq!(scheduler.reserve(b"server-a", &[tcp]), vec![tcp_route]);
         assert!(
-            scheduler.reserve(b"server-b", &[quic], &clock).is_empty(),
+            scheduler.reserve(b"server-b", &[quic]).is_empty(),
             "TCP/QUIC and peer/server rotation must still share one IPv4 /24 bucket"
         );
     }
@@ -1655,15 +1712,18 @@ mod tests {
     #[test]
     fn shared_relay_circuits_do_not_alias_distinct_terminal_peers() {
         const PEER_C: &str = "12D3KooWPiZxJceHKQBZcd79cYdqybt5ijzRGHveTKa3CaEESxVb";
-        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
-            window_ms: 1_000,
-            process_limit: 8,
-            server_limit: 8,
-            peer_limit: 4,
-            endpoint_limit: 2,
-            prefix_limit: 8,
-        });
         let clock = ManualClock::new(0);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            EndpointDialConfig {
+                window_ms: 1_000,
+                process_limit: 8,
+                server_limit: 8,
+                peer_limit: 4,
+                endpoint_limit: 2,
+                prefix_limit: 8,
+            },
+            Arc::new(clock),
+        );
         let routes = [PEER_A, PEER_B, PEER_C].map(|target| {
             let address =
                 format!("/ip4/203.0.113.44/tcp/4001/p2p/{PEER_A}/p2p-circuit/p2p/{target}");
@@ -1677,7 +1737,7 @@ mod tests {
             .collect();
 
         assert_eq!(
-            scheduler.reserve(b"one-server", &endpoints, &clock),
+            scheduler.reserve(b"one-server", &endpoints),
             routes
                 .iter()
                 .map(|(address, _)| address.clone())
@@ -1685,13 +1745,13 @@ mod tests {
             "a shared relay socket must not collapse unrelated terminal circuits into one bucket"
         );
         assert_eq!(
-            scheduler.reserve(b"one-server", std::slice::from_ref(&endpoints[0]), &clock),
+            scheduler.reserve(b"one-server", std::slice::from_ref(&endpoints[0])),
             vec![routes[0].0.clone()],
             "the per-circuit limit permits its configured second attempt"
         );
         assert!(
             scheduler
-                .reserve(b"one-server", std::slice::from_ref(&endpoints[0]), &clock)
+                .reserve(b"one-server", std::slice::from_ref(&endpoints[0]))
                 .is_empty(),
             "the same relay circuit still obeys its exact-attempt cap"
         );

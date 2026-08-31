@@ -109,13 +109,21 @@ is broken. The load-bearing fixes:
   withdrawn public IPs forever because an ISP can reassign them; a newer zero-route descriptor
   also removes the prior sealed cache row, so restart cannot resurrect it. Route signatures and matching
   peer ids still do not prove ownership of an IP/port before the bounded first packet is sent.
-  Scheduler counters are transient and reset with the process. A generation-bound, non-cloneable
-  permit moves into the network actor with each discovery dial command; actor-side duplicate or
-  already-connected suppression drops/refunds it, while the actor commits it immediately before
-  the endpoint enters the pending/socket-start path. Caller cancellation after enqueue therefore
-  cannot refund work the actor will still perform, and an old-window command cannot decrement a
-  replacement window. A failure after commit is conservatively spent even if libp2p rejects before
-  a socket completes. A relay circuit
+  Scheduler counters are transient and reset with the process. The scheduler owns the one injected
+  monotonic clock used for both reservation and commit. A generation-bound, non-cloneable permit
+  moves into the network actor with each discovery dial command; commit rechecks the window deadline
+  under the scheduler lock, so queued old-window work cannot start merely because no later
+  reservation happened to roll the generation. Actor-side duplicate, already-connected, or
+  already-dialling suppression drops/refunds the permit before commit. The peer-wide check covers
+  member dials later reclassified as infrastructure; constructor TCP/QUIC routes for one peer are
+  grouped into one known-peer address race and enter the pending ledger by exact libp2p
+  `ConnectionId`. Constructor peers are protected from remote eviction but are not thereby
+  classified as infrastructure, so an inviter reached over a bootstrap/relay route may still race a
+  newly learned direct member address. Pending infrastructure attempts are released only by the
+  matching connection/error id; an unrelated inbound connection cannot clear them. The actor commits only immediately before the endpoint enters the
+  pending/socket-start path. Caller cancellation after enqueue therefore cannot refund work the actor
+  will still perform, and an old-window command cannot decrement a replacement window. A failure
+  after commit is conservatively spent even if libp2p rejects before a socket completes. A relay circuit
   has its own attempt key so unrelated targets at one relay do not starve each other, but the shared
   outer relay socket is not separately leased at the exact-socket scope; it is bounded only by the
   relay-host prefix and process caps. Libp2p's pending-outgoing cap is still per swarm, so this slice

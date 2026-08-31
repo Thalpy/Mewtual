@@ -47,8 +47,8 @@ use catcoms_mls::{
 use catcoms_replication::{AppliedOp, EncryptedDoc, SealedOp};
 use catcoms_rt::{
     Clock, ConnectionFamily, ConnectionPath, ConnectionTransport, CryptoRngCore, DiscoveredPeer,
-    MeshTransport, PeerId, ProtocolId, RendezvousRegistration, Topic, TransportEvent,
-    MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT, MAX_PEER_DIAL_BATCH,
+    MeshTransport, PeerId, ProtocolId, RendezvousRegistration, Topic, TransportError,
+    TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT, MAX_PEER_DIAL_BATCH,
 };
 use catcoms_storage::{
     open_file as open_file_fn, seal_file as seal_file_fn, BlobStore, Cid, FileRef, MemoryBlobStore,
@@ -3735,6 +3735,29 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     join_attempts: VecDeque<JoinAttempt>,
 }
 
+/// Accounting derived from actor-acknowledged dial results.
+///
+/// `FailedAfterCommit` intentionally increments neither field: it is not a successful socket
+/// submission, but both scheduler and local discovery spends must remain charged. A transport
+/// error has no actor acknowledgement and is treated as pre-commit/refundable; production keeps
+/// the permit inside the actor command, so an unprocessed command drops and refunds it there too.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DialOutcomeTally {
+    submitted: usize,
+    refundable: usize,
+}
+
+impl DialOutcomeTally {
+    fn observe(&mut self, outcome: Result<catcoms_rt::DialSubmission, TransportError>) {
+        match outcome {
+            Ok(catcoms_rt::DialSubmission::Submitted) => self.submitted += 1,
+            Ok(catcoms_rt::DialSubmission::Suppressed) => self.refundable += 1,
+            Ok(catcoms_rt::DialSubmission::FailedAfterCommit) => {}
+            Err(_) => self.refundable += 1,
+        }
+    }
+}
+
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Build a synchronizer over `transport` for this member's `group`/`device`.
     /// `clock` is used to check invite expiry when serving join requests.
@@ -3755,12 +3778,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // replaces it with the transferred one via `adopt_routing_state`.
         let mut file_wrap_key = Zeroizing::new([0u8; 32]);
         rng.fill_bytes(file_wrap_key.as_mut());
+        let clock: Arc<dyn Clock + Send> = Arc::from(clock);
         let mut this = Self {
             transport,
             group,
             device,
             rng,
-            clock: Arc::from(clock),
+            clock: clock.clone(),
             file_wrap_key,
             ledger: InviteLedger::new(),
             docs: HashMap::new(),
@@ -3827,7 +3851,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             rendezvous_nodes: Vec::new(),
             rendezvous_renewals: BTreeMap::new(),
             discovery: DiscoveryPolicy::with_config(PolicyConfig::default()),
-            endpoint_dials: EndpointDialScheduler::default(),
+            endpoint_dials: EndpointDialScheduler::new_with_clock(
+                catcoms_discovery::EndpointDialConfig::default(),
+                clock,
+            ),
             dial_retries: HashMap::new(),
             local_reconnect_routes: Vec::new(),
             eclipse: EclipseDetector::new(EclipseConfig::default()),
@@ -5846,9 +5873,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .iter()
             .filter_map(|address| member_recovery_endpoint(address, code.peer))
             .collect();
-        let permits =
-            self.endpoint_dials
-                .reserve_permits(&self.group.group_id(), &endpoints, &*self.clock);
+        let permits = self
+            .endpoint_dials
+            .reserve_permits(&self.group.group_id(), &endpoints);
         if permits.is_empty() {
             return Err(MemberRecoveryError::Deferred);
         }
@@ -5978,11 +6005,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .iter()
                 .map(|(_, endpoint)| endpoint.clone())
                 .collect();
-            let permits = self.endpoint_dials.reserve_permits(
-                &self.group.group_id(),
-                &endpoints,
-                &*self.clock,
-            );
+            let permits = self
+                .endpoint_dials
+                .reserve_permits(&self.group.group_id(), &endpoints);
             if permits.is_empty() {
                 continue;
             }
@@ -6026,7 +6051,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 let granted = self.endpoint_dials.reserve_permits(
                     &self.group.group_id(),
                     std::slice::from_ref(&route.endpoint),
-                    &*self.clock,
                 );
                 for permit in granted {
                     let _ = self.transport.dial_permit(Box::new(permit)).await;
@@ -6328,29 +6352,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .iter()
                 .filter_map(|addr| validated_peer_endpoint(addr, &expected))
                 .collect();
-            let granted = self.endpoint_dials.reserve_permits(
-                &self.group.group_id(),
-                &endpoints,
-                &*self.clock,
-            );
+            let granted = self
+                .endpoint_dials
+                .reserve_permits(&self.group.group_id(), &endpoints);
             self.discovery
                 .refund_endpoint_budget(pd.addresses.len().saturating_sub(granted.len()));
             if granted.is_empty() {
                 continue;
             }
-            let granted_count = granted.len();
-            let mut submitted = 0usize;
+            let mut tally = DialOutcomeTally::default();
             for permit in granted {
-                if matches!(
-                    self.transport.dial_permit(Box::new(permit)).await,
-                    Ok(catcoms_rt::DialSubmission::Submitted)
-                ) {
-                    submitted += 1;
-                }
+                tally.observe(self.transport.dial_permit(Box::new(permit)).await);
             }
-            self.discovery
-                .refund_endpoint_budget(granted_count.saturating_sub(submitted));
-            if submitted > 0 {
+            self.discovery.refund_endpoint_budget(tally.refundable);
+            if tally.submitted > 0 {
                 self.note_dial_attempt(pd.peer.clone(), vec![(freshness.clone(), seq)]);
             }
         }
@@ -8026,9 +8041,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .iter()
             .map(|(_, endpoint)| endpoint.clone())
             .collect();
-        let permits =
-            self.endpoint_dials
-                .reserve_permits(&self.group.group_id(), &endpoints, &*self.clock);
+        let permits = self
+            .endpoint_dials
+            .reserve_permits(&self.group.group_id(), &endpoints);
         self.discovery
             .refund_endpoint_budget(chosen.len().saturating_sub(permits.len()));
         if permits.is_empty() {
@@ -8052,17 +8067,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 return false;
             }
         };
-        let mut submitted = false;
-        let mut rejected = 0usize;
+        let mut tally = DialOutcomeTally::default();
         for outcome in outcomes {
-            if matches!(outcome, catcoms_rt::DialSubmission::Submitted) {
-                submitted = true;
-            } else {
-                rejected += 1;
-            }
+            tally.observe(Ok(outcome));
         }
-        self.discovery.refund_endpoint_budget(rejected);
-        if submitted {
+        self.discovery.refund_endpoint_budget(tally.refundable);
+        if tally.submitted > 0 {
             self.note_dial_attempt(
                 intent.requester.peer.as_bytes().to_vec(),
                 vec![(
@@ -8071,7 +8081,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 )],
             );
         }
-        submitted
+        tally.submitted > 0
     }
 
     /// One globally bounded post-join repair pass. Pending inbound reciprocal work is first,
@@ -8710,32 +8720,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .iter()
                 .filter_map(|addr| validated_peer_endpoint(addr, &expected))
                 .collect();
-            let granted = self.endpoint_dials.reserve_permits(
-                &self.group.group_id(),
-                &endpoints,
-                &*self.clock,
-            );
+            let granted = self
+                .endpoint_dials
+                .reserve_permits(&self.group.group_id(), &endpoints);
             self.discovery
                 .refund_endpoint_budget(pd.addresses.len().saturating_sub(granted.len()));
             if granted.is_empty() {
                 continue;
             }
-            let granted_count = granted.len();
-            let mut submitted = 0usize;
+            let mut tally = DialOutcomeTally::default();
             for permit in granted {
-                if matches!(
-                    self.transport.dial_permit(Box::new(permit)).await,
-                    Ok(catcoms_rt::DialSubmission::Submitted)
-                ) {
-                    submitted += 1;
-                }
+                tally.observe(self.transport.dial_permit(Box::new(permit)).await);
             }
-            // Policy planning and a scheduler grant are not transport submission. Refund the
-            // local discovery window for actor-side rejection and do not manufacture a cooldown
-            // or a successful manual-redial outcome when no socket work entered the transport.
-            self.discovery
-                .refund_endpoint_budget(granted_count.saturating_sub(submitted));
-            if submitted > 0 {
+            // Policy planning and a scheduler grant are not transport submission. Refund only
+            // actor-side *pre-commit* suppression. A post-commit failure remains charged without
+            // manufacturing a cooldown or a successful manual-redial outcome.
+            self.discovery.refund_endpoint_budget(tally.refundable);
+            if tally.submitted > 0 {
                 self.note_dial_attempt(pd.peer.clone(), epochs);
                 dialed += 1;
             }
@@ -12446,6 +12447,44 @@ mod tests {
     use catcoms_rt::{Hub, ManualClock, MemNetwork, TransportError};
     use rand_chacha::ChaCha20Rng;
     use rand_core::{RngCore, SeedableRng};
+
+    #[test]
+    fn post_commit_dial_failure_keeps_local_policy_charged_without_attempt_success() {
+        let mut policy = DiscoveryPolicy::with_config(PolicyConfig {
+            dial_budget: 1,
+            window_ms: 1_000,
+            jitter_ms: 0,
+            ..PolicyConfig::default()
+        });
+        let clock = ManualClock::new(0);
+        let mut rng = ChaCha20Rng::from_seed([0x41; 32]);
+        let plans = policy.plan(
+            vec![Candidate {
+                peer: vec![0x22; 32],
+                addresses: vec!["/ip4/198.51.100.7/tcp/22487".into()],
+                source: Source::Cache,
+                freshness: FreshnessPrincipal::Transport(vec![0x22; 32]),
+                seq: 1,
+                tag_verified: false,
+            }],
+            2,
+            &clock,
+            &mut rng,
+        );
+        assert_eq!(plans.len(), 1);
+        assert_eq!(policy.remaining_budget(), 0);
+
+        let mut tally = DialOutcomeTally::default();
+        tally.observe(Ok(catcoms_rt::DialSubmission::FailedAfterCommit));
+        policy.refund_endpoint_budget(tally.refundable);
+
+        assert_eq!(tally.submitted, 0, "no socket submission may be claimed");
+        assert_eq!(
+            policy.remaining_budget(),
+            0,
+            "the local discovery spend remains charged after permit commit"
+        );
+    }
 
     #[test]
     fn catchup_request_roundtrips_through_codec() {

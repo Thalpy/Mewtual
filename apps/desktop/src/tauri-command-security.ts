@@ -50,10 +50,6 @@ export const TAURI_COMMAND_GROUPS = {
       // the file matches what was on screen, redaction included; the file NAME is built natively
       // and never taken from the webview, because a caller-supplied name is a path traversal.
       "save_diagnostics_report", "validate_diagnostics_report",
-      // The webview supplies no report body. Native code reads the bounded ring and emits only
-      // canonical allowlisted fields before applying the publication validator. The result may
-      // leave through the separately reviewed exact issue-tracker URL command.
-      "build_public_diagnostics_report",
     ],
   },
   server_lifecycle_and_membership: {
@@ -163,7 +159,11 @@ export const TAURI_COMMAND_GROUPS = {
   operating_system_boundary: {
     boundary: "URLs and files cross into the OS; exact allowlists, bounds and non-shell launch/write paths required.",
     commands: [
-      "open_issue_url", "open_external_url", "save_and_open_space_guide", "save_space_layout",
+      "open_issue_url", "open_public_diagnostics_issue", "open_external_url", "save_and_open_space_guide", "save_space_layout",
+      // Atomic public-diagnostics launcher. It accepts no report/title/URL payload: native code
+      // reads the bounded ring, renders the typed allowlist, constructs the exact fixed tracker URL
+      // and launches it. Only the exact full publication envelope is returned for clipboard fallback
+      // when the URL needs a bounded excerpt.
       // Writes a shared file to Downloads by streaming it from the actor: the name is sanitized
       // native-side and the reserved path is the only thing that reaches the webview.
       "save_group_file",
