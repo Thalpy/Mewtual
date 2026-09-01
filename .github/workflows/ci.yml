@@ -39,3 +39,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  linux-desktop:
+    name: Linux frontend & Tauri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit the default-deny Docker build context
+        run: |
+          mkdir -p .claude
+          printf 'must-not-enter-build-context\n' > .claude/review-secret
+          docker build --target context-audit -f docker/linux-test.Dockerfile .
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Install Linux Tauri build libraries
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Run Linux desktop checks
+        shell: bash
+        run: bash scripts/linux-container-test.sh desktop --install

@@ -160,13 +160,27 @@ class Cdp {
     await this.send("Page.navigate", { url });
   }
 
+  /** Stop the browser fetching anything matching these patterns, or lift the block when given none. */
+  async blockUrls(patterns) {
+    await this.send("Network.enable");
+    await this.send("Network.setBlockedURLs", { urls: patterns });
+  }
+
   /** The fixture stamps data-visual-ready once switchServer's final awaited load returns.
    *  The generous default absorbs a cold vite start, where the first page load pays for
    *  dependency pre-bundling and the App.svelte transform. */
   async waitReady(timeoutMs = 90000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (await this.eval("document.documentElement.dataset.visualReady ?? ''")) return;
+      // Polled inside a try, because a poll that lands mid-navigation finds no document at all and
+      // throws on `documentElement`. That is the normal state of a page that has not arrived yet,
+      // not a failure, and letting it escape turned an ordinary race into an intermittent red run
+      // whose message pointed nowhere near the cause.
+      try {
+        if (await this.eval("document.documentElement?.dataset.visualReady ?? ''")) return;
+      } catch {
+        /* not navigated yet */
+      }
       await sleep(250);
     }
     throw new Error("visual fixture never became ready");
@@ -287,6 +301,108 @@ const ACCEPT_SCENARIO = `(async () => {
   return out;
 })();`;
 
+/**
+ * Open the debug console and visit every section.
+ *
+ * The gap this fills: a runtime error in one section's markup is invisible to everything else we
+ * run. `svelte-check` type-checks and never renders; the unit suites exercise the pure functions in
+ * `debug-console.ts` and never mount the component. So the only thing standing between a broken
+ * section and a release was somebody opening it and looking, and the tool whose entire job is to
+ * explain failures is a poor choice for the one that fails silently.
+ *
+ * A smoke test, and honest about it: it proves each section rendered something and threw nothing,
+ * not that it rendered the right thing. That is still the difference between a blank panel shipping
+ * and not.
+ */
+const CONSOLE_SECTIONS_SCENARIO = `(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const out = { opened: false, sections: [], empty: [] };
+  const byText = (selector, text) =>
+    [...document.querySelectorAll(selector)].find((e) =>
+      e.textContent.trim().toLowerCase().includes(text),
+    );
+
+  // The console lives behind Settings, Diagnostics. Navigating there is part of what is being
+  // checked: a button nobody can reach is as broken as a section that will not render.
+  document.querySelector('button[aria-label="Settings"]')?.click();
+  await sleep(400);
+  byText(".stx-item, .stx-nav button, nav button, .stx-sub button", "diagnostics")?.click();
+  await sleep(400);
+  out.reached = !!byText("button", "open debug console");
+  byText("button", "open debug console")?.click();
+  // Polled, not slept: the console is a dynamic import so ordinary chat startup does not pay for
+  // it, which means the first open waits on a module fetch. A fixed delay here is a race that
+  // fails on a cold vite and passes on a warm one.
+  for (let i = 0; i < 60 && !document.querySelector(".dbg"); i += 1) await sleep(100);
+  out.opened = !!document.querySelector(".dbg");
+  if (!out.opened) return out;
+
+  for (const name of ["overview", "network", "voice", "backend", "frontend", "storage"]) {
+    const item = byText(".dbg-rail-item", name);
+    if (!item) { out.empty.push(name + ":no-rail-item"); continue; }
+    item.click();
+    await sleep(350);
+    // A section that threw while rendering leaves the panel behind entirely, so this catches the
+    // whole-console crash as well as the empty one.
+    const cards = document.querySelectorAll(".dbg-content .dbg-card").length;
+    out.sections.push(name);
+    if (!cards) out.empty.push(name);
+  }
+  out.visited = out.sections.length;
+  out.broken = out.empty.join(",");
+  return out;
+})();`;
+
+/**
+ * The boot-failure panel in `index.html`, and whether it is on screen.
+ *
+ * Written to survive the panel having been removed from the document, which is what
+ * `public/boot-failure.js` does once the application mounts: "gone" and "hidden" are both success.
+ * `display` is reported separately from `showing` because the two hiding mechanisms are different
+ * claims, and a check that only asked "is it on screen" could not tell them apart.
+ */
+const BOOT_PANEL_STATE = `(() => {
+  const el = document.getElementById("boot-failure");
+  if (!el) return { present: false, showing: false, display: "", summary: "", detail: "", copyOffered: false, appChildren: -1 };
+  const style = getComputedStyle(el);
+  return {
+    present: true,
+    showing: style.display !== "none" && style.visibility === "visible",
+    display: style.display,
+    heading: el.querySelector("h1")?.textContent?.trim() ?? "",
+    summary: document.getElementById("boot-failure-summary")?.textContent ?? "",
+    detail: document.getElementById("boot-failure-detail")?.textContent ?? "",
+    copyOffered: !!document.querySelector("#boot-failure-actions button"),
+    appChildren: document.getElementById("app")?.children.length ?? -1,
+  };
+})();`;
+
+/**
+ * Read the panel's state until `done` is satisfied, or until the cap runs out.
+ *
+ * The waiting is done here rather than inside the page on purpose. These checks run over ten-second
+ * stretches, and an evaluation that long straddles the navigation that started it: the execution
+ * context is torn down under the promise and CDP answers with nothing at all, which reads as a
+ * failing assertion about a panel nobody ever looked at. Short reads, polled from Node, survive it,
+ * and polling for the state the new page should be in is also how the harness waits out a
+ * navigation that has not committed yet.
+ */
+async function watchBootPanel(cdp, capMs, done) {
+  const deadline = Date.now() + capMs;
+  let seen = {};
+  for (;;) {
+    try {
+      seen = (await cdp.eval(BOOT_PANEL_STATE)) ?? seen;
+    } catch {
+      /* a poll that lands mid-navigation has no document to read yet */
+    }
+    if (done(seen) || Date.now() >= deadline) return seen;
+    await sleep(250);
+  }
+}
+
+const panelShowing = (seen) => !!seen.showing;
+
 function assertEqual(scenario, got, want) {
   const failures = [];
   for (const [key, expected] of Object.entries(want)) {
@@ -319,6 +435,11 @@ function cleanup() {
   if (viteUp) killPortListener(PORT);
 }
 
+// Held outside the try so a failure on the way *in* can still say what the page complained about.
+// Without this, a module that will not parse reports only "visual fixture never became ready",
+// and the SyntaxError naming the line sits in a buffer nobody prints.
+let connected = null;
+
 // Ctrl-C skips the finally block, which would leak exactly the orphans cleanup exists to
 // prevent. The temp profile is left behind on this path; it lives in tmpdir and is disposable.
 for (const signal of ["SIGINT", "SIGTERM"]) {
@@ -344,7 +465,8 @@ try {
     ],
     { stdio: "ignore" },
   );
-  const cdp = await Cdp.connect();
+  connected = await Cdp.connect();
+  const cdp = connected;
 
   await cdp.waitReady();
   const send = await cdp.eval(SEND_SCENARIO);
@@ -373,12 +495,100 @@ try {
     errorToast: null,
   });
 
+  // A fresh load again, so the accept test's patched IPC cannot decide what the console shows.
+  await cdp.navigate(URL_UNDER_TEST);
+  await cdp.waitReady();
+  // Piggybacks on the load the console scenario is about to use. An application that mounted is
+  // the success signal, and the bootstrap script takes the panel out of the document when it sees
+  // one, so on a healthy start there should be no panel left at all.
+  const bootOk = await cdp.eval(BOOT_PANEL_STATE);
+  failed |= !assertEqual(
+    "boot-failure panel is removed once the app mounts",
+    { present: bootOk?.present, showing: bootOk?.showing },
+    { present: false, showing: false },
+  );
+
+  const sections = await cdp.eval(CONSOLE_SECTIONS_SCENARIO);
+  failed |= !assertEqual("debug console renders every section", sections, {
+    reached: true,
+    opened: true,
+    visited: 6,
+    broken: "",
+  });
+
+  // Everything past here loads a deliberately broken page, so the errors it prints are the point
+  // rather than a regression. Anything the healthy scenarios reported is kept and checked below.
+  const errorsBeforeBootChecks = cdp.consoleErrors.length;
+
+  // The other half of the healthy case, with the bootstrap script blocked so nothing can take the
+  // panel away on purpose. What is left is the stylesheet's own rule, and `display` is asserted
+  // rather than "is it on screen": the visual fixture disables every animation on the page so it
+  // can screenshot deterministically, which means a reveal-timer check on a fixture page would
+  // pass whether or not anything was hiding the panel.
+  await cdp.blockUrls(["*boot-failure.js*"]);
+  await cdp.navigate(URL_UNDER_TEST);
+  const bootQuiet = await watchBootPanel(cdp, 40000, (seen) => seen.present && seen.appChildren > 0);
+  failed |= !assertEqual(
+    "the stylesheet alone hides the panel once the app mounts",
+    { present: bootQuiet?.present, display: bootQuiet?.display, showing: bootQuiet?.showing },
+    { present: true, display: "none", showing: false },
+  );
+
+  // The failure this whole panel exists for: the module bundle never arrives, so no application
+  // code runs and every diagnostic the project has built is inside the thing that failed. Blocking
+  // the entry module at the network layer is that failure exactly.
+  await cdp.blockUrls(["*main.ts*"]);
+  await cdp.navigate(URL_UNDER_TEST);
+  const bootFailure = await watchBootPanel(cdp, 20000, panelShowing);
+  failed |= !assertEqual(
+    "boot-failure panel reports a bundle that never loaded",
+    {
+      showing: bootFailure?.showing,
+      heading: bootFailure?.heading,
+      appEmpty: bootFailure?.appChildren === 0,
+      namesTheModule: /main\.ts/.test(bootFailure?.summary ?? ""),
+      summaryRedacted: !/localhost:/.test(bootFailure?.summary ?? ""),
+      rawDetailKeptWhole: /localhost:/.test(bootFailure?.detail ?? ""),
+      copyOffered: bootFailure?.copyOffered,
+    },
+    {
+      showing: true,
+      heading: "Mewtual could not start",
+      appEmpty: true,
+      namesTheModule: true,
+      summaryRedacted: true,
+      rawDetailKeptWhole: true,
+      copyOffered: true,
+    },
+  );
+
+  // And the same failure with the bootstrap script blocked too, which is the layer that has to hold
+  // when there is no script running anywhere: the panel is visible by default and the stylesheet
+  // only hides it once an application mounts, so a window that never mounts one says so on its own.
+  await cdp.blockUrls(["*main.ts*", "*boot-failure.js*"]);
+  await cdp.navigate(URL_UNDER_TEST);
+  const bootNoScript = await watchBootPanel(cdp, 40000, panelShowing);
+  failed |= !assertEqual(
+    "boot-failure panel shows with no script running at all",
+    { showing: bootNoScript?.showing, heading: bootNoScript?.heading, copyOffered: bootNoScript?.copyOffered },
+    { showing: true, heading: "Mewtual could not start", copyOffered: false },
+  );
+
+  await cdp.blockUrls([]);
+  cdp.consoleErrors.length = errorsBeforeBootChecks;
+
   if (cdp.consoleErrors.length) {
     console.error(`FAIL page errors:\n  ${cdp.consoleErrors.join("\n  ")}`);
     failed = true;
   }
 } catch (e) {
   console.error(`FAIL harness: ${e.message}`);
+  // Whatever the page managed to say before it gave up. This is usually the actual diagnosis: a
+  // "never became ready" is nearly always a module that threw or would not parse, and the browser
+  // has already reported which line.
+  if (connected?.consoleErrors.length) {
+    console.error(`  page said:\n    ${connected.consoleErrors.join("\n    ")}`);
+  }
   failed = true;
 } finally {
   cleanup();

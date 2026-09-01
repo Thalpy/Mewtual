@@ -99,6 +99,59 @@ const PROFILES = [
 const clone = <T>(value: T): T => structuredClone(value);
 
 /**
+ * One canonical diagnostic event, with the parts a fixture rarely sets defaulted.
+ *
+ * The console reads the whole canonical shape now: the section it belongs to, the phase it was in,
+ * its trace, its references and the capture mode it was rendered at. Writing eighteen fields out
+ * seven times would bury the two incidents this fixture exists to re-enact, so the defaults sit
+ * here and each event states only what makes it itself.
+ */
+const dbgEvent = (e: {
+  seq: number;
+  at_ms: number;
+  section: string;
+  view: string;
+  level: string;
+  code: string;
+  target: string;
+  phase?: string;
+  operation?: string;
+  trace?: string;
+  duration_ms?: number | null;
+  refs?: [string, string][];
+  fields?: { name: string; value: string; sensitive?: boolean }[];
+}) => ({
+  seq: e.seq,
+  at_ms: e.at_ms,
+  monotonic_ms: 0,
+  section: e.section,
+  view: e.view,
+  level: e.level,
+  code: e.code,
+  phase: e.phase ?? "observation",
+  operation: e.operation ?? "",
+  trace: e.trace ?? "",
+  span: "",
+  parent_span: "",
+  refs: e.refs ?? [],
+  duration_ms: e.duration_ms ?? null,
+  attempt: null,
+  target: e.target,
+  fields: (e.fields ?? []).map((f) => ({
+    name: f.name,
+    value: f.value,
+    kind: "bridged",
+    sensitive: f.sensitive ?? false,
+  })),
+  fields_dropped: 0,
+  capture: "enhanced",
+  capture_epoch: 1,
+});
+
+/** The code an un-migrated `tracing` event carries. Matches `BRIDGED_CODE` in `debug-console.ts`. */
+const BRIDGED = "LOG.TRACING.EVENT";
+
+/**
  * Return deterministic native-command data for the browser-rendered visual fixture.
  *
  * Keeping this as a pure function makes the contract unit-testable and makes an unsupported IPC
@@ -169,13 +222,13 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
       return clone(
         server === 2
           ? [
-              { fingerprint: ME, you: true },
-              { fingerprint: JUNIPER, you: false },
+              { fingerprint: ME, identity: `${ME}-full-device-id`, you: true },
+              { fingerprint: JUNIPER, identity: `${JUNIPER}-full-device-id`, you: false },
             ]
           : [
-              { fingerprint: ME, you: true },
-              { fingerprint: JUNIPER, you: false },
-              { fingerprint: MOSS, you: false },
+              { fingerprint: ME, identity: `${ME}-full-device-id`, you: true },
+              { fingerprint: JUNIPER, identity: `${JUNIPER}-full-device-id`, you: false },
+              { fingerprint: MOSS, identity: `${MOSS}-full-device-id`, you: false },
             ],
       );
     case "get_online_members":
@@ -192,6 +245,8 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
             mime: "text/markdown",
             cid: "55aabbeeff0011223344556677889900",
             author: JUNIPER,
+            author_verified: true,
+            author_identity: `${JUNIPER}-full-device-id`,
             path: "reviews/visual-review-notes.md",
             held: 1,
             total: 1,
@@ -215,10 +270,13 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
     case "get_channel_topic":
       return channel === "general" ? "A calm place to build and review Mewtual together" : "";
     case "get_delivery":
-      return clone([
-        { id: "msg-2", delivered: 2, reachable: 2 },
-        { id: "msg-5", delivered: 1, reachable: 1 },
-      ]);
+      return clone({
+        revision: 1,
+        states: [
+          { id: "msg-2", delivered: 2, reachable: 2, any_peer: true },
+          { id: "msg-5", delivered: 1, reachable: 1, any_peer: true },
+        ],
+      });
     case "get_badges":
       return server === 1 ? { [MOSS]: { label: "release", color: "#e6a85c" } } : {};
     case "get_events":
@@ -254,6 +312,8 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
       return clone({
         action: "found",
         subject: "Lantern Room",
+        // The join key between this panel and the debug console's record of the same attempt.
+        trace: "7f2c",
         at: VISUAL_FIXTURE_NOW - 3 * 60_000,
         server: 1,
         advertised: [
@@ -282,6 +342,291 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
           },
         ],
         last_error: "",
+      });
+    // The debug console's sources. The data deliberately re-enacts the two incidents the console
+    // was built for, so the fixture shows it doing its job rather than showing an empty shell:
+    // Moss advertises only IPv6 while this device has no observed public IPv6 candidate, and the voice signalling run
+    // fails against a peer whose transport connection has gone.
+    case "save_diagnostics_report":
+      return clone({
+        path: "C:\\fixture\\logs\\mewtual-diagnostics-eb887278-1787000000000.txt",
+        file: "mewtual-diagnostics-eb887278-1787000000000.txt",
+        bytes: 4096,
+      });
+    case "get_console_log":
+      return clone({
+        events: [
+          // Un-migrated call sites: prose under the bridge's code, which is what most of the record
+          // still looks like and therefore what the console has to stay readable against.
+          dbgEvent({
+            seq: 1,
+            at_ms: VISUAL_FIXTURE_NOW - 182_000,
+            section: "transport",
+            view: "network",
+            level: "INFO",
+            code: BRIDGED,
+            target: "catcoms_net",
+            fields: [
+              { name: "message", value: "listening address" },
+              { name: "address", value: "/ip4/192.168.1.42/udp/22487/quic-v1", sensitive: true },
+            ],
+          }),
+          dbgEvent({
+            seq: 2,
+            at_ms: VISUAL_FIXTURE_NOW - 121_000,
+            section: "transport",
+            view: "network",
+            level: "WARN",
+            code: BRIDGED,
+            target: "catcoms_net",
+            fields: [
+              { name: "message", value: "dial failed" },
+              {
+                name: "addr",
+                value: "/ip6/2601:441:4581:a5c0:b81d:9e0b:cab1:de04/udp/23123/quic-v1",
+                sensitive: true,
+              },
+              { name: "error", value: "network unreachable" },
+            ],
+          }),
+          dbgEvent({
+            seq: 3,
+            at_ms: VISUAL_FIXTURE_NOW - 96_000,
+            section: "discovery",
+            view: "network",
+            level: "WARN",
+            code: BRIDGED,
+            target: "catcoms_discovery::eclipse",
+            fields: [
+              { name: "message", value: "eclipse detector raised CAUTION (sustained isolation signs)" },
+            ],
+          }),
+          // A migrated call site: a stable code, a phase, a trace and typed fields. It shows in the
+          // voice section because it says it is a voice event, not because its text says "voice".
+          dbgEvent({
+            seq: 4,
+            at_ms: VISUAL_FIXTURE_NOW - 74_000,
+            section: "voice",
+            view: "voice",
+            level: "WARN",
+            code: "VOICE.PORT.MAP_REFUSED",
+            target: "catcoms_ui",
+            phase: "failure",
+            operation: "start_call",
+            trace: "7f2c000000000031",
+            duration_ms: 2140,
+            fields: [{ name: "mechanism", value: "upnp" }],
+          }),
+          dbgEvent({
+            seq: 5,
+            at_ms: VISUAL_FIXTURE_NOW - 61_000,
+            section: "voice",
+            view: "voice",
+            level: "WARN",
+            code: "VOICE.SIGNAL.NO_MEMBER_ROUTE",
+            target: "catcoms_ui",
+            phase: "failure",
+            operation: "send_call_signal",
+            trace: "7f2c000000000031",
+            refs: [["peer", "peer-2b5df389"]],
+            fields: [{ name: "signal", value: "ice" }],
+          }),
+          dbgEvent({
+            seq: 6,
+            at_ms: VISUAL_FIXTURE_NOW - 51_000,
+            section: "transport",
+            view: "network",
+            level: "WARN",
+            code: BRIDGED,
+            target: "catcoms_net",
+            fields: [
+              { name: "message", value: "outbound request failed" },
+              { name: "peer", value: "12D3KooWFixtureMoss" },
+              { name: "error", value: "dial failure" },
+            ],
+          }),
+          dbgEvent({
+            seq: 7,
+            at_ms: VISUAL_FIXTURE_NOW - 30_000,
+            section: "sync",
+            view: "backend",
+            level: "DEBUG",
+            code: BRIDGED,
+            target: "catcoms_sync",
+            fields: [
+              { name: "message", value: "serving PEX" },
+              { name: "count", value: "2" },
+            ],
+          }),
+        ],
+        errors: 0,
+        warnings: 4,
+        dropped: 0,
+        filtered: 118,
+        latest_seq: 7,
+        capacity: 4096,
+        capture: "enhanced",
+        session_id: "eb887278",
+      });
+    // A fixed Enhanced snapshot. The mode buttons therefore re-render the same canned page rather
+    // than changing what it shows, because this function is deterministic on purpose: the same
+    // command and arguments must give the same answer, or a screenshot stops being reproducible.
+    // What Safe and Enhanced actually do to a value is pinned by unit tests in `render.rs`, the
+    // desktop bridge and `debug-console.test.ts`, which is the right place for a property that is
+    // about rendering rather than about layout.
+    // One dead event forwarder, because the fixture exists to show the console doing its job and
+    // this is the failure the rest of the console cannot show: everything else keeps reporting
+    // normally while the thing that was meant to be doing the work is gone.
+    case "get_task_health":
+      return clone([
+        {
+          id: 1,
+          kind: "server_actor",
+          server: 1,
+          started_ms: VISUAL_FIXTURE_NOW - 600_000,
+          last_beat_ms: null,
+          state: "running",
+          fault: false,
+          cause: null,
+        },
+        {
+          id: 2,
+          kind: "event_forwarder",
+          server: 1,
+          started_ms: VISUAL_FIXTURE_NOW - 600_000,
+          last_beat_ms: null,
+          state: "panicked",
+          fault: true,
+          cause: "index out of bounds: the len is 0 but the index is 0",
+        },
+        {
+          id: 3,
+          kind: "discovery_timer",
+          server: 1,
+          started_ms: VISUAL_FIXTURE_NOW - 600_000,
+          last_beat_ms: VISUAL_FIXTURE_NOW - 20_000,
+          state: "running",
+          fault: false,
+          cause: null,
+        },
+      ]);
+    case "get_capture_config":
+    case "set_capture_mode":
+    case "set_section_capture":
+      return clone({
+        mode: "enhanced",
+        expires_at_restart: false,
+        reveals_addresses: true,
+        sections: [
+          { id: "diag", view: "backend", level: "INFO" },
+          { id: "startup", view: "backend", level: "DEBUG" },
+          { id: "ui", view: "frontend", level: "DEBUG" },
+          { id: "ipc", view: "backend", level: "DEBUG" },
+          { id: "runtime", view: "backend", level: "DEBUG" },
+          { id: "vault", view: "storage", level: "DEBUG" },
+          { id: "storage", view: "storage", level: "DEBUG" },
+          { id: "identity", view: "backend", level: "DEBUG" },
+          { id: "membership", view: "backend", level: "DEBUG" },
+          { id: "transport", view: "network", level: "DEBUG" },
+          { id: "reachability", view: "network", level: "DEBUG" },
+          { id: "discovery", view: "network", level: "DEBUG" },
+          { id: "join", view: "network", level: "DEBUG" },
+          { id: "sync", view: "backend", level: "DEBUG" },
+          { id: "channels", view: "backend", level: "DEBUG" },
+          { id: "documents", view: "backend", level: "DEBUG" },
+          { id: "files", view: "storage", level: "DEBUG" },
+          { id: "voice", view: "voice", level: "DEBUG" },
+          { id: "devices", view: "backend", level: "DEBUG" },
+          { id: "updates", view: "backend", level: "DEBUG" },
+          { id: "performance", view: "backend", level: "DEBUG" },
+          { id: "privacy", view: "backend", level: "DEBUG" },
+        ],
+      });
+    case "get_member_routes":
+      return server === 1
+        ? clone([
+            {
+              fingerprint: JUNIPER,
+              peer: "7c41a9de",
+              addresses: ["/ip4/198.51.100.24/udp/31484/quic-v1"],
+              seq: 6,
+              connected: true,
+              dial_attempts: 0,
+              next_dial_in_ms: 0,
+              health: "claimed_peer_connected_direct",
+              binding: "self_asserted",
+              active_paths: [{ family: "ipv4", transport: "quic_v1", direction: "listener" }],
+              last_success: {
+                path: { family: "ipv4", transport: "quic_v1", direction: "listener" },
+                age_ms: 12_000,
+              },
+              candidate_families: ["ipv4"],
+              candidate_transports: ["quic_v1"],
+              actions: [],
+              indirect_health: "unknown",
+              indirect_witnesses: 0,
+              indirect_age_ms: null,
+              reciprocal_pending: false,
+            },
+            {
+              fingerprint: MOSS,
+              peer: "2b5df389",
+              addresses: ["/ip6/2601:441:4581:a5c0:b81d:9e0b:cab1:de04/udp/23123/quic-v1"],
+              seq: 4,
+              connected: false,
+              dial_attempts: 8,
+              next_dial_in_ms: 812_000,
+              health: "claimed_peer_dial_cooling_down",
+              binding: "self_asserted",
+              active_paths: [],
+              last_success: null,
+              candidate_families: ["ipv6"],
+              candidate_transports: ["quic_v1"],
+              actions: [
+                { scope: "this_device", kind: "wait_for_automatic_recovery" },
+                { scope: "this_device", kind: "probe_through_members" },
+                { scope: "this_device", kind: "retry_group_now" },
+              ],
+              indirect_health: "reachable_via_member",
+              indirect_witnesses: 1,
+              indirect_age_ms: 8_000,
+              reciprocal_pending: true,
+            },
+          ])
+        : [];
+    case "manual_fallback_redial":
+      return "submitted";
+    case "get_call_transport":
+      return clone({
+        public_direct: false,
+        autonat: "not tested: no public address candidate and AutoNAT server were available together",
+        public_ipv4: ["213.105.231.38"],
+        public_ipv6: [],
+        bridges: [],
+        relay_likely_required: true,
+        router_maps: true,
+        advice:
+          "This device is behind NAT and no member is offering to host. Calls to peers who are also behind NAT need a relay.",
+      });
+    case "get_debug_logging":
+    case "test_debug_logging":
+      // Deliberately the interesting case: the preference is off while the sink from before the
+      // toggle is still writing, which is the disagreement the settings page exists to show.
+      return clone({
+        enabled: false,
+        active: true,
+        state: "active",
+        error: "",
+        session: "eb887278",
+        dir: "C:\\fixture\\logs",
+        file: "debug_log_20260823_120000.txt",
+        events_written: 1284,
+        bytes_written: 190_432,
+        events_dropped: 0,
+        events_truncated: 0,
+        queue_depth: 0,
+        queue_high_water: 12,
+        session_quota_bytes: 52_428_800,
       });
     case "get_switchboard_status":
     case "set_switchboard_offered":

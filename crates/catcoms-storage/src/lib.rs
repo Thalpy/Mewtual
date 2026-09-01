@@ -45,7 +45,8 @@ pub use retention::{
     ServerId, ONE_MONTH_MS,
 };
 pub use vault::{
-    change_vault_passphrase, open_or_create_vault, vault_exists, MAX_VAULT_SECRET_BYTES,
+    acquire_vault_session, change_vault_passphrase, open_or_create_vault, vault_exists,
+    verify_vault_passphrase, VaultSessionGuard, MAX_VAULT_SECRET_BYTES,
 };
 
 /// Errors from the storage layer.
@@ -60,10 +61,20 @@ pub enum StorageError {
     /// A filesystem error.
     #[error("io error: {0}")]
     Io(String),
+    /// The replacement is already visible, but its directory entry could not be flushed. Retrying
+    /// the operation is safe; callers must not claim that the previous state was restored.
+    #[error("write committed but could not be made durable: {0}")]
+    CommittedButNotDurable(String),
+    /// Another process is creating, opening, or rewrapping this vault. Callers may retry instead
+    /// of blocking a UI command indefinitely behind a suspended process.
+    #[error("the vault is busy in another application process; try again")]
+    VaultBusy,
     /// A blob or file reference was malformed.
     #[error("malformed data")]
     Malformed,
-    /// A proposed vault secret was empty, unreasonably large, or identical to the old secret.
-    #[error("the new vault secret must be non-empty, reasonably sized, and different")]
+    /// A vault secret was empty, unreasonably large, or a replacement matched the old secret.
+    #[error(
+        "the vault secret must be non-empty, reasonably sized, and different when replacing it"
+    )]
     InvalidVaultSecret,
 }

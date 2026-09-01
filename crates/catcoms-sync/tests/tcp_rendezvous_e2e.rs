@@ -61,7 +61,7 @@ async fn joiner_discovers_inviter_via_rendezvous_and_joins_over_real_tcp() {
 
     // --- Alice (inviter): binds an ephemeral TCP port, founds a group, connects to the
     //     rendezvous, advertises her bound address, and registers under join_ns. ---
-    let (a_mesh, _a_id) = MeshService::new_tcp(
+    let (a_mesh, a_id) = MeshService::new_tcp(
         Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
         std::slice::from_ref(&rz_dial),
     )
@@ -84,7 +84,8 @@ async fn joiner_discovers_inviter_via_rendezvous_and_joins_over_real_tcp() {
 
     // Advertise Alice's reachable TCP address and register under join_ns (all on the raw
     // mesh, before it is handed to ChannelSync to serve).
-    a_mesh.add_external_address(a_addr.clone()).await.unwrap();
+    let a_route: Multiaddr = format!("{a_addr}/p2p/{a_id}").parse().unwrap();
+    a_mesh.add_external_address(a_route).await.unwrap();
     a_mesh.rendezvous_register(&join_ns, rz_id).await.unwrap();
     timeout(Duration::from_secs(20), a_mesh.next_registered())
         .await
@@ -132,6 +133,7 @@ async fn joiner_discovers_inviter_via_rendezvous_and_joins_over_real_tcp() {
         peer: discovered.peer.to_bytes(),
         addresses: discovered.addresses.iter().map(|a| a.to_string()).collect(),
         source: Source::Rendezvous(rz_id.to_bytes()),
+        freshness: catcoms_discovery::FreshnessPrincipal::Transport(discovered.peer.to_bytes()),
         seq: 1,
         tag_verified: false,
     };

@@ -11,13 +11,17 @@
 //! Threat model (see `docs/design-persistence.md`): this protects a **stolen disk / leaked
 //! backup**, not a live process; while running, the keys are unsealed in RAM.
 
-use std::fs;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use catcoms_crypto::{seal, unseal, KeyHierarchy, SealedBlob};
 use catcoms_rt::{CryptoRngCore, OsCryptoRng};
 use catcoms_storage::{
-    change_vault_passphrase, open_or_create_vault, vault_exists, BlobStore, SealingBlobStore,
+    acquire_vault_session, change_vault_passphrase, open_or_create_vault, vault_exists,
+    verify_vault_passphrase, BlobStore, SealingBlobStore, StorageError, VaultSessionGuard,
 };
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::{Zeroize, Zeroizing};
@@ -78,7 +82,49 @@ pub struct ServerNet {
     /// The highest **peer-record sequence number** this server may already have published; see
     /// [`ServerNet::reserve_record_seq_block`].
     pub record_seq: u64,
+    /// Exact direct routes that completed an outbound Noise handshake during admission or a later
+    /// live member connection. These sealed, bounded hints cover same-LAN restart recovery without
+    /// publishing private addresses into PEX. They remain dial candidates only: the sync layer
+    /// re-checks current membership, terminal peer binding, and the shared endpoint budget before
+    /// every use.
+    pub reconnect_routes: Vec<ReconnectRoute>,
+    /// Provenance/consent for capturing and retrying reconnect routes. Keeping this separate from
+    /// an empty route vector prevents a helper admission from later being mistaken for a legacy
+    /// record that is eligible for migration.
+    pub reconnect_policy: ReconnectPolicy,
+    /// A verified recovery-code peer awaiting a live, uniquely claimed, authenticated route.
+    /// This is additive to `reconnect_policy`: the previous proven peer/routes remain usable until
+    /// one atomic save promotes this candidate, so a failed recovery cannot destroy reachability.
+    pub pending_recovery_peer: Option<[u8; 32]>,
+    /// Absolute signed-code deadline for `pending_recovery_peer`; zero when no candidate exists.
+    /// Persisting the deadline preserves the ten-minute authority boundary across restarts.
+    pub pending_recovery_expires_at_ms: u64,
 }
+
+/// One sealed same-LAN reconnect hint. `peer_id` is the Phase-0 transport identity derived from
+/// the terminal libp2p peer in `address`, not a member/device identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectRoute {
+    pub peer_id: [u8; 32],
+    pub address: String,
+}
+
+/// Durable authority for local reconnect-route capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconnectPolicy {
+    /// No route may be captured. Used for new founders and helper/reply/switchboard admission.
+    Disabled,
+    /// Direct admission authenticated this exact named inviter as the recurring contact.
+    AuthorizedPeer([u8; 32]),
+    /// A v1/v2 record may migrate once under the narrow two-member overlap rule.
+    LegacyPending,
+}
+
+/// A join races at most two useful direct transports (normally TCP and QUIC) for one peer.
+pub const MAX_RECONNECT_ROUTES: usize = 2;
+/// Canonical direct multiaddrs are tiny. This bound prevents a corrupt local record from turning
+/// reconnect setup into an oversized allocation or log value.
+pub const MAX_RECONNECT_ROUTE_BYTES: usize = 512;
 
 /// Domain separator for the derived listen port, so the port derivation can never collide with
 /// any other use of the seed.
@@ -147,10 +193,12 @@ impl Drop for ServerNet {
 /// with an explicit version so it can actually grow later.
 const SERVER_NET_V1: u8 = 1;
 const SERVER_NET_V2: u8 = 2;
+const SERVER_NET_V3: u8 = 3;
+const SERVER_NET_V4: u8 = 4;
 
 fn encode_server_net(net: &ServerNet) -> Vec<u8> {
     let mut e = Encoder::new();
-    e.put_u8(SERVER_NET_V2);
+    e.put_u8(SERVER_NET_V4);
     e.put_bytes(&net.key_seed).expect("seed fits");
     e.put_u16(net.port);
     e.put_str(&net.advertise).expect("advertise fits");
@@ -158,6 +206,49 @@ fn encode_server_net(net: &ServerNet) -> Vec<u8> {
     e.put_str(&net.rendezvous).expect("rendezvous fits");
     e.put_u64(net.record_seq);
     e.put_u8(u8::from(net.switchboard));
+    match net.reconnect_policy {
+        ReconnectPolicy::Disabled => {
+            e.put_u8(0);
+        }
+        ReconnectPolicy::AuthorizedPeer(peer) => {
+            e.put_u8(1);
+            e.put_bytes(&peer).expect("peer id fits");
+        }
+        ReconnectPolicy::LegacyPending => {
+            e.put_u8(2);
+        }
+    }
+    // Keep the encoder's output inside the decoder's own bounds even if a future caller builds a
+    // `ServerNet` directly. Desktop-created routes have already passed this cap, but producing a
+    // record we would refuse on the next launch is a particularly bad failure mode here.
+    let authorized_peer = match net.reconnect_policy {
+        ReconnectPolicy::AuthorizedPeer(peer) => Some(peer),
+        ReconnectPolicy::Disabled | ReconnectPolicy::LegacyPending => None,
+    };
+    let routes: Vec<_> = net
+        .reconnect_routes
+        .iter()
+        .filter(|route| {
+            authorized_peer == Some(route.peer_id)
+                && route.address.len() <= MAX_RECONNECT_ROUTE_BYTES
+        })
+        .take(MAX_RECONNECT_ROUTES)
+        .collect();
+    e.put_u8(routes.len() as u8);
+    for route in routes {
+        e.put_bytes(&route.peer_id).expect("peer id fits");
+        e.put_str(&route.address).expect("reconnect route fits");
+    }
+    match net.pending_recovery_peer {
+        Some(peer) => {
+            e.put_u8(1);
+            e.put_bytes(&peer).expect("peer id fits");
+            e.put_u64(net.pending_recovery_expires_at_ms);
+        }
+        None => {
+            e.put_u8(0);
+        }
+    }
     e.finish()
 }
 
@@ -165,7 +256,11 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
     let bad = || AppError::Io("corrupt server net record".into());
     let mut d = Decoder::new(bytes);
     let version = d.get_u8().map_err(|_| bad())?;
-    if version != SERVER_NET_V1 && version != SERVER_NET_V2 {
+    if version != SERVER_NET_V1
+        && version != SERVER_NET_V2
+        && version != SERVER_NET_V3
+        && version != SERVER_NET_V4
+    {
         return Err(AppError::Io("unknown server net record version".into()));
     }
     let seed = d.get_bytes().map_err(|_| bad())?;
@@ -184,6 +279,68 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
     } else {
         false
     };
+    let reconnect_policy = if version >= SERVER_NET_V3 {
+        match d.get_u8().map_err(|_| bad())? {
+            0 => ReconnectPolicy::Disabled,
+            1 => ReconnectPolicy::AuthorizedPeer(
+                d.get_bytes()
+                    .map_err(|_| bad())?
+                    .try_into()
+                    .map_err(|_| bad())?,
+            ),
+            2 => ReconnectPolicy::LegacyPending,
+            _ => return Err(bad()),
+        }
+    } else {
+        ReconnectPolicy::LegacyPending
+    };
+    let mut reconnect_routes = Vec::new();
+    if version >= SERVER_NET_V3 {
+        let count = d.get_u8().map_err(|_| bad())? as usize;
+        if count > MAX_RECONNECT_ROUTES {
+            return Err(bad());
+        }
+        for _ in 0..count {
+            let peer_id = d
+                .get_bytes()
+                .map_err(|_| bad())?
+                .try_into()
+                .map_err(|_| bad())?;
+            let address = d.get_str().map_err(|_| bad())?;
+            if address.len() > MAX_RECONNECT_ROUTE_BYTES {
+                return Err(bad());
+            }
+            reconnect_routes.push(ReconnectRoute {
+                peer_id,
+                address: address.to_string(),
+            });
+        }
+    }
+    if reconnect_routes.iter().any(|route| {
+        !matches!(
+            reconnect_policy,
+            ReconnectPolicy::AuthorizedPeer(peer) if peer == route.peer_id
+        )
+    }) {
+        return Err(bad());
+    }
+    let (pending_recovery_peer, pending_recovery_expires_at_ms) = if version >= SERVER_NET_V4 {
+        match d.get_u8().map_err(|_| bad())? {
+            0 => (None, 0),
+            1 => (
+                Some(
+                    d.get_bytes()
+                        .map_err(|_| bad())?
+                        .try_into()
+                        .map_err(|_| bad())?,
+                ),
+                d.get_u64().map_err(|_| bad())?,
+            ),
+            _ => return Err(bad()),
+        }
+    } else {
+        (None, 0)
+    };
     d.finish().map_err(|_| bad())?;
     Ok(ServerNet {
         key_seed,
@@ -193,6 +350,10 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
         rendezvous,
         record_seq,
         switchboard,
+        reconnect_routes,
+        reconnect_policy,
+        pending_recovery_peer,
+        pending_recovery_expires_at_ms,
     })
 }
 
@@ -200,6 +361,10 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 pub struct ServerStore {
     dir: PathBuf,
     keys: KeyHierarchy,
+    // This OS lock is intentionally held until the store is dropped. The in-process Tauri mutex
+    // serializes commands, while this guard prevents a second app process from forking durable MLS,
+    // invite-ledger, registry, or transport state from the same starting snapshot.
+    _session: VaultSessionGuard,
 }
 
 impl ServerStore {
@@ -212,9 +377,27 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
     ) -> Result<Self, AppError> {
         let dir = dir.as_ref().to_path_buf();
+        // Mount exclusion comes before Argon2/unsealing. A losing second process therefore gets a
+        // prompt `VaultBusy` without doing expensive password work or observing decrypted keys.
+        let session = acquire_vault_session(&dir)?;
         let keys = open_or_create_vault(&dir, passphrase, rng)?;
         fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
-        Ok(Self { dir, keys })
+        // Persist the `servers` directory entry as well as later contents. Without this flush, a
+        // first-launch power loss could retain a synced record but forget the newly created parent.
+        sync_directory(&dir).map_err(|error| AppError::Io(error.to_string()))?;
+        Ok(Self {
+            dir,
+            keys,
+            _session: session,
+        })
+    }
+
+    /// Authenticate a secret against the already-mounted vault without trying to acquire a
+    /// second lifetime session lock. Explicit UI lock keeps native actors mounted, so this is the
+    /// only safe way to reopen that webview boundary while still rejecting a wrong passphrase.
+    pub fn verify_passphrase(&self, passphrase: &[u8]) -> Result<(), AppError> {
+        verify_vault_passphrase(&self.dir, passphrase)?;
+        Ok(())
     }
 
     /// Has a store ever been opened at `dir`? [`Self::open`] creates one when it has not, so
@@ -256,8 +439,12 @@ impl ServerStore {
         new_passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
-        change_vault_passphrase(&self.dir, current_passphrase, new_passphrase, rng)?;
-        Ok(())
+        map_vault_passphrase_change(change_vault_passphrase(
+            &self.dir,
+            current_passphrase,
+            new_passphrase,
+            rng,
+        ))
     }
 
     /// Seal + atomically save bounded frontend continuity state (drafts, read markers and the
@@ -451,6 +638,19 @@ impl ServerStore {
     }
 }
 
+/// Preserve the storage transaction's commit boundary when it crosses into the application API.
+/// A directory-sync failure happens after `vault.bin` was renamed, so callers must treat the new
+/// secret as active even though crash durability could not be confirmed.
+fn map_vault_passphrase_change(result: Result<(), StorageError>) -> Result<(), AppError> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(StorageError::CommittedButNotDurable(error)) => {
+            Err(AppError::CommittedButNotDurable(error))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 impl std::fmt::Debug for ServerStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never print the vault keys.
@@ -525,12 +725,130 @@ fn decode_registry(bytes: &[u8]) -> Result<Vec<ServerRecord>, AppError> {
     Ok(out)
 }
 
-/// Write `bytes` to `path` atomically (write a temp file, then rename) so a crash mid-write
-/// never leaves a half-written (unopenable) sealed file in place of a good one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtomicWritePhase {
+    TempSynced,
+    Renamed,
+}
+
+/// Separates concurrent writers without ambient randomness. The process id separates live desktop
+/// processes, while this counter separates threads and repeated writes inside one process. A stale
+/// collision is harmless because the file is opened with `create_new`; we simply try the next id.
+static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
+const MAX_STAGING_ATTEMPTS: usize = 1_024;
+
+struct StagingPath {
+    path: PathBuf,
+    remove_on_drop: bool,
+}
+
+impl Drop for StagingPath {
+    fn drop(&mut self) {
+        if self.remove_on_drop {
+            // Cleanup is best effort: preserving the original write error matters more, and a
+            // crash can leave the same kind of harmless unreferenced sibling behind anyway.
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn staging_candidate(path: &Path, id: u64) -> PathBuf {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut name = OsString::from(".");
+    name.push(path.file_name().unwrap_or_else(|| OsStr::new("record")));
+    name.push(format!(".mewtual-stage-{}-{id}.tmp", std::process::id()));
+    parent.join(name)
+}
+
+fn open_staging_candidate(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
+fn create_staging_file(path: &Path) -> Result<(File, StagingPath), AppError> {
+    for _ in 0..MAX_STAGING_ATTEMPTS {
+        let id = NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed);
+        let candidate = staging_candidate(path, id);
+        match open_staging_candidate(&candidate) {
+            Ok(file) => {
+                return Ok((
+                    file,
+                    StagingPath {
+                        path: candidate,
+                        remove_on_drop: true,
+                    },
+                ));
+            }
+            // `create_new` rejects regular files and symlinks alike. A stale file can therefore
+            // cause a bounded retry, but can never redirect or truncate the staged write.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(AppError::Io(error.to_string())),
+        }
+    }
+    Err(AppError::Io(
+        "could not create a collision-free persistence staging file".into(),
+    ))
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    File::open(path).and_then(|directory| directory.sync_all())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Write `bytes` to `path` atomically and durably.
+///
+/// The staged file is flushed before rename, so termination before the rename leaves the previous
+/// authenticated record intact. On Unix the containing directory is flushed after rename as well,
+/// making the name replacement durable across power loss rather than merely atomic to readers.
+/// Each invocation uses a destination-specific, securely-created sibling. Concurrent writers and
+/// the `.bin`/`.net`/`.cache` records for one server therefore cannot overwrite each other's staged
+/// bytes, and a pre-planted symlink is rejected rather than followed.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes).map_err(|e| AppError::Io(e.to_string()))?;
-    fs::rename(&tmp, path).map_err(|e| AppError::Io(e.to_string()))?;
+    atomic_write_with_hook(path, bytes, |_, _| {})
+}
+
+/// The hook exists to place Linux subprocess-abort tests on the two sides of the rename. It has no
+/// production side effects, and keeping it inside the primitive ensures the test exercises the
+/// same write/flush/rename sequence as every sealed persistence record.
+fn atomic_write_with_hook(
+    path: &Path,
+    bytes: &[u8],
+    mut phase: impl FnMut(AtomicWritePhase, &Path),
+) -> Result<(), AppError> {
+    atomic_write_with_hook_and_sync(path, bytes, &mut phase, sync_directory)
+}
+
+fn atomic_write_with_hook_and_sync(
+    path: &Path,
+    bytes: &[u8],
+    mut phase: impl FnMut(AtomicWritePhase, &Path),
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), AppError> {
+    let (mut staged, mut staging) = create_staging_file(path)?;
+    staged
+        .write_all(bytes)
+        .map_err(|error| AppError::Io(error.to_string()))?;
+    staged
+        .sync_all()
+        .map_err(|error| AppError::Io(error.to_string()))?;
+    drop(staged);
+    phase(AtomicWritePhase::TempSynced, &staging.path);
+    fs::rename(&staging.path, path).map_err(|e| AppError::Io(e.to_string()))?;
+    staging.remove_on_drop = false;
+    phase(AtomicWritePhase::Renamed, &staging.path);
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        sync_parent(parent).map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+    }
     Ok(())
 }
 
@@ -539,6 +857,378 @@ mod tests {
     use super::*;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::sync::{Arc, Barrier};
+
+    const SESSION_CHILD_DIR: &str = "MEWTUAL_TEST_SESSION_CHILD_DIR";
+    const SESSION_CHILD_ROLE: &str = "MEWTUAL_TEST_SESSION_CHILD_ROLE";
+    const SESSION_POLL_ATTEMPTS: usize = 3_000;
+    const SESSION_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+    #[cfg(target_os = "linux")]
+    const ATOMIC_CHILD_PHASE: &str = "MEWTUAL_TEST_ATOMIC_CHILD_PHASE";
+    #[cfg(target_os = "linux")]
+    const ATOMIC_CHILD_PATH: &str = "MEWTUAL_TEST_ATOMIC_CHILD_PATH";
+    #[cfg(target_os = "linux")]
+    const CHILD_POLL_ATTEMPTS: usize = 3_000;
+    #[cfg(target_os = "linux")]
+    const CHILD_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+    /// Owns a spawned test process so an assertion cannot strand a vault lock behind a child
+    /// waiting for its release marker.
+    struct SessionChild(Child);
+
+    impl SessionChild {
+        fn wait_bounded(&mut self, description: &str) -> ExitStatus {
+            for _ in 0..SESSION_POLL_ATTEMPTS {
+                if let Some(status) = self.0.try_wait().expect("poll session-lock child") {
+                    return status;
+                }
+                std::thread::sleep(SESSION_POLL);
+            }
+            let _ = self.0.kill();
+            let status = self.0.wait().expect("reap timed-out session-lock child");
+            panic!("{description} timed out with {status}");
+        }
+    }
+
+    impl Drop for SessionChild {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    fn spawn_session_child(dir: &Path, role: &str) -> SessionChild {
+        let child = Command::new(std::env::current_exe().expect("current store test binary"))
+            .args([
+                "--exact",
+                "store::tests::server_store_session_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(SESSION_CHILD_DIR, dir)
+            .env(SESSION_CHILD_ROLE, role)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn session-lock child");
+        SessionChild(child)
+    }
+
+    fn wait_for_marker(path: &Path, description: &str) {
+        for _ in 0..SESSION_POLL_ATTEMPTS {
+            if path.exists() {
+                return;
+            }
+            std::thread::sleep(SESSION_POLL);
+        }
+        panic!("timed out waiting for {description}: {}", path.display());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn abort_child_at(path: &Path, phase: &str) -> std::process::ExitStatus {
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("current store test binary"))
+                .args([
+                    "--exact",
+                    "store::tests::atomic_write_abort_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(ATOMIC_CHILD_PHASE, phase)
+                .env(ATOMIC_CHILD_PATH, path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("run atomic-write abort child");
+        for _ in 0..CHILD_POLL_ATTEMPTS {
+            if let Some(status) = child.try_wait().expect("poll atomic-write abort child") {
+                return status;
+            }
+            std::thread::sleep(CHILD_POLL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("atomic-write abort child timed out at {phase}");
+    }
+
+    fn staging_files_for(path: &Path) -> Vec<PathBuf> {
+        let parent = path.parent().unwrap();
+        let prefix = format!(
+            ".{}.mewtual-stage-",
+            path.file_name().unwrap().to_string_lossy()
+        );
+        fs::read_dir(parent)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                let name = candidate.file_name().unwrap().to_string_lossy();
+                name.starts_with(&prefix) && name.ends_with(".tmp")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn concurrent_atomic_writes_never_cross_record_types_or_publish_prefixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = dir.path().join("7.bin");
+        let network = dir.path().join("7.net");
+        let barrier = Arc::new(Barrier::new(2));
+
+        let snapshot_writer = {
+            let path = snapshot.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                atomic_write_with_hook(&path, b"sealed snapshot", |phase, _| {
+                    if phase == AtomicWritePhase::TempSynced {
+                        barrier.wait();
+                    }
+                })
+            })
+        };
+        let network_writer = {
+            let path = network.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                atomic_write_with_hook(&path, b"sealed network record", |phase, _| {
+                    if phase == AtomicWritePhase::TempSynced {
+                        barrier.wait();
+                    }
+                })
+            })
+        };
+        snapshot_writer.join().unwrap().unwrap();
+        network_writer.join().unwrap().unwrap();
+        assert_eq!(fs::read(&snapshot).unwrap(), b"sealed snapshot");
+        assert_eq!(fs::read(&network).unwrap(), b"sealed network record");
+
+        // Two writers to the same destination may commit in either order, but neither may rename
+        // the other writer's staging bytes or expose a truncated record.
+        let shared = dir.path().join("registry.bin");
+        let barrier = Arc::new(Barrier::new(2));
+        let writers: Vec<_> = [
+            b"complete record A".as_slice(),
+            b"complete record B".as_slice(),
+        ]
+        .into_iter()
+        .map(|bytes| {
+            let path = shared.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                atomic_write_with_hook(&path, bytes, |phase, _| {
+                    if phase == AtomicWritePhase::TempSynced {
+                        barrier.wait();
+                    }
+                })
+            })
+        })
+        .collect();
+        for writer in writers {
+            writer.join().unwrap().unwrap();
+        }
+        let stored = fs::read(&shared).unwrap();
+        assert!(
+            stored == b"complete record A" || stored == b"complete record B",
+            "a same-destination race must publish one complete input"
+        );
+        assert!(staging_files_for(&shared).is_empty());
+    }
+
+    #[test]
+    fn post_rename_sync_failure_is_reported_as_committed_not_rolled_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.bin");
+        fs::write(&path, b"previous record").unwrap();
+        let result = atomic_write_with_hook_and_sync(
+            &path,
+            b"complete replacement",
+            |_, _| {},
+            |_| Err(std::io::Error::other("injected directory sync failure")),
+        );
+        assert!(matches!(
+            result,
+            Err(AppError::CommittedButNotDurable(message))
+                if message == "injected directory sync failure"
+        ));
+        assert_eq!(fs::read(path).unwrap(), b"complete replacement");
+    }
+
+    #[test]
+    fn vault_rewrap_preserves_the_committed_but_not_durable_error_across_the_app_boundary() {
+        let result = map_vault_passphrase_change(Err(StorageError::CommittedButNotDurable(
+            "injected vault directory sync failure".into(),
+        )));
+        assert!(matches!(
+            result,
+            Err(AppError::CommittedButNotDurable(message))
+                if message == "injected vault directory sync failure"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_preplanted_staging_symlink_is_never_followed() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.bin");
+        let victim = dir.path().join("victim");
+        fs::write(&victim, b"must stay intact").unwrap();
+        let planted = staging_candidate(&path, u64::MAX);
+        symlink(&victim, &planted).unwrap();
+
+        let error = open_staging_candidate(&planted).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        atomic_write(&path, b"authenticated state").unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"must stay intact");
+        assert_eq!(fs::read(&path).unwrap(), b"authenticated state");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn abrupt_process_termination_cannot_publish_a_partial_sealed_record() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.bin");
+        atomic_write(&path, b"old authenticated record").unwrap();
+
+        let before = abort_child_at(&path, "temp-synced");
+        assert_eq!(
+            before.signal(),
+            Some(6), // Linux SIGABRT, produced by `std::process::abort`.
+            "the failpoint must abort rather than panic or exit normally"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"old authenticated record",
+            "termination before rename preserves the complete previous record"
+        );
+        let staged = staging_files_for(&path);
+        assert_eq!(staged.len(), 1);
+        assert_eq!(fs::read(&staged[0]).unwrap(), b"new authenticated record");
+        // Crash-orphan cleanup is intentionally explicit here: a live concurrent process may own
+        // any unique sibling, so a later writer must not guess that it is safe to delete.
+        fs::remove_file(&staged[0]).unwrap();
+
+        let after = abort_child_at(&path, "renamed");
+        assert_eq!(after.signal(), Some(6));
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"new authenticated record",
+            "after rename readers see the complete replacement, never a prefix"
+        );
+        assert!(staging_files_for(&path).is_empty());
+
+        // A later normal save continues to replace the destination after either crash boundary.
+        atomic_write(&path, b"newest authenticated record").unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"newest authenticated record");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "spawned by abrupt_process_termination_cannot_publish_a_partial_sealed_record"]
+    fn atomic_write_abort_child() {
+        let wanted = std::env::var(ATOMIC_CHILD_PHASE).expect("abort phase");
+        let path = PathBuf::from(std::env::var_os(ATOMIC_CHILD_PATH).expect("abort path"));
+        atomic_write_with_hook(&path, b"new authenticated record", |phase, _| {
+            let reached = match phase {
+                AtomicWritePhase::TempSynced => "temp-synced",
+                AtomicWritePhase::Renamed => "renamed",
+            };
+            if reached == wanted {
+                std::process::abort();
+            }
+        })
+        .expect("the requested abort phase must be reached");
+        panic!("unknown abort phase {wanted}");
+    }
+
+    #[test]
+    fn one_process_mounts_a_server_store_until_normal_exit_or_abort() {
+        let root = tempfile::tempdir().unwrap();
+
+        let mut owner = spawn_session_child(root.path(), "owner");
+        wait_for_marker(&root.path().join("owner-ready"), "mounted owner");
+
+        // Exercise the production constructor in a genuinely separate process. The contender
+        // must fail promptly rather than waiting behind a suspended desktop or unsealing the DEK.
+        let mut contender = spawn_session_child(root.path(), "contender");
+        assert!(
+            contender.wait_bounded("contending store open").success(),
+            "the child records the exact open result before exiting"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("contender-result")).unwrap(),
+            "busy"
+        );
+
+        fs::write(root.path().join("release-owner"), b"release").unwrap();
+        assert!(owner.wait_bounded("normal store owner").success());
+        let mut successor = spawn_session_child(root.path(), "successor");
+        assert!(successor.wait_bounded("post-drop store open").success());
+        assert_eq!(
+            fs::read_to_string(root.path().join("successor-result")).unwrap(),
+            "opened",
+            "dropping ServerStore releases the installation mount"
+        );
+
+        // OS locks are process-owned, so an abrupt exit must not strand a durable busy marker.
+        let mut crashing = spawn_session_child(root.path(), "abort-owner");
+        wait_for_marker(
+            &root.path().join("abort-owner-ready"),
+            "mounted abort owner",
+        );
+        assert!(
+            !crashing.wait_bounded("aborting store owner").success(),
+            "the crash fixture must terminate abnormally"
+        );
+        let mut after_abort = spawn_session_child(root.path(), "after-abort");
+        assert!(after_abort.wait_bounded("post-abort store open").success());
+        assert_eq!(
+            fs::read_to_string(root.path().join("after-abort-result")).unwrap(),
+            "opened",
+            "the operating system releases the lifetime lock after process death"
+        );
+    }
+
+    #[test]
+    #[ignore = "spawned by one_process_mounts_a_server_store_until_normal_exit_or_abort"]
+    fn server_store_session_child() {
+        let dir = PathBuf::from(std::env::var_os(SESSION_CHILD_DIR).expect("session child dir"));
+        let role = std::env::var(SESSION_CHILD_ROLE).expect("session child role");
+        let mut rng = ChaCha20Rng::seed_from_u64(0x5e55_10c0);
+
+        match role.as_str() {
+            "owner" => {
+                let _store = ServerStore::open(&dir, b"process-lock-test", &mut rng)
+                    .expect("the first process mounts the store");
+                fs::write(dir.join("owner-ready"), b"ready").unwrap();
+                wait_for_marker(&dir.join("release-owner"), "owner release");
+            }
+            "abort-owner" => {
+                let _store = ServerStore::open(&dir, b"process-lock-test", &mut rng)
+                    .expect("the crash process mounts the store");
+                fs::write(dir.join("abort-owner-ready"), b"ready").unwrap();
+                std::process::abort();
+            }
+            "contender" | "successor" | "after-abort" => {
+                let result = match ServerStore::open(&dir, b"process-lock-test", &mut rng) {
+                    Ok(_store) => "opened",
+                    Err(AppError::Storage(catcoms_storage::StorageError::VaultBusy)) => "busy",
+                    Err(error) => panic!("unexpected store-open error for {role}: {error}"),
+                };
+                fs::write(dir.join(format!("{role}-result")), result).unwrap();
+            }
+            _ => panic!("unknown session child role {role}"),
+        }
+    }
 
     #[test]
     fn store_round_trips_servers_and_registry_under_the_right_passphrase() {
@@ -696,6 +1386,13 @@ mod tests {
             rendezvous: "/ip4/198.51.100.2/tcp/5000/p2p/RZ".into(),
             switchboard: true,
             record_seq: 131_072,
+            reconnect_routes: vec![ReconnectRoute {
+                peer_id: [0x44; 32],
+                address: "/ip4/192.168.1.40/tcp/47123/p2p/12D3KooWQYFnfXfgxT8kZ6BJZQ4wE4bFAJj7X9uKdqVPa5wYzD5X".into(),
+            }],
+            reconnect_policy: ReconnectPolicy::AuthorizedPeer([0x44; 32]),
+            pending_recovery_peer: Some([0x55; 32]),
+            pending_recovery_expires_at_ms: 123_456,
         };
 
         {
@@ -729,6 +1426,10 @@ mod tests {
             rendezvous: String::new(),
             switchboard: false,
             record_seq: 0,
+            reconnect_routes: Vec::new(),
+            reconnect_policy: ReconnectPolicy::Disabled,
+            pending_recovery_peer: None,
+            pending_recovery_expires_at_ms: 0,
         };
         let store = ServerStore::open(dir.path(), b"pw", &mut rng).unwrap();
         store.save_server_net(7, &net, &mut rng).unwrap();
@@ -782,8 +1483,81 @@ mod tests {
             rendezvous: String::new(),
             switchboard: false,
             record_seq: u64::MAX - 1,
+            reconnect_routes: Vec::new(),
+            reconnect_policy: ReconnectPolicy::Disabled,
+            pending_recovery_peer: None,
+            pending_recovery_expires_at_ms: 0,
         };
         assert_eq!(decode_server_net(&encode_server_net(&net)).unwrap(), net);
+    }
+
+    #[test]
+    fn server_net_reconnect_routes_are_backward_compatible_and_bounded() {
+        let legacy = |version| {
+            let mut e = Encoder::new();
+            e.put_u8(version);
+            e.put_bytes(&[7u8; 32]).unwrap();
+            e.put_u16(22_487);
+            e.put_str("192.168.1.40:22487").unwrap();
+            e.put_str("").unwrap();
+            e.put_str("").unwrap();
+            e.put_u64(42);
+            if version >= SERVER_NET_V2 {
+                e.put_u8(1);
+            }
+            e.finish()
+        };
+        for version in [SERVER_NET_V1, SERVER_NET_V2] {
+            let decoded = decode_server_net(&legacy(version)).unwrap();
+            assert!(decoded.reconnect_routes.is_empty());
+            assert_eq!(decoded.reconnect_policy, ReconnectPolicy::LegacyPending);
+            assert_eq!(decoded.switchboard, version >= SERVER_NET_V2);
+        }
+
+        // The count is checked before allocating or reading route bodies. A corrupt sealed file
+        // cannot turn a tiny record into unbounded restore work.
+        let mut over_count = Encoder::new();
+        over_count.put_u8(SERVER_NET_V3);
+        over_count.put_bytes(&[8u8; 32]).unwrap();
+        over_count.put_u16(22_487);
+        over_count.put_str("").unwrap();
+        over_count.put_str("").unwrap();
+        over_count.put_str("").unwrap();
+        over_count.put_u64(0);
+        over_count.put_u8(0);
+        over_count.put_u8(0);
+        over_count.put_u8((MAX_RECONNECT_ROUTES + 1) as u8);
+        assert!(decode_server_net(&over_count.finish()).is_err());
+
+        // Likewise, an oversized address is rejected on decode and omitted on encode, keeping a
+        // caller-created `ServerNet` from writing a record that this version cannot reopen.
+        let mut over_address = Encoder::new();
+        over_address.put_u8(SERVER_NET_V3);
+        over_address.put_bytes(&[9u8; 32]).unwrap();
+        over_address.put_u16(22_487);
+        over_address.put_str("").unwrap();
+        over_address.put_str("").unwrap();
+        over_address.put_str("").unwrap();
+        over_address.put_u64(0);
+        over_address.put_u8(0);
+        over_address.put_u8(1);
+        over_address.put_bytes(&[10u8; 32]).unwrap();
+        over_address.put_u8(1);
+        over_address.put_bytes(&[10u8; 32]).unwrap();
+        over_address
+            .put_str(&"x".repeat(MAX_RECONNECT_ROUTE_BYTES + 1))
+            .unwrap();
+        assert!(decode_server_net(&over_address.finish()).is_err());
+
+        let mut net = decode_server_net(&legacy(SERVER_NET_V2)).unwrap();
+        net.reconnect_routes.push(ReconnectRoute {
+            peer_id: [11u8; 32],
+            address: "x".repeat(MAX_RECONNECT_ROUTE_BYTES + 1),
+        });
+        assert!(decode_server_net(&encode_server_net(&net))
+            .unwrap()
+            .reconnect_routes
+            .is_empty());
     }
 
     #[test]
@@ -796,6 +1570,10 @@ mod tests {
             rendezvous: String::new(),
             switchboard: false,
             record_seq: 0,
+            reconnect_routes: Vec::new(),
+            reconnect_policy: ReconnectPolicy::Disabled,
+            pending_recovery_peer: None,
+            pending_recovery_expires_at_ms: 0,
         };
         // Same seed, same port: this is what a port-forward and a UPnP mapping depend on.
         assert_eq!(mk([1u8; 32]).derived_port(), mk([1u8; 32]).derived_port());
@@ -867,6 +1645,10 @@ mod tests {
             rendezvous: String::new(),
             switchboard: false,
             record_seq: 0,
+            reconnect_routes: Vec::new(),
+            reconnect_policy: ReconnectPolicy::Disabled,
+            pending_recovery_peer: None,
+            pending_recovery_expires_at_ms: 0,
         };
 
         // Simulate three launches: reserve a block, seal it, reload it.

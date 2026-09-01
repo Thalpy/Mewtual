@@ -89,7 +89,72 @@ pub enum TransportError {
     /// The remote received a request but dropped it without replying.
     #[error("request handler dropped without responding")]
     NoResponse,
+    /// A caller supplied a peer-bound dial batch that violated the transport contract.
+    #[error("invalid peer-bound dial batch")]
+    InvalidDialBatch,
 }
+
+/// Maximum direct routes accepted by one peer-bound reciprocal-dial batch.
+///
+/// One IPv4 and one IPv6 candidate are sufficient for the repair protocol. Keeping the bound in
+/// the transport seam means an alternate implementation cannot accidentally turn one signed
+/// helper request into an arbitrarily large dial fan-out.
+pub const MAX_PEER_DIAL_BATCH: usize = 2;
+
+/// What the transport actor did with a runtime dial command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialSubmission {
+    /// The exact endpoint entered the actor's pending/socket-start path.
+    Submitted,
+    /// No socket will start because the actor already has this endpoint covered.
+    Suppressed,
+    /// The permit was committed, but the transport rejected the dial immediately afterwards.
+    ///
+    /// This is deliberately distinct from [`DialSubmission::Suppressed`]. The caller must keep
+    /// both its shared scheduler spend and its local policy spend charged, while also avoiding a
+    /// success/cooldown claim for socket work that never started.
+    FailedAfterCommit,
+}
+
+impl DialSubmission {
+    /// Whether the transport accepted actual pending/socket work for this command.
+    pub const fn is_submitted(self) -> bool {
+        matches!(self, Self::Submitted)
+    }
+
+    /// Whether a caller may return its matching local policy reservation.
+    ///
+    /// Scheduler permits refund themselves when dropped before commit. This parallel local
+    /// refund is valid only for the same pre-commit suppression case; an immediate transport
+    /// failure after commit remains conservatively charged at both layers.
+    pub const fn refunds_local_budget(self) -> bool {
+        matches!(self, Self::Suppressed)
+    }
+}
+
+/// A single-use, generation-bound authorization to submit one exact endpoint.
+///
+/// The object crosses the transport command boundary with the address it authorizes. Production
+/// transports must keep it owned by their actor until duplicate/already-connected checks have
+/// finished, then call [`DialPermit::commit_if_current`] immediately before the endpoint enters
+/// the pending/socket-start path. Dropping it before that point refunds the reservation in the
+/// scheduler that minted it.
+///
+/// Keeping this seam in `catcoms-rt` avoids making transports depend on the discovery crate while
+/// still preventing a cancelled caller from reclaiming a command that is already queued.
+pub trait DialPermit: Send + fmt::Debug {
+    /// The exact canonical address this permit authorizes.
+    fn address(&self) -> &str;
+
+    /// Consume the permit if its accounting window is still current.
+    ///
+    /// `None` means the scheduler advanced to a new generation while the command was queued. The
+    /// transport must suppress that stale command; it must not submit the endpoint uncharged.
+    fn commit_if_current(self: Box<Self>) -> Option<String>;
+}
+
+/// Owned permit passed through an object-safe transport seam.
+pub type BoxedDialPermit = Box<dyn DialPermit>;
 
 /// Reply handle handed to a request handler. Dropping it without calling
 /// [`Responder::respond`] surfaces [`TransportError::NoResponse`] to the caller.
@@ -123,6 +188,96 @@ impl ResponderRx {
     }
 }
 
+/// Address family used by one live transport path.
+///
+/// This deliberately describes the local node's observed connection endpoint, not a claim that
+/// the same family is reachable from every other member. Keeping the type in `catcoms-rt` lets
+/// the sync layer consume the evidence without depending on libp2p's address types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ConnectionFamily {
+    /// An IPv4 endpoint.
+    Ipv4,
+    /// An IPv6 endpoint.
+    Ipv6,
+    /// A DNS-named endpoint whose eventual IP family is not represented here.
+    Dns,
+    /// An in-process libp2p memory endpoint (tests and local tooling).
+    Memory,
+    /// The endpoint did not carry a family this version understands.
+    Unknown,
+}
+
+/// Transport used by one live peer connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ConnectionTransport {
+    /// TCP without a WebSocket component.
+    Tcp,
+    /// QUIC v1 over UDP.
+    QuicV1,
+    /// WebSocket or secure WebSocket.
+    WebSocket,
+    /// A libp2p circuit-relay path. This takes precedence over the relay's underlying transport.
+    CircuitRelay,
+    /// An in-process libp2p memory transport.
+    Memory,
+    /// The endpoint did not carry a transport this version understands.
+    Unknown,
+}
+
+/// Which side opened one live connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ConnectionDirection {
+    /// Libp2p represented this side as the dialer endpoint. During hole punching the negotiated
+    /// stream role can differ, so this must not be presented as proof of who initiated contact.
+    Dialer,
+    /// Libp2p represented this side as the listener endpoint.
+    Listener,
+}
+
+/// A coarse, privacy-preserving description of one live connection.
+///
+/// No IP address or connection identifier crosses this seam. Multiple physical connections that
+/// share the same description are intentionally deduplicated in the diagnostic snapshot: the
+/// product needs to explain *how* a member is reachable, not expose low-level connection state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConnectionPath {
+    /// Address family observed on the connection endpoint.
+    pub family: ConnectionFamily,
+    /// Transport observed on the connection endpoint.
+    pub transport: ConnectionTransport,
+    /// The local libp2p endpoint role (not necessarily the socket initiator during hole punching).
+    pub direction: ConnectionDirection,
+}
+
+/// Maximum full-path snapshot a [`MeshTransport`] implementation may emit in one event.
+///
+/// Production connection limits keep snapshots much smaller. This public seam is also implemented
+/// by tests and may be implemented by alternate transports, so consumers need a declared bound
+/// before sorting or deduplicating caller-owned input.
+pub const MAX_CONNECTION_PATH_SNAPSHOT: usize = 64;
+
+/// Maximum peers returned by [`MeshTransport::connection_snapshot`].
+///
+/// Production's swarm limit is 320 established connections, so a larger alternate-transport
+/// snapshot cannot describe state the product supports and would only create unbounded startup
+/// work in consumers.
+pub const MAX_CONNECTED_PEER_SNAPSHOT: usize = 320;
+
+/// One peer in a transport's present-time connection snapshot.
+///
+/// This is deliberately a read-only, coarse companion to the ordered event stream. It lets an
+/// admission or infrastructure waiter observe liveness without stealing [`TransportEvent`] values
+/// from the eventual owner. A consumer must not seed state from this snapshot and then replay an
+/// older queued stream unless its transport supplies a shared revision watermark; this legacy seam
+/// deliberately does not. The snapshot carries no membership meaning and no network addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerConnectionSnapshot {
+    /// The transport peer that is connected at the instant of the snapshot.
+    pub peer: PeerId,
+    /// The current privacy-preserving paths for that peer.
+    pub active: Vec<ConnectionPath>,
+}
+
 /// An inbound transport event, drained via [`MeshTransport::next_event`].
 #[derive(Debug)]
 pub enum TransportEvent {
@@ -148,6 +303,24 @@ pub enum TransportEvent {
     },
     /// A peer became reachable.
     PeerConnected(PeerId),
+    /// The coarse set of paths currently carrying connections to `peer` changed.
+    ///
+    /// `newly_established` is present only for an establishment edge and lets consumers retain a
+    /// time-bounded historical success after the connection closes. `active` is a full snapshot,
+    /// not a delta, so consumers do not reconstruct path state. Events share the ordered
+    /// `MeshTransport::next_event` stream; no cross-stream reordering guarantee is implied.
+    /// Existing `PeerConnected`/`PeerDisconnected` events retain their one-per-peer semantics for
+    /// callers interested only in aggregate liveness.
+    PeerPathsChanged {
+        /// The peer whose path set changed.
+        peer: PeerId,
+        /// Live path descriptions. Implementations must send at most
+        /// [`MAX_CONNECTION_PATH_SNAPSHOT`] entries; production sends sorted/deduplicated rows,
+        /// while consumers still validate and normalize custom implementations.
+        active: Vec<ConnectionPath>,
+        /// The path that caused this update, when a new connection was established.
+        newly_established: Option<ConnectionPath>,
+    },
     /// A peer became unreachable.
     PeerDisconnected(PeerId),
 }
@@ -169,12 +342,38 @@ pub struct DiscoveredPeer {
     pub seq: u64,
 }
 
+/// Confirmation that this node's record was registered at one rendezvous namespace.
+///
+/// `ttl_secs` is a lease granted by the rendezvous node, not a promise that the record remains
+/// usable for that entire period. Consumers renew before it expires and stop treating a missing
+/// renewal as current registration evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RendezvousRegistration {
+    /// Opaque transport id of the rendezvous node that granted the lease.
+    pub rendezvous_node: Vec<u8>,
+    /// The exact namespace registered.
+    pub namespace: String,
+    /// Granted lease lifetime in seconds.
+    pub ttl_secs: u64,
+}
+
 /// The messaging seam. Outbound operations take `&self` so the transport can be
 /// shared (e.g. behind an `Arc`); [`MeshTransport::next_event`] is single-consumer.
 #[async_trait]
 pub trait MeshTransport: Send + Sync {
     /// This node's peer id.
     fn local_peer(&self) -> PeerId;
+
+    /// Return the transport's current connected-peer/path state without consuming its ordered
+    /// event stream.
+    ///
+    /// Transports without an independently queryable connection table may keep the empty default;
+    /// their consumers continue to learn liveness from [`MeshTransport::next_event`]. Implementors
+    /// must return at most [`MAX_CONNECTED_PEER_SNAPSHOT`] entries and bound each `active` vector
+    /// by [`MAX_CONNECTION_PATH_SNAPSHOT`].
+    fn connection_snapshot(&self) -> Vec<PeerConnectionSnapshot> {
+        Vec::new()
+    }
 
     /// Start receiving gossip on `topic`.
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError>;
@@ -192,6 +391,59 @@ pub trait MeshTransport: Send + Sync {
         proto: ProtocolId,
         data: Bytes,
     ) -> Result<Bytes, TransportError>;
+
+    /// Send an addressed request only over a connection that is live at handling time.
+    ///
+    /// Repair helpers use this to forward authenticated control traffic without silently dialing
+    /// the target on the helper's behalf. The fail-closed default is intentional: a transport
+    /// that cannot prove this property must report the target unreachable rather than delegate to
+    /// [`MeshTransport::request`], whose implementation may consult a recent-address cache.
+    async fn request_connected(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        _data: Bytes,
+    ) -> Result<Bytes, TransportError> {
+        Err(TransportError::Unreachable(peer))
+    }
+
+    /// Send an addressed message to `peer` **without waiting for a reply**, returning as soon as
+    /// it is queued for sending.
+    ///
+    /// For traffic whose reply carries no information: call signalling, where the receiver queues
+    /// the payload and deliberately never answers with data. The distinction is not cosmetic.
+    /// [`MeshTransport::request`] parks its caller until the remote answers or the request/response
+    /// timeout fires, which is seconds against a peer that has gone away; a caller driving an actor
+    /// loop stalls every other thing that loop serves for that whole window, including the
+    /// disconnect handling and re-dial that would have repaired the route. Delivery problems
+    /// surface in the transport's own logs rather than in this return value, because there is no
+    /// useful answer to give a caller that is not allowed to wait.
+    ///
+    /// The default delegates to `request` and discards the reply, which is what a transport whose
+    /// requests complete immediately (the in-memory one used by tests) wants anyway.
+    async fn notify(
+        &self,
+        peer: PeerId,
+        proto: ProtocolId,
+        data: Bytes,
+    ) -> Result<(), TransportError> {
+        self.request(peer, proto, data).await.map(|_| ())
+    }
+
+    /// Queue a notification only when `peer` is live at handling time.
+    ///
+    /// Addressed repair forwarding uses this form so an inbound helper request can acknowledge
+    /// immediately and cannot make the sole group actor wait on a second member. As with
+    /// [`MeshTransport::request_connected`], the default fails closed rather than implicitly
+    /// dialing through an implementation's recent-address cache.
+    async fn notify_connected(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        _data: Bytes,
+    ) -> Result<(), TransportError> {
+        Err(TransportError::Unreachable(peer))
+    }
 
     /// Await the next inbound event. Returns `None` once the transport is closed.
     /// Intended to be driven by a single consumer task.
@@ -230,6 +482,102 @@ pub trait MeshTransport: Send + Sync {
         Ok(())
     }
 
+    /// Dial with actor acknowledgement. Transports without an actor preserve their existing
+    /// behavior and report submission after `dial_addr` succeeds.
+    async fn dial_addr_outcome(&self, addr: &str) -> Result<DialSubmission, TransportError> {
+        self.dial_addr(addr).await?;
+        Ok(DialSubmission::Submitted)
+    }
+
+    /// Submit one scheduler permit through this transport's dial boundary.
+    ///
+    /// Actor-backed transports override this and transfer ownership into the actor. The fallback
+    /// commits before awaiting the legacy dial call. That may conservatively spend a permit when
+    /// an alternate transport later suppresses or rejects it, but it can never refund a queued
+    /// attempt after caller cancellation.
+    async fn dial_permit(&self, permit: BoxedDialPermit) -> Result<DialSubmission, TransportError> {
+        let Some(address) = permit.commit_if_current() else {
+            return Ok(DialSubmission::Suppressed);
+        };
+        // The scheduler spend became irreversible above. Preserve that fact even when a legacy
+        // transport reports suppression or an error after the commit; returning `Suppressed`
+        // would make the caller refund a second, local policy budget for work that is already
+        // charged globally.
+        Ok(match self.dial_addr_outcome(&address).await {
+            Ok(DialSubmission::Submitted) => DialSubmission::Submitted,
+            Ok(DialSubmission::Suppressed | DialSubmission::FailedAfterCommit) | Err(_) => {
+                DialSubmission::FailedAfterCommit
+            }
+        })
+    }
+
+    /// Submit a small direct-route batch explicitly bound to `peer`.
+    ///
+    /// Production revalidates every terminal `/p2p` component inside its actor before any socket
+    /// can start. The default is fail-closed because a generic string-only transport cannot prove
+    /// that relationship. Callers must already have applied their discovery policy and shared
+    /// endpoint scheduler; this seam is the final confused-deputy guard, not a replacement for
+    /// those budgets.
+    async fn dial_peer_batch(
+        &self,
+        peer: PeerId,
+        _addresses: &[String],
+    ) -> Result<Vec<DialSubmission>, TransportError> {
+        Err(TransportError::Unreachable(peer))
+    }
+
+    /// Submit a small peer-bound batch while retaining each scheduler permit across the transport
+    /// ownership boundary.
+    ///
+    /// The fallback commits before its first await and then calls the legacy batch seam. It is
+    /// intentionally conservative; production overrides this so actor-side suppression refunds
+    /// permits. A stale permit is represented as `Suppressed` in its original result position.
+    async fn dial_peer_permits(
+        &self,
+        peer: PeerId,
+        permits: Vec<BoxedDialPermit>,
+    ) -> Result<Vec<DialSubmission>, TransportError> {
+        if permits.is_empty() || permits.len() > MAX_PEER_DIAL_BATCH {
+            return Err(TransportError::InvalidDialBatch);
+        }
+        let mut addresses = Vec::with_capacity(permits.len());
+        let mut current = Vec::with_capacity(permits.len());
+        for permit in permits {
+            match permit.commit_if_current() {
+                Some(address) => {
+                    current.push(true);
+                    addresses.push(address);
+                }
+                None => current.push(false),
+            }
+        }
+        if addresses.is_empty() {
+            return Ok(vec![DialSubmission::Suppressed; current.len()]);
+        }
+        // Every address in this downstream call has already committed its permit. A transport
+        // error, a shorter-than-promised outcome vector, or downstream suppression must therefore
+        // remain charged rather than being rewritten as pre-commit `Suppressed`.
+        let mut submitted = self
+            .dial_peer_batch(peer, &addresses)
+            .await
+            .ok()
+            .map(Vec::into_iter);
+        Ok(current
+            .into_iter()
+            .map(|is_current| {
+                if is_current {
+                    match submitted.as_mut().and_then(Iterator::next) {
+                        Some(DialSubmission::Submitted) => DialSubmission::Submitted,
+                        Some(DialSubmission::Suppressed | DialSubmission::FailedAfterCommit)
+                        | None => DialSubmission::FailedAfterCommit,
+                    }
+                } else {
+                    DialSubmission::Suppressed
+                }
+            })
+            .collect())
+    }
+
     /// Advertise `addr` as an externally-reachable address, so a rendezvous registration can flush.
     async fn add_external_addr(&self, _addr: &str) -> Result<(), TransportError> {
         Ok(())
@@ -238,6 +586,12 @@ pub trait MeshTransport: Send + Sync {
     /// Await the next rendezvous-discovered peer. The default never resolves (a transport without
     /// rendezvous never surfaces one), so a `select!` arm awaiting it is inert.
     async fn next_discovered(&self) -> Option<DiscoveredPeer> {
+        std::future::pending().await
+    }
+
+    /// Await a successful rendezvous registration and its granted TTL. The inert default mirrors
+    /// [`MeshTransport::next_discovered`] for transports without rendezvous support.
+    async fn next_registered(&self) -> Option<RendezvousRegistration> {
         std::future::pending().await
     }
 

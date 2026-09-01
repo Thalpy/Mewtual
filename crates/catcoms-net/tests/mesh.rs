@@ -155,7 +155,8 @@ async fn client_reserves_a_circuit_slot_on_a_relay() {
     // A client connects to the relay, then reserves a slot by listening on its
     // circuit address.
     let client = MeshService::spawn(build_memory_swarm());
-    client.dial(relay_addr.clone()).await.unwrap();
+    let relay_route: Multiaddr = format!("{relay_addr}/p2p/{relay_id}").parse().unwrap();
+    client.dial(relay_route).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(TransportEvent::PeerConnected(_)) = client.next_event().await {
@@ -224,7 +225,8 @@ async fn relayed_connection_upgrades_to_direct_via_dcutr() {
     //     slot on the relay. ---
     let (server, server_id) =
         MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
-    server.dial(relay_addr.clone()).await.unwrap();
+    let relay_route: Multiaddr = format!("{relay_addr}/p2p/{relay_id}").parse().unwrap();
+    server.dial(relay_route).await.unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if let Some(TransportEvent::PeerConnected(_)) = server.next_event().await {

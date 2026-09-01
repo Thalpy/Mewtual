@@ -1,0 +1,18 @@
+[package]
+name = "catcoms-diagnostics"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+catcoms-rt = { path = "../catcoms-rt" }
+tracing.workspace = true
+# Keyed hashing for session references. BLAKE3's keyed mode is a MAC, which is exactly what a
+# reference needs: unforgeable and, with a per-session key, uncorrelatable across sessions.
+blake3 = "1"
+
+[dev-dependencies]
+
+[lints]
+workspace = true

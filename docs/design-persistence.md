@@ -97,7 +97,7 @@ before commit, per project discipline. Suggested order:
 | **9d ✅** | **Doc persistence** (`EncryptedDoc::snapshot`/`restore`); `AutoCommit::save()` + the signed-op log (rebuilds the `applied` dedup set), framed with the wire codec. Per-op signatures still verified on use, so a tampered snapshot can't inject forged history. *Done; sealing under `db_key` + restoring `ChannelSync`'s `docs` map is 9e.* | med |
 | **9e ✅** | **Sync-state persistence** (`ChannelSync::snapshot`/`restore`); assembles the MLS state (9c) + every doc (9d) + `routing_label`/`routing_secrets` + `ledger` + `commit_log` + `peer_records` into one `Zeroizing` blob; reload reconstitutes `ChannelSync` on a **fresh** transport (`adopt_routing_state` recomputes identical topics). Adversarially reviewed (no blocking findings; durable set complete, invite-ledger round-trip closes the cross-restart double-redeem). *Done; sealing the blob under the vault key + writing it to disk is 9f.* | med–high (secrets) |
 | **9f ✅** | **Registry + reload-on-startup.** `catcoms-app::store::ServerStore` (vault-sealed `servers/<id>.bin` + `registry.bin`, atomic writes, wrong-passphrase-safe) + `Server::snapshot`/`restore` + the actor `Snapshot` command. Bridge: a launch **passphrase gate** (`unlock` → open vault → reload each server onto a fresh transport → repopulate the rail) and **save-on-mutation** (seal after every found/join/send/profile/file/status/wiki, remove on leave). The desktop app now survives a restart: close it, reopen, enter the passphrase, your servers + full history are back (read offline). *Caveat:* a reloaded founder gets a new port, so new joiners need a fresh invite (existing limitation); peer re-dial is 9g. | med |
-| **9g ✅** | **Transport re-establishment**; `peer_addrs_from_snapshot` extracts the persisted peer multiaddrs from a snapshot (no full restore; the `MeshTransport` trait has no dial, so the bridge needs them before building the mesh), and reload dials them as the new transport's bootstrap. A reloaded joiner reconnects to peers whose address is stable; offline-read works meanwhile. Peers that moved need rendezvous re-discovery (the deferred networking slice). | med |
+| **9g ✅** | **Transport re-establishment**; `peer_addrs_from_snapshot` extracts persisted public peer multiaddrs from a snapshot (no full restore; the bridge needs them before building the mesh). Post-join discovery later moved these through the bounded cache/scheduler. `ServerNet` v3 now also seals at most two direct-IP routes that a joiner actually completed and Noise-authenticated to the named inviter, together with explicit `Disabled` / `AuthorizedPeer` / `LegacyPending` provenance. Direct admission fetches the inviter's signed descriptor before the first post-join snapshot when bounded PEX succeeds; helper/reply/switchboard admissions are disabled, and legacy migration is limited to an unambiguous two-member overlap. Reload installs the route into `ChannelSync`, which rechecks canonical peer binding, a unique current roster claim, raw TCP/QUIC host shape and the shared dial scheduler. Thus an established same-LAN joiner can reconnect after close/reopen when the inviter keeps the same listener address without publishing the retained private route through PEX. This does not discover a new/changed LAN peer; mDNS or rendezvous remains necessary for that. | med |
 | **9h ✅** | **Per-file encryption-at-rest**; two slices. **9h-a:** wired `SealingBlobStore` (over `FsBlobStore`) into each server under the vault `blob_key`, so files + avatars persist + are sealed at rest. **9h-b:** a **stable per-group file-wrap key** minted at founding, transferred at join **bundled into the routing transfer** (sealed under `routing_transfer_key`); `seal_file`/`open_file` so files are ciphertext keyed by the **ciphertext** CID with the wrapped key in the encrypted index; e2e, openable only by members holding the key. Adversarially reviewed (no blocking; joiner-key zeroing folded). | **high** (key mgmt + join handshake) |
 
 **Progress: 9a–9f done**; "survive restart, encrypted at rest" is delivered end-to-end: the
@@ -130,12 +130,37 @@ This is the same envelope as Signal/desktop messengers; at-rest, not anti-malwar
 - **openmls `StorageProvider` correctness** (9c) is the principal risk; get it wrong and the
   group silently corrupts. Needs property tests + round-trip tests against openmls operations.
 - **On-disk format versioning / migration**; tag every sealed blob with a version.
-- **Atomic writes**; write-temp-then-rename to survive a crash mid-write; never leave a
-  half-written group store.
+- **Atomic/durable writes**; implemented by write + file sync + rename and, on Unix, parent-directory
+  sync. Linux subprocess-abort tests pin both sides of the rename: a crash exposes the complete old
+  or complete new authenticated record, never a prefix. Each write uses a destination-specific,
+  create-new sibling, preventing cross-record staging aliases and rejecting pre-planted symlinks.
+  A failure after rename is explicitly `CommittedButNotDurable`, because the new record is visible
+  even though its directory flush failed. Catastrophic filesystem/hardware failure is not a
+  recoverability guarantee; crash-orphaned staging siblings may require later housekeeping.
+- **Vault root serialization**; `vault.bin` first creation and passphrase rewrap hold an OS-backed
+  sibling lock across read/generate/authenticate/publish; contention returns `VaultBusy` immediately
+  rather than waiting behind a suspended process. Two real child-process regressions pin one
+  successful DEK on concurrent first use, prompt contention, and exactly one successful conflicting rewrap. The wrapper
+  itself uses the same unique create-new + sync + rename durability shape; Linux abort and Unix
+  staging-symlink regressions cover that lower boundary.
+- **Vault wrapper/input compatibility**; v1 and v2 wrappers are fixed at 89 bytes and any other
+  length is rejected before allocation. New/replacement secrets are 1..4096 bytes. Existing v1
+  wrappers created with a 4097..65536-byte secret receive one bounded compatibility open, then are
+  atomically rewritten as v2 with a domain-separated 32-byte BLAKE3-normalized Argon2 input.
+  Secrets above 64 KiB are rejected. The rewrite is forward-only: an old v1-only binary cannot
+  reopen that migrated profile, so rollback requires returning to a v2-capable build.
+- **Installation lifetime serialization**; `ServerStore::open` takes a separate non-blocking OS
+  session lock before unsealing and owns it until drop/process exit. This prevents two desktop
+  processes from starting valid but divergent MLS, registry, invite-ledger and transport writers
+  from one snapshot. A real-process regression pins prompt `VaultBusy`, normal-drop reuse and
+  automatic release after abort. UI lock intentionally retains the native mount; re-unlock uses a
+  verify-only transaction against `vault.bin`, so it neither self-contends nor bypasses the secret.
 - **Passphrase UX**; prompt on launch; "forgot" = data loss (no recovery in v1). Consider an
   OS-keychain tier (`KeyTier::OsSoftware`) later so the passphrase isn't needed every launch.
-- **Concurrency**; multiple servers persisting concurrently; a per-server lock / single
-  writer.
+- **Concurrency**; byte-level concurrent writes no longer cross record types or expose prefixes.
+  The product's lifetime session lock and in-process mutex provide its single-writer boundary;
+  lower-level callers that do not own a `ServerStore` still need equivalent serialization for
+  logical read-modify-write operations.
 
 ## Files this touches
 

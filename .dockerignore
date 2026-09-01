@@ -1,0 +1,91 @@
+# Default-deny the Docker context. `COPY . .` must never send local credentials, editor state,
+# agent worktrees, vaults, logs, or arbitrary untracked files to the daemon/build cache. Keep this
+# allowlist limited to inputs consumed by the Linux test image; a newly required file should make
+# the container build fail until it is reviewed and added here.
+**
+!.dockerignore
+!Cargo.lock
+!Cargo.toml
+!deny.toml
+!rust-toolchain.toml
+
+# Root Rust workspace sources and manifests.
+!crates/
+!crates/**/
+!crates/**/Cargo.toml
+!crates/**/*.rs
+!bins/
+!bins/**/
+!bins/**/Cargo.toml
+!bins/**/*.rs
+
+# Desktop dependency manifests, build configuration, source and checked-in packaging assets.
+!apps/
+!apps/desktop/
+!apps/desktop/public/
+!apps/desktop/scripts/
+!apps/desktop/src/
+!apps/desktop/src/**/
+!apps/desktop/src-tauri/
+!apps/desktop/src-tauri/capabilities/
+!apps/desktop/src-tauri/src/
+!apps/desktop/src-tauri/src/**/
+!apps/desktop/src-tauri/icons/
+!apps/desktop/src-tauri/icons/**/
+!assets/
+!assets/cat/
+!apps/desktop/package-lock.json
+!apps/desktop/package.json
+!apps/desktop/index.html
+!apps/desktop/svelte.config.js
+!apps/desktop/tsconfig.json
+!apps/desktop/vite.config.ts
+!assets/mewtual-logo.svg
+!assets/cat/ears.svg
+!assets/cat/mascot-idle.svg
+!assets/cat/mascot-blink.svg
+!assets/cat/mascot-sleep.svg
+!assets/cat/mascot-alert.svg
+!assets/cat/mascot-sync.svg
+!apps/desktop/public/boot-failure.js
+!apps/desktop/public/THIRD-PARTY-NOTICES.txt
+!apps/desktop/scripts/test-dom.mjs
+!apps/desktop/src/**/*.css
+!apps/desktop/src/**/*.svelte
+!apps/desktop/src/**/*.ts
+!apps/desktop/src-tauri/Cargo.lock
+!apps/desktop/src-tauri/Cargo.toml
+!apps/desktop/src-tauri/about.hbs
+!apps/desktop/src-tauri/about.toml
+!apps/desktop/src-tauri/app-icon.png
+!apps/desktop/src-tauri/build.rs
+!apps/desktop/src-tauri/capabilities/default.json
+!apps/desktop/src-tauri/src/**/*.rs
+!apps/desktop/src-tauri/tauri.conf.json
+!apps/desktop/src-tauri/tauri.official.conf.json
+!apps/desktop/src-tauri/icons/**/*.icns
+!apps/desktop/src-tauri/icons/**/*.ico
+!apps/desktop/src-tauri/icons/**/*.png
+!apps/desktop/src-tauri/icons/**/*.xml
+
+# Re-assert generated/private trees after the parent-directory allow rules above. Docker's
+# negation traversal semantics otherwise let an allowed parent expose a nested Cargo target; on a
+# development checkout that can turn a sub-megabyte source context into hundreds of gigabytes.
+.git/
+.agents/
+.claude/
+.codex/
+logs/
+target/
+**/target/
+node_modules/
+**/node_modules/
+
+# Test entrypoints used from inside the image.
+!scripts/
+!scripts/check-no-ambient.sh
+!scripts/linux-container-test.sh
+!scripts/two-client-netns.sh
+!scripts/two-client-smoke.sh
+!docker/
+!docker/linux-test.Dockerfile

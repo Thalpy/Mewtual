@@ -45,14 +45,18 @@ table with the commit that closed it.
   joiner's IP/timing and spends bandwidth, while invite recipients learn the host's stable device
   and transport identities plus candidate addresses. Opt-out refuses new forwards immediately,
   but cached/already-copied signed offers remain dial-visible until their short expiry. A malicious
-  member may sign an arbitrary *public* candidate: shape/total-dial caps bound the resulting scan
-  surface, but the signature does not prove address ownership or live reachability.
+  member may sign an arbitrary *public* candidate: canonical terminal-peer binding plus endpoint,
+  prefix, server and process caps bound the resulting scan surface, but the signature does not
+  prove address ownership or live reachability.
 - **Two-way replies authenticate possession of the bearer invite, not a person.** Candidates are
   public direct literals, capped at four and live for at most 60 seconds from receipt. Every callback
   contact proves the invite-derived reply channel before seeing the invite/KeyPackage; replacing a
   different joiner needs confirmation. Anyone who obtained the original invite can still form a
   valid reply or redeem it. Both apps must remain open during an overlapping window, and symmetric
-  NAT/CGNAT can still make punching impossible.
+  NAT/CGNAT can still make punching impossible. Each callback socket pass spends the shared
+  endpoint budget; proof retries use a connected-only actor command, so a proof queued before the
+  first connection completes can still use that live connection but cannot consult the ordinary
+  recent-peer cache and silently redial after the scheduler denied a new socket attempt.
 - **The local router is trusted only for a mapping candidate.** UPnP/PCP/NAT-PMP and PCPv6 firewall
   pinholes can expose this app's stable TCP and UDP/QUIC listeners and can return a wrong or stale
   public socket. PCPv6 accepts only a request-matched Global Unicast result from the exact scoped
@@ -64,7 +68,34 @@ table with the commit that closed it.
   until that grant expires. Publishing a global IPv6 privacy address also makes that
   device/address visible to invite recipients, peers and the configured AutoNAT observer.
 - **Discovery retries are availability aids, not proof of presence.** The current member roster and
-  self-signature gate every cached record, while the common discovery policy caps outbound dials.
+  self-signature gate every cached record. Every route accepted from PEX/cache/rendezvous is parsed
+  by one canonical grammar, must terminate in the exact signed/discovered transport peer, and is
+  revalidated immediately before submission; the network actor refuses a peer-less dial instead
+  of falling back to `Swarm::dial(address)`. A signature authenticates who chose a public socket,
+  not ownership of that socket, so the local policy charges every address and one desktop-owned
+  scheduler caps process, server, canonical Phase-0 peer, attempt, and IPv4 `/24`/IPv6 `/48`
+  dial-command submissions.
+  The parser embeds the principal into the opaque endpoint, preventing cache, rendezvous, and
+  pre-join callers from selecting different byte representations for the same transport. Direct
+  attempt/prefix/process keys do not include descriptor sequence or terminal PeerId, preventing
+  those rotations from resetting the main scanner bounds. Relay attempts are keyed by relay and
+  terminal target so unrelated circuits sharing a relay do not consume one two-attempt bucket; the
+  relay host is instead bounded by prefix and process caps. Scheduler state is bounded and transient;
+  restart resets it. It accounts submitted dial commands rather than actor-confirmed socket starts,
+  and relay outer sockets have no separate exact-socket permit. Discovery endpoint permits are now
+  actor-consumed, single-use, deadline-checked, and accounting-generation-bound. Reservation and
+  commit share one injected monotonic clock; queued work cannot start after its window merely because
+  no later reservation rolled the counters. Cancellation after command enqueue cannot refund queued
+  work; actor-owned connected, member-duplicate, and pending-infrastructure checks refund before
+  commit; and a late old-window drop cannot decrement current counters. A process-wide
+  in-flight/concurrency lease remains future hardening.
+  Direct routes carried by companion grants use the same canonical invite policy, must name one
+  unambiguous contact, and spend this process budget across every grant in a bundle. Pre-join
+  rendezvous uses at most two validated seeds so infrastructure routes cannot consume the entire
+  per-server window before the actual inviter route.
+  The sync classifier refuses DNS and dangerous local/private/transitional ranges but deliberately
+  retains non-routed documentation/benchmark literals for deterministic tests; such a record can
+  waste only bounded retry tokens and is not proof of a live public route.
   Failed current epochs retry with monotonic exponential backoff and jitter; a newly signed epoch
   is tried immediately. Each discovery pass also asks the local kernel which IPv4/IPv6 source it
   would route toward documentation-only destinations (UDP `connect` sends no packet), then
@@ -76,10 +107,165 @@ table with the commit that closed it.
   but not the metadata/connection cost of probing its new holder. PEX success proves one live
   member connection at that moment; failure means only “not reachable from this device by this
   path,” never offline, removed, or malicious.
+- **Typed member-route health describes a self-asserted claimed peer.** A member's device signature
+  authenticates the `PeerDescriptor` fields it chose; it does not prove control of the transport
+  key named in `peer_id`. A malicious member can claim an unrelated already-connected peer and
+  make its own row inherit that peer's current coarse path evidence. The backend therefore uses
+  `ClaimedPeer*` health variants, exports `binding=self_asserted`, attaches observations only to
+  the signer/member's own row, clears history when the claimed transport identity is replaced or
+  removed, and the UI preserves the caveat. A fresher address epoch for the same stable transport
+  keeps that peer-scoped history; it is still labelled historical and carries no address. This is
+  diagnostic evidence, never authorization, membership proof, “online,” or
+  public reachability. The implemented reciprocal-dial repair is not a device↔transport dual-key
+  challenge and does not strengthen it; a future explicit proof is required. Raw active snapshots and retained history are capped, deduplicated, session-only,
+  monotonic-aged, and hidden after 24 hours. Transport churn can still backpressure the actor's
+  bounded event queue; connection limits and duplicate-close suppression bound amplification but
+  do not make it free. Unclaimed transport peers do not invalidate the member-only UI projection.
+  A dial-scheduler row proves only that a policy-approved batch was submitted, not that every
+  candidate reached the transport or failed, and the UI does not infer outbound IPv6 capability
+  from inbound/public candidate observations. Current switchboards forward admission only and are
+  not presented as a post-join repair path. Operational availability instead uses request-bound
+  signed catch-up proof. That transient cache retains the current roster `DeviceId` that answered
+  on each peer connection, so a removal prunes the departed signer without invalidating unaffected
+  live member paths; every later request still authenticates independently.
+- **Member-assisted repair is bounded signalling, not delegation of authority or traffic.** A
+  helper answers SWIM-style probes only from its current session-proven connection table and never
+  dials the target for a probe. Forwarding requires a current authenticated requester, exact
+  current requester/target descriptor references, live proven paths to both, a short expiry and a
+  per-device budget. The helper signs the original frame and queues connected-only delivery so an
+  A→C→B cycle cannot nest actor waits. The target rechecks roster, descriptors, helper proof,
+  signature, replay and rate limits, then submits at most two direct routes through the ordinary
+  discovery and process scheduler. A descriptor replacement/removal cancels pending work; already
+  submitted transport dials cannot be recalled. Signed negatives create only time-bounded
+  suspicion and never change presence or MLS membership. The control plane reveals attempted peer
+  pairs/timing to the selected helper, but no plaintext; ordinary participation does not make that
+  helper a public listener or general relay.
 - **The desktop webview is trusted only while the UI session is unlocked.** An explicit lock keeps
   native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
   the main-window capability reduce injection reach; the native command gate is the enforcement
   layer, not the fact that Svelte hid or cleared a control.
+- **Diagnostics have separate local-capture and public-disclosure boundaries.** Safe capture
+  destructively replaces literal addresses, arbitrary runtime prose, runtime field names, and
+  non-allowlisted targets before bounded ring storage; Enhanced and Full intentionally retain more
+  local detail and still require review before sharing. Webview-origin trace ids are normalized
+  under the process-local diagnostic salt; a native trace crossing back through the renderer is
+  accepted unchanged only with its session/trace-bound proof, which is never stored or rendered.
+  The optional raw debug file is a different sink and does not pass through Safe admission. Any
+  native tracing or frontend console/error value that passes its target/level filter can reach disk,
+  including names, message fragments, paths, URLs, tokens, serialized objects, and stack traces.
+  Its size/rate bounds are availability and retention controls, not a privacy filter; the user must
+  inspect the actual file before sharing it.
+  After Tauri decodes an invoke body, structured UI commands retain at most 256 events and 32 fields
+  per event. This does not impose a byte cap on Tauri's already-materialized JSON request: a compromised unlocked
+  webview can still spend native parsing time/memory with an oversized request body, so a transport-
+  level command payload cap remains an availability hardening item. An unlocked or compromised webview may ask
+  native code to open the fixed public-diagnostics issue, but supplies no report, title, or URL:
+  native code renders its closed allowlist, validates it, constructs the bounded tracker URL, and
+  launches that exact value. A truncated URL does not claim the later clipboard attempt succeeded;
+  the UI reports copy success only when the clipboard promise resolves. Ordinary user-authored
+  feedback remains a separate exact-tracker launcher path and is not presented as automatic safe
+  diagnostics.
+- **Delivery receipts prove receipt by a member device, not attention by a person.** Only a newly
+  applied, signature-verified op can queue a receipt, and it is sent as a connected-only
+  member-authenticated request. The author records it only when its exact document/change hash is
+  already in the bounded recent-target set; arbitrary hashes, duplicates and unauthenticated
+  frames cannot allocate confirmation state. A recipient can withhold receipts or a modified
+  current member can claim receipt without displaying content, so the UI says delivered/held and
+  never read. Receipt traffic adds message-timing metadata to peers already participating in the
+  encrypted group; it is not broadcast outside the group.
+- **Adaptive stream resolution reveals only a coarse call preference.** A call participant sends
+  one of four height buckets, not its exact window, monitor dimensions, or pixel ratio. The sender
+  treats it as an advisory upper bound and independently caps each WebRTC encoding. Screen tracks
+  stay parked until resolution, bitrate and frame-rate parameters apply; rejection pauses the edge
+  or stops sharing if parking fails. A malicious
+  receiver can request 4K but cannot raise the sender above the sender's own capture/bitrate cap.
+  H.265 and other efficient codecs remain runtime-negotiated capabilities, not security
+  guarantees. WebRTC encryption protects media in transit, while endpoint capture, decoding and
+  the who-is-watching/timing/bitrate metadata remain trusted-endpoint and traffic-analysis risks.
+  Shared audio is off by default. Surface audio is whatever the platform chooser grants and can
+  accidentally include Mewtual's own playback; separate sources require a fresh chooser grant per
+  source/session, discard the picked picture, and mix only their audio into one WebRTC track. A
+  bounded 0--200% master and bounded per-source gains change that shared track only; overlapping
+  boosts can clip and never grant a new capture source. At most eight explicit application-audio
+  grants can be live, and the graph/output track is released when the last grant ends. The call microphone is a separate sender. The
+  WebView/OS decides whether window/application audio is available, so this is not an OBS-equivalent
+  native process-capture guarantee.
+- **A shared file is authenticated bytes, not trusted content.** Explicit save streams into a
+  non-overwriting `.part`, checks the declared size and whole-file content address, sanitizes the
+  peer-provided name to one leaf, atomically publishes only after verification, and reveals it in
+  the file manager without executing it or invoking a shell. This blocks path/argument injection,
+  overwrite races, corrupt-provider substitution and automatic execution; it does **not** make the
+  payload benign or protect an external application the user later opens it with from its own
+  parser vulnerabilities. Inline image/video/audio loads through a CSP-limited, `nosniff`,
+  range-bounded custom scheme but is still parsed by the platform WebView/media stack. The scheme
+  emits a body only when a bounded container signature matches the exact allowlisted MIME; SVG,
+  mismatch and unknown inputs receive a bodyless denial because an octet-stream body may still be
+  media-sniffed. Cached heads/chunks bind to the exact uniquely resolved current manifest rather
+  than only the member-claimed plaintext CID. Cache access and the synchronous URI-responder
+  publication are generation-gated, so a disk/network read that finishes after explicit lock
+  cannot refill plaintext caches, reveal a stale size, or publish its already-built body. Storage
+  inventory separately authenticates every exact encoded chunk reference and joins verdicts to an
+  atomic manifest/listing snapshot. More than four distinct exact references for one ciphertext
+  CID makes that CID and its dependent manifests unreadable without attempting unbounded repeated
+  decryption. Native cache publication is additionally bound to the process-local server
+  incarnation, while webview continuations require their exact still-unlocked view. A plaintext
+  export's verified staging rename and reveal hold the same exact unlock-generation commit guard,
+  so an older export cannot become visible after lock or a later unlock. Before a
+  server is founded/joined, the user chooses local on-demand, specific-member, or everyone trust;
+  the bounded per-server policy is vault-sealed. On-demand is the default. It leaves passive shared
+  media, custom emoji, card thumbnails, event images and call-jukebox tracks inert;
+  specific-member trust checks the file's authenticated full device identity. The short 32-bit
+  fingerprint remains display-only. An explicit Load/Play/Open/Download click overrides the
+  passive-fetch policy. Bytes fetched into the blob store occupy one authenticated,
+  XChaCha20-Poly1305-sealed vault copy; explicit export creates a separate plaintext Downloads copy.
+  This reduces unsolicited decoder exposure but does **not** sandbox a decoder or make a trusted
+  member's file benign. Automatic whole-share mirroring remains unimplemented because the sealing
+  disk store has no quota; enabling it first would permit storage exhaustion even by an opted-in
+  trusted member.
+  Third-party HTTP(S) images always require a click, even under everyone mode: they have no file
+  attestation, disclose the client address, and may target loopback/private-network services.
+- **A sealed local reconnect route is a narrow continuation of a completed direct join, not LAN
+  discovery or durable presence.** After direct admission, the joining installation may seal at
+  most two literal-IP TCP/QUIC routes to the named inviter that were actually used by an outbound
+  Noise-authenticated connection. Inbound ephemeral ports, DNS, relay circuits, untried invite
+  candidates, WebSocket wrappers, and admission-only helper/reply/switchboard contacts are not
+  retained. Durable `ReconnectPolicy` provenance prevents a new non-direct admission with no route
+  from later being mistaken for migration consent. On every later dial the sync layer reparses the
+  terminal peer binding, requires exactly one current roster member's signed descriptor to claim
+  that transport peer, rejects removed/replaced/ambiguous claims, and charges the shared
+  process/server/peer/endpoint/prefix budget. Direct admission therefore makes one bounded
+  best-effort PEX request while the authenticated connection is still live, so an immediate
+  post-join snapshot normally contains the inviter descriptor required by reload.
+
+  The route remains self-asserted at the device-to-transport boundary: Noise proves control of the
+  transport key, while the member's signed descriptor is the only link from that key to a device.
+  It can be stale or unreachable and does not prove the person is online. The private address is
+  vault-sealed, never put into PEX/rendezvous/the UI, and reconnect dial logs expose only address
+  family and transport shape. Broader same-LAN discovery remains absent because naive mDNS would
+  disclose peer identities and create an unauthenticated address-injection surface. Pre-v3 records
+  decode as `LegacyPending` and can learn this hint only after one successful overlap in a group
+  with exactly one other member and one unique signed transport claim. That one-time migration
+  accepts private or loopback routes only, so public rendezvous and ambiguous/helper-bearing groups
+  do not become durable by accident. If both peers are already isolated with no old hint, no local
+  state can reconstruct the missing address; one fresh invite, rendezvous/relay path, or future mDNS
+  discovery is still needed.
+
+- **An out-of-band member recovery code is narrow dial consent, not new membership or route
+  proof.** The code is group-bound, signed by a device that must still be in the current MLS roster,
+  expires after ten minutes, and contains at most four terminal-peer-bound literal-IP TCP/QUIC
+  routes. DNS, relay, WebSocket, unsafe host classes, foreign peer ids, wrong groups, future,
+  expired and self codes fail before dialing; accepted candidates spend the shared endpoint,
+  prefix, peer, server and process scheduler. Private/loopback addresses are intentionally allowed
+  because the user explicitly transports the code and same-LAN address churn is the recovery case.
+  The signer's exact transport peer must also be the unique peer in that device's current signed
+  record; re-signing another member's peer is rejected. The signer can still direct bounded attempts
+  at sockets it does not own, and the code exposes its candidate addresses to the recipient.
+  Applying seals only expiring permission before dialing and preserves the prior proven contact.
+  No pasted route becomes durable until outbound Noise authentication proves the peer; bounded
+  process-local success evidence survives a short close edge long enough for the vault worker, but
+  still requires the pending/authorized peer and a unique current roster claim. Expiry is rechecked
+  under the final write lock. A code cannot repair an expired first-contact reply or make two
+  NAT-isolated devices reachable without some viable route.
 
 ## Protocol- / crypto-enforced (a modified client CANNOT bypass)
 
@@ -94,9 +280,10 @@ table with the commit that closed it.
 | Forward secrecy on removal | A removal is a real MLS Remove commit → epoch advance + routing-secret rotation; the removed member is genuinely cut off | `catcoms-sync` removal path |
 | Blob integrity | Content-addressed; served bytes are re-hashed against the requested CID before storing (no cache poisoning) | `catcoms-sync::request_blob` |
 | File-at-rest encryption | Per-group file-wrap key; sealed at rest under the vault key | `catcoms-storage` (Phase 9h) |
-| UI continuity and backup confidentiality | Drafts/read positions are vault-sealed and bounded; offline backup copies only the already-sealed vault tree without following links. Export creates another offline guessing target and exposes filesystem metadata; it does not weaken record encryption | `catcoms-app::ServerStore`; desktop `create_backup` |
-| Vault-secret rotation | The current wrapper is authenticated; the same root DEK is atomically rewrapped with a fresh Argon2 salt/nonce, so no half-rekeyed data tree is possible | `catcoms-storage::change_vault_passphrase`; desktop `change_vault_secret` |
-| Desktop explicit-lock IPC boundary | Every non-bootstrap Tauri command requires both a mounted vault and an open UI session. Lock atomically saves bounded continuity state then closes the command boundary; actor events are dropped and long downloads re-check while actors continue native background network/persistence work | desktop `require_unlocked_session`; `lock_session`; `forward_events` |
+| UI continuity and backup confidentiality | Drafts/read positions are vault-sealed and bounded; sealed records use destination-specific create-new siblings, file sync, rename and parent-directory sync on Unix, so concurrent record types cannot alias, pre-planted staging symlinks are rejected, and abrupt termination exposes a complete predecessor or replacement rather than a partial record. A failed post-rename directory flush is disclosed as committed-but-not-durable. Offline backup copies only the already-sealed vault tree without following links. Export creates another offline guessing target and exposes filesystem metadata; it does not weaken record encryption. Catastrophic filesystem/hardware failure remains outside the guarantee. | `catcoms-app::ServerStore`; desktop `create_backup` |
+| Vault creation and secret rotation | A non-blocking OS-backed sibling lock serializes first creation and rewrap across processes; contention returns `VaultBusy` for retry instead of hanging behind a suspended process. The current wrapper is authenticated; the same root DEK is published through a unique create-new, file-synced staging sibling with rename and Unix directory sync, so concurrent app instances cannot return mismatched first-run DEKs or both report a conflicting rewrap. New/replacement secrets are capped at 4096 bytes. A v1 wrapper with a legacy 4097..65536-byte secret receives one bounded compatibility open and is atomically migrated to fixed-input v2; larger inputs are rejected. This intentionally loses downgrade compatibility with v1-only builds, not ciphertext confidentiality. Wrapper reads accept exactly 89 bytes and never allocate from a hostile file length. | `catcoms-storage::{open_or_create_vault,change_vault_passphrase}`; desktop `change_vault_secret` |
+| Vault single-writer lifetime | `ServerStore::open` acquires a separate non-blocking OS session lock before unsealing and retains it until drop/process exit. A second desktop cannot start duplicate MLS, registry, invite-ledger or transport writers from the same snapshot; it receives `VaultBusy`. Normal exit and abort release the OS lock. Explicit UI lock keeps the native mount but closes IPC; re-unlock performs verify-only authentication against `vault.bin`, and a wrong secret cannot reopen the session. This is same-host installation exclusion, not distributed consensus or protection from malware with the user's OS authority. | `catcoms-storage::{acquire_vault_session,verify_vault_passphrase}`; `catcoms-app::ServerStore`; desktop `unlock` |
+| Desktop explicit-lock IPC boundary | Every non-bootstrap Tauri command requires both a mounted vault and an open UI session. Lock atomically saves bounded continuity state then closes the command boundary; actor events are dropped, late frontend/native cache publications are exact-generation gated, and plaintext export publication holds the exact-generation commit guard while actors continue native background network/persistence work | desktop `require_unlocked_session`; `require_ui_session_generation`; `lock_session`; `forward_events` |
 | Moderation-record attribution and field integrity | Each event/vote has a canonical group-bound Ed25519 signature; the reader verifies signer fingerprint and linked-device origin, so records cannot be altered or replayed into another server without detection | `catcoms-app::moderation` |
 | Path traversal | Virtual file paths normalized (drops `.`/`..`/empty) so a path can't escape the share | `catcoms-app::normalize_path` |
 

@@ -9,10 +9,12 @@
 //! every forwarded event is tagged with its server id so the UI routes it correctly.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::future::Future;
+use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -20,28 +22,37 @@ use base64::Engine;
 use catcoms_app::store::MAX_UI_STATE_BYTES;
 use catcoms_app::{
     channel_id, spawn, AppEvent, Cid, CidHasher, DeviceId, FileListing, FileRef, InviteJoinPlan,
-    Livery, PairingLedger, PairingSecrets, PerServerGrant, Profile, Server, ServerActor, ServerNet,
-    ServerRecord, ServerStore, StorageHealth, CHUNK_BYTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES,
-    MAX_FILE_BYTES, MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
+    Livery, PairingLedger, PairingSecrets, PerServerGrant, Profile, ReconnectPolicy,
+    ReconnectRoute, Server, ServerActor, ServerNet, ServerRecord, ServerStore, StorageHealth,
+    StorageSnapshot, CHUNK_BYTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES,
+    MAX_RECONNECT_ROUTES, MAX_RECONNECT_ROUTE_BYTES, MAX_SERVER_CURSOR_BYTES,
+    MAX_SERVER_ICON_BYTES,
 };
-use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
+use catcoms_discovery::{
+    parse_peer_dial_route, Candidate, DialEndpoint, DiscoveryPolicy, EndpointDialScheduler,
+    PolicyConfig, RouteHost, Source,
+};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{
     addr_is_globally_routable, addr_is_loopback, addr_is_private, addr_is_undialable,
     keypair_from_seed, phase0_peer_id, target_peer_in_multiaddr, validate_invite_rendezvous_addrs,
-    validate_operator_rendezvous_addrs, AutoNatResult, AutoNatSnapshot, JoinReply, MeshHandle,
-    MeshObservationSnapshot, MeshService, PortMappingMechanism, PortMappingSnapshot,
-    PortMappingTransport, RelayAddressSnapshot, RendezvousTarget,
+    validate_operator_rendezvous_addrs, AuthenticatedDialRoute, AutoNatResult, AutoNatSnapshot,
+    JoinReply, MeshHandle, MeshObservationSnapshot, MeshService, PortMappingMechanism,
+    PortMappingSnapshot, PortMappingTransport, RelayAddressSnapshot, RendezvousTarget,
 };
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
-use catcoms_sync::{join_namespace, JOIN_REPLY_PROOF_KIND};
+use catcoms_sync::{fingerprint, join_namespace, PreOwnerConnectionHandoff, JOIN_REPLY_PROOF_KIND};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{http, AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
 use zeroize::Zeroizing;
+
+mod errors;
+mod tasks;
+use errors::{codes, AppError, ErrorCode};
 
 /// Independent reasons an exact address belongs in this device's aggregate bootstrap set. The
 /// same IPv6 socket is commonly both a raw interface route and a PCP firewall pinhole; removing
@@ -64,6 +75,10 @@ struct InterfaceRouteIdentity {
 /// its display name (kept here too so the registry can be re-sealed on disk, Phase 9f).
 struct ServerEntry {
     actor: ServerActor,
+    /// Process-local incarnation of this registry row. Persisted ids are intentionally reused on
+    /// reload, so the id alone cannot stop a scan begun for a removed actor from populating a new
+    /// actor's cache after that id is installed again.
+    instance: u64,
     /// Stable MLS identity checks for old signed invite permits embedded in two-way reply codes.
     group_id: Vec<u8>,
     device_id: DeviceId,
@@ -109,17 +124,17 @@ struct ServerEntry {
 struct MediaChunk {
     server: u64,
     cid: String,
+    manifest_version: [u8; 32],
     index: usize,
     bytes: Arc<Vec<u8>>,
 }
 
-/// A file's size and declared type, remembered so the media protocol asks the actor for them once
-/// per track instead of once per response. Neither can change for a content address, so there is
-/// nothing here to invalidate.
+/// A file's size and validated type, bound to the exact current encrypted chunk manifest.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct MediaHead {
     server: u64,
     cid: String,
+    manifest_version: [u8; 32],
     total_size: u64,
     mime: String,
 }
@@ -128,6 +143,7 @@ struct MediaHead {
 /// and a short seek back, and it is 16 MiB of plaintext: the cache exists to keep the actor free,
 /// not to hold the film.
 const MEDIA_CACHE_CHUNKS: usize = 2;
+const STORAGE_SCAN_STRIPES: usize = 16;
 /// How many file heads stay remembered. Tiny (two integers and a mime each), and more than one
 /// because a queue moves between tracks.
 const MEDIA_HEAD_ENTRIES: usize = 8;
@@ -142,11 +158,15 @@ fn media_cache_take(
     cache: &mut Vec<MediaChunk>,
     server: u64,
     cid: &str,
+    manifest_version: [u8; 32],
     index: usize,
 ) -> Option<Arc<Vec<u8>>> {
-    let at = cache
-        .iter()
-        .position(|c| c.server == server && c.cid == cid && c.index == index)?;
+    let at = cache.iter().position(|c| {
+        c.server == server
+            && c.cid == cid
+            && c.manifest_version == manifest_version
+            && c.index == index
+    })?;
     let hit = cache.remove(at);
     let bytes = Arc::clone(&hit.bytes);
     cache.push(hit);
@@ -157,13 +177,14 @@ fn media_cache_take(
 fn media_cache_put(cache: &mut Vec<MediaChunk>, chunk: MediaChunk) {
     // A different track displaces the whole cache: nothing about the old one will be asked for
     // again, and holding two tracks' plaintext to serve one is the wrong trade.
-    if cache
-        .iter()
-        .any(|c| c.cid != chunk.cid || c.server != chunk.server)
-    {
+    if cache.iter().any(|c| {
+        c.cid != chunk.cid
+            || c.server != chunk.server
+            || c.manifest_version != chunk.manifest_version
+    }) {
         cache.clear();
     }
-    cache.retain(|c| c.index != chunk.index);
+    cache.retain(|c| c.index != chunk.index || c.manifest_version != chunk.manifest_version);
     cache.push(chunk);
     while cache.len() > MEDIA_CACHE_CHUNKS {
         cache.remove(0);
@@ -205,6 +226,18 @@ impl NetworkChangeSignal {
 #[derive(Default)]
 struct AppState {
     servers: Mutex<HashMap<u64, ServerEntry>>,
+    /// Monotonic process-local source for [`ServerEntry::instance`]. Wrapping would require more
+    /// actor installations than the process can perform in its lifetime; zero has no special
+    /// meaning and is permitted after that theoretical wrap.
+    next_server_instance: AtomicU64,
+    /// One endpoint budget shared by every server swarm and pre-join discovery attempt in this
+    /// desktop process. Per-server ranking remains inside each actor; this is the final bound on
+    /// actual socket fan-out across groups.
+    endpoint_dials: EndpointDialScheduler,
+    /// Per-server single-flight wake signals for sealing newly authenticated recovery routes.
+    /// This uses a synchronous mutex only to clone/notify a `watch::Sender`; no actor/store await
+    /// may ever run in the event consumer, or the bounded actor event channel can deadlock.
+    reconnect_capture_signals: StdMutex<HashMap<u64, watch::Sender<u64>>>,
     /// The last few decrypted media chunks. Small and deliberately not an LRU: playback is
     /// sequential, so "the current chunk and the one before it" covers the straddle at a chunk
     /// boundary and a short seek backwards, which is all the locality there is to exploit.
@@ -227,10 +260,25 @@ struct AppState {
     /// dropping the entry (call end, or the app closing) is what ends that route.
     media_mappings: Mutex<HashMap<u16, catcoms_net::MediaPortMapping>>,
     next_id: Mutex<u64>,
+    /// Serialize first mount and already-mounted authentication. A duplicate frontend unlock must
+    /// never race two reloads, while an explicitly UI-locked session must authenticate against
+    /// the existing mount rather than deadlocking itself on the lifetime vault lock.
+    vault_mount: Mutex<()>,
     store: Mutex<Option<ServerStore>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
     session_resumable: Mutex<bool>,
+    /// Set before an explicit lock performs any awaited cleanup. Commands check this as well as
+    /// `session_resumable`, so new IPC cannot slip through while the lock is waiting to serialize
+    /// against an older command's final native commit.
+    session_lock_requested: AtomicBool,
+    /// Every explicit lock invalidates work that began in an earlier UI authorization epoch.
+    /// Long-running joins carry the captured value to both their reply event and durable commit.
+    ui_session_generation: AtomicU64,
+    /// Orders the externally-visible parts of a long command against explicit lock completion.
+    /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
+    /// reply event or server registration to occur after `lock_session` itself has completed.
+    ui_session_commit: Mutex<()>,
     /// The **new device's** half of an in-flight grant ceremony (multi-device M2): the device
     /// identity + single-use nonce minted by `pairing_begin`, held until the grant bundle is
     /// pasted back. One slot; starting a new ceremony abandons any previous one; and, like
@@ -271,15 +319,39 @@ struct AppState {
     /// Connected peers' low-trust Identify observations of our outbound socket. Diagnostic only;
     /// these are never folded into bootstrap, rendezvous registration or AutoNAT candidates.
     mesh_observations: Mutex<HashMap<u64, Vec<String>>>,
-    /// One integrity/inventory scan per server per process session. Health is a point-in-time
+    /// One integrity/inventory scan per server per unlocked UI session. Health is a point-in-time
     /// observation, so file events deliberately do not invalidate it behind the user's back;
-    /// explicit authenticated repair is the only operation that replaces a cached report.
-    storage_health: Mutex<HashMap<u64, UiStorageHealth>>,
+    /// explicit lock clears the metadata, and repair replaces it after re-verification.
+    storage_health: Mutex<HashMap<u64, CachedStorageHealth>>,
+    /// Per-server singleflight gates for expensive storage scans/repairs. These are deliberately
+    /// separate from the plaintext result cache: explicit lock must clear that cache immediately,
+    /// without waiting for local decryption or peer-fetch timeouts to finish.
+    storage_scans: StorageScanGates,
     /// One native monitor fans a coalesced generation out to every per-server discovery loop.
     /// Polling remains active, so monitor initialization failure affects latency, not correctness.
     network_changes: NetworkChangeSignal,
     /// Streamed uploads in flight, keyed by `(server, upload id)`. See [`PendingUpload`].
     uploads: Mutex<HashMap<UploadKey, PendingUpload>>,
+}
+
+/// Fixed-size keyed singleflight. Hash collisions only serialize two explicit scans; unlike a map
+/// keyed by webview-provided server ids, this cannot become an unbounded allocation surface.
+struct StorageScanGates {
+    stripes: [Mutex<()>; STORAGE_SCAN_STRIPES],
+}
+
+impl Default for StorageScanGates {
+    fn default() -> Self {
+        Self {
+            stripes: std::array::from_fn(|_| Mutex::new(())),
+        }
+    }
+}
+
+impl StorageScanGates {
+    fn for_server(&self, server: u64) -> &Mutex<()> {
+        &self.stripes[(server as usize) % STORAGE_SCAN_STRIPES]
+    }
 }
 
 /// Identity of one streamed upload: the server, and a **backend-minted** generation token.
@@ -548,6 +620,24 @@ struct JoinReplyApplied {
     helper: bool,
 }
 
+/// A short-lived, member-signed route repair code. Unlike a join reply this can only reconnect a
+/// device that is already in the current roster; it cannot admit a new device or replace MLS
+/// membership state.
+#[derive(Debug, Clone, Serialize)]
+struct MemberRecoveryReady {
+    code: String,
+    expires_at_ms: u64,
+    candidate_count: usize,
+}
+
+/// Result of accepting a member recovery code. `submitted_routes` reports socket attempts, not a
+/// successful connection: the ordinary Noise and signed peer-record checks remain authoritative.
+#[derive(Debug, Clone, Serialize)]
+struct MemberRecoveryAppliedEvt {
+    fingerprint: String,
+    submitted_routes: usize,
+}
+
 /// Decode-only information shown before a pasted invite is allowed to contact standing helpers.
 /// Routes stay native-side: the webview learns only that the inviter endorsed a bounded fallback
 /// set and the privacy consequence of choosing it.
@@ -664,6 +754,12 @@ struct Connectivity {
     steps: Vec<DiagStep>,
     /// The last error, verbatim, so the user can copy exactly what the code said.
     last_error: String,
+    /// The trace this attempt belongs to, in the short form a person quotes.
+    ///
+    /// The panel and the diagnostic record used to be two accounts of the same minute with nothing
+    /// joining them, so relating one to the other meant matching wall-clock times by eye. This is
+    /// the join key, shown in the panel and stamped on every event the attempt produced.
+    trace: String,
 }
 
 #[derive(Serialize)]
@@ -691,29 +787,128 @@ struct PendingGrant {
 /// networking in the background, but that must not leave their plaintext projections callable by
 /// injected/stale frontend code behind the lock screen.
 async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
-    if *state.session_resumable.lock().await && state.store.lock().await.is_some() {
+    if state.session_lock_requested.load(Ordering::Acquire) {
+        return Err("the vault is locked".into());
+    }
+    if *state.session_resumable.lock().await
+        && state.store.lock().await.is_some()
+        && !state.session_lock_requested.load(Ordering::Acquire)
+    {
         Ok(())
     } else {
         Err("the vault is locked".into())
     }
 }
 
+/// Capture an unlocked UI epoch while serialized with the final phase of any older command.
+async fn unlocked_ui_session_generation(state: &AppState) -> Result<u64, String> {
+    let _commit = state.ui_session_commit.lock().await;
+    require_unlocked_session(state).await?;
+    Ok(state.ui_session_generation.load(Ordering::Acquire))
+}
+
+/// Permit one externally-visible step only if it still belongs to the UI session that began it.
+/// Holding the returned guard through the step orders it before a concurrently requested lock;
+/// the atomic request flag still makes all newly-started commands fail without waiting.
+async fn require_ui_session_generation(
+    state: &AppState,
+    expected: u64,
+) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+    let commit = state.ui_session_commit.lock().await;
+    require_unlocked_session(state).await?;
+    if state.ui_session_generation.load(Ordering::Acquire) != expected {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    Ok(commit)
+}
+
+/// Why a server's actor could not be handed over.
+///
+/// A typed answer rather than a sentence, because the two states ask opposite things of the user
+/// and a caller cannot tell them apart from a string without sniffing prose.
+///
+/// The bug this fixes: [`actor_of`] checks the lock and then reports every failure the same way, so
+/// a locked vault reached the user as `SERVER.ACTOR.UNAVAILABLE` with a `Restart` remediation. They
+/// were told to restart the application when what they needed to do was type their passphrase.
+/// `channel_target` a few hundred lines down had always got this right, which is the tell: the
+/// distinction was known and lost on the way through one helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActorLookup {
+    /// The vault is locked.
+    Locked,
+    /// No server with that id is open in this process.
+    ///
+    /// "Never opened" and "closed since" are one state here, deliberately: the registry cannot tell
+    /// them apart, and a code that claimed to would be guessing.
+    NotOpen,
+}
+
+impl ActorLookup {
+    fn code(self) -> ErrorCode {
+        match self {
+            ActorLookup::Locked => codes::SESSION_LOCKED,
+            ActorLookup::NotOpen => codes::SERVER_UNAVAILABLE,
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            ActorLookup::Locked => "the vault is locked",
+            ActorLookup::NotOpen => "unknown server",
+        }
+    }
+}
+
+impl std::fmt::Display for ActorLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+/// So the sixty-odd commands that return a bare string keep compiling, and keep saying what they
+/// said. `?` applies this conversion for them; the typed callers match on the value instead.
+impl From<ActorLookup> for String {
+    fn from(failure: ActorLookup) -> String {
+        failure.message().to_string()
+    }
+}
+
 /// Internal actor lookup used by persistence/reload paths which must keep operating while the UI
 /// is locked. Native command handlers use [`actor_of`] so the webview cannot cross that boundary.
-async fn actor_of_unchecked(state: &AppState, server: u64) -> Result<ServerActor, String> {
+async fn actor_of_unchecked(state: &AppState, server: u64) -> Result<ServerActor, ActorLookup> {
     state
         .servers
         .lock()
         .await
         .get(&server)
         .map(|e| e.actor.clone())
-        .ok_or_else(|| "unknown server".to_string())
+        .ok_or(ActorLookup::NotOpen)
 }
 
 /// Clone out the actor for an unlocked webview command (never holding either lock across actor I/O).
-async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> {
-    require_unlocked_session(state).await?;
+async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, ActorLookup> {
+    require_unlocked_session(state)
+        .await
+        .map_err(|_| ActorLookup::Locked)?;
     actor_of_unchecked(state, server).await
+}
+
+/// Clone the actor together with its process-local registry incarnation. Long operations must
+/// carry both: a persisted server id may legitimately be removed and reinstalled in one process.
+async fn actor_instance_of(
+    state: &AppState,
+    server: u64,
+) -> Result<(ServerActor, u64), ActorLookup> {
+    require_unlocked_session(state)
+        .await
+        .map_err(|_| ActorLookup::Locked)?;
+    state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|entry| (entry.actor.clone(), entry.instance))
+        .ok_or(ActorLookup::NotOpen)
 }
 
 /// Clone the actor and DM marker together. Moderation is server-wide and intentionally absent
@@ -817,6 +1012,8 @@ fn ui_message(m: catcoms_app::ChatMessage) -> UiMessage {
 #[derive(Serialize, Clone)]
 struct UiMember {
     fingerprint: String,
+    /// Full device id for authorization; the short fingerprint is display-only.
+    identity: String,
     you: bool,
 }
 
@@ -911,11 +1108,19 @@ struct UiFile {
     mime: String,
     cid: String,
     author: String,
+    /// Full attested signer identity. Empty for unsigned/invalid legacy listings.
+    author_identity: String,
+    /// Cryptographic group-bound proof for the uploader label; legacy listings are false.
+    author_verified: bool,
     path: String,
     /// Chunks of this file already held locally (availability indicator).
     held: u32,
     /// Total chunks the file is split into.
     total: u32,
+    /// Internal join key for the exact actor snapshot. The webview neither needs nor gets this
+    /// digest; it only sees whether the native verified-inventory policy admitted the row.
+    #[serde(skip_serializing)]
+    manifest_version: [u8; 32],
     /// When this listing drops out of circulation, ms epoch. `null` means either "keep forever"
     /// or "never recorded"; `expires_known` tells those apart. Recorded metadata only: nothing
     /// enforces it yet (see `catcoms_app::FileExpiry`).
@@ -941,8 +1146,8 @@ struct UiFileUsage {
     pinned: bool,
 }
 
-/// The shared file list plus whether any peer is currently reachable to fetch from; the payload
-/// of `get_files`, so the UI can color each file by availability in one round-trip.
+/// The shared file list plus whether a live peer previously proved it could serve authenticated
+/// catch-up; the payload of `get_files`, so the UI can color files conservatively in one trip.
 #[derive(Serialize, Clone)]
 struct FilesPayload {
     files: Vec<UiFile>,
@@ -970,6 +1175,15 @@ struct UiStorageHealth {
     pinned_local_estimated_bytes: u64,
     categories: Vec<UiStorageCategory>,
     largest_files: Vec<UiStorageFile>,
+    /// Fully local files whose managed copy remains sealed under the vault. Exporting one creates
+    /// a separate plaintext copy; it never mutates this inventory row in place.
+    local_files: Vec<UiStorageFile>,
+}
+
+#[derive(Clone)]
+struct CachedStorageHealth {
+    server_instance: u64,
+    report: UiStorageHealth,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -1008,9 +1222,12 @@ fn ui_file(listing: FileListing) -> UiFile {
         mime: listing.entry.mime,
         cid: hex::encode(&listing.entry.cid),
         author: listing.entry.author,
+        author_identity: listing.entry.author_identity,
+        author_verified: listing.entry.author_verified,
         path: listing.entry.path,
         held: listing.held_chunks,
         total: listing.total_chunks,
+        manifest_version: listing.manifest_version,
         expires: listing.entry.expires.deadline_ms(),
         expires_known: listing.entry.expires.is_recorded(),
     }
@@ -1062,11 +1279,22 @@ fn build_storage_report(
     checked_at_ms: u64,
 ) -> UiStorageHealth {
     let mut unique = HashMap::<String, UiFile>::new();
+    let mut ambiguous = HashSet::<String>::new();
     for file in files {
-        unique.entry(file.cid.clone()).or_insert(file);
+        match unique.entry(file.cid.clone()) {
+            std::collections::hash_map::Entry::Occupied(existing) => {
+                if existing.get().manifest_version != file.manifest_version {
+                    ambiguous.insert(file.cid);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(file);
+            }
+        }
     }
     let mut category_map = HashMap::<String, UiStorageCategory>::new();
     let mut largest_files = Vec::with_capacity(unique.len());
+    let mut local_files = Vec::new();
     let mut logical_bytes = 0u64;
     let mut local_estimated_bytes = 0u64;
     let mut pinned_files = 0usize;
@@ -1096,7 +1324,7 @@ fn build_storage_report(
         row.logical_bytes = row.logical_bytes.saturating_add(file.size);
         row.local_estimated_bytes = row.local_estimated_bytes.saturating_add(local);
         row.pinned_files += usize::from(is_pinned);
-        largest_files.push(UiStorageFile {
+        let inventory_file = UiStorageFile {
             name: file.name.clone(),
             path: file.path.clone(),
             cid: file.cid.clone(),
@@ -1106,7 +1334,17 @@ fn build_storage_report(
             pinned: is_pinned,
             held: file.held,
             total: file.total,
-        });
+        };
+        if file.total > 0
+            && file.held == file.total
+            && !ambiguous.contains(&file.cid)
+            && health
+                .verified_manifest_versions
+                .contains(&file.manifest_version)
+        {
+            local_files.push(inventory_file.clone());
+        }
+        largest_files.push(inventory_file);
     }
     let order = ["Images", "Video", "Audio", "Documents", "Archives", "Other"];
     let mut categories: Vec<_> = category_map.into_values().collect();
@@ -1124,6 +1362,12 @@ fn build_storage_report(
             .then_with(|| a.cid.cmp(&b.cid))
     });
     largest_files.truncate(10);
+    local_files.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.cid.cmp(&b.cid))
+    });
     UiStorageHealth {
         listed_files: health.listed_files,
         referenced_chunks: health.referenced_chunks,
@@ -1142,19 +1386,19 @@ fn build_storage_report(
         pinned_local_estimated_bytes,
         categories,
         largest_files,
+        local_files,
     }
 }
 
 async fn storage_report(
     actor: &ServerActor,
-    health: StorageHealth,
+    snapshot: StorageSnapshot,
     checked_at_ms: u64,
 ) -> UiStorageHealth {
-    let view = actor.files_view().await;
     let pins = actor.wiki_pinned_cids().await.into_iter().collect();
     build_storage_report(
-        health,
-        view.files.into_iter().map(ui_file).collect(),
+        snapshot.health,
+        snapshot.files.files.into_iter().map(ui_file).collect(),
         &pins,
         checked_at_ms,
     )
@@ -1288,28 +1532,38 @@ struct DeliveryStateEvt {
     id: String,
     delivered: usize,
     reachable: usize,
-    /// Any transport peer connected at all. The only honest basis for "nothing can leave this
-    /// device": `reachable` resolves connections to members through signed peer records and can
-    /// read zero while ops are gossiping fine.
+    /// A live peer previously served roster-verified catch-up; self-asserted descriptor claims and
+    /// bare relay/rendezvous sockets do not count.
     any_peer: bool,
 }
 #[derive(Serialize, Clone)]
 struct DeliveryEvt {
     server: u64,
     channel: String,
+    revision: u64,
     states: Vec<DeliveryStateEvt>,
 }
 
-fn delivery_payload(states: Vec<catcoms_app::DeliveryState>) -> Vec<DeliveryStateEvt> {
-    states
-        .into_iter()
-        .map(|s| DeliveryStateEvt {
-            id: s.id,
-            delivered: s.delivered,
-            reachable: s.reachable,
-            any_peer: s.any_peer,
-        })
-        .collect()
+#[derive(Serialize, Clone)]
+struct DeliverySnapshotEvt {
+    revision: u64,
+    states: Vec<DeliveryStateEvt>,
+}
+
+fn delivery_payload(snapshot: catcoms_app::DeliverySnapshot) -> DeliverySnapshotEvt {
+    DeliverySnapshotEvt {
+        revision: snapshot.revision,
+        states: snapshot
+            .states
+            .into_iter()
+            .map(|s| DeliveryStateEvt {
+                id: s.id,
+                delivered: s.delivered,
+                reachable: s.reachable,
+                any_peer: s.any_peer,
+            })
+            .collect(),
+    }
 }
 
 /// Forward one server actor's event stream to the frontend, tagging each with `server`.
@@ -1331,6 +1585,10 @@ const DISCOVERY_JITTER_MS: u64 = 15_000;
 /// a freshly-founded server looking dead for up to a minute. A few seconds is enough to stop the
 /// servers in one process from ticking in unison.
 const DISCOVERY_START_SPREAD_MS: u64 = 5_000;
+/// One best-effort PEX request immediately after direct admission. This is what persists the
+/// inviter's signed device-to-transport claim before an immediate close/reopen; failure does not
+/// roll back an otherwise valid MLS join.
+const DIRECT_JOIN_PEX_MS: u64 = 3_000;
 /// Extra quiet window above the platform monitor's own short coalescing delay. DHCP, route and
 /// IPv6 privacy-address changes commonly arrive as a burst; publishing a signed peer-record epoch
 /// for every callback would waste sequence numbers and make members redial transient routes.
@@ -1389,7 +1647,9 @@ where
 /// poll in every discovery loop remains the portable correctness path.
 fn spawn_network_monitor(app: &AppHandle) {
     let signal = app.state::<AppState>().network_changes.clone();
-    tauri::async_runtime::spawn(async move {
+    // No rhythm declared: an interface that does not change is the ordinary case, so silence here
+    // means nothing happened rather than that nothing is watching.
+    supervise_detached("network_monitor", None, None, async move {
         let monitor = match netwatch::netmon::Monitor::new().await {
             Ok(monitor) => monitor,
             Err(error) => {
@@ -1442,12 +1702,12 @@ async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
     // protects it inside the net actor when the raw-interface owner is removed.
     for address in external_addrs(&removed) {
         if let Err(error) = mesh.remove_external_address(address.clone()).await {
-            eprintln!("interface refresh: could not withdraw {address}: {error}");
+            tracing::warn!(target: "catcoms_app", %address, %error, "REACH.INTERFACE.WITHDRAW_FAILED");
         }
     }
     for address in external_addrs(&added) {
         if let Err(error) = mesh.add_external_address(address.clone()).await {
-            eprintln!("interface refresh: could not advertise {address}: {error}");
+            tracing::warn!(target: "catcoms_app", %address, %error, "REACH.INTERFACE.ADVERTISE_FAILED");
         }
     }
 
@@ -1460,7 +1720,12 @@ async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
             diag.advertised = bootstrap;
         }
     }
-    let _ = app.emit("reachability-changed", server);
+    emit_tracked(
+        app,
+        "reachability-changed",
+        ServerEvt { server },
+        catcoms_diagnostics::TraceId::default(),
+    );
     true
 }
 
@@ -1472,10 +1737,21 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
     // first poll cannot be lost. The current startup sample is already authoritative; only future
     // generations wake this server early.
     let mut network_changes = app.state::<AppState>().network_changes.subscribe();
-    tokio::spawn(async move {
+    // Declared before the task starts, so the handle exists for the loop to beat on.
+    let watched = tasks::register(
+        "discovery_timer",
+        Some(server),
+        wall_ms(),
+        // This one does have a rhythm, and it is the rhythm that keeps peer records fresh. A
+        // discovery timer that has silently stopped looks exactly like a network that has gone
+        // quiet, and only one of those is a bug here.
+        Some(DISCOVERY_INTERVAL_SECS * 1_000 + DISCOVERY_JITTER_MS),
+    );
+    let task = tokio::spawn(async move {
         // A short randomised start offset, then an independently randomised period each round.
         let mut delay = jittered_delay(0, DISCOVERY_START_SPREAD_MS);
         loop {
+            watched.beat(wall_ms());
             tokio::select! {
                 _ = SystemClock.sleep(delay) => {}
                 changed = network_changes.changed() => {
@@ -1493,17 +1769,93 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
             // The pass just refreshed the member records; seal the cache on the same cadence, so
             // the next launch starts from the members this one actually proved.
             persist_address_cache(&app, server).await;
+            // Learn a currently connected member's private route as well. This upgrades pre-v3
+            // records after one successful overlap and updates the running actor without ever
+            // publishing the address to the group.
+            persist_live_local_reconnect_routes(&app, server, &actor).await;
             delay = jittered_delay(
                 DISCOVERY_INTERVAL_SECS * 1_000 - DISCOVERY_JITTER_MS,
                 DISCOVERY_JITTER_MS * 2,
             );
         }
     });
+    supervise_registered("discovery_timer", Some(server), watched, task);
 }
 
-fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEvent>) {
-    tokio::spawn(async move {
+/// Wake the per-server recovery capture worker without awaiting the actor from its event consumer.
+/// `watch` coalesces any number of flaps into one latest generation while a capture is in flight.
+fn notify_reconnect_capture(app: &AppHandle, server: u64) {
+    let state = app.state::<AppState>();
+    let Ok(signals) = state.reconnect_capture_signals.lock() else {
+        return;
+    };
+    if let Some(signal) = signals.get(&server) {
+        signal.send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+}
+
+fn spawn_reconnect_capture_worker(
+    app: AppHandle,
+    server: u64,
+    actor: ServerActor,
+    mut wake: watch::Receiver<u64>,
+) {
+    let task = tokio::spawn(async move {
+        while wake.changed().await.is_ok() {
+            persist_live_local_reconnect_routes(&app, server, &actor).await;
+        }
+    });
+    supervise("reconnect_capture", server, task);
+}
+
+fn replace_reconnect_capture_signal(
+    signals: &StdMutex<HashMap<u64, watch::Sender<u64>>>,
+    server: u64,
+) -> Option<watch::Receiver<u64>> {
+    let (signal, wake) = watch::channel(0u64);
+    signals.lock().ok()?.insert(server, signal);
+    Some(wake)
+}
+
+/// Install the single bounded recovery-capture wakeup for a registry entry. Replacing the sender
+/// closes any prior worker after its current capture, which matters when an on-disk id is restored
+/// into a process that previously held a transient entry with the same id.
+fn install_reconnect_capture_worker(app: &AppHandle, server: u64, actor: ServerActor) {
+    let Some(capture_wake) = replace_reconnect_capture_signal(
+        &app.state::<AppState>().reconnect_capture_signals,
+        server,
+    ) else {
+        return;
+    };
+    spawn_reconnect_capture_worker(app.clone(), server, actor, capture_wake);
+}
+
+fn forward_events(
+    app: AppHandle,
+    server: u64,
+    mut events: mpsc::Receiver<catcoms_app::TracedEvent>,
+) {
+    let task = tokio::spawn(async move {
         while let Some(ev) = events.recv().await {
+            // The actor carries the boundary token rather than the normalized diagnostic id: its
+            // `tracing` stages and this returned event both cross through native normalization.
+            // Keeping that rule uniform means an arbitrary runtime `trace` field can never bypass
+            // Safe capture, while both actor outputs still join the command's canonical trace.
+            let actor_trace = catcoms_diagnostics::TraceId(ev.trace.0);
+            let trace = actor_trace
+                .is_set()
+                .then(|| catcoms_log::hub().external_trace(actor_trace))
+                .unwrap_or_default();
+            // Route/authentication changes are the narrow window in which a pasted recovery route
+            // is provable. Seal it before the ordinary UI-event lock gate: actors intentionally
+            // keep networking behind the lock, and waiting for the minute timer could lose a
+            // short-lived authenticated edge before it ever became restart-safe.
+            if matches!(
+                &ev.event,
+                AppEvent::ConnectivityChanged { .. } | AppEvent::MemberRoutesChanged
+            ) {
+                notify_reconnect_capture(&app, server);
+            }
             // Actor networking stays live behind the explicit lock, but its event stream can
             // contain member fingerprints, channel ids, delivery state and call signalling.
             // Drop those notifications at the native boundary; unlock reloads fresh projections.
@@ -1511,18 +1863,32 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 .await
                 .is_err()
             {
-                if matches!(&ev, AppEvent::Closed) {
+                // Recorded rather than dropped in silence. An operation whose event never reached
+                // the UI because the vault locked mid-flight looks exactly like one that was lost,
+                // and only one of those is a bug.
+                catcoms_diagnostics::DiagnosticHub::record(
+                    &catcoms_log::hub(),
+                    catcoms_diagnostics::DiagnosticEvent::new(
+                        catcoms_diagnostics::Section::Ipc,
+                        catcoms_diagnostics::Level::Debug,
+                        "IPC.EVENT.WITHHELD_LOCKED",
+                    )
+                    .target("catcoms_app")
+                    .trace(trace),
+                );
+                if matches!(&ev.event, AppEvent::Closed) {
                     break;
                 }
                 continue;
             }
-            match ev {
+            match ev.event {
                 AppEvent::ChannelsUpdated => {
-                    let _ = app.emit("channels-changed", ServerEvt { server });
+                    emit_tracked(&app, "channels-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::ChannelUpdated { channel, change } => {
                     // Channel ids are u128; send as a string (JS numbers lose precision).
-                    let _ = app.emit(
+                    emit_tracked(
+                        &app,
                         "channel-updated",
                         ChannelEvt {
                             server,
@@ -1532,80 +1898,108 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                             topic: change.topic,
                             jukebox: change.jukebox,
                         },
+                        trace,
                     );
                 }
                 AppEvent::MembersChanged { count } => {
-                    let _ = app.emit("members-changed", CountEvt { server, count });
+                    emit_tracked(&app, "members-changed", CountEvt { server, count }, trace);
                 }
                 AppEvent::ProfilesUpdated => {
-                    let _ = app.emit("profiles-updated", ServerEvt { server });
+                    emit_tracked(&app, "profiles-updated", ServerEvt { server }, trace);
                 }
                 AppEvent::LiveryUpdated => {
-                    let _ = app.emit("livery-changed", ServerEvt { server });
+                    emit_tracked(&app, "livery-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::BadgesUpdated => {
-                    let _ = app.emit("badges-changed", ServerEvt { server });
+                    emit_tracked(&app, "badges-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::DevicesUpdated => {
-                    let _ = app.emit("devices-changed", ServerEvt { server });
+                    emit_tracked(&app, "devices-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::FilesUpdated => {
-                    let _ = app.emit("files-updated", ServerEvt { server });
+                    emit_tracked(&app, "files-updated", ServerEvt { server }, trace);
                 }
                 AppEvent::StatusUpdated => {
-                    let _ = app.emit("status-updated", ServerEvt { server });
+                    emit_tracked(&app, "status-updated", ServerEvt { server }, trace);
                 }
                 AppEvent::EventsUpdated => {
-                    let _ = app.emit("events-changed", ServerEvt { server });
+                    emit_tracked(&app, "events-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::WikiUpdated => {
-                    let _ = app.emit("wiki-updated", ServerEvt { server });
+                    emit_tracked(&app, "wiki-updated", ServerEvt { server }, trace);
                 }
                 AppEvent::RolesUpdated => {
-                    let _ = app.emit("roles-updated", ServerEvt { server });
+                    emit_tracked(&app, "roles-updated", ServerEvt { server }, trace);
                 }
                 AppEvent::ModerationUpdated => {
-                    let _ = app.emit("moderation-updated", ServerEvt { server });
+                    emit_tracked(&app, "moderation-updated", ServerEvt { server }, trace);
                 }
                 AppEvent::EclipseChanged { caution } => {
-                    let _ = app.emit("eclipse-changed", EclipseEvt { server, caution });
+                    emit_tracked(
+                        &app,
+                        "eclipse-changed",
+                        EclipseEvt { server, caution },
+                        trace,
+                    );
                 }
                 AppEvent::ConnectivityChanged { online } => {
-                    let _ = app.emit("connectivity-changed", OnlineEvt { server, online });
+                    emit_tracked(
+                        &app,
+                        "connectivity-changed",
+                        OnlineEvt { server, online },
+                        trace,
+                    );
+                }
+                AppEvent::MemberRoutesChanged => {
+                    emit_tracked(&app, "member-routes-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::SwitchboardsChanged => {
-                    let _ = app.emit("switchboard-changed", server);
+                    emit_tracked(&app, "switchboard-changed", ServerEvt { server }, trace);
                 }
-                AppEvent::DeliveryChanged { channel, states } => {
-                    let _ = app.emit(
+                AppEvent::DeliveryChanged { channel, snapshot } => {
+                    let snapshot = delivery_payload(snapshot);
+                    emit_tracked(
+                        &app,
                         "delivery-changed",
                         DeliveryEvt {
                             server,
                             channel: channel.to_string(),
-                            states: delivery_payload(states),
+                            revision: snapshot.revision,
+                            states: snapshot.states,
                         },
+                        trace,
                     );
                 }
                 AppEvent::DmRequestsChanged => {
-                    let _ = app.emit("dm-requests-changed", ServerEvt { server });
+                    emit_tracked(&app, "dm-requests-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::CallSignal { from_fp, payload } => {
-                    let _ = app.emit(
+                    emit_tracked(
+                        &app,
                         "call-signal",
                         CallSignalEvt {
                             server,
                             from_fp,
                             payload: B64.encode(payload),
                         },
+                        trace,
                     );
                 }
                 AppEvent::Closed => {
-                    let _ = app.emit("server-closed", ServerEvt { server });
+                    emit_tracked(&app, "server-closed", ServerEvt { server }, trace);
                     break;
                 }
             }
         }
     });
+    // The task whose unobserved death this whole registry was written for. It can stop while the
+    // server actor is perfectly healthy: the protocol keeps running, membership keeps changing,
+    // messages keep arriving, and the webview is told none of it. What a user sees is a stale
+    // unread badge and stale presence, and until now the app's own answer would have been that
+    // everything was fine.
+    //
+    // No rhythm declared, because a quiet server is quiet and not broken.
+    supervise_task("event_forwarder", Some(server), None, task);
 }
 
 /// Extract the listen port from a multiaddr. Both `/tcp/<p>` and `/udp/<p>/quic-v1` carry it,
@@ -1898,14 +2292,621 @@ fn choose_port(net: &ServerNet) -> u16 {
     os_chosen_port()
 }
 
-/// Insert a freshly-spawned server into the registry, forward its events, and return the
-/// new server id.
+/// One command's worth of stages, recorded as it goes.
+///
+/// The native half of the correlation wrapper. The frontend allocates a trace and passes it in;
+/// this stamps every stage with it, so an operation reads as one story across the boundary instead
+/// of as two unrelated halves that have to be lined up by timestamp.
+///
+/// Deliberately cheap. Constructing one is a parse and two clones; each stage is one `record`
+/// call, which costs two atomic loads when the section is not being captured. Instrumentation that
+/// slows a command becomes a cause of the latency it was added to explain.
+struct Operation {
+    /// Session-normalized id used by every canonical native diagnostic and user-facing error.
+    trace: catcoms_diagnostics::TraceId,
+    /// Boundary token passed through library actors and normalized when their logs/events return.
+    actor_trace: catcoms_diagnostics::TraceId,
+    section: catcoms_diagnostics::Section,
+    operation: &'static str,
+    server: Option<catcoms_diagnostics::SessionRef>,
+    channel: Option<catcoms_diagnostics::SessionRef>,
+    started_ms: u64,
+}
+
+impl Operation {
+    /// Begin an operation, continuing the frontend's trace when it supplied one.
+    ///
+    /// A missing or unparseable trace is not an error: most commands have not been migrated yet,
+    /// and an un-traced operation is still worth recording. It simply cannot be joined to the
+    /// frontend's half.
+    fn start(
+        trace: Option<String>,
+        section: catcoms_diagnostics::Section,
+        operation: &'static str,
+        server: u64,
+        channel: Option<&str>,
+    ) -> Self {
+        Self::start_maybe(trace, section, operation, Some(server), channel)
+    }
+
+    /// [`start`](Operation::start) for an operation that has no server yet.
+    ///
+    /// Founding and joining do not have a server id until they succeed, and inventing one to fit
+    /// the signature would put a reference in the record standing for nothing. An operation with no
+    /// subject is honest; one with a made-up subject correlates with the wrong events.
+    fn start_maybe(
+        trace: Option<String>,
+        section: catcoms_diagnostics::Section,
+        operation: &'static str,
+        server: Option<u64>,
+        channel: Option<&str>,
+    ) -> Self {
+        let hub = catcoms_log::hub();
+        let actor_trace = trace
+            .as_deref()
+            .and_then(parse_trace)
+            .unwrap_or_else(|| hub.new_trace());
+        let trace = hub.external_trace(actor_trace);
+        let op = Operation {
+            trace,
+            actor_trace,
+            section,
+            operation,
+            server: server.map(|id| {
+                hub.reference_str(catcoms_diagnostics::RefDomain::Server, &id.to_string())
+            }),
+            channel: channel.map(|c| hub.reference_str(catcoms_diagnostics::RefDomain::Channel, c)),
+            started_ms: SystemClock.now_ms(),
+        };
+        op.emit(
+            catcoms_diagnostics::Level::Debug,
+            catcoms_diagnostics::Phase::Start,
+            "IPC.COMMAND.RECEIVED",
+            None,
+        );
+        op
+    }
+
+    /// The server's actor, bound to this operation.
+    ///
+    /// One function rather than the same three lines at each command, because binding is the part
+    /// that is easy to leave out: an actor fetched the plain way still works perfectly, and the
+    /// only symptom is a trace that stops at the bridge on that one command. Getting the actor and
+    /// adopting the operation are the same act here, so they cannot come apart.
+    async fn actor(&self, state: &AppState, server: u64) -> Result<ServerActor, AppError> {
+        actor_of(state, server)
+            .await
+            .map(|actor| self.bind_actor(actor))
+            // The lookup's own answer, not a blanket one. A locked vault used to arrive here as
+            // "the server is unavailable, restart the app".
+            .map_err(|failure| self.fail(failure.code(), failure.message()))
+    }
+
+    /// Bind an already-authorized actor clone to this operation's boundary token.
+    ///
+    /// Most commands use [`Operation::actor`]. Multi-server operations such as backup acquire a
+    /// whole actor set under one state lock and use this narrower half so every actor command still
+    /// joins the canonical trace after it crosses the logging/event boundary.
+    fn bind_actor(&self, actor: ServerActor) -> ServerActor {
+        actor.with_trace(self.actor_trace.0)
+    }
+
+    /// Note that the operation reached a stage, without ending it.
+    fn stage(&self, code: &'static str) {
+        self.emit(
+            catcoms_diagnostics::Level::Debug,
+            catcoms_diagnostics::Phase::Progress,
+            code,
+            None,
+        );
+    }
+
+    /// End the operation successfully, with how long the whole thing took.
+    fn succeeded(&self, code: &'static str) {
+        self.emit(
+            catcoms_diagnostics::Level::Debug,
+            catcoms_diagnostics::Phase::Success,
+            code,
+            Some(self.elapsed()),
+        );
+    }
+
+    /// End the operation in failure. Recorded at warn, because a command that did not do what the
+    /// user asked is the thing a person came to the log to find.
+    fn failed(&self, code: &'static str) {
+        self.emit(
+            catcoms_diagnostics::Level::Warn,
+            catcoms_diagnostics::Phase::Failure,
+            code,
+            Some(self.elapsed()),
+        );
+    }
+
+    fn elapsed(&self) -> u64 {
+        SystemClock.now_ms().saturating_sub(self.started_ms)
+    }
+
+    /// The trace, in the short form a person quotes.
+    fn short_trace(&self) -> String {
+        self.trace.short()
+    }
+
+    /// Replay a connectivity attempt's steps into the diagnostic record, under this trace.
+    ///
+    /// Founding and joining already keep an excellent step-by-step account for the connectivity
+    /// panel: the review calls it the strongest diagnostic pattern in the codebase and says to
+    /// generalise it. What it could not do was correlate. The panel showed one attempt, the log
+    /// showed everything else, and tying the two together meant matching wall-clock times by eye,
+    /// which is exactly the correlation-by-timestamp the trace exists to replace.
+    ///
+    /// Replayed at the end rather than recorded as each step happens, because the steps are pushed
+    /// from a dozen places across `establish_reachability` and threading an operation through all
+    /// of them would be a large change for the same result. The trade is that the record's own
+    /// timestamps are the replay's, so each step carries the moment it actually happened as a
+    /// field, and the ordering is the attempt's own.
+    fn replay(&self, steps: &[DiagStep]) {
+        for step in steps {
+            // A failed step is the thing somebody came looking for, so it is the one that is loud
+            // enough to survive a Safe-mode filter. `unknown` is genuinely not a failure: several
+            // of these start work libp2p finishes later.
+            let level = match step.status.as_str() {
+                "failed" => catcoms_diagnostics::Level::Warn,
+                _ => catcoms_diagnostics::Level::Debug,
+            };
+            // A replay walks every step of an attempt and each one bounds two or three strings, so
+            // this is the loop where building an excluded event is most obviously wasted.
+            catcoms_log::hub().record_with(self.section, level, || {
+                let mut event =
+                    catcoms_diagnostics::DiagnosticEvent::new(self.section, level, "REACH.STEP")
+                        .target("catcoms_app")
+                        .phase(catcoms_diagnostics::Phase::Progress)
+                        .operation(self.operation)
+                        .trace(self.trace)
+                        .refs(catcoms_diagnostics::Refs {
+                            server: self.server.clone(),
+                            ..catcoms_diagnostics::Refs::default()
+                        })
+                        .field("kind", catcoms_diagnostics::SafeText::describe(&step.kind))
+                        .field(
+                            "status",
+                            catcoms_diagnostics::SafeText::describe(&step.status),
+                        )
+                        .field("at_ms", step.at);
+                if !step.target.is_empty() {
+                    // The step's subject is usually an address, so it goes in as one: Safe mode
+                    // keeps its family and transport, which is what diagnoses a route problem, and
+                    // drops the literal that would stop the report being publishable.
+                    event = event.field(
+                        "target",
+                        catcoms_diagnostics::AddressValue::new(&step.target),
+                    );
+                }
+                if !step.detail.is_empty() {
+                    event = event.field(
+                        "detail",
+                        catcoms_diagnostics::SafeText::describe(&step.detail),
+                    );
+                }
+                event
+            });
+        }
+    }
+
+    /// End the operation in failure and build the error the frontend receives.
+    ///
+    /// One call rather than two, because the pair has to stay in step: an operation recorded as
+    /// failed with one code and reported to the user with another is a diagnostic that actively
+    /// misleads, and keeping them together is the only reliable way to prevent it.
+    ///
+    /// The recorded event carries the code; the *message* is not recorded, because it comes from a
+    /// deeper layer that may have interpolated something into it. The user sees it, the log does
+    /// not, and that split is deliberate.
+    fn fail(&self, code: ErrorCode, message: impl Into<String>) -> AppError {
+        self.failed(code.code());
+        AppError::new(code, message, &self.short_trace())
+    }
+
+    fn emit(
+        &self,
+        level: catcoms_diagnostics::Level,
+        phase: catcoms_diagnostics::Phase,
+        code: &'static str,
+        duration_ms: Option<u64>,
+    ) {
+        // Built only if it will be kept. Every stage of every command comes through here, and the
+        // reference clones below are not free, so a stage the config excludes should cost the two
+        // atomic loads of the gate and nothing else.
+        catcoms_log::hub().record_with(self.section, level, || {
+            let mut event = catcoms_diagnostics::DiagnosticEvent::new(self.section, level, code)
+                .target("catcoms_app")
+                .phase(phase)
+                .operation(self.operation)
+                .trace(self.trace)
+                .refs(catcoms_diagnostics::Refs {
+                    server: self.server.clone(),
+                    channel: self.channel.clone(),
+                    ..catcoms_diagnostics::Refs::default()
+                });
+            if let Some(duration) = duration_ms {
+                event = event.took(duration);
+            }
+            event
+        });
+    }
+}
+
+/// A trace the webview minted, as a canonical [`TraceId`](catcoms_diagnostics::TraceId).
+///
+/// The webview allocates a trace before it invokes, so the half of an operation that happens in the
+/// webview and the half that happens here are stages of one thing rather than two records that have
+/// to be lined up by timestamp afterwards. That only works if both sides agree on the parse, which
+/// is why this is one function rather than the same `from_str_radix` written out at each door the
+/// webview can knock on.
+///
+/// A trace of zero is treated as absent: it is what an unset trace renders as, and correlating on
+/// it would gather every unrelated event that also had none.
+fn parse_trace(text: &str) -> Option<catcoms_diagnostics::TraceId> {
+    u64::from_str_radix(text, 16)
+        .ok()
+        .map(catcoms_diagnostics::TraceId)
+        .filter(|t| t.is_set())
+}
+
+/// Parse and immediately session-normalize a trace supplied by the webview.
+///
+/// The UI needs repeated values to join its events to native command stages, but it does not get to
+/// choose the bytes that Safe capture later displays or copies. Keeping this separate from
+/// `parse_trace` makes tests of the wire spelling independent from the privacy boundary.
+fn parse_external_trace(text: &str) -> Option<catcoms_diagnostics::TraceId> {
+    parse_trace(text).map(|trace| catcoms_log::hub().external_trace(trace))
+}
+
+/// Normalize the optional trace on the chunk-upload fast path.
+///
+/// `push_file_chunk` predates `Operation`, but its trace is still renderer-controlled command data.
+/// Keeping this tiny boundary helper testable prevents that exceptional path from accidentally
+/// blessing raw UI hex as a native trace when it emits progress.
+fn external_progress_trace(text: Option<&str>) -> catcoms_diagnostics::TraceId {
+    text.and_then(parse_external_trace).unwrap_or_default()
+}
+
+/// Accept a native-normalized trace only when it carries this session's unforgeable return proof.
+///
+/// A webview-origin trace has no proof and is normalized exactly once. Native event envelopes carry
+/// both the already-normalized trace and a proof; accepting that pair unchanged preserves
+/// correlation across native -> webview -> native without letting a compromised renderer mark its
+/// own caller-controlled hex as safe.
+fn parse_returned_ui_trace(text: &str, proof: &str) -> Option<catcoms_diagnostics::TraceId> {
+    let trace = parse_trace(text)?;
+    let decoded = (proof.len() == 32)
+        .then(|| hex::decode(proof).ok())
+        .flatten();
+    let hub = catcoms_log::hub();
+    if decoded
+        .as_deref()
+        .is_some_and(|bytes| hub.verifies_trace_proof(trace, bytes))
+    {
+        Some(trace)
+    } else {
+        Some(hub.external_trace(trace))
+    }
+}
+
+/// Per-name sequence numbers for emitted events.
+///
+/// Guarded by a mutex, which is affordable here in a way it would not be on the logging path:
+/// these are UI refreshes, already throttled, and orders of magnitude rarer than diagnostic
+/// events. The map has about twenty entries and never grows beyond the set of event names in
+/// this file.
+static EVENT_SEQ: std::sync::OnceLock<std::sync::Mutex<HashMap<&'static str, u64>>> =
+    std::sync::OnceLock::new();
+
+fn next_event_seq(name: &'static str) -> u64 {
+    let table = EVENT_SEQ.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
+    let slot = table.entry(name).or_insert(0);
+    *slot += 1;
+    *slot
+}
+
+/// The whole event stream's order, across every event name.
+///
+/// Per-name sequences answer "did I miss a `channel-updated`", which is what tells the frontend
+/// *what* to re-fetch. They cannot answer "did I miss anything", because the last event of a
+/// family leaves no successor to show the gap, and they say nothing about the order two different
+/// events happened in. This is one counter for the stream, so both questions have answers.
+static EVENT_ORD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Which run of the native process this event stream belongs to.
+///
+/// The webview can be remounted on its own (F5, or a hot reload during development) while the
+/// process it is talking to keeps running, and it comes back with no memory of what it had seen.
+/// Stamping the run lets it tell "I have been restarted beside the same stream" from "this is a
+/// different stream entirely", which are different amounts of catching up.
+static EVENT_GENERATION: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+fn event_generation() -> u64 {
+    *EVENT_GENERATION.get_or_init(|| catcoms_rt::RngCore::next_u64(&mut catcoms_rt::OsCryptoRng))
+}
+
+/// The envelope keys, which a payload may not define for itself.
+const ENVELOPE_KEYS: [&str; 5] = ["__seq", "__ord", "__gen", "__trace", "__trace_proof"];
+
+/// Attach the stream envelope to an event payload, if it can carry one.
+///
+/// A pure function so the contract the webview relies on can be tested without a running window.
+/// `None` means the payload is not a JSON object and could carry nothing; the caller records that
+/// fact rather than letting the absence look like a gap.
+fn stamp_payload(
+    mut value: serde_json::Value,
+    seq: u64,
+    ord: u64,
+    trace: catcoms_diagnostics::TraceId,
+    trace_proof: Option<&str>,
+) -> Option<serde_json::Value> {
+    let object = value.as_object_mut()?;
+    object.insert("__seq".to_string(), serde_json::json!(seq));
+    object.insert("__ord".to_string(), serde_json::json!(ord));
+    object.insert("__gen".to_string(), serde_json::json!(event_generation()));
+    // Only when there is one. An absent trace is left off entirely rather than sent as sixteen
+    // zeroes, so a listener testing for it gets an answer rather than a value that looks like an
+    // operation and belongs to none.
+    if trace.is_set() {
+        object.insert("__trace".to_string(), serde_json::json!(trace.as_hex()));
+        // A proof never appears without its trace and is neither rendered nor persisted. It lets
+        // the native ingress recognise this already-normalized value after the untrusted webview
+        // returns it, instead of double-hashing it or trusting a renderer-controlled provenance bit.
+        if let Some(proof) = trace_proof {
+            object.insert("__trace_proof".to_string(), serde_json::json!(proof));
+        }
+    }
+    Some(value)
+}
+
+/// Whether a payload already defines a key the envelope owns.
+///
+/// A collision means a payload type has grown a field that shadows the stream's own bookkeeping.
+/// The envelope has to win, or the frontend's gap detection starts reading application data as
+/// sequence numbers; but overwriting in silence is how the collision would survive. This is what
+/// makes it noticed instead.
+fn collides_with_envelope(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| ENVELOPE_KEYS.iter().any(|key| object.contains_key(*key)))
+}
+
+/// Emit a Tauri event, numbered, traced and recorded.
+///
+/// Three problems in one. Every emit in this file used to be `app.emit(...)`, so a delivery
+/// failure was discarded at the exact moment it mattered: the backend had changed state, the
+/// webview was never told, and nothing anywhere recorded the disagreement. Without a sequence
+/// number the frontend cannot tell an event that was coalesced from one that was lost, which is the
+/// difference between correct behaviour and a stale unread badge. And without a trace, an update
+/// arriving two seconds after a send carried no evidence of being that send's consequence, which is
+/// the question the whole correlation architecture exists to answer.
+///
+/// Both are injected into the payload, as `__seq` and `__trace`, rather than added to each payload
+/// type. That keeps every existing listener working unchanged while giving the frontend what it
+/// needs. A payload that is not a JSON object (a bare server id) cannot carry either, so it is
+/// emitted as-is and both are recorded natively only.
+///
+/// The trace is passed rather than inherited from ambient state. Which operation caused an emit is
+/// a fact the caller knows and nothing else can recover, and a wrong answer here asserts a causal
+/// link that never existed.
+fn emit_tracked<S: Serialize + Clone>(
+    app: &AppHandle,
+    name: &'static str,
+    payload: S,
+    trace: catcoms_diagnostics::TraceId,
+) {
+    let seq = next_event_seq(name);
+    let ord = EVENT_ORD.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let raw = serde_json::to_value(&payload).ok();
+    let collision = raw.as_ref().is_some_and(collides_with_envelope);
+    let trace_proof = trace
+        .is_set()
+        .then(|| hex::encode(catcoms_log::hub().trace_proof(trace)));
+    let numbered =
+        raw.and_then(|value| stamp_payload(value, seq, ord, trace, trace_proof.as_deref()));
+
+    let carried = numbered.is_some();
+    if collision {
+        // Loud, because the consequence is silent: the frontend would read a payload field as the
+        // stream's sequence and either invent a gap or miss a real one.
+        catcoms_log::hub().record_with(
+            catcoms_diagnostics::Section::Ipc,
+            catcoms_diagnostics::Level::Error,
+            || {
+                catcoms_diagnostics::DiagnosticEvent::error(
+                    catcoms_diagnostics::Section::Ipc,
+                    "IPC.EVENT.ENVELOPE_COLLISION",
+                )
+                .target("catcoms_app")
+                .trace(trace)
+                .field("event", catcoms_diagnostics::SafeText::describe(name))
+            },
+        );
+    }
+    let sent = match numbered {
+        Some(value) => app.emit(name, value),
+        None => app.emit(name, payload),
+    };
+    // A successful emit is ordinary and frequent; a failed one is the thing somebody came looking
+    // for, so it is loud enough to survive a Safe-mode filter. The level is decided before the
+    // event is built, so an excluded one costs the gate's two atomic loads and nothing else.
+    let level = match &sent {
+        Ok(()) => catcoms_diagnostics::Level::Debug,
+        Err(_) => catcoms_diagnostics::Level::Warn,
+    };
+    catcoms_log::hub().record_with(catcoms_diagnostics::Section::Ipc, level, || {
+        let code = match &sent {
+            Ok(()) => "IPC.EVENT.EMITTED",
+            // The failure this replaces. A backend that changed state while the webview never
+            // heard about it is a stale-UI bug with no evidence, and it used to leave none.
+            Err(_) => "IPC.EVENT.EMIT_FAILED",
+        };
+        let mut event = catcoms_diagnostics::DiagnosticEvent::new(
+            catcoms_diagnostics::Section::Ipc,
+            level,
+            code,
+        )
+        .target("catcoms_app")
+        .trace(trace)
+        .field("event", catcoms_diagnostics::SafeText::describe(name))
+        .field("seq", seq)
+        // A payload the sequence could not be attached to is one the frontend cannot check for
+        // gaps, so the record says which kind it was rather than leaving the absence unexplained.
+        .field("numbered", carried);
+        if let Err(e) = &sent {
+            event = event.field(
+                "error",
+                catcoms_diagnostics::SafeText::describe(&e.to_string()),
+            );
+        }
+        event
+    });
+}
+
+/// The most of a panic payload that is recorded.
+const MAX_PANIC_SUMMARY: usize = 300;
+
+/// What a panic payload says, reduced to something safe to keep.
+///
+/// A payload can be any type. In this codebase they come from `expect` and `unwrap` with literal
+/// messages, so the text is developer-written rather than user data, but it is bounded and stripped
+/// anyway: a diagnostic that can carry an arbitrary payload is a diagnostic that can carry whatever
+/// was in scope when the panic happened.
+fn panic_summary(payload: &(dyn std::any::Any + Send)) -> String {
+    let text = payload
+        .downcast_ref::<&'static str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic payload was not a string".to_string());
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_PANIC_SUMMARY)
+        .collect()
+}
+
+/// Watch a long-lived task and record how it ended.
+///
+/// Every spawn site used to destructure the handle as `_task` and drop it, so the shell could hold
+/// a perfectly live-looking actor whose task had exited minutes earlier. The symptoms surface much
+/// later as stale state, missing events, or a generic "actor stopped", with the panic or exit cause
+/// long gone: the one piece of evidence that would have explained it is exactly what was discarded.
+///
+/// Deliberately does not restart anything. These tasks own MLS and CRDT state, and a blind restart
+/// would trade a diagnosable stop for an undiagnosable inconsistency. The policy is to surface the
+/// failure and preserve the cause; recovery is a decision for a level that knows what was lost.
+fn supervise(kind: &'static str, server: u64, task: tokio::task::JoinHandle<()>) {
+    supervise_task(kind, Some(server), None, task);
+}
+
+/// Watch a long-lived task, and keep what became of it after the log line has aged out.
+///
+/// Every critical spawn goes through here. Only the server actor did: six other long-lived tasks
+/// had their `JoinHandle` dropped on the floor, so their deaths were unobserved. The event
+/// forwarder is the one that matters most, because it can die while the actor stays perfectly
+/// healthy: the protocol keeps running and the webview is told none of it, which a user sees as a
+/// stale unread badge and the app would have reported as fine. Found by adversarial review
+/// (P3-009).
+///
+/// `expect_ms` is how often the task promises to report progress, for the ones that have a rhythm.
+/// A task that makes no promise is never called stalled, because silence is not evidence: the
+/// forwarder can have nothing to forward for an hour and be working perfectly.
+fn supervise_task(
+    kind: &'static str,
+    server: Option<u64>,
+    expect_ms: Option<u64>,
+    task: tokio::task::JoinHandle<()>,
+) -> tasks::TaskHandle {
+    let handle = tasks::register(kind, server, wall_ms(), expect_ms);
+    supervise_registered(kind, server, handle, task);
+    handle
+}
+
+/// Spawn and supervise a task from a caller that may not be on the async runtime yet.
+///
+/// # The nesting is the point
+///
+/// Tauri's `setup` runs on the main thread *before* the async runtime has been entered.
+/// `tokio::spawn` panics there ("there is no reactor running"), and a panic in `setup` means the
+/// application does not start at all: no window, no log beyond the session line, exit code 101.
+/// Tauri's own `spawn` works because it holds a runtime handle already.
+///
+/// But Tauri's `JoinHandle` cannot report a panic, and reporting one is the entire reason these
+/// tasks are supervised. So the outer spawn is Tauri's, and *inside* that block a runtime is
+/// current, which is where the real `tokio::JoinHandle` is made.
+///
+/// One function rather than the pattern written out at each call site, because getting it wrong
+/// looks exactly like getting it right until the app is launched, and nothing in the test suite
+/// launches it. This is the shape a caller before the runtime has to use; the test below calls it
+/// from a plain `#[test]`, which is the same context `setup` is in.
+fn supervise_detached<F>(
+    kind: &'static str,
+    server: Option<u64>,
+    expect_ms: Option<u64>,
+    future: F,
+) -> tasks::TaskHandle
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    // Registered here rather than inside the block, so the task is known from the moment it is
+    // asked for rather than from the moment it gets a thread.
+    let watched = tasks::register(kind, server, wall_ms(), expect_ms);
+    tauri::async_runtime::spawn(async move {
+        supervise_registered(kind, server, watched, tokio::spawn(future));
+    });
+    watched
+}
+
+/// [`supervise_task`] for a task that was registered before it was spawned.
+///
+/// A task that reports progress needs its own registry handle inside its loop, which means the
+/// registration has to happen first.
+fn supervise_registered(
+    kind: &'static str,
+    server: Option<u64>,
+    handle: tasks::TaskHandle,
+    task: tokio::task::JoinHandle<()>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let (state, cause) = match task.await {
+            // The mailbox closed and the loop returned. Ordinary at shutdown, and worth a line
+            // either way because "the task is gone" explains a lot of later symptoms.
+            Ok(()) => {
+                tracing::info!(target: "catcoms_app", kind, server, "RUNTIME.TASK.EXITED");
+                (tasks::TaskState::Exited, None)
+            }
+            Err(e) if e.is_cancelled() => {
+                tracing::warn!(target: "catcoms_app", kind, server, "RUNTIME.TASK.CANCELLED");
+                (tasks::TaskState::Cancelled, None)
+            }
+            Err(e) => {
+                let cause = panic_summary(&*e.into_panic());
+                tracing::error!(
+                    target: "catcoms_app",
+                    kind,
+                    server,
+                    cause = %cause,
+                    "RUNTIME.TASK.PANICKED"
+                );
+                (tasks::TaskState::Panicked, Some(cause))
+            }
+        };
+        tasks::finished(handle, state, cause);
+    });
+}
+
+/// Insert a freshly-spawned server into the registry, supervise its task, forward its events, and
+/// return the new server id.
 #[allow(clippy::too_many_arguments)]
 async fn register_server(
     app: &AppHandle,
     state: &AppState,
     actor: ServerActor,
-    events: mpsc::Receiver<AppEvent>,
+    events: mpsc::Receiver<catcoms_app::TracedEvent>,
+    task: tokio::task::JoinHandle<()>,
     group_id: Vec<u8>,
     device_id: DeviceId,
     invite: Option<String>,
@@ -1924,12 +2925,15 @@ async fn register_server(
         *n += 1;
         *n
     };
+    let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
+    supervise("server_actor", id, task);
     forward_events(app.clone(), id, events);
     let timer_actor = actor.clone();
     state.servers.lock().await.insert(
         id,
         ServerEntry {
             actor,
+            instance,
             group_id,
             device_id,
             invite,
@@ -1944,6 +2948,7 @@ async fn register_server(
             record_seq,
         },
     );
+    install_reconnect_capture_worker(app, id, timer_actor.clone());
     // Start only after the entry exists. A zero-millisecond randomized first tick must not race
     // the registry insertion and silently skip the initial interface/discovery refresh.
     spawn_discovery_timer(app.clone(), id, timer_actor);
@@ -1970,7 +2975,7 @@ async fn persist_server(state: &AppState, server: u64) {
     let bytes = match actor.snapshot().await {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("persist: snapshot of server {server} failed: {e}");
+            tracing::error!(target: "catcoms_app", server, error = %e, "VAULT.SNAPSHOT.FAILED");
             return;
         }
     };
@@ -1978,7 +2983,7 @@ async fn persist_server(state: &AppState, server: u64) {
     if let Some(store) = guard.as_ref() {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_server(server, &bytes, &mut rng) {
-            eprintln!("persist: sealing server {server} failed: {e}");
+            tracing::error!(target: "catcoms_app", server, error = %e, "VAULT.SEAL_SERVER.FAILED");
         }
     }
 }
@@ -2005,7 +3010,7 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
             Some(store) => match store.address_cache_key() {
                 Ok(k) => k,
                 Err(e) => {
-                    eprintln!("persist: no address-cache key for server {server}: {e}");
+                    tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.ADDRESS_CACHE.NO_KEY");
                     return;
                 }
             },
@@ -2019,9 +3024,151 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
     if let Some(store) = guard.as_ref() {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_address_cache(server, &bytes, &mut rng) {
-            eprintln!("persist: sealing the address cache of server {server} failed: {e}");
+            tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.ADDRESS_CACHE.SEAL_FAILED");
         }
     }
+}
+
+/// Upgrade or refresh an admission-authorized private-address reconnect hint.
+///
+/// Direct admission may refresh only its named inviter. A legacy v1/v2 record gets one migration
+/// opportunity only for an unambiguous two-member group; new helper/reply/switchboard admissions
+/// are durably disabled so an empty route list can never be mistaken for migration consent. An
+/// empty observation never erases the last sealed hint: the normal reason for seeing no live route
+/// is precisely that the remote app is closed, when the hint is needed most.
+async fn persist_live_local_reconnect_routes(app: &AppHandle, server: u64, actor: &ServerActor) {
+    let state = app.state::<AppState>();
+    let state = state.inner();
+    let now_ms = SystemClock.now_ms();
+    let net = {
+        let guard = state.store.lock().await;
+        let Some(store) = guard.as_ref() else {
+            return;
+        };
+        match store.load_server_net(server) {
+            Ok(Some(mut net)) => {
+                if net.pending_recovery_peer.is_some()
+                    && now_ms > net.pending_recovery_expires_at_ms
+                {
+                    net.pending_recovery_peer = None;
+                    net.pending_recovery_expires_at_ms = 0;
+                    if let Err(error) = store.save_server_net(server, &net, &mut OsCryptoRng) {
+                        tracing::warn!(
+                            target: "catcoms_app",
+                            server,
+                            error = %error,
+                            "VAULT.RECONNECT_PENDING.EXPIRY_CLEAR_FAILED"
+                        );
+                    }
+                }
+                net
+            }
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    target: "catcoms_app",
+                    server,
+                    error = %error,
+                    "VAULT.RECONNECT_ROUTE.LOAD_FAILED"
+                );
+                return;
+            }
+        }
+    };
+    let mesh = {
+        let servers = state.servers.lock().await;
+        servers.get(&server).and_then(|entry| entry.mesh.clone())
+    };
+    let Some(mesh) = mesh else {
+        return;
+    };
+    let member_routes = actor.member_routes().await;
+    let claimed_peers: Vec<_> = member_routes
+        .iter()
+        .filter_map(|route| route.peer_id.map(PeerId::new))
+        .collect();
+    // Actor and mesh observations may wait behind unrelated work. Sample again after those awaits
+    // so a code that expired while evidence was gathered cannot be selected on a stale timestamp.
+    let selection_now_ms = SystemClock.now_ms();
+    let pending_recovery_peer = pending_recovery_capture_peer(
+        net.pending_recovery_peer,
+        net.pending_recovery_expires_at_ms,
+        selection_now_ms,
+        claimed_peers.iter().copied(),
+    );
+    // A recovery code grants only session-local permission to try its signer. It becomes the
+    // durable singleton contact only once present-time roster evidence and the mesh's outbound
+    // authenticated-route ledger agree. Until then the old proven contact/routes remain intact.
+    let capture_peer = pending_recovery_peer.or_else(|| {
+        reconnect_capture_peer(
+            net.reconnect_policy,
+            member_routes.len(),
+            claimed_peers.iter().copied(),
+        )
+    });
+    let Some(capture_peer) = capture_peer else {
+        return;
+    };
+    let selected_from_pending = pending_recovery_peer == Some(capture_peer);
+    let member_peers = HashSet::from([capture_peer]);
+    let routes = if selected_from_pending {
+        // Recovery codes permit safe public direct literals as well as LAN addresses. Promotion
+        // still uses only the exact outbound Noise-authenticated route for this unique member.
+        select_authenticated_reconnect_routes(
+            mesh.authenticated_dial_route_evidence(),
+            &member_peers,
+            false,
+        )
+    } else {
+        authenticated_member_lan_reconnect_routes(&mesh, &member_peers)
+    };
+    if routes.is_empty() {
+        return;
+    }
+    let actor_routes = routes
+        .iter()
+        .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
+        .collect();
+    let guard = state.store.lock().await;
+    let Some(store) = guard.as_ref() else {
+        return;
+    };
+    // Re-read under the final write lock. A recovery-code apply can update only the pending field
+    // while discovery is awaiting member/mesh evidence; saving the earlier `net` wholesale would
+    // silently erase that newer consent.
+    let mut current = match store.load_server_net(server) {
+        Ok(Some(current)) => current,
+        _ => return,
+    };
+    // The vault lock itself may have crossed the signed deadline. This final sample is the
+    // authority boundary used by the atomic merge and durable save.
+    let final_now_ms = SystemClock.now_ms();
+    let Some(changed) = merge_live_reconnect_capture(
+        &mut current,
+        selected_from_pending,
+        capture_peer,
+        routes,
+        member_routes.len(),
+        final_now_ms,
+        claimed_peers.iter().copied(),
+    ) else {
+        return;
+    };
+    if changed {
+        if let Err(error) = store.save_server_net(server, &current, &mut OsCryptoRng) {
+            tracing::warn!(
+                target: "catcoms_app",
+                server,
+                error = %error,
+                "VAULT.RECONNECT_ROUTE.SEAL_FAILED"
+            );
+            return;
+        }
+    }
+    drop(guard);
+    // The durable write is the safety boundary. Updating the live actor afterwards avoids holding
+    // the vault lock across an actor await; a failure costs only this session's proactive redial.
+    let _ = actor.set_local_reconnect_routes(actor_routes).await;
 }
 
 /// Re-seal the registry (the set of servers + their names/invites) to disk.
@@ -2042,7 +3189,7 @@ async fn persist_registry(state: &AppState) {
     if let Some(store) = guard.as_ref() {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_registry(&records, &mut rng) {
-            eprintln!("persist: sealing registry failed: {e}");
+            tracing::error!(target: "catcoms_app", error = %e, "VAULT.REGISTRY.SEAL_FAILED");
         }
     }
 }
@@ -2057,19 +3204,24 @@ async fn persist_registry(state: &AppState) {
 /// survive the last process: the only record of what it was for died with that process, and no
 /// later upload can adopt it. This is the one place that can say so, because it runs once per
 /// server before anything has had a chance to stage something new.
-async fn attach_blob_store(state: &AppState, server: &mut Server<MeshService, OsCryptoRng>) {
+async fn attach_blob_store<T: MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    state: &AppState,
+    server: &mut Server<T, R>,
+) {
     let guard = state.store.lock().await;
     if let Some(store) = guard.as_ref() {
         let key = hex::encode(server.group_id());
         match store.blob_store(&key) {
             Ok(blobs) => server.set_blob_store(blobs),
-            Err(e) => eprintln!("attach blob store failed: {e}"),
+            Err(e) => {
+                tracing::error!(target: "catcoms_app", error = %e, "STORAGE.BLOB_STORE.ATTACH_FAILED")
+            }
         }
     }
     drop(guard);
     let swept = server.clear_staged_uploads();
     if swept > 0 {
-        eprintln!("startup: dropped {swept} chunk(s) from uploads that never finished");
+        tracing::info!(target: "catcoms_app", chunks = swept, "STORAGE.UPLOAD.STAGED_SWEPT");
     }
 }
 
@@ -2104,6 +3256,9 @@ fn external_addr(s: &str) -> Option<Multiaddr> {
 /// to spare, and turns "one pasted string, 64 outbound connections to hosts of the author's
 /// choosing" into something with a much smaller blast radius.
 const MAX_BOOTSTRAP_DIALS: usize = 12;
+/// Pre-join rendezvous is a route to the inviter, not the destination. Two distinct validated
+/// seeds retain redundancy while leaving the per-group scheduler budget for the inviter itself.
+const MAX_INVITE_RENDEZVOUS_DIALS: usize = 2;
 
 /// Validate and rank an invite's `bootstrap` list into the addresses this client will dial.
 ///
@@ -2115,14 +3270,15 @@ const MAX_BOOTSTRAP_DIALS: usize = 12;
 /// is exactly the party we are guarding against here.
 ///
 /// Rules:
-/// * anything unparseable, or naming something that cannot be a peer ([`addr_is_undialable`]),
-///   is dropped;
+/// * anything unparseable, naming something that cannot be a peer ([`addr_is_undialable`]), or
+///   missing the canonical non-zero TCP/QUIC stack and terminal peer id is dropped;
 /// * loopback is kept only when **nothing else survived**. A loopback entry is by construction
 ///   the same-machine case (two instances on one dev box, the DM/self-pairing flows), and that
 ///   case is real and must keep working. But when the invite also carries routable addresses,
 ///   a loopback entry is not a fallback for anything: it can only ever probe ports on the
 ///   reader's own machine, so it is dropped rather than dialled;
-/// * the survivors are capped at [`MAX_BOOTSTRAP_DIALS`], routable first.
+/// * the survivors are capped at [`MAX_BOOTSTRAP_DIALS`], routable first; the process scheduler
+///   applies its tighter present-window allowance before the transport is constructed.
 ///
 /// Private (LAN) addresses are deliberately **kept**: a group on one home network is the single
 /// most common first invite, and dropping them would break it. The exposure is bounded by the
@@ -2132,7 +3288,7 @@ fn dialable_bootstrap(bootstrap: &[String]) -> Vec<Multiaddr> {
     let parsed: Vec<Multiaddr> = bootstrap
         .iter()
         .filter_map(|s| s.parse::<Multiaddr>().ok())
-        .filter(|a| !addr_is_undialable(a))
+        .filter(|a| canonical_invite_peer_endpoint(a).is_some())
         .collect();
     let (loopback, routable): (Vec<Multiaddr>, Vec<Multiaddr>) =
         parsed.into_iter().partition(addr_is_loopback);
@@ -2372,7 +3528,7 @@ async fn establish_reachability(
     // itself because "reachable through a relay" is a separate property from direct reachability.
     for addr in external_addrs(&bootstrap) {
         if let Err(e) = mesh.add_external_address(addr.clone()).await {
-            eprintln!("reachability: could not offer {addr} to AutoNAT: {e}");
+            tracing::warn!(target: "catcoms_app", %addr, error = %e, "REACH.AUTONAT.OFFER_FAILED");
         }
     }
 
@@ -2429,17 +3585,13 @@ async fn reserve_relay_circuit(mesh: &MeshService, relay: &str) -> Result<String
     // Dialing again when the transport was already constructed dialing this relay is harmless
     // (libp2p collapses it onto the existing connection) and is what makes a reload self-contained.
     mesh.dial(relay_addr).await.map_err(|e| e.to_string())?;
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if p == relay_peer {
-                    break;
-                }
-            }
-        }
-    })
+    timeout(
+        Duration::from_secs(20),
+        mesh.wait_for_peer_connected(relay_peer),
+    )
     .await
-    .map_err(|_| "could not connect to the relay".to_string())?;
+    .map_err(|_| "could not connect to the relay".to_string())?
+    .map_err(|_| "the relay transport closed while connecting".to_string())?;
     mesh.listen_on(circuit).await.map_err(|e| e.to_string())?;
     let addr = timeout(Duration::from_secs(20), async {
         loop {
@@ -2475,17 +3627,13 @@ async fn connect_rendezvous(
         .await
         .map_err(|e| e.to_string())?;
     let rz_peer = phase0_peer_id(&rz.peer);
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if p == rz_peer {
-                    break;
-                }
-            }
-        }
-    })
+    timeout(
+        Duration::from_secs(20),
+        mesh.wait_for_peer_connected(rz_peer),
+    )
     .await
-    .map_err(|_| "could not connect to the rendezvous".to_string())?;
+    .map_err(|_| "could not connect to the rendezvous".to_string())?
+    .map_err(|_| "the rendezvous transport closed while connecting".to_string())?;
     Ok(rz)
 }
 
@@ -2545,6 +3693,10 @@ fn new_server_net(advertise: &str, relay: &str, rendezvous: &str) -> ServerNet {
         switchboard: false,
         // Reserved just below; this session gets the first block, the next launch the second.
         record_seq: 0,
+        reconnect_routes: Vec::new(),
+        reconnect_policy: ReconnectPolicy::Disabled,
+        pending_recovery_peer: None,
+        pending_recovery_expires_at_ms: 0,
     };
     // Own a peer-record sequence block from the very first session, so the invariant "this launch
     // can only publish numbers below anything the next launch can" holds from birth rather than
@@ -2561,7 +3713,7 @@ async fn persist_server_net(state: &AppState, server: u64, net: &ServerNet) {
     if let Some(store) = guard.as_ref() {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_server_net(server, net, &mut rng) {
-            eprintln!("persist: sealing the network identity of server {server} failed: {e}");
+            tracing::error!(target: "catcoms_app", server, error = %e, "VAULT.NET_IDENTITY.SEAL_FAILED");
         }
     }
 }
@@ -2590,7 +3742,7 @@ async fn load_or_init_server_net(
             Some(store) => match store.load_server_net(server) {
                 Ok(net) => net,
                 Err(e) => {
-                    eprintln!("reload: the network identity of server {server} did not load: {e}");
+                    tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.NET_IDENTITY.LOAD_FAILED");
                     None
                 }
             },
@@ -2827,7 +3979,12 @@ async fn store_port_mapping_status(
         .as_ref()
         != Some(&outcome);
     if changed {
-        let _ = app.emit("reachability-changed", server);
+        emit_tracked(
+            app,
+            "reachability-changed",
+            ServerEvt { server },
+            catcoms_diagnostics::TraceId::default(),
+        );
     }
 }
 
@@ -2899,7 +4056,7 @@ fn spawn_port_mapping_fold(
     mut rx: watch::Receiver<PortMappingSnapshot>,
     peer_id: String,
 ) {
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let deadline = SystemClock.sleep(Duration::from_secs(PORT_MAPPING_WINDOW_SECS));
         tokio::pin!(deadline);
         let mut waiting = true;
@@ -2949,6 +4106,10 @@ fn spawn_port_mapping_fold(
             store_port_mapping_status(&app, server, &active, &unavailable, waiting).await;
         }
     });
+    // A watch fold: it wakes when its source changes and is silent otherwise, so it declares no
+    // rhythm. What supervision buys here is knowing it died, which is the difference between
+    // "reachability stopped updating" and "reachability stopped changing".
+    supervise_task("port_mapping_fold", Some(server), None, task);
 }
 
 async fn apply_relay_snapshot(
@@ -2975,16 +4136,22 @@ async fn apply_relay_snapshot(
 /// listener can expire or be re-created later; the watch snapshot ensures Settings, invites and
 /// peer records all withdraw/add the same exact circuit address.
 fn spawn_relay_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<RelayAddressSnapshot>) {
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut previous = HashSet::new();
         let initial = rx.borrow_and_update().clone();
         apply_relay_snapshot(&app, server, initial, &mut previous).await;
         while rx.changed().await.is_ok() {
             let snapshot = rx.borrow_and_update().clone();
             apply_relay_snapshot(&app, server, snapshot, &mut previous).await;
-            let _ = app.emit("reachability-changed", server);
+            emit_tracked(
+                &app,
+                "reachability-changed",
+                ServerEvt { server },
+                catcoms_diagnostics::TraceId::default(),
+            );
         }
     });
+    supervise_task("relay_fold", Some(server), None, task);
 }
 
 fn spawn_mesh_observation_fold(
@@ -2992,7 +4159,7 @@ fn spawn_mesh_observation_fold(
     server: u64,
     mut rx: watch::Receiver<MeshObservationSnapshot>,
 ) {
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
             let snapshot = rx.borrow_and_update().clone();
             let observations: Vec<String> = snapshot
@@ -3017,13 +4184,19 @@ fn spawn_mesh_observation_fold(
                 .as_ref()
                 != Some(&observations);
             if changed {
-                let _ = app.emit("reachability-changed", server);
+                emit_tracked(
+                    &app,
+                    "reachability-changed",
+                    ServerEvt { server },
+                    catcoms_diagnostics::TraceId::default(),
+                );
             }
             if rx.changed().await.is_err() {
                 break;
             }
         }
     });
+    supervise_task("mesh_observation_fold", Some(server), None, task);
 }
 
 /// How long the background connectivity collector waits for AutoNAT v2.
@@ -3121,14 +4294,19 @@ async fn store_autonat_snapshot(
         .as_ref()
         != Some(&next);
     if changed {
-        let _ = app.emit("reachability-changed", server);
+        emit_tracked(
+            app,
+            "reachability-changed",
+            ServerEvt { server },
+            catcoms_diagnostics::TraceId::default(),
+        );
     }
 }
 
 /// Collect coalesced per-address AutoNAT v2 evidence. The product filters it against live routes
 /// only when read, closing startup-order and expiry races without an unbounded output queue.
 fn spawn_autonat_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<AutoNatSnapshot>) {
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let deadline = SystemClock.sleep(Duration::from_secs(AUTONAT_WINDOW_SECS));
         tokio::pin!(deadline);
         let mut waiting = true;
@@ -3154,6 +4332,7 @@ fn spawn_autonat_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<AutoN
             }
         }
     });
+    supervise_task("autonat_fold", Some(server), None, task);
 }
 
 /// Decode a pasted invite **and check its signature**, before anything touches the network.
@@ -3306,6 +4485,65 @@ fn switchboard_dial_plan(
     (allowed, selected)
 }
 
+/// Apply the same process-wide endpoint accounting to opt-in standing-member fallbacks. The
+/// switchboard signatures authorize *which helper may be contacted*; they do not exempt its
+/// public sockets from the scanner/resource boundary.
+fn schedule_switchboard_candidates(
+    scheduler: &EndpointDialScheduler,
+    group_id: &[u8],
+    mut allowed: HashMap<PeerId, u64>,
+    candidates: Vec<Multiaddr>,
+) -> (HashMap<PeerId, u64>, Vec<Multiaddr>) {
+    let mut granted = Vec::new();
+    let mut granted_peers = HashSet::new();
+    for candidate in candidates {
+        let Some(target) = target_peer_in_multiaddr(&candidate) else {
+            continue;
+        };
+        let peer = phase0_peer_id(&target);
+        if !allowed.contains_key(&peer) {
+            continue;
+        }
+        let address = candidate.to_string();
+        let Some(endpoint) = untrusted_peer_endpoint(&address, &peer) else {
+            continue;
+        };
+        if !scheduler
+            .reserve(group_id, std::slice::from_ref(&endpoint))
+            .is_empty()
+        {
+            granted_peers.insert(peer);
+            granted.push(candidate);
+        }
+    }
+    allowed.retain(|peer, _| granted_peers.contains(peer));
+    (allowed, granted)
+}
+
+/// Charge one two-way reply dial pass against the same process-wide boundary as rendezvous,
+/// signed peer-record, and switchboard dials. A valid reply authenticates the joiner PeerId and
+/// its short-lived address set, but it does not make those Internet sockets free to probe.
+///
+/// Returning an empty set is deliberately temporary: the caller keeps the bounded reply session
+/// alive and may retry after the scheduler's monotonic window rolls over.
+fn schedule_join_reply_candidates(
+    scheduler: &EndpointDialScheduler,
+    group_id: &[u8],
+    joiner: &libp2p::PeerId,
+    candidates: &[Multiaddr],
+) -> Vec<Multiaddr> {
+    let phase_peer = phase0_peer_id(joiner);
+    let endpoints: Vec<_> = candidates
+        .iter()
+        .filter_map(|candidate| untrusted_peer_endpoint(&candidate.to_string(), &phase_peer))
+        .collect();
+    scheduler
+        .reserve(group_id, &endpoints)
+        .into_iter()
+        .filter_map(|address| address.parse().ok())
+        .collect()
+}
+
 #[tauri::command]
 async fn preview_invite(
     state: State<'_, AppState>,
@@ -3333,10 +4571,327 @@ async fn preview_invite(
 /// through the [`DiscoveryPolicy`] (never auto-dial), then dial the chosen addresses; plus the
 /// invite's `bootstrap` addrs as direct fallbacks; and return the connected transport + the
 /// inviter's peer id. Mirrors `tcp_rendezvous_e2e.rs`.
+fn untrusted_peer_endpoint(address: &str, expected_peer: &PeerId) -> Option<DialEndpoint> {
+    let route = parse_peer_dial_route(address, expected_peer.as_bytes())?;
+    if !matches!(route.host, RouteHost::Ip(_)) {
+        return None;
+    }
+    let parsed: Multiaddr = address.parse().ok()?;
+    addr_is_globally_routable(&parsed).then_some(route.endpoint)
+}
+
+/// Validate an invite route while preserving the deliberate same-LAN and same-machine cases.
+/// The canonical grammar and terminal peer binding are identical to internet discovery; only the
+/// host policy differs. DNS, link-local, multicast, unspecified, and unsupported route shapes
+/// still fail closed.
+fn invite_peer_endpoint(address: &str, expected_peer: &PeerId) -> Option<DialEndpoint> {
+    let route = parse_peer_dial_route(address, expected_peer.as_bytes())?;
+    if !matches!(route.host, RouteHost::Ip(_)) {
+        return None;
+    }
+    let parsed: Multiaddr = address.parse().ok()?;
+    (!addr_is_undialable(&parsed)).then_some(route.endpoint)
+}
+
+fn canonical_invite_peer_endpoint(address: &Multiaddr) -> Option<DialEndpoint> {
+    let target = target_peer_in_multiaddr(address)?;
+    invite_peer_endpoint(&address.to_string(), &phase0_peer_id(&target))
+}
+
+/// Retain only the live outbound route that Noise authenticated for the member who completed
+/// admission. This is the local-only substitute for putting private LAN addresses into PEX: the
+/// route is sealed with `ServerNet`, capped to TCP/QUIC scale, and is roster-checked again by the
+/// sync layer before every later dial.
+fn select_authenticated_reconnect_routes(
+    routes: Vec<AuthenticatedDialRoute>,
+    member_peers: &HashSet<PeerId>,
+    local_only: bool,
+) -> Vec<ReconnectRoute> {
+    let mut routes: Vec<_> = routes
+        .into_iter()
+        .filter(|route| member_peers.contains(&route.peer))
+        .filter(|route| route.address.len() <= MAX_RECONNECT_ROUTE_BYTES)
+        .filter(|route| invite_peer_endpoint(&route.address, &route.peer).is_some())
+        .filter(|route| {
+            !local_only
+                || route
+                    .address
+                    .parse::<Multiaddr>()
+                    .is_ok_and(|addr| addr_is_private(&addr) || addr_is_loopback(&addr))
+        })
+        .map(|route| ReconnectRoute {
+            peer_id: *route.peer.as_bytes(),
+            address: route.address,
+        })
+        .collect();
+    routes.sort_by(|left, right| {
+        left.peer_id
+            .cmp(&right.peer_id)
+            .then_with(|| left.address.cmp(&right.address))
+    });
+    routes.dedup();
+    routes.truncate(MAX_RECONNECT_ROUTES);
+    routes
+}
+
+fn authenticated_reconnect_routes(mesh: &MeshHandle, contact: PeerId) -> Vec<ReconnectRoute> {
+    select_authenticated_reconnect_routes(
+        mesh.authenticated_dial_routes(),
+        &HashSet::from([contact]),
+        false,
+    )
+}
+
+/// Convert the actual admission path into durable reconnect authority.
+///
+/// A reply may ultimately authenticate the named inviter, but that path authorized a bounded
+/// inbound callback rather than indefinite future dialing. Likewise, a switchboard authorized a
+/// bounded helper ceremony. Test the path flags explicitly instead of inferring consent from the
+/// final contact identity, which is deliberately the inviter in the successful reply case.
+fn reconnect_policy_after_admission(
+    join_contact: PeerId,
+    inviter: PeerId,
+    used_reply_path: bool,
+    used_switchboard_path: bool,
+) -> ReconnectPolicy {
+    if join_contact == inviter && !used_reply_path && !used_switchboard_path {
+        ReconnectPolicy::AuthorizedPeer(*join_contact.as_bytes())
+    } else {
+        ReconnectPolicy::Disabled
+    }
+}
+
+/// A transport identity is a safe durable member target only while exactly one roster entry
+/// claims it. A duplicate claim is ambiguous even if the live Noise connection itself is valid:
+/// retaining that socket as either member's route would turn the shared transport key into a
+/// confused-deputy shortcut on the next launch. The sync layer repeats this uniqueness check at
+/// dial time; doing it here also keeps ambiguous state out of the sealed store.
+fn uniquely_claimed_member_peers(peers: impl IntoIterator<Item = PeerId>) -> HashSet<PeerId> {
+    let mut claim_counts = HashMap::<PeerId, usize>::new();
+    for peer in peers {
+        *claim_counts.entry(peer).or_default() += 1;
+    }
+    claim_counts
+        .into_iter()
+        .filter_map(|(peer, claims)| (claims == 1).then_some(peer))
+        .collect()
+}
+
+/// Apply durable admission provenance before a live route may be captured.
+///
+/// A direct admission can refresh only its named inviter. A pre-v3 record gets one conservative
+/// migration opportunity only when the roster has exactly one other member; helper and
+/// switchboard joins necessarily have a larger roster and new non-direct joins are explicitly
+/// disabled rather than inferred from an empty route vector.
+fn reconnect_capture_peer(
+    policy: ReconnectPolicy,
+    other_member_count: usize,
+    claimed_peers: impl IntoIterator<Item = PeerId>,
+) -> Option<PeerId> {
+    let unique = uniquely_claimed_member_peers(claimed_peers);
+    match policy {
+        ReconnectPolicy::Disabled => None,
+        ReconnectPolicy::AuthorizedPeer(peer) => {
+            let peer = PeerId::new(peer);
+            unique.contains(&peer).then_some(peer)
+        }
+        ReconnectPolicy::LegacyPending if other_member_count == 1 && unique.len() == 1 => {
+            unique.into_iter().next()
+        }
+        ReconnectPolicy::LegacyPending => None,
+    }
+}
+
+/// Apply the same unique-current-claim boundary to a recovery candidate before it may replace a
+/// proven reconnect contact. A signed recovery code proves which member requested the attempt;
+/// it does not make a transport identity claimed by two roster entries unambiguous.
+fn pending_recovery_capture_peer(
+    pending: Option<[u8; 32]>,
+    expires_at_ms: u64,
+    now_ms: u64,
+    claimed_peers: impl IntoIterator<Item = PeerId>,
+) -> Option<PeerId> {
+    if pending.is_none() || now_ms > expires_at_ms {
+        return None;
+    }
+    let unique = uniquely_claimed_member_peers(claimed_peers);
+    pending
+        .map(PeerId::new)
+        .filter(|peer| unique.contains(peer))
+}
+
+/// Merge one authenticated route observation into the *latest* sealed network record.
+///
+/// Discovery awaits actor/mesh state between its initial read and final save. Re-authorizing a
+/// different recovery peer during that gap must not be lost to a stale whole-record write. `None`
+/// means the authority that selected this capture is no longer current; `Some(changed)` preserves
+/// any unrelated newer pending consent and clears only the exact candidate being promoted.
+fn merge_live_reconnect_capture(
+    current: &mut ServerNet,
+    selected_from_pending: bool,
+    capture_peer: PeerId,
+    routes: Vec<ReconnectRoute>,
+    other_member_count: usize,
+    now_ms: u64,
+    claimed_peers: impl IntoIterator<Item = PeerId>,
+) -> Option<bool> {
+    let peer_bytes = *capture_peer.as_bytes();
+    if selected_from_pending {
+        if current.pending_recovery_peer != Some(peer_bytes)
+            || now_ms > current.pending_recovery_expires_at_ms
+        {
+            return None;
+        }
+    } else if reconnect_capture_peer(current.reconnect_policy, other_member_count, claimed_peers)
+        != Some(capture_peer)
+    {
+        return None;
+    }
+
+    let next_policy = ReconnectPolicy::AuthorizedPeer(peer_bytes);
+    let pending_is_current =
+        current.pending_recovery_peer.is_some() && now_ms <= current.pending_recovery_expires_at_ms;
+    let (next_pending, next_pending_expiry) = if selected_from_pending || !pending_is_current {
+        (None, 0)
+    } else {
+        (
+            current.pending_recovery_peer,
+            current.pending_recovery_expires_at_ms,
+        )
+    };
+    let changed = current.reconnect_routes != routes
+        || current.reconnect_policy != next_policy
+        || current.pending_recovery_peer != next_pending
+        || current.pending_recovery_expires_at_ms != next_pending_expiry;
+    current.reconnect_routes = routes;
+    current.reconnect_policy = next_policy;
+    current.pending_recovery_peer = next_pending;
+    current.pending_recovery_expires_at_ms = next_pending_expiry;
+    Some(changed)
+}
+
+/// Capture same-LAN routes for already-established servers, including records created before
+/// `ServerNet` v3 existed. Only a current member's self-signed transport claim may select a live
+/// Noise-authenticated route, and this migration path is intentionally local-only: public member
+/// routes already belong in the signed PEX/cache path, while infrastructure/helper sockets must
+/// not become durable merely because they share this process.
+fn authenticated_member_lan_reconnect_routes(
+    mesh: &MeshHandle,
+    member_peers: &HashSet<PeerId>,
+) -> Vec<ReconnectRoute> {
+    select_authenticated_reconnect_routes(
+        mesh.authenticated_dial_route_evidence(),
+        member_peers,
+        true,
+    )
+}
+
+/// Schedule already set-validated rendezvous routes. The invite validator permits loopback only
+/// when the entire set is loopback, so this must use the invite host policy rather than silently
+/// tightening it to the public-only policy used for network-discovered records.
+fn schedule_invite_rendezvous_targets(
+    scheduler: &EndpointDialScheduler,
+    group_id: &[u8],
+    targets: Vec<RendezvousTarget>,
+) -> Vec<RendezvousTarget> {
+    targets
+        .into_iter()
+        .filter(|target| {
+            let phase_peer = phase0_peer_id(&target.peer);
+            let Some(endpoint) = invite_peer_endpoint(&target.addr.to_string(), &phase_peer) else {
+                return false;
+            };
+            !scheduler
+                .reserve(group_id, std::slice::from_ref(&endpoint))
+                .is_empty()
+        })
+        // Cap actual grants, not merely entries considered: a structurally valid but unsupported
+        // address before a usable one must not consume rendezvous redundancy.
+        .take(MAX_INVITE_RENDEZVOUS_DIALS)
+        .collect()
+}
+
+/// Keep the same bounded, canonical seed set for steady-state recovery after a switchboard join.
+/// This path does not reserve again: the live server actor will spend the shared scheduler when it
+/// actually reconnects to these configured nodes.
+fn retained_invite_rendezvous_config(targets: &[RendezvousTarget]) -> Vec<(String, Vec<u8>)> {
+    targets
+        .iter()
+        .filter(|target| canonical_invite_peer_endpoint(&target.addr).is_some())
+        .take(MAX_INVITE_RENDEZVOUS_DIALS)
+        .map(|target| (target.addr.to_string(), target.peer.to_bytes()))
+        .collect()
+}
+
+/// Merge candidate sources without erasing their different host-trust rules. Rendezvous/PEX
+/// discovery is public-IP-only; the issuer-signed direct bootstrap deliberately retains bounded
+/// LAN and same-machine routes.
+fn join_candidate_endpoints(
+    discovered: &[String],
+    invite_fallbacks: &[String],
+    inviter: &PeerId,
+) -> Vec<DialEndpoint> {
+    let mut endpoints = Vec::new();
+    for address in discovered {
+        if let Some(endpoint) = untrusted_peer_endpoint(address, inviter) {
+            if !endpoints.contains(&endpoint) {
+                endpoints.push(endpoint);
+            }
+        }
+    }
+    for address in invite_fallbacks {
+        if let Some(endpoint) = invite_peer_endpoint(address, inviter) {
+            if !endpoints.contains(&endpoint) {
+                endpoints.push(endpoint);
+            }
+        }
+    }
+    endpoints
+}
+
+/// Validate and schedule the direct reach fields copied into one companion grant. Grants are
+/// authenticated pairing material, but a compromised/buggy origin must not turn a multi-server
+/// bundle into an unbounded or peer-confused dial list on the new device.
+fn schedule_grant_bootstrap(
+    scheduler: &EndpointDialScheduler,
+    group_id: &[u8],
+    bootstrap: &[String],
+) -> Result<(PeerId, Vec<Multiaddr>), String> {
+    let candidates = dialable_bootstrap(bootstrap);
+    if candidates.is_empty() {
+        return Err("this grant carries no usable address for that server".to_string());
+    }
+    let contacts: HashSet<_> = candidates
+        .iter()
+        .filter_map(target_peer_in_multiaddr)
+        .collect();
+    if contacts.len() != 1 {
+        return Err("grant addresses do not name one unambiguous server peer".to_string());
+    }
+    let contact_lp = *contacts.iter().next().expect("one contact checked above");
+    let contact = phase0_peer_id(&contact_lp);
+    let endpoints: Vec<_> = candidates
+        .iter()
+        .filter_map(|address| invite_peer_endpoint(&address.to_string(), &contact))
+        .collect();
+    let granted: Vec<_> = scheduler
+        .reserve(group_id, &endpoints)
+        .into_iter()
+        .filter_map(|address| address.parse().ok())
+        .collect();
+    if granted.is_empty() {
+        return Err(
+            "the process-wide discovery dial budget deferred every grant endpoint".to_string(),
+        );
+    }
+    Ok((contact, granted))
+}
+
 async fn discover_and_connect(
     invite: &InviteToken,
     net: &ServerNet,
     expected_inviter: Option<PeerId>,
+    endpoint_dials: &EndpointDialScheduler,
     steps: &mut Vec<DiagStep>,
 ) -> Result<(MeshService, PeerId, Vec<(String, Vec<u8>)>, u16), String> {
     // Invite-supplied, so attacker-controlled: the strict variant. The bootstrap half of this same
@@ -3346,6 +4901,16 @@ async fn discover_and_connect(
         validate_invite_rendezvous_addrs(&invite.rendezvous).map_err(|e| e.to_string())?;
     if targets.is_empty() {
         return Err("invite carries no rendezvous address".into());
+    }
+    // The transport constructor dials its seed list immediately, so the shared scheduler must
+    // trim invite-selected rendezvous endpoints before construction. Charging only the member
+    // records discovered afterwards would leave the first (and easiest) scanner seam outside the
+    // process cap.
+    let targets = schedule_invite_rendezvous_targets(endpoint_dials, &invite.group_id, targets);
+    if targets.is_empty() {
+        return Err(
+            "the process-wide discovery dial budget deferred every rendezvous endpoint".into(),
+        );
     }
     let rz_addrs: Vec<Multiaddr> = targets.iter().map(|t| t.addr.clone()).collect();
     // Bind the joiner's own (stable, persisted-identity) listen addresses so it is itself dialable;
@@ -3361,15 +4926,10 @@ async fn discover_and_connect(
 
     // Wait until at least one rendezvous node is connected.
     let rz_peers: Vec<PeerId> = targets.iter().map(|t| phase0_peer_id(&t.peer)).collect();
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if rz_peers.contains(&p) {
-                    break;
-                }
-            }
-        }
-    })
+    timeout(
+        Duration::from_secs(20),
+        mesh.wait_for_any_connected(&rz_peers),
+    )
     .await
     .map_err(|_| {
         steps.push(DiagStep::failed(
@@ -3382,7 +4942,8 @@ async fn discover_and_connect(
             "timed out connecting to the rendezvous",
         ));
         "timed out connecting to the rendezvous".to_string()
-    })?;
+    })?
+    .map_err(|_| "the rendezvous transport closed while connecting".to_string())?;
     steps.push(DiagStep::ok(
         "rendezvous",
         rz_addrs
@@ -3409,10 +4970,21 @@ async fn discover_and_connect(
             if expected_inviter.is_some_and(|expected| phase0_peer_id(&d.peer) != expected) {
                 continue;
             }
+            let phase_peer = phase0_peer_id(&d.peer);
+            let addresses: Vec<String> = d
+                .addresses
+                .iter()
+                .map(ToString::to_string)
+                .filter(|address| untrusted_peer_endpoint(address, &phase_peer).is_some())
+                .collect();
+            if addresses.is_empty() {
+                continue;
+            }
             candidates.push(Candidate {
                 peer: d.peer.to_bytes(),
-                addresses: d.addresses.iter().map(|a| a.to_string()).collect(),
+                addresses,
                 source: Source::Rendezvous(root.clone()),
+                freshness: catcoms_discovery::FreshnessPrincipal::Transport(d.peer.to_bytes()),
                 // The record's own signed seq gives the policy real anti-replay freshness; the
                 // backstop remains request_join's Welcome-signature + group-id check, which fails
                 // closed if we dial the wrong peer. tag_verified stays false pre-join (no group
@@ -3460,7 +5032,14 @@ async fn discover_and_connect(
         .iter()
         .map(|m| m.to_string())
         .collect();
-    for a in dialed.addresses.iter().chain(fallbacks.iter()) {
+    let endpoints = join_candidate_endpoints(&dialed.addresses, &fallbacks, &inviter);
+    let granted = endpoint_dials.reserve(&invite.group_id, &endpoints);
+    if granted.is_empty() {
+        return Err(
+            "the process-wide discovery dial budget deferred every inviter endpoint".into(),
+        );
+    }
+    for a in &granted {
         match a.parse::<Multiaddr>() {
             Ok(m) => match mesh.dial(m).await {
                 // libp2p dials these concurrently and only the *first* one to complete surfaces
@@ -3471,15 +5050,10 @@ async fn discover_and_connect(
             Err(e) => steps.push(DiagStep::failed("dial", a.clone(), e.to_string())),
         }
     }
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if p == inviter {
-                    break;
-                }
-            }
-        }
-    })
+    timeout(
+        Duration::from_secs(20),
+        mesh.wait_for_peer_connected(inviter),
+    )
     .await
     .map_err(|_| {
         steps.push(DiagStep::failed(
@@ -3488,7 +5062,8 @@ async fn discover_and_connect(
             "none of the dialled addresses answered within 20s",
         ));
         "timed out connecting to the discovered server".to_string()
-    })?;
+    })?
+    .map_err(|_| "the join transport closed while connecting".to_string())?;
     steps.push(DiagStep::ok("connect", "", "connected to the server"));
     // The rendezvous config the joiner keeps for steady-state discovery (re-finding the group).
     let rz_config: Vec<(String, Vec<u8>)> = targets
@@ -3520,12 +5095,23 @@ async fn found_server(
     rendezvous: String,
     is_dm: bool,
     server_name: Option<String>,
+    trace: Option<String>,
 ) -> Result<FoundResult, String> {
-    require_unlocked_session(&state).await?;
+    let op = Operation::start_maybe(
+        trace,
+        catcoms_diagnostics::Section::Reachability,
+        "found_server",
+        None,
+        None,
+    );
+    let ui_session_generation = unlocked_ui_session_generation(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e).into_message())?;
     let mut diag = Connectivity {
         action: "found".into(),
         subject: display_name.clone(),
         at: SystemClock.now_ms(),
+        trace: op.short_trace(),
         ..Default::default()
     };
     let out = found_server_inner(
@@ -3537,13 +5123,20 @@ async fn found_server(
         rendezvous,
         is_dm,
         server_name,
+        ui_session_generation,
         &mut diag,
     )
     .await;
+    // The panel's own account, now also in the record and under this attempt's trace. Both, rather
+    // than one: the panel is what the user reads and the record is what survives to be exported.
+    op.replay(&diag.steps);
     // The verbatim error is the point: the connectivity panel shows exactly what the code said,
     // so a user can paste it rather than paraphrase it.
     if let Err(e) = &out {
         diag.last_error.clone_from(e);
+        op.failed("REACH.FOUND.FAILED");
+    } else {
+        op.succeeded("REACH.FOUND.COMPLETED");
     }
     *state.diag.lock().await = diag;
     out
@@ -3561,6 +5154,7 @@ async fn found_server_inner(
     rendezvous: String,
     is_dm: bool,
     server_name: Option<String>,
+    ui_session_generation: u64,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
     // This server's own network identity + stable port, minted once here and sealed to disk, so
@@ -3617,6 +5211,7 @@ async fn found_server_inner(
         display_name,
     )
     .map_err(|e| e.to_string())?;
+    server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
     server
         .subscribe_control()
         .await
@@ -3635,7 +5230,7 @@ async fn found_server_inner(
     // `bootstrap` (loopback, the LAN address) are stripped inside `publish_self_record`, so what
     // members learn is only what they could actually dial.
     if let Err(e) = server.publish_self_record(bootstrap.clone(), net.record_seq) {
-        eprintln!("found: publishing the peer record failed: {e}");
+        tracing::warn!(target: "catcoms_app", error = %e, "DISCOVERY.PEER_RECORD.PUBLISH_FAILED");
     }
 
     // Mint a single-use invite (1h) carrying the bootstrap address (+ rendezvous addr if set, so
@@ -3663,14 +5258,24 @@ async fn found_server_inner(
     let general = channel_id("general");
     let group_id = server.group_id();
     let device_id = server.device_id();
-    let (actor, events, _task) = spawn(server);
+    let (actor, events, task) = spawn(server);
     actor.open_channel(general).await;
     let channels = ui_channels(actor.channels().await);
+    let session_commit = match require_ui_session_generation(state, ui_session_generation).await {
+        Ok(commit) => commit,
+        Err(error) => {
+            actor.shutdown().await;
+            drop(events);
+            let _ = task.await;
+            return Err(error);
+        }
+    };
     let server_id = register_server(
         app,
         state,
         actor,
         events,
+        task,
         group_id,
         device_id,
         Some(invite_hex),
@@ -3694,6 +5299,7 @@ async fn found_server_inner(
     persist_server(state, server_id).await;
     persist_server_net(state, server_id, &net).await;
     persist_registry(state).await;
+    drop(session_commit);
     diag.server = server_id;
     diag.advertised.clone_from(&invite.bootstrap);
     diag.steps.push(DiagStep::ok(
@@ -3740,17 +5346,11 @@ async fn found_server_inner(
 /// Join an existing server by pasting its invite: decode it, dial all bootstrap addresses,
 /// run the MLS join, then catch up #general / profiles / files.
 async fn wait_for_peer(mesh: &MeshService, wanted: PeerId, within: Duration) -> Result<(), ()> {
-    timeout(within, async {
-        loop {
-            match mesh.next_event().await {
-                Some(TransportEvent::PeerConnected(peer)) if peer == wanted => return,
-                Some(_) => {}
-                None => std::future::pending::<()>().await,
-            }
-        }
-    })
-    .await
-    .map_err(|_| ())
+    timeout(within, mesh.wait_for_peer_connected(wanted))
+        .await
+        .map_err(|_| ())?
+        .map(|_| ())
+        .map_err(|_| ())
 }
 
 /// Wait for whichever peer answers a reply-code dial-back.  The reply candidate is public and
@@ -3758,6 +5358,7 @@ async fn wait_for_peer(mesh: &MeshService, wanted: PeerId, within: Duration) -> 
 /// path distinguishes them and never grants the helper admission authority.
 async fn wait_for_reply_peer(
     mesh: &MeshService,
+    connection_handoff: &mut PreOwnerConnectionHandoff,
     reply: &JoinReply,
     invite_nonce: &[u8; 16],
     within: Duration,
@@ -3785,6 +5386,7 @@ async fn wait_for_reply_peer(
                 Some(TransportEvent::Request { responder, .. }) => {
                     responder.respond(bytes::Bytes::new());
                 }
+                Some(event) if connection_handoff.observe(&event) => {}
                 Some(_) => {}
                 None => std::future::pending::<()>().await,
             }
@@ -3799,26 +5401,54 @@ async fn wait_for_switchboard_peer(
     allowed: &HashMap<PeerId, u64>,
     within: Duration,
 ) -> Result<(PeerId, u64), ()> {
+    let now_ms = SystemClock.now_ms();
+    let mut wanted: Vec<_> = allowed
+        .iter()
+        .filter_map(|(peer, expires_at_ms)| (*expires_at_ms >= now_ms).then_some(*peer))
+        .collect();
     timeout(within, async {
         loop {
-            match mesh.next_event().await {
-                Some(TransportEvent::PeerConnected(peer)) => {
-                    if let Some(expires_at_ms) = allowed.get(&peer).copied() {
-                        if SystemClock.now_ms() <= expires_at_ms {
-                            return (peer, expires_at_ms);
-                        }
-                    }
-                }
-                Some(_) => {}
-                None => std::future::pending::<()>().await,
+            if wanted.is_empty() {
+                return Err(());
             }
+            let connected = mesh.wait_for_any_connected(&wanted).await.map_err(|_| ())?;
+            if let Some(candidate) = accept_or_prune_switchboard_candidate(
+                &mut wanted,
+                allowed,
+                connected.peer,
+                SystemClock.now_ms(),
+            ) {
+                return Ok(candidate);
+            }
+            // The returned row expired while the wait was pending. It has been removed from
+            // `wanted`, so an already-connected valid helper can win the next immediate watch
+            // query instead of the expired row masking it forever.
         }
     })
     .await
-    .map_err(|_| ())
+    .map_err(|_| ())?
+}
+
+/// Accept a still-current switchboard route, or remove an expired/confused candidate before the
+/// caller waits again. Keeping this decision pure makes the two-connected-helper expiry race
+/// deterministic in unit tests.
+fn accept_or_prune_switchboard_candidate(
+    wanted: &mut Vec<PeerId>,
+    allowed: &HashMap<PeerId, u64>,
+    connected: PeerId,
+    now_ms: u64,
+) -> Option<(PeerId, u64)> {
+    if let Some(expires_at_ms) = allowed.get(&connected).copied() {
+        if now_ms <= expires_at_ms {
+            return Some((connected, expires_at_ms));
+        }
+    }
+    wanted.retain(|peer| *peer != connected);
+    None
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn join_server(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -3827,11 +5457,22 @@ async fn join_server(
     is_dm: bool,
     allow_switchboards: bool,
     server_name: Option<String>,
+    trace: Option<String>,
 ) -> Result<FoundResult, String> {
-    require_unlocked_session(&state).await?;
+    let op = Operation::start_maybe(
+        trace,
+        catcoms_diagnostics::Section::Join,
+        "join_server",
+        None,
+        None,
+    );
+    let ui_session_generation = unlocked_ui_session_generation(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e).into_message())?;
     let mut diag = Connectivity {
         action: "join".into(),
         at: SystemClock.now_ms(),
+        trace: op.short_trace(),
         ..Default::default()
     };
     let out = join_server_inner(
@@ -3842,11 +5483,18 @@ async fn join_server(
         is_dm,
         allow_switchboards,
         server_name,
+        ui_session_generation,
         &mut diag,
     )
     .await;
+    op.replay(&diag.steps);
     if let Err(e) = &out {
         diag.last_error.clone_from(e);
+        // A join that fails is the single most reported problem in this app, and until now the
+        // record of one was a panel the user had to be looking at to see.
+        op.failed("JOIN.ATTEMPT.FAILED");
+    } else {
+        op.succeeded("JOIN.ATTEMPT.COMPLETED");
     }
     *state.diag.lock().await = diag;
     out
@@ -3863,6 +5511,7 @@ async fn join_server_inner(
     is_dm: bool,
     allow_switchboards: bool,
     server_name: Option<String>,
+    ui_session_generation: u64,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
     let decoded = decode_and_verify_invite(&invite_hex).inspect_err(|e| {
@@ -3924,11 +5573,16 @@ async fn join_server_inner(
     {
         let targets =
             validate_invite_rendezvous_addrs(&invite.rendezvous).map_err(|e| e.to_string())?;
-        let fallback_rz_config: Vec<_> = targets
-            .iter()
-            .map(|target| (target.addr.to_string(), target.peer.to_bytes()))
-            .collect();
-        match discover_and_connect(&invite, &net, plan_inviter, &mut diag.steps).await {
+        let fallback_rz_config = retained_invite_rendezvous_config(&targets);
+        match discover_and_connect(
+            &invite,
+            &net,
+            plan_inviter,
+            &state.endpoint_dials,
+            &mut diag.steps,
+        )
+        .await
+        {
             Ok((mesh, inviter, rz_config, port)) => {
                 net.port = port;
                 (mesh, inviter, rz_config, false, false)
@@ -3955,10 +5609,10 @@ async fn join_server_inner(
     } else {
         // Validated + capped before a single socket is opened (defect P7): an unvalidated list of
         // up to 64 author-chosen addresses is a connect flood with a paste for a trigger.
-        let addrs = dialable_bootstrap(&invite.bootstrap);
+        let candidate_addrs = dialable_bootstrap(&invite.bootstrap);
         // The dropped entries are worth naming: "the invite listed three addresses and every one
         // was loopback or otherwise undialable" is a diagnosis; a bare empty list is not.
-        let dropped = invite.bootstrap.len().saturating_sub(addrs.len());
+        let dropped = invite.bootstrap.len().saturating_sub(candidate_addrs.len());
         if dropped > 0 {
             diag.steps.push(DiagStep::failed(
                 "dial",
@@ -3966,16 +5620,61 @@ async fn join_server_inner(
                 format!("{dropped} address(es) in the invite were unusable and were not dialled"),
             ));
         }
-        if addrs.is_empty() && !use_switchboards {
+        if candidate_addrs.is_empty() && !use_switchboards {
             return Err("invite carries no usable bootstrap address".to_string());
         }
-        let inviter = match addrs.iter().find_map(target_peer_in_multiaddr) {
+        let inviter = match candidate_addrs.iter().find_map(target_peer_in_multiaddr) {
             Some(peer) => phase0_peer_id(&peer),
             None => plan_inviter.ok_or_else(|| {
                 "invite has neither a direct inviter route nor a pinned assisted inviter"
                     .to_string()
             })?,
         };
+        let peer_bound: Vec<(Multiaddr, DialEndpoint)> = candidate_addrs
+            .iter()
+            .filter_map(|address| {
+                invite_peer_endpoint(&address.to_string(), &inviter)
+                    .map(|endpoint| (address.clone(), endpoint))
+            })
+            .collect();
+        let wrong_peer = candidate_addrs.len().saturating_sub(peer_bound.len());
+        if wrong_peer > 0 {
+            diag.steps.push(DiagStep::failed(
+                "dial",
+                "",
+                format!(
+                    "{wrong_peer} otherwise usable address(es) named a different inviter and were not dialled"
+                ),
+            ));
+        }
+        if peer_bound.is_empty() && !use_switchboards {
+            return Err("invite carries no usable route bound to its inviter".to_string());
+        }
+        let endpoints: Vec<DialEndpoint> = peer_bound
+            .iter()
+            .map(|(_, endpoint)| endpoint.clone())
+            .collect();
+        let granted = state.endpoint_dials.reserve(&invite.group_id, &endpoints);
+        let addrs: Vec<Multiaddr> = granted
+            .iter()
+            .filter_map(|address| address.parse().ok())
+            .collect();
+        let deferred = peer_bound.len().saturating_sub(addrs.len());
+        if deferred > 0 {
+            diag.steps.push(DiagStep::unknown(
+                "dial",
+                "",
+                format!(
+                    "the shared process budget deferred {deferred} otherwise usable address(es)"
+                ),
+            ));
+        }
+        if addrs.is_empty() && !use_switchboards {
+            return Err(
+                "the process-wide discovery dial budget deferred every inviter endpoint"
+                    .to_string(),
+            );
+        }
         let (mesh, _id, port, bound) = build_transport(&net, &addrs)?;
         record_listener_evidence(&mesh, &bound, &mut diag.steps).await;
         net.port = port;
@@ -4006,6 +5705,7 @@ async fn join_server_inner(
     let mut join_contact = inviter;
     let mut reply_expires_at_ms = None;
     let mut reply_context: Option<JoinReply> = None;
+    let mut connection_handoff = PreOwnerConnectionHandoff::default();
     let mut switchboard_expires_at_ms = None;
     let mut switchboard_contacts = Vec::new();
     if needs_direct_wait {
@@ -4035,6 +5735,12 @@ async fn join_server_inner(
                     &invite.group_id,
                     now,
                     invite.expires_at_ms,
+                );
+                let (allowed, candidates) = schedule_switchboard_candidates(
+                    &state.endpoint_dials,
+                    &invite.group_id,
+                    allowed,
+                    candidates,
                 );
                 let latest_deadline = allowed.values().copied().max().unwrap_or(now);
                 if !candidates.is_empty() {
@@ -4113,8 +5819,15 @@ async fn join_server_inner(
                     candidate_count: reply.candidates.len(),
                 };
                 reply_expires_at_ms = Some(reply.expires_at_ms);
-                app.emit("join-reply-ready", &ready)
-                    .map_err(|e| e.to_string())?;
+                {
+                    // The code contains this device's current listener addresses. Never publish
+                    // it into a webview session that was explicitly locked while direct dialing
+                    // was pending.
+                    let _session =
+                        require_ui_session_generation(state, ui_session_generation).await?;
+                    app.emit("join-reply-ready", &ready)
+                        .map_err(|e| e.to_string())?;
+                }
                 diag.steps.push(DiagStep::unknown(
                 "reply",
                 "",
@@ -4127,6 +5840,7 @@ async fn join_server_inner(
                 let remaining = reply.expires_at_ms.saturating_sub(SystemClock.now_ms());
                 join_contact = wait_for_reply_peer(
                 &mesh,
+                &mut connection_handoff,
                 &reply,
                 &invite.invite_nonce,
                 Duration::from_millis(remaining),
@@ -4188,8 +5902,9 @@ async fn join_server_inner(
             .as_ref()
             .ok_or_else(|| "reply connection was selected without its proof context".to_string())?;
         let reply_joiner_peer = reply.joiner.to_bytes();
-        Server::join_from_reply(
+        Server::join_from_reply_with_handoff(
             mesh,
+            connection_handoff,
             device,
             OsCryptoRng,
             Box::new(SystemClock),
@@ -4235,6 +5950,56 @@ async fn join_server_inner(
         ));
         msg
     })?;
+    server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
+    // Admission has now authenticated both group membership and the live Noise peer. Persist only
+    // a direct route to the named inviter; untried invite candidates and admission-only helpers
+    // never become recurring socket work. Reply and switchboard consent is time-bounded even when
+    // the final authenticated contact is the inviter, so the path itself must remain part of this
+    // decision rather than relying on the contact identity alone.
+    net.reconnect_policy = reconnect_policy_after_admission(
+        join_contact,
+        inviter,
+        used_reply_path,
+        used_switchboard_path,
+    );
+    let direct_reconnect_authorized = matches!(
+        net.reconnect_policy,
+        ReconnectPolicy::AuthorizedPeer(peer) if peer == *join_contact.as_bytes()
+    );
+    net.reconnect_routes = if direct_reconnect_authorized {
+        authenticated_reconnect_routes(&mesh_handle, join_contact)
+    } else {
+        Vec::new()
+    };
+    server.set_local_reconnect_routes(
+        net.reconnect_routes
+            .iter()
+            .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
+            .collect(),
+    );
+    if direct_reconnect_authorized {
+        // The sealed socket is useful after a restart only when the group snapshot also contains
+        // the inviter's independently signed PeerDescriptor. Admission itself seeds merely an
+        // untrusted transport candidate, so fetch the ordinary request-bound PEX record now rather
+        // than hoping the periodic timer wins a race against the user closing the app.
+        match timeout(
+            Duration::from_millis(DIRECT_JOIN_PEX_MS),
+            server.request_pex(join_contact),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(
+                target: "catcoms_app",
+                error = %error,
+                "DISCOVERY.DIRECT_JOIN_PEX.FAILED"
+            ),
+            Err(_) => tracing::warn!(
+                target: "catcoms_app",
+                "DISCOVERY.DIRECT_JOIN_PEX.TIMED_OUT"
+            ),
+        }
+    }
     diag.steps
         .push(DiagStep::ok("join", "", "admitted to the group"));
     // A joiner has to subscribe the control topic like the founder does. Without this,
@@ -4259,13 +6024,13 @@ async fn join_server_inner(
     // `publish_self_record`.
     diag.advertised.clone_from(&joiner_addrs);
     if let Err(e) = server.publish_self_record(joiner_addrs.clone(), net.record_seq) {
-        eprintln!("join: publishing the peer record failed: {e}");
+        tracing::warn!(target: "catcoms_app", phase = "join", error = %e, "DISCOVERY.PEER_RECORD.PUBLISH_FAILED");
     }
 
     let general = channel_id("general");
     let group_id = server.group_id();
     let device_id = server.device_id();
-    let (actor, events, _task) = spawn(server);
+    let (actor, events, task) = spawn(server);
     actor.catch_up_channel_index(join_contact).await;
     actor.open_channel(general).await;
     actor.catch_up(join_contact, general).await;
@@ -4283,11 +6048,25 @@ async fn join_server_inner(
     // peer record. A later router mapping or relay reservation is folded into this same set.
     let joiner_bootstrap_owners =
         bootstrap_owners(&joiner_addrs, BootstrapOwner::AutomaticInterface);
+    // Catch-up can take arbitrarily longer than the UI session that initiated it. Serialize the
+    // native registration + sealing boundary with explicit lock, and abandon the transient actor
+    // if that lock already invalidated this operation. No server id, registry row, or event
+    // forwarder is installed on the stale path.
+    let session_commit = match require_ui_session_generation(state, ui_session_generation).await {
+        Ok(commit) => commit,
+        Err(error) => {
+            actor.shutdown().await;
+            drop(events);
+            let _ = task.await;
+            return Err(error);
+        }
+    };
     let server_id = register_server(
         app,
         state,
         actor,
         events,
+        task,
         group_id,
         device_id,
         None,
@@ -4309,6 +6088,7 @@ async fn join_server_inner(
     persist_server(state, server_id).await;
     persist_server_net(state, server_id, &net).await;
     persist_registry(state).await;
+    drop(session_commit);
     diag.server = server_id;
     if let Some(rx) = port_mapping_rx {
         state
@@ -4532,6 +6312,7 @@ async fn apply_join_reply(
     if start_dial {
         let task_app = app.clone();
         let invite_nonce = permit.invite_nonce;
+        let endpoint_dials = state.endpoint_dials.clone();
         tauri::async_runtime::spawn(async move {
             let clock = SystemClock;
             let mut delay_ms = 200 + jitter;
@@ -4546,16 +6327,29 @@ async fn apply_join_reply(
                     .is_some_and(|active| {
                         active.generation == generation && active.joiner == joiner
                     });
-                if !current || mesh.dial_join_candidates(&targets).await.is_err() {
+                if !current {
+                    return;
+                }
+                let scheduled =
+                    schedule_join_reply_candidates(&endpoint_dials, &group_id, &joiner, &targets);
+                if !scheduled.is_empty() && mesh.dial_join_candidates(&scheduled).await.is_err() {
                     return;
                 }
                 // A socket alone proves nothing: send the code-holder proof over the Noise
                 // connection before the retained joiner reveals its bearer invite/KeyPackage.
+                // Keep retrying this even when the endpoint scheduler denies another *new* dial:
+                // the actor drains the initial Dial and Request commands before polling the
+                // swarm, so that first request can legitimately precede connection establishment.
+                // The connected-only command never consults the actor's recent-peer redial cache;
+                // without that distinction a denied pass could still start an implicit socket.
                 let mut proof_request = Vec::with_capacity(33);
                 proof_request.push(JOIN_REPLY_PROOF_KIND);
                 proof_request.extend_from_slice(&proof);
                 let _ = mesh
-                    .request_control(phase0_peer_id(&joiner), bytes::Bytes::from(proof_request))
+                    .request_control_connected_only(
+                        phase0_peer_id(&joiner),
+                        bytes::Bytes::from(proof_request),
+                    )
                     .await;
                 clock.sleep(Duration::from_millis(delay_ms)).await;
                 delay_ms = delay_ms.saturating_mul(2).min(4_000);
@@ -4596,7 +6390,14 @@ fn effective_join_reply_expiry(encoded_expires_at_ms: u64, received_at_ms: u64) 
 #[tauri::command]
 async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), String> {
     require_unlocked_session(&state).await?;
+    // Remove the registry row first. Cache publication holds that same registry lock through its
+    // insertion: either publication wins and this subsequent remove clears it, or removal wins
+    // and the old actor incarnation can no longer publish at all.
+    let removed = state.servers.lock().await.remove(&server);
     state.storage_health.lock().await.remove(&server);
+    if let Ok(mut signals) = state.reconnect_capture_signals.lock() {
+        signals.remove(&server);
+    }
     state.upnp.lock().await.remove(&server);
     state.autonat.lock().await.remove(&server);
     state.mesh_observations.lock().await.remove(&server);
@@ -4605,7 +6406,7 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
         .lock()
         .await
         .retain(|(candidate_server, _), _| *candidate_server != server);
-    if let Some(entry) = state.servers.lock().await.remove(&server) {
+    if let Some(entry) = removed {
         entry.actor.shutdown().await;
     }
     // Drop the sealed snapshot + re-seal the (now smaller) registry.
@@ -4613,7 +6414,7 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
         let guard = state.store.lock().await;
         if let Some(store) = guard.as_ref() {
             if let Err(e) = store.remove_server(server) {
-                eprintln!("leave: removing sealed server {server} failed: {e}");
+                tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.SERVER.REMOVE_FAILED");
             }
         }
     }
@@ -4688,7 +6489,7 @@ async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<St
     match refresh_or_mint_invite(&state, server, false).await {
         Ok(fresh) => Ok(Some(fresh)),
         Err(e) => {
-            eprintln!("get_invite: re-mint after a reachability change failed: {e}");
+            tracing::warn!(target: "catcoms_app", error = %e, "JOIN.INVITE.REMINT_FAILED");
             Err(format!("the live invite could not be refreshed: {e}"))
         }
     }
@@ -4716,10 +6517,12 @@ async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<St
     match actor_of(&state, server).await {
         Ok(actor) => {
             if let Err(e) = actor.readmit_evicted_peers().await {
-                eprintln!("mint_invite_fresh: lifting outstanding evictions failed: {e}");
+                tracing::warn!(target: "catcoms_app", error = %e, "JOIN.EVICTIONS.LIFT_FAILED");
             }
         }
-        Err(e) => eprintln!("mint_invite_fresh: no actor to lift evictions on: {e}"),
+        Err(e) => {
+            tracing::warn!(target: "catcoms_app", error = %e, "JOIN.EVICTIONS.NO_ACTOR")
+        }
     }
     Ok(invite)
 }
@@ -4956,6 +6759,7 @@ async fn get_members(state: State<'_, AppState>, server: u64) -> Result<Vec<UiMe
         .into_iter()
         .map(|m| UiMember {
             fingerprint: m.fingerprint,
+            identity: m.identity,
             you: m.is_self,
         })
         .collect())
@@ -5223,21 +7027,36 @@ async fn begin_file_upload(
     upload_id: String,
     mime: String,
     size: u64,
-) -> Result<UploadTicket, String> {
+    trace: Option<String>,
+) -> Result<UploadTicket, AppError> {
+    // The first half of the bracket. An upload that begins and never ends is a reservation holding
+    // a slot with no record of what became of it, and the review names it: FILE.UPLOAD.ORPHANED.
+    // Detecting one means being able to see a start with no matching end, which means recording
+    // the start.
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Files,
+        "file_upload",
+        server,
+        None,
+    );
     // Reaching the actor is both the session gate and proof the server exists, before this
     // reserves a slot for it.
-    actor_of(&state, server).await?;
+    actor_of(&state, server)
+        .await
+        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
     if upload_id.is_empty()
         || upload_id.len() > MAX_UPLOAD_ID_BYTES
         || !upload_id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
-        return Err("bad upload id".into());
+        return Err(op.fail(codes::FILE_UPLOAD_REFUSED, "bad upload id"));
     }
     if size > MAX_FILE_BYTES as u64 {
-        return Err(format!(
-            "file is larger than the {MAX_FILE_BYTES}-byte limit"
+        return Err(op.fail(
+            codes::FILE_UPLOAD_REFUSED,
+            format!("file is larger than the {MAX_FILE_BYTES}-byte limit"),
         ));
     }
     let chunk_total = upload_chunk_count(size);
@@ -5258,13 +7077,19 @@ async fn begin_file_upload(
         .collect();
     let retired: Vec<PendingUpload> = retired.iter().filter_map(|k| uploads.remove(k)).collect();
     if uploads.len() >= MAX_PENDING_UPLOADS {
-        return Err("too many uploads are already in flight".into());
+        return Err(op.fail(
+            codes::FILE_UPLOAD_REFUSED,
+            "too many uploads are already in flight",
+        ));
     }
     // The entry cap does not bound vault growth; this does. Counted against what is already
     // staged plus what this upload would add if it ran to the end and never finished.
     let staged: u64 = uploads.values().map(PendingUpload::staged_bytes).sum();
     if staged.saturating_add(chunk_total as u64 * CHUNK_BYTES as u64) > MAX_STAGED_UPLOAD_BYTES {
-        return Err("too much upload data is already waiting to be published".into());
+        return Err(op.fail(
+            codes::FILE_UPLOAD_REFUSED,
+            "too much upload data is already waiting to be published",
+        ));
     }
     uploads.insert(
         (server, token.clone()),
@@ -5283,8 +7108,21 @@ async fn begin_file_upload(
         },
     );
     drop(uploads);
+    let superseded = retired.len();
     for old in retired {
         discard_pending_upload(&state, old).await;
+    }
+    // Not a terminal phase: the upload has started, not finished. `finish` or `cancel` closes it,
+    // and a trace with neither is the orphan.
+    op.stage("FILE.UPLOAD.RESERVED");
+    if superseded > 0 {
+        // A restart of the same visible transfer, or a sweep of uploads whose caller went away.
+        // Worth a line: it is also what an upload loop looks like from the outside.
+        tracing::info!(
+            target: "catcoms_app",
+            superseded,
+            "FILE.UPLOAD.SUPERSEDED"
+        );
     }
     Ok(UploadTicket {
         token,
@@ -5313,6 +7151,13 @@ async fn push_file_chunk(
     token: String,
     offset: u64,
     data: String,
+    // The frontend threads the upload's trace through every slice so the whole transfer is one
+    // operation. A slice is deliberately not worth a diagnostic event of its own: a large file is
+    // thousands of them, and recording each would bury the upload in its own progress. It is used
+    // for the progress emit below, which is per *chunk* and is what a stalled transfer is
+    // diagnosed from. Begin and finish bracket the transfer; what happened between is the
+    // difference.
+    trace: Option<String>,
 ) -> Result<(), String> {
     let actor = actor_of(&state, server).await?;
     // Bound the decode before doing it: base64 expands by 4/3, so this cannot be a legal slice
@@ -5345,7 +7190,8 @@ async fn push_file_chunk(
         return Ok(()); // buffered; the chunk it belongs to is not complete yet
     };
     let done = seal_pending_chunk(&state, &actor, &key, chunk, mime).await?;
-    let _ = app.emit(
+    emit_tracked(
+        &app,
         "upload-progress",
         UploadProgressEvt {
             server,
@@ -5355,6 +7201,7 @@ async fn push_file_chunk(
             // actually see the file rather than that this device has finished copying it.
             total: chunk_total + 1,
         },
+        external_progress_trace(trace.as_deref()),
     );
     Ok(())
 }
@@ -5450,6 +7297,7 @@ async fn seal_pending_chunk(
 /// The MIME type is the one declared at `begin_file_upload`, not one passed here, so it always
 /// matches what the chunks were actually sealed with.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn finish_file_upload(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -5457,8 +7305,18 @@ async fn finish_file_upload(
     token: String,
     name: String,
     path: String,
-) -> Result<String, String> {
-    let actor = actor_of(&state, server).await?;
+    trace: Option<String>,
+) -> Result<String, AppError> {
+    // Closes the bracket opened by `begin_file_upload`, under the same trace the frontend threaded
+    // through every slice.
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Files,
+        "file_upload",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
     let key = (server, token);
     // Seal whatever the last slices left buffered: a file whose size is not a whole number of
     // chunks ends with a short one, and an empty file is still one (empty) chunk.
@@ -5466,14 +7324,20 @@ async fn finish_file_upload(
         let mut uploads = state.uploads.lock().await;
         let up = uploads
             .get_mut(&key)
-            .ok_or_else(|| "no such upload".to_string())?;
-        up.take_tail()?.map(|chunk| (chunk, up.mime.clone()))
+            .ok_or_else(|| op.fail(codes::FILE_UPLOAD_FAILED, "no such upload"))?;
+        up.take_tail()
+            .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?
+            .map(|chunk| (chunk, up.mime.clone()))
     };
     if let Some((chunk, mime)) = tail {
-        seal_pending_chunk(&state, &actor, &key, chunk, mime).await?;
+        seal_pending_chunk(&state, &actor, &key, chunk, mime)
+            .await
+            .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?;
     }
     let locked = require_unlocked_session(&state).await.is_err();
-    let pending = take_publishable_upload(&state, &key, locked).await?;
+    let pending = take_publishable_upload(&state, &key, locked)
+        .await
+        .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?;
     let cid = pending.address.cid();
     let chunk_total = pending.chunk_total;
     let upload_id = pending.upload_id;
@@ -5493,10 +7357,13 @@ async fn finish_file_upload(
         Ok(hex) => hex,
         Err(e) => {
             actor.discard_upload(sealed).await;
-            return Err(e);
+            // Sealed bytes existed and were thrown away. Distinguishable from a refusal at begin,
+            // where nothing had been written yet.
+            return Err(op.fail(codes::FILE_UPLOAD_FAILED, e));
         }
     };
-    let _ = app.emit(
+    emit_tracked(
+        &app,
         "upload-progress",
         UploadProgressEvt {
             server,
@@ -5504,8 +7371,13 @@ async fn finish_file_upload(
             done: chunk_total + 1,
             total: chunk_total + 1,
         },
+        op.trace,
     );
     persist_server(&state, server).await;
+    // Deliberately after persistence, like every other operation here: an upload reported as
+    // succeeding before its index entry reached the disk is the shape of "it uploaded and then it
+    // was gone after a restart".
+    op.succeeded("FILE.UPLOAD.PUBLISHED");
     Ok(hex)
 }
 
@@ -5517,11 +7389,32 @@ async fn cancel_file_upload(
     state: State<'_, AppState>,
     server: u64,
     token: String,
-) -> Result<(), String> {
-    require_unlocked_session(&state).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    // The other way the bracket closes. A cancel is not a failure of the app, but it is the
+    // difference between an upload that ended and one that was abandoned without a word.
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Files,
+        "file_upload",
+        server,
+        None,
+    );
+    require_unlocked_session(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     let pending = state.uploads.lock().await.remove(&(server, token));
+    let had_reservation = pending.is_some();
     if let Some(up) = pending {
         discard_pending_upload(&state, up).await;
+    }
+    if had_reservation {
+        op.succeeded("FILE.UPLOAD.CANCELLED");
+    } else {
+        // Cancelling something that was already gone. Harmless and idempotent by design, but
+        // worth distinguishing: a cancel with nothing to cancel means the reservation was retired
+        // by something else, which is a different story from the user changing their mind.
+        op.succeeded("FILE.UPLOAD.CANCEL_NOOP");
     }
     Ok(())
 }
@@ -5545,30 +7438,45 @@ async fn get_storage_health(
     state: State<'_, AppState>,
     server: u64,
 ) -> Result<UiStorageHealth, String> {
-    // Hold the dedicated cache lock across the actor round-trip. Simultaneous callers therefore
-    // coalesce into one scan instead of both missing the cache and hammering the blob store.
-    let mut cache = state.storage_health.lock().await;
-    if let Some(report) = cache.get(&server) {
-        return Ok(report.clone());
+    let generation = unlocked_ui_session_generation(&state).await?;
+    // Validate the webview-provided id before touching the singleflight. The gate itself is fixed
+    // size, but stale cache rows for a departed/nonexistent server must not be returned either.
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    if let Some(report) = storage_health_cache_get(&state, server, instance, generation).await? {
+        return Ok(report);
     }
-    let actor = actor_of(&state, server).await?;
-    let health = actor.storage_health().await;
-    let report = storage_report(&actor, health, SystemClock.now_ms()).await;
-    cache.insert(server, report.clone());
+    // Coalesce expensive work without blocking explicit lock's short cache-clear operation.
+    let _scan = state.storage_scans.for_server(server).lock().await;
+    if let Some(report) = storage_health_cache_get(&state, server, instance, generation).await? {
+        return Ok(report);
+    }
+    let snapshot = actor.storage_snapshot().await;
+    let report = storage_report(&actor, snapshot, SystemClock.now_ms()).await;
+    storage_health_cache_publish(&state, server, instance, generation, report.clone()).await?;
     Ok(report)
 }
 
-/// Ask authenticated peers for every missing/unreadable chunk, then verify the complete set.
+/// Ask authenticated peers for every repairable missing/unreadable chunk, then verify the set.
+/// Contradictory exact references remain unreadable without a pointless same-CID fetch.
 #[tauri::command]
 async fn repair_storage(
     state: State<'_, AppState>,
     server: u64,
 ) -> Result<UiStorageRepair, String> {
-    let mut cache = state.storage_health.lock().await;
-    let actor = actor_of(&state, server).await?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let _scan = state.storage_scans.for_server(server).lock().await;
+    let generation_check = require_ui_session_generation(&state, generation).await?;
+    // Do not retain the UI commit guard across peer fetches: lock closes the command boundary
+    // immediately and a late result is independently rejected by the guarded publish below.
+    drop(generation_check);
     let repaired = actor.repair_storage().await?;
-    let health = storage_report(&actor, repaired.health, SystemClock.now_ms()).await;
-    cache.insert(server, health.clone());
+    // The repair result records work counts. Re-snapshot afterward so the inventory rows and
+    // exact-manifest health verdict are paired atomically even if a replicated index update landed
+    // while the repair was fetching chunks.
+    let snapshot = actor.storage_snapshot().await;
+    let health = storage_report(&actor, snapshot, SystemClock.now_ms()).await;
+    storage_health_cache_publish(&state, server, instance, generation, health.clone()).await?;
     Ok(UiStorageRepair {
         attempted_chunks: repaired.attempted_chunks,
         recovered_chunks: repaired.recovered_chunks,
@@ -5576,7 +7484,66 @@ async fn repair_storage(
     })
 }
 
-/// The fingerprints of members reachable right now (presence indicators in the roster).
+/// Clone a cache row, then prove the original UI generation still owns the native commit boundary
+/// before returning it. Explicit lock can therefore clear promptly and no stale clone escapes
+/// after that lock operation completes.
+async fn storage_health_cache_get(
+    state: &AppState,
+    server: u64,
+    server_instance: u64,
+    generation: u64,
+) -> Result<Option<UiStorageHealth>, String> {
+    let cached = state
+        .storage_health
+        .lock()
+        .await
+        .get(&server)
+        .filter(|cached| cached.server_instance == server_instance)
+        .map(|cached| cached.report.clone());
+    let _commit = require_ui_session_generation(state, generation).await?;
+    let current = state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .is_some_and(|entry| entry.instance == server_instance);
+    if !current {
+        return Err("the server changed while storage inspection was in progress".into());
+    }
+    Ok(cached)
+}
+
+/// Publish expensive work only if it still belongs to the unlocked UI generation that requested
+/// it. Lock does not await the scan gate, and a scan that finishes later cannot refill the cache.
+async fn storage_health_cache_publish(
+    state: &AppState,
+    server: u64,
+    server_instance: u64,
+    generation: u64,
+    report: UiStorageHealth,
+) -> Result<(), String> {
+    let _commit = require_ui_session_generation(state, generation).await?;
+    // Hold the registry row through cache insertion. `leave_server` removes this row before
+    // clearing the cache, which makes its ordering with this publication atomic.
+    let servers = state.servers.lock().await;
+    if !servers
+        .get(&server)
+        .is_some_and(|entry| entry.instance == server_instance)
+    {
+        return Err("the server changed while storage inspection was in progress".into());
+    }
+    state.storage_health.lock().await.insert(
+        server,
+        CachedStorageHealth {
+            server_instance,
+            report,
+        },
+    );
+    Ok(())
+}
+
+/// Current members whose self-asserted peer id has a live connection here. This diagnostic
+/// projection is not proof that the member controls the peer or is personally online.
 #[tauri::command]
 async fn get_online_members(
     state: State<'_, AppState>,
@@ -5584,6 +7551,309 @@ async fn get_online_members(
 ) -> Result<Vec<String>, String> {
     let actor = actor_of(&state, server).await?;
     Ok(actor.online_members().await)
+}
+
+/// One member's reachability as this node sees it, for the debug console's network view.
+#[derive(Serialize)]
+struct MemberRouteEvt {
+    fingerprint: String,
+    /// Short hex of the member's self-asserted transport peer, or empty when no record has been
+    /// learned. Empty is a complete explanation on its own for a member calls cannot reach.
+    peer: String,
+    addresses: Vec<String>,
+    seq: u64,
+    connected: bool,
+    /// Policy-approved dial batches submitted for this record epoch, not confirmed failures.
+    dial_attempts: u8,
+    next_dial_in_ms: u64,
+    health: &'static str,
+    binding: &'static str,
+    active_paths: Vec<ConnectionPathEvt>,
+    last_success: Option<MemberRouteSuccessEvt>,
+    candidate_families: Vec<&'static str>,
+    candidate_transports: Vec<&'static str>,
+    actions: Vec<MemberRouteActionEvt>,
+    indirect_health: &'static str,
+    indirect_witnesses: usize,
+    indirect_age_ms: Option<u64>,
+    reciprocal_pending: bool,
+}
+
+#[derive(Serialize)]
+struct ConnectionPathEvt {
+    family: &'static str,
+    transport: &'static str,
+    direction: &'static str,
+}
+
+#[derive(Serialize)]
+struct MemberRouteSuccessEvt {
+    path: ConnectionPathEvt,
+    age_ms: u64,
+}
+
+#[derive(Serialize)]
+struct MemberRouteActionEvt {
+    scope: &'static str,
+    kind: &'static str,
+}
+
+fn connection_family_name(family: catcoms_rt::ConnectionFamily) -> &'static str {
+    use catcoms_rt::ConnectionFamily::*;
+    match family {
+        Ipv4 => "ipv4",
+        Ipv6 => "ipv6",
+        Dns => "dns",
+        Memory => "memory",
+        Unknown => "unknown",
+    }
+}
+
+fn connection_transport_name(transport: catcoms_rt::ConnectionTransport) -> &'static str {
+    use catcoms_rt::ConnectionTransport::*;
+    match transport {
+        Tcp => "tcp",
+        QuicV1 => "quic_v1",
+        WebSocket => "websocket",
+        CircuitRelay => "circuit_relay",
+        Memory => "memory",
+        Unknown => "unknown",
+    }
+}
+
+fn connection_path_evt(path: catcoms_rt::ConnectionPath) -> ConnectionPathEvt {
+    ConnectionPathEvt {
+        family: connection_family_name(path.family),
+        transport: connection_transport_name(path.transport),
+        direction: match path.direction {
+            catcoms_rt::ConnectionDirection::Dialer => "dialer",
+            catcoms_rt::ConnectionDirection::Listener => "listener",
+        },
+    }
+}
+
+fn member_route_health_name(health: catcoms_sync::MemberRouteHealth) -> &'static str {
+    use catcoms_sync::MemberRouteHealth::*;
+    match health {
+        NoPeerRecord => "no_peer_record",
+        ClaimedPeerHasNoRoute => "claimed_peer_has_no_route",
+        ClaimedPeerConnectedDirect => "claimed_peer_connected_direct",
+        ClaimedPeerConnectedRelay => "claimed_peer_connected_relay",
+        ClaimedPeerConnectedOther => "claimed_peer_connected_other",
+        ClaimedPeerDialCoolingDown => "claimed_peer_dial_cooling_down",
+        ClaimedPeerDialEligible => "claimed_peer_dial_eligible",
+    }
+}
+
+fn member_route_action_evt(action: catcoms_sync::MemberRouteAction) -> MemberRouteActionEvt {
+    use catcoms_sync::{MemberRouteActionKind as Kind, MemberRouteActionScope as Scope};
+    MemberRouteActionEvt {
+        scope: match action.scope {
+            Scope::ThisDevice => "this_device",
+            Scope::MemberDevice => "member_device",
+            Scope::Group => "group",
+        },
+        kind: match action.kind {
+            Kind::WaitForAutomaticRecovery => "wait_for_automatic_recovery",
+            Kind::CheckMemberConnectivity => "check_member_connectivity",
+            Kind::KeepAnotherMemberConnected => "keep_another_member_connected",
+            Kind::ConfigureFallbackNode => "configure_fallback_node",
+            Kind::ProbeThroughMembers => "probe_through_members",
+            Kind::RetryGroupNow => "retry_group_now",
+        },
+    }
+}
+
+fn indirect_route_health_name(health: catcoms_sync::IndirectRouteHealth) -> &'static str {
+    use catcoms_sync::IndirectRouteHealth::*;
+    match health {
+        Unknown => "unknown",
+        ReachableViaMember => "reachable_via_member",
+        SuspectedUnreachable => "suspected_unreachable",
+    }
+}
+
+/// What this node knows about reaching each member of a server.
+///
+/// The question none of the existing views could answer: the roster shows names whether or not
+/// anything can be reached, and presence collapses "no record for them yet", "a record with no
+/// candidate" and "a submitted dial batch is in scheduler cooldown" into one grey dot. Local
+/// state only, so asking costs nothing on the wire. Submission is not a per-address failure result.
+#[tauri::command]
+async fn get_member_routes(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<Vec<MemberRouteEvt>, String> {
+    let actor = actor_of(&state, server).await?;
+    let deadline_clock = SystemClock;
+    let routes = finish_member_route_query_before(
+        actor.try_member_routes(),
+        deadline_clock.sleep(Duration::from_secs(5)),
+    )
+    .await?;
+    Ok(routes
+        .into_iter()
+        .map(|r| MemberRouteEvt {
+            fingerprint: r.fingerprint,
+            peer: r.peer_id.map(|p| hex::encode(&p[..4])).unwrap_or_default(),
+            addresses: r.addresses,
+            seq: r.seq,
+            connected: r.connected,
+            dial_attempts: r.dial_attempts,
+            next_dial_in_ms: r.next_dial_in_ms,
+            health: member_route_health_name(r.health),
+            binding: match r.binding {
+                catcoms_sync::MemberRouteBinding::Absent => "absent",
+                catcoms_sync::MemberRouteBinding::SelfAsserted => "self_asserted",
+            },
+            active_paths: r
+                .active_paths
+                .into_iter()
+                .map(connection_path_evt)
+                .collect(),
+            last_success: r.last_success.map(|success| MemberRouteSuccessEvt {
+                path: connection_path_evt(success.path),
+                age_ms: success.age_ms,
+            }),
+            candidate_families: r
+                .candidate_families
+                .into_iter()
+                .map(connection_family_name)
+                .collect(),
+            candidate_transports: r
+                .candidate_transports
+                .into_iter()
+                .map(connection_transport_name)
+                .collect(),
+            actions: r.actions.into_iter().map(member_route_action_evt).collect(),
+            indirect_health: indirect_route_health_name(r.indirect_health),
+            indirect_witnesses: r.indirect_witnesses,
+            indirect_age_ms: r.indirect_age_ms,
+            reciprocal_pending: r.reciprocal_pending,
+        })
+        .collect())
+}
+
+/// Ask the selected server to retry every current member route once, preserving the process-wide
+/// scheduler and anti-click cooldown. The stable result id lets Connectivity explain whether work
+/// started, no route existed, or a safety limit deferred it.
+#[tauri::command]
+async fn manual_fallback_redial(state: State<'_, AppState>, server: u64) -> Result<String, String> {
+    let actor = actor_of(&state, server).await?;
+    let outcome = actor.manual_fallback_redial().await?;
+    Ok(match outcome {
+        catcoms_sync::ManualRedialOutcome::Submitted => "submitted",
+        catcoms_sync::ManualRedialOutcome::CoolingDown => "cooling_down",
+        catcoms_sync::ManualRedialOutcome::NoRoutes => "no_routes",
+        catcoms_sync::ManualRedialOutcome::DeferredBySafetyLimit => "deferred_by_safety_limit",
+    }
+    .into())
+}
+
+/// Produce a recovery code from this server's current listener candidates. The sync layer filters
+/// the bridge's aggregate bootstrap set down to canonical direct IP routes bound to this actor's
+/// transport identity, so relay, rendezvous, DNS and stale foreign-peer entries cannot leak into
+/// or gain authority through the out-of-band code.
+#[tauri::command]
+async fn mint_member_recovery(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<MemberRecoveryReady, String> {
+    let ui_session_generation = unlocked_ui_session_generation(&state).await?;
+    let actor = actor_of(&state, server).await?;
+    let candidates = {
+        let servers = state.servers.lock().await;
+        servers
+            .get(&server)
+            .map(|entry| entry.bootstrap.clone())
+            .ok_or_else(|| "server is not open".to_string())?
+    };
+    let recovery = actor.mint_member_recovery(candidates).await?;
+    let ready = MemberRecoveryReady {
+        code: recovery.encode(),
+        expires_at_ms: recovery.expires_at_ms,
+        candidate_count: recovery.candidates.len(),
+    };
+    // The code contains current private/LAN listener candidates. Serialize its return with an
+    // explicit lock exactly like the join-reply event; stale work must not repopulate the webview.
+    let _session = require_ui_session_generation(&state, ui_session_generation).await?;
+    Ok(ready)
+}
+
+/// Seal bounded pending permission to retain a route for the member named by a verified recovery
+/// code. Neither the pasted route nor the proven peer/routes change here: a later discovery tick
+/// atomically promotes this field only after the exact new peer authenticates live.
+async fn authorize_member_recovery_capture(
+    state: &AppState,
+    server: u64,
+    peer: PeerId,
+    expires_at_ms: u64,
+) -> Result<(), String> {
+    let guard = state.store.lock().await;
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "the vault is locked".to_string())?;
+    let mut net = store
+        .load_server_net(server)
+        .map_err(|error| format!("could not load the server network identity: {error}"))?
+        .ok_or_else(|| "the server network identity is missing".to_string())?;
+    net.pending_recovery_peer = Some(*peer.as_bytes());
+    net.pending_recovery_expires_at_ms = expires_at_ms;
+    store
+        .save_server_net(server, &net, &mut OsCryptoRng)
+        .map_err(|error| format!("could not save pending recovery permission: {error}"))
+}
+
+/// Apply a code from another current member. Verification, roster membership, expiry, canonical
+/// address filtering and shared dial limits all live inside the actor. A successful result means
+/// attempts were submitted; the UI must wait for ordinary connectivity evidence before calling
+/// the member reachable.
+#[tauri::command]
+async fn apply_member_recovery(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server: u64,
+    code: String,
+) -> Result<MemberRecoveryAppliedEvt, String> {
+    let ui_session_generation = unlocked_ui_session_generation(&state).await?;
+    let actor = actor_of(&state, server).await?;
+    // Verify without network work, then serialize the durable, expiring authority against lock.
+    // This ordering closes the short-edge race where authentication completed before the bridge
+    // had written permission for the capture worker to retain that route.
+    let verified = actor.verify_member_recovery(code.clone()).await?;
+    let _session = require_ui_session_generation(&state, ui_session_generation).await?;
+    authorize_member_recovery_capture(&state, server, verified.peer, verified.expires_at_ms)
+        .await?;
+    drop(_session);
+    // Validation is intentionally repeated inside the actor immediately before the bounded dial;
+    // a code that expired or lost its roster binding between phases does not reach the network.
+    let applied = actor.apply_member_recovery(code).await?;
+    // The bounded dial may finish after lock, but its private command result may not escape into a
+    // newer or locked UI session. Pending authority simply expires if the result is withheld.
+    let _session = require_ui_session_generation(&state, ui_session_generation).await?;
+    drop(_session);
+    // The dial submission may already have authenticated by the time the actor reply arrives.
+    // Wake the same coalesced worker used by later connectivity/member-route events.
+    notify_reconnect_capture(&app, server);
+    Ok(MemberRecoveryAppliedEvt {
+        fingerprint: fingerprint(&applied.device),
+        submitted_routes: applied.submitted_routes,
+    })
+}
+
+/// Bound a present-time diagnostic query so a busy server actor becomes an explicit unavailable
+/// snapshot instead of leaving old green rows labelled as current indefinitely.
+async fn finish_member_route_query_before<T, Q, D>(query: Q, deadline: D) -> Result<T, String>
+where
+    Q: Future<Output = Result<T, String>>,
+    D: Future<Output = ()>,
+{
+    tokio::pin!(query);
+    tokio::pin!(deadline);
+    tokio::select! {
+        result = &mut query => result,
+        _ = &mut deadline => Err("member-route snapshot timed out".to_string()),
+    }
 }
 
 /// Delivery state for this device's recent messages in a channel; the seed a UI paints on open,
@@ -5594,10 +7864,10 @@ async fn get_delivery(
     state: State<'_, AppState>,
     server: u64,
     channel: String,
-) -> Result<Vec<DeliveryStateEvt>, String> {
+) -> Result<DeliverySnapshotEvt, String> {
     let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
     let actor = actor_of(&state, server).await?;
-    Ok(delivery_payload(actor.delivery_snapshot(id).await))
+    Ok(delivery_payload(actor.delivery_snapshot(id).await?))
 }
 
 /// Per-DM activity stats (no message text) for the friends-list sortings, one entry per DM group.
@@ -5662,18 +7932,45 @@ async fn send_dm_invite(
 }
 
 /// Push a call-signalling message (base64 payload) to member `target_fp`. `true` if reached.
+///
+/// The path behind one of the two incidents that started all of this: a call died while the roster
+/// still showed the peer online. That is exactly a run of these returning `false`, which the caller
+/// turned into a `console.warn` and nothing else. The `false` is not an error and must not be
+/// recorded as one, but it is the whole diagnosis, so it is recorded as its own outcome.
+///
+/// The payload is opaque here and stays that way: what is recorded is whether it went, never what
+/// it said.
 #[tauri::command]
 async fn send_call_signal(
     state: State<'_, AppState>,
     server: u64,
     target_fp: String,
     payload: String,
-) -> Result<bool, String> {
+    trace: Option<String>,
+) -> Result<bool, AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Voice,
+        "send_call_signal",
+        server,
+        None,
+    );
     let bytes = B64
         .decode(payload.as_bytes())
-        .map_err(|e| format!("bad payload: {e}"))?;
-    let actor = actor_of(&state, server).await?;
-    actor.send_call_signal(target_fp, bytes).await
+        .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, format!("bad payload: {e}")))?;
+    let actor = op.actor(&state, server).await?;
+    let delivered = actor
+        .send_call_signal(target_fp, bytes)
+        .await
+        .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, e))?;
+    if delivered {
+        op.succeeded("VOICE.SIGNAL.DELIVERED");
+    } else {
+        // The roster says this member is here and the transport has nowhere to send to. Not a
+        // failure of this command, and precisely the thing that was invisible.
+        op.failed("VOICE.SIGNAL.NO_MEMBER_ROUTE");
+    }
+    Ok(delivered)
 }
 
 /// This call's E2E media base key (base64) + the MLS epoch it's keyed to. Derived locally from the
@@ -5811,19 +8108,37 @@ async fn download_file(
     state: State<'_, AppState>,
     server: u64,
     cid: String,
-) -> Result<String, String> {
-    let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
+    trace: Option<String>,
+) -> Result<String, AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Files,
+        "download_file",
+        server,
+        None,
+    );
+    let raw = hex::decode(cid.trim())
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, format!("bad cid: {e}")))?;
     let target: [u8; 32] = raw
         .clone()
         .try_into()
-        .map_err(|_| "bad cid length".to_string())?;
-    let actor = actor_of(&state, server).await?;
+        .map_err(|_| op.fail(codes::FILE_DOWNLOAD_FAILED, "bad cid length"))?;
+    let actor = op.actor(&state, server).await?;
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
-        "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
+        op.fail(
+            codes::FILE_DOWNLOAD_FAILED,
+            "this file can't be downloaded; it isn't listed, or its reference is invalid",
+        )
     })?;
-    inline_download_allowed(size)?;
-    require_unlocked_session(&state).await?;
-    let _ = app.emit(
+    inline_download_allowed(size).map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+    require_unlocked_session(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    // The plan, before any bytes move. A download that stalls is one of these with no completion
+    // after it, and the chunk count is what says how far it got.
+    op.stage("FILE.DOWNLOAD.PLANNED");
+    emit_tracked(
+        &app,
         "download-progress",
         DownloadProgressEvt {
             server,
@@ -5835,14 +8150,20 @@ async fn download_file(
             network_bytes_done: 0,
             provider: None,
         },
+        op.trace,
     );
     let mut out = Vec::with_capacity(size as usize);
     let mut network_bytes_done = 0u64;
     for i in 0..total {
         // A transfer can outlive the click that started it. Do not return plaintext or continue
         // emitting file metadata after an explicit lock closes the webview session.
-        require_unlocked_session(&state).await?;
-        let (chunk, provider) = actor.fetch_file_chunk(raw.clone(), i).await?;
+        require_unlocked_session(&state)
+            .await
+            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+        let (chunk, provider) = actor
+            .fetch_file_chunk(raw.clone(), i)
+            .await
+            .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
         if provider.is_some() {
             network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
         }
@@ -5850,10 +8171,14 @@ async fn download_file(
         // whose chunks exceed its declared size must be stopped before the next append rather
         // than at the address check after the last one.
         if out.len() as u64 + chunk.len() as u64 > size {
-            return Err("this file's chunks hold more data than it declares".into());
+            return Err(op.fail(
+                codes::FILE_DOWNLOAD_FAILED,
+                "this file's chunks hold more data than it declares",
+            ));
         }
         out.extend_from_slice(&chunk);
-        let _ = app.emit(
+        emit_tracked(
+            &app,
             "download-progress",
             DownloadProgressEvt {
                 server,
@@ -5865,24 +8190,54 @@ async fn download_file(
                 network_bytes_done,
                 provider,
             },
+            op.trace,
         );
     }
     if out.len() as u64 != size {
-        return Err("this file's chunks hold less data than it declares".into());
+        return Err(op.fail(
+            codes::FILE_DOWNLOAD_FAILED,
+            "this file's chunks hold less data than it declares",
+        ));
     }
     if Cid::of(&out).as_bytes() != &target {
-        return Err("the reassembled file failed its integrity check".into());
+        // Every chunk verified and the whole did not. Recorded as its own outcome because it means
+        // something specific: a manifest whose parts are individually honest and collectively not.
+        return Err(op.fail(
+            codes::FILE_DOWNLOAD_FAILED,
+            "the reassembled file failed its integrity check",
+        ));
     }
-    require_unlocked_session(&state).await?;
+    require_unlocked_session(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    op.succeeded("FILE.DOWNLOAD.COMPLETED");
     Ok(B64.encode(&out))
 }
 
-/// Post to the server status feed.
+/// Post to the server status feed. **Owner/admin only** unless the feed has been opened to
+/// members (`set_status_policy`), so a refusal is a real outcome the caller sees rather than a
+/// post that silently never happened.
 #[tauri::command]
-async fn post_status(state: State<'_, AppState>, server: u64, text: String) -> Result<(), String> {
-    let actor = actor_of(&state, server).await?;
-    actor.post_status(text).await;
+async fn post_status(
+    state: State<'_, AppState>,
+    server: u64,
+    text: String,
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "post_status",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    actor
+        .post_status(text)
+        .await
+        .map_err(|e| op.fail(codes::STATUS_POST_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("STATUS.POST.PERSISTED");
     Ok(())
 }
 
@@ -5899,6 +8254,144 @@ async fn get_statuses(state: State<'_, AppState>, server: u64) -> Result<Vec<UiM
         .collect())
 }
 
+/// Edit one of your own status posts (by post id); re-seals the server.
+#[tauri::command]
+async fn edit_status(
+    state: State<'_, AppState>,
+    server: u64,
+    msg_id: String,
+    text: String,
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "edit_status",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    actor
+        .edit_status(msg_id, text)
+        .await
+        .map_err(|e| op.fail(codes::STATUS_EDIT_REJECTED, e))?;
+    persist_server(&state, server).await;
+    op.succeeded("STATUS.EDIT.PERSISTED");
+    Ok(())
+}
+
+/// Delete a status post (by post id): your own, or anyone's as an owner/admin.
+#[tauri::command]
+async fn delete_status(
+    state: State<'_, AppState>,
+    server: u64,
+    msg_id: String,
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "delete_status",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    actor
+        .delete_status(msg_id)
+        .await
+        .map_err(|e| op.fail(codes::STATUS_DELETE_REJECTED, e))?;
+    persist_server(&state, server).await;
+    op.succeeded("STATUS.DELETE.PERSISTED");
+    Ok(())
+}
+
+/// Toggle this member's emoji reaction on a status post (by post id). Any member may react,
+/// whoever the feed lets write.
+#[tauri::command]
+async fn toggle_status_reaction(
+    state: State<'_, AppState>,
+    server: u64,
+    msg_id: String,
+    emoji: String,
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "toggle_status_reaction",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    actor
+        .toggle_status_reaction(msg_id, emoji)
+        .await
+        .map_err(|e| op.fail(codes::STATUS_REACTION_REJECTED, e))?;
+    persist_server(&state, server).await;
+    op.succeeded("STATUS.REACTION.PERSISTED");
+    Ok(())
+}
+
+/// Pin or unpin a status post (by post id) (owner/admin).
+#[tauri::command]
+async fn set_status_pin(
+    state: State<'_, AppState>,
+    server: u64,
+    msg_id: String,
+    pinned: bool,
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "set_status_pin",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    actor
+        .set_status_pin(msg_id, pinned)
+        .await
+        .map_err(|e| op.fail(codes::STATUS_PIN_REJECTED, e))?;
+    persist_server(&state, server).await;
+    op.succeeded("STATUS.PIN.PERSISTED");
+    Ok(())
+}
+
+/// Whether plain members may post to the status feed (`false` = owner/admin only, the default).
+#[tauri::command]
+async fn get_status_policy(state: State<'_, AppState>, server: u64) -> Result<bool, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor.status_members_may_post().await)
+}
+
+/// Open or close the status feed to plain members (owner/admin only); re-seals the server. The
+/// policy rides the feed document, so a `status-updated` event follows and every member re-reads
+/// it along with the posts.
+#[tauri::command]
+async fn set_status_policy(
+    state: State<'_, AppState>,
+    server: u64,
+    members_may_post: bool,
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "set_status_policy",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    actor
+        .set_status_members_may_post(members_may_post)
+        .await
+        .map_err(|e| op.fail(codes::STATUS_POLICY_REJECTED, e))?;
+    persist_server(&state, server).await;
+    op.succeeded("STATUS.POLICY.PERSISTED");
+    Ok(())
+}
+
 /// Create a server event; re-seals the server. **Any member may**; an event is server content,
 /// like a channel or a status post. Rejected with a message when the title is blank or over 120
 /// UTF-8 bytes, the body is over 1024, or the end time precedes the start (`endTs: 0` = no end).
@@ -5906,6 +8399,7 @@ async fn get_statuses(state: State<'_, AppState>, server: u64) -> Result<Vec<UiM
 /// shape only: the blob is fetched over the file path like any other embed.
 /// An `events-changed` event follows, so the UI re-reads the calendar.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn create_event(
     state: State<'_, AppState>,
     server: u64,
@@ -5914,12 +8408,23 @@ async fn create_event(
     start_ts: u64,
     end_ts: u64,
     image: String,
-) -> Result<(), String> {
-    let actor = actor_of(&state, server).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "create_event",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    // The title and body are content; that an event was created is the record.
     actor
         .create_event(title, body, start_ts, end_ts, image)
-        .await?;
+        .await
+        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("EVENT.CREATE.PERSISTED");
     Ok(())
 }
 
@@ -6197,7 +8702,12 @@ async fn set_switchboard_offered(
             entry.switchboard = true;
         }
     }
-    let _ = app.emit("switchboard-changed", server);
+    emit_tracked(
+        &app,
+        "switchboard-changed",
+        ServerEvt { server },
+        catcoms_diagnostics::TraceId::default(),
+    );
     get_switchboard_status(state, server).await
 }
 
@@ -6463,6 +8973,72 @@ fn parse_media_path(path: &str) -> Option<(u64, String)> {
     Some((server, cid.to_ascii_lowercase()))
 }
 
+/// Authorize every head-derived response, including bodyless range errors, against the UI
+/// generation that began the request. File size is plaintext metadata too: a delayed request must
+/// not return `Content-Range: */size` after explicit lock has completed.
+async fn authorized_media_range(
+    state: &AppState,
+    generation: u64,
+    total: u64,
+    range: Option<String>,
+) -> Result<(u64, usize), http::Response<Vec<u8>>> {
+    let deny = |code: http::StatusCode| {
+        http::Response::builder()
+            .status(code)
+            .header("Access-Control-Allow-Origin", "null")
+            .body(Vec::new())
+            .expect("static response builds")
+    };
+    let _commit = require_ui_session_generation(state, generation)
+        .await
+        .map_err(|_| deny(http::StatusCode::FORBIDDEN))?;
+    let (start, len) = match range
+        .as_deref()
+        .and_then(|value| parse_range_header(value, total))
+    {
+        Some(parsed) => parsed,
+        None if range.is_some() => return Err(deny(http::StatusCode::RANGE_NOT_SATISFIABLE)),
+        None => (0, MEDIA_WINDOW_BYTES),
+    };
+    if start >= total {
+        return Err(http::Response::builder()
+            .status(http::StatusCode::RANGE_NOT_SATISFIABLE)
+            .header("Content-Range", format!("bytes */{total}"))
+            .body(Vec::new())
+            .expect("static response builds"));
+    }
+    Ok((start, len))
+}
+
+fn bodyless_media_denial(code: http::StatusCode) -> http::Response<Vec<u8>> {
+    http::Response::builder()
+        .status(code)
+        .header("Access-Control-Allow-Origin", "null")
+        .body(Vec::new())
+        .expect("static response builds")
+}
+
+/// Publish the scheme response while owning the same native commit guard explicit lock waits on.
+/// Building a response under the guard is insufficient: the responder is the externally-visible
+/// step, and another runtime thread could otherwise complete lock between return and `respond`.
+async fn publish_media_response<F>(
+    state: &AppState,
+    generation: Option<u64>,
+    response: http::Response<Vec<u8>>,
+    publish: F,
+) where
+    F: FnOnce(http::Response<Vec<u8>>),
+{
+    let Some(generation) = generation else {
+        publish(bodyless_media_denial(http::StatusCode::FORBIDDEN));
+        return;
+    };
+    match require_ui_session_generation(state, generation).await {
+        Ok(_commit) => publish(response),
+        Err(_) => publish(bodyless_media_denial(http::StatusCode::FORBIDDEN)),
+    }
+}
+
 /// Parse a single-range `bytes=start-[end]` header into a start offset and a length cap.
 ///
 /// Only the first range of a possibly-multi-range header is honoured, and a multipart response is
@@ -6503,18 +9079,16 @@ async fn serve_media(
     path: &str,
     range: Option<String>,
 ) -> http::Response<Vec<u8>> {
-    let deny = |code: http::StatusCode| {
-        http::Response::builder()
-            .status(code)
-            .header("Access-Control-Allow-Origin", "null")
-            .body(Vec::new())
-            .expect("static response builds")
-    };
+    let deny = |code: http::StatusCode| bodyless_media_denial(code);
     let Some((server, cid)) = parse_media_path(path) else {
         return deny(http::StatusCode::BAD_REQUEST);
     };
     // The same boundary every native command sits behind: a locked vault serves no plaintext,
     // and a media element left in the DOM must not keep pulling bytes after an explicit lock.
+    let generation = match unlocked_ui_session_generation(state).await {
+        Ok(generation) => generation,
+        Err(_) => return deny(http::StatusCode::FORBIDDEN),
+    };
     if require_unlocked_session(state).await.is_err() {
         return deny(http::StatusCode::FORBIDDEN);
     }
@@ -6534,26 +9108,30 @@ async fn serve_media(
     // The head comes from the index rather than from chunk 0 for the same reason: reading a whole
     // chunk to learn a size and a mime put a second decrypt on every response and, because the
     // cache is small, evicted the chunk the player was actually reading.
-    let (total, declared) = match media_head(state, &actor, server, &cid, &raw).await {
+    let head = match media_head(state, &actor, server, &cid, &raw, generation).await {
         Some(head) => head,
         None => return deny(http::StatusCode::NOT_FOUND),
     };
-    let mime = safe_media_mime(&declared);
+    let total = head.total_size;
+    let mime = safe_media_mime(&head.mime);
 
-    let (start, len) = match range.as_deref().and_then(|r| parse_range_header(r, total)) {
-        Some(parsed) => parsed,
-        None if range.is_some() => return deny(http::StatusCode::RANGE_NOT_SATISFIABLE),
-        None => (0, MEDIA_WINDOW_BYTES),
+    let (start, len) = match authorized_media_range(state, generation, total, range).await {
+        Ok(plan) => plan,
+        Err(response) => return response,
     };
-    if start >= total {
-        return http::Response::builder()
-            .status(http::StatusCode::RANGE_NOT_SATISFIABLE)
-            .header("Content-Range", format!("bytes */{total}"))
-            .body(Vec::new())
-            .expect("static response builds");
-    }
     let plan = media_window(start, len);
-    let bytes = match media_chunk(state, &actor, server, &cid, &raw, plan.index).await {
+    let bytes = match media_chunk(
+        state,
+        &actor,
+        server,
+        &cid,
+        &raw,
+        head.manifest_version,
+        plan.index,
+        generation,
+    )
+    .await
+    {
         Some(bytes) => bytes,
         None => return deny(http::StatusCode::SERVICE_UNAVAILABLE),
     };
@@ -6561,6 +9139,13 @@ async fn serve_media(
     let hi = (lo + plan.len).min(bytes.len());
     let body = bytes[lo..hi].to_vec();
     let end = start + body.len() as u64;
+    // This is the last authorization point and remains held through response construction. If an
+    // explicit lock completed during either actor read, no plaintext crosses the scheme boundary;
+    // if lock begins after this guard, it cannot complete until this response has been built.
+    let _response_commit = match require_ui_session_generation(state, generation).await {
+        Ok(commit) => commit,
+        Err(_) => return deny(http::StatusCode::FORBIDDEN),
+    };
     // Always a 206 with an explicit Content-Range: the response is a window by construction, and
     // claiming 200 for a partial body is what makes a player think the file is truncated.
     http::Response::builder()
@@ -6624,26 +9209,77 @@ async fn media_head(
     server: u64,
     cid: &str,
     raw: &[u8],
-) -> Option<(u64, String)> {
-    {
+    generation: u64,
+) -> Option<MediaHead> {
+    // Re-resolve the cheap index metadata on every request. The claimed plaintext CID is not a
+    // trustworthy manifest identity until a full export hashes every byte, and another member may
+    // replace or ambiguously repeat it while the media element remains mounted.
+    let live = actor.file_head(raw.to_vec()).await?;
+    let cached = {
         let heads = state.media_heads.lock().await;
-        if let Some(hit) = heads.iter().find(|h| h.server == server && h.cid == cid) {
-            return Some((hit.total_size, hit.mime.clone()));
-        }
+        heads
+            .iter()
+            .find(|h| {
+                h.server == server && h.cid == cid && h.manifest_version == live.manifest_version
+            })
+            .cloned()
+    };
+    if let Some(hit) = cached {
+        let _commit = require_ui_session_generation(state, generation)
+            .await
+            .ok()?;
+        return Some(hit);
     }
-    let (total_size, mime) = actor.file_head(raw.to_vec()).await?;
-    let mut heads = state.media_heads.lock().await;
-    heads.retain(|h| h.server != server || h.cid != cid);
-    heads.push(MediaHead {
+    let total_size = live.total_size;
+    let declared = live.mime;
+    // A member-authored MIME string is not evidence about the bytes. Open chunk zero through the
+    // normal authenticated file path once per exact manifest and authorize the scheme only when
+    // the conservative classifier agrees. Returning octet-stream with a body is not a denial:
+    // media elements may still sniff and decode it despite `nosniff`.
+    if safe_media_mime(&declared) == "application/octet-stream" {
+        return None;
+    }
+    let first = media_chunk(
+        state,
+        actor,
         server,
-        cid: cid.to_string(),
-        total_size,
-        mime: mime.clone(),
-    });
+        cid,
+        raw,
+        live.manifest_version,
+        0,
+        generation,
+    )
+    .await?;
+    let mime = validated_inline_media_mime(&declared, &first)?;
+    media_head_put_for_generation(
+        state,
+        generation,
+        MediaHead {
+            server,
+            cid: cid.to_string(),
+            manifest_version: live.manifest_version,
+            total_size,
+            mime: mime.clone(),
+        },
+    )
+    .await
+}
+
+async fn media_head_put_for_generation(
+    state: &AppState,
+    generation: u64,
+    head: MediaHead,
+) -> Option<MediaHead> {
+    let _commit = require_ui_session_generation(state, generation)
+        .await
+        .ok()?;
+    let mut heads = state.media_heads.lock().await;
+    heads.retain(|existing| existing.server != head.server || existing.cid != head.cid);
+    heads.push(head);
     while heads.len() > MEDIA_HEAD_ENTRIES {
         heads.remove(0);
     }
-    Some((total_size, mime))
+    heads.last().cloned()
 }
 
 /// Fetch one whole decrypted chunk, from the cache when possible.
@@ -6657,17 +9293,23 @@ async fn media_chunk(
     server: u64,
     cid: &str,
     raw: &[u8],
+    manifest_version: [u8; 32],
     index: usize,
+    generation: u64,
 ) -> Option<Arc<Vec<u8>>> {
-    {
+    let cached = {
         let mut cache = state.media_cache.lock().await;
-        if let Some(bytes) = media_cache_take(&mut cache, server, cid, index) {
-            return Some(bytes);
-        }
+        media_cache_take(&mut cache, server, cid, manifest_version, index)
+    };
+    if let Some(bytes) = cached {
+        let _commit = require_ui_session_generation(state, generation)
+            .await
+            .ok()?;
+        return Some(bytes);
     }
     let start = index as u64 * CHUNK_BYTES as u64;
     let range = actor
-        .read_file_range(raw.to_vec(), start, CHUNK_BYTES)
+        .read_file_range(raw.to_vec(), manifest_version, start, CHUNK_BYTES)
         .await
         .ok()?;
     // A read past the end is how the caller learns the file is shorter than it guessed; it is not
@@ -6676,17 +9318,32 @@ async fn media_chunk(
         return Some(Arc::new(Vec::new()));
     }
     let bytes = Arc::new(range.bytes);
-    let mut cache = state.media_cache.lock().await;
-    media_cache_put(
-        &mut cache,
+    media_cache_put_for_generation(
+        state,
+        generation,
         MediaChunk {
             server,
             cid: cid.to_string(),
+            manifest_version,
             index,
             bytes: Arc::clone(&bytes),
         },
-    );
-    Some(bytes)
+    )
+    .await
+    .then_some(bytes)
+}
+
+async fn media_cache_put_for_generation(
+    state: &AppState,
+    generation: u64,
+    chunk: MediaChunk,
+) -> bool {
+    let Ok(_commit) = require_ui_session_generation(state, generation).await else {
+        return false;
+    };
+    let mut cache = state.media_cache.lock().await;
+    media_cache_put(&mut cache, chunk);
+    true
 }
 
 /// Constrain what a shared file's declared MIME may become on a media response. The value is
@@ -6695,15 +9352,201 @@ async fn media_chunk(
 fn safe_media_mime(declared: &str) -> String {
     let lowered = declared.trim().to_ascii_lowercase();
     let base = lowered.split(';').next().unwrap_or("").trim().to_string();
-    let ok = matches!(base.split('/').next(), Some("audio" | "video" | "image"))
-        && base
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'+' | b'.'));
+    // Explicit allowlist: notably excludes SVG/XML and playlist formats, which can contain active
+    // links or markup and are not inert merely because their top-level type says "image/audio".
+    let ok = matches!(
+        base.as_str(),
+        "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "image/avif"
+            | "image/bmp"
+            | "image/tiff"
+            | "image/x-icon"
+            | "audio/mpeg"
+            | "audio/ogg"
+            | "audio/wav"
+            | "audio/x-wav"
+            | "audio/flac"
+            | "audio/mp4"
+            | "audio/aac"
+            | "audio/webm"
+            | "video/mp4"
+            | "video/webm"
+            | "video/ogg"
+            | "video/quicktime"
+            | "video/x-msvideo"
+    );
     if ok {
         base
     } else {
         "application/octet-stream".to_string()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaSignatureEvidence {
+    /// Recognized bytes agree with the exact declared container (or an explicit alias).
+    Matched,
+    /// Recognized bytes belong to a different container than the declaration.
+    Mismatch,
+    /// The declaration is allowed media, but the bounded prefix is not a format we recognize.
+    Unrecognized,
+    /// The declaration itself is not on the inert media allowlist.
+    NotMedia,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetectedMediaContainer {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    Avif,
+    Bmp,
+    Tiff,
+    Ico,
+    Mp3,
+    Wav,
+    Flac,
+    Aac,
+    Mp4,
+    Ogg,
+    Webm,
+    QuickTime,
+    Avi,
+}
+
+fn container_matches_mime(container: DetectedMediaContainer, mime: &str) -> bool {
+    match container {
+        DetectedMediaContainer::Png => mime == "image/png",
+        DetectedMediaContainer::Jpeg => mime == "image/jpeg",
+        DetectedMediaContainer::Gif => mime == "image/gif",
+        DetectedMediaContainer::Webp => mime == "image/webp",
+        DetectedMediaContainer::Avif => mime == "image/avif",
+        DetectedMediaContainer::Bmp => mime == "image/bmp",
+        DetectedMediaContainer::Tiff => mime == "image/tiff",
+        DetectedMediaContainer::Ico => mime == "image/x-icon",
+        DetectedMediaContainer::Mp3 => mime == "audio/mpeg",
+        DetectedMediaContainer::Wav => matches!(mime, "audio/wav" | "audio/x-wav"),
+        DetectedMediaContainer::Flac => mime == "audio/flac",
+        DetectedMediaContainer::Aac => mime == "audio/aac",
+        // These containers do not reveal whether their tracks are audio-only from the bounded
+        // header evidence. Both explicitly allowlisted top-level aliases are therefore honest.
+        DetectedMediaContainer::Mp4 => matches!(mime, "audio/mp4" | "video/mp4"),
+        DetectedMediaContainer::Ogg => matches!(mime, "audio/ogg" | "video/ogg"),
+        DetectedMediaContainer::Webm => matches!(mime, "audio/webm" | "video/webm"),
+        DetectedMediaContainer::QuickTime => mime == "video/quicktime",
+        DetectedMediaContainer::Avi => mime == "video/x-msvideo",
+    }
+}
+
+/// Conservative magic-byte classification for the media formats the webview is willing to decode.
+/// This validates container identity, not codec correctness or safety; malformed-but-recognizable
+/// media still reaches a decoder and must remain untrusted.
+fn detected_media_container(bytes: &[u8]) -> Option<DetectedMediaContainer> {
+    let starts = |signature: &[u8]| bytes.starts_with(signature);
+    if starts(b"\x89PNG\r\n\x1a\n") {
+        return Some(DetectedMediaContainer::Png);
+    }
+    if starts(b"\xff\xd8\xff") {
+        return Some(DetectedMediaContainer::Jpeg);
+    }
+    if starts(b"GIF87a") || starts(b"GIF89a") {
+        return Some(DetectedMediaContainer::Gif);
+    }
+    if starts(b"BM") {
+        return Some(DetectedMediaContainer::Bmp);
+    }
+    if starts(b"II*\0") || starts(b"MM\0*") {
+        return Some(DetectedMediaContainer::Tiff);
+    }
+    if starts(b"\0\0\x01\0") {
+        return Some(DetectedMediaContainer::Ico);
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some(DetectedMediaContainer::Webp);
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        let declared_box_len = u32::from_be_bytes(bytes[..4].try_into().ok()?) as usize;
+        if declared_box_len < 12 {
+            return None;
+        }
+        let end = declared_box_len.min(bytes.len());
+        let has_brand = |wanted: &[u8; 4]| {
+            &bytes[8..12] == wanted
+                || (end >= 20 && bytes[16..end].chunks_exact(4).any(|brand| brand == wanted))
+        };
+        if has_brand(b"avif") || has_brand(b"avis") {
+            return Some(DetectedMediaContainer::Avif);
+        }
+        if has_brand(b"qt  ") {
+            return Some(DetectedMediaContainer::QuickTime);
+        }
+        if [
+            b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"M4A ",
+            b"M4V ", b"avc1", b"dash", b"cmfc",
+        ]
+        .iter()
+        .any(|brand| has_brand(brand))
+        {
+            return Some(DetectedMediaContainer::Mp4);
+        }
+        return None;
+    }
+    if starts(b"fLaC") {
+        return Some(DetectedMediaContainer::Flac);
+    }
+    if starts(b"ID3") {
+        return Some(DetectedMediaContainer::Mp3);
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xf6 == 0xf0 {
+        return Some(DetectedMediaContainer::Aac);
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0 && bytes[1] & 0x06 != 0 {
+        return Some(DetectedMediaContainer::Mp3);
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        return Some(DetectedMediaContainer::Wav);
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"AVI " {
+        return Some(DetectedMediaContainer::Avi);
+    }
+    if starts(b"OggS") {
+        return Some(DetectedMediaContainer::Ogg);
+    }
+    if starts(b"\x1a\x45\xdf\xa3")
+        && bytes
+            .windows(4)
+            .any(|window| window.eq_ignore_ascii_case(b"webm"))
+    {
+        return Some(DetectedMediaContainer::Webm);
+    }
+    None
+}
+
+fn media_signature_evidence(declared: &str, bytes: &[u8]) -> MediaSignatureEvidence {
+    let allowed = safe_media_mime(declared);
+    if allowed == "application/octet-stream" {
+        return MediaSignatureEvidence::NotMedia;
+    }
+    let Some(detected) = detected_media_container(bytes) else {
+        return MediaSignatureEvidence::Unrecognized;
+    };
+    if container_matches_mime(detected, &allowed) {
+        MediaSignatureEvidence::Matched
+    } else {
+        MediaSignatureEvidence::Mismatch
+    }
+}
+
+/// Return a decoder-facing MIME only for a recognized, agreeing inert media container.
+/// Mismatch, unknown media, SVG and non-media declarations receive no response body at all.
+fn validated_inline_media_mime(declared: &str, bytes: &[u8]) -> Option<String> {
+    let allowed = safe_media_mime(declared);
+    (media_signature_evidence(&allowed, bytes) == MediaSignatureEvidence::Matched)
+        .then_some(allowed)
 }
 
 fn validate_ui_state_json(json: &str) -> Result<(), String> {
@@ -6748,8 +9591,20 @@ async fn get_ui_state(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn save_ui_state(state: State<'_, AppState>, json: String) -> Result<(), String> {
-    require_unlocked_session(&state).await?;
     validate_ui_state_json(&json)?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    save_ui_state_for_generation(&state, &json, generation).await
+}
+
+/// Serialize continuity writes with the lock snapshot. If lock was requested after the caller
+/// captured its JSON, the generation recheck rejects it; if this write already owns the commit
+/// mutex, lock waits and its newer final snapshot necessarily wins afterward.
+async fn save_ui_state_for_generation(
+    state: &AppState,
+    json: &str,
+    generation: u64,
+) -> Result<(), String> {
+    let _session_commit = require_ui_session_generation(state, generation).await?;
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
@@ -6931,10 +9786,33 @@ async fn save_wiki_page(
     server: u64,
     name: String,
     body: String,
-) -> Result<bool, String> {
-    let actor = actor_of(&state, server).await?;
-    let queued = actor.write_wiki_page(name, body).await?;
+    trace: Option<String>,
+) -> Result<bool, AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "save_wiki_page",
+        server,
+        None,
+    );
+    let actor = op.actor(&state, server).await?;
+    // The page body never reaches the record, and neither does its name: a wiki page is content,
+    // and the whole point of the privacy model is that content has no representation here.
+    let queued = actor
+        .write_wiki_page(name, body)
+        .await
+        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
     persist_server(&state, server).await;
+    // Two different things happened, and only one of them put the edit on the page. "Saved" and
+    // "queued for someone to approve" look identical from a success return, and an author who
+    // thinks the first happened when it was the second goes looking for their edit and cannot find
+    // it. Same shape as a call signal that was sent to a member with no route: an outcome, not an
+    // error, and the outcome is the diagnosis.
+    if queued {
+        op.succeeded("WIKI.EDIT.QUEUED_FOR_REVIEW");
+    } else {
+        op.succeeded("WIKI.EDIT.APPLIED");
+    }
     Ok(queued)
 }
 
@@ -7127,7 +10005,50 @@ async fn rename_wiki_page(
     Ok(())
 }
 
+/// Resolve the two things every channel operation needs, classifying each failure as it happens.
+///
+/// The prefix shared by send, edit, delete, react and pin. Sharing it is not only about repetition:
+/// it makes the five commands classify identically, which is what turns "how often does a server's
+/// actor go missing" into a question with an answer rather than five separate answers that have to
+/// be reconciled by reading prose.
+///
+/// The session gate and the actor lookup are separated on purpose. They are one call today and
+/// they fail for entirely different reasons: one means "unlock the app", the other means "this
+/// server's task has stopped". Collapsing them is how both came to produce the same sentence.
+async fn channel_target(
+    state: &AppState,
+    op: &Operation,
+    server: u64,
+    channel: &str,
+) -> Result<(u128, ServerActor), AppError> {
+    let id: u128 = channel
+        .parse()
+        .map_err(|_| op.fail(codes::CHANNEL_BAD_ID, "bad channel id"))?;
+    require_unlocked_session(state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    let actor = actor_of_unchecked(state, server)
+        .await
+        .map_err(|failure| op.fail(failure.code(), failure.message()))?;
+    // Bound to this operation here rather than at each caller, which is what makes it impossible
+    // for a new channel command to forget. Everything the actor does in response, and every event
+    // that work produces, then lands under the same trace as the command that asked for it.
+    // Library actors carry the pre-normalization boundary token. Their `tracing` records and
+    // returned events are normalized when they cross back into diagnostics; passing `op.trace`
+    // here would compute H(H(raw)) and split channel operations from every actor stage.
+    Ok((id, op.bind_actor(actor)))
+}
+
 /// Send a chat message to a channel (by id).
+///
+/// The first command instrumented end to end, and the pattern the others follow. What it records is
+/// the *stages*, because "the message did not arrive" was previously unanswerable: the evidence
+/// could not say whether the command reached Rust, whether the actor was alive, whether the
+/// operation was accepted, or whether persistence completed. Each is a different bug with a
+/// different fix, and they all looked the same.
+///
+/// Note what is not recorded: the message. Not its text, not its length, not its recipient. The
+/// channel becomes a session reference and the stage names carry the diagnosis.
 #[tauri::command]
 async fn send_message(
     state: State<'_, AppState>,
@@ -7135,13 +10056,26 @@ async fn send_message(
     channel: String,
     text: String,
     reply_to: Option<String>,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "send_message",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    op.stage("CHANNEL.SEND.ENQUEUED");
     actor
         .send_reply(id, text, reply_to.unwrap_or_default())
-        .await?;
+        .await
+        .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
+    op.stage("CHANNEL.SEND.ACCEPTED");
     persist_server(&state, server).await;
+    // Deliberately after persistence. An operation reported as succeeding before its state reached
+    // the disk is the exact shape of "it worked and then it was gone after a restart".
+    op.succeeded("CHANNEL.SEND.PERSISTED");
     Ok(())
 }
 
@@ -7153,11 +10087,22 @@ async fn edit_message(
     channel: String,
     msg_id: String,
     text: String,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    actor.edit_message(id, msg_id, text).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "edit_message",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    actor
+        .edit_message(id, msg_id, text)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("CHANNEL.EDIT.PERSISTED");
     Ok(())
 }
 
@@ -7168,11 +10113,22 @@ async fn delete_message(
     server: u64,
     channel: String,
     msg_id: String,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    actor.delete_message(id, msg_id).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "delete_message",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    actor
+        .delete_message(id, msg_id)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_DELETE_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("CHANNEL.DELETE.PERSISTED");
     Ok(())
 }
 
@@ -7184,11 +10140,22 @@ async fn toggle_reaction(
     channel: String,
     msg_id: String,
     emoji: String,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    actor.toggle_reaction(id, msg_id, emoji).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "toggle_reaction",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    actor
+        .toggle_reaction(id, msg_id, emoji)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_REACTION_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("CHANNEL.REACTION.PERSISTED");
     Ok(())
 }
 
@@ -7200,11 +10167,22 @@ async fn set_pin(
     channel: String,
     msg_id: String,
     pinned: bool,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    actor.set_pin(id, msg_id, pinned).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "set_pin",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    actor
+        .set_pin(id, msg_id, pinned)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_PIN_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("CHANNEL.PIN.PERSISTED");
     Ok(())
 }
 
@@ -7217,11 +10195,23 @@ async fn set_channel_topic(
     server: u64,
     channel: String,
     topic: String,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    actor.set_channel_topic(id, topic).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "set_channel_topic",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    // The topic text is content and stays out of the record; that it changed is the event.
+    actor
+        .set_channel_topic(id, topic)
+        .await
+        .map_err(|e| op.fail(codes::CHANNEL_TOPIC_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("CHANNEL.TOPIC.PERSISTED");
     Ok(())
 }
 
@@ -7249,11 +10239,24 @@ async fn jukebox_add(
     channel: String,
     cid: String,
     name: String,
-) -> Result<String, String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    let entry = actor.jukebox_add(id, cid, name).await?;
+    trace: Option<String>,
+) -> Result<String, AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "jukebox_add",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    // The track's name is a user's words and never reaches the record. What it was called does not
+    // explain why the queue failed to converge; that the operation was accepted and persisted does.
+    let entry = actor
+        .jukebox_add(id, cid, name)
+        .await
+        .map_err(|e| op.fail(codes::JUKEBOX_ADD_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("JUKEBOX.ADD.PERSISTED");
     Ok(entry)
 }
 
@@ -7264,11 +10267,22 @@ async fn jukebox_remove(
     server: u64,
     channel: String,
     entry: String,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    actor.jukebox_remove(id, entry).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "jukebox_remove",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    actor
+        .jukebox_remove(id, entry)
+        .await
+        .map_err(|e| op.fail(codes::JUKEBOX_REMOVE_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("JUKEBOX.REMOVE.PERSISTED");
     Ok(())
 }
 
@@ -7402,6 +10416,108 @@ struct ReloadedServer {
     is_dm: bool,
 }
 
+/// Transport-independent half of vault reload. Keeping this seam below Tauri's concrete runtime
+/// lets the lifecycle test exercise the exact restore, blob attachment, route restoration and
+/// actor startup used in production with a deterministic in-memory transport.
+struct RestoredActor {
+    actor: ServerActor,
+    events: mpsc::Receiver<catcoms_app::TracedEvent>,
+    task: tokio::task::JoinHandle<()>,
+    group_id: Vec<u8>,
+    device_id: DeviceId,
+}
+
+async fn restore_server_actor<T, R>(
+    state: &AppState,
+    snapshot: &[u8],
+    record: &ServerRecord,
+    transport: T,
+    rng: R,
+    clock: Box<dyn Clock + Send>,
+    bootstrap: &[String],
+    record_seq: u64,
+    reconnect_routes: Vec<(PeerId, String)>,
+    switchboard: bool,
+) -> Result<RestoredActor, String>
+where
+    T: MeshTransport + Send + 'static,
+    R: catcoms_rt::CryptoRngCore + Send + 'static,
+{
+    let mut server = Server::restore(snapshot, transport, rng, clock, &record.display_name)
+        .map_err(|error| error.to_string())?;
+    server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
+    server.set_local_reconnect_routes(reconnect_routes);
+    server
+        .subscribe_control()
+        .await
+        .map_err(|error| error.to_string())?;
+    attach_blob_store(state, &mut server).await;
+    if let Err(error) = server.publish_self_record(bootstrap.to_vec(), record_seq) {
+        tracing::warn!(
+            target: "catcoms_app",
+            server = record.id,
+            phase = "reload",
+            error = %error,
+            "DISCOVERY.PEER_RECORD.PUBLISH_FAILED"
+        );
+    }
+    server.set_switchboard_offered(switchboard);
+
+    // Restore the cross-session address cache before the eager member redial. Invalid or missing
+    // best-effort cache data never prevents the authoritative group snapshot from opening.
+    {
+        let guard = state.store.lock().await;
+        if let Some(store) = guard.as_ref() {
+            match (
+                store.address_cache_key(),
+                store.load_address_cache(record.id),
+            ) {
+                (Ok(key), Ok(bytes)) if !bytes.is_empty() => {
+                    if !server.load_address_cache(&bytes, &key) {
+                        tracing::warn!(
+                            target: "catcoms_app",
+                            server = record.id,
+                            "VAULT.ADDRESS_CACHE.REJECTED"
+                        );
+                    }
+                }
+                (Err(error), _) | (_, Err(error)) => tracing::warn!(
+                    target: "catcoms_app",
+                    server = record.id,
+                    error = %error,
+                    "VAULT.ADDRESS_CACHE.LOAD_FAILED"
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    server.cache_known_records();
+    let local_redialled = server.dial_local_reconnect_routes().await;
+    let cached_redialled = server.dial_cached_peers().await;
+    if local_redialled + cached_redialled > 0 {
+        tracing::info!(
+            target: "catcoms_app",
+            server = record.id,
+            local_peers = local_redialled,
+            cached_peers = cached_redialled,
+            "DISCOVERY.REDIAL.STARTED"
+        );
+    }
+
+    let group_id = server.group_id();
+    let device_id = server.device_id();
+    let (actor, events, task) = spawn(server);
+    actor.open_channel(channel_id("general")).await;
+    Ok(RestoredActor {
+        actor,
+        events,
+        task,
+        group_id,
+        device_id,
+    })
+}
+
 async fn running_servers(state: &AppState) -> Vec<ReloadedServer> {
     let servers: Vec<_> = state
         .servers
@@ -7483,7 +10599,7 @@ async fn reload_one(
     for p in &problems {
         // Unlike founding, a reload never fails over this: the user is not standing at a form, and
         // a server that loads with reduced reach still reads its history and re-dials its peers.
-        eprintln!("reload: server {} reachability: {p}", record.id);
+        tracing::warn!(target: "catcoms_app", server = record.id, problem = %p, "REACH.RELOAD.DEGRADED");
     }
     let Reachability {
         bootstrap,
@@ -7512,69 +10628,28 @@ async fn reload_one(
     }
     let rz_vec: Vec<String> = rz_target.iter().map(|t| t.addr.to_string()).collect();
 
-    let mut server = Server::restore(
+    let RestoredActor {
+        actor,
+        events,
+        task,
+        group_id,
+        device_id,
+    } = restore_server_actor(
+        state,
         snapshot,
+        record,
         mesh,
         OsCryptoRng,
         Box::new(SystemClock),
-        &record.display_name,
+        &bootstrap,
+        net.record_seq,
+        net.reconnect_routes
+            .iter()
+            .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
+            .collect(),
+        net.switchboard,
     )
-    .map_err(|e| e.to_string())?;
-    server
-        .subscribe_control()
-        .await
-        .map_err(|e| e.to_string())?;
-    attach_blob_store(state, &mut server).await;
-    // Republish this device's peer record on THIS launch's reserved sequence block (defect P1 and
-    // the 1a-7 seq bug together). The identity and port are the same as last launch, but the
-    // reachable address may not be (a new relay circuit, a different UPnP mapping), and a record
-    // published from a number the peers have already seen is discarded by every one of them.
-    if let Err(e) = server.publish_self_record(bootstrap.clone(), net.record_seq) {
-        eprintln!("reload: publishing the peer record failed: {e}");
-    }
-    server.set_switchboard_offered(net.switchboard);
-    // Restore the cross-session address cache: the previously-proven members this node can offer
-    // the dial policy immediately, before any rendezvous has had a chance to answer with Sybils.
-    // Best-effort; a missing, unreadable or tamper-detected cache just means no cached candidates.
-    {
-        let guard = state.store.lock().await;
-        if let Some(store) = guard.as_ref() {
-            match (
-                store.address_cache_key(),
-                store.load_address_cache(record.id),
-            ) {
-                (Ok(key), Ok(bytes)) if !bytes.is_empty() => {
-                    if !server.load_address_cache(&bytes, &key) {
-                        eprintln!(
-                            "reload: the address cache of server {} was rejected",
-                            record.id
-                        );
-                    }
-                }
-                (Err(e), _) | (_, Err(e)) => {
-                    eprintln!(
-                        "reload: the address cache of server {} did not load: {e}",
-                        record.id
-                    )
-                }
-                _ => {}
-            }
-        }
-    }
-    // Re-dial the last-known members now that the roster is loaded (the Phase 9g healing path).
-    // `cache_known_records` folds the snapshot's restored peer records into the cache, pruning
-    // anyone no longer on the roster, and `dial_cached_peers` runs the survivors through the
-    // DiscoveryPolicy: routability-checked, ranked, and capped by the dial budget. The discovery
-    // tick repeats this every minute or so; doing it eagerly here is only about reconnect latency.
-    server.cache_known_records();
-    let redialled = server.dial_cached_peers().await;
-    if redialled > 0 {
-        eprintln!(
-            "reload: server {} re-dialled {redialled} known member(s)",
-            record.id
-        );
-    }
-
+    .await?;
     // If the persisted invite is discovery-enabled but we could NOT re-register its namespace
     // (rendezvous infra was down at reload), drop it: it would not resolve. The rail then prompts a
     // fresh invite (which re-registers). A direct (non-rendezvous) invite is presented unchanged;
@@ -7589,18 +10664,15 @@ async fn reload_one(
         Some(record.invite.clone())
     };
 
-    let general = channel_id("general");
-    let group_id = server.group_id();
-    let device_id = server.device_id();
-    let (actor, events, _task) = spawn(server);
-    actor.open_channel(general).await;
     // Register under the SAME id as on disk (don't allocate a new one).
+    supervise("server_actor", record.id, task);
     forward_events(app.clone(), record.id, events);
     let timer_actor = actor.clone();
     state.servers.lock().await.insert(
         record.id,
         ServerEntry {
             actor,
+            instance: state.next_server_instance.fetch_add(1, Ordering::Relaxed),
             group_id,
             device_id,
             invite: presented_invite,
@@ -7618,6 +10690,7 @@ async fn reload_one(
             record_seq: net.record_seq,
         },
     );
+    install_reconnect_capture_worker(app, record.id, timer_actor.clone());
     spawn_discovery_timer(app.clone(), record.id, timer_actor);
     // Re-seal if the port moved. (The reserved peer-record sequence block was already sealed by
     // `load_or_init_server_net`, before the transport came up.)
@@ -7658,6 +10731,9 @@ async fn reload_one(
 /// is a constant here rather than anything the webview can influence.
 const ISSUE_URL_PREFIX: &str = "https://github.com/Thalpy/Mewtual/issues/new?";
 const ISSUE_URL_MAX_BYTES: usize = 6_000;
+const PUBLIC_ISSUE_TITLE: &str = "Diagnostic report";
+const PUBLIC_ISSUE_TRUNCATION_NOTE: &str =
+    "\n\n_(Report truncated in this URL; return to Mewtual for the full text.)_";
 
 /// Is this a new-issue URL on our own tracker? Split out from the command so the allowlist
 /// itself is testable without launching a browser.
@@ -7667,6 +10743,104 @@ fn is_tracker_url(url: &str) -> bool {
             .chars()
             .any(|character| character.is_control() || character.is_whitespace())
         && url.starts_with(ISSUE_URL_PREFIX)
+}
+
+/// Percent-encode one query value from its UTF-8 bytes.
+///
+/// A tiny local encoder keeps the launch boundary dependency-free and, unlike string slicing on a
+/// finished URL, can never cut a `%HH` escape or a Unicode scalar. Only RFC 3986 unreserved bytes
+/// survive literally; every other byte becomes ASCII, so URL byte accounting is exact.
+fn encode_issue_query(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(*byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[(byte >> 4) as usize]));
+            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+    }
+    encoded
+}
+
+fn encoded_issue_query_len(value: &str) -> usize {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                1
+            } else {
+                3
+            }
+        })
+        .sum()
+}
+
+/// Native-owned public issue output. `report` is the exact publication envelope for clipboard
+/// fallback; only the browser URL may receive a shortened excerpt.
+#[derive(Serialize)]
+struct PublicDiagnosticsIssue {
+    report: String,
+    truncated: bool,
+}
+
+struct PreparedPublicDiagnosticsIssue {
+    url: String,
+    report: String,
+    truncated: bool,
+}
+
+fn public_issue_url(body: &str) -> String {
+    format!(
+        "{ISSUE_URL_PREFIX}labels=bug&title={}&body={}",
+        encode_issue_query(PUBLIC_ISSUE_TITLE),
+        encode_issue_query(body),
+    )
+}
+
+/// Build a bounded tracker URL while retaining the exact full report separately.
+fn prepare_public_diagnostics_issue(native_report: &str) -> PreparedPublicDiagnosticsIssue {
+    let report = format!(
+        "**Type:** Bug report\n**App:** Mewtual desktop {}\n**Environment:** Mewtual desktop\n\n{}",
+        env!("CARGO_PKG_VERSION"),
+        native_report,
+    );
+    let complete = public_issue_url(&report);
+    if complete.len() <= ISSUE_URL_MAX_BYTES {
+        return PreparedPublicDiagnosticsIssue {
+            url: complete,
+            report,
+            truncated: false,
+        };
+    }
+
+    let empty_url = public_issue_url("");
+    let note_len = encoded_issue_query_len(PUBLIC_ISSUE_TRUNCATION_NOTE);
+    let body_budget = ISSUE_URL_MAX_BYTES
+        .saturating_sub(empty_url.len())
+        .saturating_sub(note_len);
+    let mut excerpt = String::new();
+    let mut encoded_len = 0usize;
+    for character in report.chars() {
+        let mut utf8 = [0; 4];
+        let char_len = encoded_issue_query_len(character.encode_utf8(&mut utf8));
+        if encoded_len.saturating_add(char_len) > body_budget {
+            break;
+        }
+        excerpt.push(character);
+        encoded_len += char_len;
+    }
+    excerpt.push_str(PUBLIC_ISSUE_TRUNCATION_NOTE);
+    let url = public_issue_url(&excerpt);
+    debug_assert!(url.len() <= ISSUE_URL_MAX_BYTES);
+    PreparedPublicDiagnosticsIssue {
+        url,
+        report,
+        truncated: true,
+    }
 }
 
 fn is_external_http_url(url: &str) -> bool {
@@ -7923,6 +11097,9 @@ struct SavedFileResult {
     path: String,
     displayed: bool,
     warning: Option<String>,
+    /// `matched`, `mismatch`, or `unrecognized` for an allowlisted declared media type. This is
+    /// format evidence only—not a promise that a platform decoder is vulnerability-free.
+    content_validation: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -7933,6 +11110,39 @@ struct BackupResult {
     bytes: u64,
     displayed: bool,
     warning: Option<String>,
+}
+
+/// A secret change has a third outcome beyond success/failure: rename committed the new wrapper,
+/// but the directory flush could not prove it durable across sudden power loss. Reporting that as
+/// an error would falsely tell the user the old secret remained active.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct VaultSecretChangeResult {
+    changed: bool,
+    durability_confirmed: bool,
+    warning: Option<String>,
+}
+
+fn vault_secret_change_result(
+    result: Result<(), catcoms_app::AppError>,
+) -> Result<VaultSecretChangeResult, String> {
+    match result {
+        Ok(()) => Ok(VaultSecretChangeResult {
+            changed: true,
+            durability_confirmed: true,
+            warning: None,
+        }),
+        Err(catcoms_app::AppError::CommittedButNotDurable(error)) => {
+            Ok(VaultSecretChangeResult {
+                changed: true,
+                durability_confirmed: false,
+                warning: Some(format!(
+                    "The new secret is active, but the filesystem could not confirm crash durability. Keep the new secret; do not treat the old secret as current. Details: {error}"
+                )),
+            })
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// Copy one already-sealed vault tree without following links. Refusing links is important for
@@ -7991,8 +11201,24 @@ fn backup_destination(downloads: &Path, stamp: u64) -> Result<PathBuf, String> {
 /// secret; no plaintext snapshots, drafts, identities or attachments are written to Downloads.
 /// Restore is intentionally a locked-screen operation and is not performed by this command.
 #[tauri::command]
-async fn create_backup(app: AppHandle, state: State<'_, AppState>) -> Result<BackupResult, String> {
-    require_unlocked_session(&state).await?;
+async fn create_backup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    trace: Option<String>,
+) -> Result<BackupResult, AppError> {
+    // A backup is the operation whose silent failure costs the most. It writes every server's
+    // snapshot and the registry before copying, so a failure part-way through is a partial image,
+    // and the phases say which part.
+    let op = Operation::start_maybe(
+        trace,
+        catcoms_diagnostics::Section::Vault,
+        "create_backup",
+        None,
+        None,
+    );
+    require_unlocked_session(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     // Capture every actor first, without holding either state lock across its round trip.
     let servers: Vec<(u64, ServerActor, ServerRecord)> = {
         let servers = state.servers.lock().await;
@@ -8001,7 +11227,7 @@ async fn create_backup(app: AppHandle, state: State<'_, AppState>) -> Result<Bac
             .map(|(id, entry)| {
                 (
                     *id,
-                    entry.actor.clone(),
+                    op.bind_actor(entry.actor.clone()),
                     ServerRecord {
                         id: *id,
                         display_name: entry.name.clone(),
@@ -8014,36 +11240,51 @@ async fn create_backup(app: AppHandle, state: State<'_, AppState>) -> Result<Bac
     };
     let mut snapshots = Vec::with_capacity(servers.len());
     for (id, actor, _) in &servers {
-        snapshots.push((*id, actor.snapshot().await?));
+        snapshots.push((
+            *id,
+            actor
+                .snapshot()
+                .await
+                .map_err(|e| op.fail(codes::VAULT_BACKUP_FAILED, e))?,
+        ));
     }
     let records: Vec<ServerRecord> = servers.into_iter().map(|(_, _, record)| record).collect();
+    op.stage("VAULT.BACKUP.SNAPSHOTTED");
 
     let downloads = app
         .path()
         .download_dir()
-        .map_err(|error| error.to_string())?;
-    let destination = backup_destination(&downloads, SystemClock.now_ms())?;
+        .map_err(|error| op.fail(codes::VAULT_BACKUP_FAILED, error.to_string()))?;
+    let destination = backup_destination(&downloads, SystemClock.now_ms())
+        .map_err(|e| op.fail(codes::VAULT_BACKUP_FAILED, e))?;
     let (files, bytes) = {
         // Serialize persistence and the filesystem copy with every other vault write so the
         // exported registry and snapshots form one coherent point-in-time image.
         let guard = state.store.lock().await;
-        let store = guard
-            .as_ref()
-            .ok_or_else(|| "unlock the vault before creating a backup".to_string())?;
+        let store = guard.as_ref().ok_or_else(|| {
+            op.fail(
+                codes::VAULT_BACKUP_FAILED,
+                "unlock the vault before creating a backup",
+            )
+        })?;
         let mut rng = OsCryptoRng;
         for (id, snapshot) in snapshots {
             store
                 .save_server(id, &snapshot, &mut rng)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| op.fail(codes::VAULT_BACKUP_FAILED, error.to_string()))?;
         }
         store
             .save_registry(&records, &mut rng)
-            .map_err(|error| error.to_string())?;
-        copy_backup_tree(store.backup_source_dir(), &destination)?
+            .map_err(|error| op.fail(codes::VAULT_BACKUP_FAILED, error.to_string()))?;
+        copy_backup_tree(store.backup_source_dir(), &destination)
+            .map_err(|e| op.fail(codes::VAULT_BACKUP_FAILED, e))?
     };
     let warning = reveal_path(&destination)
         .err()
         .map(|error| format!("The backup was created, but Downloads could not be opened: {error}"));
+    // The bytes are on disk by this point; failing to open a file manager afterwards is not a
+    // failed backup and must not be recorded as one.
+    op.succeeded("VAULT.BACKUP.WRITTEN");
     Ok(BackupResult {
         path: destination.to_string_lossy().into_owned(),
         files,
@@ -8061,7 +11302,7 @@ async fn change_vault_secret(
     state: State<'_, AppState>,
     current_secret: String,
     new_secret: String,
-) -> Result<(), String> {
+) -> Result<VaultSecretChangeResult, String> {
     require_unlocked_session(&state).await?;
     let current_secret = Zeroizing::new(current_secret);
     let new_secret = Zeroizing::new(new_secret);
@@ -8069,13 +11310,11 @@ async fn change_vault_secret(
     let store = guard
         .as_ref()
         .ok_or_else(|| "unlock the vault before changing its secret".to_string())?;
-    store
-        .change_passphrase(
-            current_secret.as_bytes(),
-            new_secret.as_bytes(),
-            &mut OsCryptoRng,
-        )
-        .map_err(|error| error.to_string())
+    vault_secret_change_result(store.change_passphrase(
+        current_secret.as_bytes(),
+        new_secret.as_bytes(),
+        &mut OsCryptoRng,
+    ))
 }
 
 /// Open a prefilled bug report / feature request on the tracker in the user's default browser.
@@ -8129,6 +11368,7 @@ async fn save_and_open_space_guide(
         path: path.to_string_lossy().into_owned(),
         displayed: warning.is_none(),
         warning,
+        content_validation: Some("matched".into()), // generator output passed strict PNG checks
     })
 }
 
@@ -8152,6 +11392,7 @@ async fn save_space_layout(
         path: path.to_string_lossy().into_owned(),
         displayed: warning.is_none(),
         warning,
+        content_validation: None,
     })
 }
 
@@ -8170,6 +11411,11 @@ trait SaveSource {
     /// Whether the webview session is still unlocked. Called again after every await, because an
     /// answer from before a network round-trip says nothing about the state after it.
     async fn still_unlocked(&self) -> Result<(), String>;
+
+    /// Atomically cross from verified staging bytes to a visible plaintext file under the
+    /// authorization epoch that started this save. Implementations must not split their final
+    /// session check from the rename.
+    async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String>;
 
     /// Report progress. Purely informational; a dropped update never changes the outcome.
     fn progress(
@@ -8257,16 +11503,33 @@ async fn stream_download_to_disk(
             "the reassembled file failed its integrity check".into(),
         ));
     }
-    // Last gate before the file becomes visible under its real name and Downloads is opened.
-    // Pinned by `a_lock_after_the_last_chunk_still_stops_the_rename`: once the loop is done there
-    // is no next iteration left to notice a lock, so removing this publishes the file anyway.
-    if let Err(e) = source.still_unlocked().await {
-        return Err(failed(e));
-    }
-    if let Err(e) = publish_staged_download(&staging, &path) {
+    // The source owns one indivisible authorization+rename step. A plain check followed by this
+    // rename has a lock TOCTOU: explicit lock can complete in the gap and the old command then
+    // publishes plaintext under its final name.
+    if let Err(e) = source.publish_verified(&staging, &path).await {
         return Err(failed(e));
     }
     Ok(path)
+}
+
+fn exported_media_validation(path: &Path, declared_mime: &str) -> Option<String> {
+    if safe_media_mime(declared_mime) == "application/octet-stream" {
+        return None;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Some("unrecognized".into());
+    };
+    let mut prefix = [0u8; 64];
+    let Ok(read) = file.read(&mut prefix) else {
+        return Some("unrecognized".into());
+    };
+    let evidence = match media_signature_evidence(declared_mime, &prefix[..read]) {
+        MediaSignatureEvidence::Matched => "matched",
+        MediaSignatureEvidence::Mismatch => "mismatch",
+        MediaSignatureEvidence::Unrecognized => "unrecognized",
+        MediaSignatureEvidence::NotMedia => return None,
+    };
+    Some(evidence.into())
 }
 
 /// The live [`SaveSource`]: chunks from the server actor, authorization from the session gate,
@@ -8280,6 +11543,7 @@ struct ActorSaveSource<'a> {
     raw: Vec<u8>,
     total: usize,
     size: u64,
+    generation: u64,
 }
 
 impl SaveSource for ActorSaveSource<'_> {
@@ -8288,7 +11552,13 @@ impl SaveSource for ActorSaveSource<'_> {
     }
 
     async fn still_unlocked(&self) -> Result<(), String> {
-        require_unlocked_session(self.state).await
+        let generation_check = require_ui_session_generation(self.state, self.generation).await?;
+        drop(generation_check);
+        Ok(())
+    }
+
+    async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
+        publish_download_for_generation(self.state, self.generation, staging, final_path).await
     }
 
     fn progress(
@@ -8314,6 +11584,16 @@ impl SaveSource for ActorSaveSource<'_> {
     }
 }
 
+async fn publish_download_for_generation(
+    state: &AppState,
+    generation: u64,
+    staging: &Path,
+    final_path: &Path,
+) -> Result<(), String> {
+    let _commit = require_ui_session_generation(state, generation).await?;
+    publish_staged_download(staging, final_path)
+}
+
 /// Download a listed group file straight into Downloads, one chunk at a time, and reveal it.
 ///
 /// The plaintext never enters the webview. Saving a file used to mean `download_file` handing the
@@ -8333,6 +11613,7 @@ async fn save_group_file(
     cid: String,
     name: String,
 ) -> Result<SavedFileResult, String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
     let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
     let target: [u8; 32] = raw
         .clone()
@@ -8342,6 +11623,13 @@ async fn save_group_file(
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
         "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
     })?;
+    let declared_mime = actor
+        .file_head(raw.clone())
+        .await
+        .ok_or_else(|| {
+            "this file can't be inspected; it isn't listed, or its reference is invalid".to_string()
+        })?
+        .mime;
     if size > MAX_FILE_BYTES as u64 {
         return Err(format!(
             "file is larger than the {MAX_FILE_BYTES}-byte limit"
@@ -8357,9 +11645,15 @@ async fn save_group_file(
         raw,
         total,
         size,
+        generation,
     };
     let path =
         stream_download_to_disk(&downloads, &name, total, size, &target, &mut source).await?;
+    // Keep inspection and the OS reveal in the same initiating UI epoch as publication. If lock
+    // won after the rename guard was released, the verified file may remain in Downloads, but the
+    // stale command cannot inspect/reveal it or report success behind the lock screen.
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    let content_validation = exported_media_validation(&path, &declared_mime);
     let warning = reveal_path(&path)
         .err()
         .map(|error| format!("The file was saved, but Downloads could not be opened: {error}"));
@@ -8367,6 +11661,7 @@ async fn save_group_file(
         path: path.to_string_lossy().into_owned(),
         displayed: warning.is_none(),
         warning,
+        content_validation,
     })
 }
 
@@ -8384,6 +11679,59 @@ async fn vault_exists(app: AppHandle) -> Result<bool, String> {
     Ok(ServerStore::exists(&dir))
 }
 
+/// Re-authorize a webview against the store this native process already owns. Explicit UI lock
+/// intentionally leaves actors and decrypted store state mounted, but it still closes every IPC
+/// plaintext boundary; therefore this path must verify the supplied passphrase before restoring
+/// the session. It cannot call `ServerStore::open`: the existing store owns the lifetime mount
+/// lock by design.
+async fn authenticate_mounted_store(
+    state: &AppState,
+    passphrase: &[u8],
+) -> Result<bool, catcoms_app::AppError> {
+    let store_guard = state.store.lock().await;
+    let Some(store) = store_guard.as_ref() else {
+        return Ok(false);
+    };
+    store.verify_passphrase(passphrase)?;
+    Ok(true)
+}
+
+/// Commit a successful authentication only if no newer explicit lock began while Argon2, disk
+/// reads, or actor reloads were in flight. The generation is checked on both sides of updating the
+/// flags because `lock_session_inner` deliberately invalidates commands before awaiting this
+/// commit mutex. A racing lock therefore either wins first or makes this transition roll itself
+/// back; a completed lock can never be undone by stale unlock work.
+async fn finalize_unlock_session(
+    state: &AppState,
+    expected_generation: u64,
+    include_running_servers: bool,
+) -> Result<Option<Vec<ReloadedServer>>, String> {
+    let _commit = state.ui_session_commit.lock().await;
+    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+        return Err("unlock was superseded by a newer lock request; try again".into());
+    }
+    let servers = if include_running_servers {
+        Some(running_servers(state).await)
+    } else {
+        None
+    };
+    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+        return Err("unlock was superseded by a newer lock request; try again".into());
+    }
+
+    let mut resumable = state.session_resumable.lock().await;
+    *resumable = true;
+    state.session_lock_requested.store(false, Ordering::Release);
+    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+        // A lock request may publish its generation without this mutex so new IPC fails promptly.
+        // Restore the conservative state before releasing either transition boundary.
+        *resumable = false;
+        state.session_lock_requested.store(true, Ordering::Release);
+        return Err("unlock was superseded by a newer lock request; try again".into());
+    }
+    Ok(servers)
+}
+
 /// Unlock the on-disk store with `passphrase` and reload every persisted server. Called once
 /// at launch. A wrong passphrase fails (the vault won't open); a first-ever launch just
 /// creates the vault and returns no servers. Returns the reloaded servers for the rail.
@@ -8392,26 +11740,49 @@ async fn unlock(
     app: AppHandle,
     state: State<'_, AppState>,
     passphrase: String,
-) -> Result<Vec<ReloadedServer>, String> {
+    trace: Option<String>,
+) -> Result<Vec<ReloadedServer>, AppError> {
+    // Unlock is the one operation whose failures a user meets before anything else works, and the
+    // three of them are entirely different: the passphrase is wrong, the vault is unreadable, or it
+    // opened and some servers did not come back. All three were one string.
+    let op = Operation::start_maybe(
+        trace,
+        catcoms_diagnostics::Section::Vault,
+        "unlock",
+        None,
+        None,
+    );
+    // Capture before the first await. Any lock command that starts after this unlock invalidates
+    // its generation, even if the unlock was queued behind another mount or expensive KDF work.
+    let unlock_generation = state.ui_session_generation.load(Ordering::Acquire);
+    // This lock covers both the already-mounted authentication path and first reload. Without it,
+    // two concurrent webview mounts can both observe `None` and start duplicate actors.
+    let _mount = state.vault_mount.lock().await;
+    if authenticate_mounted_store(&state, passphrase.as_bytes())
+        .await
+        .map_err(|e| op.fail(codes::VAULT_LOCKED_OUT, e.to_string()))?
+    {
+        let servers = finalize_unlock_session(&state, unlock_generation, true)
+            .await
+            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?
+            .expect("the mounted-store path requests a running-server projection");
+        op.succeeded("VAULT.UNLOCK.ALREADY_OPEN");
+        return Ok(servers);
+    }
+
     let dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| op.fail(codes::VAULT_READ_FAILED, e.to_string()))?
         .join("vault");
     let mut rng = OsCryptoRng;
     // Opening the vault verifies the passphrase (the DEK won't decrypt otherwise).
-    let store =
-        ServerStore::open(&dir, passphrase.as_bytes(), &mut rng).map_err(|e| e.to_string())?;
+    let store = ServerStore::open(&dir, passphrase.as_bytes(), &mut rng)
+        .map_err(|e| op.fail(codes::VAULT_LOCKED_OUT, e.to_string()))?;
 
-    // If the vault is already unlocked (e.g. a dev HMR re-mounted the frontend while the Rust
-    // process kept running), don't reload from disk; that would spawn a duplicate actor +
-    // transport per server. Return the servers already registered so the rail repopulates.
-    if state.store.lock().await.is_some() {
-        *state.session_resumable.lock().await = true;
-        return Ok(running_servers(&state).await);
-    }
-
-    let records = store.load_registry().map_err(|e| e.to_string())?;
+    let records = store
+        .load_registry()
+        .map_err(|e| op.fail(codes::VAULT_READ_FAILED, e.to_string()))?;
 
     // Restore the grant-ceremony ledger: a pairing request must stay single-use across a restart,
     // or re-pasting one would mint a second bundle. A corrupt/missing blob leaves an empty ledger
@@ -8419,10 +11790,14 @@ async fn unlock(
     match store.load_pairing_ledger() {
         Ok(bytes) if !bytes.is_empty() => match PairingLedger::restore(&bytes) {
             Ok(led) => *state.pairing_ledger.lock().await = led,
-            Err(e) => eprintln!("unlock: the pairing ledger did not restore: {e}"),
+            Err(e) => {
+                tracing::warn!(target: "catcoms_app", error = %e, "IDENTITY.PAIRING_LEDGER.RESTORE_FAILED")
+            }
         },
         Ok(_) => {}
-        Err(e) => eprintln!("unlock: reading the pairing ledger failed: {e}"),
+        Err(e) => {
+            tracing::warn!(target: "catcoms_app", error = %e, "IDENTITY.PAIRING_LEDGER.READ_FAILED")
+        }
     }
 
     // Load every server's sealed snapshot up front, while we still own `store` locally.
@@ -8431,7 +11806,7 @@ async fn unlock(
         .map(|r| match store.load_server(r.id) {
             Ok(b) => Some(b),
             Err(e) => {
-                eprintln!("unlock: loading server {} failed: {e}", r.id);
+                tracing::error!(target: "catcoms_app", server = r.id, error = %e, "VAULT.SERVER.LOAD_FAILED");
                 None
             }
         })
@@ -8451,10 +11826,15 @@ async fn unlock(
     }
 
     let mut reloaded = Vec::new();
+    let mut failed = 0usize;
     for (record, snap) in records.iter().zip(snapshots.iter()) {
-        let Some(bytes) = snap else { continue };
+        let Some(bytes) = snap else {
+            failed += 1;
+            continue;
+        };
         if let Err(e) = reload_one(&app, &state, bytes, record).await {
-            eprintln!("unlock: restoring server {} failed: {e}", record.id);
+            tracing::error!(target: "catcoms_app", server = record.id, error = %e, "VAULT.SERVER.RESTORE_FAILED");
+            failed += 1;
             continue;
         }
         reloaded.push(ReloadedServer {
@@ -8464,25 +11844,79 @@ async fn unlock(
             channel: channel_id("general").to_string(),
             channels: ui_channels(
                 actor_of_unchecked(&state, record.id)
-                    .await?
+                    .await
+                    .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?
                     .channels()
                     .await,
             ),
             is_dm: record.is_dm,
         });
     }
-    *state.session_resumable.lock().await = true;
+    finalize_unlock_session(&state, unlock_generation, false)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    // The summary that makes a partial unlock visible.
+    //
+    // Individual failures already log, but an unlock that returns four servers when the registry
+    // held five is reported to the user as a success, and the missing one simply is not on the
+    // rail. Somebody noticing that a week later has no way to tell whether the server was left,
+    // never joined, or failed to restore every single launch since. This is the difference between
+    // those, at a level Safe mode keeps when anything went wrong.
+    if failed > 0 {
+        tracing::warn!(
+            target: "catcoms_app",
+            restored = reloaded.len(),
+            failed,
+            expected = records.len(),
+            "VAULT.UNLOCK.PARTIAL"
+        );
+    } else {
+        tracing::info!(
+            target: "catcoms_app",
+            restored = reloaded.len(),
+            "VAULT.UNLOCK.COMPLETED"
+        );
+    }
     Ok(reloaded)
 }
 
 /// Restore an already-unlocked frontend after F5/HMR without asking for the vault passphrase
 /// again. An explicit UI lock disables this path until `unlock` verifies the passphrase.
+async fn resume_session_for_generation(
+    state: &AppState,
+    generation: u64,
+) -> Option<Vec<ReloadedServer>> {
+    resume_session_projection(state, generation, running_servers(state)).await
+}
+
+async fn resume_session_projection(
+    state: &AppState,
+    generation: u64,
+    projection: impl Future<Output = Vec<ReloadedServer>>,
+) -> Option<Vec<ReloadedServer>> {
+    let _commit = require_ui_session_generation(state, generation)
+        .await
+        .ok()?;
+    let servers = projection.await;
+    // Lock invalidation deliberately happens before `lock_session_inner` waits for `_commit`, so
+    // recheck after every actor await. If a lock began while channels were being projected, none
+    // of the names/invites/channels may cross back into the stale webview.
+    if state.ui_session_generation.load(Ordering::Acquire) != generation
+        || require_unlocked_session(state).await.is_err()
+    {
+        return None;
+    }
+    Some(servers)
+}
+
+async fn resume_session_inner(state: &AppState) -> Option<Vec<ReloadedServer>> {
+    let generation = unlocked_ui_session_generation(state).await.ok()?;
+    resume_session_for_generation(state, generation).await
+}
+
 #[tauri::command]
 async fn resume_session(state: State<'_, AppState>) -> Result<Option<Vec<ReloadedServer>>, String> {
-    if !*state.session_resumable.lock().await || state.store.lock().await.is_none() {
-        return Ok(None);
-    }
-    Ok(Some(running_servers(&state).await))
+    Ok(resume_session_inner(&state).await)
 }
 
 #[tauri::command]
@@ -8497,6 +11931,12 @@ async fn lock_session(
 /// malformed continuity state or a vault write failure is reported, but must never leave the
 /// sensitive webview session open as a side effect of that error.
 async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> Result<(), String> {
+    // Invalidate old work before awaiting anything. The commit mutex is acquired next so, once
+    // this function returns, an old join can neither emit its private reply nor register/persist.
+    state.session_lock_requested.store(true, Ordering::Release);
+    state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+    *state.session_resumable.lock().await = false;
+    let _session_commit = state.ui_session_commit.lock().await;
     // Save the final draft/read snapshot and close IPC as one ordered native operation. Two
     // separate fire-and-forget commands could race, causing the save to arrive after the lock and
     // be correctly rejected by the new session gate.
@@ -8516,13 +11956,15 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
     } else {
         Ok(())
     };
-    *state.session_resumable.lock().await = false;
     // The media cache holds decrypted chunks of shared files. Locking must drop them along with
     // the rest of the session's plaintext, not leave a film resident until something evicts it.
     state.media_cache.lock().await.clear();
     // The heads are only sizes and types, but they name what was being played: a locked vault
     // should not still be able to answer that.
     state.media_heads.lock().await.clear();
+    // Storage reports contain plaintext metadata even though the managed file bytes remain
+    // sealed. Clear them at the same boundary and require a fresh authenticated scan after unlock.
+    state.storage_health.lock().await.clear();
     // An upload in flight is session state too. Dropping the reservations frees their slots and
     // garbage-collects the chunks they had sealed but will now never publish.
     let abandoned: Vec<PendingUpload> =
@@ -8708,7 +12150,7 @@ async fn persist_pairing_ledger(state: &AppState) {
     if let Some(store) = guard.as_ref() {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_pairing_ledger(&snapshot, &mut rng) {
-            eprintln!("persist: sealing the pairing ledger failed: {e}");
+            tracing::error!(target: "catcoms_app", error = %e, "IDENTITY.PAIRING_LEDGER.SEAL_FAILED");
         }
     }
 }
@@ -8965,36 +12407,25 @@ async fn join_one_grant(
     // nonce* (`join_namespace(group_id, invite_nonce, …)`), and a grant carries a certificate
     // instead. A companion whose grant has only rendezvous hints therefore cannot discover the
     // group yet; that needs a certificate-keyed pre-join namespace (M4 backlog).
-    let addrs: Vec<Multiaddr> = grant
-        .bootstrap
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    if addrs.is_empty() {
-        return Err(if grant.rendezvous.is_empty() {
-            "this grant carries no usable address for that server".to_string()
-        } else {
-            "this grant is rendezvous-only; pairing needs a directly-dialable server".to_string()
-        });
-    }
-    let contact_lp = addrs
-        .iter()
-        .find_map(target_peer_in_multiaddr)
-        .ok_or_else(|| "grant address has no peer id".to_string())?;
-    let contact = phase0_peer_id(&contact_lp);
+    let (contact, addrs) =
+        schedule_grant_bootstrap(&state.endpoint_dials, &grant.group_id, &grant.bootstrap)
+            .map_err(|error| {
+                if grant.bootstrap.is_empty() && !grant.rendezvous.is_empty() {
+                    "this grant is rendezvous-only; pairing needs a directly-dialable server"
+                        .to_string()
+                } else {
+                    error
+                }
+            })?;
     let (mesh, _id) = MeshService::new_tcp(None, &addrs).map_err(|e| e.to_string())?;
     let mesh_handle = mesh.handle();
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if p == contact {
-                    break;
-                }
-            }
-        }
-    })
+    timeout(
+        Duration::from_secs(20),
+        mesh.wait_for_peer_connected(contact),
+    )
     .await
-    .map_err(|_| "timed out connecting to the server".to_string())?;
+    .map_err(|_| "timed out connecting to the server".to_string())?
+    .map_err(|_| "the server transport closed while connecting".to_string())?;
 
     let name = grant.server_name.clone();
     let mut server = Server::join_with_grant(
@@ -9008,6 +12439,7 @@ async fn join_one_grant(
     )
     .await
     .map_err(|e| e.to_string())?;
+    server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
     // Same omission as `join_server`, and the same consequence: a companion device that never
     // subscribes the control topic stops seeing membership changes the moment it is paired.
     server
@@ -9032,7 +12464,7 @@ async fn join_one_grant(
             .map(|t| (t.addr.to_string(), t.peer.to_bytes()))
             .collect(),
         Err(e) => {
-            eprintln!("pair: the grant's rendezvous addresses were rejected ({e}); pairing without steady-state discovery");
+            tracing::warn!(target: "catcoms_app", error = %e, "IDENTITY.PAIRING.RENDEZVOUS_REJECTED");
             Vec::new()
         }
     };
@@ -9043,7 +12475,7 @@ async fn join_one_grant(
     let general = channel_id("general");
     let group_id = server.group_id();
     let device_id = server.device_id();
-    let (actor, events, _task) = spawn(server);
+    let (actor, events, task) = spawn(server);
     actor.open_channel(general).await;
     actor.catch_up_channel_index(contact).await;
     actor.catch_up(contact, general).await;
@@ -9073,6 +12505,7 @@ async fn join_one_grant(
         state,
         actor,
         events,
+        task,
         group_id,
         device_id,
         None,
@@ -9112,6 +12545,11 @@ fn debug_flag_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 }
 
 /// The state of the debug log, as shown in Settings.
+///
+/// `enabled` and `state` are separate because the whole value of this struct is that they can
+/// disagree. The old version had one boolean assigned from the preference, so a process that had
+/// never managed to open a file still reported "active" and a user could burn their only
+/// reproduction on the strength of it.
 #[derive(Serialize, Clone)]
 struct DebugLogging {
     /// Whether the preference is on right now.
@@ -9120,10 +12558,63 @@ struct DebugLogging {
     /// installed once per process, so a toggle applies at the next launch, and saying so is the
     /// difference between a working setting and a user who thinks they captured a log.
     active: bool,
+    /// What the sink is doing: `stopped`, `active`, `degraded` or `failed`. Derived from bytes
+    /// that reached a file, never from `enabled`.
+    state: String,
+    /// Why it is degraded or failed, when it is. Shown verbatim, because "permission denied
+    /// opening the diagnostics directory" is something a person can act on and "logging failed"
+    /// is not.
+    error: String,
+    /// Identifies this run inside the file itself, so an excerpt can be matched to its source.
+    session: String,
     /// The folder the log is written to, always shown so the user can go and get it.
     dir: String,
-    /// The current session's file, when there is one.
+    /// The file **this process opened**. Not the newest file in the directory: that used to be
+    /// how this was answered, and it names a previous run's log whenever the current one failed
+    /// to open, which is exactly when a wrong answer does the most damage.
     file: String,
+    /// Events this session put in the file, and bytes they took.
+    events_written: u64,
+    bytes_written: u64,
+    /// Events that never made it: queue overflow, or emitted after the quota stopped the writer.
+    events_dropped: u64,
+    /// Events that reached the file with their tail cut off. A different thing from dropped, and
+    /// worth showing separately: a truncated line is there and says so, so a reader who meets one
+    /// knows not to draw a conclusion from half an error message.
+    events_truncated: u64,
+    /// How full the write queue is, and how full it has ever been.
+    queue_depth: u64,
+    queue_high_water: u64,
+    /// The session byte quota, so the UI can show how close to it this run has come.
+    session_quota_bytes: u64,
+}
+
+impl DebugLogging {
+    /// Build the reply from the sink's own health plus the stored preference.
+    fn from_health(enabled: bool, dir: &std::path::Path, health: &catcoms_log::SinkHealth) -> Self {
+        DebugLogging {
+            enabled,
+            active: health.state == catcoms_log::SinkState::Active
+                || health.state == catcoms_log::SinkState::Degraded,
+            state: health.state.as_str().to_string(),
+            error: health.last_error.clone().unwrap_or_default(),
+            session: health.session_id.clone(),
+            dir: dir.display().to_string(),
+            file: health
+                .path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            events_written: health.events_written,
+            bytes_written: health.bytes_written,
+            events_dropped: health.events_dropped,
+            events_truncated: health.events_truncated,
+            queue_depth: health.queue_depth as u64,
+            queue_high_water: health.queue_high_water as u64,
+            session_quota_bytes: catcoms_log::MAX_SESSION_BYTES,
+        }
+    }
 }
 
 /// Read the debug-logging preference.
@@ -9152,36 +12643,38 @@ fn debug_enabled_from_flag(opt_out_exists: bool) -> bool {
     !opt_out_exists
 }
 
-/// Whether this process installed a debug-log file layer, and which file it is writing. Set once
-/// in `setup`; read by `get_debug_logging` so the UI can distinguish "on" from "on since the
-/// last restart".
+/// What this process did about diagnostics at startup, and what came of it.
+///
+/// Set once in `setup`; read by `get_debug_logging` so the UI can distinguish "on" from "on since
+/// the last restart", and both of those from "asked for, and it did not work".
 struct LogState {
-    /// Dropping this flushes the file, so it is held for the life of the process.
-    _guard: catcoms_log::LogGuard,
-    active: bool,
+    /// Dropping this waits for queued output to reach the disk, so it is held for the life of the
+    /// process. It also answers for the sink's health, which is why it is no longer a `_` binding.
+    guard: Option<catcoms_log::LogGuard>,
+    /// Why there is no guard, when there is none. Preserved verbatim from startup, because by the
+    /// time a user opens Settings the failing call is long gone.
+    init_error: Option<String>,
     dir: std::path::PathBuf,
 }
 
-/// The newest `debug_log_*.txt` in `dir`, so Settings can name the file this session is writing
-/// rather than making the user guess which timestamp is theirs.
-fn newest_log_file(dir: &std::path::Path) -> String {
-    let mut best: Option<(std::time::SystemTime, String)> = None;
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return String::new();
-    };
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if !name.starts_with("debug_log_") {
-            continue;
-        }
-        let Ok(modified) = e.metadata().and_then(|m| m.modified()) else {
-            continue;
-        };
-        if best.as_ref().is_none_or(|(t, _)| modified > *t) {
-            best = Some((modified, name));
+impl LogState {
+    /// The sink's health, or a synthetic failed state carrying the startup error.
+    ///
+    /// A process whose logger would not start has no sink to ask, and answering "stopped" there
+    /// would be indistinguishable from the user having turned logging off. The distinction is the
+    /// entire point of the struct, so the startup error is carried forward instead.
+    fn health(&self) -> catcoms_log::SinkHealth {
+        match (&self.guard, &self.init_error) {
+            (Some(guard), _) => guard.health(),
+            (None, Some(error)) => catcoms_log::SinkHealth {
+                desired: true,
+                state: catcoms_log::SinkState::Failed,
+                last_error: Some(error.clone()),
+                ..catcoms_log::SinkHealth::stopped()
+            },
+            (None, None) => catcoms_log::SinkHealth::stopped(),
         }
     }
-    best.map(|(_, n)| n).unwrap_or_default()
 }
 
 /// The debug log's current state, for Settings.
@@ -9192,23 +12685,42 @@ async fn get_debug_logging(
 ) -> Result<DebugLogging, String> {
     require_unlocked_session(&state).await?;
     let log = app.try_state::<LogState>();
-    let active = log.as_ref().is_some_and(|l| l.active);
     // Prefer the directory this process actually opened, so the path shown is the path being
     // written to even if the app data directory moved under us.
     let dir = match log.as_ref() {
         Some(l) => l.dir.clone(),
         None => log_dir(&app)?,
     };
-    Ok(DebugLogging {
-        enabled: debug_logging_enabled(&app),
-        active,
-        dir: dir.display().to_string(),
-        file: if active {
-            newest_log_file(&dir)
-        } else {
-            String::new()
-        },
-    })
+    let health = match log.as_ref() {
+        Some(l) => l.health(),
+        None => catcoms_log::SinkHealth::stopped(),
+    };
+    Ok(DebugLogging::from_health(
+        debug_logging_enabled(&app),
+        &dir,
+        &health,
+    ))
+}
+
+/// Put a marked record through the whole pipeline and report whether it reached the disk.
+///
+/// The one question the settings page could never answer for itself. Every other signal it shows
+/// is inferred from a preference or from state captured at startup; this emits an event now, waits
+/// for the writer, and reads the file size back, so a sink that has quietly stopped since launch is
+/// caught by the button rather than by a missing bug report a week later.
+#[tauri::command]
+async fn test_debug_logging(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DebugLogging, String> {
+    require_unlocked_session(&state).await?;
+    tracing::info!(target: "catcoms_app", at = wall_ms(), "DIAG.SELFTEST.RECORD");
+    if let Some(log) = app.try_state::<LogState>() {
+        if let Some(guard) = log.guard.as_ref() {
+            guard.sync();
+        }
+    }
+    get_debug_logging(app, state).await
 }
 
 /// Turn the debug log on or off for the **next** launch (a tracing subscriber is install-once
@@ -9240,6 +12752,759 @@ async fn set_debug_logging(
 /// short enough that a runaway loop cannot fill the disk one line at a time.
 const MAX_UI_LOG_BYTES: usize = 2000;
 
+/// One field of a diagnostic event, rendered at the session's capture mode.
+#[derive(Serialize)]
+struct ConsoleField {
+    name: String,
+    value: String,
+    kind: &'static str,
+    /// Whether a higher capture mode would show more of this value. Lets the console tell a reader
+    /// what they are *not* seeing, instead of leaving them to find out by switching and comparing.
+    sensitive: bool,
+}
+
+/// One diagnostic event, as the debug console reads it.
+///
+/// A faithful carry of `catcoms_diagnostics::EventView`, which is a faithful carry of the canonical
+/// event. It used to be a flattened `tracing` line: section, phase, span parentage, references and
+/// capture mode were dropped on the way, twelve of the trace's sixteen characters with them, and
+/// every value was rendered at a hard-coded Enhanced regardless of what the user had chosen. The
+/// console then guessed the sections back from target names and by searching the text for the word
+/// "voice". Found by adversarial review (P3-005).
+#[derive(Serialize)]
+struct ConsoleLogEvent {
+    seq: u64,
+    at_ms: u64,
+    /// Milliseconds since this process started, which never goes backwards. `at_ms` can jump when
+    /// a clock is corrected, so a duration taken across two events uses this one.
+    monotonic_ms: u64,
+    /// The canonical section, one of twenty-two.
+    section: &'static str,
+    /// The console section it falls under, one of six. Stated natively, so the console groups
+    /// events by what they *are* rather than by which crate happened to emit them.
+    view: &'static str,
+    level: &'static str,
+    /// The stable `AREA.COMPONENT.OUTCOME` code. `LOG.TRACING.EVENT` means an un-migrated call
+    /// site whose prose is in the `message` field.
+    code: &'static str,
+    phase: &'static str,
+    operation: &'static str,
+    /// Sixteen hex characters, or empty when the event belongs to no operation.
+    trace: String,
+    span: String,
+    parent_span: String,
+    refs: Vec<(&'static str, String)>,
+    duration_ms: Option<u64>,
+    attempt: Option<u32>,
+    /// The emitting module, e.g. `catcoms_net`. Kept for locating the code that said this; it is
+    /// no longer what decides which console section the event appears in.
+    target: String,
+    fields: Vec<ConsoleField>,
+    /// Fields this event had to drop at the cap.
+    ///
+    /// Carried so a shortened field list reads as shortened. The JSON and the text row already say
+    /// so, and a console that quietly showed the surviving thirty-two would be the one rendering
+    /// where a reader could take the list for the whole of it.
+    fields_dropped: u32,
+    /// The mode this line was rendered at. On every event rather than only in the page header,
+    /// because an excerpt someone pastes gets separated from its header immediately.
+    capture: &'static str,
+    /// Mode generation assigned when the event entered the native ring.
+    capture_epoch: u64,
+}
+
+impl From<catcoms_diagnostics::EventView> for ConsoleLogEvent {
+    fn from(view: catcoms_diagnostics::EventView) -> Self {
+        ConsoleLogEvent {
+            seq: view.seq,
+            at_ms: view.at_ms,
+            monotonic_ms: view.monotonic_ms,
+            section: view.section,
+            view: view.view,
+            level: view.level,
+            code: view.code,
+            phase: view.phase,
+            operation: view.operation,
+            trace: view.trace,
+            span: view.span,
+            parent_span: view.parent_span,
+            refs: view.refs,
+            duration_ms: view.duration_ms,
+            attempt: view.attempt,
+            target: view.target,
+            fields: view
+                .fields
+                .into_iter()
+                .map(|f| ConsoleField {
+                    name: f.name,
+                    value: f.value,
+                    kind: f.kind,
+                    sensitive: f.sensitive,
+                })
+                .collect(),
+            fields_dropped: view.fields_dropped,
+            capture: view.capture,
+            capture_epoch: view.capture_epoch,
+        }
+    }
+}
+
+/// A page of diagnostics plus the counters the console's severity roll-up needs.
+#[derive(Serialize)]
+struct ConsoleLog {
+    events: Vec<ConsoleLogEvent>,
+    /// Session totals, counted before the ring evicts anything, so the roll-up stays true after
+    /// the offending line has aged out.
+    errors: u64,
+    warnings: u64,
+    /// Events the ring dropped to stay bounded. The console says so rather than presenting the
+    /// gap as a quiet period.
+    dropped: u64,
+    /// Events the capture config excluded. A different thing from `dropped` and worth showing
+    /// separately: it is what distinguishes a section that is silent by policy from one that is
+    /// silent because nothing happened.
+    filtered: u64,
+    latest_seq: u64,
+    capacity: usize,
+    /// The mode this page was rendered at, so the console can label what it is showing.
+    capture: &'static str,
+    /// Identifies this run, so an excerpt someone pastes can be matched to its report.
+    session_id: String,
+}
+
+/// The most events one poll will return, so a console that has been closed for an hour cannot ask
+/// for the whole ring in a single IPC payload.
+const MAX_CONSOLE_LOG_PAGE: usize = 500;
+
+/// Serve the debug console the diagnostics it has not seen yet.
+///
+/// Polled with the last sequence number the console holds, so an open console costs one small
+/// message per tick and a freshly opened one gets the backlog the ring still has. The ring is
+/// in-memory only: this reads it, and nothing here writes it anywhere.
+///
+/// Each event renders at its capture-time mode and carries its mode generation. Changing the
+/// viewer later cannot recover address bytes that Safe capture destroyed before ring insertion.
+///
+/// Gated on an unlocked session, unlike `log_ui` below. The ring holds peer addresses and stable
+/// identifiers, and a locked app must not show those to whoever picks the machine up. Someone
+/// diagnosing a failure that happens before unlock still has the debug log file.
+#[tauri::command]
+async fn get_console_log(
+    state: State<'_, AppState>,
+    after_seq: u64,
+    limit: usize,
+) -> Result<ConsoleLog, String> {
+    require_unlocked_session(&state).await?;
+    let hub = catcoms_log::hub();
+    let stats = hub.stats();
+    let mode = hub.mode();
+    let events = hub
+        .since(after_seq, limit.clamp(1, MAX_CONSOLE_LOG_PAGE))
+        .iter()
+        .map(|e| catcoms_diagnostics::event_view(e, mode).into())
+        .collect();
+    Ok(ConsoleLog {
+        events,
+        errors: stats.errors,
+        warnings: stats.warnings,
+        dropped: stats.dropped,
+        filtered: stats.filtered,
+        latest_seq: stats.latest_seq,
+        capacity: catcoms_log::LOG_RING_CAPACITY,
+        capture: mode.as_str(),
+        session_id: hub.session_id().to_string(),
+    })
+}
+
+/// Drop the events the console is holding. The session counters and sequence are kept: this is a
+/// "clear my view" button, not a rewrite of what happened.
+#[tauri::command]
+async fn clear_console_log(state: State<'_, AppState>) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
+    catcoms_log::hub().clear();
+    Ok(())
+}
+
+/// Told to the webview when the capture mode moves, so it can stop producing records nobody wants.
+#[derive(Serialize, Clone)]
+struct CaptureModeEvt {
+    mode: &'static str,
+}
+
+/// One section's capture level, for the console's capture panel.
+#[derive(Serialize)]
+struct SectionCapture {
+    id: &'static str,
+    /// The console section it feeds, so the panel can group twenty-two rows under six headings.
+    view: &'static str,
+    /// `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`, or absent when the section is off entirely.
+    level: Option<&'static str>,
+}
+
+/// What is being captured right now.
+#[derive(Serialize)]
+struct CaptureConfigView {
+    mode: &'static str,
+    /// Whether this mode is deliberately forgotten at the next launch. Full trace is expensive and
+    /// revealing, and somebody who turned it on to reproduce one bug should not still be running it
+    /// a fortnight later because they forgot.
+    expires_at_restart: bool,
+    /// Whether this mode may render literal addresses. This is an address-display decision, not a
+    /// publication verdict: automatic public diagnostics use a separate native allowlist.
+    reveals_addresses: bool,
+    sections: Vec<SectionCapture>,
+}
+
+fn capture_config_view() -> CaptureConfigView {
+    let hub = catcoms_log::hub();
+    let config = hub.config();
+    CaptureConfigView {
+        mode: config.mode.as_str(),
+        expires_at_restart: config.mode.expires_at_restart(),
+        reveals_addresses: config.mode.allows_raw_addresses(),
+        sections: catcoms_diagnostics::SECTIONS
+            .iter()
+            .map(|section| SectionCapture {
+                id: section.as_str(),
+                view: section.view().as_str(),
+                level: config.level(*section).map(|l| l.as_str()),
+            })
+            .collect(),
+    }
+}
+
+/// One background task, as the console shows it.
+#[derive(Serialize)]
+struct TaskHealthView {
+    id: u64,
+    kind: &'static str,
+    server: Option<u64>,
+    started_ms: i64,
+    last_beat_ms: Option<i64>,
+    state: &'static str,
+    /// Whether this is a state somebody should be told about. Decided natively so the console does
+    /// not hold a second opinion about what counts as a fault.
+    fault: bool,
+    cause: Option<String>,
+}
+
+/// What every supervised background task is doing.
+///
+/// The answer that used to be a log line and then, once the line aged out of the ring, nothing at
+/// all: a healthy-looking app whose only evidence that half of it had stopped had scrolled away.
+/// State that has to stay in a bounded buffer to be true is not state. Found by adversarial review
+/// (P3-009).
+#[tauri::command]
+async fn get_task_health(state: State<'_, AppState>) -> Result<Vec<TaskHealthView>, String> {
+    require_unlocked_session(&state).await?;
+    Ok(tasks::snapshot(wall_ms())
+        .into_iter()
+        .map(|task| TaskHealthView {
+            id: task.id,
+            kind: task.kind,
+            server: task.server,
+            started_ms: task.started_ms,
+            last_beat_ms: task.last_beat_ms,
+            state: task.state,
+            fault: task.fault,
+            cause: task.cause,
+        })
+        .collect())
+}
+
+/// Where the event stream has got to.
+#[derive(Serialize)]
+struct EventCursor {
+    /// Which run of the native process this stream belongs to.
+    generation: u64,
+    /// The last position issued across the whole stream.
+    ord: u64,
+}
+
+/// Where the event stream has got to right now.
+///
+/// Read by the webview before it installs its listeners, so it knows what the next event should be
+/// numbered. Without it a remounted webview takes whatever sequence it happens to see first as its
+/// baseline, which makes everything missed before that moment invisible: precisely the window a
+/// hot reload or an F5 opens while the native process keeps running and keeps emitting.
+///
+/// Two counters and nothing else. Gated with the other reads for consistency rather than because
+/// they are sensitive.
+#[tauri::command]
+async fn get_event_cursor(state: State<'_, AppState>) -> Result<EventCursor, String> {
+    require_unlocked_session(&state).await?;
+    Ok(EventCursor {
+        generation: event_generation(),
+        ord: EVENT_ORD.load(std::sync::atomic::Ordering::Relaxed),
+    })
+}
+
+/// What the diagnostics are currently capturing.
+#[tauri::command]
+async fn get_capture_config(state: State<'_, AppState>) -> Result<CaptureConfigView, String> {
+    require_unlocked_session(&state).await?;
+    Ok(capture_config_view())
+}
+
+/// Change how much is captured, immediately.
+///
+/// Takes effect now rather than at the next launch. That is the whole point of the hub owning the
+/// gate: the previous design could attach a subscriber only once per process, so a user who wanted
+/// to stop being recorded had to quit the app to do it.
+///
+/// Not persisted, deliberately. A capture mode that survived a restart would be a privacy setting
+/// nobody remembers making, and `Full` in particular is meant to expire on its own.
+#[tauri::command]
+async fn set_capture_mode(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mode: String,
+) -> Result<CaptureConfigView, String> {
+    require_unlocked_session(&state).await?;
+    let mode = catcoms_diagnostics::CaptureMode::parse(&mode)
+        .ok_or_else(|| format!("unknown capture mode: {mode}"))?;
+    catcoms_log::hub().set_mode(mode);
+    // The webview produces diagnostics too, and it cannot see the gate. Without being told, it
+    // would keep building records and sending them across the bridge for the native side to throw
+    // away, which is the same "kept paying, stopped keeping" shape the tracing layer had.
+    emit_tracked(
+        &app,
+        "capture-changed",
+        CaptureModeEvt {
+            mode: mode.as_str(),
+        },
+        catcoms_diagnostics::TraceId::default(),
+    );
+    // Recorded through the pipeline's own section, which is never turned down: a report that
+    // changed what it was capturing halfway through, silently, is a report that misleads about a
+    // gap. `Off` records nothing at all, including this, which is what off means.
+    catcoms_diagnostics::DiagnosticHub::record(
+        &catcoms_log::hub(),
+        catcoms_diagnostics::DiagnosticEvent::info(
+            catcoms_diagnostics::Section::Diag,
+            "DIAG.CAPTURE.MODE_CHANGED",
+        )
+        .target("catcoms_app")
+        .field(
+            "mode",
+            catcoms_diagnostics::SafeText::describe(mode.as_str()),
+        ),
+    );
+    Ok(capture_config_view())
+}
+
+/// Turn one section up, down, or off, without disturbing the others.
+///
+/// The second of the two axes. One switch meant choosing between capturing almost nothing and
+/// capturing the transport layer narrating every address the node has ever seen, so it stayed off
+/// and nobody had a log when they needed one.
+#[tauri::command]
+async fn set_section_capture(
+    state: State<'_, AppState>,
+    section: String,
+    level: Option<String>,
+) -> Result<CaptureConfigView, String> {
+    require_unlocked_session(&state).await?;
+    let section = catcoms_diagnostics::Section::parse(&section)
+        .ok_or_else(|| format!("unknown diagnostic section: {section}"))?;
+    // An unrecognised level is refused rather than defaulted. A control that quietly does something
+    // other than what it was asked is worse than one that says no.
+    let level = match level {
+        Some(name) => Some(
+            catcoms_diagnostics::Level::parse(&name)
+                .ok_or_else(|| format!("unknown capture level: {name}"))?,
+        ),
+        None => None,
+    };
+    catcoms_log::hub().set_section_level(section, level);
+    Ok(capture_config_view())
+}
+
+/// Explicitly restore the recommended section levels for the current privacy mode.
+#[tauri::command]
+async fn reset_section_capture(state: State<'_, AppState>) -> Result<CaptureConfigView, String> {
+    require_unlocked_session(&state).await?;
+    catcoms_log::hub().reset_section_levels();
+    Ok(capture_config_view())
+}
+
+/// Build the public-issue attachment from a native allowlist.
+///
+/// Kept as a private helper rather than an IPC command: the webview must never receive a report
+/// and then hand caller-authored title/body/URL bytes back across the operating-system launcher
+/// boundary. [`open_public_diagnostics_issue`] performs that sequence atomically in native code.
+fn build_public_diagnostics_report() -> Result<String, String> {
+    let hub = catcoms_log::hub();
+    let events = hub.since(0, catcoms_log::LOG_RING_CAPACITY);
+    let report =
+        catcoms_diagnostics::export::render_public_report(events.iter().map(|event| &**event));
+    if report.len() > MAX_REPORT_BYTES {
+        return Err("public diagnostics report exceeds the bounded export size".into());
+    }
+    // Defense in depth: the allowlist is the privacy proof; the scanner catches regressions in
+    // its output contract before any future issue-submission command receives the bytes.
+    validate_report_for_mode(
+        &report,
+        catcoms_diagnostics::CaptureMode::Safe,
+        ExportPurpose::Publish,
+    )?;
+    Ok(report)
+}
+
+/// Open a public diagnostics issue using only native-owned report, title and destination bytes.
+///
+/// The command intentionally accepts no webview payload. A compromised renderer can ask for this
+/// fixed disclosure after unlock, but cannot append another report, swap the title, or turn the
+/// launcher into a confused deputy for a different URL. The browser still presents the GitHub form
+/// for the user to review and submit; Mewtual posts nothing itself.
+#[tauri::command]
+async fn open_public_diagnostics_issue(
+    state: State<'_, AppState>,
+) -> Result<PublicDiagnosticsIssue, String> {
+    require_unlocked_session(&state).await?;
+    let native_report = build_public_diagnostics_report()?;
+    let prepared = prepare_public_diagnostics_issue(&native_report);
+    if !is_tracker_url(&prepared.url) {
+        return Err("native diagnostics issue URL failed its fixed tracker boundary".into());
+    }
+    launch_url(&prepared.url)?;
+    Ok(PublicDiagnosticsIssue {
+        report: prepared.report,
+        truncated: prepared.truncated,
+    })
+}
+
+/// The largest diagnostics report that will be written.
+///
+/// Comfortably above a full ring rendered as text, and far below anything that could fill a disk.
+/// A cap that is never reached in normal use is still the difference between a bug and an outage.
+const MAX_REPORT_BYTES: usize = 8 * 1024 * 1024;
+
+/// The prefix every saved report carries. Retention only ever considers files matching it, so the
+/// debug logs sharing this directory are never at risk from it, and vice versa.
+const REPORT_PREFIX: &str = "mewtual-diagnostics-";
+
+/// How many saved reports survive, and how much they may occupy between them.
+///
+/// The bounded writer next door limits segment size, segment count, session bytes and directory
+/// bytes, and its retention only considers `debug_log_*`. Reports were exempt from all of it: an
+/// unlocked webview could press Save in a loop and fill the disk without touching a single one of
+/// those carefully chosen limits, which would make the console's own export the outage the writer
+/// was designed to prevent. Found by adversarial review (P3-003).
+const MAX_SAVED_REPORTS: usize = 10;
+const MAX_REPORT_DIR_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Delete the oldest saved reports until they are inside both the count and the byte quota.
+///
+/// Never touches the file being written, and never touches anything that is not a report.
+fn retain_reports(dir: &std::path::Path, keeping: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut held: Vec<(std::path::PathBuf, u64)> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(REPORT_PREFIX))
+        .map(|e| (e.path(), e.metadata().map(|m| m.len()).unwrap_or(0)))
+        .collect();
+    // The name leads with a zero-padded timestamp, so sorting by name is sorting by age.
+    held.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut total: u64 = held.iter().map(|(_, size)| size).sum();
+    let mut index = 0;
+    while index < held.len()
+        && (held.len() + keeping > MAX_SAVED_REPORTS || total > MAX_REPORT_DIR_BYTES)
+    {
+        let (path, size) = &held[index];
+        if std::fs::remove_file(path).is_ok() {
+            total = total.saturating_sub(*size);
+            held.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+/// Whether a report save is already running.
+///
+/// One at a time. Two concurrent saves would race on retention and could each delete what the other
+/// was about to count, and there is no reason for a person to need two at once.
+static REPORT_SAVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Clears [`REPORT_SAVING`] however the save ends.
+///
+/// A guard rather than a clear at each exit: this function has several `?` returns and one that
+/// forgot to release would wedge the button for the rest of the session, with no symptom except a
+/// feature that quietly stopped working.
+struct ReportSaveGuard;
+
+impl Drop for ReportSaveGuard {
+    fn drop(&mut self) {
+        REPORT_SAVING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Where a saved report went, for the UI to show.
+#[derive(Serialize)]
+struct SavedReport {
+    /// The full path, so the user can go and get it.
+    path: String,
+    /// Just the file name, for saying "saved as X" without a wall of directory.
+    file: String,
+    bytes: usize,
+    /// Non-blocking validator categories still present (currently legacy bridged prose). The UI
+    /// must disclose these rather than turning "written" into "safe".
+    review: Vec<String>,
+}
+
+use catcoms_diagnostics::export::ExportPurpose;
+
+/// Validate the exact bytes about to leave the process and return what the reader should review.
+///
+/// Deliberately native: a compromised or stale webview must not be able to bypass the check by
+/// invoking the command directly, and the capture mode consulted is the real one rather than
+/// whatever the frontend believes.
+fn validate_report_for_save(text: &str) -> Result<Vec<String>, String> {
+    validate_report_for_mode(text, catcoms_log::hub().mode(), ExportPurpose::Local)
+}
+
+/// Where the caller says these bytes are going. Anything unrecognised is treated as publishing,
+/// so a typo fails closed rather than quietly downgrading the check.
+fn export_purpose(purpose: &str) -> ExportPurpose {
+    match purpose {
+        "local" => ExportPurpose::Local,
+        _ => ExportPurpose::Publish,
+    }
+}
+
+fn validate_report_for_mode(
+    text: &str,
+    mode: catcoms_diagnostics::CaptureMode,
+    purpose: ExportPurpose,
+) -> Result<Vec<String>, String> {
+    let report = catcoms_diagnostics::export::validate_export(text, mode);
+    // One row per category with a count, never one per finding. Reported verbatim this filled the
+    // window with several hundred `opaque_blob at line N` entries and told the reader nothing they
+    // could act on. The line numbers stay in the report for anyone who wants to jump to one.
+    let say = |rows: Vec<(catcoms_diagnostics::export::Category, usize)>| -> Vec<String> {
+        rows.into_iter()
+            .map(|(category, lines)| format!("{} ({lines})", category.as_str()))
+            .collect()
+    };
+    // Saving or copying is never refused. The report goes into the same folder as the log it was
+    // drawn from, so refusing to write it guards nothing, and refusing on every category is what
+    // made the first Save of a real session fail: the un-migrated networking prose narrates every
+    // address and peer id it sees, which is hundreds of findings in an ordinary report.
+    //
+    // Publishing is the boundary the review was about, in its words: "the planned next stage is
+    // GitHub issue submission. A false 'safe' label turns a local diagnostic failure into a public
+    // disclosure." An interruption is worth it there, because that one cannot be taken back.
+    if report.blocked(purpose) {
+        return Err(format!(
+            "this report is not safe to post: it contains {}. Turn on redaction, or save it and read it first",
+            say(report.refusals(purpose)).join(", ")
+        ));
+    }
+    Ok(say(report.disclosure()))
+}
+
+#[cfg(test)]
+mod report_validation_tests {
+    use super::{export_purpose, validate_report_for_mode};
+    use catcoms_diagnostics::export::ExportPurpose;
+    use catcoms_diagnostics::CaptureMode;
+
+    /// Saving and copying, the two purposes that never leave this machine.
+    fn saving(text: &str, mode: CaptureMode) -> Result<Vec<String>, String> {
+        validate_report_for_mode(text, mode, ExportPurpose::Local)
+    }
+
+    /// A caller that names no recognised purpose is treated as publishing.
+    ///
+    /// Fail closed: a typo or an older webview must not be able to downgrade the check by asking
+    /// for a purpose this build has never heard of.
+    #[test]
+    fn an_unrecognised_purpose_is_treated_as_publishing() {
+        assert_eq!(export_purpose("local"), ExportPurpose::Local);
+        assert_eq!(export_purpose("publish"), ExportPurpose::Publish);
+        assert_eq!(export_purpose(""), ExportPurpose::Publish);
+        assert_eq!(export_purpose("locl"), ExportPurpose::Publish);
+    }
+
+    /// Posting a report that carries an account path is refused, and says why without echoing it.
+    #[test]
+    fn publishing_refuses_what_saving_allows() {
+        let text = "Mewtual report\nerror at C:\\Users\\private\\vault.db\n";
+        let error = validate_report_for_mode(text, CaptureMode::Safe, ExportPurpose::Publish)
+            .expect_err("a local account path must not be posted in public");
+        assert!(error.contains("local_path (1)"), "{error}");
+        assert!(
+            !error.contains("C:\\Users"),
+            "the refusal must not echo the text it is refusing"
+        );
+    }
+
+    /// Saving discloses; it does not refuse.
+    ///
+    /// This asserted the opposite and shipped a Save button that could not save. The log the
+    /// report is drawn from is already in the same folder, so refusing to write the report guards
+    /// nothing, and every ordinary session trips the scanners because the un-migrated networking
+    /// prose narrates addresses and peer ids by the hundred.
+    #[test]
+    fn saving_names_what_is_in_the_report_instead_of_refusing_it() {
+        let review = saving(
+            "Mewtual report\nerror at C:\\Users\\private\\vault.db\n",
+            CaptureMode::Safe,
+        )
+        .expect("writing to the user's own log folder is not disclosure");
+        assert_eq!(review, vec!["local_path (1)"]);
+        assert!(
+            !review.iter().any(|row| row.contains("C:\\Users")),
+            "the disclosure must not echo the text it is describing"
+        );
+    }
+
+    #[test]
+    fn raw_addresses_follow_the_native_capture_mode() {
+        let text = "route 203.0.113.9:443";
+        assert_eq!(
+            saving(text, CaptureMode::Safe).unwrap(),
+            vec!["raw_address (1)"],
+            "safe capture promised no literal addresses, so the report says it has one"
+        );
+        assert!(
+            saving(text, CaptureMode::Enhanced).unwrap().is_empty(),
+            "enhanced was asked for addresses, so one is nothing to report"
+        );
+    }
+
+    #[test]
+    fn legacy_bridged_prose_requires_review_but_does_not_force_a_bypass() {
+        let review = saving("LOG.TRACING.EVENT outcome=failed", CaptureMode::Safe)
+            .expect("legacy prose without a concrete sensitive shape remains exportable");
+        assert_eq!(review, vec!["bridged_prose (1)"]);
+    }
+
+    /// The report from the screenshot: hundreds of findings, and a Save that has to work.
+    #[test]
+    fn a_real_session_log_saves_and_is_summarised_rather_than_enumerated() {
+        let mut body = String::from("Mewtual report\n");
+        for at in 0..200 {
+            body.push_str(&format!(
+                "LOG.TRACING.EVENT message=dialling 198.51.100.{} peer=12D3KooWQ9xTvR4bKdL2sWpAmN7zYcEfGh{:02}\n",
+                at % 250,
+                at % 100,
+            ));
+        }
+        let review =
+            saving(&body, CaptureMode::Safe).expect("a real session's own log must be savable");
+        assert!(
+            review.len() <= 4,
+            "the user gets a few counted rows, not one line per finding: {review:?}"
+        );
+        assert!(review.iter().any(|row| row.starts_with("raw_address (")));
+    }
+}
+
+#[derive(Serialize)]
+struct ReportValidation {
+    review: Vec<String>,
+}
+
+/// Check a report immediately before the webview copies it. Validation stays native and uses the
+/// native capture mode, so the clipboard path cannot drift into a weaker frontend-only scanner.
+#[tauri::command]
+async fn validate_diagnostics_report(
+    state: State<'_, AppState>,
+    text: String,
+    purpose: String,
+) -> Result<ReportValidation, String> {
+    require_unlocked_session(&state).await?;
+    if text.len() > MAX_REPORT_BYTES {
+        return Err(format!(
+            "the report is larger than the {} MiB limit",
+            MAX_REPORT_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(ReportValidation {
+        review: validate_report_for_mode(
+            &text,
+            catcoms_log::hub().mode(),
+            export_purpose(&purpose),
+        )?,
+    })
+}
+
+/// Write a diagnostics report next to the debug log.
+///
+/// The console can already copy a report to the clipboard, which is the fast path for pasting into
+/// a chat. This is the one for keeping: a clipboard survives until the next thing you copy, and a
+/// bug report written a day later needs the evidence to still exist. It also gives someone a file
+/// to attach rather than a wall of text to paste.
+///
+/// The text is composed by the console, through the same serialiser that renders the screen, so
+/// the file matches what the user was looking at including whether redaction was on. Composing it
+/// natively instead would give two renderings that could disagree, and a report that contradicts
+/// the screenshot it arrived with costs the reader more time than it saves.
+///
+/// The file name is built here and never taken from the webview: a caller-supplied name is a path
+/// traversal waiting to happen, and there is nothing the webview needs to say about it.
+#[tauri::command]
+async fn save_diagnostics_report(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<SavedReport, String> {
+    require_unlocked_session(&state).await?;
+    if text.len() > MAX_REPORT_BYTES {
+        return Err(format!(
+            "the report is larger than the {} MiB limit",
+            MAX_REPORT_BYTES / (1024 * 1024)
+        ));
+    }
+    let review = validate_report_for_save(&text)?;
+
+    // One save at a time: two would race on retention, each deleting what the other was about to
+    // count. Released on every exit below, including the error paths.
+    if REPORT_SAVING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("a diagnostics report is already being written".to_string());
+    }
+    let _release = ReportSaveGuard;
+
+    let dir = match app.try_state::<LogState>() {
+        Some(log) => log.dir.clone(),
+        None => log_dir(&app)?,
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Make room before writing, counting the one about to be written.
+    retain_reports(&dir, 1);
+
+    let session = catcoms_log::hub().session_id().to_string();
+    // The timestamp leads and is zero-padded so that sorting these by name sorts them by age,
+    // which is what retention above relies on.
+    let file = format!("{REPORT_PREFIX}{:013}-{session}.txt", wall_ms());
+    let path = dir.join(&file);
+    // Written to a temporary file and renamed, so an interrupted save leaves no half-report that
+    // reads as a whole one. A stray `.part` is obvious; a truncated report is not.
+    let staging = dir.join(format!("{file}.part"));
+    std::fs::write(&staging, text.as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::rename(&staging, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&staging);
+        e.to_string()
+    })?;
+
+    tracing::info!(
+        target: "catcoms_app",
+        bytes = text.len(),
+        "PRIVACY.EXPORT.WRITTEN"
+    );
+    Ok(SavedReport {
+        path: path.display().to_string(),
+        file,
+        bytes: text.len(),
+        review,
+    })
+}
+
 /// Record something the webview saw.
 ///
 /// Until this existed the log was Rust-only, so every `console.warn` in the voice path (failed
@@ -9249,25 +13514,490 @@ const MAX_UI_LOG_BYTES: usize = 2000;
 ///
 /// Deliberately not gated on an unlocked session, unlike almost every other command: the errors
 /// most worth having are the ones from unlock failing and from startup, which happen before there
-/// is a session to check. It writes only to the local log file, and only when logging is on.
+/// is a session to check.
+///
+/// It also does not check whether the debug **file** is on any more. It emits a `tracing` event and
+/// lets the installed layers decide: the file layer exists only when the user enabled it, and the
+/// in-memory console ring is always there. Returning early when the file was off is what used to
+/// make the frontend's own errors invisible to the in-app console unless the user had turned on a
+/// log file and restarted first, which is the opposite of what someone hitting a problem needs.
 #[tauri::command]
-async fn log_ui(app: AppHandle, level: String, message: String) {
-    if !app.state::<LogState>().active {
+async fn log_ui(level: String, message: String) {
+    record_ui_log(&level, message, 1);
+}
+
+/// One line the webview wants recorded.
+#[derive(Deserialize)]
+struct UiLogRecord {
+    level: String,
+    message: String,
+    /// How many identical lines this one stands for.
+    ///
+    /// The frontend collapses consecutive repeats so a render or reconnect loop does not cost an
+    /// IPC round trip per line, but the count travels with the survivor. "One ICE candidate
+    /// rejected" and "four thousand in two seconds" are different bugs, and the old deduper
+    /// rendered them as the same evidence.
+    #[serde(default)]
+    repeats: u32,
+}
+
+/// The most records one call may carry. A batch is a convenience, not a way around the rate limit.
+const MAX_UI_LOG_BATCH: usize = 256;
+
+/// Record a batch of webview lines.
+///
+/// Batching exists because the alternative is one IPC round trip per `console.warn`, and the
+/// moments worth capturing are exactly the ones where the webview is emitting fastest. See
+/// [`log_ui`] for why this is not gated on an unlocked session.
+#[tauri::command]
+async fn log_ui_batch(records: Vec<UiLogRecord>) -> SendOutcome {
+    let offered = records.len() as u64;
+    let mut accepted = 0u64;
+    for record in records.into_iter().take(MAX_UI_LOG_BATCH) {
+        if record_ui_log(&record.level, record.message, record.repeats.max(1)) {
+            accepted += 1;
+        }
+    }
+    SendOutcome { offered, accepted }
+}
+
+/// Shorten `text` to at most `max` **bytes** without splitting a character.
+///
+/// `String::truncate` panics unless the index is a character boundary, and this input is arbitrary
+/// text from the webview: one emoji, one combining mark or any CJK line long enough puts a
+/// multi-byte character across the cap. The frontend's own limit is counted in UTF-16 units, so it
+/// cannot prevent this. Panicking here would mean the act of recording an error destroys the
+/// evidence of that error, which is the worst available failure for a logging path.
+fn truncate_utf8_bytes(text: &mut String, max: usize) {
+    if text.len() <= max {
         return;
     }
+    let mut end = max;
+    // Byte 0 is always a boundary, so this terminates even when the first character alone is
+    // longer than the cap.
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+}
+
+/// Wall-clock milliseconds, through the same `SystemClock` seam the rest of the bridge stamps
+/// with. Reading the OS clock directly is forbidden outside that seam, and for good reason: it is
+/// what makes every timing-dependent behaviour here testable.
+///
+/// Only ever used for rate-limiter arithmetic and for stamping a self-test record, so a clock that
+/// steps is a cosmetic problem rather than a correctness one; the elapsed calculation clamps
+/// negatives either way.
+fn wall_ms() -> i64 {
+    SystemClock.now_ms() as i64
+}
+
+/// What the native side did with a batch of webview records.
+///
+/// The webview cannot otherwise know. Its send used to be `void invoke(...).catch(() => {})`: the
+/// batch was retired the moment it was handed over, the rejection was swallowed outside the
+/// batcher, and the pipeline reported perfect health precisely when the bridge was unhealthy. An
+/// explicit answer is what lets it count its own losses. Found by adversarial review (P3-006).
+///
+/// `accepted` can be less than `offered` without anything being wrong: the limiter below exists to
+/// suppress a storm, and doing its job is not a delivery failure. It *is* a loss, and the webview
+/// is entitled to know the number.
+#[derive(Serialize, Clone, Copy)]
+struct SendOutcome {
+    offered: u64,
+    accepted: u64,
+}
+
+/// How many webview records may arrive in a burst before the limiter starts suppressing.
+const UI_LOG_BURST: f64 = 200.0;
+
+/// How many it may sustain per second once the burst is spent.
+const UI_LOG_PER_SECOND: f64 = 50.0;
+
+/// How often the limiter is allowed to say how much it suppressed.
+const UI_LOG_REPORT_INTERVAL_MS: i64 = 5_000;
+
+/// A token bucket over the webview's log traffic.
+///
+/// The webview is the least trustworthy input this process has: a render loop, a reconnect storm
+/// or a compromised page can all emit without bound, and each record costs formatting, a queue
+/// slot and disk. Suppression is counted and reported rather than silent, because a limiter that
+/// hides its own effect turns a retry storm into a quiet period.
+#[derive(Debug)]
+struct UiLogBudget {
+    tokens: f64,
+    last_ms: i64,
+    suppressed: u64,
+    last_report_ms: i64,
+}
+
+/// Which of the webview's two channels a record arrived on.
+///
+/// They get separate budgets rather than sharing one. A `console.warn` storm and a stalled send are
+/// both plausible at the same moment, and while the two shared a bucket the storm spent it: the
+/// structured events describing what was actually going wrong were suppressed by the noise about
+/// it. Required by adversarial review (P3-006).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UiLogChannel {
+    /// `console.error` and friends, forwarded as prose.
+    Prose,
+    /// Structured observations with a code, a section and a trace.
+    Structured,
+}
+
+static UI_PROSE_BUDGET: std::sync::OnceLock<std::sync::Mutex<UiLogBudget>> =
+    std::sync::OnceLock::new();
+static UI_STRUCTURED_BUDGET: std::sync::OnceLock<std::sync::Mutex<UiLogBudget>> =
+    std::sync::OnceLock::new();
+
+/// Whether one more record fits, plus the suppression summary owed to the log if it does.
+fn ui_log_allowance(channel: UiLogChannel, now_ms: i64) -> (bool, Option<u64>) {
+    let slot = match channel {
+        UiLogChannel::Prose => &UI_PROSE_BUDGET,
+        UiLogChannel::Structured => &UI_STRUCTURED_BUDGET,
+    };
+    let cell = slot.get_or_init(|| {
+        std::sync::Mutex::new(UiLogBudget {
+            tokens: UI_LOG_BURST,
+            last_ms: now_ms,
+            suppressed: 0,
+            last_report_ms: now_ms,
+        })
+    });
+    let mut budget = match cell.lock() {
+        Ok(b) => b,
+        // A poisoned limiter must not take logging down with it: the numbers behind it are still
+        // perfectly usable.
+        Err(e) => e.into_inner(),
+    };
+
+    let elapsed = (now_ms - budget.last_ms).max(0) as f64 / 1000.0;
+    budget.tokens = (budget.tokens + elapsed * UI_LOG_PER_SECOND).min(UI_LOG_BURST);
+    budget.last_ms = now_ms;
+
+    if budget.tokens >= 1.0 {
+        budget.tokens -= 1.0;
+        // Report on the first record after a quiet spell rather than on a timer, so the summary
+        // lands next to the traffic it describes.
+        if budget.suppressed > 0 && now_ms - budget.last_report_ms >= UI_LOG_REPORT_INTERVAL_MS {
+            let count = std::mem::take(&mut budget.suppressed);
+            budget.last_report_ms = now_ms;
+            return (true, Some(count));
+        }
+        return (true, None);
+    }
+
+    budget.suppressed += 1;
+    (false, None)
+}
+
+/// Read a JSON object into ordered pairs.
+///
+/// `serde` will not map an object onto a `Vec` of pairs on its own: it wants a sequence, and says
+/// so. A visitor gets the entries in the order the parser met them, which is the order the webview
+/// wrote them.
+#[derive(Default)]
+struct BoundedUiFields {
+    values: Vec<(String, serde_json::Value)>,
+    dropped: u32,
+}
+
+impl From<Vec<(String, serde_json::Value)>> for BoundedUiFields {
+    fn from(mut values: Vec<(String, serde_json::Value)>) -> Self {
+        let dropped = values.len().saturating_sub(catcoms_diagnostics::MAX_FIELDS) as u32;
+        values.truncate(catcoms_diagnostics::MAX_FIELDS);
+        BoundedUiFields { values, dropped }
+    }
+}
+
+fn ordered_fields<'de, D>(deserializer: D) -> Result<BoundedUiFields, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct InDocumentOrder;
+
+    impl<'de> serde::de::Visitor<'de> for InDocumentOrder {
+        type Value = BoundedUiFields;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an object of diagnostic fields")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut fields = Vec::with_capacity(
+                map.size_hint()
+                    .unwrap_or(0)
+                    .min(catcoms_diagnostics::MAX_FIELDS),
+            );
+            let mut dropped = 0u32;
+            while let Some(name) = map.next_key::<String>()? {
+                if fields.len() < catcoms_diagnostics::MAX_FIELDS {
+                    fields.push((name, map.next_value()?));
+                } else {
+                    // Drain the rest without retaining it in the command/event. Tauri has already
+                    // materialized the outer JSON `Value`, so this is deliberately a post-decode
+                    // work/ring bound rather than a claim that the IPC request was never allocated.
+                    // The loss remains explicit on the event.
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                    dropped = dropped.saturating_add(1);
+                }
+            }
+            Ok(BoundedUiFields {
+                values: fields,
+                dropped,
+            })
+        }
+    }
+
+    deserializer.deserialize_map(InDocumentOrder)
+}
+
+/// One structured observation from the webview.
+#[derive(Deserialize)]
+struct UiDiagnosticEvent {
+    section: String,
+    code: String,
+    level: String,
+    #[serde(default)]
+    trace: String,
+    /// Session-local proof returned beside a native event trace. This is bridge metadata, never a
+    /// diagnostic field: persisting it would turn a short-lived provenance check into report data.
+    #[serde(default)]
+    trace_proof: String,
+    #[serde(default)]
+    phase: String,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    /// The webview's fields, in the order it wrote them.
+    ///
+    /// A `Vec` of pairs rather than a `HashMap`, because a map has no order and Rust's is
+    /// deliberately seeded per process: the same events exported from two runs came out with their
+    /// fields shuffled differently, which is the byte-identical-output property gone for exactly
+    /// the events the console shows most. Found by adversarial review (P3-015).
+    ///
+    /// Insertion order rather than sorted, because that is what the canonical event does with its
+    /// own fields and what `render.rs` promises. Sorting would also be deterministic, and would
+    /// throw away the order the producer meant.
+    #[serde(default, deserialize_with = "ordered_fields")]
+    fields: BoundedUiFields,
+}
+
+/// The bounded subset retained after Tauri has decoded the invoke's JSON body.
+///
+/// This limits command/ring work and drops the decoded excess promptly; it is not a raw IPC byte
+/// cap. Tauri materializes `InvokeBody::Json` before command argument deserialization, so a
+/// compromised renderer can still spend process memory and parsing time on an oversized request.
+struct RetainedUiDiagnosticEvents {
+    offered: usize,
+    values: Vec<UiDiagnosticEvent>,
+}
+
+impl<'de> Deserialize<'de> for RetainedUiDiagnosticEvents {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct BoundedBatch;
+
+        impl<'de> serde::de::Visitor<'de> for BoundedBatch {
+            type Value = RetainedUiDiagnosticEvents;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an array of structured UI diagnostic events")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut values =
+                    Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX_UI_LOG_BATCH));
+                while values.len() < MAX_UI_LOG_BATCH {
+                    let Some(event) = seq.next_element::<UiDiagnosticEvent>()? else {
+                        let offered = values.len();
+                        return Ok(RetainedUiDiagnosticEvents { offered, values });
+                    };
+                    values.push(event);
+                }
+                let mut offered = values.len();
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    offered = offered.saturating_add(1);
+                }
+                Ok(RetainedUiDiagnosticEvents { offered, values })
+            }
+        }
+
+        deserializer.deserialize_seq(BoundedBatch)
+    }
+}
+
+impl From<Vec<UiDiagnosticEvent>> for RetainedUiDiagnosticEvents {
+    fn from(mut values: Vec<UiDiagnosticEvent>) -> Self {
+        let offered = values.len();
+        values.truncate(MAX_UI_LOG_BATCH);
+        RetainedUiDiagnosticEvents { offered, values }
+    }
+}
+
+/// Record structured observations from the webview.
+///
+/// The difference between this and `log_ui_batch` is the difference the whole migration is about.
+/// A console line is prose that happens to have been written down; this is an event with a stable
+/// code, a section, a phase and a trace, so the half of an operation that happens in the webview
+/// is readable alongside the half that happens here rather than in a separate format that has to
+/// be correlated by eye.
+///
+/// Shares `log_ui`'s rate limiter, because it shares its threat model: the webview is the least
+/// trustworthy producer this process has, and a render loop must cost a counter rather than a disk.
+/// Also shares its reason for being outside the unlocked-session gate.
+#[tauri::command]
+async fn record_ui_events(events: RetainedUiDiagnosticEvents) -> SendOutcome {
+    use catcoms_diagnostics::{DiagnosticEvent, Level, Phase, SafeText, Section};
+
+    let offered = events.offered;
+    let mut accepted = 0usize;
+    for event in events.values {
+        let (allowed, suppressed) = ui_log_allowance(UiLogChannel::Structured, wall_ms());
+        if let Some(count) = suppressed {
+            tracing::warn!(
+                target: "catcoms_ui",
+                suppressed = count,
+                "UI.LOG.RATE_LIMITED: records dropped to keep the log usable"
+            );
+        }
+        if !allowed {
+            continue;
+        }
+
+        // Built only if it will be kept. Each of these bounds the webview's code, its trace and
+        // every one of its fields, and the webview is the producer with the least restraint in the
+        // process, so an excluded batch should cost the gate and nothing else.
+        let section = ui_section(&event.section);
+        let level = ui_level(&event.level);
+        catcoms_log::hub().record_with(section, level, || {
+            // The code is data from the webview, so it cannot be the `&'static str` a structured
+            // event wants. It is bounded and carried as a field instead, and the event's own code
+            // says where it came from. A webview cannot mint an arbitrary code that later shows up
+            // in an issue title, which is the property that matters.
+            let mut recorded = DiagnosticEvent::new(section, level, "UI.EVENT")
+                .target("catcoms_ui")
+                .phase(ui_phase(&event.phase))
+                .field("code", SafeText::describe(&event.code));
+
+            if let Some(duration) = event.duration_ms {
+                recorded = recorded.took(duration);
+            }
+            // The trace becomes the event's own trace, not a field that happens to be called
+            // "trace". As a field it rendered as text, did not reach `DiagnosticHub::trace`, and so
+            // could not gather the webview's half of an operation with the native half: the
+            // correlation the whole mechanism exists for stopped exactly at the bridge. Found by
+            // adversarial review (P3-011).
+            if let Some(trace) = parse_returned_ui_trace(&event.trace, &event.trace_proof) {
+                recorded = recorded.trace(trace);
+            }
+            recorded.fields_dropped = recorded.fields_dropped.saturating_add(event.fields.dropped);
+            for (name, value) in event.fields.values {
+                recorded = recorded.field(name, ui_field(&value));
+            }
+            recorded
+        });
+        // Counted as accepted once it has been offered to the hub. An event the capture config
+        // excludes is not a delivery failure: the webview got it here, and the hub's own `filtered`
+        // counter accounts for the rest. Counting it as lost would report the user's own setting
+        // back to them as a fault.
+        accepted += 1;
+    }
+
+    fn ui_section(name: &str) -> Section {
+        match name {
+            "ipc" => Section::Ipc,
+            "channels" => Section::Channels,
+            "voice" => Section::Voice,
+            "files" => Section::Files,
+            "sync" => Section::Sync,
+            "join" => Section::Join,
+            "startup" => Section::Startup,
+            _ => Section::Ui,
+        }
+    }
+    fn ui_level(name: &str) -> Level {
+        match name {
+            "error" => Level::Error,
+            "warn" => Level::Warn,
+            "debug" => Level::Debug,
+            _ => Level::Info,
+        }
+    }
+    fn ui_phase(name: &str) -> Phase {
+        match name {
+            "start" => Phase::Start,
+            "progress" => Phase::Progress,
+            "success" => Phase::Success,
+            "failure" => Phase::Failure,
+            "cancel" => Phase::Cancel,
+            "timeout" => Phase::Timeout,
+            _ => Phase::Observation,
+        }
+    }
+    /// Map a JSON field onto the typed value that can carry it.
+    ///
+    /// Numbers and booleans keep their type so a reader can sort on them. Anything else becomes
+    /// bounded text: the webview cannot put an object graph or a message body into a diagnostic
+    /// through this door.
+    fn ui_field(value: &serde_json::Value) -> catcoms_diagnostics::SafeValue {
+        use catcoms_diagnostics::SafeValue;
+        match value {
+            serde_json::Value::Bool(v) => SafeValue::Bool(*v),
+            serde_json::Value::Number(n) => n
+                .as_u64()
+                .map(SafeValue::Count)
+                .or_else(|| n.as_i64().map(SafeValue::Delta))
+                .unwrap_or_else(|| SafeValue::Text(SafeText::describe(&n.to_string()))),
+            serde_json::Value::String(s) => SafeValue::Text(SafeText::describe(s)),
+            other => SafeValue::Text(SafeText::describe(&other.to_string())),
+        }
+    }
+
+    SendOutcome {
+        offered: offered as u64,
+        accepted: accepted as u64,
+    }
+}
+
+/// Bound, rate-limit and emit one webview line. Returns whether it was kept.
+fn record_ui_log(level: &str, message: String, repeats: u32) -> bool {
+    let (allowed, suppressed) = ui_log_allowance(UiLogChannel::Prose, wall_ms());
+    if let Some(count) = suppressed {
+        tracing::warn!(
+            target: "catcoms_ui",
+            suppressed = count,
+            "UI.LOG.RATE_LIMITED: records dropped to keep the log usable"
+        );
+    }
+    if !allowed {
+        return false;
+    }
+
     let mut text = message;
     if text.len() > MAX_UI_LOG_BYTES {
-        text.truncate(MAX_UI_LOG_BYTES);
+        truncate_utf8_bytes(&mut text, MAX_UI_LOG_BYTES);
         text.push_str(" [truncated]");
+    }
+    if repeats > 1 {
+        text.push_str(&format!(" [x{repeats}]"));
     }
     // The webview chooses the level, so it is matched against a known set rather than parsed:
     // an unrecognised one becomes info instead of being dropped.
-    match level.as_str() {
+    match level {
         "error" => tracing::error!(target: "catcoms_ui", "{text}"),
         "warn" => tracing::warn!(target: "catcoms_ui", "{text}"),
         "debug" => tracing::debug!(target: "catcoms_ui", "{text}"),
         _ => tracing::info!(target: "catcoms_ui", "{text}"),
     }
+    true
 }
 
 /// Build and run the Tauri application.
@@ -9291,7 +14021,15 @@ pub fn run() {
                 .map(str::to_string);
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
-                responder.respond(serve_media(&state, &path, range).await);
+                // Capture authorization before any actor/disk await, then hold its native commit
+                // boundary through the synchronous responder publication. A stale response is
+                // replaced by a bodyless denial rather than escaping after explicit lock.
+                let generation = unlocked_ui_session_generation(&state).await.ok();
+                let response = serve_media(&state, &path, range).await;
+                publish_media_response(&state, generation, response, |response| {
+                    responder.respond(response);
+                })
+                .await;
             });
         })
         // Install the tracing subscriber before anything interesting happens. Until this landed
@@ -9303,13 +14041,30 @@ pub fn run() {
             let handle = app.handle().clone();
             let enabled = debug_logging_enabled(&handle);
             let dir = log_dir(&handle).unwrap_or_else(|_| std::path::PathBuf::from("logs"));
-            let guard = catcoms_log::init_debug_with(enabled, &dir, catcoms_log::APP_FILE_FILTER);
+            // A failure here is kept rather than discarded. Diagnostics that cannot start are a
+            // thing the user needs told, and the only moment the reason exists is right now: by
+            // the time somebody opens Settings and wonders why their log is missing, the io::Error
+            // that explains it was dropped several thousand events ago.
+            let (guard, init_error) =
+                match catcoms_log::init_debug_with(enabled, &dir, catcoms_log::APP_FILE_FILTER) {
+                    Ok(guard) => (Some(guard), None),
+                    Err(e) => (None, Some(e.to_string())),
+                };
             app.manage(LogState {
-                _guard: guard,
-                active: enabled,
+                guard,
+                init_error,
                 dir,
             });
             spawn_network_monitor(&handle);
+            // The last line of `setup`, and the only proof that startup got all the way through.
+            //
+            // Everything before this point can fail in ways that leave a plausible-looking log: a
+            // panic here exits the process with no window, and the last thing written is whatever
+            // happened to come before it. A marker at the end turns "the log stops somewhere" into
+            // "the log stops before this", which is the difference between a guess and an answer.
+            // `scripts/startup-check.mjs` asserts on it, because liveness cannot be asserted on:
+            // somebody closing the window is not a failure.
+            tracing::info!(target: "catcoms_app", "STARTUP.SETUP.COMPLETE");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -9346,6 +14101,10 @@ pub fn run() {
             get_storage_health,
             repair_storage,
             get_online_members,
+            get_member_routes,
+            manual_fallback_redial,
+            mint_member_recovery,
+            apply_member_recovery,
             get_delivery,
             dm_stats,
             send_dm_invite,
@@ -9361,6 +14120,12 @@ pub fn run() {
             get_wiki_pinned_cids,
             post_status,
             get_statuses,
+            edit_status,
+            delete_status,
+            toggle_status_reaction,
+            set_status_pin,
+            get_status_policy,
+            set_status_policy,
             create_event,
             delete_event,
             get_events,
@@ -9398,7 +14163,21 @@ pub fn run() {
             change_vault_secret,
             get_debug_logging,
             set_debug_logging,
+            test_debug_logging,
+            get_console_log,
+            clear_console_log,
+            get_capture_config,
+            set_capture_mode,
+            set_section_capture,
+            reset_section_capture,
+            open_public_diagnostics_issue,
+            get_event_cursor,
+            get_task_health,
+            save_diagnostics_report,
+            validate_diagnostics_report,
             log_ui,
+            log_ui_batch,
+            record_ui_events,
             set_admin,
             remove_member,
             revoke_device,
@@ -9434,6 +14213,587 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use catcoms_rt::ManualClock;
+
+    #[tokio::test]
+    async fn recovery_capture_wakes_are_bounded_replaced_and_coalesced() {
+        let signals = StdMutex::new(HashMap::new());
+        let mut old = replace_reconnect_capture_signal(&signals, 41).unwrap();
+        let mut restored = replace_reconnect_capture_signal(&signals, 41).unwrap();
+        assert!(
+            old.changed().await.is_err(),
+            "restoring an on-disk id closes its superseded capture worker"
+        );
+
+        {
+            let guard = signals.lock().unwrap();
+            let signal = guard.get(&41).expect("the restored registry entry is live");
+            for _ in 0..10_000 {
+                signal.send_modify(|generation| *generation = generation.wrapping_add(1));
+            }
+        }
+        restored.changed().await.unwrap();
+        assert_eq!(
+            *restored.borrow_and_update(),
+            10_000,
+            "a burst retains one latest wake generation rather than an event-sized queue"
+        );
+
+        signals.lock().unwrap().remove(&41);
+        assert!(
+            restored.changed().await.is_err(),
+            "leaving the server closes the capture worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_member_route_query_becomes_an_unavailable_snapshot() {
+        let clock = ManualClock::new(0);
+        let deadline_clock = clock.clone();
+        let query = tokio::spawn(async move {
+            finish_member_route_query_before(
+                std::future::pending::<Result<(), String>>(),
+                deadline_clock.sleep(Duration::from_secs(5)),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        clock.advance_ms(5_000);
+
+        assert_eq!(
+            query.await.unwrap().unwrap_err(),
+            "member-route snapshot timed out"
+        );
+    }
+
+    /// A canonical event as it reaches the webview.
+    ///
+    /// The last hop of P3-005, and the one worth testing separately: the canonical model and the
+    /// view over it can both be right while the bridge quietly drops a field on the way to the
+    /// only thing a person actually looks at. Asserted through the serialised JSON rather than the
+    /// struct, because it is the JSON the console parses.
+    #[test]
+    fn every_canonical_field_reaches_the_webview() {
+        use catcoms_diagnostics::{
+            AddressValue, CaptureMode, DiagnosticEvent, DiagnosticHub, Phase, RefDomain, Refs,
+            Section, SessionSalt, SpanId, TraceId,
+        };
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+
+        let salt = SessionSalt::for_tests(3);
+        let event = DiagnosticEvent::warn(Section::Join, "JOIN.ROUTES.EXHAUSTED")
+            .phase(Phase::Failure)
+            .operation("join_server")
+            .trace(TraceId(0x7f2c_0000_0000_0001))
+            .span(SpanId(0x91ab), SpanId(0x6dc4))
+            .target("catcoms_sync")
+            .took(60_123)
+            .attempt(4)
+            .refs(Refs {
+                server: Some(salt.reference(RefDomain::Server, b"group-1")),
+                ..Refs::default()
+            })
+            .field("direct_candidates", 4u64)
+            .field(
+                "address",
+                AddressValue::new("/ip6/2001:db8::1/udp/31484/quic-v1"),
+            );
+        // Exercise the real capture boundary. Constructing an event alone still retains its raw
+        // address so a Full-mode hub could admit it; only the hub irreversibly minimises Safe
+        // capture before the webview can read the event.
+        let clock = Arc::new(ManualClock::new(1_787_000_000_000));
+        let mut rng = ChaCha20Rng::from_seed([7; 32]);
+        let safe_hub = DiagnosticHub::with_capacity(
+            clock,
+            SessionSalt::for_tests(11),
+            CaptureMode::Safe,
+            2,
+            &mut rng,
+        );
+        assert_eq!(safe_hub.record(event.clone()), Some(1));
+        let safe_event = safe_hub.since(0, 1).pop().unwrap();
+
+        let bridged: ConsoleLogEvent =
+            catcoms_diagnostics::event_view(&safe_event, CaptureMode::Full).into();
+        let json = serde_json::to_value(&bridged).expect("the console event serialises");
+
+        assert_eq!(json["seq"], 1);
+        assert_eq!(json["at_ms"], 1_787_000_000_000u64);
+        assert_eq!(json["monotonic_ms"], 0);
+        assert_eq!(json["section"], "join");
+        assert_eq!(
+            json["view"], "network",
+            "the console groups on this instead of guessing from the target"
+        );
+        assert_eq!(json["level"], "WARN");
+        assert_eq!(json["code"], "JOIN.ROUTES.EXHAUSTED");
+        assert_eq!(json["phase"], "failure");
+        assert_eq!(json["operation"], "join_server");
+        assert_eq!(json["trace"], "7f2c000000000001");
+        assert_eq!(json["span"], "00000000000091ab");
+        assert_eq!(json["parent_span"], "0000000000006dc4");
+        assert_eq!(json["duration_ms"], 60_123);
+        assert_eq!(json["attempt"], 4);
+        assert_eq!(json["target"], "catcoms_sync");
+        assert_eq!(json["capture"], "safe");
+        // The key names the slot; the value is the keyed per-session reference, which carries its
+        // domain so a server reference can never be mistaken for a peer one.
+        assert_eq!(json["refs"][0][0], "server");
+        assert!(
+            json["refs"][0][1].as_str().unwrap().starts_with("srv-"),
+            "{}",
+            json["refs"][0][1]
+        );
+        assert!(
+            !json.to_string().contains("group-1"),
+            "and never the identifier it stands for: {json}"
+        );
+        assert_eq!(json["fields"][0]["name"], "direct_candidates");
+        assert_eq!(json["fields"][0]["value"], "4");
+        assert_eq!(json["fields"][0]["sensitive"], false);
+
+        // Safe is Safe all the way to the webview. The projection this replaced hard-coded
+        // Enhanced, so the console rendered a literal address whatever the user had chosen.
+        assert_eq!(json["fields"][1]["name"], "address");
+        assert_eq!(json["fields"][1]["kind"], "address");
+        assert_eq!(json["fields"][1]["value"], "ip6/quic-v1");
+        assert_eq!(
+            json["fields"][1]["sensitive"], false,
+            "Safe capture destroyed the literal rather than merely hiding it"
+        );
+
+        let clock = Arc::new(ManualClock::new(1_787_000_000_000));
+        let enhanced_hub = DiagnosticHub::with_capacity(
+            clock,
+            SessionSalt::for_tests(12),
+            CaptureMode::Enhanced,
+            2,
+            &mut rng,
+        );
+        assert_eq!(enhanced_hub.record(event), Some(1));
+        let enhanced_event = enhanced_hub.since(0, 1).pop().unwrap();
+        let enhanced: ConsoleLogEvent =
+            catcoms_diagnostics::event_view(&enhanced_event, CaptureMode::Safe).into();
+        let json = serde_json::to_value(&enhanced).expect("the console event serialises");
+        assert_eq!(
+            json["fields"][1]["value"],
+            "/ip6/2001:db8::1/udp/31484/quic-v1"
+        );
+        assert_eq!(json["capture"], "enhanced");
+        assert_eq!(json["capture_epoch"], 1);
+    }
+
+    /// The webview's fields keep the order it wrote them in.
+    ///
+    /// They arrived in a `HashMap`, whose iteration order Rust seeds per process, so the same
+    /// events exported from two runs came out with their fields shuffled differently. That is the
+    /// byte-identical-output property gone, for exactly the events the console shows most: a report
+    /// that cannot be diffed against another cannot be compared between two peers, which is how
+    /// some sync bugs are localised at all. Found by adversarial review (P3-015).
+    #[test]
+    fn a_webview_events_fields_keep_the_order_it_wrote_them() {
+        // Deliberately not alphabetical, so a container that sorted would be caught too.
+        let json = r#"{
+            "section": "channels",
+            "code": "UI.TEST",
+            "level": "info",
+            "fields": { "zulu": 1, "alpha": 2, "mike": 3 }
+        }"#;
+        let event: UiDiagnosticEvent = serde_json::from_str(json).expect("the webview's shape");
+        let names: Vec<&str> = event
+            .fields
+            .values
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(names, ["zulu", "alpha", "mike"]);
+
+        // And it is the same on every parse, which a hashed container is not.
+        for _ in 0..8 {
+            let again: UiDiagnosticEvent = serde_json::from_str(json).unwrap();
+            let order: Vec<&str> = again
+                .fields
+                .values
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect();
+            assert_eq!(order, names);
+        }
+    }
+
+    #[test]
+    fn ui_diagnostic_command_retains_only_bounded_events_and_fields_after_ipc_decode() {
+        let fields: serde_json::Map<String, serde_json::Value> = (0
+            ..(catcoms_diagnostics::MAX_FIELDS + 5))
+            .map(|index| (format!("field_{index}"), serde_json::json!(index)))
+            .collect();
+        let event = serde_json::json!({
+            "section": "ui",
+            "code": "UI.BOUNDED",
+            "level": "warn",
+            "fields": fields,
+        });
+        let offered = MAX_UI_LOG_BATCH + 3;
+        let wire = serde_json::Value::Array((0..offered).map(|_| event.clone()).collect());
+
+        let batch: RetainedUiDiagnosticEvents = serde_json::from_value(wire).unwrap();
+        assert_eq!(batch.offered, offered);
+        assert_eq!(batch.values.len(), MAX_UI_LOG_BATCH);
+        assert!(batch.values.iter().all(|event| {
+            event.fields.values.len() == catcoms_diagnostics::MAX_FIELDS
+                && event.fields.dropped == 5
+        }));
+    }
+
+    #[tokio::test]
+    async fn the_ui_recording_bridge_cannot_retain_address_or_peer_text_under_safe_capture() {
+        use catcoms_diagnostics::CaptureMode;
+
+        const IPV6: &str = "2001:db8:feed::42";
+        const PEER: &str = "12D3KooWDoNotRetainThisPeerIdentifier";
+        // Sixteen caller-controlled hex digits can encode an address/identifier just as readily as
+        // an arbitrary string field. Repeating it also proves normalization preserves correlation.
+        const TRACE: &str = "20010db8feed0042";
+
+        let hub = catcoms_log::hub();
+        let restore = hub.config();
+        hub.set_mode(CaptureMode::Safe);
+        hub.reset_section_levels();
+        let before = hub.stats().latest_seq;
+        let outcome = record_ui_events(
+            (0..2)
+                .map(|_| UiDiagnosticEvent {
+                    section: "join".into(),
+                    code: format!("UI route {IPV6} {PEER}"),
+                    level: "warn".into(),
+                    trace: TRACE.into(),
+                    trace_proof: String::new(),
+                    phase: "failure".into(),
+                    duration_ms: None,
+                    fields: vec![(
+                        format!("route_{IPV6}_{PEER}"),
+                        serde_json::Value::String(format!("/ip6/{IPV6}/tcp/22487/p2p/{PEER}")),
+                    )]
+                    .into(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        )
+        .await;
+        assert_eq!((outcome.offered, outcome.accepted), (2, 2));
+
+        let events: Vec<_> = hub
+            .since(before, 16)
+            .into_iter()
+            .filter(|event| event.code == "UI.EVENT")
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_ne!(
+            events[0].trace.as_hex(),
+            TRACE,
+            "raw external trace retained"
+        );
+        assert_eq!(
+            events[0].trace, events[1].trace,
+            "repeated external traces must still correlate inside one session"
+        );
+        let event = &events[0];
+        let later_full = catcoms_diagnostics::event_view(event, CaptureMode::Full);
+        let rendered = format!(
+            "{} {} {:?}",
+            later_full.target,
+            later_full.trace,
+            later_full
+                .fields
+                .iter()
+                .map(|field| (&field.name, &field.value))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(later_full.capture, "safe");
+        for canary in [IPV6, PEER, TRACE] {
+            assert!(
+                !rendered.contains(canary),
+                "Safe-captured UI text reappeared in a later Full view: {rendered}"
+            );
+        }
+
+        hub.set_mode(restore.mode);
+        for section in catcoms_diagnostics::SECTIONS {
+            hub.set_section_level(section, restore.level(section));
+        }
+    }
+
+    /// A locked vault must not be reported as a broken server.
+    ///
+    /// These two failures want opposite things from the user, and for a long time they arrived
+    /// identically: `actor_of` checked the lock and then reported everything as
+    /// `SERVER.ACTOR.UNAVAILABLE` with a `Restart` remediation, so somebody who needed to type a
+    /// passphrase was told to restart the application. The sentence above it was even correct,
+    /// which is what made it survive: only the remediation was wrong, and nothing asserted on that.
+    #[test]
+    fn a_locked_vault_and_a_missing_server_ask_for_different_things() {
+        assert_eq!(ActorLookup::Locked.code().code(), "SESSION.LOCKED");
+        assert_eq!(
+            ActorLookup::Locked.code().remediation(),
+            Some(errors::Remediation::Unlock),
+            "the fix is a passphrase, and the advice has to say so"
+        );
+
+        assert_eq!(
+            ActorLookup::NotOpen.code().code(),
+            "SERVER.ACTOR.UNAVAILABLE"
+        );
+        assert_eq!(
+            ActorLookup::NotOpen.code().remediation(),
+            Some(errors::Remediation::Restart)
+        );
+
+        // The distinction is the point, so assert it rather than the two halves separately.
+        assert_ne!(
+            ActorLookup::Locked.code().remediation(),
+            ActorLookup::NotOpen.code().remediation()
+        );
+    }
+
+    /// A refusal about who somebody is must not arrive as advice about what they typed.
+    ///
+    /// The status feed's commands all reported `DOCUMENT.WRITE.REJECTED`, whose declared remedy is
+    /// `AmendInput`, so a member refused by the feed's posting policy was told to change their
+    /// wording while the composer deliberately kept their draft: the app's combined answer to "you
+    /// may not post here" was "try rephrasing it". The sentence above it was correct in every
+    /// case, which is what let it stand. Found by adversarial review.
+    #[test]
+    fn a_status_refusal_about_authority_suggests_nothing_to_retype() {
+        for code in [
+            codes::STATUS_POST_REJECTED,
+            codes::STATUS_DELETE_REJECTED,
+            codes::STATUS_REACTION_REJECTED,
+            codes::STATUS_PIN_REJECTED,
+            codes::STATUS_POLICY_REJECTED,
+        ] {
+            assert_eq!(
+                code.remediation(),
+                None,
+                "{} is refused by a role or a policy, so it has nothing to suggest",
+                code.code()
+            );
+        }
+        // And the one that does carry a remedy is the one carrying the caller's text, so the
+        // split is asserted rather than only its larger half.
+        assert_eq!(
+            codes::STATUS_EDIT_REJECTED.remediation(),
+            Some(errors::Remediation::AmendInput)
+        );
+    }
+
+    /// The lookup itself, not just the mapping. A default state has no unlocked session, which is
+    /// exactly the case that used to come back as a broken server.
+    #[tokio::test]
+    async fn looking_up_an_actor_while_locked_says_locked() {
+        let state = AppState::default();
+        assert_eq!(actor_of(&state, 1).await.unwrap_err(), ActorLookup::Locked);
+        // And with the lock out of the way it is an honest "no such server", rather than the lock
+        // answer leaking into every later failure. A real vault, because that is what unlocked
+        // means here: the check is `resumable && store.is_some()`, and faking half of it would test
+        // the test rather than the code.
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            catcoms_app::ServerStore::open(dir.path(), b"passphrase", &mut catcoms_rt::OsCryptoRng)
+                .expect("a fresh vault opens");
+        *state.session_resumable.lock().await = true;
+        *state.store.lock().await = Some(store);
+        assert_eq!(actor_of(&state, 1).await.unwrap_err(), ActorLookup::NotOpen);
+    }
+
+    /// A task started from `setup` must not need a runtime that does not exist yet.
+    ///
+    /// Deliberately a plain `#[test]` and not a `#[tokio::test]`. That is the whole point: `setup`
+    /// runs on the main thread before the async runtime is entered, so this test is in the same
+    /// context the real caller is, and a bare `tokio::spawn` panics in it exactly as it did at
+    /// startup.
+    ///
+    /// This is the bug that shipped: `spawn_network_monitor` was changed to `tokio::spawn` to give
+    /// the supervisor a handle it could read a panic from, which is right, and it was called before
+    /// there was anything to spawn onto, which is fatal. Nothing caught it, because the whole suite
+    /// tests functions and never starts the application, so the first thing to notice was a person
+    /// launching it and getting exit code 101.
+    #[test]
+    fn a_task_can_be_supervised_from_before_the_runtime_exists() {
+        let handle = supervise_detached("test_detached", None, None, async {});
+        // Known immediately, rather than once it has been given a thread. A caller that asked for a
+        // task and crashed before it started should still leave evidence that it asked.
+        let found = tasks::snapshot(wall_ms())
+            .into_iter()
+            .find(|t| t.id == handle.id())
+            .expect("the task is registered before it is spawned");
+        assert_eq!(found.kind, "test_detached");
+    }
+
+    /// An emitted event has to tell the webview which operation it belongs to.
+    ///
+    /// The last hop of P3-004. The trace crosses the actor boundary, reaches the bridge, and then
+    /// has to survive into the payload the listener actually reads, or the frontend stages of an
+    /// operation are back to being lined up against the native ones by wall clock.
+    #[test]
+    fn an_emitted_payload_carries_the_operation_that_caused_it() {
+        let trace = catcoms_diagnostics::TraceId(0x7f2c_0000_0000_0001);
+        let stamped = stamp_payload(
+            serde_json::json!({ "server": 1 }),
+            1198,
+            44_012,
+            trace,
+            Some("native-proof"),
+        )
+        .expect("an object payload can carry the envelope");
+        assert_eq!(stamped["__seq"], 1198, "this event name's own sequence");
+        assert_eq!(
+            stamped["__ord"], 44_012,
+            "and the whole stream's, which is what says whether anything at all was missed"
+        );
+        assert_eq!(stamped["__gen"], event_generation());
+        assert_eq!(stamped["__trace"], "7f2c000000000001");
+        assert_eq!(stamped["__trace_proof"], "native-proof");
+        assert_eq!(stamped["server"], 1, "and the payload itself is untouched");
+
+        // An arrival from a peer belongs to no local operation. Left off entirely rather than sent
+        // as sixteen zeroes, so a listener testing for it gets an answer rather than a value that
+        // looks like an operation and is not one.
+        let spontaneous = stamp_payload(
+            serde_json::json!({ "server": 1 }),
+            1199,
+            44_013,
+            catcoms_diagnostics::TraceId::default(),
+            None,
+        )
+        .expect("still numbered");
+        assert_eq!(spontaneous["__seq"], 1199);
+        assert!(spontaneous.get("__trace").is_none());
+
+        // A payload that is not an object can carry none of it, and says so by refusing rather
+        // than by silently dropping the sequence the frontend checks for gaps with.
+        assert!(stamp_payload(serde_json::json!(7), 1200, 44_014, trace, None).is_none());
+    }
+
+    /// A payload field that shadows the envelope must be noticed, not silently overwritten.
+    ///
+    /// The envelope has to win, or the frontend reads application data as a sequence number and
+    /// either invents a gap or misses a real one. But winning quietly is how such a collision would
+    /// survive: the symptom is a gap detector that has become fiction.
+    #[test]
+    fn a_payload_that_shadows_the_envelope_is_noticed() {
+        assert!(collides_with_envelope(
+            &serde_json::json!({ "server": 1, "__seq": 5 })
+        ));
+        assert!(collides_with_envelope(&serde_json::json!({ "__ord": 5 })));
+        assert!(collides_with_envelope(&serde_json::json!({ "__gen": 5 })));
+        assert!(collides_with_envelope(
+            &serde_json::json!({ "__trace": "x" })
+        ));
+        assert!(collides_with_envelope(
+            &serde_json::json!({ "__trace_proof": "x" })
+        ));
+        assert!(!collides_with_envelope(
+            &serde_json::json!({ "server": 1, "seq": 5 })
+        ));
+        // A payload that cannot carry an envelope cannot collide with one either.
+        assert!(!collides_with_envelope(&serde_json::json!(7)));
+
+        // Every envelope key is checked. One added to `stamp_payload` and forgotten here would be
+        // one the collision test does not cover.
+        let stamped = stamp_payload(
+            serde_json::json!({}),
+            1,
+            2,
+            catcoms_diagnostics::TraceId(9),
+            Some("proof"),
+        )
+        .unwrap();
+        for key in stamped.as_object().unwrap().keys() {
+            assert!(
+                ENVELOPE_KEYS.contains(&key.as_str()),
+                "{key} is stamped onto every payload but is not guarded against collision"
+            );
+        }
+    }
+
+    /// Pin the external trace's canonical wire spelling independently from its privacy reduction.
+    #[test]
+    fn a_webview_trace_is_the_same_trace_natively() {
+        assert_eq!(
+            parse_trace("7f2c000000000001"),
+            Some(catcoms_diagnostics::TraceId(0x7f2c_0000_0000_0001))
+        );
+        assert_eq!(parse_trace(""), None);
+        assert_eq!(parse_trace("not hex"), None);
+        assert_eq!(
+            parse_trace("0000000000000000"),
+            None,
+            "an all-zero trace is what unset renders as; correlating on it would gather everything"
+        );
+    }
+
+    #[test]
+    fn a_native_event_round_trip_normalizes_an_external_trace_exactly_once() {
+        const RAW: &str = "20010db8feed0042";
+        let raw = parse_trace(RAW).unwrap();
+        let operation = Operation::start_maybe(
+            Some(RAW.into()),
+            catcoms_diagnostics::Section::Ipc,
+            "trace-proof-test",
+            None,
+            None,
+        );
+        assert_ne!(
+            operation.trace, raw,
+            "caller-controlled trace bytes entered native state"
+        );
+
+        // This is the same pair `emit_tracked` places in an event envelope after an actor carries
+        // the normalized trace. The webview returns both unchanged on its UI diagnostic stage.
+        let proof = hex::encode(catcoms_log::hub().trace_proof(operation.trace));
+        let stamped = stamp_payload(
+            serde_json::json!({ "server": 1 }),
+            1,
+            2,
+            operation.trace,
+            Some(&proof),
+        )
+        .unwrap();
+        let returned = parse_returned_ui_trace(
+            stamped["__trace"].as_str().unwrap(),
+            stamped["__trace_proof"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            returned, operation.trace,
+            "the return path must not compute H(H(raw))"
+        );
+
+        let unproved = parse_returned_ui_trace(stamped["__trace"].as_str().unwrap(), "").unwrap();
+        assert_ne!(
+            unproved, operation.trace,
+            "the webview cannot claim arbitrary hex was already normalized without a valid proof"
+        );
+    }
+
+    #[test]
+    fn upload_progress_never_blesses_a_renderer_controlled_trace_as_native() {
+        const RAW: &str = "20010db8feed0042";
+        let raw = parse_trace(RAW).unwrap();
+        let first = external_progress_trace(Some(RAW));
+        let repeated = external_progress_trace(Some(RAW));
+
+        assert_ne!(first, raw);
+        assert_eq!(
+            first, repeated,
+            "upload stages still need session-local correlation"
+        );
+        assert_eq!(
+            external_progress_trace(None),
+            catcoms_diagnostics::TraceId::default()
+        );
+    }
 
     /// The scope rules behind the invite page's "Your network / Internet" chips and the manual
     /// port-forward suggestion. Each address kind must land in exactly one scope, and only a
@@ -9972,6 +15332,11 @@ mod tests {
             }
         }
 
+        async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
+            self.still_unlocked().await?;
+            publish_staged_download(staging, final_path)
+        }
+
         fn progress(&self, done: usize, bytes_done: u64, _network: u64, _provider: Option<String>) {
             self.progress.borrow_mut().push((done, bytes_done));
             if Some(done) == self.lock_after_writes && done > 0 {
@@ -10071,6 +15436,52 @@ mod tests {
             downloads_empty(dir.path()),
             "but the final name never appeared and the staging file was removed"
         );
+    }
+
+    #[tokio::test]
+    async fn verified_export_publication_is_bound_to_its_exact_unlock_generation() {
+        let vault = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(vault.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let old_generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let (mut file, staging, final_path) =
+            create_staged_download(downloads.path(), "verified.txt").unwrap();
+        file.write_all(b"verified plaintext").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        // This is the deterministic post-verification/pre-rename pause: lock completes before the
+        // old worker tries to publish its already-synced plaintext staging file.
+        lock_session_inner(&state, None).await.unwrap();
+        assert!(
+            publish_download_for_generation(&state, old_generation, &staging, &final_path,)
+                .await
+                .is_err()
+        );
+        assert!(staging.exists());
+        assert_eq!(std::fs::metadata(&final_path).unwrap().len(), 0);
+
+        assert!(authenticate_mounted_store(&state, b"correct horse")
+            .await
+            .unwrap());
+        let new_generation = state.ui_session_generation.load(Ordering::Acquire);
+        finalize_unlock_session(&state, new_generation, true)
+            .await
+            .unwrap();
+        assert_ne!(old_generation, new_generation);
+        assert!(
+            publish_download_for_generation(&state, old_generation, &staging, &final_path,)
+                .await
+                .is_err(),
+            "unlocking again must not revive an export authorized by the older session"
+        );
+        publish_download_for_generation(&state, new_generation, &staging, &final_path)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(final_path).unwrap(), b"verified plaintext");
     }
 
     #[tokio::test]
@@ -10200,6 +15611,44 @@ mod tests {
         assert!(
             !*state.session_resumable.lock().await,
             "and the session closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_lock_invalidates_a_blocked_join_before_its_commit() {
+        use std::sync::atomic::AtomicBool;
+
+        let state = Arc::new(AppState::default());
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerStore::open(dir.path(), b"passphrase", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+
+        // Model the long network/reply portion of `join_server`: it captured an unlocked epoch,
+        // then remained blocked until after the user explicitly locked the UI.
+        let committed = Arc::new(AtomicBool::new(false));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let blocked_state = state.clone();
+        let blocked_committed = committed.clone();
+        let join = tokio::spawn(async move {
+            release_rx.await.unwrap();
+            let _permit = require_ui_session_generation(&blocked_state, generation).await?;
+            blocked_committed.store(true, Ordering::Release);
+            Ok::<(), String>(())
+        });
+
+        lock_session_inner(&state, None).await.unwrap();
+        release_tx.send(()).unwrap();
+        let error = join.await.unwrap().unwrap_err();
+        assert!(error.contains("locked") || error.contains("session changed"));
+        assert!(
+            !committed.load(Ordering::Acquire),
+            "stale join work must not enter the registration/persistence boundary"
+        );
+        assert_ne!(
+            state.ui_session_generation.load(Ordering::Acquire),
+            generation
         );
     }
 
@@ -10359,9 +15808,75 @@ mod tests {
         MediaChunk {
             server,
             cid: cid.to_string(),
+            manifest_version: [7; 32],
             index,
             bytes: Arc::new(vec![index as u8; 8]),
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_lock_rejects_late_media_cache_publication_and_serves_no_body() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+        state.media_cache.lock().await.push(cached(1, "cid", 0));
+        state.media_heads.lock().await.push(MediaHead {
+            server: 1,
+            cid: "cid".into(),
+            manifest_version: [7; 32],
+            total_size: 8,
+            mime: "image/png".into(),
+        });
+
+        lock_session_inner(&state, None).await.unwrap();
+        assert!(state.media_cache.lock().await.is_empty());
+        assert!(state.media_heads.lock().await.is_empty());
+        assert!(!media_cache_put_for_generation(&state, generation, cached(1, "cid", 1),).await);
+        assert!(media_head_put_for_generation(
+            &state,
+            generation,
+            MediaHead {
+                server: 1,
+                cid: "cid".into(),
+                manifest_version: [8; 32],
+                total_size: 8,
+                mime: "image/png".into(),
+            },
+        )
+        .await
+        .is_none());
+        assert!(state.media_cache.lock().await.is_empty());
+        assert!(state.media_heads.lock().await.is_empty());
+
+        // Model a worker paused after constructing plaintext but before the URI responder call.
+        // Lock has already completed, so publication must replace it with a bodyless denial.
+        let plaintext = http::Response::builder()
+            .status(http::StatusCode::PARTIAL_CONTENT)
+            .body(b"must not escape".to_vec())
+            .unwrap();
+        let mut published = None;
+        publish_media_response(&state, Some(generation), plaintext, |response| {
+            published = Some(response);
+        })
+        .await;
+        let published = published.unwrap();
+        assert_eq!(published.status(), http::StatusCode::FORBIDDEN);
+        assert!(published.body().is_empty());
+
+        let stale_range = authorized_media_range(&state, generation, 8, Some("bytes=99-".into()))
+            .await
+            .expect_err("a head resolved before lock cannot reveal its size afterward");
+        assert_eq!(stale_range.status(), http::StatusCode::FORBIDDEN);
+        assert!(stale_range.headers().get("Content-Range").is_none());
+        assert!(stale_range.body().is_empty());
+
+        let cid = Cid::of(b"locked media").to_hex();
+        let response = serve_media(&state, &format!("/1/{cid}"), None).await;
+        assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+        assert!(response.body().is_empty());
     }
 
     /// Walk a file the way a player does and report which chunks had to be decrypted.
@@ -10371,7 +15886,7 @@ mod tests {
         let mut at = 0u64;
         while at < total {
             let w = media_window(at, MEDIA_WINDOW_BYTES);
-            if media_cache_take(&mut cache, 1, "cid", w.index).is_none() {
+            if media_cache_take(&mut cache, 1, "cid", [7; 32], w.index).is_none() {
                 decrypts.push(w.index);
                 media_cache_put(&mut cache, cached(1, "cid", w.index));
             }
@@ -10398,14 +15913,14 @@ mod tests {
         let mut cache = Vec::new();
         media_cache_put(&mut cache, cached(1, "cid", 0));
         media_cache_put(&mut cache, cached(1, "cid", 1));
-        assert!(media_cache_take(&mut cache, 1, "cid", 0).is_some());
+        assert!(media_cache_take(&mut cache, 1, "cid", [7; 32], 0).is_some());
         media_cache_put(&mut cache, cached(1, "cid", 2));
         assert!(
-            media_cache_take(&mut cache, 1, "cid", 0).is_some(),
+            media_cache_take(&mut cache, 1, "cid", [7; 32], 0).is_some(),
             "the chunk that was just read must survive the next admission"
         );
         assert!(
-            media_cache_take(&mut cache, 1, "cid", 1).is_none(),
+            media_cache_take(&mut cache, 1, "cid", [7; 32], 1).is_none(),
             "the idle one is the one that goes"
         );
     }
@@ -10429,10 +15944,10 @@ mod tests {
         media_cache_put(&mut cache, cached(1, "aaa", 1));
         media_cache_put(&mut cache, cached(1, "bbb", 0));
         assert_eq!(cache.len(), 1, "nothing of the old track is kept");
-        assert!(media_cache_take(&mut cache, 1, "aaa", 0).is_none());
+        assert!(media_cache_take(&mut cache, 1, "aaa", [7; 32], 0).is_none());
         // The same content address on another server is another track, and must not be served
         // from this one's cache.
-        assert!(media_cache_take(&mut cache, 2, "bbb", 0).is_none());
+        assert!(media_cache_take(&mut cache, 2, "bbb", [7; 32], 0).is_none());
         media_cache_put(&mut cache, cached(2, "bbb", 0));
         assert_eq!(cache.len(), 1);
     }
@@ -10503,11 +16018,11 @@ mod tests {
 
     #[test]
     fn a_declared_mime_cannot_become_a_script_vector() {
-        // The value is author-controlled. Only media types survive; everything else is served as
-        // an opaque download type, so a file claiming text/html cannot become same-origin script.
+        // The value is author-controlled. Only media types may proceed to byte validation;
+        // everything else ultimately receives a bodyless denial from the scheme handler.
         assert_eq!(safe_media_mime("video/mp4"), "video/mp4");
         assert_eq!(safe_media_mime("AUDIO/MPEG"), "audio/mpeg");
-        assert_eq!(safe_media_mime("image/svg+xml"), "image/svg+xml");
+        assert_eq!(safe_media_mime("image/svg+xml"), "application/octet-stream");
         // Parameters are stripped rather than echoed.
         assert_eq!(safe_media_mime("video/mp4; codecs=\"avc1\""), "video/mp4");
         for hostile in [
@@ -10523,6 +16038,84 @@ mod tests {
                 "{hostile} must not be served as its declared type"
             );
         }
+    }
+
+    #[test]
+    fn media_magic_bytes_must_agree_with_the_exact_declared_container() {
+        let png = b"\x89PNG\r\n\x1a\nrest";
+        let jpeg = b"\xff\xd8\xff\xe0jpeg";
+        let mp3 = b"ID3\x04\0\0music";
+        let wav = b"RIFF\x10\0\0\0WAVEdata";
+        let mp4 = b"\0\0\0\x18ftypisomcontainer";
+        let avi = b"RIFF\x10\0\0\0AVI data";
+        assert_eq!(
+            media_signature_evidence("image/png", png),
+            MediaSignatureEvidence::Matched
+        );
+        assert_eq!(
+            media_signature_evidence("audio/mpeg", mp3),
+            MediaSignatureEvidence::Matched
+        );
+        assert_eq!(
+            media_signature_evidence("video/mp4", mp4),
+            MediaSignatureEvidence::Matched
+        );
+        assert_eq!(
+            media_signature_evidence("audio/mp4", mp4),
+            MediaSignatureEvidence::Matched,
+            "container headers alone cannot distinguish audio-only from video MP4"
+        );
+        assert_eq!(
+            media_signature_evidence("image/png", mp3),
+            MediaSignatureEvidence::Mismatch
+        );
+        for (declared, bytes) in [
+            ("image/png", jpeg.as_slice()),
+            ("audio/mpeg", wav.as_slice()),
+            ("video/mp4", avi.as_slice()),
+        ] {
+            assert_eq!(
+                media_signature_evidence(declared, bytes),
+                MediaSignatureEvidence::Mismatch,
+                "same-family container swaps must not inherit the declared decoder path"
+            );
+        }
+        assert_eq!(
+            media_signature_evidence("audio/x-wav", wav),
+            MediaSignatureEvidence::Matched,
+            "the explicit WAV alias is supported"
+        );
+        assert_eq!(
+            media_signature_evidence("image/png", b"<svg><script/></svg>"),
+            MediaSignatureEvidence::Unrecognized
+        );
+        assert_eq!(
+            media_signature_evidence("image/svg+xml", b"<svg/>"),
+            MediaSignatureEvidence::NotMedia
+        );
+        assert_eq!(
+            validated_inline_media_mime("image/png", png).as_deref(),
+            Some("image/png")
+        );
+        assert!(validated_inline_media_mime("image/png", mp3).is_none());
+        assert!(validated_inline_media_mime("image/png", b"unknown").is_none());
+        assert!(validated_inline_media_mime("image/svg+xml", b"<svg/>").is_none());
+    }
+
+    #[test]
+    fn exported_media_reports_format_evidence_without_claiming_decoder_safety() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("cat.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        assert_eq!(
+            exported_media_validation(&png, "image/png").as_deref(),
+            Some("matched")
+        );
+        assert_eq!(
+            exported_media_validation(&png, "audio/mpeg").as_deref(),
+            Some("mismatch")
+        );
+        assert_eq!(exported_media_validation(&png, "text/plain"), None);
     }
 
     #[test]
@@ -10725,6 +16318,107 @@ mod tests {
     }
 
     #[test]
+    fn join_reply_retries_share_exact_socket_budget_across_groups() {
+        let joiner = test_libp2p_peer(49);
+        let other = test_libp2p_peer(50);
+        let route: Multiaddr = format!("/ip4/45.79.12.34/tcp/22487/p2p/{joiner}")
+            .parse()
+            .unwrap();
+        let wrong_peer: Multiaddr = format!("/ip4/8.8.8.8/tcp/22487/p2p/{other}")
+            .parse()
+            .unwrap();
+        let clock = ManualClock::new(0);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            catcoms_discovery::EndpointDialConfig {
+                window_ms: 1_000,
+                process_limit: 4,
+                server_limit: 4,
+                peer_limit: 4,
+                endpoint_limit: 2,
+                prefix_limit: 4,
+            },
+            Arc::new(clock.clone()),
+        );
+
+        assert_eq!(
+            schedule_join_reply_candidates(
+                &scheduler,
+                b"group-a",
+                &joiner,
+                &[route.clone(), wrong_peer],
+            ),
+            vec![route.clone()],
+            "a candidate bound to another peer must never consume a grant or reach the dialer"
+        );
+        assert_eq!(
+            schedule_join_reply_candidates(
+                &scheduler,
+                b"group-a",
+                &joiner,
+                std::slice::from_ref(&route),
+            ),
+            vec![route.clone()]
+        );
+        assert!(schedule_join_reply_candidates(
+            &scheduler,
+            b"group-b",
+            &joiner,
+            std::slice::from_ref(&route),
+        )
+        .is_empty());
+
+        clock.advance_ms(1_000);
+        assert_eq!(
+            schedule_join_reply_candidates(
+                &scheduler,
+                b"group-b",
+                &joiner,
+                std::slice::from_ref(&route),
+            ),
+            vec![route]
+        );
+    }
+
+    #[test]
+    fn companion_grants_reject_peer_confusion_and_share_the_process_cap() {
+        let first = test_libp2p_peer(47);
+        let other = test_libp2p_peer(48);
+        let first_route = format!("/ip4/45.79.12.34/tcp/22487/p2p/{first}");
+        let second_route = format!("/ip4/8.8.8.8/tcp/22487/p2p/{other}");
+        let bare = "/ip4/1.1.1.1/tcp/53".to_string();
+        let clock = ManualClock::new(0);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            catcoms_discovery::EndpointDialConfig {
+                window_ms: 1_000,
+                process_limit: 1,
+                server_limit: 2,
+                peer_limit: 2,
+                endpoint_limit: 1,
+                prefix_limit: 2,
+            },
+            Arc::new(clock),
+        );
+
+        let (contact, granted) =
+            schedule_grant_bootstrap(&scheduler, b"group-a", &[first_route.clone(), bare]).unwrap();
+        assert_eq!(contact, phase0_peer_id(&first));
+        assert_eq!(granted, vec![first_route.parse::<Multiaddr>().unwrap()]);
+
+        let confused = schedule_grant_bootstrap(
+            &EndpointDialScheduler::default(),
+            b"group-confused",
+            &[first_route, second_route.clone()],
+        )
+        .unwrap_err();
+        assert!(confused.contains("one unambiguous server peer"));
+
+        let capped =
+            schedule_grant_bootstrap(&scheduler, b"group-b", std::slice::from_ref(&second_route))
+                .unwrap_err();
+        assert!(capped.contains("process-wide"));
+    }
+
+    #[test]
     fn switchboard_dial_plan_skips_expired_or_mismatched_routes_and_caps_total_dials() {
         let now = 1_000;
         let group_id = vec![9; 16];
@@ -10786,6 +16480,52 @@ mod tests {
         assert!(addresses.iter().all(|address| {
             target_peer_in_multiaddr(address).is_some_and(|peer| peer == first || peer == second)
         }));
+
+        let clock = ManualClock::new(1_000);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            catcoms_discovery::EndpointDialConfig {
+                window_ms: 1_000,
+                process_limit: 2,
+                server_limit: 2,
+                peer_limit: 2,
+                endpoint_limit: 1,
+                prefix_limit: 2,
+            },
+            Arc::new(clock),
+        );
+        let (scheduled_allowed, scheduled) =
+            schedule_switchboard_candidates(&scheduler, &group_id, allowed, addresses);
+        assert_eq!(scheduled.len(), 2, "helper routes spend endpoint tokens");
+        assert_eq!(scheduled_allowed.len(), 2);
+
+        let (denied_allowed, denied) = schedule_switchboard_candidates(
+            &scheduler,
+            b"another-group",
+            HashMap::from([(first_phase, 3_000), (second_phase, 4_000)]),
+            scheduled,
+        );
+        assert!(denied.is_empty(), "the process cap is shared across groups");
+        assert!(denied_allowed.is_empty());
+    }
+
+    #[test]
+    fn an_expired_connected_switchboard_cannot_mask_another_live_candidate() {
+        let expired = PeerId::from_u64(70);
+        let valid = PeerId::from_u64(71);
+        let allowed = HashMap::from([(expired, 1_000), (valid, 2_000)]);
+        let mut wanted = vec![expired, valid];
+
+        assert_eq!(
+            accept_or_prune_switchboard_candidate(&mut wanted, &allowed, expired, 1_001),
+            None,
+            "a route that expires while the watch is pending must not abort the whole join"
+        );
+        assert_eq!(wanted, vec![valid]);
+        assert_eq!(
+            accept_or_prune_switchboard_candidate(&mut wanted, &allowed, valid, 1_001),
+            Some((valid, 2_000)),
+            "the next already-connected, still-endorsed helper remains usable"
+        );
     }
 
     #[test]
@@ -11153,6 +16893,18 @@ mod tests {
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
         *state.store.lock().await = Some(store);
         *state.session_resumable.lock().await = true;
+        state.storage_health.lock().await.insert(
+            7,
+            CachedStorageHealth {
+                server_instance: 1,
+                report: build_storage_report(
+                    StorageHealth::default(),
+                    Vec::new(),
+                    &HashSet::new(),
+                    41,
+                ),
+            },
+        );
         assert!(require_unlocked_session(&state).await.is_ok());
 
         let continuity = r#"{"version":1,"drafts":{"1:2":"latest"},"readMarks":{"1:2":9}}"#;
@@ -11172,6 +16924,10 @@ mod tests {
             .load_ui_state()
             .unwrap();
         assert_eq!(saved, continuity.as_bytes());
+        assert!(
+            state.storage_health.lock().await.is_empty(),
+            "explicit lock must purge cached plaintext file metadata"
+        );
 
         // Validation errors are returned to the caller, but the security boundary still closes.
         *state.session_resumable.lock().await = true;
@@ -11184,6 +16940,536 @@ mod tests {
         );
         // The vault remains mounted so actors and persistence may continue behind the UI lock.
         assert!(state.store.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn locked_session_cannot_read_a_preexisting_storage_health_cache_entry() {
+        let state = AppState::default();
+        state.storage_health.lock().await.insert(
+            9,
+            CachedStorageHealth {
+                server_instance: 1,
+                report: build_storage_report(
+                    StorageHealth::default(),
+                    Vec::new(),
+                    &HashSet::new(),
+                    99,
+                ),
+            },
+        );
+
+        assert_eq!(
+            storage_health_cache_get(&state, 9, 1, 0)
+                .await
+                .err()
+                .as_deref(),
+            Some("the vault is locked"),
+            "the session gate must run before a cache hit can expose names or content addresses"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_storage_scan_finishing_after_lock_cannot_repopulate_plaintext_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let late_report =
+            build_storage_report(StorageHealth::default(), Vec::new(), &HashSet::new(), 123);
+
+        lock_session_inner(&state, None).await.unwrap();
+        assert!(
+            storage_health_cache_publish(&state, 12, 1, generation, late_report)
+                .await
+                .is_err(),
+            "a scan authorized before lock must not publish after the UI generation changes"
+        );
+        assert!(state.storage_health.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_removed_server_incarnation_cannot_publish_into_a_reused_id() {
+        use catcoms_rt::Hub;
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(91)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(91),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        let group_id = server.group_id();
+        let device_id = server.device_id();
+        let (actor, events, task) = spawn(server);
+        let entry = |instance| ServerEntry {
+            actor: actor.clone(),
+            instance,
+            group_id: group_id.clone(),
+            device_id: device_id.clone(),
+            invite: None,
+            name: "test".into(),
+            bootstrap: Vec::new(),
+            bootstrap_owners: HashMap::new(),
+            interface_routes: None,
+            rendezvous: Vec::new(),
+            mesh: None,
+            is_dm: false,
+            switchboard: false,
+            record_seq: 0,
+        };
+        const SERVER: u64 = 12;
+        const OLD: u64 = 40;
+        const NEW: u64 = 41;
+        state.servers.lock().await.insert(SERVER, entry(OLD));
+        let stale_report =
+            build_storage_report(StorageHealth::default(), Vec::new(), &HashSet::new(), 123);
+
+        // Model a scan paused after producing its report: leave removes its registry incarnation,
+        // then a reload installs a new actor row under the same persisted id before it resumes.
+        state.servers.lock().await.remove(&SERVER);
+        state.storage_health.lock().await.remove(&SERVER);
+        state.servers.lock().await.insert(SERVER, entry(NEW));
+        assert!(storage_health_cache_publish(
+            &state,
+            SERVER,
+            OLD,
+            generation,
+            stale_report.clone()
+        )
+        .await
+        .is_err());
+        assert!(state.storage_health.lock().await.is_empty());
+
+        storage_health_cache_publish(&state, SERVER, NEW, generation, stale_report)
+            .await
+            .unwrap();
+        assert!(storage_health_cache_get(&state, SERVER, NEW, generation)
+            .await
+            .unwrap()
+            .is_some());
+
+        actor.shutdown().await;
+        task.await.unwrap();
+        drop(events);
+    }
+
+    #[tokio::test]
+    async fn mounted_session_unlock_verifies_the_secret_without_remounting_the_vault() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = false;
+
+        assert!(
+            authenticate_mounted_store(&state, b"wrong horse")
+                .await
+                .is_err(),
+            "an explicitly locked webview cannot regain IPC access with a wrong secret"
+        );
+        assert!(authenticate_mounted_store(&state, b"").await.is_err());
+        let oversized = vec![b'x'; 4_097];
+        assert!(authenticate_mounted_store(&state, &oversized)
+            .await
+            .is_err());
+        assert!(!*state.session_resumable.lock().await);
+
+        assert!(authenticate_mounted_store(&state, b"correct horse")
+            .await
+            .unwrap());
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let running = finalize_unlock_session(&state, generation, true)
+            .await
+            .unwrap()
+            .expect("the mounted path requests its current servers");
+        assert!(running.is_empty());
+        assert!(*state.session_resumable.lock().await);
+
+        // The successful path authenticated the existing mount; it did not release ownership or
+        // create a second ServerStore just to verify the passphrase.
+        match ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng) {
+            Err(error) => assert!(error.to_string().contains("vault is busy")),
+            Ok(_) => panic!("verify-only unlock must not release the existing mount"),
+        }
+    }
+
+    #[test]
+    fn a_committed_secret_rewrap_is_never_reported_as_unchanged() {
+        let result = vault_secret_change_result(Err(
+            catcoms_app::AppError::CommittedButNotDurable("injected directory sync failure".into()),
+        ))
+        .unwrap();
+        assert!(result.changed);
+        assert!(!result.durability_confirmed);
+        let warning = result.warning.unwrap();
+        assert!(warning.contains("new secret is active"));
+        assert!(!warning.contains("not changed"));
+    }
+
+    #[tokio::test]
+    async fn a_newer_explicit_lock_defeats_unlock_finalization_after_authentication() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = false;
+
+        let stale_generation = state.ui_session_generation.load(Ordering::Acquire);
+        assert!(
+            authenticate_mounted_store(&state, b"correct horse")
+                .await
+                .unwrap(),
+            "the test pauses the unlock after real vault authentication"
+        );
+        lock_session_inner(&state, None).await.unwrap();
+
+        assert!(
+            finalize_unlock_session(&state, stale_generation, true)
+                .await
+                .is_err(),
+            "work authenticated before a newer lock must not reopen IPC"
+        );
+        assert_eq!(
+            require_unlocked_session(&state).await.unwrap_err(),
+            "the vault is locked"
+        );
+        assert!(state.session_lock_requested.load(Ordering::Acquire));
+        assert!(!*state.session_resumable.lock().await);
+    }
+
+    #[tokio::test]
+    async fn a_stale_hmr_resume_cannot_return_server_projection_after_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+
+        // This generation is exactly what production captures before `running_servers` begins its
+        // actor awaits. The injected projection pauses after the helper owns the same commit guard
+        // production uses, so the lock invalidates immediately and then waits behind that guard.
+        let stale_generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let projection_started = Arc::new(tokio::sync::Notify::new());
+        let release_projection = Arc::new(tokio::sync::Notify::new());
+        let resume_state = Arc::clone(&state);
+        let started = Arc::clone(&projection_started);
+        let release = Arc::clone(&release_projection);
+        let resuming = tokio::spawn(async move {
+            resume_session_projection(&resume_state, stale_generation, async move {
+                started.notify_one();
+                release.notified().await;
+                Vec::new()
+            })
+            .await
+        });
+        projection_started.notified().await;
+
+        let lock_state = Arc::clone(&state);
+        let locking = tokio::spawn(async move { lock_session_inner(&lock_state, None).await });
+        while !state.session_lock_requested.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        release_projection.notify_one();
+        assert!(
+            resuming.await.unwrap().is_none(),
+            "no server names, invites, or channels may cross a completed explicit lock"
+        );
+        locking.await.unwrap().unwrap();
+        assert!(resume_session_inner(&state).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_continuity_save_queued_before_lock_cannot_overwrite_the_lock_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+
+        // Hold the common commit boundary so the old debounced save is definitely queued before
+        // lock invalidates its UI generation. Releasing it then exercises the dangerous ordering:
+        // old command first, final lock snapshot second.
+        let boundary = state.ui_session_commit.lock().await;
+        let stale_state = Arc::clone(&state);
+        let stale = tokio::spawn(async move {
+            save_ui_state_for_generation(
+                &stale_state,
+                r#"{"version":1,"drafts":{},"readMarks":{},"fileTrustPolicies":{"1":{"mode":"everyone","trustedAuthors":[]}}}"#,
+                generation,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        let latest = r#"{"version":1,"drafts":{},"readMarks":{},"fileTrustPolicies":{"1":{"mode":"on-demand","trustedAuthors":[]}}}"#;
+        let lock_state = Arc::clone(&state);
+        let locking =
+            tokio::spawn(async move { lock_session_inner(&lock_state, Some(latest.into())).await });
+        while !state.session_lock_requested.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        drop(boundary);
+
+        assert!(
+            stale.await.unwrap().is_err(),
+            "the stale generation must be rejected"
+        );
+        locking.await.unwrap().unwrap();
+        let saved = state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .load_ui_state()
+            .unwrap();
+        assert_eq!(saved, latest.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn vault_full_close_unlock_and_actor_reload_survives_twice() {
+        use catcoms_rt::Hub;
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+
+        const SERVER_ID: u64 = 41;
+        const PASSPHRASE: &[u8] = b"correct horse";
+        let general = channel_id("general");
+        let root = tempfile::tempdir().unwrap();
+
+        // Build exactly the durable material the Tauri bridge owns: a server snapshot, registry
+        // row and network identity in one vault. The source actor then disappears, modelling a
+        // process close rather than an in-process UI lock.
+        let hub = Hub::new();
+        let mut original = Server::found(
+            hub.join(PeerId::from_u64(1)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        original.subscribe_control().await.unwrap();
+        original.open_channel(general).await.unwrap();
+        original
+            .send_message(general, "survives a full close")
+            .await
+            .unwrap();
+        let snapshot = original.snapshot().unwrap();
+        let record = ServerRecord {
+            id: SERVER_ID,
+            display_name: "private friend".into(),
+            invite: String::new(),
+            is_dm: true,
+        };
+        let mut network = new_server_net("", "", "");
+        network.port = 22_487;
+        network.reconnect_policy = ReconnectPolicy::AuthorizedPeer([9; 32]);
+        {
+            let mut rng = ChaCha20Rng::seed_from_u64(2);
+            let store = ServerStore::open(root.path(), PASSPHRASE, &mut rng).unwrap();
+            store.save_server(SERVER_ID, &snapshot, &mut rng).unwrap();
+            store
+                .save_registry(std::slice::from_ref(&record), &mut rng)
+                .unwrap();
+            store
+                .save_server_net(SERVER_ID, &network, &mut rng)
+                .unwrap();
+        }
+        drop(original);
+        assert!(ServerStore::open(
+            root.path(),
+            b"wrong passphrase",
+            &mut ChaCha20Rng::seed_from_u64(3),
+        )
+        .is_err());
+
+        // Open and restore through the transport-independent production seam used by
+        // `reload_one`. Returning the task and receiver lets the test perform a clean full close.
+        async fn open_cycle(
+            root: &Path,
+            peer: u64,
+        ) -> (
+            AppState,
+            ServerActor,
+            mpsc::Receiver<catcoms_app::TracedEvent>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            use catcoms_rt::Hub;
+            use rand_chacha::ChaCha20Rng;
+            use rand_core::SeedableRng;
+
+            let mut rng = ChaCha20Rng::seed_from_u64(peer + 10);
+            let store = ServerStore::open(root, PASSPHRASE, &mut rng).unwrap();
+            let records = store.load_registry().unwrap();
+            assert_eq!(
+                records,
+                vec![ServerRecord {
+                    id: SERVER_ID,
+                    display_name: "private friend".into(),
+                    invite: String::new(),
+                    is_dm: true,
+                }]
+            );
+            let snapshot = store.load_server(SERVER_ID).unwrap();
+            let network = store.load_server_net(SERVER_ID).unwrap().unwrap();
+            assert_eq!(
+                network.reconnect_policy,
+                ReconnectPolicy::AuthorizedPeer([9; 32]),
+                "reconnect consent is part of the sealed lifecycle"
+            );
+            let state = AppState::default();
+            *state.store.lock().await = Some(store);
+            *state.next_id.lock().await = SERVER_ID;
+            *state.session_resumable.lock().await = true;
+            let restored = restore_server_actor(
+                &state,
+                &snapshot,
+                &records[0],
+                Hub::new().join(PeerId::from_u64(peer)),
+                ChaCha20Rng::seed_from_u64(peer + 20),
+                Box::new(ManualClock::new(2_000 + peer)),
+                &[],
+                network.record_seq,
+                network
+                    .reconnect_routes
+                    .iter()
+                    .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
+                    .collect(),
+                network.switchboard,
+            )
+            .await
+            .unwrap();
+            let actor = restored.actor.clone();
+            state.servers.lock().await.insert(
+                SERVER_ID,
+                ServerEntry {
+                    actor: restored.actor,
+                    instance: state.next_server_instance.fetch_add(1, Ordering::Relaxed),
+                    group_id: restored.group_id,
+                    device_id: restored.device_id,
+                    invite: None,
+                    name: records[0].display_name.clone(),
+                    bootstrap: Vec::new(),
+                    bootstrap_owners: HashMap::new(),
+                    interface_routes: None,
+                    rendezvous: Vec::new(),
+                    mesh: None,
+                    is_dm: records[0].is_dm,
+                    switchboard: network.switchboard,
+                    record_seq: network.record_seq,
+                },
+            );
+            (state, actor, restored.events, restored.task)
+        }
+
+        let (first_state, first_actor, first_events, first_task) = open_cycle(root.path(), 2).await;
+        assert_eq!(
+            running_servers(&first_state).await[0].name,
+            "private friend"
+        );
+        assert!(running_servers(&first_state).await[0].is_dm);
+        assert_eq!(
+            first_actor.messages(general).await[0].text,
+            "survives a full close"
+        );
+        lock_session_inner(
+            &first_state,
+            Some(r#"{"version":1,"drafts":{},"readMarks":{}}"#.into()),
+        )
+        .await
+        .unwrap();
+        assert!(require_unlocked_session(&first_state).await.is_err());
+        assert_eq!(
+            first_actor.messages(general).await[0].text,
+            "survives a full close",
+            "the native actor remains valid behind an explicit UI lock"
+        );
+        first_actor.shutdown().await;
+        first_task.await.unwrap();
+        drop(first_events);
+        drop(first_state);
+
+        // A second independent state proves this is not HMR/resume: the vault keys, actor,
+        // transport and frontend gate all start again from sealed bytes after a full close.
+        let (second_state, second_actor, second_events, second_task) =
+            open_cycle(root.path(), 3).await;
+        assert!(require_unlocked_session(&second_state).await.is_ok());
+        assert_eq!(
+            second_actor.messages(general).await[0].text,
+            "survives a full close"
+        );
+        second_actor.shutdown().await;
+        second_task.await.unwrap();
+        drop(second_events);
+    }
+
+    #[tokio::test]
+    async fn member_recovery_preserves_a_proven_route_while_pending_consent_survives_reopen() {
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+
+        const SERVER_ID: u64 = 57;
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let mut rng = ChaCha20Rng::seed_from_u64(57);
+        let store = ServerStore::open(root.path(), b"recovery vault", &mut rng).unwrap();
+        let previous_peer = PeerId::from_u64(98);
+        let mut network = new_server_net("", "", "");
+        network.reconnect_policy = ReconnectPolicy::AuthorizedPeer(*previous_peer.as_bytes());
+        network.reconnect_routes = vec![ReconnectRoute {
+            peer_id: *previous_peer.as_bytes(),
+            address: "/ip4/192.168.1.98/tcp/22487".into(),
+        }];
+        let previous_routes = network.reconnect_routes.clone();
+        store
+            .save_server_net(SERVER_ID, &network, &mut rng)
+            .unwrap();
+        *state.store.lock().await = Some(store);
+
+        let pending_peer = PeerId::from_u64(99);
+        authorize_member_recovery_capture(&state, SERVER_ID, pending_peer, u64::MAX)
+            .await
+            .unwrap();
+
+        let guard = state.store.lock().await;
+        let sealed = guard
+            .as_ref()
+            .unwrap()
+            .load_server_net(SERVER_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sealed.reconnect_policy,
+            ReconnectPolicy::AuthorizedPeer(*previous_peer.as_bytes()),
+            "pending recovery cannot replace the last proven contact"
+        );
+        assert_eq!(sealed.reconnect_routes, previous_routes);
+        assert_eq!(
+            sealed.pending_recovery_peer,
+            Some(*pending_peer.as_bytes()),
+            "consent survives a crash while the new peer is still unreachable"
+        );
+        drop(guard);
+        drop(state);
+
+        let reopened = ServerStore::open(root.path(), b"recovery vault", &mut rng).unwrap();
+        let sealed = reopened.load_server_net(SERVER_ID).unwrap().unwrap();
+        assert_eq!(sealed.reconnect_routes, previous_routes);
+        assert_eq!(sealed.pending_recovery_peer, Some(*pending_peer.as_bytes()));
     }
 
     /// The trap this guards: founding mints the invite immediately, UPnP answers seconds later,
@@ -11241,31 +17527,206 @@ mod tests {
         );
     }
 
-    /// Settings promises the user "this session's file is X". If that name is wrong they open
-    /// somebody else's capture (or yesterday's) and send the wrong thing, so the newest-wins rule
-    /// and the "only debug_log_* counts" rule are both pinned.
+    /// Settings promises the user "this session's file is X". The name now comes from the sink
+    /// that opened it, not from whichever `debug_log_*` in the folder was touched most recently.
+    ///
+    /// The old rule looked reasonable and was wrong in the one case that matters: when this
+    /// process failed to open a file, the newest one in the directory belongs to a *previous* run,
+    /// so the UI named a stale capture and called it active. A user then sends yesterday's log for
+    /// today's bug, which costs a round trip and usually a second reproduction.
     #[test]
-    fn the_named_log_file_is_the_newest_debug_log_in_the_folder() {
-        let dir = std::env::temp_dir().join(format!("mewtual-logtest-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn settings_names_the_file_this_process_opened_and_never_a_stale_one() {
+        let dir = std::path::Path::new("/data/logs");
+        let health = catcoms_log::SinkHealth {
+            desired: true,
+            state: catcoms_log::SinkState::Active,
+            session_id: "eb887278".into(),
+            path: Some(dir.join("debug_log_20260823_120000.txt")),
+            events_written: 12,
+            bytes_written: 900,
+            ..catcoms_log::SinkHealth::stopped()
+        };
+        let reply = DebugLogging::from_health(true, dir, &health);
+        assert!(reply.active);
+        assert_eq!(reply.state, "active");
+        assert_eq!(reply.file, "debug_log_20260823_120000.txt");
+        assert_eq!(reply.session, "eb887278");
+        assert!(reply.error.is_empty());
+    }
 
-        // Nothing yet: an empty answer, never a guessed filename.
-        assert_eq!(newest_log_file(&dir), "");
-        // A missing folder is the same "nothing to name", not a panic.
-        assert_eq!(newest_log_file(&dir.join("absent")), "");
+    /// The case the previous design could not express: the preference says yes and the sink says
+    /// no. Both halves have to reach the UI, or "enabled" is read as "captured".
+    #[test]
+    fn a_failed_sink_is_reported_as_failed_with_its_reason_and_names_no_file() {
+        let dir = std::path::Path::new("/data/logs");
+        let health = catcoms_log::SinkHealth {
+            desired: true,
+            state: catcoms_log::SinkState::Failed,
+            last_error: Some("permission denied opening the diagnostics directory".into()),
+            ..catcoms_log::SinkHealth::stopped()
+        };
+        let reply = DebugLogging::from_health(true, dir, &health);
+        assert!(reply.enabled, "the user did ask for a log");
+        assert!(!reply.active, "and did not get one");
+        assert_eq!(reply.state, "failed");
+        assert_eq!(
+            reply.error,
+            "permission denied opening the diagnostics directory"
+        );
+        assert!(
+            reply.file.is_empty(),
+            "no file is named when none was opened"
+        );
+    }
 
-        std::fs::write(dir.join("debug_log_20260819_100000.txt"), b"old").unwrap();
-        std::fs::write(dir.join("notes.txt"), b"not a log").unwrap();
-        assert_eq!(newest_log_file(&dir), "debug_log_20260819_100000.txt");
+    /// Loss must not read as health. A sink that is still writing but has dropped records is
+    /// degraded, and the UI keeps treating it as capturing so the user does not stop mid-report.
+    #[test]
+    fn a_degraded_sink_is_still_capturing_but_says_it_lost_events() {
+        let dir = std::path::Path::new("/data/logs");
+        let health = catcoms_log::SinkHealth {
+            desired: true,
+            state: catcoms_log::SinkState::Degraded,
+            path: Some(dir.join("debug_log_20260823_120000.txt")),
+            events_written: 40_000,
+            events_dropped: 17,
+            events_truncated: 3,
+            queue_high_water: 8192,
+            ..catcoms_log::SinkHealth::stopped()
+        };
+        let reply = DebugLogging::from_health(true, dir, &health);
+        assert!(reply.active);
+        assert_eq!(reply.state, "degraded");
+        assert_eq!(reply.events_dropped, 17);
+        assert_eq!(
+            reply.events_truncated, 3,
+            "a line that is there with its tail cut off is not a line that is missing"
+        );
+        assert_eq!(reply.queue_high_water, 8192);
+    }
 
-        // Written second, so it is the newer file whatever the timestamps in the names say; the
-        // rule is modification time, because that is what "this session's" actually means.
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(dir.join("debug_log_20260101_000000.txt"), b"new").unwrap();
-        assert_eq!(newest_log_file(&dir), "debug_log_20260101_000000.txt");
+    /// Recording an error must never be able to destroy the evidence of that error.
+    ///
+    /// `String::truncate` panics on a non-boundary index, the frontend's own cap counts UTF-16
+    /// units rather than bytes, and this input is arbitrary text from the webview. Every byte
+    /// offset into a multibyte line is tried, because the bug is not "emoji break it", it is
+    /// "one specific offset breaks it" and which offset depends entirely on the message.
+    #[test]
+    fn truncating_a_ui_log_line_never_splits_a_character() {
+        let samples = [
+            "🐈‍⬛🐈‍⬛🐈‍⬛ the cat is on the roof",
+            "こんにちは、世界。これはテストです。",
+            "e\u{0301}e\u{0301}e\u{0301} combining marks",
+            "plain ascii is the easy case",
+            "🎹",
+        ];
+        for sample in samples {
+            for max in 0..=sample.len() + 2 {
+                let mut text = sample.to_string();
+                truncate_utf8_bytes(&mut text, max);
+                assert!(text.len() <= max.max(0), "{sample:?} at {max} grew");
+                assert!(
+                    sample.starts_with(&text),
+                    "{sample:?} at {max} is not a prefix"
+                );
+            }
+        }
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    /// A single character longer than the whole cap is the edge that the obvious implementations
+    /// get wrong: there is no boundary at or below the limit except zero.
+    #[test]
+    fn a_first_character_larger_than_the_cap_truncates_to_nothing() {
+        let mut text = "🎹abc".to_string();
+        truncate_utf8_bytes(&mut text, 2);
+        assert_eq!(text, "");
+    }
+
+    /// The console's own export must not become the outage the bounded writer prevents.
+    ///
+    /// Saved reports live beside the debug logs, and the writer's retention only ever considers
+    /// `debug_log_*`. Before this, pressing Save in a loop could fill the disk without touching a
+    /// single one of the writer's carefully chosen limits.
+    #[test]
+    fn saved_reports_are_bounded_and_never_touch_the_logs_beside_them() {
+        let dir = tempfile::tempdir().unwrap();
+        // Something the quota must leave alone, of each kind that shares this directory.
+        std::fs::write(dir.path().join("debug_log_20260823_120000.txt"), b"a log").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"not ours").unwrap();
+
+        for n in 0..(MAX_SAVED_REPORTS * 3) {
+            let name = format!(
+                "{REPORT_PREFIX}{:013}-abcd1234.txt",
+                1_700_000_000_000u64 + n as u64
+            );
+            std::fs::write(dir.path().join(name), b"report").unwrap();
+            retain_reports(dir.path(), 1);
+        }
+
+        let reports: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(REPORT_PREFIX))
+            .collect();
+        assert!(
+            reports.len() <= MAX_SAVED_REPORTS,
+            "reports grew without bound: {}",
+            reports.len()
+        );
+        // Oldest first out: a report written a moment ago is the one somebody is about to send.
+        assert!(
+            reports
+                .iter()
+                .all(|n| n > &format!("{REPORT_PREFIX}1700000000010")),
+            "the newest reports should be the survivors: {reports:?}"
+        );
+        assert!(
+            dir.path().join("debug_log_20260823_120000.txt").exists(),
+            "logs are untouched"
+        );
+        assert!(
+            dir.path().join("notes.txt").exists(),
+            "so is everything else"
+        );
+    }
+
+    /// A render loop must not be able to fill the log, and the limiter must not be able to hide
+    /// that it happened: a suppressed storm presented as a quiet period is worse than the storm.
+    #[test]
+    fn the_ui_log_limiter_caps_a_burst_and_counts_what_it_dropped() {
+        let start = 1_700_000_000_000;
+        let mut allowed = 0;
+        for _ in 0..1000 {
+            if ui_log_allowance(UiLogChannel::Prose, start).0 {
+                allowed += 1;
+            }
+        }
+        assert_eq!(
+            allowed, UI_LOG_BURST as i32,
+            "the burst is the burst, not a suggestion"
+        );
+
+        // The other channel is untouched by it. A console storm and a stalled send are both
+        // plausible at the same moment, and while the two shared a bucket the storm spent it: the
+        // structured events describing what was going wrong were suppressed by the noise about it.
+        assert!(
+            ui_log_allowance(UiLogChannel::Structured, start).0,
+            "a prose storm must not starve the operation events explaining it"
+        );
+
+        // Time passing refills it, and the first record afterwards carries the summary of what was
+        // lost, so the count reaches the log rather than a counter nobody reads.
+        let (ok, suppressed) = ui_log_allowance(
+            UiLogChannel::Prose,
+            start + UI_LOG_REPORT_INTERVAL_MS + 1000,
+        );
+        assert!(ok);
+        assert_eq!(
+            suppressed,
+            Some(800),
+            "every suppressed record is accounted for"
+        );
     }
 
     #[test]
@@ -11413,11 +17874,417 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].to_string(), a("/ip4/203.0.113.7"));
 
+        // A socket alone is not a peer route. Missing, duplicated, zero-port and unsupported
+        // stacks are rejected before the transport constructor can dial them.
+        let other = test_libp2p_peer(91);
+        for invalid in [
+            "/ip4/203.0.113.7/tcp/9".to_string(),
+            format!("/ip4/203.0.113.7/tcp/9/p2p/{ID}/p2p/{other}"),
+            format!("/ip4/203.0.113.7/tcp/0/p2p/{ID}"),
+            format!("/ip4/203.0.113.7/udp/9/p2p/{ID}"),
+        ] {
+            assert!(
+                dialable_bootstrap(&[invalid]).is_empty(),
+                "non-canonical invite route must not be dialled"
+            );
+        }
+
         // And the number actually dialled is capped well below the token's 64.
         let flood: Vec<String> = (1..=60)
             .map(|n| a(&format!("/ip4/203.0.113.{n}")))
             .collect();
         assert_eq!(dialable_bootstrap(&flood).len(), MAX_BOOTSTRAP_DIALS);
+    }
+
+    #[test]
+    fn same_machine_invite_rendezvous_survives_endpoint_scheduling() {
+        let peer = test_libp2p_peer(92);
+        let address = format!("/ip4/127.0.0.1/tcp/22487/p2p/{peer}");
+        let targets = validate_invite_rendezvous_addrs(std::slice::from_ref(&address)).unwrap();
+        let scheduler = EndpointDialScheduler::default();
+        let scheduled =
+            schedule_invite_rendezvous_targets(&scheduler, b"same-machine-group", targets);
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].addr.to_string(), address);
+    }
+
+    #[test]
+    fn invite_rendezvous_seeds_leave_group_budget_for_the_inviter() {
+        let routes: Vec<_> = (0..8u8)
+            .map(|index| {
+                format!(
+                    "/ip4/45.79.{}.34/tcp/22487/p2p/{}",
+                    index + 1,
+                    test_libp2p_peer(index + 100)
+                )
+            })
+            .collect();
+        let targets = validate_invite_rendezvous_addrs(&routes).unwrap();
+        let clock = ManualClock::new(0);
+        let scheduler = EndpointDialScheduler::new_with_clock(
+            catcoms_discovery::EndpointDialConfig::default(),
+            Arc::new(clock),
+        );
+        let scheduled =
+            schedule_invite_rendezvous_targets(&scheduler, b"rendezvous-headroom", targets);
+        assert_eq!(scheduled.len(), MAX_INVITE_RENDEZVOUS_DIALS);
+
+        let inviter = test_libp2p_peer(120);
+        let inviter_phase = phase0_peer_id(&inviter);
+        let inviter_route = format!("/ip4/8.8.8.8/tcp/22487/p2p/{inviter}");
+        let endpoint = untrusted_peer_endpoint(&inviter_route, &inviter_phase).unwrap();
+        assert_eq!(
+            scheduler.reserve(b"rendezvous-headroom", &[endpoint]),
+            vec![inviter_route]
+        );
+    }
+
+    #[test]
+    fn rendezvous_seed_cap_counts_supported_routes_not_unusable_prefix_entries() {
+        let tls_only = format!("/ip4/45.79.1.34/tcp/443/tls/p2p/{}", test_libp2p_peer(121));
+        let unsupported = format!("/ip4/45.79.2.34/tcp/443/http/p2p/{}", test_libp2p_peer(122));
+        let usable = format!(
+            "/ip4/45.79.3.34/udp/22487/quic-v1/p2p/{}",
+            test_libp2p_peer(123)
+        );
+        let targets =
+            validate_invite_rendezvous_addrs(&[tls_only, unsupported, usable.clone()]).unwrap();
+
+        let retained = retained_invite_rendezvous_config(&targets);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].0, usable);
+        let scheduled = schedule_invite_rendezvous_targets(
+            &EndpointDialScheduler::default(),
+            b"supported-seeds",
+            targets,
+        );
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].addr.to_string(), usable);
+    }
+
+    #[test]
+    fn signed_lan_fallback_keeps_invite_policy_but_discovery_does_not() {
+        let inviter_lp = test_libp2p_peer(93);
+        let other = test_libp2p_peer(94);
+        let inviter = phase0_peer_id(&inviter_lp);
+        let public = format!("/ip4/45.79.12.34/tcp/22487/p2p/{inviter_lp}");
+        let lan = format!("/ip4/192.168.1.5/tcp/22487/p2p/{inviter_lp}");
+        let wrong_peer = format!("/ip4/192.168.1.6/tcp/22487/p2p/{other}");
+
+        let endpoints = join_candidate_endpoints(
+            &[public.clone(), lan.clone()],
+            &[lan.clone(), wrong_peer],
+            &inviter,
+        );
+        let addresses: Vec<_> = endpoints
+            .iter()
+            .map(|endpoint| endpoint.address())
+            .collect();
+        assert_eq!(addresses, vec![public.as_str(), lan.as_str()]);
+    }
+
+    #[test]
+    fn reconnect_route_selection_is_member_bound_local_and_bounded() {
+        let member_lp = test_libp2p_peer(95);
+        let stranger_lp = test_libp2p_peer(96);
+        let member = phase0_peer_id(&member_lp);
+        let stranger = phase0_peer_id(&stranger_lp);
+        let lan_tcp = format!("/ip4/192.168.1.5/tcp/22487/p2p/{member_lp}");
+        let lan_quic = format!("/ip4/192.168.1.5/udp/22487/quic-v1/p2p/{member_lp}");
+        let public = format!("/ip4/45.79.12.34/tcp/22487/p2p/{member_lp}");
+        let wrong_member = format!("/ip4/192.168.1.6/tcp/22487/p2p/{stranger_lp}");
+        let confused_terminal = format!("/ip4/192.168.1.7/tcp/22487/p2p/{stranger_lp}");
+        let candidates = vec![
+            AuthenticatedDialRoute {
+                peer: member,
+                address: public.clone(),
+            },
+            AuthenticatedDialRoute {
+                peer: member,
+                address: lan_quic.clone(),
+            },
+            AuthenticatedDialRoute {
+                peer: stranger,
+                address: wrong_member,
+            },
+            AuthenticatedDialRoute {
+                peer: member,
+                address: confused_terminal,
+            },
+            AuthenticatedDialRoute {
+                peer: member,
+                address: lan_tcp.clone(),
+            },
+        ];
+
+        let allowed = HashSet::from([member]);
+        assert_eq!(
+            select_authenticated_reconnect_routes(candidates.clone(), &allowed, true),
+            vec![
+                ReconnectRoute {
+                    peer_id: *member.as_bytes(),
+                    address: lan_tcp,
+                },
+                ReconnectRoute {
+                    peer_id: *member.as_bytes(),
+                    address: lan_quic,
+                },
+            ],
+            "the migration path retains at most two private routes for current member peers"
+        );
+        assert!(select_authenticated_reconnect_routes(
+            vec![AuthenticatedDialRoute {
+                peer: member,
+                address: public.clone(),
+            }],
+            &allowed,
+            true,
+        )
+        .is_empty());
+        assert_eq!(
+            select_authenticated_reconnect_routes(
+                vec![AuthenticatedDialRoute {
+                    peer: member,
+                    address: public.clone(),
+                }],
+                &allowed,
+                false,
+            ),
+            vec![ReconnectRoute {
+                peer_id: *member.as_bytes(),
+                address: public,
+            }],
+            "direct admission may retain its exact authenticated public inviter route"
+        );
+    }
+
+    #[test]
+    fn reconnect_route_migration_rejects_ambiguous_member_peer_claims() {
+        let unique = phase0_peer_id(&test_libp2p_peer(97));
+        let duplicated = phase0_peer_id(&test_libp2p_peer(98));
+
+        assert_eq!(
+            uniquely_claimed_member_peers([duplicated, unique, duplicated]),
+            HashSet::from([unique]),
+            "a transport peer claimed by two roster entries must not become durable"
+        );
+    }
+
+    #[test]
+    fn pending_recovery_rejects_an_ambiguously_claimed_transport_peer() {
+        let pending = PeerId::from_u64(100);
+        assert_eq!(
+            pending_recovery_capture_peer(
+                Some(*pending.as_bytes()),
+                2_000,
+                1_000,
+                [pending, pending, PeerId::from_u64(101)],
+            ),
+            None,
+            "a pasted code cannot bypass the same unique member-to-transport binding as ordinary capture"
+        );
+        assert_eq!(
+            pending_recovery_capture_peer(Some(*pending.as_bytes()), 2_000, 1_000, [pending]),
+            Some(pending)
+        );
+        assert_eq!(
+            pending_recovery_capture_peer(Some(*pending.as_bytes()), 2_000, 2_001, [pending]),
+            None,
+            "sealed pending consent cannot outlive the signed code's deadline"
+        );
+    }
+
+    #[test]
+    fn pending_recovery_cannot_promote_after_expiring_during_evidence_collection() {
+        let peer = PeerId::from_u64(106);
+        let mut current = new_server_net("", "", "");
+        current.pending_recovery_peer = Some(*peer.as_bytes());
+        current.pending_recovery_expires_at_ms = 2_000;
+        assert_eq!(
+            pending_recovery_capture_peer(Some(*peer.as_bytes()), 2_000, 1_999, [peer]),
+            Some(peer),
+            "the evidence collection began while the signed code was still valid"
+        );
+        let before = current.clone();
+        assert_eq!(
+            merge_live_reconnect_capture(
+                &mut current,
+                true,
+                peer,
+                vec![ReconnectRoute {
+                    peer_id: *peer.as_bytes(),
+                    address: "/ip4/192.168.1.106/tcp/22487".into(),
+                }],
+                1,
+                2_001,
+                [peer],
+            ),
+            None,
+            "the final vault-locked merge rechecks the deadline"
+        );
+        assert_eq!(current, before);
+    }
+
+    #[test]
+    fn pending_recovery_can_promote_an_authenticated_public_route_before_expiry() {
+        let remote = test_libp2p_peer(105);
+        let peer = phase0_peer_id(&remote);
+        let public = format!("/ip4/45.79.12.35/tcp/22487/p2p/{remote}");
+        let authenticated = vec![AuthenticatedDialRoute {
+            peer,
+            address: public.clone(),
+        }];
+        let allowed = HashSet::from([peer]);
+        assert!(
+            select_authenticated_reconnect_routes(authenticated.clone(), &allowed, true).is_empty(),
+            "ordinary legacy migration remains LAN-only"
+        );
+        let routes = select_authenticated_reconnect_routes(authenticated, &allowed, false);
+        assert_eq!(routes[0].address, public);
+
+        let mut current = new_server_net("", "", "");
+        current.pending_recovery_peer = Some(*peer.as_bytes());
+        current.pending_recovery_expires_at_ms = 2_000;
+        assert_eq!(
+            merge_live_reconnect_capture(
+                &mut current,
+                true,
+                peer,
+                routes.clone(),
+                1,
+                1_000,
+                [peer],
+            ),
+            Some(true)
+        );
+        assert_eq!(current.reconnect_routes, routes);
+        assert_eq!(
+            current.reconnect_policy,
+            ReconnectPolicy::AuthorizedPeer(*peer.as_bytes())
+        );
+        assert_eq!(current.pending_recovery_peer, None);
+        assert_eq!(current.pending_recovery_expires_at_ms, 0);
+    }
+
+    #[test]
+    fn reconnect_capture_merge_preserves_newer_pending_consent() {
+        let bob = PeerId::from_u64(102);
+        let carol = PeerId::from_u64(103);
+        let mut current = new_server_net("", "", "");
+        current.reconnect_policy = ReconnectPolicy::AuthorizedPeer(*bob.as_bytes());
+        current.pending_recovery_peer = Some(*carol.as_bytes());
+        current.pending_recovery_expires_at_ms = 2_000;
+        let bob_routes = vec![ReconnectRoute {
+            peer_id: *bob.as_bytes(),
+            address: "/ip4/192.168.1.102/tcp/22487".into(),
+        }];
+
+        assert_eq!(
+            merge_live_reconnect_capture(
+                &mut current,
+                false,
+                bob,
+                bob_routes.clone(),
+                2,
+                1_000,
+                [bob, carol],
+            ),
+            Some(true)
+        );
+        assert_eq!(current.pending_recovery_peer, Some(*carol.as_bytes()));
+        assert_eq!(current.reconnect_routes, bob_routes);
+
+        // A timer that selected an older pending Carol observation cannot overwrite a newer Dave
+        // authorization read from disk at the final merge point.
+        let dave = PeerId::from_u64(104);
+        current.pending_recovery_peer = Some(*dave.as_bytes());
+        current.pending_recovery_expires_at_ms = 3_000;
+        let before = current.clone();
+        assert_eq!(
+            merge_live_reconnect_capture(
+                &mut current,
+                true,
+                carol,
+                vec![ReconnectRoute {
+                    peer_id: *carol.as_bytes(),
+                    address: "/ip4/192.168.1.103/tcp/22487".into(),
+                }],
+                3,
+                1_000,
+                [bob, carol, dave],
+            ),
+            None
+        );
+        assert_eq!(
+            current, before,
+            "stale whole-record state must not be saved"
+        );
+    }
+
+    #[test]
+    fn only_a_direct_inviter_admission_grants_durable_reconnect_authority() {
+        let inviter = phase0_peer_id(&test_libp2p_peer(101));
+        let helper = phase0_peer_id(&test_libp2p_peer(102));
+
+        assert_eq!(
+            reconnect_policy_after_admission(inviter, inviter, false, false),
+            ReconnectPolicy::AuthorizedPeer(*inviter.as_bytes()),
+        );
+        assert_eq!(
+            reconnect_policy_after_admission(inviter, inviter, true, false),
+            ReconnectPolicy::Disabled,
+            "a reply callback stays time-bounded even when it authenticates the inviter"
+        );
+        assert_eq!(
+            reconnect_policy_after_admission(inviter, inviter, false, true),
+            ReconnectPolicy::Disabled,
+            "a switchboard ceremony cannot become indefinite inviter-dial consent"
+        );
+        assert_eq!(
+            reconnect_policy_after_admission(helper, inviter, false, false),
+            ReconnectPolicy::Disabled,
+            "an authenticated non-inviter contact is never the recurring contact"
+        );
+    }
+
+    #[test]
+    fn reconnect_capture_policy_preserves_admission_consent_and_legacy_scope() {
+        let authorized = phase0_peer_id(&test_libp2p_peer(99));
+        let helper = phase0_peer_id(&test_libp2p_peer(100));
+
+        assert_eq!(
+            reconnect_capture_peer(ReconnectPolicy::Disabled, 1, [authorized]),
+            None,
+            "helper/reply/switchboard admission may never be inferred from an empty route list"
+        );
+        assert_eq!(
+            reconnect_capture_peer(
+                ReconnectPolicy::AuthorizedPeer(*authorized.as_bytes()),
+                2,
+                [authorized, helper],
+            ),
+            Some(authorized),
+            "direct admission refreshes only its named inviter"
+        );
+        assert_eq!(
+            reconnect_capture_peer(
+                ReconnectPolicy::AuthorizedPeer(*authorized.as_bytes()),
+                1,
+                [helper],
+            ),
+            None,
+            "another member cannot replace the authorized recurring contact"
+        );
+        assert_eq!(
+            reconnect_capture_peer(ReconnectPolicy::LegacyPending, 1, [authorized]),
+            Some(authorized),
+            "a pre-v3 two-member server may migrate once after overlap"
+        );
+        assert_eq!(
+            reconnect_capture_peer(ReconnectPolicy::LegacyPending, 2, [authorized, helper]),
+            None,
+            "legacy migration stays disabled where a helper/switchboard may be involved"
+        );
     }
 
     #[test]
@@ -11549,6 +18416,10 @@ mod tests {
             rendezvous: String::new(),
             switchboard: false,
             record_seq: 0,
+            reconnect_routes: Vec::new(),
+            reconnect_policy: ReconnectPolicy::Disabled,
+            pending_recovery_peer: None,
+            pending_recovery_expires_at_ms: 0,
         };
         // Nothing is holding the derived port on a test machine, so that is what gets chosen, and
         // it is chosen again on the next call: stability is the whole point.
@@ -11686,6 +18557,40 @@ mod tests {
     }
 
     #[test]
+    fn native_public_issue_keeps_the_exact_report_and_bounds_only_the_url_excerpt() {
+        let native = "Mewtual public diagnostics v1\n\nJOIN.TEST count=1 \u{1f408}";
+        let small = prepare_public_diagnostics_issue(native);
+        let expected = format!(
+            "**Type:** Bug report\n**App:** Mewtual desktop {}\n**Environment:** Mewtual desktop\n\n{native}",
+            env!("CARGO_PKG_VERSION"),
+        );
+        assert_eq!(small.report, expected);
+        assert!(!small.truncated);
+        assert!(is_tracker_url(&small.url));
+        assert_eq!(
+            encoded_issue_query_len(&small.report),
+            encode_issue_query(&small.report).len(),
+            "the URL budget and encoder must count the same UTF-8 bytes"
+        );
+
+        let large_native = format!("{}\u{1f408}", "bounded-public-event\n".repeat(20_000));
+        let large = prepare_public_diagnostics_issue(&large_native);
+        assert!(large.truncated);
+        assert!(large.url.len() <= ISSUE_URL_MAX_BYTES);
+        assert!(is_tracker_url(&large.url));
+        assert!(
+            large.report.ends_with(&large_native),
+            "the exact native report survives for clipboard fallback"
+        );
+        assert!(
+            large
+                .url
+                .contains(&encode_issue_query(PUBLIC_ISSUE_TRUNCATION_NOTE)),
+            "only the launched URL is explicitly shortened"
+        );
+    }
+
+    #[test]
     fn external_links_are_limited_to_http_and_https() {
         assert!(is_external_http_url("https://example.com/path?cat=yes"));
         assert!(is_external_http_url("http://localhost:1420/image.png"));
@@ -11788,15 +18693,26 @@ mod tests {
 
     #[test]
     fn storage_inventory_deduplicates_content_and_breaks_out_pinned_space() {
-        let file = |name: &str, cid: &str, mime: &str, size: u64, held: u32, total: u32| UiFile {
+        let cat_cid = Cid::of(b"cat").to_hex();
+        let song_cid = Cid::of(b"song").to_hex();
+        let file = |name: &str,
+                    cid: &str,
+                    mime: &str,
+                    size: u64,
+                    held: u32,
+                    total: u32,
+                    manifest_version: [u8; 32]| UiFile {
             name: name.into(),
             size,
             mime: mime.into(),
             cid: cid.into(),
             author: "member".into(),
+            author_identity: "full-member-device-id".into(),
+            author_verified: true,
             path: "shared".into(),
             held,
             total,
+            manifest_version,
             expires: None,
             expires_known: false,
         };
@@ -11806,14 +18722,15 @@ mod tests {
                 referenced_chunks: 3,
                 verified_chunks: 3,
                 verified_bytes: 512,
+                verified_manifest_versions: HashSet::from([[2; 32]]),
                 ..StorageHealth::default()
             },
             vec![
-                file("cat.png", "aa", "image/png", 100, 1, 2),
-                file("same-cat.png", "aa", "image/png", 100, 1, 2),
-                file("song.ogg", "bb", "audio/ogg", 400, 2, 2),
+                file("cat.png", &cat_cid, "image/png", 100, 1, 2, [1; 32]),
+                file("same-cat.png", &cat_cid, "image/png", 100, 1, 2, [1; 32]),
+                file("song.ogg", &song_cid, "audio/ogg", 400, 2, 2, [2; 32]),
             ],
-            &HashSet::from(["aa".to_string()]),
+            &HashSet::from([cat_cid]),
             42,
         );
 
@@ -11841,6 +18758,69 @@ mod tests {
         );
         assert_eq!(report.largest_files[0].name, "song.ogg");
         assert!(report.largest_files[1].pinned);
+        assert_eq!(
+            report
+                .local_files
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["song.ogg"],
+            "only complete local ciphertext belongs in the downloadable-on-this-device list"
+        );
+    }
+
+    #[test]
+    fn storage_inventory_denies_ambiguous_or_unverified_manifest_rows() {
+        let cid = Cid::of(b"same claimed content").to_hex();
+        let file = |name: &str, manifest_version: [u8; 32]| UiFile {
+            name: name.into(),
+            size: 20,
+            mime: "image/png".into(),
+            cid: cid.clone(),
+            author: "member".into(),
+            author_identity: "full-member-device-id".into(),
+            author_verified: true,
+            path: name.into(),
+            held: 1,
+            total: 1,
+            manifest_version,
+            expires: None,
+            expires_known: false,
+        };
+        let report = build_storage_report(
+            StorageHealth {
+                verified_manifest_versions: HashSet::from([[3; 32], [4; 32]]),
+                ..StorageHealth::default()
+            },
+            vec![file("safe", [3; 32]), file("replacement", [4; 32])],
+            &HashSet::new(),
+            1,
+        );
+        assert!(
+            report.local_files.is_empty(),
+            "two exact manifests sharing one claimed plaintext CID are not one unlockable file"
+        );
+
+        let unverified = build_storage_report(
+            StorageHealth::default(),
+            vec![file("present-but-unreadable", [5; 32])],
+            &HashSet::new(),
+            2,
+        );
+        assert!(
+            unverified.local_files.is_empty(),
+            "held-chunk existence alone must not admit a file into local inventory"
+        );
+    }
+
+    #[test]
+    fn storage_scan_singleflight_has_fixed_bounded_cardinality() {
+        let gates = StorageScanGates::default();
+        assert_eq!(gates.stripes.len(), STORAGE_SCAN_STRIPES);
+        assert!(std::ptr::eq(
+            gates.for_server(3),
+            gates.for_server(3 + STORAGE_SCAN_STRIPES as u64),
+        ));
     }
 
     #[test]
@@ -11924,5 +18904,111 @@ mod tests {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| display_name.clone());
         assert_eq!(name, "DM with Friend");
+    }
+
+    #[test]
+    fn member_route_enums_have_stable_exhaustive_webview_names() {
+        use catcoms_rt::{ConnectionFamily as Family, ConnectionTransport as Transport};
+        use catcoms_sync::{
+            IndirectRouteHealth as Indirect, MemberRouteAction, MemberRouteActionKind as Kind,
+            MemberRouteActionScope as Scope, MemberRouteHealth as Health,
+        };
+
+        assert_eq!(
+            [
+                Family::Ipv4,
+                Family::Ipv6,
+                Family::Dns,
+                Family::Memory,
+                Family::Unknown,
+            ]
+            .map(connection_family_name),
+            ["ipv4", "ipv6", "dns", "memory", "unknown"]
+        );
+        assert_eq!(
+            [
+                Transport::Tcp,
+                Transport::QuicV1,
+                Transport::WebSocket,
+                Transport::CircuitRelay,
+                Transport::Memory,
+                Transport::Unknown,
+            ]
+            .map(connection_transport_name),
+            [
+                "tcp",
+                "quic_v1",
+                "websocket",
+                "circuit_relay",
+                "memory",
+                "unknown",
+            ]
+        );
+        assert_eq!(
+            [
+                Health::NoPeerRecord,
+                Health::ClaimedPeerHasNoRoute,
+                Health::ClaimedPeerConnectedDirect,
+                Health::ClaimedPeerConnectedRelay,
+                Health::ClaimedPeerConnectedOther,
+                Health::ClaimedPeerDialCoolingDown,
+                Health::ClaimedPeerDialEligible,
+            ]
+            .map(member_route_health_name),
+            [
+                "no_peer_record",
+                "claimed_peer_has_no_route",
+                "claimed_peer_connected_direct",
+                "claimed_peer_connected_relay",
+                "claimed_peer_connected_other",
+                "claimed_peer_dial_cooling_down",
+                "claimed_peer_dial_eligible",
+            ]
+        );
+
+        let scopes = [Scope::ThisDevice, Scope::MemberDevice, Scope::Group].map(|scope| {
+            member_route_action_evt(MemberRouteAction {
+                scope,
+                kind: Kind::WaitForAutomaticRecovery,
+            })
+            .scope
+        });
+        assert_eq!(scopes, ["this_device", "member_device", "group"]);
+
+        let kinds = [
+            Kind::WaitForAutomaticRecovery,
+            Kind::CheckMemberConnectivity,
+            Kind::KeepAnotherMemberConnected,
+            Kind::ConfigureFallbackNode,
+            Kind::ProbeThroughMembers,
+            Kind::RetryGroupNow,
+        ]
+        .map(|kind| {
+            member_route_action_evt(MemberRouteAction {
+                scope: Scope::Group,
+                kind,
+            })
+            .kind
+        });
+        assert_eq!(
+            kinds,
+            [
+                "wait_for_automatic_recovery",
+                "check_member_connectivity",
+                "keep_another_member_connected",
+                "configure_fallback_node",
+                "probe_through_members",
+                "retry_group_now",
+            ]
+        );
+        assert_eq!(
+            [
+                Indirect::Unknown,
+                Indirect::ReachableViaMember,
+                Indirect::SuspectedUnreachable,
+            ]
+            .map(indirect_route_health_name),
+            ["unknown", "reachable_via_member", "suspected_unreachable"]
+        );
     }
 }

@@ -58,6 +58,11 @@
 | 13 | Android (Tauri 2 mobile): keystore, foreground service and two-tier keys | planned |
 | 14 | Hardening: last-copy-safe retention, recovery import, AutoNAT, voice completion, supply-chain attestation and independent security review | planned |
 
+The active, evidence-based status for the current development pass is maintained in
+[`DEVELOPMENT-SWEEP.md`](DEVELOPMENT-SWEEP.md). It separates existing-but-unverified work from
+work that has not been implemented and records contradictory older directions without silently
+choosing between them.
+
 Features/things in stack:
 1. Draw a waveform or shared visualizer for MIDI/instruments in voice chat (fun; decide whether
    this stays a toy or becomes a small collaborative music surface).
@@ -114,6 +119,80 @@ questionnaire remain.
 Working rule carried out of this: **adversarial review happens per slice, before the commit
 that lands it.** Batching it at the end is how unreviewed work reached `main` twice.
 
+## Two-client automated acceptance test
+
+**Context (2026-08-26).** The diagnostics methodology explains a failure after it happens, but it
+does not itself prove that two independently running clients can complete the user journey. The
+repository already has the right fast foundation. See
+[`TWO-CLIENT-TESTING.md`](TWO-CLIENT-TESTING.md) for the commands that work today and the proposed
+operator contract for the packaged two-process harness:
+
+- `crates/catcoms-app/tests/product_e2e.rs` drives the same `ServerActor`/`AppEvent` product surface
+  as the Tauri bridge, deterministically over the in-memory mesh;
+- `crates/catcoms-app/tests/tcp_product_e2e.rs` runs two real libp2p nodes over OS TCP sockets and
+  verifies join, chat convergence, presence and disconnect;
+- the lower-level sync suite separately covers direct, rendezvous, relay and DCUtR paths.
+
+These are product integration tests, but they do not launch two packaged desktop processes, load
+two independent vaults, or cross the webview/IPC boundary. Keep that distinction explicit rather
+than calling the existing suite a complete desktop acceptance test.
+
+**TODO — fast discrete two-client scenario (normal CI).** Extend the real-socket product test, or
+add a neighbouring `two_client_acceptance.rs`, with one named scenario and a small reusable `Node`
+harness. It should use ephemeral ports and temporary stores, bound every wait, and assert visible
+outcomes rather than log text:
+
+1. Alice founds a server and mints a fresh invite; Bob redeems it.
+2. Each sends a uniquely identified message and the other observes it.
+3. Transfer a small deterministic file and compare its bytes/CID at Bob.
+4. Stop Bob, assert Alice observes the disconnect, then start Bob from the same sealed store.
+5. Assert rediscovery/reconnection and catch-up without minting another invite.
+6. Export each node's bounded diagnostic report only on failure, labelled Alice/Bob and with the
+   scenario seed, phase and exact commit in the test artifact.
+
+Do not use fixed sleeps as success criteria, share a vault/store between nodes, assert prose log
+messages, or run both discovery passes simultaneously. The existing product tests document why
+simultaneous PEX passes can make both actors wait for their request deadlines.
+
+**TODO — two-process desktop smoke test (nightly/release gate).** Add a Windows-first harness that
+launches two copies of the built application with separate temporary app-data roots and drives a
+minimal stable automation surface. Prefer purpose-built, debug/test-only commands addressed by
+semantic operation (`found`, `mint_invite`, `join`, `send`, `wait_for_message`, `shutdown`) over
+screen coordinates. The automation surface must be impossible to enable in a release build unless
+the explicit test feature/configuration is present. Capture both process exit codes, screenshots,
+startup logs and privacy-filtered diagnostics on failure. Run this after building the desktop, not
+in the root Rust matrix; the desktop is a separate Cargo workspace and CI currently does not build
+it there.
+
+Start with join + bidirectional text + clean shutdown. Add restart/catch-up next, then one small
+file. Relay/rendezvous/NAT fault injection belongs in separate scenarios so the basic smoke test
+stays quick and failures identify one boundary. A real cross-network canary remains useful, but it
+is monitoring infrastructure rather than a deterministic pull-request test.
+
+## Endpoint scheduler follow-up hardening
+
+**Context (P-fixes adversarial re-review, reviewed `a165e31`, rechecked at `e896dec`).** Canonical
+transport principals, connected-only reciprocal proof requests, separate relay-circuit attempt
+keys and exact WebSocket-path parsing resolved or explicitly accepted the three MEDIUM findings.
+The present scheduler deliberately accounts dial-command submissions, not confirmed socket starts.
+
+- **TODO:** replace scalar `DiscoveryPolicy::refund_endpoint_budget(count)` with an opaque,
+  single-use reservation/permit tied to the exact planned endpoint.
+- **PARTIAL:** exact single-use permits now reach the network actor's `Submitted`/`Suppressed`
+  decision. Duplicate/already-connected suppression and failed command delivery refund by dropping
+  the uncommitted permit. A distinct post-flush `started` acknowledgement and cancellation after
+  actor acceptance remain.
+- **TODO:** separately lease a genuinely new outer relay socket while keeping logical relay-circuit
+  attempts distinct, so shared relays neither collapse unrelated peers nor evade exact-socket
+  accounting.
+- **TODO:** add a process-wide in-flight/concurrency lease across swarms; libp2p's current pending
+  outgoing limit is per swarm.
+- **TODO:** add actor-level suppression, cancellation and new-outer-relay regression tests. Preserve
+  the existing connected-only proof test and canonical cache/rendezvous identity test.
+
+Until these land, documentation and diagnostics must continue to say **bounded dial-command
+submissions**, not claim a transport-wide bound on actual socket starts.
+
 ## Field test, 2026-08-19: first successful internet P2P session
 
 Two machines, different networks, over the internet. **Text, image and audio transfer all
@@ -150,4 +229,3 @@ Issues observed, in the user's words, to be worked after the outstanding P-defec
    opt-in `tracing` log with its path shown in the UI (the desktop app currently initialises no
    subscriber at all, so every warning it logs is discarded), and a connectivity panel on the
    create/join screens.
-

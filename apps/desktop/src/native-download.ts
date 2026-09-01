@@ -7,6 +7,7 @@ export type SavedFileResult = {
   path: string;
   displayed: boolean;
   warning?: string;
+  contentValidation?: "matched" | "mismatch" | "unrecognized";
 };
 
 function checkedResult(value: unknown): SavedFileResult {
@@ -20,10 +21,18 @@ function checkedResult(value: unknown): SavedFileResult {
   if (result.warning !== undefined && result.warning !== null && typeof result.warning !== "string") {
     throw new Error("the desktop returned an invalid save result");
   }
+  if (result.contentValidation !== undefined && result.contentValidation !== null &&
+      result.contentValidation !== "matched" && result.contentValidation !== "mismatch" &&
+      result.contentValidation !== "unrecognized") {
+    throw new Error("the desktop returned an invalid save result");
+  }
   return {
     path: result.path,
     displayed: result.displayed,
     ...(typeof result.warning === "string" ? { warning: result.warning } : {}),
+    ...(typeof result.contentValidation === "string"
+      ? { contentValidation: result.contentValidation as SavedFileResult["contentValidation"] }
+      : {}),
   };
 }
 
@@ -68,6 +77,20 @@ export function completedDownload(
 }
 
 export function downloadSavedNotice(name: string, saved: SavedFileResult) {
+  if (saved.contentValidation === "mismatch") {
+    return {
+      text: `Saved ${name}, but its bytes do not match the declared media type. Treat the unlocked copy as untrusted.`,
+      kind: "warn" as const,
+      ms: 10_000,
+    };
+  }
+  if (saved.contentValidation === "unrecognized") {
+    return {
+      text: `Saved ${name}, but Mewtual could not recognize its declared media format. Treat the unlocked copy as untrusted.`,
+      kind: "warn" as const,
+      ms: 10_000,
+    };
+  }
   return saved.displayed
     ? { text: `Saved ${name} to Downloads`, kind: "ok" as const, ms: 4_000 }
     : {

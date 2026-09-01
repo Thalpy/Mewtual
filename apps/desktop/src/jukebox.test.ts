@@ -15,12 +15,16 @@ import {
   nudgeRate,
   isStalled,
   playableQueue,
+  queueChanged,
+  queueDigest,
   resolveCallName,
   stallChip,
   jukeClaimWins,
   nextJukeSeq,
   validJukeSeq,
   HAVE_FUTURE_DATA,
+  JUKE_SEQ_COLD_CEILING,
+  JUKE_SEQ_LEAD,
   MAX_JUKE_SEQ,
   STALL_ANNOUNCE_MS,
   type JukeEntry,
@@ -536,14 +540,24 @@ test("a transport revision the deck cannot count past is refused", () => {
   assert.equal(validJukeSeq(undefined), false);
 });
 
-test("a press always outranks what it has heard, and the bound holds", () => {
+test("a press always outranks what it has heard", () => {
   assert.equal(nextJukeSeq(0, null), 1);
   assert.equal(nextJukeSeq(3, 9), 10); // someone else's press is what I have to beat
   assert.equal(nextJukeSeq(9, 3), 10);
   // An unusable value on either side is treated as nothing heard rather than as a ceiling.
   assert.equal(nextJukeSeq(1e308, null), 1);
   assert.equal(nextJukeSeq(0, 1e308), 1);
-  assert.equal(nextJukeSeq(MAX_JUKE_SEQ, MAX_JUKE_SEQ), MAX_JUKE_SEQ);
+});
+
+test("the press counter never saturates, so the deck cannot be parked at the ceiling", () => {
+  // The deadlock: this used to return MAX_JUKE_SEQ, so every press from here produced the same
+  // number, the fingerprint tiebreak settled the room permanently, and nobody below it could ever
+  // take the deck back. A floor with nowhere to go is dropped and the counting restarts instead.
+  assert.equal(nextJukeSeq(MAX_JUKE_SEQ, MAX_JUKE_SEQ), 1);
+  assert.equal(nextJukeSeq(0, MAX_JUKE_SEQ), 1);
+  assert.equal(nextJukeSeq(MAX_JUKE_SEQ, null), 1);
+  // Below the ceiling it is still a plain increment, so ordinary pressing is untouched.
+  assert.equal(nextJukeSeq(MAX_JUKE_SEQ - 2, MAX_JUKE_SEQ - 2), MAX_JUKE_SEQ - 1);
 });
 
 test("the deck goes to the newest press, with a stable tiebreak", () => {
@@ -558,4 +572,158 @@ test("the deck goes to the newest press, with a stable tiebreak", () => {
   // And a frame nobody can order is never adopted, whatever it claims.
   assert.equal(jukeClaimWins(null, { seq: 1e308, fromFp: "z" }), false);
   assert.equal(jukeClaimWins({ seq: 2, fromFp: "a" }, { seq: 1e308, fromFp: "z" }), false);
+});
+
+// --- who owns the deck, when the peer sending the numbers is not to be trusted ------------------
+//
+// A revision is an assertion by whoever sent it. Nothing signs a transport frame and nothing can
+// check one, so the interesting cases below are all "a peer said something no honest deck would".
+
+test("a peer naming the ceiling does not get the deck", () => {
+  // The capture that used to work: one frame at MAX_JUKE_SEQ and the deck belonged to whoever sent
+  // it, because every honest press afterwards came out at that same number and lost the tiebreak.
+  assert.equal(jukeClaimWins(null, { seq: MAX_JUKE_SEQ, fromFp: "attacker" }), false);
+  assert.equal(
+    jukeClaimWins({ seq: 5, fromFp: "dj" }, { seq: MAX_JUKE_SEQ, fromFp: "attacker" }),
+    false,
+  );
+  // Nor does anything else parked far past what this deck has watched happen.
+  const dj = { seq: 5, fromFp: "dj" };
+  assert.equal(jukeClaimWins(dj, { seq: 5 + JUKE_SEQ_LEAD + 1, fromFp: "attacker" }), false);
+  // The edge of the window is still believable, so the bound refuses only what it means to.
+  assert.equal(jukeClaimWins(dj, { seq: 5 + JUKE_SEQ_LEAD, fromFp: "peer" }), true);
+});
+
+test("a late arrival still picks up a room that has been playing for hours", () => {
+  // The bound above must not be the reason somebody who just walked in follows nothing: they have
+  // no observation to measure against, so the only question is whether a room could have counted
+  // this far. Getting this wrong is silent, and it only shows up for the person who joined late.
+  assert.equal(jukeClaimWins(null, { seq: 500, fromFp: "dj" }), true);
+  assert.equal(jukeClaimWins(null, { seq: JUKE_SEQ_COLD_CEILING, fromFp: "dj" }), true);
+  assert.equal(jukeClaimWins(null, { seq: JUKE_SEQ_COLD_CEILING + 1, fromFp: "dj" }), false);
+});
+
+test("two people pressing at the ceiling still resolve, and the deck comes back", () => {
+  // Both decks have somehow ended up holding a revision nothing can count past. A press restarts
+  // the counting, and a restarted count beats the spent claim on every machine, so the lower
+  // fingerprint (which under the old rule could never win again) takes the deck.
+  const spent = { seq: MAX_JUKE_SEQ, fromFp: "zzz" };
+  assert.equal(jukeClaimWins(spent, { seq: nextJukeSeq(0, MAX_JUKE_SEQ), fromFp: "aaa" }), true);
+  // Two spent claims are still ordered, so a pair of them does not swap DJ back and forth forever.
+  const a = { seq: MAX_JUKE_SEQ, fromFp: "aaa" };
+  const b = { seq: MAX_JUKE_SEQ, fromFp: "bbb" };
+  assert.equal(jukeClaimWins(a, b), true);
+  assert.equal(jukeClaimWins(b, a), false);
+  // And two presses out of that state land on one answer everywhere, the ordinary tiebreak.
+  assert.equal(jukeClaimWins({ seq: 1, fromFp: "aaa" }, { seq: 1, fromFp: "bbb" }), true);
+  assert.equal(jukeClaimWins({ seq: 1, fromFp: "bbb" }, { seq: 1, fromFp: "aaa" }), false);
+});
+
+test("a captured transport frame does not take the deck back when it is replayed", () => {
+  // Transport frames are not signed, so anything on the wire can be kept and sent again later.
+  // A replay of the room's high-water frame after the room moved on is simply older than what the
+  // deck follows now.
+  const highWater = { seq: 900, fromFp: "dj" };
+  const movedOn = { seq: 901, fromFp: "someone-else" };
+  assert.equal(jukeClaimWins(movedOn, highWater), false);
+  // And a hoarded frame naming the ceiling is refused from whatever state the deck is in, so
+  // keeping one to spring later buys nothing at all.
+  const poison = { seq: MAX_JUKE_SEQ, fromFp: "attacker" };
+  assert.equal(jukeClaimWins(null, poison), false);
+  assert.equal(jukeClaimWins({ seq: 0, fromFp: "dj" }, poison), false);
+  assert.equal(jukeClaimWins(movedOn, poison), false);
+});
+
+// --- queue digests -----------------------------------------------------------------------------
+//
+// The failure this exists to make visible: a channel-updated event says the jukebox moved, the UI
+// re-reads the queue, and the queue is identical. The event and the document disagree, and that
+// used to look exactly like a queue that legitimately had not changed since the last look.
+
+const queued = (id: string, over: Partial<JukeEntry> = {}): JukeEntry => ({
+  id,
+  cid: `cid-${id}`,
+  name: `Track ${id}`,
+  author: "741af9ff",
+  added_ms: 1000,
+  ...over,
+});
+
+test("the same queue digests the same, so 'nothing changed' is detectable", () => {
+  const queue = [queued("a"), queued("b"), queued("c")];
+  assert.equal(queueDigest(queue), queueDigest([queued("a"), queued("b"), queued("c")]));
+});
+
+test("adding, removing or reordering all change the digest", () => {
+  const base = queueDigest([queued("a"), queued("b")]);
+  assert.notEqual(queueDigest([queued("a"), queued("b"), queued("c")]), base, "added");
+  assert.notEqual(queueDigest([queued("a")]), base, "removed");
+  // A reorder is a change: whoever is next to play is different.
+  assert.notEqual(queueDigest([queued("b"), queued("a")]), base, "reordered");
+});
+
+test("an empty queue reads as empty rather than as a hash nobody can interpret", () => {
+  assert.equal(queueDigest([]), "empty");
+});
+
+/**
+ * Names are user content and have no business in a value that ends up in a diagnostic record. The
+ * ids already determine the queue completely.
+ */
+test("a digest ignores everything except the ids, in order", () => {
+  const plain = queueDigest([queued("a"), queued("b")]);
+  const renamed = queueDigest([
+    queued("a", { name: "something private", cid: "different", author: "someone" }),
+    queued("b", { name: "also private", added_ms: 99 }),
+  ]);
+  assert.equal(renamed, plain);
+});
+
+test("ids that concatenate to the same string still differ", () => {
+  // Without a separator ["ab","c"] and ["a","bc"] would collide, and a reorder-shaped bug would
+  // be invisible exactly when the ids happen to line up.
+  assert.notEqual(queueDigest([queued("ab"), queued("c")]), queueDigest([queued("a"), queued("bc")]));
+});
+
+test("a digest is short enough to sit in a log line", () => {
+  const long = Array.from({ length: 64 }, (_, n) => queued(`entry-number-${n}`));
+  assert.ok(queueDigest(long).length <= 16, queueDigest(long));
+});
+
+test("a refresh can tell 'the event was wrong' from 'nothing has happened'", () => {
+  // What the deck records around every jukebox refresh, as the refresh itself computes it: the
+  // digest before the re-read and the digest after. An event claimed the jukebox moved, so a
+  // queue that comes back identical means the event and the channel document disagree, and that
+  // used to be indistinguishable from a queue nobody had touched since the last look.
+  const refreshChanged = queueChanged;
+
+  const queue = [queued("a"), queued("b")];
+  assert.equal(refreshChanged(queue, [queued("a"), queued("b")]), false, "the event was wrong");
+  assert.equal(refreshChanged(queue, [queued("a"), queued("b"), queued("c")]), true, "an add");
+  assert.equal(refreshChanged(queue, [queued("b")]), true, "a removal");
+  // The one a count or a first-entry check would call unchanged: same length, same tracks, and the
+  // room is still going to play something different next.
+  assert.equal(refreshChanged(queue, [queued("b"), queued("a")]), true, "a reorder");
+  // An emptied queue is a change too, not a read that failed to say anything.
+  assert.equal(refreshChanged(queue, []), true, "a clear");
+});
+
+test("a digest collision cannot make a changed queue report as quiet", () => {
+  // The review asks for this case by name. These are not a stand-in: they are two real track ids
+  // that collide under the actual `queueDigest`, found by searching its 32-bit output. Any digest
+  // narrower than its input has pairs like this, which is the whole reason the decision does not
+  // go through one.
+  const a = [queued("t7pfs")];
+  const b = [queued("tovja")];
+  assert.equal(queueDigest(a), queueDigest(b), "these two really do collide under the digest");
+  // The queue genuinely changed: a different track is queued, and the room will play something
+  // else next. Deciding by digest would report this refresh as quiet and hide the disagreement
+  // between the event and the document, which is the one thing the record exists to catch.
+  assert.equal(queueChanged(a, b), true);
+});
+
+test("the queue digest stays short enough to read in a log line", () => {
+  // It is a display value, so the constraint on it is legibility rather than collision resistance.
+  const long = Array.from({ length: 200 }, (_unused, at) => queued(`track-${at}`));
+  assert.ok(queueDigest(long).length <= 20, queueDigest(long));
 });

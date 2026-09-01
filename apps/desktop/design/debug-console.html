@@ -1,0 +1,902 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mewtual: debug console mockup</title>
+<style>
+/* ============================================================
+   TOKENS: copied from apps/desktop/src/app.css (Nightshade).
+   The implementation uses the real tokens; never hardcode.
+   ============================================================ */
+:root {
+  --bg-0: #131218;
+  --panel: #1a1922;
+  --bg-elev: #232130;
+  --border: #2e2b3d;
+  --border-soft: #24222f;
+
+  --text: #e8e6f0;
+  --text-2: #c6c2d6;
+  --muted: #8f8ba3;
+  --faint: #5c5870;
+
+  --accent: #977df2;
+  --accent-hi: #ab95f5;
+  --accent-dim: color-mix(in oklab, var(--accent) 16%, var(--panel));
+  --on-accent: #131218;
+
+  --ok: #5ec96e;
+  --ok-dim: color-mix(in oklab, var(--ok) 14%, var(--panel));
+  --ok-brd: color-mix(in oklab, var(--ok) 40%, var(--panel));
+  --warn: #d8a657;
+  --warn-dim: color-mix(in oklab, var(--warn) 16%, var(--panel));
+  --warn-brd: color-mix(in oklab, var(--warn) 40%, var(--panel));
+  --danger: #e0574b;
+  --danger-hi: #ef6f63;
+  --danger-dim: color-mix(in oklab, var(--danger) 14%, var(--panel));
+  --danger-brd: color-mix(in oklab, var(--danger) 40%, var(--panel));
+  --transfer: #4f9cf8;
+
+  --ui: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: "Cascadia Code", ui-monospace, Consolas, monospace;
+
+  --r: 4px;
+  --r-lg: 8px;
+  --titlebar-h: 30px;
+
+  --fs-msg: 0.84rem;
+  --panel-pad: 0.75rem;
+
+  font-family: var(--ui);
+  color: var(--text);
+  background: var(--bg-0);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg-0); }
+
+/* ---- house pieces reused as-is (copied so the mockup stands alone) ---- */
+button {
+  padding: 0.5rem 0.9rem;
+  border-radius: var(--r);
+  border: none;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  cursor: pointer;
+  font-family: var(--ui);
+}
+button:hover { background: var(--accent-hi); }
+button.ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  font-weight: 500;
+  padding: 0.3rem 0.6rem;
+}
+button.ghost:hover { background: var(--bg-elev); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.small { font-size: 0.78rem; }
+.muted { color: var(--muted); font-size: 0.85rem; }
+.fp { font-family: var(--mono); font-size: 0.85em; color: var(--text-2); }
+.stx-crumb {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.16em;
+  color: var(--faint);
+  margin-bottom: 4px;
+}
+.chip {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  padding: 2px 7px;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+  font-weight: 400;
+}
+.chip.ok       { color: var(--ok);       border-color: color-mix(in oklab, var(--ok) 40%, transparent); }
+.chip.warn     { color: var(--warn);     border-color: color-mix(in oklab, var(--warn) 40%, transparent); }
+.chip.danger   { color: var(--danger);   border-color: color-mix(in oklab, var(--danger) 40%, transparent); }
+.chip.transfer { color: var(--transfer); border-color: color-mix(in oklab, var(--transfer) 40%, transparent); }
+.chip.faint    { color: var(--faint);    border-color: var(--border-soft); }
+.toggle { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
+.toggle input[type="checkbox"] {
+  appearance: none; flex: none;
+  width: 2.05rem; height: 1.1rem; margin: 0;
+  border-radius: 999px; border: 1px solid var(--border);
+  background: var(--bg-elev); position: relative; cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.toggle input[type="checkbox"]::before {
+  content: ""; position: absolute; top: 50%; left: 2px;
+  width: 0.78rem; height: 0.78rem; border-radius: 50%;
+  background: var(--muted); transform: translateY(-50%);
+  transition: left 0.15s ease, background 0.15s ease;
+}
+.toggle input[type="checkbox"]:checked { background: var(--accent-dim); border-color: var(--accent); }
+.toggle input[type="checkbox"]:checked::before { left: calc(100% - 0.78rem - 2px); background: var(--accent); }
+.stx-esc {
+  position: absolute; top: 14px; right: 14px;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  background: transparent; border: none; padding: 0;
+  font-family: var(--mono); font-size: 0.58rem; letter-spacing: 0.14em; color: var(--faint);
+  cursor: pointer;
+}
+.stx-esc:hover { background: transparent; }
+.stx-esc-ring {
+  width: 36px; height: 36px; border-radius: 50%;
+  border: 2px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 0.85rem;
+}
+.stx-esc:hover .stx-esc-ring { border-color: var(--muted); color: var(--text); }
+
+/* ---- fake window chrome, context only, not part of the console ---- */
+.titlebar {
+  position: fixed; top: 0; left: 0; right: 0; height: var(--titlebar-h);
+  background: var(--bg-0); border-bottom: 1px solid var(--border-soft);
+  display: flex; align-items: center; padding: 0 0.7rem;
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--faint); user-select: none; z-index: 1000;
+}
+
+/* ============================================================
+   DEBUG CONSOLE (all new classes are dbg- prefixed)
+   ============================================================ */
+.dbg {
+  position: fixed;
+  inset: var(--titlebar-h) 0 0 0;
+  display: flex; flex-direction: column;
+  background: var(--panel);
+  user-select: none;
+}
+.dbg .dbg-feed-scroll, .dbg .dbg-table, .dbg .dbg-kv .v, .dbg .fp,
+.dbg .dbg-row-detail, .dbg input { user-select: text; }
+
+/* header */
+.dbg-head {
+  position: relative;
+  display: flex; align-items: center; gap: 16px;
+  padding: 12px 70px 10px 18px;
+  border-bottom: 1px solid var(--border-soft);
+  flex: none;
+}
+.dbg-title h1 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+.dbg-sev { display: flex; gap: 8px; margin-inline: auto; }
+.dbg-sev-chip {
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.1em;
+  padding: 3px 9px; border-radius: var(--r); border: 1px solid;
+  white-space: nowrap;
+}
+.dbg-sev-chip b { font-size: 0.82rem; margin-right: 4px; }
+.dbg-sev-chip.err   { color: var(--danger); border-color: var(--danger-brd); background: var(--danger-dim); }
+.dbg-sev-chip.warn  { color: var(--warn);   border-color: var(--warn-brd);   background: var(--warn-dim); }
+.dbg-sev-chip.quiet { color: var(--faint);  border-color: var(--border-soft); background: transparent; }
+.dbg-head-actions { display: flex; gap: 8px; align-items: center; }
+
+/* body: rail + content */
+.dbg-body { flex: 1; display: flex; min-height: 0; }
+.dbg-rail {
+  width: 168px; flex: none;
+  background: var(--panel); border-right: 1px solid var(--border);
+  padding: 10px 6px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 1px;
+}
+button.dbg-rail-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px; border: none; border-radius: var(--r);
+  background: transparent; color: var(--text-2);
+  font-size: 0.84rem; font-weight: 500; text-align: left; cursor: pointer;
+}
+button.dbg-rail-item:hover { background: var(--bg-elev); }
+button.dbg-rail-item.active {
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.dbg-rail-count {
+  margin-left: auto; font-family: var(--mono); font-size: 0.66rem;
+}
+.dbg-rail-count.err  { color: var(--danger); }
+.dbg-rail-count.warn { color: var(--warn); }
+
+.dbg-content {
+  flex: 1; min-width: 0;
+  background: var(--bg-0);
+  overflow-y: auto;
+  padding: 14px 18px 24px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.dbg-sec { display: none; flex-direction: column; gap: 12px; }
+.dbg-sec.active { display: flex; }
+
+/* footer */
+.dbg-foot {
+  flex: none;
+  display: flex; align-items: center; gap: 16px;
+  padding: 8px 18px;
+  border-top: 1px solid var(--border-soft);
+}
+.dbg-foot .muted { flex: 1; min-width: 0; }
+.dbg-redact { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.1em; color: var(--text-2); flex: none; }
+
+/* cards */
+.dbg-card {
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  padding: var(--panel-pad);
+  display: flex; flex-direction: column; gap: 8px;
+  min-width: 0;
+}
+.dbg-card-h {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 0.62rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.14em; color: var(--faint);
+}
+.dbg-card-h::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+.dbg-card-actions { display: flex; gap: 6px; order: 2; }
+.dbg-card-h + * { margin-top: 0; }
+.dbg-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1060px) { .dbg-grid { grid-template-columns: minmax(0, 1fr); } }
+
+.dbg-kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; align-items: baseline; }
+.dbg-kv .k { color: var(--muted); font-size: 0.78rem; white-space: nowrap; }
+.dbg-kv .v { font-family: var(--mono); font-size: 0.78rem; color: var(--text-2); overflow-wrap: anywhere; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dbg-note { color: var(--muted); font-size: 0.78rem; margin: 0; }
+.dbg-empty {
+  border: 1px dashed var(--border-soft); border-radius: var(--r);
+  padding: 22px 14px; text-align: center;
+  color: var(--muted); font-size: 0.85rem;
+}
+
+/* attention list (overview) */
+.dbg-attn { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dbg-attn li { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 0.74rem; color: var(--text-2); padding: 2px 0; }
+.dbg-attn .where { color: var(--accent); cursor: pointer; text-decoration: none; border-bottom: 1px dotted var(--accent); flex: none; }
+
+/* tables */
+.dbg-table-wrap { overflow-x: auto; min-width: 0; }
+.dbg-table { border-collapse: collapse; width: 100%; font-size: 0.72rem; }
+.dbg-table th {
+  font-family: var(--mono); font-size: 0.6rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.12em; color: var(--faint);
+  text-align: left; padding: 3px 10px 5px 0; border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.dbg-table td {
+  font-family: var(--mono); color: var(--text-2);
+  padding: 4px 10px 4px 0; border-bottom: 1px solid var(--border-soft);
+  vertical-align: top; white-space: nowrap;
+}
+.dbg-table td.name-cell { font-family: var(--ui); font-size: 0.78rem; color: var(--text); }
+.dbg-table td.num, .dbg-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.dbg-table td.num.bad { color: var(--danger); }
+.dbg-table tr.totals td { border-top: 1px solid var(--border); border-bottom: none; color: var(--text); font-weight: 600; }
+.dbg-table .sub { color: var(--faint); font-size: 0.64rem; }
+tr.dbg-row-toggle { cursor: pointer; }
+tr.dbg-row-toggle:hover td { background: color-mix(in oklab, var(--bg-elev) 60%, transparent); }
+tr.dbg-row-toggle .chev { color: var(--faint); width: 14px; }
+tr.dbg-row-detail > td { white-space: normal; padding: 0 0 8px; }
+.dbg-row-detail-inner {
+  margin-top: 2px; padding: 8px 10px;
+  background: var(--bg-0); border: 1px solid var(--border-soft); border-radius: var(--r);
+  font-size: 0.72rem; line-height: 1.5; overflow-wrap: anywhere;
+}
+.dbg-row-detail-inner .lbl { color: var(--faint); font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; display: block; margin: 6px 0 2px; }
+.dbg-row-detail-inner .lbl:first-child { margin-top: 0; }
+.dbg-row-detail-inner .bad { color: var(--danger); }
+.dbg-row-detail-inner .good { color: var(--ok); }
+
+/* feeds */
+.dbg-feed { min-height: 0; }
+.dbg-feed-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dbg-feed-filter {
+  flex: 1; min-width: 140px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--r);
+  color: var(--text); font-family: var(--mono); font-size: 0.72rem;
+  padding: 4px 8px;
+}
+.dbg-lvl-chips { display: flex; gap: 4px; }
+.dbg-lvl-chips .chip { cursor: pointer; background: transparent; }
+.dbg-lvl-chips .chip:not(.on) { color: var(--faint); border-color: var(--border-soft); }
+.dbg-lvl-chips .chip:hover { background: var(--bg-elev); }
+.dbg-feed-count { font-family: var(--mono); font-size: 0.62rem; color: var(--faint); white-space: nowrap; }
+.dbg-feed-scroll {
+  background: var(--bg-0); border: 1px solid var(--border-soft); border-radius: var(--r);
+  overflow-y: auto; padding: 4px 0;
+  font-family: var(--mono); font-size: var(--fs-msg); line-height: 1.45;
+}
+.dbg-feed-scroll.h-lg { max-height: 56vh; min-height: 200px; }
+.dbg-feed-scroll.h-md { max-height: 30vh; min-height: 120px; }
+.dbg-feed-scroll.h-sm { max-height: 20vh; min-height: 80px; }
+.dbg-drop-note {
+  position: sticky; top: 0;
+  padding: 4px 10px; margin-bottom: 2px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--muted); font-size: 0.68rem; font-family: var(--ui);
+}
+.dbg-line {
+  position: relative;
+  padding: 1px 30px 1px 10px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 0.74rem; color: var(--text-2);
+}
+.dbg-line:hover { background: color-mix(in oklab, var(--bg-elev) 55%, transparent); }
+.dbg-ts { color: var(--faint); }
+.dbg-tag { display: inline-block; min-width: 5ch; font-weight: 600; }
+.lvl-err   .dbg-tag { color: var(--danger); }
+.lvl-warn  .dbg-tag { color: var(--warn); }
+.lvl-info  .dbg-tag { color: var(--text-2); }
+.lvl-debug .dbg-tag { color: var(--muted); }
+.lvl-trace .dbg-tag { color: var(--faint); }
+.lvl-debug { color: var(--muted); }
+.lvl-trace { color: var(--faint); }
+.dbg-target { color: var(--muted); }
+.dbg-kvs { color: var(--muted); }
+.dbg-dir { display: inline-block; min-width: 2ch; font-weight: 600; }
+.dbg-dir.tx { color: var(--transfer); }
+.dbg-dir.rx { color: var(--text-2); }
+.dbg-line-stack summary {
+  cursor: pointer; color: var(--faint); font-size: 0.66rem;
+  list-style: none; display: inline; border-bottom: 1px dotted var(--faint);
+}
+.dbg-line-stack summary::-webkit-details-marker { display: none; }
+.dbg-line-stack[open] summary { color: var(--muted); }
+.dbg-line-stack pre {
+  margin: 3px 0 2px; padding: 6px 8px;
+  background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--r);
+  color: var(--muted); font-size: 0.68rem; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.dbg-copy {
+  position: absolute; right: 4px; top: 0;
+  padding: 0 5px; border: 1px solid var(--border); border-radius: var(--r);
+  background: var(--panel); color: var(--muted);
+  font-family: var(--mono); font-size: 0.6rem; line-height: 1.5;
+  cursor: pointer; opacity: 0; font-weight: 400;
+}
+.dbg-line:hover .dbg-copy, .dbg-copy:focus-visible { opacity: 1; }
+.dbg-copy:hover { background: var(--bg-elev); color: var(--text); }
+.dbg-pii { /* redactable value; no visual change while unredacted */ }
+body.redacted .dbg-pii { color: var(--warn); }
+
+/* voice */
+.dbg-voice-peer .dbg-kv { grid-template-columns: max-content 1fr; }
+
+@media (max-width: 820px) {
+  .dbg-sev { display: none; } /* the rail badges still tell the story */
+}
+</style>
+</head>
+<body>
+
+<div class="titlebar">MEWTUAL</div>
+
+<div class="dbg" role="dialog" aria-label="Debug console">
+
+  <!-- ============ header ============ -->
+  <header class="dbg-head">
+    <div class="dbg-title">
+      <div class="stx-crumb" id="crumb">DIAGNOSTICS // OVERVIEW</div>
+      <h1>Debug console</h1>
+    </div>
+    <div class="dbg-sev" title="This session, all sections, counted even while this console was closed">
+      <span class="dbg-sev-chip err"><b>14</b>ERRORS</span>
+      <span class="dbg-sev-chip warn"><b>9</b>WARNINGS</span>
+    </div>
+    <div class="dbg-head-actions">
+      <button class="ghost small" data-copy-bundle>Copy report</button>
+    </div>
+    <button type="button" class="stx-esc" title="Close (Esc)">
+      <span class="stx-esc-ring">&#10005;</span>
+      <span>ESC</span>
+    </button>
+  </header>
+
+  <!-- ============ body ============ -->
+  <div class="dbg-body">
+    <nav class="dbg-rail" aria-label="Console sections">
+      <button class="dbg-rail-item active" data-sec="overview" data-crumb="DIAGNOSTICS // OVERVIEW">Overview</button>
+      <button class="dbg-rail-item" data-sec="network" data-crumb="DIAGNOSTICS // NETWORK">Network <span class="dbg-rail-count err">11</span></button>
+      <button class="dbg-rail-item" data-sec="voice" data-crumb="DIAGNOSTICS // VOICE">Voice <span class="dbg-rail-count err">2</span></button>
+      <button class="dbg-rail-item" data-sec="backend" data-crumb="DIAGNOSTICS // BACKEND">Backend <span class="dbg-rail-count err">13</span></button>
+      <button class="dbg-rail-item" data-sec="frontend" data-crumb="DIAGNOSTICS // FRONTEND">Frontend <span class="dbg-rail-count err">1</span></button>
+      <button class="dbg-rail-item" data-sec="storage" data-crumb="DIAGNOSTICS // STORAGE">Storage</button>
+    </nav>
+
+    <div class="dbg-content">
+
+      <!-- ================= OVERVIEW ================= -->
+      <section class="dbg-sec active" id="sec-overview">
+
+        <div class="dbg-card">
+          <div class="dbg-card-h">Servers
+            <span class="dbg-card-actions"><button class="ghost small" data-copy-card>Copy section</button></span>
+          </div>
+          <div class="dbg-table-wrap">
+            <table class="dbg-table">
+              <thead><tr>
+                <th>Server</th><th class="num">Peers</th><th class="num">Roster</th>
+                <th>Last sync</th><th>Eclipse</th><th>Re-dial</th>
+              </tr></thead>
+              <tbody>
+                <tr>
+                  <td class="name-cell">moss-garden</td>
+                  <td class="num">4 / 6</td><td class="num">6</td>
+                  <td title="14:52:31 local">42s ago</td>
+                  <td><span class="chip ok">OK</span></td>
+                  <td><span class="chip faint">-</span></td>
+                </tr>
+                <tr>
+                  <td class="name-cell">torpor</td>
+                  <td class="num bad">0 / 3</td><td class="num">3</td>
+                  <td title="13:41:05 local">1h 12m ago</td>
+                  <td><span class="chip warn">CAUTION</span></td>
+                  <td><span class="chip transfer">PENDING</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="dbg-note">Eclipse CAUTION: every reachable peer for that server is on one network path. Click a row to see its peers in Network.</p>
+        </div>
+
+        <div class="dbg-grid">
+          <div class="dbg-card">
+            <div class="dbg-card-h">This device
+              <span class="dbg-card-actions"><button class="ghost small" data-copy-card>Copy section</button></span>
+            </div>
+            <div class="dbg-kv">
+              <span class="k">Public IPv4</span>
+              <span class="v"><span class="dbg-pii" data-kind="ip" data-mask="[ip 1]">86.13.88.121</span> <span class="chip ok">AUTONAT CONFIRMED</span></span>
+              <span class="k">IPv6</span>
+              <span class="v"><span class="chip warn">NO ROUTE</span></span>
+              <span class="k">Listen</span>
+              <span class="v">/ip4/<span class="dbg-pii" data-kind="ip" data-mask="[ip 6]">192.168.1.23</span>/udp/4001/quic-v1</span>
+            </div>
+            <p class="dbg-note">No IPv6 route: dials to /ip6/ addresses cannot succeed from this device.</p>
+          </div>
+
+          <div class="dbg-card">
+            <div class="dbg-card-h">Router mappings</div>
+            <div class="dbg-kv">
+              <span class="k">UPnP</span>
+              <span class="v"><span class="chip ok">ACTIVE</span> udp 4001 &gt; 4001 &middot; renews in 4m</span>
+              <span class="k">PCP</span>
+              <span class="v"><span class="chip faint">NOT OFFERED</span></span>
+              <span class="k">NAT-PMP</span>
+              <span class="v"><span class="chip faint">NOT OFFERED</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="dbg-card">
+          <div class="dbg-card-h">Needs attention</div>
+          <ul class="dbg-attn">
+            <li><span class="dbg-ts">14:52:58</span> <a class="where" data-goto="network">NETWORK</a> dial failed: /ip6/&hellip;/quic-v1: network unreachable (no IPv6 route on this host)</li>
+            <li><span class="dbg-ts">14:52:12</span> <a class="where" data-goto="voice">VOICE</a> signalling send failed: transport closed</li>
+            <li><span class="dbg-ts">14:47:03</span> <a class="where" data-goto="backend">BACKEND</a> eclipse detector: torpor peers share one relay path</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ================= NETWORK ================= -->
+      <section class="dbg-sec" id="sec-network">
+
+        <div class="dbg-card">
+          <div class="dbg-card-h">Peers
+            <span class="dbg-card-actions"><button class="ghost small" data-copy-card>Copy section</button></span>
+          </div>
+          <div class="dbg-table-wrap">
+            <table class="dbg-table">
+              <thead><tr>
+                <th></th><th>Peer</th><th>Device</th><th>State</th><th>Transport</th>
+                <th>Address in use</th><th class="num">Fails</th><th>Next dial</th>
+              </tr></thead>
+              <tbody>
+                <tr class="dbg-row-toggle" data-detail="pd-1">
+                  <td class="chev">&#9656;</td>
+                  <td><span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span> <span class="name-cell">Sable</span></td>
+                  <td><span class="dbg-pii" data-kind="fp" data-mask="[fp 1]">c4a9 11f0</span></td>
+                  <td><span class="chip ok">CONNECTED</span></td>
+                  <td><span class="chip faint">QUIC</span></td>
+                  <td><span class="dbg-pii" data-kind="addr" data-mask="/ip4/[ip 2]/udp/4001/quic-v1">/ip4/203.0.113.87/udp/4001/quic-v1</span></td>
+                  <td class="num">0</td><td>-</td>
+                </tr>
+                <tr class="dbg-row-detail" id="pd-1" hidden><td colspan="8">
+                  <div class="dbg-row-detail-inner">
+                    <span class="lbl">Known addresses</span>
+                    <div><span class="good">ok 14:51:40</span> &middot; <span class="dbg-pii" data-kind="addr" data-mask="/ip4/[ip 2]/udp/4001/quic-v1">/ip4/203.0.113.87/udp/4001/quic-v1</span></div>
+                    <div><span class="good">ok 09:12:03</span> &middot; <span class="dbg-pii" data-kind="addr" data-mask="/ip4/[ip 2]/tcp/4001">/ip4/203.0.113.87/tcp/4001</span></div>
+                  </div>
+                </td></tr>
+
+                <tr class="dbg-row-toggle" data-detail="pd-2">
+                  <td class="chev">&#9656;</td>
+                  <td><span class="dbg-pii" data-kind="peer" data-mask="[peer 2]">12D3&hellip;Ejp5</span> <span class="name-cell">Juniper</span></td>
+                  <td><span class="dbg-pii" data-kind="fp" data-mask="[fp 2]">7be2 0d5c</span></td>
+                  <td><span class="chip ok">CONNECTED</span></td>
+                  <td><span class="chip warn">RELAY</span></td>
+                  <td><span class="dbg-pii" data-kind="addr" data-mask="/ip4/[ip 5]/&hellip;/p2p-circuit">/ip4/198.51.100.34/udp/4001/quic-v1/p2p-circuit</span></td>
+                  <td class="num">0</td><td>-</td>
+                </tr>
+                <tr class="dbg-row-detail" id="pd-2" hidden><td colspan="8">
+                  <div class="dbg-row-detail-inner">
+                    <span class="lbl">Known addresses</span>
+                    <div><span class="good">ok 14:31:11</span> &middot; relayed via <span class="dbg-pii" data-kind="ip" data-mask="[ip 5]">198.51.100.34</span> (their NAT refuses hole punch)</div>
+                  </div>
+                </td></tr>
+
+                <tr class="dbg-row-toggle" data-detail="pd-3">
+                  <td class="chev">&#9656;</td>
+                  <td><span class="dbg-pii" data-kind="peer" data-mask="[peer 3]">12D3&hellip;Ax3c</span> <span class="name-cell">Corvid</span></td>
+                  <td><span class="dbg-pii" data-kind="fp" data-mask="[fp 3]">e01d 9a44</span></td>
+                  <td><span class="chip warn">BACKING OFF</span></td>
+                  <td><span class="chip faint">-</span></td>
+                  <td>-</td>
+                  <td class="num bad">7</td><td>in 34s</td>
+                </tr>
+                <tr class="dbg-row-detail" id="pd-3" hidden><td colspan="8">
+                  <div class="dbg-row-detail-inner">
+                    <span class="lbl">Known addresses (all candidates and their last outcome)</span>
+                    <div><span class="bad">failed 14:52:58</span> &middot; <span class="dbg-pii" data-kind="addr" data-mask="/ip6/[ip 3]/udp/4001/quic-v1">/ip6/2a02:8010:6f3e::9c1/udp/4001/quic-v1</span></div>
+                    <div><span class="bad">failed 14:52:58</span> &middot; <span class="dbg-pii" data-kind="addr" data-mask="/ip6/[ip 4]/tcp/4001">/ip6/2a02:8010:6f3e:0:1c2f::4b/tcp/4001</span></div>
+                    <span class="lbl">Last error</span>
+                    <div class="bad">network unreachable (no IPv6 route on this host); this peer has published no IPv4 address</div>
+                  </div>
+                </td></tr>
+
+                <tr class="dbg-row-toggle" data-detail="pd-4">
+                  <td class="chev">&#9656;</td>
+                  <td><span class="dbg-pii" data-kind="peer" data-mask="[peer 4]">12D3&hellip;Zn41</span> <span class="sub">(no name yet)</span></td>
+                  <td><span class="dbg-pii" data-kind="fp" data-mask="[fp 4]">55c0 2fa8</span></td>
+                  <td><span class="chip danger">UNREACHABLE</span></td>
+                  <td><span class="chip faint">-</span></td>
+                  <td>-</td>
+                  <td class="num bad">19</td><td>in 8m</td>
+                </tr>
+                <tr class="dbg-row-detail" id="pd-4" hidden><td colspan="8">
+                  <div class="dbg-row-detail-inner">
+                    <span class="lbl">Known addresses</span>
+                    <div><span class="bad">failed 14:44:19</span> &middot; <span class="dbg-pii" data-kind="addr" data-mask="/ip4/[ip 7]/tcp/4001">/ip4/100.64.11.2/tcp/4001</span> (connection refused)</div>
+                    <span class="lbl">Last error</span>
+                    <div class="bad">connection refused; address may be stale (last seen 3 days ago)</div>
+                  </div>
+                </td></tr>
+
+                <tr class="dbg-row-toggle" data-detail="pd-5">
+                  <td class="chev">&#9656;</td>
+                  <td><span class="dbg-pii" data-kind="peer" data-mask="[peer 5]">12D3&hellip;Qm8x</span> <span class="name-cell">Tansy</span></td>
+                  <td><span class="dbg-pii" data-kind="fp" data-mask="[fp 5]">31d7 c6e9</span></td>
+                  <td><span class="chip transfer">DIALLING</span></td>
+                  <td><span class="chip faint">-</span></td>
+                  <td><span class="dbg-pii" data-kind="addr" data-mask="/ip4/[ip 8]/udp/4001/quic-v1">/ip4/192.0.2.199/udp/4001/quic-v1</span></td>
+                  <td class="num">1</td><td>now</td>
+                </tr>
+                <tr class="dbg-row-detail" id="pd-5" hidden><td colspan="8">
+                  <div class="dbg-row-detail-inner">
+                    <span class="lbl">Known addresses</span>
+                    <div>attempt in flight &middot; <span class="dbg-pii" data-kind="addr" data-mask="/ip4/[ip 8]/udp/4001/quic-v1">/ip4/192.0.2.199/udp/4001/quic-v1</span></div>
+                  </div>
+                </td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="dbg-card dbg-feed">
+          <div class="dbg-card-h">Dial attempts</div>
+          <div class="dbg-feed-bar">
+            <input class="dbg-feed-filter" type="search" placeholder="Filter&hellip;" aria-label="Filter dial attempts">
+            <span class="dbg-feed-count">8 of 8 shown</span>
+            <button class="ghost small" data-pause aria-pressed="false">Pause</button>
+            <button class="ghost small" data-copy-feed>Copy feed</button>
+          </div>
+          <div class="dbg-feed-scroll h-md" role="log" aria-label="Dial attempt feed">
+            <div class="dbg-drop-note">Ring full: oldest entries dropped. Showing the last 500 of 1,283 this session. The debug log file may hold some of these, but it is not a complete record of them.</div>
+            <div class="dbg-line lvl-err"><span class="dbg-ts">14:52:58.114</span>  <span class="dbg-tag">FAIL</span> <span class="dbg-pii" data-kind="peer" data-mask="[peer 3]">12D3&hellip;Ax3c</span> <span class="dbg-pii" data-kind="addr" data-mask="/ip6/[ip 3]/udp/4001/quic-v1">/ip6/2a02:8010:6f3e::9c1/udp/4001/quic-v1</span> : network unreachable (no IPv6 route on this host)<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-err"><span class="dbg-ts">14:52:58.119</span>  <span class="dbg-tag">FAIL</span> <span class="dbg-pii" data-kind="peer" data-mask="[peer 3]">12D3&hellip;Ax3c</span> <span class="dbg-pii" data-kind="addr" data-mask="/ip6/[ip 4]/tcp/4001">/ip6/2a02:8010:6f3e:0:1c2f::4b/tcp/4001</span> : network unreachable (no IPv6 route on this host)<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:53:02.371</span>  <span class="dbg-tag">OK</span> <span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span> <span class="dbg-pii" data-kind="addr" data-mask="/ip4/[ip 2]/udp/4001/quic-v1">/ip4/203.0.113.87/udp/4001/quic-v1</span> : connected in 84ms<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-err"><span class="dbg-ts">14:53:40.005</span>  <span class="dbg-tag">FAIL</span> <span class="dbg-pii" data-kind="peer" data-mask="[peer 4]">12D3&hellip;Zn41</span> <span class="dbg-pii" data-kind="addr" data-mask="/ip4/[ip 7]/tcp/4001">/ip4/100.64.11.2/tcp/4001</span> : connection refused<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-err"><span class="dbg-ts">14:54:12.660</span>  <span class="dbg-tag">FAIL</span> <span class="dbg-pii" data-kind="peer" data-mask="[peer 3]">12D3&hellip;Ax3c</span> <span class="dbg-pii" data-kind="addr" data-mask="/ip6/[ip 3]/udp/4001/quic-v1">/ip6/2a02:8010:6f3e::9c1/udp/4001/quic-v1</span> : network unreachable (no IPv6 route on this host)<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:54:31.209</span>  <span class="dbg-tag">OK</span> <span class="dbg-pii" data-kind="peer" data-mask="[peer 2]">12D3&hellip;Ejp5</span> relayed via <span class="dbg-pii" data-kind="ip" data-mask="[ip 5]">198.51.100.34</span> : circuit established<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-err"><span class="dbg-ts">14:55:44.981</span>  <span class="dbg-tag">FAIL</span> <span class="dbg-pii" data-kind="peer" data-mask="[peer 3]">12D3&hellip;Ax3c</span> <span class="dbg-pii" data-kind="addr" data-mask="/ip6/[ip 4]/tcp/4001">/ip6/2a02:8010:6f3e:0:1c2f::4b/tcp/4001</span> : network unreachable (no IPv6 route on this host)<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:56:00.102</span>  <span class="dbg-tag">DIAL</span> <span class="dbg-pii" data-kind="peer" data-mask="[peer 5]">12D3&hellip;Qm8x</span> <span class="dbg-pii" data-kind="addr" data-mask="/ip4/[ip 8]/udp/4001/quic-v1">/ip4/192.0.2.199/udp/4001/quic-v1</span> : attempting&hellip;<button class="dbg-copy" data-copy-line>copy</button></div>
+          </div>
+        </div>
+
+        <div class="dbg-card">
+          <div class="dbg-card-h">Router / port mapping</div>
+          <div class="dbg-kv">
+            <span class="k">UPnP lease</span>
+            <span class="v">udp 4001 &gt; 4001 on <span class="dbg-pii" data-kind="ip" data-mask="[ip 9]">192.168.1.1</span> &middot; lease 300s &middot; renews in 4m 02s</span>
+          </div>
+          <div class="dbg-feed-scroll h-sm" role="log" aria-label="Router events">
+            <div class="dbg-line lvl-info"><span class="dbg-ts">13:02:11.480</span>  <span class="dbg-tag">MAP</span> UPnP mapping obtained (udp 4001)<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:52:09.017</span>  <span class="dbg-tag">MAP</span> UPnP mapping renewed<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-warn"><span class="dbg-ts">11:14:53.322</span>  <span class="dbg-tag">MAP</span> PCP probe: gateway did not answer (2 tries)<button class="dbg-copy" data-copy-line>copy</button></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= VOICE ================= -->
+      <section class="dbg-sec" id="sec-voice">
+
+        <div class="dbg-card dbg-voice-peer">
+          <div class="dbg-card-h">Call peer: Sable
+            <span class="dbg-card-actions"><button class="ghost small" data-copy-card>Copy section</button></span>
+          </div>
+          <div class="dbg-grid">
+            <div class="dbg-kv">
+              <span class="k">connectionState</span><span class="v"><span class="chip ok">CONNECTED</span></span>
+              <span class="k">iceConnectionState</span><span class="v"><span class="chip ok">CONNECTED</span></span>
+              <span class="k">signalingState</span><span class="v"><span class="chip ok">STABLE</span></span>
+              <span class="k">Media path</span><span class="v"><span class="chip ok">DIRECT</span></span>
+            </div>
+            <div class="dbg-kv">
+              <span class="k">Pair local</span>
+              <span class="v"><span class="chip faint">SRFLX</span> <span class="dbg-pii" data-kind="ip" data-mask="[ip 1]">86.13.88.121</span>:61042</span>
+              <span class="k">Pair remote</span>
+              <span class="v"><span class="chip faint">SRFLX</span> <span class="dbg-pii" data-kind="ip" data-mask="[ip 2]">203.0.113.87</span>:52200</span>
+              <span class="k">Candidates</span>
+              <span class="v">host 3 &middot; srflx 1 &middot; relay 0</span>
+            </div>
+          </div>
+          <p class="dbg-note">No relay candidates: no TURN server is configured. Direct or nothing.</p>
+        </div>
+
+        <div class="dbg-card">
+          <div class="dbg-card-h">STUN / TURN errors</div>
+          <div class="dbg-empty">No STUN/TURN errors this session.</div>
+        </div>
+
+        <div class="dbg-card dbg-feed">
+          <div class="dbg-card-h">Signalling</div>
+          <div class="dbg-feed-bar">
+            <input class="dbg-feed-filter" type="search" placeholder="Filter&hellip;" aria-label="Filter signalling feed">
+            <span class="dbg-feed-count">7 of 7 shown</span>
+            <button class="ghost small" data-pause aria-pressed="false">Pause</button>
+            <button class="ghost small" data-copy-feed>Copy feed</button>
+          </div>
+          <div class="dbg-feed-scroll h-md" role="log" aria-label="Signalling feed">
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:49:58.204</span>  <span class="dbg-dir tx">TX</span> offer &gt; <span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span> <span class="chip ok">DELIVERED</span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:49:58.871</span>  <span class="dbg-dir rx">RX</span> answer &lt; <span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:49:59.032</span>  <span class="dbg-dir tx">TX</span> ice (4 candidates) &gt; <span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span> <span class="chip ok">DELIVERED</span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:49:59.406</span>  <span class="dbg-dir rx">RX</span> ice (3 candidates) &lt; <span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-err"><span class="dbg-ts">14:52:12.550</span>  <span class="dbg-dir tx">TX</span> ice (1 candidate) &gt; <span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span> <span class="chip danger">FAILED</span> signalling transport closed<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-err"><span class="dbg-ts">14:52:13.101</span>  <span class="dbg-dir tx">TX</span> ice (1 candidate) &gt; <span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span> <span class="chip danger">FAILED</span> signalling transport closed<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:52:19.884</span>  <span class="dbg-dir tx">TX</span> ice (1 candidate) &gt; <span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span> <span class="chip ok">DELIVERED</span> (after transport reconnect)<button class="dbg-copy" data-copy-line>copy</button></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= BACKEND ================= -->
+      <section class="dbg-sec" id="sec-backend">
+        <div class="dbg-card dbg-feed">
+          <div class="dbg-card-h">Tracing
+            <span class="dbg-card-actions"><button class="ghost small" data-copy-feed>Copy feed</button></span>
+          </div>
+          <div class="dbg-feed-bar">
+            <input class="dbg-feed-filter" type="search" placeholder="Filter&hellip;" aria-label="Filter backend events">
+            <span class="dbg-lvl-chips" role="group" aria-label="Level filter">
+              <button class="chip danger on" data-lvl="lvl-err" aria-pressed="true">ERROR</button>
+              <button class="chip warn on" data-lvl="lvl-warn" aria-pressed="true">WARN</button>
+              <button class="chip on" data-lvl="lvl-info" aria-pressed="true">INFO</button>
+              <button class="chip" data-lvl="lvl-debug" aria-pressed="false">DEBUG</button>
+              <button class="chip" data-lvl="lvl-trace" aria-pressed="false">TRACE</button>
+            </span>
+            <input class="dbg-feed-filter" data-target-filter type="search" placeholder="target: catcoms_net&hellip;" aria-label="Filter by tracing target" style="flex:0 1 170px">
+            <span class="dbg-feed-count">10 of 12 shown</span>
+            <button class="ghost small" data-pause aria-pressed="false">Pause</button>
+          </div>
+          <div class="dbg-feed-scroll h-lg" role="log" aria-label="Backend tracing feed">
+            <div class="dbg-drop-note">Ring full: oldest entries dropped. Showing the last 2,000 of 3,417 this session. The debug log file may hold some of these, but it is not a complete record of them.</div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:47:00.112</span>  <span class="dbg-tag">INFO</span>  <span class="dbg-target">catcoms_app</span>  session unlocked, 2 servers loaded<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-warn"><span class="dbg-ts">14:47:03.590</span>  <span class="dbg-tag">WARN</span>  <span class="dbg-target">catcoms_net</span>  eclipse detector: all reachable peers for server share one relay path <span class="dbg-kvs">server=torpor peers=1</span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-debug"><span class="dbg-ts">14:47:04.001</span>  <span class="dbg-tag">DEBUG</span> <span class="dbg-target">catcoms_sync</span>  snapshot check: head unchanged <span class="dbg-kvs">server=moss-garden</span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:51:40.283</span>  <span class="dbg-tag">INFO</span>  <span class="dbg-target">catcoms_net</span>  connection established <span class="dbg-kvs">peer=<span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span> transport=quic-v1</span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-err"><span class="dbg-ts">14:52:12.548</span>  <span class="dbg-tag">ERROR</span> <span class="dbg-target">catcoms_net</span>  media-signalling stream reset by transport <span class="dbg-kvs">peer=<span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span></span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-err"><span class="dbg-ts">14:52:58.114</span>  <span class="dbg-tag">ERROR</span> <span class="dbg-target">catcoms_net</span>  dial failure <span class="dbg-kvs">peer=<span class="dbg-pii" data-kind="peer" data-mask="[peer 3]">12D3&hellip;Ax3c</span> addr=<span class="dbg-pii" data-kind="addr" data-mask="/ip6/[ip 3]/udp/4001/quic-v1">/ip6/2a02:8010:6f3e::9c1/udp/4001/quic-v1</span> err="network unreachable"</span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-err"><span class="dbg-ts">14:52:58.119</span>  <span class="dbg-tag">ERROR</span> <span class="dbg-target">catcoms_net</span>  dial failure <span class="dbg-kvs">peer=<span class="dbg-pii" data-kind="peer" data-mask="[peer 3]">12D3&hellip;Ax3c</span> addr=<span class="dbg-pii" data-kind="addr" data-mask="/ip6/[ip 4]/tcp/4001">/ip6/2a02:8010:6f3e:0:1c2f::4b/tcp/4001</span> err="network unreachable"</span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-warn"><span class="dbg-ts">14:52:58.125</span>  <span class="dbg-tag">WARN</span>  <span class="dbg-target">catcoms_net</span>  peer has no dialable address for this host <span class="dbg-kvs">peer=<span class="dbg-pii" data-kind="peer" data-mask="[peer 3]">12D3&hellip;Ax3c</span> reason="only /ip6/ candidates, host has no IPv6 route"</span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:52:59.301</span>  <span class="dbg-tag">INFO</span>  <span class="dbg-target">catcoms_sync</span>  synced 12 ops <span class="dbg-kvs">server=moss-garden peer=<span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span></span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-trace"><span class="dbg-ts">14:53:00.007</span>  <span class="dbg-tag">TRACE</span> <span class="dbg-target">catcoms_net</span>  identify push <span class="dbg-kvs">peer=<span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span></span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:54:31.209</span>  <span class="dbg-tag">INFO</span>  <span class="dbg-target">catcoms_net</span>  relayed circuit established <span class="dbg-kvs">peer=<span class="dbg-pii" data-kind="peer" data-mask="[peer 2]">12D3&hellip;Ejp5</span></span><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-warn"><span class="dbg-ts">14:56:20.833</span>  <span class="dbg-tag">WARN</span>  <span class="dbg-target">catcoms_app</span>  re-dial scheduled for all torpor peers <span class="dbg-kvs">in=8m</span><button class="dbg-copy" data-copy-line>copy</button></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= FRONTEND ================= -->
+      <section class="dbg-sec" id="sec-frontend">
+        <div class="dbg-card dbg-feed">
+          <div class="dbg-card-h">Console and errors
+            <span class="dbg-card-actions"><button class="ghost small" data-copy-feed>Copy feed</button></span>
+          </div>
+          <div class="dbg-feed-bar">
+            <input class="dbg-feed-filter" type="search" placeholder="Filter&hellip;" aria-label="Filter frontend events">
+            <span class="dbg-lvl-chips" role="group" aria-label="Level filter">
+              <button class="chip danger on" data-lvl="lvl-err" aria-pressed="true">ERROR</button>
+              <button class="chip warn on" data-lvl="lvl-warn" aria-pressed="true">WARN</button>
+              <button class="chip on" data-lvl="lvl-info" aria-pressed="true">INFO</button>
+            </span>
+            <span class="dbg-feed-count">5 of 5 shown</span>
+            <button class="ghost small" data-pause aria-pressed="false">Pause</button>
+          </div>
+          <div class="dbg-feed-scroll h-lg" role="log" aria-label="Frontend feed">
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:47:00.900</span>  <span class="dbg-tag">info</span>  voice-signaling: transport attached<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-warn"><span class="dbg-ts">14:52:12.551</span>  <span class="dbg-tag">warn</span>  voice-signaling: send failed, queueing for reconnect (1 message)<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-warn"><span class="dbg-ts">14:52:13.102</span>  <span class="dbg-tag">warn</span>  voice-signaling: send failed, queueing for reconnect (2 messages)<button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-err"><span class="dbg-ts">14:52:14.480</span>  <span class="dbg-tag">uncaught</span>  TypeError: Cannot read properties of null (reading 'iceConnectionState')
+              <details class="dbg-line-stack"><summary>stack</summary><pre>TypeError: Cannot read properties of null (reading 'iceConnectionState')
+    at pollCallStats (App.svelte:4182:27)
+    at callStatsTick (App.svelte:4159:9)</pre></details><button class="dbg-copy" data-copy-line>copy</button></div>
+            <div class="dbg-line lvl-info"><span class="dbg-ts">14:52:19.885</span>  <span class="dbg-tag">info</span>  voice-signaling: transport reconnected, queue flushed<button class="dbg-copy" data-copy-line>copy</button></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= STORAGE ================= -->
+      <section class="dbg-sec" id="sec-storage">
+        <div class="dbg-card">
+          <div class="dbg-card-h">Stores
+            <span class="dbg-card-actions"><button class="ghost small" data-copy-card>Copy section</button></span>
+          </div>
+          <div class="dbg-table-wrap">
+            <table class="dbg-table">
+              <thead><tr>
+                <th>Server</th><th class="num">Documents</th><th class="num">Blob store</th>
+                <th class="num">Pending up</th><th class="num">Pending down</th>
+              </tr></thead>
+              <tbody>
+                <tr>
+                  <td class="name-cell">moss-garden</td>
+                  <td class="num">1,284</td><td class="num">412.6 MB</td>
+                  <td class="num" style="color: var(--muted)">0</td>
+                  <td class="num" style="color: var(--transfer)">2 (18.4 MB)</td>
+                </tr>
+                <tr>
+                  <td class="name-cell">torpor</td>
+                  <td class="num">96</td><td class="num">3.1 MB</td>
+                  <td class="num" style="color: var(--transfer)">1 (2.0 MB)</td>
+                  <td class="num" style="color: var(--muted)">0</td>
+                </tr>
+                <tr class="totals">
+                  <td>Total</td>
+                  <td class="num">1,380</td><td class="num">415.7 MB</td>
+                  <td class="num">1</td><td class="num">2</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="dbg-note">Data directory: <span class="fp">%APPDATA%\mewtual\data</span>. Blob sizes are on-disk (encrypted at rest).</p>
+        </div>
+      </section>
+
+    </div><!-- /dbg-content -->
+  </div><!-- /dbg-body -->
+
+  <!-- ============ footer ============ -->
+  <footer class="dbg-foot">
+    <p class="muted small">Everything here can include your IP addresses, peer and device identifiers, and timing. It never includes message text, file contents, names or key material.</p>
+    <label class="toggle dbg-redact">
+      <input type="checkbox" id="redact-toggle">
+      <span>REDACT FOR SCREENSHOTS</span>
+    </label>
+  </footer>
+</div>
+
+<script>
+/* Mockup behaviour only. The implementation does all of this in Svelte state;
+   see docs/design-debug-console.md section 8. */
+
+/* section switching */
+const railItems = document.querySelectorAll(".dbg-rail-item");
+const crumb = document.getElementById("crumb");
+function showSection(name) {
+  railItems.forEach((b) => b.classList.toggle("active", b.dataset.sec === name));
+  document.querySelectorAll(".dbg-sec").forEach((s) =>
+    s.classList.toggle("active", s.id === "sec-" + name));
+  const active = document.querySelector('.dbg-rail-item[data-sec="' + name + '"]');
+  if (active) crumb.textContent = active.dataset.crumb;
+}
+railItems.forEach((b) => b.addEventListener("click", () => showSection(b.dataset.sec)));
+document.querySelectorAll("[data-goto]").forEach((a) =>
+  a.addEventListener("click", () => showSection(a.dataset.goto)));
+
+/* redact: swap real text for a stable alias; the implementation swaps at render
+   time via a redact() helper so copy always matches what is on screen */
+document.getElementById("redact-toggle").addEventListener("change", (e) => {
+  document.body.classList.toggle("redacted", e.target.checked);
+  document.querySelectorAll(".dbg-pii").forEach((el) => {
+    if (!el.dataset.full) el.dataset.full = el.textContent;
+    el.textContent = e.target.checked ? el.dataset.mask : el.dataset.full;
+  });
+});
+
+/* per-feed text filter + level chips */
+function applyFilters(card) {
+  const scroll = card.querySelector(".dbg-feed-scroll");
+  if (!scroll) return;
+  const q = (card.querySelector(".dbg-feed-filter:not([data-target-filter])")?.value || "").toLowerCase();
+  const tq = (card.querySelector("[data-target-filter]")?.value || "").toLowerCase();
+  const chips = card.querySelectorAll(".dbg-lvl-chips .chip");
+  const on = new Set();
+  chips.forEach((c) => { if (c.classList.contains("on")) on.add(c.dataset.lvl); });
+  const lines = scroll.querySelectorAll(".dbg-line");
+  let shown = 0;
+  lines.forEach((ln) => {
+    let ok = !q || ln.textContent.toLowerCase().includes(q);
+    if (ok && tq) {
+      const t = ln.querySelector(".dbg-target");
+      ok = t && t.textContent.toLowerCase().includes(tq);
+    }
+    if (ok && chips.length) {
+      ok = [...on].some((lvl) => ln.classList.contains(lvl));
+    }
+    ln.style.display = ok ? "" : "none";
+    if (ok) shown += 1;
+  });
+  const count = card.querySelector(".dbg-feed-count");
+  if (count) count.textContent = shown + " of " + lines.length + " shown";
+}
+document.querySelectorAll(".dbg-card").forEach((card) => {
+  card.querySelectorAll(".dbg-feed-filter").forEach((inp) =>
+    inp.addEventListener("input", () => applyFilters(card)));
+  card.querySelectorAll(".dbg-lvl-chips .chip").forEach((chip) =>
+    chip.addEventListener("click", () => {
+      chip.classList.toggle("on");
+      chip.setAttribute("aria-pressed", chip.classList.contains("on"));
+      applyFilters(card);
+    }));
+  applyFilters(card);
+});
+
+/* pause: freezes rendering only; capture continues (faked here) */
+document.querySelectorAll("[data-pause]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const paused = btn.getAttribute("aria-pressed") !== "true";
+    btn.setAttribute("aria-pressed", paused);
+    btn.textContent = paused ? "Resume (+3)" : "Pause";
+  });
+});
+
+/* peer row expansion */
+document.querySelectorAll("tr.dbg-row-toggle").forEach((row) => {
+  row.addEventListener("click", () => {
+    const d = document.getElementById(row.dataset.detail);
+    if (!d) return;
+    d.hidden = !d.hidden;
+    const chev = row.querySelector(".chev");
+    if (chev) chev.innerHTML = d.hidden ? "&#9656;" : "&#9662;";
+  });
+});
+
+/* copy: best effort in a local file; flashes the button either way */
+function flash(btn) {
+  const old = btn.textContent;
+  btn.textContent = "Copied";
+  setTimeout(() => { btn.textContent = old; }, 1400);
+}
+function copyText(btn, text) {
+  try { navigator.clipboard.writeText(text); } catch (_) { /* file:// may refuse */ }
+  flash(btn);
+}
+document.querySelectorAll("[data-copy-line]").forEach((btn) =>
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    copyText(btn, btn.closest(".dbg-line").textContent.replace(/copy$/, "").trim());
+  }));
+document.querySelectorAll("[data-copy-card], [data-copy-feed]").forEach((btn) =>
+  btn.addEventListener("click", () =>
+    copyText(btn, btn.closest(".dbg-card").innerText)));
+document.querySelectorAll("[data-copy-bundle]").forEach((btn) =>
+  btn.addEventListener("click", () =>
+    copyText(btn, "== MEWTUAL DEBUG REPORT ==\n(the implementation serialises every section here)")));
+</script>
+</body>
+</html>

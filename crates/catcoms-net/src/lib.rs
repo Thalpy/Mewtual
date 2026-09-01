@@ -75,15 +75,17 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use catcoms_rt::{
-    Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerId, ProtocolId,
-    Responder, SystemClock, Topic, TransportError, TransportEvent,
+    Clock, ConnectionDirection, ConnectionFamily, ConnectionPath, ConnectionTransport,
+    CryptoRngCore, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerConnectionSnapshot, PeerId,
+    ProtocolId, RendezvousRegistration, Responder, SystemClock, Topic, TransportError,
+    TransportEvent, MAX_PEER_DIAL_BATCH,
 };
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
 use libp2p::core::transport::MemoryTransport;
 use libp2p::core::transport::PortUse;
 use libp2p::core::upgrade::Version;
-use libp2p::core::Endpoint;
+use libp2p::core::{ConnectedPoint, Endpoint};
 use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{OutboundRequestId, ResponseChannel};
 use libp2p::swarm::behaviour::toggle::Toggle;
@@ -159,6 +161,29 @@ pub struct Registered {
     /// The rendezvous node that granted it.
     pub rendezvous_node: libp2p::PeerId,
 }
+
+/// One currently-live outbound route whose terminal peer completed libp2p's Noise handshake.
+///
+/// This is intentionally separate from ordinary connection diagnostics: it contains a network
+/// address and must never be shown as membership or presence evidence. The desktop uses it only
+/// to retain the exact same-LAN route that a joiner already proved during admission, so a restart
+/// does not depend on an unimplemented local-discovery mechanism. Listener source addresses are
+/// excluded because their ephemeral source port is not a future dial target; relay circuits are
+/// excluded because their lease/consent lifecycle is managed separately.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AuthenticatedDialRoute {
+    /// The Phase-0 transport identity authenticated by Noise on this connection.
+    pub peer: PeerId,
+    /// A canonical, direct IP multiaddr ending in that peer's `/p2p/<id>` component.
+    pub address: String,
+}
+
+/// Retain two most-recent exact routes per peer for this process lifetime. This is evidence of a
+/// completed outbound Noise handshake, not current connectivity; the application still supplies
+/// roster and local-consent checks before it may persist or dial one.
+const MAX_AUTHENTICATED_ROUTE_EVIDENCE_PER_PEER: usize = 2;
+const MAX_AUTHENTICATED_ROUTE_EVIDENCE: usize =
+    catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT * MAX_AUTHENTICATED_ROUTE_EVIDENCE_PER_PEER;
 
 /// The result of one AutoNAT v2 dial-back for one candidate address.
 ///
@@ -695,11 +720,322 @@ pub fn target_peer_in_multiaddr(addr: &Multiaddr) -> Option<libp2p::PeerId> {
     target
 }
 
+/// Submit constructor/bootstrap dials with a known peer whenever an address names one.
+///
+/// `Swarm::dial(Multiaddr)` deliberately creates unknown-peer options, even when the multiaddr
+/// ends in `/p2p/<peer>`. That hides the in-flight peer from libp2p's condition checks and from our
+/// actor ledger. Constructor routes are locally trusted bootstrap choices, so bind their explicit
+/// terminal identity and retain the accepted connection id. If the same peer is later explicitly
+/// classified as infrastructure, the actor can suppress a duplicate before it spends a permit.
+///
+/// Grouping is load-bearing: ordinary bootstraps carry TCP and QUIC routes for the same terminal
+/// peer. Separate `DisconnectedAndNotDialing` calls would accept the first and reject the second,
+/// as well as losing libp2p's intended address race. Bare development addresses retain the legacy
+/// unknown-peer behavior and are submitted individually.
+fn dial_bootstraps(
+    swarm: &mut Swarm<MeshBehaviour>,
+    addrs: &[Multiaddr],
+) -> Result<Vec<(libp2p::PeerId, ConnectionId)>, libp2p::swarm::DialError> {
+    let mut peer_groups: Vec<(libp2p::PeerId, Vec<Multiaddr>)> = Vec::new();
+    let mut bare = Vec::new();
+    for addr in addrs {
+        if let Some(target) = target_peer_in_multiaddr(addr) {
+            if let Some((_, grouped)) = peer_groups.iter_mut().find(|(peer, _)| *peer == target) {
+                grouped.push(addr.clone());
+            } else {
+                peer_groups.push((target, vec![addr.clone()]));
+            }
+        } else {
+            bare.push(addr.clone());
+        }
+    }
+
+    let mut submitted = Vec::with_capacity(peer_groups.len());
+    for (target, addresses) in peer_groups {
+        let opts = DialOpts::peer_id(target)
+            .addresses(addresses)
+            .condition(PeerCondition::DisconnectedAndNotDialing)
+            .build();
+        let connection_id = opts.connection_id();
+        swarm.dial(opts)?;
+        submitted.push((target, connection_id));
+    }
+    for addr in bare {
+        swarm.dial(addr)?;
+    }
+    Ok(submitted)
+}
+
 /// Whether a multiaddr is a relay-circuit address (`…/p2p-circuit/…`). A connection
 /// established over such an address is relayed; DCUtR then tries to upgrade it to a
 /// direct one.
 fn is_relayed(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| p == Protocol::P2pCircuit)
+}
+
+/// Reduce libp2p's endpoint to the stable, address-free evidence exposed above the transport.
+///
+/// Relay wins over its carrier protocol: `/ip4/.../tcp/.../p2p-circuit` is useful evidence that a
+/// circuit works, not evidence that this member is directly reachable over TCP. WebSocket likewise
+/// wins over its TCP carrier. The order here is therefore part of the diagnostic contract.
+fn classify_connection_path(endpoint: &ConnectedPoint) -> ConnectionPath {
+    // For an inbound relay circuit the relay route lives on `local_addr`; `send_back_addr` is the
+    // remote endpoint *inside* the circuit and can even be a memory address. Direct listeners and
+    // every dialer continue to use the remote address. Family and transport must describe the
+    // same route or the UI can report a nonsensical "memory circuit over an IPv4 relay".
+    let addr = match endpoint {
+        ConnectedPoint::Listener { local_addr, .. } if endpoint.is_relayed() => local_addr,
+        _ => endpoint.get_remote_address(),
+    };
+    let family = if addr.iter().any(|p| {
+        matches!(p, Protocol::Ip4(_))
+            || matches!(p, Protocol::Ip6(ip) if ip.to_ipv4_mapped().is_some())
+    }) {
+        ConnectionFamily::Ipv4
+    } else if addr
+        .iter()
+        .any(|p| matches!(p, Protocol::Ip6(ip) if ip.to_ipv4_mapped().is_none()))
+    {
+        ConnectionFamily::Ipv6
+    } else if addr.iter().any(|p| {
+        matches!(
+            p,
+            Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_)
+        )
+    }) {
+        ConnectionFamily::Dns
+    } else if addr.iter().any(|p| matches!(p, Protocol::Memory(_))) {
+        ConnectionFamily::Memory
+    } else {
+        ConnectionFamily::Unknown
+    };
+    let transport = if endpoint.is_relayed() {
+        ConnectionTransport::CircuitRelay
+    } else if addr
+        .iter()
+        .any(|p| matches!(p, Protocol::Ws(_) | Protocol::Wss(_)))
+    {
+        ConnectionTransport::WebSocket
+    } else if addr.iter().any(|p| matches!(p, Protocol::QuicV1)) {
+        ConnectionTransport::QuicV1
+    } else if addr.iter().any(|p| matches!(p, Protocol::Tcp(_))) {
+        ConnectionTransport::Tcp
+    } else if addr.iter().any(|p| matches!(p, Protocol::Memory(_))) {
+        ConnectionTransport::Memory
+    } else {
+        ConnectionTransport::Unknown
+    };
+    ConnectionPath {
+        family,
+        transport,
+        direction: if endpoint.is_dialer() {
+            ConnectionDirection::Dialer
+        } else {
+            ConnectionDirection::Listener
+        },
+    }
+}
+
+fn active_connection_paths(
+    paths: &HashMap<(libp2p::PeerId, ConnectionId), ConnectionPath>,
+    peer_id: libp2p::PeerId,
+) -> Vec<ConnectionPath> {
+    let mut active: Vec<_> = paths
+        .iter()
+        .filter_map(|((candidate, _), path)| (*candidate == peer_id).then_some(*path))
+        .collect();
+    active.sort_unstable();
+    active.dedup();
+    active
+}
+
+/// Recover the exact future-dialable route from an authenticated outbound connection.
+///
+/// libp2p removes the terminal `/p2p` component from some established dialer endpoints. Reattach
+/// the identity that Noise actually authenticated, then run the same final direct-route guard used
+/// by reciprocal repair. Keeping only literal IP routes avoids turning a remembered DNS answer
+/// into a cross-session rebinding capability.
+fn authenticated_dial_route(
+    peer_id: libp2p::PeerId,
+    endpoint: &ConnectedPoint,
+) -> Option<AuthenticatedDialRoute> {
+    let ConnectedPoint::Dialer { address, .. } = endpoint else {
+        return None;
+    };
+    if is_relayed(address)
+        || !address
+            .iter()
+            .any(|part| matches!(part, Protocol::Ip4(_) | Protocol::Ip6(_)))
+        || address
+            .iter()
+            .any(|part| matches!(part, Protocol::Ws(_) | Protocol::Wss(_) | Protocol::Tls))
+        || address.iter().any(|part| {
+            matches!(
+                part,
+                Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_)
+            )
+        })
+    {
+        return None;
+    }
+
+    let mut route = address.clone();
+    match target_peer_in_multiaddr(&route) {
+        Some(target) if target != peer_id => return None,
+        Some(_) => {}
+        None => route.push(Protocol::P2p(peer_id)),
+    }
+    let peer = to_peer(&peer_id);
+    valid_direct_peer_batch(peer, std::slice::from_ref(&route)).then(|| AuthenticatedDialRoute {
+        peer,
+        address: route.to_string(),
+    })
+}
+
+/// Address-free dial diagnostics. Member routes can contain private LAN coordinates, so generic
+/// transport logging records only enough structure to distinguish family/transport failures.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DialLogShape {
+    ipv4: usize,
+    ipv6: usize,
+    dns: usize,
+    tcp: usize,
+    websocket: usize,
+    quic: usize,
+    relay: usize,
+}
+
+fn dial_log_shape<'a>(addresses: impl IntoIterator<Item = &'a Multiaddr>) -> DialLogShape {
+    let mut shape = DialLogShape::default();
+    for address in addresses {
+        let parts: Vec<_> = address.iter().collect();
+        if parts.iter().any(|part| matches!(part, Protocol::Ip4(_))) {
+            shape.ipv4 += 1;
+        } else if parts.iter().any(|part| matches!(part, Protocol::Ip6(_))) {
+            shape.ipv6 += 1;
+        } else if parts.iter().any(|part| {
+            matches!(
+                part,
+                Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_)
+            )
+        }) {
+            shape.dns += 1;
+        }
+        if parts.iter().any(|part| matches!(part, Protocol::QuicV1)) {
+            shape.quic += 1;
+        } else if parts
+            .iter()
+            .any(|part| matches!(part, Protocol::Ws(_) | Protocol::Wss(_) | Protocol::Tls))
+        {
+            shape.websocket += 1;
+        } else if parts.iter().any(|part| matches!(part, Protocol::Tcp(_))) {
+            shape.tcp += 1;
+        }
+        if parts
+            .iter()
+            .any(|part| matches!(part, Protocol::P2pCircuit))
+        {
+            shape.relay += 1;
+        }
+    }
+    shape
+}
+
+fn dial_error_kind(error: &libp2p::swarm::DialError) -> &'static str {
+    match error {
+        libp2p::swarm::DialError::LocalPeerId { .. } => "local-peer",
+        libp2p::swarm::DialError::NoAddresses => "no-addresses",
+        libp2p::swarm::DialError::DialPeerConditionFalse(_) => "condition",
+        libp2p::swarm::DialError::Aborted => "aborted",
+        libp2p::swarm::DialError::WrongPeerId { .. } => "wrong-peer",
+        libp2p::swarm::DialError::Denied { .. } => "denied",
+        libp2p::swarm::DialError::Transport(_) => "transport",
+    }
+}
+
+/// Apply a libp2p close edge to the path ledger. `remaining == 0` is authoritative and clears all
+/// rows for the peer, healing any missed/unknown connection id instead of stranding stale detail.
+fn forget_connection_path(
+    paths: &mut HashMap<(libp2p::PeerId, ConnectionId), ConnectionPath>,
+    peer_id: libp2p::PeerId,
+    connection_id: ConnectionId,
+    remaining: u32,
+) {
+    paths.remove(&(peer_id, connection_id));
+    if remaining == 0 {
+        paths.retain(|(candidate, _), _| candidate != &peer_id);
+    }
+}
+
+/// Mirror the path ledger's authoritative final-close healing for address-bearing route state.
+fn forget_authenticated_routes(
+    routes: &mut HashMap<(libp2p::PeerId, ConnectionId), AuthenticatedDialRoute>,
+    peer: libp2p::PeerId,
+    connection: ConnectionId,
+    remaining: u32,
+) {
+    routes.remove(&(peer, connection));
+    if remaining == 0 {
+        routes.retain(|(candidate, _), _| *candidate != peer);
+    }
+}
+
+/// Build the exact deterministic value exposed through the private authenticated-route watch.
+fn authenticated_route_snapshot(
+    routes: &HashMap<(libp2p::PeerId, ConnectionId), AuthenticatedDialRoute>,
+) -> Vec<AuthenticatedDialRoute> {
+    // A peer may have parallel TCP/QUIC connections to the same socket. Collapse identical routes
+    // and retain the hard bound even if alternate swarm limits are configured in the future.
+    let mut snapshot: Vec<_> = routes.values().cloned().collect();
+    snapshot.sort();
+    snapshot.dedup();
+    snapshot.truncate(catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT * MAX_PEER_DIAL_BATCH);
+    snapshot
+}
+
+/// Record a completed outbound Noise handshake independently of current liveness. A connection
+/// can establish and close before the desktop obtains its vault lock; clearing this proof on the
+/// close edge would make a valid, explicitly authorized recovery impossible to seal.
+fn record_authenticated_route_evidence(
+    evidence: &mut VecDeque<AuthenticatedDialRoute>,
+    route: AuthenticatedDialRoute,
+) {
+    evidence.retain(|candidate| candidate != &route);
+    while evidence
+        .iter()
+        .filter(|candidate| candidate.peer == route.peer)
+        .count()
+        >= MAX_AUTHENTICATED_ROUTE_EVIDENCE_PER_PEER
+    {
+        let Some(index) = evidence
+            .iter()
+            .position(|candidate| candidate.peer == route.peer)
+        else {
+            break;
+        };
+        evidence.remove(index);
+    }
+    evidence.push_back(route);
+    while evidence.len() > MAX_AUTHENTICATED_ROUTE_EVIDENCE {
+        evidence.pop_front();
+    }
+}
+
+/// Apply one physical close edge and immediately publish its address-bearing result.
+///
+/// This must not be conditional on the privacy-preserving coarse path set changing: two distinct
+/// TCP connections can collapse to the same path shape while carrying different future-dialable
+/// addresses. Keeping the state transition and publication together makes that invariant directly
+/// regression-testable.
+fn forget_and_publish_authenticated_routes(
+    routes: &mut HashMap<(libp2p::PeerId, ConnectionId), AuthenticatedDialRoute>,
+    snapshots: &watch::Sender<Vec<AuthenticatedDialRoute>>,
+    peer: libp2p::PeerId,
+    connection: ConnectionId,
+    remaining: u32,
+) {
+    forget_authenticated_routes(routes, peer, connection, remaining);
+    snapshots.send_replace(authenticated_route_snapshot(routes));
 }
 
 /// The **relay**'s peer id in a circuit address `…/p2p/<relay>/p2p-circuit[/p2p/<target>]`, i.e.
@@ -869,10 +1205,44 @@ enum Command {
         data: Bytes,
         reply: oneshot::Sender<Result<Bytes, TransportError>>,
     },
+    /// Send only over a connection that is live when this command is handled. Unlike
+    /// [`Command::Request`], this must never consult `recent_peers` or seed an implicit redial.
+    /// It is the proof path used after a reciprocal-dial scheduler denies a new socket pass.
+    RequestConnected {
+        peer: PeerId,
+        data: Bytes,
+        reply: oneshot::Sender<Result<Bytes, TransportError>>,
+    },
+    /// Send a request whose reply nobody is waiting for (see [`catcoms_rt::MeshTransport::notify`]).
+    /// No `pending_req` entry is registered, so the outcome is logged here and goes nowhere else.
+    Notify {
+        peer: PeerId,
+        data: Bytes,
+    },
+    /// Fire-and-forget counterpart to `RequestConnected`: never consult `recent_peers`.
+    NotifyConnected {
+        peer: PeerId,
+        data: Bytes,
+    },
     /// Start listening on `addr` (e.g. a `…/p2p-circuit` relay reservation).
     Listen(Multiaddr),
     /// Dial `addr` (e.g. a relay, before reserving a circuit on it).
-    Dial(Multiaddr),
+    Dial {
+        addr: Multiaddr,
+        /// Present for discovery-policy dials. Ownership must remain in this command until the
+        /// actor either suppresses the endpoint or commits it at socket submission.
+        permit: Option<catcoms_rt::BoxedDialPermit>,
+        reply: Option<oneshot::Sender<catcoms_rt::DialSubmission>>,
+    },
+    /// A reciprocal-repair batch whose direct routes must all terminate at `peer`.
+    /// Validation happens inside the actor, immediately before the ordinary dial gate, so an
+    /// alternate caller cannot separate a checked peer id from a substituted address.
+    DialPeerBatch {
+        peer: PeerId,
+        addrs: Vec<Multiaddr>,
+        permits: Option<Vec<catcoms_rt::BoxedDialPermit>>,
+        reply: oneshot::Sender<Result<Vec<catcoms_rt::DialSubmission>, TransportError>>,
+    },
     /// Advertise `addr` as an external (reachable) address; for a node with a
     /// directly-reachable address (a public IP, or a memory listener in tests) that
     /// does not need a relay circuit to be registerable at a rendezvous. Flushes any
@@ -902,6 +1272,24 @@ enum Command {
     /// ex-member who is later re-invited dials the founder, is refused at the connection handler,
     /// and the join times out with nothing to diagnose.
     Unevict(PeerId),
+}
+
+/// Commit an optional scheduler permit for this exact actor-owned endpoint.
+///
+/// A command without a permit is a locally configured/bootstrap dial and follows the legacy path.
+/// A command with a stale permit is suppressed. The exact-address comparison is repeated here,
+/// next to submission, even though the sender parsed the same string before enqueueing.
+fn commit_dial_permit(permit: Option<catcoms_rt::BoxedDialPermit>, addr: &Multiaddr) -> bool {
+    let Some(permit) = permit else {
+        return true;
+    };
+    let canonical = addr.to_string();
+    if permit.address() != canonical {
+        return false;
+    }
+    permit
+        .commit_if_current()
+        .is_some_and(|authorized| authorized == canonical)
 }
 
 /// Cap on the eviction deny list.
@@ -1192,6 +1580,69 @@ type PortMappingKey = (PortMappingMechanism, PortMappingTransport, Option<IpAddr
 /// public watch channel itself is coalesced.
 const MAX_AUTONAT_OBSERVATIONS: usize = 64;
 const MAX_MESH_OBSERVATIONS: usize = 32;
+
+/// How many disconnected peers keep a redial hint (see `Actor::recent_peers`). Comfortably above
+/// a friend circle's roster, and small enough that a churning public node cannot grow on it.
+const MAX_RECENT_PEERS: usize = 256;
+
+/// How many addresses one redial hint remembers. A peer is reachable over a handful of routes
+/// (direct v4/v6, a relay circuit); keeping every address a long-lived peer has ever connected
+/// from would let one peer crowd out the rest of the map.
+const MAX_RECENT_PEER_ADDRS: usize = 4;
+
+/// A peer's last known transport identity, kept so a request can redial it after its connection
+/// dropped. See `Actor::recent_peers` for why the transport remembers this at all.
+#[derive(Debug, Clone)]
+struct RecentPeer {
+    libp2p: libp2p::PeerId,
+    /// Addresses this node has actually established a connection over, freshest last. Offered to
+    /// the swarm's address book before a redial; never advertised as anything of ours.
+    addresses: VecDeque<Multiaddr>,
+}
+
+/// Remember a peer's transport identity and the address it connected over, so a later request can
+/// redial it once that connection has gone. See `Actor::recent_peers`.
+///
+/// Unlike [`record_mesh_observation`], a repeat visit does **not** make the peer newest: the map is
+/// a redial hint for peers this node keeps talking to, and refreshing on every reconnect would let
+/// a pair of chatty peers push out the quiet member whose route is the one worth remembering.
+fn record_recent_peer(
+    recent: &mut HashMap<PeerId, RecentPeer>,
+    order: &mut VecDeque<PeerId>,
+    peer: PeerId,
+    libp2p_peer: libp2p::PeerId,
+    addr: Multiaddr,
+) {
+    match recent.get_mut(&peer) {
+        Some(entry) => {
+            // A peer id is derived from its key, so this only ever re-confirms what is already
+            // there; assigning keeps the halves consistent if that ever stops being true.
+            entry.libp2p = libp2p_peer;
+            if !entry.addresses.contains(&addr) {
+                entry.addresses.push_back(addr);
+                while entry.addresses.len() > MAX_RECENT_PEER_ADDRS {
+                    entry.addresses.pop_front();
+                }
+            }
+        }
+        None => {
+            recent.insert(
+                peer,
+                RecentPeer {
+                    libp2p: libp2p_peer,
+                    addresses: VecDeque::from([addr]),
+                },
+            );
+            order.push_back(peer);
+            while recent.len() > MAX_RECENT_PEERS {
+                let Some(oldest) = order.pop_front() else {
+                    break;
+                };
+                recent.remove(&oldest);
+            }
+        }
+    }
+}
 
 fn record_mesh_observation(
     observations: &mut HashMap<libp2p::PeerId, Multiaddr>,
@@ -2668,6 +3119,16 @@ struct Actor {
     enable_port_mapping: bool,
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
+    /// Coalesced, present-time liveness/path table. Pre-actor admission and infrastructure waits
+    /// observe this instead of consuming the sole ordered event stream that `ChannelSync` owns.
+    connection_snapshot_tx: watch::Sender<Vec<PeerConnectionSnapshot>>,
+    /// Address-bearing companion to the privacy-preserving connection snapshot. Only current
+    /// outbound, Noise-authenticated direct routes enter this table; consumers use it to seal a
+    /// same-LAN reconnect hint after admission, never for UI presence.
+    authenticated_route_tx: watch::Sender<Vec<AuthenticatedDialRoute>>,
+    /// Session-bounded successful outbound routes. Unlike `authenticated_route_tx`, a close does
+    /// not erase these before an authorized recovery capture can seal its evidence.
+    authenticated_route_evidence_tx: watch::Sender<Vec<AuthenticatedDialRoute>>,
     listen_tx: mpsc::Sender<Multiaddr>,
     active_listeners: HashSet<Multiaddr>,
     listener_snapshot_tx: watch::Sender<ListenerSnapshot>,
@@ -2722,6 +3183,17 @@ struct Actor {
     /// Registrations deferred until we have a confirmed external address to advertise.
     pending_registers: Vec<(rendezvous::Namespace, libp2p::PeerId)>,
     peers: HashMap<PeerId, libp2p::PeerId>,
+    /// Last known libp2p identity and dial addresses for every peer this node has been connected
+    /// to, deliberately kept **past** disconnect. `peers` is the live set and `to_peer` is a
+    /// one-way BLAKE3, so without this an outbound request to a peer whose connection had dropped
+    /// could not even name a dial target and failed instantly, with no attempt to reconnect. That
+    /// turned one dropped connection into a permanently dead route for call signalling, which
+    /// re-sends on a timer and therefore never recovered on its own.
+    ///
+    /// Bounded FIFO: this is a redial hint, not an address book, and the authoritative one
+    /// (signed peer records) lives above the transport.
+    recent_peers: HashMap<PeerId, RecentPeer>,
+    recent_peer_order: VecDeque<PeerId>,
     pending_req: HashMap<OutboundRequestId, oneshot::Sender<Result<Bytes, TransportError>>>,
     pending_publish: Vec<(Topic, Bytes)>,
     /// Peers this node uses as **infrastructure**: rendezvous nodes it registers or discovers at,
@@ -2735,6 +3207,25 @@ struct Actor {
     /// Member-peer dials accumulated during one drain of the command queue, so a peer's addresses
     /// are handed to libp2p as one racing dial rather than N sequential ones.
     pending_dials: HashMap<libp2p::PeerId, Vec<Multiaddr>>,
+    /// Infrastructure peers with an accepted libp2p dial that has not yet established or failed,
+    /// paired with the exact libp2p connection id assigned to that attempt.
+    ///
+    /// Infrastructure uses `DisconnectedAndNotDialing`, but libp2p reports its duplicate check
+    /// only after a scheduler permit would otherwise be committed. This actor-owned mirror lets
+    /// the duplicate path drop/refund the permit before submission. The outer key matches the
+    /// transport's peer-wide condition; the connection id prevents an unrelated inbound/member
+    /// connection event for that peer from clearing the outbound attempt prematurely.
+    pending_infra_dials: HashMap<libp2p::PeerId, ConnectionId>,
+    /// Coarse path evidence for every established libp2p connection. The swarm's hard limits
+    /// bound this to 320 entries globally and eight per peer. Keying by `ConnectionId` is
+    /// load-bearing: DCUtR temporarily leaves relay and direct connections live together, and a
+    /// close for either one must remove only that path rather than declaring the peer unreachable.
+    connection_paths: HashMap<(libp2p::PeerId, ConnectionId), ConnectionPath>,
+    /// Exact authenticated dial endpoints, keyed by physical connection so a close removes only
+    /// its own route while a simultaneous TCP/QUIC or DCUtR connection survives.
+    authenticated_routes: HashMap<(libp2p::PeerId, ConnectionId), AuthenticatedDialRoute>,
+    /// The newest bounded outbound Noise successes, retained across close edges for this process.
+    authenticated_route_evidence: VecDeque<AuthenticatedDialRoute>,
     /// Peers **this node's own configuration** named as infrastructure or as a bootstrap: the
     /// relays it reserves on, the rendezvous nodes it registers/discovers at, and the addresses
     /// it was constructed to dial. They are never deniable by a membership action.
@@ -2749,7 +3240,57 @@ struct Actor {
     protected: HashSet<libp2p::PeerId>,
 }
 
+/// Clear an infrastructure dial only for the lifecycle event belonging to that exact attempt.
+///
+/// A peer can open an inbound connection while this node's outbound dial is still pending. A
+/// peer-only removal lets that unrelated event erase the pre-commit guard, after which the next
+/// maintenance tick spends a scheduler permit on a dial libp2p will reject as already dialing.
+fn clear_matching_pending_infra_dial(
+    pending: &mut HashMap<libp2p::PeerId, ConnectionId>,
+    peer: libp2p::PeerId,
+    connection_id: ConnectionId,
+) -> bool {
+    if pending.get(&peer) != Some(&connection_id) {
+        return false;
+    }
+    pending.remove(&peer);
+    true
+}
+
 impl Actor {
+    /// Publish the current, bounded connection table without exposing addresses or connection ids.
+    fn publish_connection_snapshot(&self) {
+        let mut peers: Vec<_> = self
+            .peers
+            .iter()
+            .map(|(peer, libp2p_peer)| PeerConnectionSnapshot {
+                peer: *peer,
+                active: active_connection_paths(&self.connection_paths, *libp2p_peer),
+            })
+            .collect();
+        peers.sort_by_key(|snapshot| snapshot.peer);
+        self.connection_snapshot_tx.send_replace(peers);
+
+        self.authenticated_route_tx
+            .send_replace(authenticated_route_snapshot(&self.authenticated_routes));
+    }
+
+    /// Publish a full, deterministic path snapshot after one connection edge.
+    fn peer_paths_event(
+        &self,
+        peer_id: libp2p::PeerId,
+        newly_established: Option<ConnectionPath>,
+    ) -> TransportEvent {
+        // Multiple physical connections can have the same coarse description. Do not leak that
+        // count into product diagnostics, and keep snapshots stable across HashMap iteration.
+        let active = active_connection_paths(&self.connection_paths, peer_id);
+        TransportEvent::PeerPathsChanged {
+            peer: to_peer(&peer_id),
+            active,
+            newly_established,
+        }
+    }
+
     async fn run(mut self) {
         let mut inbound: InboundResponses = FuturesUnordered::new();
         loop {
@@ -2798,6 +3339,12 @@ impl Actor {
                 }
             }
         }
+        // A normal command-channel shutdown has an explicit empty terminal value. A panic cannot
+        // run this line, so readers additionally reject any retained value once the sender closes.
+        self.connection_snapshot_tx.send_replace(Vec::new());
+        self.authenticated_route_tx.send_replace(Vec::new());
+        self.authenticated_route_evidence_tx
+            .send_replace(Vec::new());
     }
 
     /// Reconcile router workers from the authoritative live listener set. This runs for both
@@ -3208,14 +3755,14 @@ impl Actor {
                     tracing::trace!(bytes = len, "published");
                 }
             }
-            Command::Request { peer, data, reply } => match self.peers.get(&peer) {
+            Command::Request { peer, data, reply } => match self.request_target(&peer) {
                 Some(libp2p_peer) => {
                     tracing::debug!(peer = %libp2p_peer, bytes = data.len(), "send request");
                     let id = self
                         .swarm
                         .behaviour_mut()
                         .request_response
-                        .send_request(libp2p_peer, data.to_vec());
+                        .send_request(&libp2p_peer, data.to_vec());
                     self.pending_req.insert(id, reply);
                 }
                 None => {
@@ -3223,6 +3770,64 @@ impl Actor {
                     let _ = reply.send(Err(TransportError::Unreachable(peer)));
                 }
             },
+            Command::RequestConnected { peer, data, reply } => {
+                let live = self
+                    .peers
+                    .get(&peer)
+                    .copied()
+                    // `peers` is updated from swarm events, but make the present-time transport
+                    // check as well. No actor event can interleave between this check and
+                    // `send_request`, so a disconnected recent peer cannot turn this command
+                    // into a dial.
+                    .filter(|target| self.swarm.is_connected(target));
+                match live {
+                    Some(libp2p_peer) => {
+                        tracing::debug!(peer = %libp2p_peer, bytes = data.len(), "send connected-only request");
+                        let id = self
+                            .swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_request(&libp2p_peer, data.to_vec());
+                        self.pending_req.insert(id, reply);
+                    }
+                    None => {
+                        tracing::trace!(?peer, "connected-only request refused: peer is not live");
+                        let _ = reply.send(Err(TransportError::Unreachable(peer)));
+                    }
+                }
+            }
+            Command::Notify { peer, data } => match self.request_target(&peer) {
+                Some(libp2p_peer) => {
+                    tracing::debug!(peer = %libp2p_peer, bytes = data.len(), "send notification");
+                    // No `pending_req` entry: nobody is waiting, and registering one would keep a
+                    // sender alive for the whole request timeout for a reply that is never read.
+                    self.swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_request(&libp2p_peer, data.to_vec());
+                }
+                None => tracing::warn!(?peer, "notification to unknown peer"),
+            },
+            Command::NotifyConnected { peer, data } => {
+                let live = self
+                    .peers
+                    .get(&peer)
+                    .copied()
+                    .filter(|target| self.swarm.is_connected(target));
+                match live {
+                    Some(libp2p_peer) => {
+                        tracing::debug!(peer = %libp2p_peer, bytes = data.len(), "send connected-only notification");
+                        self.swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_request(&libp2p_peer, data.to_vec());
+                    }
+                    None => tracing::trace!(
+                        ?peer,
+                        "connected-only notification refused: peer is not live"
+                    ),
+                }
+            }
             Command::Listen(addr) => {
                 // Listening on a `…/p2p-circuit` address is how a reservation is requested, so the
                 // relay named in it is an infra target from here on.
@@ -3233,7 +3838,41 @@ impl Actor {
                     tracing::warn!(%addr, error = %e, "listen failed");
                 }
             }
-            Command::Dial(addr) => self.dial_gated(addr),
+            Command::Dial {
+                addr,
+                permit,
+                reply,
+            } => {
+                let outcome = self.dial_gated(addr, permit);
+                if let Some(reply) = reply {
+                    let _ = reply.send(outcome);
+                }
+            }
+            Command::DialPeerBatch {
+                peer,
+                addrs,
+                permits,
+                reply,
+            } => {
+                if !valid_direct_peer_batch(peer, &addrs)
+                    || permits.as_ref().is_some_and(|p| p.len() != addrs.len())
+                {
+                    let _ = reply.send(Err(TransportError::InvalidDialBatch));
+                    return;
+                }
+                let outcomes = match permits {
+                    Some(permits) => addrs
+                        .into_iter()
+                        .zip(permits)
+                        .map(|(addr, permit)| self.dial_gated(addr, Some(permit)))
+                        .collect(),
+                    None => addrs
+                        .into_iter()
+                        .map(|addr| self.dial_gated(addr, None))
+                        .collect(),
+                };
+                let _ = reply.send(Ok(outcomes));
+            }
             Command::AddExternalAddress(addr) => {
                 tracing::debug!(%addr, "add external address");
                 // `Swarm::add_external_address` is an assertion: it marks the address confirmed
@@ -3304,6 +3943,29 @@ impl Actor {
     /// point of the check is that it cannot be talked out of.
     fn is_protected(&self, peer: PeerId) -> bool {
         self.protected.iter().any(|p| to_peer(p) == peer)
+    }
+
+    /// The libp2p peer an outbound request should go to: a live connection when there is one, and
+    /// otherwise the last peer we held one with. On that fallback the remembered addresses are
+    /// handed to the swarm first, so `send_request` has somewhere to dial rather than failing for
+    /// want of an address.
+    ///
+    /// An evicted peer is still refused. The deny list is enforced when the connection is
+    /// established, so naming a dial target here cannot smuggle one past it.
+    fn request_target(&mut self, peer: &PeerId) -> Option<libp2p::PeerId> {
+        if let Some(live) = self.peers.get(peer).copied() {
+            return Some(live);
+        }
+        let recent = self.recent_peers.get(peer)?.clone();
+        tracing::debug!(
+            peer = %recent.libp2p,
+            addresses = recent.addresses.len(),
+            "request to a peer that is not connected; offering its last known addresses for a redial"
+        );
+        for addr in recent.addresses {
+            self.swarm.add_peer_address(recent.libp2p, addr);
+        }
+        Some(recent.libp2p)
     }
 
     /// Detach an evicted peer (P6) and keep it detached.
@@ -3394,9 +4056,24 @@ impl Actor {
     ///   address for an already-connected peer is not, which is what lets a direct address
     ///   preempt a relayed connection.
     ///
-    /// An address with no `/p2p/<id>` names no peer, so it cannot be gated; it is dialed as
-    /// before. (The jitter half of P11 lives in the caller that drives the timer.)
-    fn dial_gated(&mut self, addr: Multiaddr) {
+    /// An address with no `/p2p/<id>` names no authenticated target and is refused. Discovery and
+    /// PEX validate the terminal id against the signed record before this point; retaining a bare
+    /// fallback here would silently turn a malformed record back into an arbitrary socket dial.
+    /// (The jitter half of P11 lives in the caller that drives the timer.)
+    fn dial_gated(
+        &mut self,
+        addr: Multiaddr,
+        permit: Option<catcoms_rt::BoxedDialPermit>,
+    ) -> catcoms_rt::DialSubmission {
+        // A permit is authority for one canonical endpoint, not merely one peer. Check the owned
+        // command data before any actor ledger mutation; a mismatched permit drops and refunds.
+        if permit
+            .as_ref()
+            .is_some_and(|permit| permit.address() != addr.to_string())
+        {
+            tracing::warn!("dial refused: scheduler permit/address mismatch");
+            return catcoms_rt::DialSubmission::Suppressed;
+        }
         // Routing *through* a relay makes it this node's infrastructure just as surely as
         // reserving on it does, and only the reservation path was noting it. The gate below
         // resolves the LAST `/p2p/` component, which for `…/p2p/RELAY/p2p-circuit/p2p/TARGET` is
@@ -3408,14 +4085,12 @@ impl Actor {
             self.note_infra(relay);
         }
         let Some(target) = target_peer_in_multiaddr(&addr) else {
-            if let Err(e) = self.swarm.dial(addr.clone()) {
-                tracing::warn!(%addr, error = %e, "dial failed");
-            }
-            return;
+            let shape = dial_log_shape(std::iter::once(&addr));
+            tracing::warn!(?shape, "dial refused: address has no terminal peer id");
+            return catcoms_rt::DialSubmission::Suppressed;
         };
         if self.infra_peers.contains(&target) {
-            self.dial_infra(target, addr);
-            return;
+            return self.dial_infra(target, addr, permit);
         }
         if self.covered_addrs.len() > MAX_DIAL_LEDGER_PEERS {
             // Entries are dropped when a peer disconnects or a dial fails, so this is the
@@ -3424,34 +4099,75 @@ impl Actor {
             tracing::debug!("dial ledger over its cap; clearing");
             self.covered_addrs.clear();
         }
-        if !self
+        if self
             .covered_addrs
+            .get(&target)
+            .is_some_and(|covered| covered.contains(&addr))
+        {
+            let shape = dial_log_shape(std::iter::once(&addr));
+            tracing::trace!(?shape, peer = %target, "dial suppressed: route is already dialing or connected");
+            return catcoms_rt::DialSubmission::Suppressed;
+        }
+        if !commit_dial_permit(permit, &addr) {
+            tracing::trace!(peer = %target, "dial suppressed: scheduler permit expired");
+            return catcoms_rt::DialSubmission::Suppressed;
+        }
+        self.covered_addrs
             .entry(target)
             .or_default()
-            .insert(addr.clone())
-        {
-            tracing::trace!(%addr, peer = %target, "dial suppressed: this address is already dialing or connected");
-            return;
-        }
+            .insert(addr.clone());
         self.pending_dials.entry(target).or_default().push(addr);
+        catcoms_rt::DialSubmission::Submitted
     }
 
     /// Dial an infra target under the strict one-connection-per-peer condition.
-    fn dial_infra(&mut self, target: libp2p::PeerId, addr: Multiaddr) {
-        if self.swarm.is_connected(&target) {
-            tracing::trace!(%addr, peer = %target, "infra dial suppressed: already connected");
-            return;
+    fn dial_infra(
+        &mut self,
+        target: libp2p::PeerId,
+        addr: Multiaddr,
+        permit: Option<catcoms_rt::BoxedDialPermit>,
+    ) -> catcoms_rt::DialSubmission {
+        if self.swarm.is_connected(&target)
+            || self.pending_infra_dials.contains_key(&target)
+            // A target can first arrive as a member route and be classified as infrastructure
+            // later in the same actor drain. `pending_dials` covers the pre-flush case and
+            // `covered_addrs` remains while the resulting libp2p dial is pending. Infrastructure's
+            // peer-wide condition would reject both, so consult them before committing its permit.
+            || self.pending_dials.contains_key(&target)
+            || self.covered_addrs.contains_key(&target)
+        {
+            let shape = dial_log_shape(std::iter::once(&addr));
+            tracing::trace!(?shape, peer = %target, "infra dial suppressed: already connected or dialing");
+            return catcoms_rt::DialSubmission::Suppressed;
         }
+        if !commit_dial_permit(permit, &addr) {
+            tracing::trace!(peer = %target, "infra dial suppressed: scheduler permit expired");
+            return catcoms_rt::DialSubmission::Suppressed;
+        }
+        let shape = dial_log_shape(std::iter::once(&addr));
         let opts = DialOpts::peer_id(target)
-            .addresses(vec![addr.clone()])
+            .addresses(vec![addr])
             .condition(PeerCondition::DisconnectedAndNotDialing)
             .build();
+        let connection_id = opts.connection_id();
+        // Insert before calling into libp2p so another command drained in this same actor turn
+        // observes the in-flight attempt. Every immediate error below removes it because no later
+        // swarm lifecycle event is guaranteed for a dial that was never accepted.
+        self.pending_infra_dials.insert(target, connection_id);
         match self.swarm.dial(opts) {
-            Ok(()) => tracing::debug!(%addr, peer = %target, "dialing infra node"),
+            Ok(()) => {
+                tracing::debug!(?shape, peer = %target, "dialing infra node");
+                return catcoms_rt::DialSubmission::Submitted;
+            }
             // `DialError::DialPeerConditionFalse` is the condition doing its job (a dial to this
             // peer is already in flight), not a failure worth warning about.
             Err(libp2p::swarm::DialError::DialPeerConditionFalse(cond)) => {
-                tracing::trace!(%addr, peer = %target, ?cond, "infra dial suppressed: already dialing");
+                tracing::trace!(?shape, peer = %target, ?cond, "infra dial suppressed: already dialing");
+                clear_matching_pending_infra_dial(
+                    &mut self.pending_infra_dials,
+                    target,
+                    connection_id,
+                );
             }
             Err(e) => {
                 // Drop the ledger entry so the next tick retries. A dial refused *before* it
@@ -3459,10 +4175,19 @@ impl Actor {
                 // `OutgoingConnectionError`, so nothing else would ever clear it and the node
                 // would stop dialing its own relay or rendezvous for the rest of the process.
                 // `flush_dials` already does this for member peers.
-                tracing::warn!(%addr, error = %e, "dial failed");
+                tracing::warn!(?shape, error_kind = dial_error_kind(&e), "dial failed");
+                clear_matching_pending_infra_dial(
+                    &mut self.pending_infra_dials,
+                    target,
+                    connection_id,
+                );
                 self.release_failed_dial(Some(target), &e);
             }
         }
+        // The scheduler permit was committed before `Swarm::dial`. This is a failed attempt, not
+        // actor-side suppression: callers must keep their local policy spend charged but must not
+        // record a successful submission/cooldown.
+        catcoms_rt::DialSubmission::FailedAfterCommit
     }
 
     /// Issue one racing dial per member peer whose addresses accumulated during this drain.
@@ -3473,14 +4198,17 @@ impl Actor {
     fn flush_dials(&mut self) {
         for (peer, addrs) in std::mem::take(&mut self.pending_dials) {
             let count = addrs.len();
+            // Family/transport counts preserve the useful diagnosis without copying a member's
+            // private coordinates into the always-on diagnostic ring or optional file log.
+            let shape = dial_log_shape(&addrs);
             let opts = DialOpts::peer_id(peer)
                 .addresses(addrs)
                 .condition(PeerCondition::Always)
                 .build();
             match self.swarm.dial(opts) {
-                Ok(()) => tracing::debug!(peer = %peer, addresses = count, "dialing"),
+                Ok(()) => tracing::debug!(peer = %peer, addresses = count, ?shape, "dialing"),
                 Err(e) => {
-                    tracing::warn!(peer = %peer, error = %e, "dial failed");
+                    tracing::warn!(peer = %peer, error_kind = dial_error_kind(&e), ?shape, "dial failed");
                     self.covered_addrs.remove(&peer);
                 }
             }
@@ -3637,9 +4365,21 @@ impl Actor {
                 }
             }
             SwarmEvent::ConnectionEstablished {
-                peer_id, endpoint, ..
+                peer_id,
+                connection_id,
+                endpoint,
+                ..
             } => {
-                let relayed = is_relayed(endpoint.get_remote_address());
+                // This is the authoritative completion edge for an accepted infrastructure dial.
+                // Inbound/member connections are harmless no-ops because their connection id does
+                // not match the accepted outbound attempt.
+                clear_matching_pending_infra_dial(
+                    &mut self.pending_infra_dials,
+                    peer_id,
+                    connection_id,
+                );
+                let relayed = endpoint.is_relayed();
+                let path = classify_connection_path(&endpoint);
                 tracing::debug!(peer = %peer_id, relayed, "connection established");
                 // Record the address this came up on. Repeating a dial of an address already
                 // carrying a connection is the thundering herd P11 describes, and is suppressed;
@@ -3667,29 +4407,105 @@ impl Actor {
                 // Only surface `PeerConnected` on the *first* connection to a peer;
                 // a DCUtR upgrade opens a second (direct) connection to a peer we
                 // already know, and must not look like a new peer to layers above.
-                if self.peers.insert(peer, peer_id).is_none() {
+                // Kept past the disconnect that follows, so a later request can redial rather than
+                // fail for want of a dial target.
+                record_recent_peer(
+                    &mut self.recent_peers,
+                    &mut self.recent_peer_order,
+                    peer,
+                    peer_id,
+                    endpoint.get_remote_address().clone(),
+                );
+                let first_connection = self.peers.insert(peer, peer_id).is_none();
+                self.connection_paths.insert((peer_id, connection_id), path);
+                if let Some(route) = authenticated_dial_route(peer_id, &endpoint) {
+                    self.authenticated_routes
+                        .insert((peer_id, connection_id), route.clone());
+                    record_authenticated_route_evidence(
+                        &mut self.authenticated_route_evidence,
+                        route,
+                    );
+                    self.authenticated_route_evidence_tx
+                        .send_replace(self.authenticated_route_evidence.iter().cloned().collect());
+                }
+                // Update the queryable state atomically before sending either ordered edge. A
+                // waiter that wakes here sees both aggregate liveness and its current path.
+                self.publish_connection_snapshot();
+                if first_connection {
                     let _ = self
                         .event_tx
                         .send(TransportEvent::PeerConnected(peer))
                         .await;
                 }
+                // Preserve `PeerConnected` as the first event for a peer so existing consumers
+                // keep their one-edge liveness contract. The path snapshot follows immediately;
+                // consumers that understand it may refine "connected" to direct vs relay.
+                let paths = self.peer_paths_event(peer_id, Some(path));
+                let _ = self.event_tx.send(paths).await;
             }
-            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+            SwarmEvent::OutgoingConnectionError {
+                connection_id,
+                peer_id,
+                error,
+            } => {
+                if let Some(peer_id) = peer_id {
+                    clear_matching_pending_infra_dial(
+                        &mut self.pending_infra_dials,
+                        peer_id,
+                        connection_id,
+                    );
+                }
+                // Say so. Every failed dial used to be silent: the only trace an unreachable peer
+                // left in a log was quinn's raw `sendmsg` warning for the UDP case, and nothing at
+                // all for TCP, so "this node is dialing and failing" and "this node is not dialing"
+                // read identically. A `Transport` error names each address it tried, which is the
+                // part worth having; the rest carry their reason in the error itself.
+                match &error {
+                    libp2p::swarm::DialError::Transport(failed) => {
+                        for (addr, _cause) in failed {
+                            let shape = dial_log_shape(std::iter::once(addr));
+                            tracing::warn!(peer = ?peer_id, ?shape, error_kind = "transport", "dial failed");
+                        }
+                    }
+                    other => tracing::warn!(
+                        peer = ?peer_id,
+                        error_kind = dial_error_kind(other),
+                        "dial failed"
+                    ),
+                }
                 // The attempt is over, so a later tick may retry rather than being suppressed by a
                 // ledger entry that nothing would ever clear.
                 self.release_failed_dial(peer_id, &error);
             }
             SwarmEvent::ConnectionClosed {
                 peer_id,
+                connection_id,
                 num_established,
                 ..
             } => {
+                let previous_paths = active_connection_paths(&self.connection_paths, peer_id);
+                forget_and_publish_authenticated_routes(
+                    &mut self.authenticated_routes,
+                    &self.authenticated_route_tx,
+                    peer_id,
+                    connection_id,
+                    num_established,
+                );
+                forget_connection_path(
+                    &mut self.connection_paths,
+                    peer_id,
+                    connection_id,
+                    num_established,
+                );
+                let paths_changed =
+                    previous_paths != active_connection_paths(&self.connection_paths, peer_id);
                 if num_established == 0 {
                     tracing::debug!(peer = %peer_id, "peer disconnected");
                     // Nothing covers this peer any more, so the next tick is free to dial it.
                     self.clear_dial_ledger(&peer_id);
                     let peer = to_peer(&peer_id);
                     self.peers.remove(&peer);
+                    self.publish_connection_snapshot();
                     if self.mesh_observations.remove(&peer_id).is_some() {
                         self.mesh_observation_order
                             .retain(|candidate| candidate != &peer_id);
@@ -3702,6 +4518,19 @@ impl Actor {
                         .event_tx
                         .send(TransportEvent::PeerDisconnected(peer))
                         .await;
+                    // `num_established` is libp2p's authoritative count. Clear every entry for
+                    // the peer as a fail-safe if an earlier close edge was missed or changed
+                    // shape, then publish the empty snapshot after the legacy disconnect edge.
+                    if paths_changed {
+                        let paths = self.peer_paths_event(peer_id, None);
+                        let _ = self.event_tx.send(paths).await;
+                    }
+                } else if paths_changed {
+                    // The address-bearing watch was already published independently above. The
+                    // coarse snapshot/event need move only when their deduplicated set changed.
+                    self.publish_connection_snapshot();
+                    let paths = self.peer_paths_event(peer_id, None);
+                    let _ = self.event_tx.send(paths).await;
                 }
             }
             SwarmEvent::Behaviour(MeshBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -3759,10 +4588,32 @@ impl Actor {
                 }
             },
             SwarmEvent::Behaviour(MeshBehaviourEvent::RequestResponse(
-                request_response::Event::OutboundFailure { request_id, .. },
+                request_response::Event::OutboundFailure {
+                    request_id,
+                    peer,
+                    error,
+                    ..
+                },
             )) => {
+                // Log the reason. Every outbound failure used to be reported as "transport closed",
+                // which reads as a local shutdown; a dial that never landed, a peer that went away
+                // mid-request and a request that simply timed out are three different problems and
+                // a log that spells them all the same way sends you looking in the wrong place.
+                tracing::warn!(peer = %peer, error = %error, "outbound request failed");
                 if let Some(reply) = self.pending_req.remove(&request_id) {
-                    let _ = reply.send(Err(TransportError::Closed));
+                    let _ = reply.send(Err(match error {
+                        request_response::OutboundFailure::Timeout => {
+                            TransportError::Timeout(to_peer(&peer))
+                        }
+                        request_response::OutboundFailure::DialFailure
+                        | request_response::OutboundFailure::UnsupportedProtocols => {
+                            TransportError::Unreachable(to_peer(&peer))
+                        }
+                        // The remote had the request and the connection died before its answer:
+                        // "no response" is the honest description, and unlike `Closed` it does not
+                        // claim this node's own transport went down.
+                        _ => TransportError::NoResponse,
+                    }));
                 }
             }
             // DCUtR hole-punch result. On success the relayed link has been upgraded
@@ -3962,7 +4813,52 @@ impl Actor {
     }
 }
 
+/// Final actor-side guard for reciprocal direct dialing. Validation lives beside command
+/// handling so every caller, including a compromised higher layer, must provide one or two
+/// direct multiaddrs whose terminal transport identity is exactly the addressed Phase-0 peer.
+fn valid_direct_peer_batch(peer: PeerId, addrs: &[Multiaddr]) -> bool {
+    !addrs.is_empty()
+        && addrs.len() <= MAX_PEER_DIAL_BATCH
+        && addrs.iter().all(|addr| {
+            !is_relayed(addr)
+                && target_peer_in_multiaddr(addr).is_some_and(|target| to_peer(&target) == peer)
+        })
+}
+
 // ----- handle ----------------------------------------------------------------
+
+/// Clone one watch value only while its actor is still alive. Tokio deliberately retains the last
+/// value after the final sender drops; accepting that value would turn an actor crash into stale
+/// "connected" evidence during a handoff.
+fn current_connection_snapshot(
+    snapshots: &mut watch::Receiver<Vec<PeerConnectionSnapshot>>,
+) -> Result<Vec<PeerConnectionSnapshot>, TransportError> {
+    loop {
+        let current = snapshots.borrow_and_update().clone();
+        match snapshots.has_changed() {
+            Ok(false) => return Ok(current),
+            // A replacement landed between the clone and the check. Re-read it rather than
+            // returning the stale connected row (most importantly, after a disconnect).
+            Ok(true) => continue,
+            Err(_) => return Err(TransportError::Closed),
+        }
+    }
+}
+
+/// Address-bearing counterpart to [`current_connection_snapshot`]. Reject a retained watch value
+/// after actor shutdown so a caller cannot persist a route that is no longer present-time proof.
+fn current_authenticated_routes(
+    snapshots: &mut watch::Receiver<Vec<AuthenticatedDialRoute>>,
+) -> Result<Vec<AuthenticatedDialRoute>, TransportError> {
+    loop {
+        let current = snapshots.borrow_and_update().clone();
+        match snapshots.has_changed() {
+            Ok(false) => return Ok(current),
+            Ok(true) => continue,
+            Err(_) => return Err(TransportError::Closed),
+        }
+    }
+}
 
 /// A handle to a running libp2p mesh node, implementing [`MeshTransport`].
 #[derive(Debug)]
@@ -3970,6 +4866,9 @@ pub struct MeshService {
     local: PeerId,
     cmd_tx: mpsc::Sender<Command>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
+    connection_snapshot_rx: watch::Receiver<Vec<PeerConnectionSnapshot>>,
+    authenticated_route_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
+    authenticated_route_evidence_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
     listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
     listener_snapshot_rx: Mutex<watch::Receiver<ListenerSnapshot>>,
     /// `None` once the desktop has taken the coalesced router-mapping state.
@@ -4003,12 +4902,16 @@ impl MeshService {
     /// bootstrap/infra set). Those are never deniable by an eviction: see `Actor::protected`.
     fn spawn_protecting(
         swarm: Swarm<MeshBehaviour>,
-        protected: Vec<libp2p::PeerId>,
+        constructor_dials: Vec<(libp2p::PeerId, ConnectionId)>,
         enable_port_mapping: bool,
     ) -> Self {
         let local = to_peer(swarm.local_peer_id());
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
+        let (connection_snapshot_tx, connection_snapshot_rx) = watch::channel(Vec::new());
+        let (authenticated_route_tx, authenticated_route_rx) = watch::channel(Vec::new());
+        let (authenticated_route_evidence_tx, authenticated_route_evidence_rx) =
+            watch::channel(Vec::new());
         let (listen_tx, listen_rx) = mpsc::channel(16);
         let (listener_snapshot_tx, listener_snapshot_rx) =
             watch::channel(ListenerSnapshot::default());
@@ -4021,11 +4924,22 @@ impl MeshService {
         let (upgrade_tx, upgrade_rx) = mpsc::channel(16);
         let (discovered_tx, discovered_rx) = mpsc::unbounded_channel();
         let (registered_tx, registered_rx) = mpsc::unbounded_channel();
+        // Keep eviction ownership and dial lifecycle separate. Constructor targets are protected
+        // because local configuration selected them, while the connection ids are only the exact
+        // attempts that were accepted before the actor began polling the swarm.
+        let pending_infra_dials: HashMap<_, _> = constructor_dials.iter().copied().collect();
+        let protected: HashSet<_> = constructor_dials
+            .into_iter()
+            .map(|(peer, _)| peer)
+            .collect();
         let actor = Actor {
             swarm,
             enable_port_mapping,
             cmd_rx,
             event_tx,
+            connection_snapshot_tx,
+            authenticated_route_tx,
+            authenticated_route_evidence_tx,
             listen_tx,
             active_listeners: HashSet::new(),
             listener_snapshot_tx,
@@ -4050,18 +4964,36 @@ impl MeshService {
             registered_tx,
             pending_registers: Vec::new(),
             peers: HashMap::new(),
+            recent_peers: HashMap::new(),
+            recent_peer_order: VecDeque::new(),
             pending_req: HashMap::new(),
             pending_publish: Vec::new(),
+            // A constructor target is locally protected from remote eviction, but it is not
+            // necessarily infrastructure: the same path constructs a joiner's first dial to an
+            // ordinary member. Only rendezvous/reservation commands may opt a peer into strict
+            // infrastructure dial semantics. Treating every constructor peer as infra pins an
+            // inviter reached through a relay to that relay and suppresses a later direct upgrade.
             infra_peers: HashSet::new(),
             covered_addrs: HashMap::new(),
             pending_dials: HashMap::new(),
-            protected: protected.into_iter().collect(),
+            // Constructor dials are already pending in this freshly built swarm. Keep that fact
+            // separately from classification so a subsequent explicit `note_infra` sees the
+            // in-flight attempt without turning an ordinary bootstrap/member into infrastructure.
+            // Success/error lifecycle events clear the set.
+            pending_infra_dials,
+            connection_paths: HashMap::new(),
+            authenticated_routes: HashMap::new(),
+            authenticated_route_evidence: VecDeque::new(),
+            protected,
         };
         tokio::spawn(actor.run());
         Self {
             local,
             cmd_tx,
             event_rx: Mutex::new(event_rx),
+            connection_snapshot_rx,
+            authenticated_route_rx,
+            authenticated_route_evidence_rx,
             listen_rx: Mutex::new(listen_rx),
             listener_snapshot_rx: Mutex::new(listener_snapshot_rx),
             port_mapping_rx: Mutex::new(Some(port_mapping_rx)),
@@ -4072,6 +5004,48 @@ impl MeshService {
             discovered_rx: Mutex::new(discovered_rx),
             registered_rx: Mutex::new(registered_rx),
         }
+    }
+
+    /// Read the current connected-peer/path table without consuming the ordered transport event
+    /// stream. The actor publishes an empty replacement on disconnect, so this is present-time
+    /// state rather than historical evidence.
+    pub fn connection_snapshot(&self) -> Vec<PeerConnectionSnapshot> {
+        let mut snapshots = self.connection_snapshot_rx.clone();
+        current_connection_snapshot(&mut snapshots).unwrap_or_default()
+    }
+
+    /// Wait until one of `wanted` is currently connected without stealing lifecycle, request, or
+    /// gossip events from the single consumer that will own this transport afterward.
+    ///
+    /// The caller supplies the deadline through its injected/runtime timeout policy. Returning
+    /// [`TransportError::Closed`] distinguishes actor shutdown from an ordinary timeout.
+    pub async fn wait_for_any_connected(
+        &self,
+        wanted: &[PeerId],
+    ) -> Result<PeerConnectionSnapshot, TransportError> {
+        let mut snapshots = self.connection_snapshot_rx.clone();
+        loop {
+            let current = current_connection_snapshot(&mut snapshots)?;
+            let connected = current
+                .into_iter()
+                .find(|entry| wanted.contains(&entry.peer));
+            if let Some(connected) = connected {
+                return Ok(connected);
+            }
+            snapshots
+                .changed()
+                .await
+                .map_err(|_| TransportError::Closed)?;
+        }
+    }
+
+    /// Convenience form of [`MeshService::wait_for_any_connected`] for one peer.
+    pub async fn wait_for_peer_connected(
+        &self,
+        wanted: PeerId,
+    ) -> Result<PeerConnectionSnapshot, TransportError> {
+        self.wait_for_any_connected(std::slice::from_ref(&wanted))
+            .await
     }
 
     /// Await the next bound listen address (e.g. to learn the real port when
@@ -4207,10 +5181,108 @@ impl MeshService {
 
     /// Dial `addr` at runtime (e.g. a relay, before reserving a circuit on it).
     pub async fn dial(&self, addr: Multiaddr) -> Result<(), TransportError> {
+        self.dial_outcome(addr).await.map(|_| ())
+    }
+
+    pub async fn dial_outcome(
+        &self,
+        addr: Multiaddr,
+    ) -> Result<catcoms_rt::DialSubmission, TransportError> {
+        let (reply, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::Dial(addr))
+            .send(Command::Dial {
+                addr,
+                permit: None,
+                reply: Some(reply),
+            })
             .await
-            .map_err(|_| TransportError::Closed)
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)
+    }
+
+    /// Transfer a discovery scheduler permit into the actor before awaiting its decision.
+    pub async fn dial_permit(
+        &self,
+        permit: catcoms_rt::BoxedDialPermit,
+    ) -> Result<catcoms_rt::DialSubmission, TransportError> {
+        let addr = permit
+            .address()
+            .parse::<Multiaddr>()
+            .map_err(|_| TransportError::InvalidDialBatch)?;
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Dial {
+                addr,
+                permit: Some(permit),
+                reply: Some(reply),
+            })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)
+    }
+
+    /// Submit one bounded direct-route batch whose terminal identity must match `peer`.
+    ///
+    /// String parsing here is only an early rejection. The actor repeats the peer binding and
+    /// direct-route checks on the owned `Multiaddr` values immediately before its dial ledger.
+    pub async fn dial_peer_batch(
+        &self,
+        peer: PeerId,
+        addresses: &[String],
+    ) -> Result<Vec<catcoms_rt::DialSubmission>, TransportError> {
+        if addresses.is_empty() || addresses.len() > MAX_PEER_DIAL_BATCH {
+            return Err(TransportError::InvalidDialBatch);
+        }
+        let addrs = addresses
+            .iter()
+            .map(|address| {
+                address
+                    .parse::<Multiaddr>()
+                    .map_err(|_| TransportError::InvalidDialBatch)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::DialPeerBatch {
+                peer,
+                addrs,
+                permits: None,
+                reply,
+            })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)?
+    }
+
+    /// Transfer a peer-bound discovery batch into the actor as one owned command.
+    pub async fn dial_peer_permits(
+        &self,
+        peer: PeerId,
+        permits: Vec<catcoms_rt::BoxedDialPermit>,
+    ) -> Result<Vec<catcoms_rt::DialSubmission>, TransportError> {
+        if permits.is_empty() || permits.len() > MAX_PEER_DIAL_BATCH {
+            return Err(TransportError::InvalidDialBatch);
+        }
+        let addrs = permits
+            .iter()
+            .map(|permit| {
+                permit
+                    .address()
+                    .parse::<Multiaddr>()
+                    .map_err(|_| TransportError::InvalidDialBatch)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::DialPeerBatch {
+                peer,
+                addrs,
+                permits: Some(permits),
+                reply,
+            })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)?
     }
 
     /// Advertise `addr` as an external (reachable) address, so a node with a directly-
@@ -4242,12 +5314,8 @@ impl MeshService {
                 .listen_on(addr)
                 .map_err(|e| NetError::Listen(e.to_string()))?;
         }
-        for addr in dial {
-            swarm
-                .dial(addr.clone())
-                .map_err(|e| NetError::Dial(e.to_string()))?;
-        }
-        let protected = dial.iter().filter_map(target_peer_in_multiaddr).collect();
+        let protected =
+            dial_bootstraps(&mut swarm, dial).map_err(|e| NetError::Dial(e.to_string()))?;
         Ok(Self::spawn_protecting(swarm, protected, false))
     }
 
@@ -4318,14 +5386,10 @@ impl MeshService {
                 last_err.unwrap_or_else(|| "no listen address bound".into()),
             ));
         }
-        for addr in dial {
-            swarm
-                .dial(addr.clone())
-                .map_err(|e| NetError::Dial(e.to_string()))?;
-        }
+        let protected =
+            dial_bootstraps(&mut swarm, dial).map_err(|e| NetError::Dial(e.to_string()))?;
         // Whatever this node was constructed to dial is its bootstrap/infra set, chosen locally
         // and never by a peer record, so no eviction may take it away (see `Actor::protected`).
-        let protected = dial.iter().filter_map(target_peer_in_multiaddr).collect();
         Ok((
             Self::spawn_protecting(swarm, protected, enable_port_mapping),
             libp2p_id,
@@ -4340,6 +5404,8 @@ impl MeshService {
         MeshHandle {
             local: self.local,
             cmd_tx: self.cmd_tx.clone(),
+            authenticated_route_rx: self.authenticated_route_rx.clone(),
+            authenticated_route_evidence_rx: self.authenticated_route_evidence_rx.clone(),
         }
     }
 }
@@ -4355,12 +5421,35 @@ impl MeshService {
 pub struct MeshHandle {
     local: PeerId,
     cmd_tx: mpsc::Sender<Command>,
+    authenticated_route_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
+    authenticated_route_evidence_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
 }
 
 impl MeshHandle {
     /// This node's transport peer id.
     pub fn local_peer(&self) -> PeerId {
         self.local
+    }
+
+    /// Snapshot the currently-live outbound direct routes that completed Noise authentication.
+    ///
+    /// The values contain private network addresses and are intentionally not part of
+    /// [`MeshTransport::connection_snapshot`]. Callers should retain only routes needed for a
+    /// specific locally-authorized reconnect and must re-check application membership before a
+    /// later dial.
+    pub fn authenticated_dial_routes(&self) -> Vec<AuthenticatedDialRoute> {
+        let mut snapshot = self.authenticated_route_rx.clone();
+        current_authenticated_routes(&mut snapshot).unwrap_or_default()
+    }
+
+    /// Snapshot this process's bounded recent outbound Noise-authenticated route evidence.
+    ///
+    /// A route remains here after a short connection closes so an already-authorized recovery can
+    /// seal it without racing liveness. This grants no authority: consumers must still require an
+    /// exact current member-to-peer claim and local admission/recovery consent.
+    pub fn authenticated_dial_route_evidence(&self) -> Vec<AuthenticatedDialRoute> {
+        let mut snapshot = self.authenticated_route_evidence_rx.clone();
+        current_authenticated_routes(&mut snapshot).unwrap_or_default()
     }
 
     /// See [`MeshService::rendezvous_register`].
@@ -4394,7 +5483,11 @@ impl MeshHandle {
     /// See [`MeshService::dial`].
     pub async fn dial(&self, addr: Multiaddr) -> Result<(), TransportError> {
         self.cmd_tx
-            .send(Command::Dial(addr))
+            .send(Command::Dial {
+                addr,
+                permit: None,
+                reply: None,
+            })
             .await
             .map_err(|_| TransportError::Closed)
     }
@@ -4411,11 +5504,45 @@ impl MeshHandle {
     ) -> Result<(), TransportError> {
         for address in addresses.iter().take(4) {
             self.cmd_tx
-                .send(Command::Dial(address.clone()))
+                .send(Command::Dial {
+                    addr: address.clone(),
+                    permit: None,
+                    reply: None,
+                })
                 .await
                 .map_err(|_| TransportError::Closed)?;
         }
         Ok(())
+    }
+
+    /// See [`MeshService::dial_peer_batch`].
+    pub async fn dial_peer_batch(
+        &self,
+        peer: PeerId,
+        addresses: &[String],
+    ) -> Result<Vec<catcoms_rt::DialSubmission>, TransportError> {
+        if addresses.is_empty() || addresses.len() > MAX_PEER_DIAL_BATCH {
+            return Err(TransportError::InvalidDialBatch);
+        }
+        let addrs = addresses
+            .iter()
+            .map(|address| {
+                address
+                    .parse::<Multiaddr>()
+                    .map_err(|_| TransportError::InvalidDialBatch)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::DialPeerBatch {
+                peer,
+                addrs,
+                permits: None,
+                reply,
+            })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)?
     }
 
     /// Send one bounded control request without routing it through the group `ChannelSync` actor.
@@ -4429,6 +5556,24 @@ impl MeshHandle {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Request { peer, data, reply })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)?
+    }
+
+    /// Send one control request only when `peer` has a live connection at actor handling time.
+    ///
+    /// This is intentionally narrower than [`MeshHandle::request_control`]: it never consults
+    /// the recent-peer cache and therefore cannot initiate an implicit redial. Reciprocal invite
+    /// proof retries use it when the shared endpoint scheduler has not granted a new socket pass.
+    pub async fn request_control_connected_only(
+        &self,
+        peer: PeerId,
+        data: Bytes,
+    ) -> Result<Bytes, TransportError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::RequestConnected { peer, data, reply })
             .await
             .map_err(|_| TransportError::Closed)?;
         rx.await.map_err(|_| TransportError::Closed)?
@@ -4456,6 +5601,10 @@ impl MeshHandle {
 impl MeshTransport for MeshService {
     fn local_peer(&self) -> PeerId {
         self.local
+    }
+
+    fn connection_snapshot(&self) -> Vec<PeerConnectionSnapshot> {
+        MeshService::connection_snapshot(self)
     }
 
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {
@@ -4493,6 +5642,45 @@ impl MeshTransport for MeshService {
         rx.await.map_err(|_| TransportError::Closed)?
     }
 
+    async fn request_connected(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        data: Bytes,
+    ) -> Result<Bytes, TransportError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::RequestConnected { peer, data, reply })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)?
+    }
+
+    /// Queue the send and return; the only wait is for room in the actor's command channel.
+    async fn notify(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        data: Bytes,
+    ) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::Notify { peer, data })
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
+    async fn notify_connected(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        data: Bytes,
+    ) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::NotifyConnected { peer, data })
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
     async fn next_event(&self) -> Option<TransportEvent> {
         self.event_rx.lock().await.recv().await
     }
@@ -4526,6 +5714,37 @@ impl MeshTransport for MeshService {
         MeshService::dial(self, m).await
     }
 
+    async fn dial_addr_outcome(
+        &self,
+        addr: &str,
+    ) -> Result<catcoms_rt::DialSubmission, TransportError> {
+        let m: Multiaddr = addr.parse().map_err(|_| TransportError::Closed)?;
+        MeshService::dial_outcome(self, m).await
+    }
+
+    async fn dial_permit(
+        &self,
+        permit: catcoms_rt::BoxedDialPermit,
+    ) -> Result<catcoms_rt::DialSubmission, TransportError> {
+        MeshService::dial_permit(self, permit).await
+    }
+
+    async fn dial_peer_batch(
+        &self,
+        peer: PeerId,
+        addresses: &[String],
+    ) -> Result<Vec<catcoms_rt::DialSubmission>, TransportError> {
+        MeshService::dial_peer_batch(self, peer, addresses).await
+    }
+
+    async fn dial_peer_permits(
+        &self,
+        peer: PeerId,
+        permits: Vec<catcoms_rt::BoxedDialPermit>,
+    ) -> Result<Vec<catcoms_rt::DialSubmission>, TransportError> {
+        MeshService::dial_peer_permits(self, peer, permits).await
+    }
+
     async fn add_external_addr(&self, addr: &str) -> Result<(), TransportError> {
         let m: Multiaddr = addr.parse().map_err(|_| TransportError::Closed)?;
         MeshService::add_external_address(self, m).await
@@ -4538,6 +5757,15 @@ impl MeshTransport for MeshService {
             addresses: d.addresses.iter().map(|a| a.to_string()).collect(),
             namespace: d.namespace,
             seq: d.seq,
+        })
+    }
+
+    async fn next_registered(&self) -> Option<RendezvousRegistration> {
+        let registered = MeshService::next_registered(self).await?;
+        Some(RendezvousRegistration {
+            rendezvous_node: registered.rendezvous_node.to_bytes(),
+            namespace: registered.namespace,
+            ttl_secs: registered.ttl,
         })
     }
 
@@ -4561,6 +5789,47 @@ mod tests {
     use super::*;
     use catcoms_rt::rng::RngError;
     use catcoms_rt::{CryptoRng, ManualClock, RngCore};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct DropObservedPermit {
+        address: String,
+        drops: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct CommitObservedPermit {
+        address: String,
+        commits: Arc<AtomicUsize>,
+    }
+
+    impl catcoms_rt::DialPermit for CommitObservedPermit {
+        fn address(&self) -> &str {
+            &self.address
+        }
+
+        fn commit_if_current(self: Box<Self>) -> Option<String> {
+            self.commits.fetch_add(1, Ordering::SeqCst);
+            Some(self.address.clone())
+        }
+    }
+
+    impl Drop for DropObservedPermit {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl catcoms_rt::DialPermit for DropObservedPermit {
+        fn address(&self) -> &str {
+            &self.address
+        }
+
+        fn commit_if_current(self: Box<Self>) -> Option<String> {
+            Some(self.address.clone())
+        }
+    }
 
     #[derive(Debug, Clone, Copy)]
     struct FixedRng(u8);
@@ -4595,6 +5864,632 @@ mod tests {
         libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id()
+    }
+
+    #[test]
+    fn reciprocal_batch_guard_rejects_substitution_relay_and_oversize_inputs() {
+        let target = libp2p_peer();
+        let other = libp2p_peer();
+        let peer = to_peer(&target);
+        let v4: Multiaddr = format!("/ip4/198.51.100.7/tcp/22487/p2p/{target}")
+            .parse()
+            .unwrap();
+        let v6: Multiaddr = format!("/ip6/2001:db8::7/udp/22487/quic-v1/p2p/{target}")
+            .parse()
+            .unwrap();
+        assert!(valid_direct_peer_batch(peer, &[v4.clone(), v6.clone()]));
+        assert!(!valid_direct_peer_batch(peer, &[]));
+        assert!(!valid_direct_peer_batch(
+            peer,
+            &[v4.clone(), v6.clone(), v4.clone()]
+        ));
+
+        let substituted: Multiaddr = format!("/ip4/198.51.100.7/tcp/22487/p2p/{other}")
+            .parse()
+            .unwrap();
+        assert!(!valid_direct_peer_batch(peer, &[substituted]));
+        let relay: Multiaddr =
+            format!("/ip4/198.51.100.8/tcp/4001/p2p/{other}/p2p-circuit/p2p/{target}")
+                .parse()
+                .unwrap();
+        assert!(!valid_direct_peer_batch(peer, &[relay]));
+        let unbound: Multiaddr = "/ip4/198.51.100.7/tcp/22487".parse().unwrap();
+        assert!(!valid_direct_peer_batch(peer, &[unbound]));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_reply_receiver_cannot_reclaim_a_queued_dial_permit() {
+        let target = libp2p_peer();
+        let address = format!("/ip4/198.51.100.7/tcp/22487/p2p/{target}");
+        let drops = Arc::new(AtomicUsize::new(0));
+        let permit = DropObservedPermit {
+            address: address.clone(),
+            drops: drops.clone(),
+        };
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let (reply, reply_rx) = oneshot::channel();
+        command_tx
+            .send(Command::Dial {
+                addr: address.parse().unwrap(),
+                permit: Some(Box::new(permit)),
+                reply: Some(reply),
+            })
+            .await
+            .unwrap();
+
+        // This is the original failure window: the calling future disappears after enqueue but
+        // before the actor replies. The permit must remain owned by the queued command.
+        drop(reply_rx);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let queued = command_rx.recv().await.expect("command remained queued");
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(queued);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_infrastructure_dial_is_suppressed_before_its_permit_is_committed() {
+        let service = MeshService::new_memory(None, &[]).unwrap();
+        let target = libp2p_peer();
+        let address = format!("/memory/918299/p2p/{target}");
+        let addr: Multiaddr = address.parse().unwrap();
+        let commits = Arc::new(AtomicUsize::new(0));
+        let namespace = rendezvous::Namespace::new("infra-ledger-test".to_string()).unwrap();
+        let (first_tx, first_rx) = oneshot::channel();
+        let (duplicate_tx, duplicate_rx) = oneshot::channel();
+
+        // Queue the classification and both dials before yielding. Actor::run drains the complete
+        // command batch before polling the swarm, which deterministically exercises the same
+        // duplicate window that charged a second scheduler token in production.
+        service
+            .cmd_tx
+            .send(Command::RendezvousDiscover {
+                namespace,
+                rz_node: target,
+            })
+            .await
+            .unwrap();
+        for reply in [first_tx, duplicate_tx] {
+            service
+                .cmd_tx
+                .send(Command::Dial {
+                    addr: addr.clone(),
+                    permit: Some(Box::new(CommitObservedPermit {
+                        address: address.clone(),
+                        commits: commits.clone(),
+                    })),
+                    reply: Some(reply),
+                })
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            first_rx.await.unwrap(),
+            catcoms_rt::DialSubmission::Submitted
+        );
+        assert_eq!(
+            duplicate_rx.await.unwrap(),
+            catcoms_rt::DialSubmission::Suppressed
+        );
+        assert_eq!(
+            commits.load(Ordering::SeqCst),
+            1,
+            "the actor-owned pending-infrastructure ledger must refund the duplicate permit"
+        );
+    }
+
+    #[tokio::test]
+    async fn immediate_infrastructure_refusal_stays_charged_without_claiming_submission() {
+        let target = libp2p_peer();
+        // Keep the hidden first libp2p dial pending on a real TCP listener that never speaks the
+        // Noise handshake. That makes both strict-condition refusals deterministic instead of
+        // racing a fast connection-refused event from an unused port.
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let address = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{target}");
+        let addr: Multiaddr = address.parse().unwrap();
+        let endpoint =
+            catcoms_discovery::parse_peer_dial_route(&address, phase0_peer_id(&target).as_bytes())
+                .expect("the test route is a canonical peer-bound endpoint")
+                .endpoint;
+        let scheduler = catcoms_discovery::EndpointDialScheduler::new_with_clock(
+            catcoms_discovery::EndpointDialConfig {
+                window_ms: 1_000,
+                process_limit: 2,
+                server_limit: 2,
+                peer_limit: 2,
+                endpoint_limit: 2,
+                prefix_limit: 2,
+            },
+            Arc::new(ManualClock::new(0)),
+        );
+        let mut permits = scheduler.reserve_permits(
+            b"post-commit-refusal",
+            &[endpoint.clone(), endpoint.clone()],
+        );
+        assert_eq!(permits.len(), 2);
+
+        // Seed libp2p's internal pending-dial state without seeding Actor's mirror. The actor then
+        // passes all of its pre-commit checks, commits the real scheduler permit, and receives the
+        // deterministic `DialPeerConditionFalse` immediate refusal from `Swarm::dial`.
+        let mut swarm = build_tcp_swarm().unwrap();
+        swarm
+            .dial(
+                DialOpts::peer_id(target)
+                    .addresses(vec![addr.clone()])
+                    .condition(PeerCondition::Always)
+                    .build(),
+            )
+            .expect("the hidden first dial must enter libp2p's pending set");
+        let service = MeshService::spawn(swarm);
+        let namespace = rendezvous::Namespace::new("post-commit-refusal-test".to_string()).unwrap();
+        let (reply, result) = oneshot::channel();
+        service
+            .cmd_tx
+            .try_send(Command::RendezvousDiscover {
+                namespace,
+                rz_node: target,
+            })
+            .expect("classification command fits the fresh actor queue");
+        service
+            .cmd_tx
+            .try_send(Command::Dial {
+                addr,
+                permit: Some(Box::new(permits.pop().unwrap())),
+                reply: Some(reply),
+            })
+            .expect("dial command fits the fresh actor queue");
+
+        assert_eq!(
+            result.await.unwrap(),
+            catcoms_rt::DialSubmission::FailedAfterCommit,
+            "an immediate libp2p refusal is charged failure, not pre-commit suppression"
+        );
+
+        // A second committed command reaches libp2p and fails the same way only if the first
+        // immediate-refusal branch removed its temporary actor ledger entry. If it did not, this
+        // command is incorrectly suppressed before permit commit.
+        let (second_reply, second_result) = oneshot::channel();
+        service
+            .cmd_tx
+            .send(Command::Dial {
+                addr: address.parse().unwrap(),
+                permit: Some(Box::new(permits.pop().unwrap())),
+                reply: Some(second_reply),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            second_result.await.unwrap(),
+            catcoms_rt::DialSubmission::FailedAfterCommit,
+            "the immediate-refusal path must clear its exact pending-infra entry"
+        );
+        assert!(
+            scheduler
+                .reserve_permits(b"post-commit-refusal", &[endpoint])
+                .is_empty(),
+            "neither committed shared scheduler permit may be refunded"
+        );
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn constructor_races_two_routes_for_one_bootstrap_peer_in_one_dial() {
+        let target = libp2p_peer();
+        let routes: Vec<Multiaddr> = [918_301u64, 918_302]
+            .into_iter()
+            .map(|port| format!("/memory/{port}/p2p/{target}").parse().unwrap())
+            .collect();
+
+        let service = MeshService::new_memory(None, &routes)
+            .expect("TCP/QUIC-shaped same-peer bootstraps must be one racing known-peer dial");
+        assert!(service
+            .local_peer()
+            .as_bytes()
+            .iter()
+            .any(|byte| *byte != 0));
+    }
+
+    #[tokio::test]
+    async fn constructor_member_does_not_suppress_a_later_direct_route_as_infrastructure() {
+        let listen: Multiaddr = "/memory/918303".parse().unwrap();
+        let mut server_swarm = build_memory_swarm();
+        let target = *server_swarm.local_peer_id();
+        server_swarm.listen_on(listen.clone()).unwrap();
+        let server = MeshService::spawn(server_swarm);
+        let constructor: Multiaddr = format!("{listen}/p2p/{target}").parse().unwrap();
+        let direct_text = format!("/memory/918304/p2p/{target}");
+        let direct: Multiaddr = direct_text.parse().unwrap();
+        let commits = Arc::new(AtomicUsize::new(0));
+        let service = MeshService::new_memory(None, &[constructor])
+            .expect("constructor member route should enter the swarm");
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            service.wait_for_peer_connected(server.local_peer()),
+        )
+        .await
+        .expect("constructor route should connect")
+        .expect("client actor should remain alive");
+        let (reply, result) = oneshot::channel();
+
+        // If constructor peers are accidentally classified as infrastructure, the live constructor
+        // connection makes its peer-wide gate suppress this different route before committing the
+        // permit. Ordinary members must instead retain address-scoped `Always` semantics so a
+        // relay/bootstrap path can be upgraded to a newly learned direct address.
+        service
+            .cmd_tx
+            .send(Command::Dial {
+                addr: direct,
+                permit: Some(Box::new(CommitObservedPermit {
+                    address: direct_text,
+                    commits: commits.clone(),
+                })),
+                reply: Some(reply),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.await.unwrap(), catcoms_rt::DialSubmission::Submitted);
+        assert_eq!(
+            commits.load(Ordering::SeqCst),
+            1,
+            "a new member route must survive a constructor attempt to the same peer"
+        );
+    }
+
+    #[test]
+    fn unrelated_connection_lifecycle_cannot_clear_a_pending_infrastructure_dial() {
+        let peer = libp2p_peer();
+        let outbound = ConnectionId::new_unchecked(918_305);
+        let inbound = ConnectionId::new_unchecked(918_306);
+        let mut pending = HashMap::from([(peer, outbound)]);
+
+        assert!(!clear_matching_pending_infra_dial(
+            &mut pending,
+            peer,
+            inbound
+        ));
+        assert_eq!(pending.get(&peer), Some(&outbound));
+        assert!(clear_matching_pending_infra_dial(
+            &mut pending,
+            peer,
+            outbound
+        ));
+        assert!(!pending.contains_key(&peer));
+    }
+
+    #[tokio::test]
+    async fn member_dial_reclassified_as_infrastructure_refunds_the_real_scheduler_permit() {
+        let (service, _) = MeshService::new_tcp(None, &[]).unwrap();
+        let target = libp2p_peer();
+        let address = format!("/ip4/127.0.0.1/tcp/9/p2p/{target}");
+        let addr: Multiaddr = address.parse().unwrap();
+        let endpoint =
+            catcoms_discovery::parse_peer_dial_route(&address, phase0_peer_id(&target).as_bytes())
+                .expect("the test route is a canonical peer-bound TCP endpoint")
+                .endpoint;
+        let scheduler = catcoms_discovery::EndpointDialScheduler::new_with_clock(
+            catcoms_discovery::EndpointDialConfig {
+                window_ms: 1_000,
+                process_limit: 2,
+                server_limit: 2,
+                peer_limit: 2,
+                endpoint_limit: 2,
+                prefix_limit: 2,
+            },
+            Arc::new(ManualClock::new(0)),
+        );
+        let mut permits =
+            scheduler.reserve_permits(b"reclassified-infra", &[endpoint.clone(), endpoint.clone()]);
+        assert_eq!(permits.len(), 2);
+        let duplicate = permits.pop().unwrap();
+        let first = permits.pop().unwrap();
+        let namespace =
+            rendezvous::Namespace::new("infra-reclassification-test".to_string()).unwrap();
+        let (first_tx, first_rx) = oneshot::channel();
+        let (duplicate_tx, duplicate_rx) = oneshot::channel();
+
+        // The first command is accepted as an ordinary member route. The next command labels the
+        // same peer as infrastructure before the actor flushes its member batch. The infrastructure
+        // path must observe the member ledger and drop its permit without asking libp2p's later
+        // peer-condition check to do the suppression.
+        service
+            .cmd_tx
+            .send(Command::Dial {
+                addr: addr.clone(),
+                permit: Some(Box::new(first)),
+                reply: Some(first_tx),
+            })
+            .await
+            .unwrap();
+        service
+            .cmd_tx
+            .send(Command::RendezvousDiscover {
+                namespace,
+                rz_node: target,
+            })
+            .await
+            .unwrap();
+        service
+            .cmd_tx
+            .send(Command::Dial {
+                addr,
+                permit: Some(Box::new(duplicate)),
+                reply: Some(duplicate_tx),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first_rx.await.unwrap(),
+            catcoms_rt::DialSubmission::Submitted
+        );
+        assert_eq!(
+            duplicate_rx.await.unwrap(),
+            catcoms_rt::DialSubmission::Suppressed
+        );
+        assert_eq!(
+            scheduler
+                .reserve_permits(b"reclassified-infra", &[endpoint])
+                .len(),
+            1,
+            "the suppressed second command returns real process/server/peer/endpoint capacity"
+        );
+    }
+
+    fn dialled_endpoint(address: &str) -> ConnectedPoint {
+        ConnectedPoint::Dialer {
+            address: address.parse().unwrap(),
+            role_override: Endpoint::Dialer,
+            port_use: PortUse::New,
+        }
+    }
+
+    #[test]
+    fn connection_path_classification_prefers_route_semantics_over_carriers() {
+        assert_eq!(
+            classify_connection_path(&dialled_endpoint("/ip4/198.51.100.5/tcp/443/wss")),
+            ConnectionPath {
+                family: ConnectionFamily::Ipv4,
+                transport: ConnectionTransport::WebSocket,
+                direction: ConnectionDirection::Dialer,
+            }
+        );
+        assert_eq!(
+            classify_connection_path(&dialled_endpoint("/ip6/2001:db8::5/udp/22487/quic-v1")),
+            ConnectionPath {
+                family: ConnectionFamily::Ipv6,
+                transport: ConnectionTransport::QuicV1,
+                direction: ConnectionDirection::Dialer,
+            }
+        );
+
+        let relay = libp2p_peer();
+        let target = libp2p_peer();
+        let relayed =
+            format!("/dns4/relay.example/tcp/443/wss/p2p/{relay}/p2p-circuit/p2p/{target}");
+        assert_eq!(
+            classify_connection_path(&dialled_endpoint(&relayed)),
+            ConnectionPath {
+                family: ConnectionFamily::Dns,
+                // A relay circuit is not a direct WebSocket path to the member.
+                transport: ConnectionTransport::CircuitRelay,
+                direction: ConnectionDirection::Dialer,
+            }
+        );
+
+        let inbound = ConnectedPoint::Listener {
+            local_addr: "/ip4/0.0.0.0/tcp/22487".parse().unwrap(),
+            send_back_addr: "/ip4/203.0.113.10/tcp/53000".parse().unwrap(),
+        };
+        assert_eq!(
+            classify_connection_path(&inbound),
+            ConnectionPath {
+                family: ConnectionFamily::Ipv4,
+                transport: ConnectionTransport::Tcp,
+                direction: ConnectionDirection::Listener,
+            }
+        );
+
+        let inbound_relay = ConnectedPoint::Listener {
+            local_addr: format!("/ip4/198.51.100.8/tcp/4001/p2p/{relay}/p2p-circuit")
+                .parse()
+                .unwrap(),
+            send_back_addr: "/memory/9".parse().unwrap(),
+        };
+        assert_eq!(
+            classify_connection_path(&inbound_relay),
+            ConnectionPath {
+                family: ConnectionFamily::Ipv4,
+                transport: ConnectionTransport::CircuitRelay,
+                direction: ConnectionDirection::Listener,
+            },
+            "an inbound relay's family and transport both come from local_addr"
+        );
+
+        assert_eq!(
+            classify_connection_path(&dialled_endpoint("/ip6/::ffff:192.0.2.4/tcp/22487")).family,
+            ConnectionFamily::Ipv4,
+            "IPv4-mapped IPv6 is an IPv4 path in the canonical route model"
+        );
+    }
+
+    #[test]
+    fn only_noise_authenticated_outbound_ip_routes_become_reconnect_hints() {
+        let target = libp2p_peer();
+        let peer = to_peer(&target);
+        let direct = dialled_endpoint("/ip4/192.168.1.40/tcp/22487");
+        assert_eq!(
+            authenticated_dial_route(target, &direct),
+            Some(AuthenticatedDialRoute {
+                peer,
+                address: format!("/ip4/192.168.1.40/tcp/22487/p2p/{target}"),
+            })
+        );
+
+        let inbound = ConnectedPoint::Listener {
+            local_addr: "/ip4/0.0.0.0/tcp/22487".parse().unwrap(),
+            send_back_addr: "/ip4/192.168.1.40/tcp/53122".parse().unwrap(),
+        };
+        assert_eq!(
+            authenticated_dial_route(target, &inbound),
+            None,
+            "an inbound ephemeral source port is not a future listener route"
+        );
+        assert_eq!(
+            authenticated_dial_route(
+                target,
+                &dialled_endpoint(&format!(
+                    "/ip4/192.168.1.1/tcp/4001/p2p/{target}/p2p-circuit"
+                )),
+            ),
+            None,
+            "relay lifecycle and consent are not persisted as a direct LAN hint"
+        );
+        assert_eq!(
+            authenticated_dial_route(
+                target,
+                &dialled_endpoint(&format!("/dns4/member.invalid/tcp/22487/p2p/{target}")),
+            ),
+            None,
+            "cross-session DNS rebinding is not retained"
+        );
+        assert_eq!(
+            authenticated_dial_route(
+                target,
+                &dialled_endpoint(&format!("/ip4/192.168.1.40/tcp/22487/ws/p2p/{target}")),
+            ),
+            None,
+            "persisted reconnects stay raw TCP/QUIC rather than widening to WebSocket"
+        );
+    }
+
+    #[test]
+    fn dial_diagnostics_keep_route_shape_without_private_coordinates() {
+        let private: Multiaddr = "/ip4/192.168.77.91/tcp/22487".parse().unwrap();
+        let quic: Multiaddr = "/ip6/fd00::7/udp/22487/quic-v1".parse().unwrap();
+        let rendered = format!("{:?}", dial_log_shape([&private, &quic]));
+
+        assert!(!rendered.contains("192.168.77.91"));
+        assert!(!rendered.contains("fd00::7"));
+        assert_eq!(
+            dial_log_shape([&private, &quic]),
+            DialLogShape {
+                ipv4: 1,
+                ipv6: 1,
+                tcp: 1,
+                quic: 1,
+                ..DialLogShape::default()
+            }
+        );
+    }
+
+    #[test]
+    fn final_close_clears_every_authenticated_route_for_that_peer() {
+        let peer = libp2p_peer();
+        let other = libp2p_peer();
+        let route = |target: libp2p::PeerId, port| AuthenticatedDialRoute {
+            peer: to_peer(&target),
+            address: format!("/ip4/192.168.1.40/tcp/{port}/p2p/{target}"),
+        };
+        let mut routes = HashMap::from([
+            ((peer, ConnectionId::new_unchecked(1)), route(peer, 22_487)),
+            ((peer, ConnectionId::new_unchecked(2)), route(peer, 22_488)),
+            (
+                (other, ConnectionId::new_unchecked(3)),
+                route(other, 22_489),
+            ),
+        ]);
+
+        forget_authenticated_routes(&mut routes, peer, ConnectionId::new_unchecked(999), 0);
+        assert!(routes.keys().all(|(candidate, _)| *candidate != peer));
+        assert!(routes.keys().any(|(candidate, _)| *candidate == other));
+    }
+
+    #[test]
+    fn recent_authenticated_route_evidence_survives_close_and_is_per_peer_bounded() {
+        let transport = libp2p_peer();
+        let peer = to_peer(&transport);
+        let route = |port| AuthenticatedDialRoute {
+            peer,
+            address: format!("/ip4/192.168.1.40/tcp/{port}/p2p/{transport}"),
+        };
+        let mut live =
+            HashMap::from([((transport, ConnectionId::new_unchecked(1)), route(22_487))]);
+        let mut evidence = VecDeque::new();
+        record_authenticated_route_evidence(&mut evidence, route(22_487));
+        record_authenticated_route_evidence(&mut evidence, route(22_488));
+        record_authenticated_route_evidence(&mut evidence, route(22_489));
+
+        forget_authenticated_routes(&mut live, transport, ConnectionId::new_unchecked(1), 0);
+        assert!(live.is_empty(), "present-time liveness remains truthful");
+        assert_eq!(
+            evidence.into_iter().collect::<Vec<_>>(),
+            vec![route(22_488), route(22_489)],
+            "a short edge leaves bounded proof for the recovery worker"
+        );
+    }
+
+    #[test]
+    fn partial_close_removes_only_its_authenticated_route_even_when_path_shape_is_unchanged() {
+        let peer = libp2p_peer();
+        let first = ConnectionId::new_unchecked(1);
+        let surviving = ConnectionId::new_unchecked(2);
+        let route = |port| AuthenticatedDialRoute {
+            peer: to_peer(&peer),
+            address: format!("/ip4/192.168.1.40/tcp/{port}/p2p/{peer}"),
+        };
+        let mut routes = HashMap::from([
+            ((peer, first), route(22_487)),
+            ((peer, surviving), route(22_488)),
+        ]);
+        let (tx, mut rx) = watch::channel(authenticated_route_snapshot(&routes));
+
+        // Both physical connections have the same coarse IPv4/TCP/dialer projection. The actor
+        // must still advance the independent address-bearing watch when one closes.
+        forget_and_publish_authenticated_routes(&mut routes, &tx, peer, first, 1);
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(rx.borrow_and_update().clone(), vec![route(22_488)]);
+        assert_eq!(routes.get(&(peer, surviving)), Some(&route(22_488)));
+    }
+
+    #[test]
+    fn connection_path_ledger_handles_upgrades_duplicates_and_final_close() {
+        let peer = libp2p_peer();
+        let other = libp2p_peer();
+        let relay = ConnectionPath {
+            family: ConnectionFamily::Ipv6,
+            transport: ConnectionTransport::CircuitRelay,
+            direction: ConnectionDirection::Listener,
+        };
+        let direct = ConnectionPath {
+            family: ConnectionFamily::Ipv4,
+            transport: ConnectionTransport::QuicV1,
+            direction: ConnectionDirection::Dialer,
+        };
+        let mut paths = HashMap::from([
+            ((peer, ConnectionId::new_unchecked(1)), relay),
+            ((peer, ConnectionId::new_unchecked(2)), direct),
+            ((other, ConnectionId::new_unchecked(3)), direct),
+        ]);
+
+        assert_eq!(active_connection_paths(&paths, peer), vec![direct, relay]);
+        forget_connection_path(&mut paths, peer, ConnectionId::new_unchecked(2), 1);
+        assert_eq!(active_connection_paths(&paths, peer), vec![relay]);
+
+        // Two physical relay connections intentionally collapse into one coarse UI path. Closing
+        // either must leave the path present while the other is established.
+        paths.insert((peer, ConnectionId::new_unchecked(4)), relay);
+        forget_connection_path(&mut paths, peer, ConnectionId::new_unchecked(1), 1);
+        assert_eq!(active_connection_paths(&paths, peer), vec![relay]);
+
+        // The authoritative final count heals a missing close id and preserves other peers.
+        forget_connection_path(&mut paths, peer, ConnectionId::new_unchecked(999), 0);
+        assert!(active_connection_paths(&paths, peer).is_empty());
+        assert_eq!(active_connection_paths(&paths, other), vec![direct]);
     }
 
     #[test]
@@ -4868,6 +6763,63 @@ mod tests {
         assert!(
             !observations.contains_key(&first),
             "the oldest peer is evicted"
+        );
+    }
+
+    #[test]
+    fn a_peer_is_remembered_with_its_routes_and_the_map_stays_bounded() {
+        // The redial hint that makes a request to a disconnected peer survivable. `to_peer` is a
+        // one-way hash and `peers` holds only live connections, so without this map an outbound
+        // request to a peer whose connection had dropped could not even name a dial target.
+        let mut recent = HashMap::new();
+        let mut order = VecDeque::new();
+        let first = to_peer(&test_peer(1));
+        for n in 1..=(MAX_RECENT_PEER_ADDRS + 2) {
+            record_recent_peer(
+                &mut recent,
+                &mut order,
+                first,
+                test_peer(1),
+                format!("/ip4/198.51.100.1/tcp/{}", 40000 + n)
+                    .parse()
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            recent[&first].addresses.len(),
+            MAX_RECENT_PEER_ADDRS,
+            "one peer's route list is capped"
+        );
+        assert_eq!(
+            recent[&first].addresses.back().unwrap().to_string(),
+            format!(
+                "/ip4/198.51.100.1/tcp/{}",
+                40000 + MAX_RECENT_PEER_ADDRS + 2
+            ),
+            "the freshest route is kept"
+        );
+
+        // A repeat visit must not renew the peer's place in the queue, or two chatty peers would
+        // evict the quiet member whose route is the one actually worth remembering.
+        // `test_peer` only spans a byte, and the bound needs more distinct peers than that.
+        let wide_peer = |n: u16| {
+            let mut seed = [5u8; 32];
+            seed[..2].copy_from_slice(&n.to_be_bytes());
+            keypair_from_seed(seed).unwrap().public().to_peer_id()
+        };
+        for n in 2..=(MAX_RECENT_PEERS as u16 + 2) {
+            record_recent_peer(
+                &mut recent,
+                &mut order,
+                to_peer(&wide_peer(n)),
+                wide_peer(n),
+                format!("/ip4/198.51.100.2/tcp/{n}").parse().unwrap(),
+            );
+        }
+        assert_eq!(recent.len(), MAX_RECENT_PEERS);
+        assert!(
+            !recent.contains_key(&first),
+            "the least recently learned peer is evicted"
         );
     }
 
@@ -5511,6 +7463,218 @@ mod tests {
             .unwrap();
         assert_eq!(target_peer_in_multiaddr(&direct), Some(target));
         assert_eq!(relay_peer_in_circuit_addr(&direct), None);
+    }
+
+    /// Pin the actor boundary, not merely the route parser: an untrusted caller can enqueue a
+    /// syntactically valid bare socket through the public runtime handle, but it must never reach
+    /// libp2p. A peer-bound form of that same address must still connect normally.
+    #[tokio::test]
+    async fn the_runtime_dial_actor_refuses_a_bare_socket() {
+        let listen: Multiaddr = "/memory/918274".parse().unwrap();
+        let mut server_swarm = build_memory_swarm();
+        let server_id = *server_swarm.local_peer_id();
+        server_swarm.listen_on(listen.clone()).unwrap();
+        let server = MeshService::spawn(server_swarm);
+        let client = MeshService::new_memory(None, &[]).unwrap();
+
+        client.dial(listen.clone()).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), server.next_event())
+                .await
+                .is_err(),
+            "a bare runtime address must be discarded before the swarm dials it"
+        );
+
+        let bound: Multiaddr = format!("{listen}/p2p/{server_id}").parse().unwrap();
+        client.dial(bound).await.unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), server.next_event())
+            .await
+            .expect("the peer-bound control route should connect")
+            .expect("the server actor should remain alive");
+        assert!(matches!(event, TransportEvent::PeerConnected(_)));
+    }
+
+    /// Pre-owner waits use the watch table, not the single-consumer event queue. The returned row
+    /// must already contain its coarse path, while the future sync owner still receives both
+    /// ordered edges. Dropping the remote actor must then remove the row rather than retaining a
+    /// stale success.
+    #[tokio::test]
+    async fn connection_watch_wait_preserves_ordered_events_and_withdraws_on_close() {
+        let listen: Multiaddr = "/memory/918276".parse().unwrap();
+        let mut server_swarm = build_memory_swarm();
+        let server_id = *server_swarm.local_peer_id();
+        server_swarm.listen_on(listen.clone()).unwrap();
+        let server = MeshService::spawn(server_swarm);
+        let client = MeshService::new_memory(None, &[]).unwrap();
+        let server_peer = server.local_peer();
+
+        let bound: Multiaddr = format!("{listen}/p2p/{server_id}").parse().unwrap();
+        client.dial(bound).await.unwrap();
+        let connected = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.wait_for_peer_connected(server_peer),
+        )
+        .await
+        .expect("connection watch should change")
+        .expect("client actor should remain alive");
+        assert_eq!(connected.peer, server_peer);
+        assert_eq!(connected.active.len(), 1);
+        assert_eq!(connected.active[0].transport, ConnectionTransport::Memory);
+
+        assert!(
+            matches!(
+                client.next_event().await,
+                Some(TransportEvent::PeerConnected(peer)) if peer == server_peer
+            ),
+            "the watch must not consume the aggregate edge"
+        );
+        assert!(matches!(
+            client.next_event().await,
+            Some(TransportEvent::PeerPathsChanged { peer, active, .. })
+                if peer == server_peer && active == connected.active
+        ));
+
+        let mut snapshots = client.connection_snapshot_rx.clone();
+        drop(server);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                snapshots
+                    .changed()
+                    .await
+                    .expect("client actor remains alive");
+                if snapshots.borrow_and_update().is_empty() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("final close should withdraw the watch row");
+    }
+
+    #[test]
+    fn a_closed_connection_watch_never_returns_its_retained_last_success() {
+        let peer = PeerId::from_u64(77);
+        let path = ConnectionPath {
+            family: ConnectionFamily::Memory,
+            transport: ConnectionTransport::Memory,
+            direction: ConnectionDirection::Dialer,
+        };
+        let connected = vec![PeerConnectionSnapshot {
+            peer,
+            active: vec![path],
+        }];
+        let (tx, mut rx) = watch::channel(connected.clone());
+        tx.send_replace(Vec::new());
+        assert!(
+            current_connection_snapshot(&mut rx).unwrap().is_empty(),
+            "a pending disconnect replacement wins over the retained success"
+        );
+        tx.send_replace(connected);
+        drop(tx);
+
+        assert!(matches!(
+            current_connection_snapshot(&mut rx),
+            Err(TransportError::Closed)
+        ));
+    }
+
+    /// Reciprocal proof retries are allowed to continue after the endpoint scheduler refuses a
+    /// new socket pass, so their request command must distinguish a live connection from the
+    /// actor's ordinary recent-peer auto-redial cache.
+    #[tokio::test]
+    async fn connected_only_control_requests_never_redial_a_recent_peer() {
+        let listen: Multiaddr = "/memory/918275".parse().unwrap();
+        let mut server_swarm = build_memory_swarm();
+        let server_id = *server_swarm.local_peer_id();
+        server_swarm.listen_on(listen.clone()).unwrap();
+        let server = MeshService::spawn(server_swarm);
+        let client = MeshService::new_memory(None, &[]).unwrap();
+        let server_peer = server.local_peer();
+        let client_peer = client.local_peer();
+
+        let bound: Multiaddr = format!("{listen}/p2p/{server_id}").parse().unwrap();
+        client.dial(bound).await.unwrap();
+        for node in [&client, &server] {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if matches!(
+                        node.next_event().await,
+                        Some(TransportEvent::PeerConnected(_))
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("the memory peers should connect");
+        }
+
+        // Positive half: a live connection carries the proof without any additional dial.
+        let handle = client.handle();
+        let request = tokio::spawn(async move {
+            handle
+                .request_control_connected_only(server_peer, Bytes::from_static(b"proof"))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(TransportEvent::Request {
+                    data, responder, ..
+                }) = server.next_event().await
+                {
+                    assert_eq!(&data[..], b"proof");
+                    responder.respond(Bytes::from_static(b"ok"));
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the connected-only request should reach the live peer");
+        assert_eq!(&request.await.unwrap().unwrap()[..], b"ok");
+
+        // Populate the client's recent-peer cache by severing the established connection. The
+        // server lifts its deny immediately afterwards so any accidental redial would be visible.
+        server.evict_peer(client_peer).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(
+                    client.next_event().await,
+                    Some(TransportEvent::PeerDisconnected(peer)) if peer == server_peer
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the client should observe the severed connection");
+        server.unevict_peer(client_peer).await.unwrap();
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            client
+                .handle()
+                .request_control_connected_only(server_peer, Bytes::from_static(b"again")),
+        )
+        .await
+        .expect("a disconnected proof is rejected immediately");
+        assert!(matches!(outcome, Err(TransportError::Unreachable(peer)) if peer == server_peer));
+        // Path detail is emitted after the aggregate disconnect edge, so an empty
+        // `ConnectionPathsChanged` may still be queued here. That refinement is not a redial; the
+        // contract this regression protects is that no new aggregate connection edge appears.
+        let reconnected = tokio::time::timeout(Duration::from_millis(150), async {
+            loop {
+                match client.next_event().await {
+                    Some(TransportEvent::PeerConnected(peer)) if peer == server_peer => break,
+                    Some(_) => continue,
+                    None => std::future::pending::<()>().await,
+                }
+            }
+        })
+        .await;
+        assert!(
+            reconnected.is_err(),
+            "the connected-only request must not reconnect from recent_peers"
+        );
     }
 
     #[test]

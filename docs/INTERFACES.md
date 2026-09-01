@@ -35,11 +35,24 @@ CryptoRngCore>` does **not** satisfy the bound (CryptoRng isn't forwarded throug
 ```rust
 pub trait MeshTransport: Send + Sync {
     fn local_peer(&self) -> PeerId;
+    fn connection_snapshot(&self) -> Vec<PeerConnectionSnapshot>; // bounded, present-time; default empty
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError>;
     async fn unsubscribe(&self, topic: Topic) -> Result<(), TransportError>;
     async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError>;
     async fn request(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<Bytes, TransportError>;
+    async fn request_connected(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<Bytes, TransportError>; // fail-closed default
+    async fn notify(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>;
+    async fn notify_connected(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>; // fail-closed default
     async fn next_event(&self) -> Option<TransportEvent>;   // single-consumer
+    async fn rendezvous_register(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
+    async fn rendezvous_discover(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
+    async fn dial_addr(&self, addr:&str) -> Result<(),TransportError>;
+    async fn dial_permit(&self, permit:BoxedDialPermit) -> Result<DialSubmission,TransportError>;
+    async fn dial_peer_batch(&self, peer:PeerId, addrs:&[String]) -> Result<Vec<DialSubmission>,TransportError>; // 1..=2, direct, terminal peer-bound
+    async fn dial_peer_permits(&self, peer:PeerId, permits:Vec<BoxedDialPermit>) -> Result<Vec<DialSubmission>,TransportError>;
+    async fn add_external_addr(&self, addr:&str) -> Result<(),TransportError>;
+    async fn next_discovered(&self) -> Option<DiscoveredPeer>; // default never resolves
+    async fn next_registered(&self) -> Option<RendezvousRegistration>; // exact node/ns + granted TTL; default never resolves
 }
 pub struct PeerId([u8;32]);   fn from_u64(n)->Self; fn as_bytes()->&[u8;32];
 pub struct Topic(Bytes);      fn new(impl Into<Bytes>)->Self; fn as_bytes()->&[u8];
@@ -47,17 +60,76 @@ pub struct ProtocolId(pub &'static str);
 pub enum TransportEvent {
     Gossip { topic: Topic, from: PeerId, data: Bytes },
     Request { from: PeerId, proto: ProtocolId, data: Bytes, responder: Responder },
-    PeerConnected(PeerId), PeerDisconnected(PeerId),
+    PeerConnected(PeerId),
+    PeerPathsChanged { peer: PeerId, active: Vec<ConnectionPath>, newly_established: Option<ConnectionPath> },
+    PeerDisconnected(PeerId),
 }
+pub struct ConnectionPath { family: ConnectionFamily, transport: ConnectionTransport,
+                             direction: ConnectionDirection }
+pub struct PeerConnectionSnapshot { peer: PeerId, active: Vec<ConnectionPath> }
+pub struct AuthenticatedDialRoute { peer: PeerId, address: String } // catcoms-net only; local-sensitive
+pub const MAX_CONNECTED_PEER_SNAPSHOT: usize = 320;
+pub const MAX_CONNECTION_PATH_SNAPSHOT: usize = 64;
+pub enum ConnectionFamily { Ipv4, Ipv6, Dns, Memory, Unknown }
+pub enum ConnectionTransport { Tcp, QuicV1, WebSocket, CircuitRelay, Memory, Unknown }
+pub enum ConnectionDirection { Dialer, Listener }
 pub struct Responder;  fn respond(self, Bytes);  fn channel() -> (Responder, ResponderRx);
 pub struct ResponderRx; async fn recv(self) -> Option<Bytes>;
-pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, NoResponse }
+pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, NoResponse, InvalidDialBatch }
+pub trait DialPermit: Send + Debug { fn address(&self)->&str; fn commit_if_current(self:Box<Self>)->Option<String>; }
+pub type BoxedDialPermit = Box<dyn DialPermit>;
 ```
 Implementations:
 - **`MemNetwork`** (tests): `let hub = Hub::new(); let net = hub.join(PeerId::from_u64(n));`
 - **`MeshService`** (prod, catcoms-net): `spawn(swarm)` / `new_memory(listen, dial)` /
   `new_tcp(...)`; `build_memory_swarm()` / `build_tcp_swarm()`. Maps `PeerId`↔libp2p
   PeerId, hex-encodes topics, queues+retries publishes until a subscriber appears.
+  `request_connected` / `notify_connected` are deliberately narrow repair sends: the actor
+  succeeds only when its current peer map and `Swarm::is_connected` both say
+  the transport is live. Unlike ordinary `request_control`, it never consults `recent_peers` and
+  cannot implicitly redial after the shared scheduler denied a new socket attempt.
+  `dial_peer_batch` accepts one or two direct multiaddrs and revalidates inside the actor that each
+  has a terminal libp2p peer whose Phase-0 id equals the addressed `PeerId`; empty, oversized,
+  relayed, bare, or substituted batches fail before `dial_gated` can start work.
+  Discovery- and recovery-policy dials use `dial_permit` / `dial_peer_permits` instead. Production
+  transfers each non-cloneable generation-bound permit into the actor command before awaiting a
+  reply. Already-connected, duplicate, or already-dialling suppression drops and refunds it there;
+  the actor owns the pending-infrastructure ledger and commits only immediately before inserting the
+  exact member endpoint into the pending path or calling `Swarm::dial` for infrastructure. Caller
+  cancellation therefore cannot refund a queued command, and a permit whose monotonic deadline has
+  passed or whose scheduler window was replaced can neither start nor alter the new counters.
+  A transport using the default fallback commits before its first await and may conservatively
+  spend on later failure, but cannot over-refund work that escaped the caller.
+  `PeerConnected`/`PeerDisconnected` retain their legacy one-edge aggregate meaning.
+  `PeerPathsChanged` follows them on the same ordered event stream and also fires when a second
+  connection upgrades/refines a path without changing aggregate liveness. It carries no address or
+  physical-connection count. Relay/WebSocket semantics win over their TCP carrier; IPv4-mapped IPv6
+  normalizes to IPv4. Connection limits bound the actor ledger (320 global/eight per peer), and
+  duplicate coarse close snapshots are suppressed. Each genuine establishment still emits a
+  snapshot to timestamp historical success, so intense connection churn can consume the bounded
+  256-event channel and backpressure the single swarm actor; limits bound memory but do not erase
+  that availability residual.
+  `connection_snapshot()` is the non-consuming handoff seam: admission/relay/rendezvous waits use
+  `MeshService::wait_for_*_connected` over its coalesced watch, leaving every ordered event for the
+  eventual owner. The admission routines that must inspect pushed proof/Welcome requests on that
+  stream coalesce any lifecycle events they dequeue into a bounded
+  `PreOwnerConnectionHandoff`; the newly constructed `ChannelSync` adopts its final live table once
+  before draining later queued events. Because the legacy query snapshot and event stream have no
+  shared revision watermark, `ChannelSync` never seeds from `connection_snapshot()` directly. A
+  stopped actor returns an empty snapshot / `Closed`, never Tokio watch's retained last value.
+  `MeshHandle::authenticated_dial_routes()` is a separate, address-bearing watch over currently
+  live **outbound direct IP** connections whose remote PeerId completed Noise authentication. It
+  never contains inbound ephemeral source ports, DNS or relay circuits and is not exposed through
+  the address-free `MeshTransport` snapshot. The desktop may retain at most two routes for the
+  named inviter after successful direct admission; these values are local-sensitive reconnect
+  hints, not membership, device-to-transport binding, presence, or future reachability proof.
+  `catcoms-sync` increments a session-local member-route revision only when a current member's
+  path, record, dial-scheduler state, or verdict can change. `catcoms-app` compares that revision
+  and emits `AppEvent::MemberRoutesChanged` / Tauri `member-routes-changed` without rebuilding the
+  O(roster × addresses) projection after every sync. Unclaimed Noise-peer churn retains only its
+  bounded evidence and does not bump the UI revision. Time-derived cooldown/history expiry does
+  not mutate that revision, so the visible Connectivity view also refreshes at most once a minute;
+  the debug console already uses a bounded poll.
   - **NAT traversal:** `listen_on(circuit)` / `next_listen_addr()` reserve a relay
     circuit; `next_direct_upgrade()` surfaces a DCUtR hole-punch. Infra nodes:
     `build_relay_swarm()`/`run_relay(...)`, `build_rendezvous_swarm()`/`run_rendezvous(...)`.
@@ -113,9 +185,82 @@ Implementations:
     surface results. Discovered records (`Discovered { peer, addresses, namespace }`) are
     **never auto-dialed**; a higher layer (`catcoms-discovery`) decides whether to dial;
     the surfaced-record queue is per-Discover-response capped. `add_external_address(addr)`
-    lets a directly-reachable node register without a relay. `dial(addr)` dials at runtime.
+    lets a directly-reachable node register without a relay. `dial(addr)` queues a runtime dial;
+    the actor refuses it unless the address has a terminal peer id (there is no bare fallback).
     Free fn `validate_rendezvous_addrs(&[String]) -> Vec<RendezvousTarget>` (reject
     `/p2p-circuit`, require exactly one `/p2p/`, distinct PeerIds).
+
+### Peer-bound route parsing and endpoint scheduling  *(catcoms-discovery)*
+
+```rust
+pub fn parse_peer_dial_route(addr:&str, expected_peer:&[u8;32]) -> Option<ParsedPeerRoute>;
+pub struct CanonicalDialPeer; // Phase-0 terminal transport id; constructible only by the parser
+pub enum DialRouteKind {
+    Direct,
+    Relay { relay_peer:CanonicalDialPeer, target_peer:CanonicalDialPeer },
+}
+pub struct ParsedPeerRoute {
+    pub host:RouteHost, pub principal:CanonicalDialPeer,
+    pub kind:DialRouteKind, pub endpoint:DialEndpoint,
+}
+pub enum RouteHost { Ip(IpAddr), Dns(String) }
+pub struct EndpointDialConfig {
+    pub window_ms:u64, pub process_limit:u32, pub server_limit:u32,
+    pub peer_limit:u32, pub endpoint_limit:u32, pub prefix_limit:u32,
+}
+pub struct EndpointDialScheduler; // cloneable; clones share one bounded transient counter set
+  new(EndpointDialConfig) -> Self;
+  new_with_clock(EndpointDialConfig, Arc<dyn Clock>) -> Self;
+  reserve(&self, server:&[u8], endpoints:&[DialEndpoint]) -> Vec<String>;
+  reserve_permits(&self, server:&[u8], endpoints:&[DialEndpoint])
+    -> Vec<EndpointDialPermit>; // non-cloneable and bound to one accounting generation
+
+pub trait DialPermit { // `catcoms-rt`; object-safe transport ownership seam
+  address(&self) -> &str;
+  commit_if_current(self:Box<Self>) -> Option<String>;
+}
+MeshTransport::dial_permit(BoxedDialPermit) -> DialSubmission;
+MeshTransport::dial_peer_permits(PeerId, Vec<BoxedDialPermit>) -> Vec<DialSubmission>;
+```
+
+The parser accepts only canonical, non-zero raw TCP or root-path WebSocket TCP (exactly `/ws`,
+`/wss`, or `/tls/ws`; non-root paths, SNI, and standalone/mixed TLS shapes are not product transports)
+or UDP/QUIC-v1 routes, plus the explicit single-relay circuit form. A direct route has exactly one
+terminal `/p2p/<PeerId>`; a circuit has one relay id and one terminal target. The terminal id's
+Phase-0 hash must equal `expected_peer`, with nothing trailing. Syntax and identity binding are
+separate from host trust: PEX/cache/member inputs additionally refuse DNS and dangerous local,
+private, link-local, multicast and transitional ranges (the sync test vocabulary deliberately
+retains non-routed documentation/benchmark literals); invite rendezvous and switchboards use the
+stricter global-literal classifier. Direct invite bootstraps deliberately retain bounded
+LAN/loopback support.
+
+`DiscoveryPolicy::dial_budget` counts returned addresses, not peers. The desktop creates one
+`EndpointDialScheduler`, installs a clone into every server before cached redial, and applies it to
+untrusted post-join discovery plus pre-join invite/rendezvous/switchboard routes, repeated two-way
+reply callbacks, and direct companion-grant redemption. Trusted operator-configured infrastructure
+connections have separate validation/lifecycle paths and are not universally mediated by this API.
+Defaults grant at most 32 endpoints per 60-second process window, 8 per server, 4 per canonical
+`(server, Phase-0 peer)`, 2 per direct physical socket or authenticated relay/target circuit, and 8
+per IPv4 `/24`, IPv6 `/48`, or DNS host. The parser embeds the canonical peer principal in the opaque
+endpoint; callers cannot supply a device id or raw libp2p id as an accounting alias. Direct-socket
+and prefix keys exclude the claimed PeerId and descriptor sequence. Separate relay-circuit keys keep
+unrelated targets at one relay from exhausting each other's two-attempt cap; the shared relay host is
+bounded at prefix/process scope rather than by a separate outer-socket lease. A shared denial is
+refunded to the local policy because no dial command was submitted. Scheduler state is session-only
+and uses one scheduler-owned `Clock::monotonic_ms` timeline. A permit is transferred into the
+production transport actor before the caller awaits; duplicate/already-connected/already-dialling
+  pre-commit suppression refunds it, while a deadline- and generation-current commit happens immediately before
+pending/socket submission. Infrastructure targets have an actor-owned pending ledger that is
+shared with member routes later reclassified as infrastructure and released on immediate refusal,
+connection, or outgoing failure. Constructor routes are grouped by terminal peer into one
+known-peer address race and seed that ledger before the actor starts. Immediate transport refusal
+after commit is reported separately from suppression: it remains conservatively charged in both the
+shared scheduler and local discovery policy, but does not manufacture a successful attempt/cooldown.
+Deadline and generation checks prevent queued expired work from starting and
+delayed command drops from refunding a newer window. A process-wide in-flight/concurrency lease
+remains future hardening. Pre-join invite
+rendezvous seeds are capped at two distinct validated nodes so infrastructure cannot exhaust the
+per-server window before the discovered inviter is dialed.
 
 ### `SecureKeyStore`; at-rest DEK protection, tiered  *(catcoms-crypto)*
 ```rust
@@ -303,7 +448,21 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   // Cross-session redial: newest roster-checked cached records are policy-ranked. Equal address
   // epochs retry with bounded monotonic exponential backoff+jitter; a newer signed seq or a live
   // connect/disconnect lifecycle resets the delay. Old public IPs are not unioned indefinitely.
+  set_endpoint_dial_scheduler(EndpointDialScheduler); // inject one process-shared final dial gate
+  set_local_reconnect_routes(Vec<(PeerId,String)>);    // sealed desktop hints; direct literal IP only, transient in ChannelSync
+  async dial_local_reconnect_routes() -> usize;        // exact current roster claim + shared scheduler rechecked before dial
+  mint_member_recovery_code(Vec<String>) -> Result<MemberRecoveryCode>; // current member signs <=4 current direct listener routes
+  verify_member_recovery_code(&str) -> Result<MemberRecoveryVerified>; // pure group/member/time/exact-device-peer/address validation
+  async apply_member_recovery_code(&str) -> Result<MemberRecoveryApplied>; // verifies group/member/time/peer binding, then scheduler-charged dial
   cache_known_records() -> usize;  async dial_cached_peers() -> usize;
+  async drive_mesh_repair() -> usize;               // one bounded target: ≤2 connected-only probes, optional reciprocal request
+  async drive_pending_reciprocal() -> usize;        // target-side exact-descriptor direct batch submission
+  async manual_fallback_redial() -> ManualRedialOutcome; // anti-click cooldown; preserves policy/process scheduler
+  async drive_discovery();                          // periodic discovery + TTL-aware registration renewal
+  async next_postjoin_discovery_event() -> Option<PostJoinDiscoveryEvent>;
+  note_rendezvous_registered(RendezvousRegistration) -> bool;
+  track_delivery_target(DocType, doc_id, ChangeHash); // bounded exact targets eligible for an explicit receipt
+  peers_with_changes(DocType, doc_id, &[ChangeHash]) -> Vec<Vec<String>>; // causal authors union authenticated receipts
   authorize_join_helper(joiner:PeerId, invite_nonce:[u8;16], inviter_device:DeviceId,
                         target:PeerId, expires_at_ms:u64) -> bool;
   doc(DocType, doc_id) -> Option<&EncryptedDoc>;  local_peer() -> PeerId;  transport() -> &T;  // transport(): the discovery/dial layer above ChannelSync
@@ -312,7 +471,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
 // (BLAKE3-keyed off derive_key(invite_nonce), bound to group + rz_peer); so a joiner
 // discovers the inviter with no group secret and no hard-coded address.
 pub fn join_namespace(group_id:&[u8], invite_nonce:&[u8;16], rz_peer:&[u8]) -> String;
-// A member's self-signed, dialable peer record (PEX entry / discovery candidate).
+// A member's self-signed, dialable peer record (PEX entry / discovery candidate). Every address
+// must be canonical, public-IP based, and terminate in the libp2p id whose Phase-0 hash is peer_id.
 pub struct PeerDescriptor { pub device_pubkey:Vec<u8>, pub peer_id:[u8;32], pub addresses:Vec<String>, pub seq:u64, pub signature:[u8;64] }
   verify_self() -> bool;
 
@@ -360,7 +520,10 @@ ordered replay when the gap fills) · `past_keys` (BTreeMap `(DocType,doc_id,epo
 → `Zeroizing<[u8;32]>`, captured by `snapshot_epoch_keys` *before* each advance) ·
 `routing_secrets` (BTreeMap `L → Zeroizing<[u8;32]>`, `{L-2,L-1,L}`, the source of the
 blinded topics + namespaces) · **two-pool peers:** `known_peers` (untrusted candidates)
-vs `member_peers` (promoted via a verifying *signed* catch-up; preferred) · `catchup_queue`.
+vs `member_peers` (promoted via a verifying *signed* catch-up; preferred). Each transient
+`member_peers` entry retains the roster `DeviceId` that signed its request-bound response, so an
+MLS removal invalidates the departed signer's proof without discarding unaffected live peers ·
+`catchup_queue`.
 
 ---
 
@@ -374,7 +537,11 @@ pub struct DiscoveryPolicy;  new() / with_config(PolicyConfig);  remaining_budge
   // ranking: tag-verified member > multi-rendezvous corroboration > cache > raw junk (never dropped);
   // ≤1 trust root/rendezvous; round-robin interleave; roster clamp; seq-freshness (drop stale/replayed).
 pub enum Source { Rendezvous(PeerKey), Pex(PeerKey), Cache }   pub type PeerKey = Vec<u8>;
-pub struct Candidate { peer:PeerKey, addresses:Vec<String>, source:Source, seq:u64, tag_verified:bool }  // seq MUST be from a verified PeerRecord
+pub enum FreshnessPrincipal { Device(PeerKey), Transport(PeerKey) }
+pub struct Candidate { peer:PeerKey /*canonical transport merge/dial key*/, addresses:Vec<String>,
+                       source:Source, freshness:FreshnessPrincipal, seq:u64, tag_verified:bool }
+// `seq` is compared only within its verified signer domain: device-signed PeerDescriptor cache
+// rows use Device(device id); transport-signed rendezvous PeerRecords use Transport(peer id).
 pub struct PlannedDial { peer:PeerKey, addresses:Vec<String> }
 pub struct PolicyConfig { dial_budget, window_ms, jitter_ms, roster_headroom, min_dial_slots, max_addresses, max_tracked_peers }
 
@@ -387,7 +554,7 @@ pub struct EclipseConfig { roster_floor, min_reach:f64, min_sources, grace_ms, c
 // Cross-session cache of proven members (first-contact eclipse). SQLCipher backing deferred.
 pub struct AddressCache;  new(CacheConfig);  insert(CachedPeer, &mut impl CryptoRngCore);  get(&PeerKey)->Option<&CachedPeer>;  candidates()->Vec<CachedPeer>;
   to_bytes(&[u8;32])->Vec<u8>;  from_bytes(&[u8], &[u8;32], CacheConfig)->Result<Self,CacheError>;  // BLAKE3 keyed tag → tamper-detected (constant-time) on load
-pub struct CachedPeer { peer:PeerKey /*device id*/, addresses:Vec<String>, seq:u64, record:Vec<u8> }
+pub struct CachedPeer { peer:PeerKey /*device-id storage key; not Candidate.peer*/, addresses:Vec<String>, seq:u64, record:Vec<u8> }
 ```
 
 ---
@@ -416,6 +583,22 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     `bytes responder_pubkey ‖ bytes sig(64) ‖ bytes bundle`, sig over `"catcoms/catchup-resp/v1" ‖ group_id ‖ requester_pubkey ‖ u64 req_ts ‖ nonce(16) ‖ u64 req_epoch ‖ bundle`.
   - `4` KIND_PEX (6e-3d-7); **authed** body (empty); response responder-signed like commit catch-up but under
     `"catcoms/pex-resp/v1"`; bundle = `u32 count(≤64) ‖ len-prefixed PeerDescriptor`s, each self-signed under `"catcoms/peer-record/v1"`.
+  - `14` KIND_RECIPROCAL_FORWARD; authed exact requester/target descriptor references + random
+    attempt + expiry. A proven connected helper checks both live paths, rate-limits, signs the
+    original frame and queues kind 15 delivery. The sender does not await the response.
+  - `15` KIND_RECIPROCAL_DELIVERY; connected-only helper-attested original kind-14 frame. The
+    target rechecks helper/requester membership, both exact current descriptors, signature,
+    expiry/replay/rate bounds, then queues a later direct peer-bound dial intent.
+  - `16` KIND_INDIRECT_PROBE; authed exact target descriptor + attempt + expiry. A connected helper
+    queues kind 17 from current proven path state and never dials.
+  - `17` KIND_INDIRECT_RESULT; separately authed exact target hash + echoed attempt + boolean. It
+    is accepted only from the pending proven helper while the target descriptor remains current.
+    Two distinct negatives are suspicion only; one positive may queue kind 14 through that helper.
+  - `18` KIND_DELIVERY_RECEIPT; connected-only authed document type, document id, and 32-byte
+    change hash. A receiver queues it only when that exact signed op is newly applied, and the
+    sender accepts it only for one of its bounded recent targets. Duplicates are inert; unknown
+    hashes cannot allocate state. It proves that member device received the op, never that a human
+    displayed or read it.
   - **Authed body** (members-only gate): `bytes inner ‖ bytes requester_pubkey ‖ u64 timestamp_ms ‖ bytes nonce(16) ‖ u64 req_epoch ‖ bytes signature(64)`,
     signature over `"catcoms/catchup-auth/v1" ‖ group_id ‖ u16 kind ‖ inner ‖ requester_pubkey ‖ timestamp_ms ‖ nonce ‖ req_epoch`.
     Served only if `requester_pubkey` content-addresses a **current member**, the timestamp is fresh (`MAX_REQUEST_AGE_MS` 60s),
@@ -424,11 +607,32 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
   - Caps: requests 64 KiB; responses 16 MiB (catch-up) / **512 KiB (PEX)**; bundle element counts capped.
 - **`InviteToken`** signed payload (v2): `"catcoms/invite/v2" ‖ group_id ‖ inviter_device_id ‖ inviter_public_key ‖ nonce ‖ u64 expires ‖ u32 n ‖ n×bootstrap_str ‖ u32 m ‖ m×rendezvous_str`, then `signature(64)`.
 
+**Member recovery code.** The text prefix is `mewtual-reconnect-v1:` followed by the hex encoding
+of a canonical group id, member device public key, transport peer, candidate list, nonce, issue and
+expiry times, and the member signature. The whole text is at most 8 KiB, has at most four 512-byte
+direct literal-IP TCP/QUIC candidates, lives exactly ten minutes, and tolerates at most 30 seconds
+of future skew. Every route terminates in the signed transport peer; the signing device must still
+be in the receiver's current MLS roster. This is not an invite or a membership operation.
+
 ## 8. `DocType` tags (stable; only append)
 `Channel=1, Wiki=2, Status=3, Calendar=4, InviteLedger=5, MemberRoles=6, FileIndex=7, Routing=8,
 Profile=9, Livery=10, Badges=11, Devices=12, ChannelIndex=13, Moderation=14`.
 Exporter context = `u16 tag ‖ u128 doc_id` (18 bytes, fixed-width → injective). `Routing` has no content
 doc; it feeds the **metadata** exporter label to derive the per-removal `ns_secret_L`.
+
+`Status` document compatibility is additive. Older posts remain maps in the root `messages` list.
+New posts are message-schema maps stored directly at distinct root keys
+`"status_post/" ‖ random_post_id`; readers and post mutators accept both layouts. The keyed layout
+avoids concurrent first authors independently creating conflicting `messages` list objects and
+silently hiding one branch after merge. Status readers enumerate **all** legacy `messages`
+conflicts with Automerge `get_all`, so an already-conflicted old feed recovers both branches.
+Addressable ids are exactly 32 lowercase hex characters and must resolve to exactly one object
+across both layouts; ambiguous/malformed keyed rows are hidden and mutations fail closed. Feed
+order is materialized deterministically by `(timestamp, post_id)`. The root `members_may_post`
+scalar remains the posting-policy field. Mixed-version limitation: older clients know only the
+legacy list and therefore do not display posts authored in the keyed layout; clients must upgrade
+to participate in the new status feed. New clients intentionally do not dual-write, because doing
+so would recreate both the container race and cross-layout id ambiguity.
 
 ---
 
@@ -452,8 +656,12 @@ impl Server {
     async fn create_kick_case(&mut self, target:&str, reason:&str, evidence_ids:&[String]) -> Result<String,AppError>;
     async fn cast_kick_vote(&mut self, case_id:&str, yes:bool) -> Result<(),AppError>;
     async fn resolve_kick_case(&mut self, case_id:&str, remove:bool) -> Result<(),AppError>;
+    fn delivery_snapshot(&mut self, channel:u128) -> DeliverySnapshot;
 }
+pub struct DeliverySnapshot { revision:u64, states:Vec<DeliveryState> }
 impl ServerStore {
+    fn open(dir:impl AsRef<Path>, passphrase:&[u8], rng:&mut impl CryptoRngCore) -> Result<Self,AppError>; // owns lifetime installation lock
+    fn verify_passphrase(&self, passphrase:&[u8]) -> Result<(),AppError>; // verify-only; no second mount
     fn save_ui_state(&self, json:&[u8], rng:&mut impl CryptoRngCore) -> Result<(),AppError>; // ≤1 MiB, vault-sealed + atomic
     fn load_ui_state(&self) -> Result<Vec<u8>,AppError>;
     fn backup_source_dir(&self) -> &Path;
@@ -461,15 +669,150 @@ impl ServerStore {
 }
 ```
 
+`get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
+the complete bounded `states` array. The webview accepts only a strictly newer revision for its
+current server/channel view, so a delayed query completion or event cannot replace fresher receipt
+evidence. Revisions are process-local ordering tokens, not persisted delivery evidence.
+
+Diagnostic events similarly carry their capture-time `capture_mode` and `capture_epoch`. Before a
+Safe event enters the hub, literal `AddressValue` bytes are removed, arbitrary `SafeText` and legacy
+`BridgedMessage` values are replaced by fixed typed placeholders, runtime field names become ordinal
+slots, and targets are reduced to a closed component-root allowlist. Later viewer changes therefore
+cannot recover those discarded strings. Every rendered row carries its capture mode and epoch;
+mixed-history reports name both the current setting and all epochs actually present.
+Native event envelopes use `__seq`, `__ord`, `__gen`, optional `__trace`, and optional
+`__trace_proof`. Webview-origin trace hex is untrusted and is reduced to a session-local token before
+ring admission. `__trace_proof` is an opaque, trace-bound MAC under the diagnostic session salt; it
+allows an unchanged native trace to return through `record_ui_events` without becoming
+`H(H(trace))`. It is neither diagnostic data nor authority, is never persisted/rendered, and a
+missing/invalid proof causes normalization rather than trust. After Tauri has decoded an invoke's
+JSON body, structured UI commands retain at most 256 events and 32 ordered fields per event;
+omitted fields increment the canonical row's dropped-field count. This is a ring/command work bound,
+not a pre-parse IPC byte limit.
+The optional `catcoms-log` debug file is a separate raw tracing sink, not an export of this Safe
+ring. It can retain arbitrary native tracing and frontend console/error prose—including names,
+message fragments, paths, URLs, tokens, serialized objects, and stacks—whenever a call site emits
+them. Its rate, line, queue, rotation, and session-size bounds limit work and retention; they do not
+provide content minimization. Users must review that file before sharing it.
+`set_capture_mode` preserves per-section levels, while the separate `reset_section_capture` command
+restores recommended levels. Turning capture Off stops new admission but does not retroactively erase
+bounded history. Local Copy/Save reports are honestly labelled and receive validator disclosure
+findings. `open_public_diagnostics_issue` accepts no webview payload: native code renders the ring
+through a canonical allowlist, validates it, builds the fixed tracker title/body/URL, and launches
+that exact URL atomically. Targets, wall-clock time, addresses, runtime field names, user prose and
+legacy tracing events are absent from its report by construction. Each included public row states
+its capture mode and epoch, so a mixed-history clipboard fallback cannot imply one privacy setting
+for bytes admitted under another. Only the URL excerpt is bounded;
+when it is shortened, the exact full publication envelope is returned for clipboard review.
+
+The version-1 UI-continuity JSON retains the required `drafts` and `readMarks` objects and may also
+carry `statusCursors` plus bounded per-server `fileTrustPolicies`. Each file policy is local to this
+installation (`on-demand`, `specific` with exact authenticated full device identities, or `everyone`),
+vault-sealed with the other continuity state, and never enters group replication or the wire.
+Missing/malformed policy data decodes to on-demand. It governs passive media fetch/decoding only;
+an explicit Load/Play/Open/Download action is a separate user grant. Third-party HTTP(S) image
+URLs always require that explicit grant because they have no authenticated file origin.
+
+New file-index rows append `signer_key` and `signature` fields. The signature domain
+`catcoms/file-entry-attestation/v1` length-prefixes the stable group id, name, claimed author,
+normalized path, and encoded `FileManifest`/legacy `FileRef`. Readers recompute the signer device
+fingerprint, require it to equal `author`, and verify the signature before exposing
+`author_verified=true` plus the signer's full `DeviceId`. The eight-hex-character fingerprint is
+display-only; `specific` authorization compares the full identity. Missing fields are the
+backward-compatible legacy shape and remain downloadable, but a `specific` local trust policy must
+not auto-load them. Readers and writers cap the index at 256 rows and bound each signed field before
+clone/decode/verification, containing malicious replicated-index work.
+
+`ServerNet` record version 3 adds a reconnect-policy tag after the version-2 switchboard flag:
+`Disabled`, `AuthorizedPeer(peer_id)`, or `LegacyPending`, followed by at most two
+`ReconnectRoute { peer_id, address }` rows. A row is valid only under `AuthorizedPeer` and must name
+that exact peer. Version 4 appends an optional `pending_recovery_peer` plus the signed code's
+absolute expiry. Versions 1 and 2 decode with an empty route list and `LegacyPending`; version 3
+decodes with no pending recovery. New founders
+and helper/reply/switchboard admissions persist `Disabled`, while a successful direct admission
+persists only its named inviter as `AuthorizedPeer`. Each address is capped at 512 bytes and the
+entire record remains vault-sealed and atomically replaced. Every `ServerStore` record uses the
+same durability primitive: write and sync a sibling staging file, rename it over the destination,
+then sync the parent directory on Unix. Abrupt termination before rename therefore retains the
+complete authenticated predecessor; after rename readers see the complete replacement. Staging
+siblings are destination-specific, unique per invocation and opened with create-new semantics, so
+concurrent record types cannot alias and a pre-planted symlink is not followed. A parent-directory
+sync failure is reported distinctly as `CommittedButNotDurable`: the replacement is already visible
+and a retry is safe. Logical read-modify-write operations still require serialization to prevent a
+stale last writer from replacing newer state. `ServerStore::open` additionally acquires a
+non-blocking OS session lock before unsealing and holds it for the store's lifetime. A second
+desktop process therefore receives `VaultBusy` instead of mounting duplicate MLS, invite-ledger
+and transport actors from the same snapshot. Normal drop and abrupt process termination release
+the OS lock. An explicitly UI-locked webview re-authenticates with `verify_passphrase`, under the
+short vault transaction lock, rather than trying to mount a second `ServerStore` in its own native
+process; a wrong passphrase still leaves the IPC boundary locked.
+
+The rows are installation-local: they never enter the group snapshot, PEX, rendezvous, or webview,
+and reconnect diagnostics retain route shape rather than the private coordinate. Reload installs
+them into `ChannelSync`, which reparses the canonical terminal peer binding, permits literal-IP raw
+TCP/QUIC (including private/loopback) but rejects DNS, relay, WebSocket, link-local, multicast,
+unspecified and IPv4 0/8 or 240/4 hosts, requires exactly one current roster record to claim that
+transport peer, skips live/self peers, and spends the same process-wide endpoint scheduler as other
+untrusted recovery dials. Direct admission makes one bounded best-effort PEX request before the
+first post-join snapshot so the inviter's signed descriptor normally accompanies the sealed socket.
+On the discovery cadence, an authorized record may refresh only that inviter. `LegacyPending` may
+promote once only when the group has exactly one other member and exactly one unique live member
+claim; its captured route must additionally be private/loopback. A non-empty observation replaces
+and installs the bounded hints; an empty observation does not erase them merely because the remote
+app is closed.
+
+Applying a member recovery code first verifies its group, signature, current roster membership,
+exact unique device→transport record, deadline and route grammar **without dialing**. While the UI
+session commit gate is held, the desktop atomically seals only that peer and deadline as pending;
+the previous `ReconnectPolicy` and proven routes remain intact. Applying then repeats validation
+and submits scheduler-charged dials. A coalesced worker installed for both new and restored servers
+may promote the pending peer only before the deadline and only from this process's bounded recent
+outbound Noise-authenticated route evidence. Establish+close therefore cannot erase proof before a
+vault wait completes. Promotion atomically changes `ReconnectPolicy` and installs the exact route;
+a pasted candidate alone never becomes durable. Recovery may retain a safe public direct literal,
+while ordinary legacy migration remains private/loopback-only. The Tauri commands are
+`mint_member_recovery(server) -> {code,expires_at_ms,candidate_count}` and
+`apply_member_recovery(server,code) -> {fingerprint,submitted_routes}`. A successful apply result
+means bounded dial attempts were submitted, not that the member is connected.
+
 `storage_health` counts a chunk as verified only after its storage seal/content address and the
-file-layer decryption both succeed. `repair_storage` explicitly fetches only missing or unreadable
-referenced chunks over the authenticated blob path and verifies again; `has()` alone must never
-short-circuit repair.
+file-layer decryption both succeed. `repair_storage` explicitly fetches repairable missing or
+unreadable referenced chunks over the authenticated blob path and verifies again; `has()` alone
+must never short-circuit repair. Over-cap contradictory exact references remain unreadable without
+a fetch because the same content address cannot reconcile different wrapped keys.
 
 The Tauri `get_storage_health(server)` command adds a cached, deduplicated inventory projection:
-`checked_at_ms`, unique/logical/local-estimated/pinned totals, category rows, and the ten largest
-files. It performs at most one ordinary scan per server per process session. Only
-`repair_storage(server)` replaces that cache after its mandatory post-repair verification.
+`checked_at_ms`, unique/logical/local-estimated/pinned totals, category rows, the ten largest
+files, and `local_files`, the deduplicated files whose complete encrypted chunk set is held by this
+installation. The Storage pane can pass one of those rows through the existing authenticated
+`save_group_file` path. That explicit “Unlock copy” action verifies/decrypts the managed chunks and
+creates a separate, non-overwriting plaintext Downloads file; it does not alter or remove the
+vault-encrypted copy. Its final staging-file rename and reveal are authorized by the exact unlock
+generation that began the export; locking, then unlocking again, cannot revive the old operation.
+Chunk health is keyed by the exact encoded `FileRef`, and the inventory joins
+that verdict to the exact manifest in one actor snapshot; a reused ciphertext or plaintext CID
+cannot borrow another row's successful verification, and ambiguous same-CID manifests stay out of
+`local_files`. Authentication attempts are capped at four distinct exact references per ciphertext
+CID; a larger contradictory set fails that CID and every dependent manifest closed instead of
+multiplying large-blob decryption work. It performs at most one ordinary scan per server per
+unlocked UI session (the cache survives HMR but explicit lock clears it). Cache publication is
+bound to both the exact UI generation and process-local server incarnation; a removed/reinstalled
+server id cannot inherit a late old scan. The webview applies the same unlocked exact-view gate to
+deferred results. Only `repair_storage(server)` replaces that cache after its mandatory post-repair
+verification.
+
+Media presented to the WebView uses an exact inert MIME allow-list and must have a matching common
+image/audio/video container signature in authenticated chunk zero; SVG, mismatches and unrecognized
+containers receive a bodyless scheme denial instead of relying on `application/octet-stream` or
+`nosniff`, because media elements may still sniff an opaque response. The validated head and each
+decrypted chunk cache are bound to an exact manifest digest, and every request re-resolves a unique
+current manifest before serving, so reusing a claimed plaintext CID cannot inherit a stale MIME.
+Every head/chunk cache access and URI-responder publication is bound to the initiating unlocked UI
+generation; explicit lock clears cached plaintext and a delayed actor read can publish only a
+bodyless denial afterward. Plaintext exports report `contentValidation` as `matched`, `mismatch`,
+`unrecognized`, or absent for a
+non-media file after inspecting a fixed 64-byte prefix. This is bounded type evidence, not full
+bitstream validation or a claim that the platform decoder/external application is safe.
 
 Moderation uses one server-wide `DocType::Moderation` document (`doc_id=0`). Events and votes have
 their own canonical, group-bound Ed25519 signatures in addition to the replicated-op envelope.
@@ -488,8 +831,21 @@ locked with staged verification and rollback.
 
 The bridge's `change_vault_secret(current_secret,new_secret)` holds the store mutex and calls
 `ServerStore::change_passphrase`. The storage layer authenticates the current wrapper and atomically
-rewraps the unchanged root DEK under a fresh salt/nonce. Existing derived data keys do not rotate;
-older exported vaults remain bound to their old secret.
+rewraps the unchanged root DEK under a fresh salt/nonce. A sibling OS file lock serializes both
+first creation and rewrap across desktop processes; unique create-new staging, file sync, rename and
+Unix directory sync then publish the wrapper without shared-temp aliasing. Lock contention fails
+promptly as `VaultBusy` so a suspended process cannot hang another app's unlock command. This short
+transaction lock is distinct from the lifetime installation lock described above. Existing derived
+data keys do not rotate; older exported vaults remain bound to their old secret.
+
+New and replacement vault secrets are non-empty and capped at 4096 bytes before Argon2 work. Vault
+wrapper v1 feeds that bounded secret directly to Argon2. For compatibility only, an existing v1
+wrapper may be opened with a 4097..65536-byte legacy secret; the first successful open atomically
+rewrites the fixed-size wrapper as v2, which domain-separates and BLAKE3-normalizes that long secret
+to a fixed KDF input. Secrets above 64 KiB are rejected. This migration is intentionally
+forward-only: a v1-only older binary does not understand the v2 wrapper, so a user who triggers the
+legacy-long migration must return to a v2-capable build rather than roll back. Both versions are
+exactly 89 bytes; other lengths are rejected before allocation/decryption.
 
 ---
 
@@ -545,3 +901,26 @@ unread row. Wall time remains display metadata only.
 The single record of a server's outstanding activity is its `unread` channel-id list. The rail
 badge, the orbit glow and the DM circle's dot are all derived from it, so no separate mutable
 "activity" flag can disagree with the channel list.
+
+---
+
+## 11. Adaptive screen-share signalling  *(desktop WebRTC)*
+
+Call signalling's existing authenticated peer state adds an optional `rx` field with exactly one
+of `720`, `1080`, `1440`, or `2160`. Older senders ignore it; newer receivers default an absent or
+invalid field to 1080p. In automatic mode the receiver computes the largest 16:9 physical-pixel
+surface fitting the current Mewtual window, rounds it to the nearest bucket, and keeps the prior
+bucket through a 72-pixel midpoint dead band. Exact window and monitor dimensions never leave the
+device.
+
+Screen capture settings are local and persisted as resolution (720p/1080p/1440p/2160p), frame rate
+(15/24/30/60), quality priority, and a 0.5--50 Mbps full-resolution per-peer cap. For each connected
+viewer the sender chooses `min(capture_height, rx)`, parks that edge, applies
+`scaleResolutionDownBy`, `maxBitrate`, `maxFramerate`, and degradation preference to the independent
+`RTCRtpSender`, and attaches the screen track only after success. Resize/settings bursts retain one
+active plus one overwriteable pending mutation per sender. A rejected cap leaves that edge paused;
+if it cannot be parked, screen sharing stops rather than sending uncapped. The panel shows per-peer
+and aggregate estimates excluding audio/protocol overhead. The WebView performs the actual
+compressed encoding and may vary below the cap. Codec preferences are H.265/HEVC, AV1, VP9, H.264,
+then VP8 when exposed by the runtime; the UI labels only the codec observed in WebRTC outbound
+stats as negotiated.

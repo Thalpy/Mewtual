@@ -60,38 +60,20 @@ async fn fresh_node_reaches(target: &Multiaddr, secs: u64) -> bool {
     .is_ok()
 }
 
-/// Drive a mesh node until it reports a peer connection, or fail the test.
-async fn await_connected(node: &MeshService) {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            match node.next_event().await {
-                Some(TransportEvent::PeerConnected(_)) => return,
-                Some(_) => continue,
-                None => panic!("mesh actor stopped"),
-            }
-        }
-    })
-    .await
-    .expect("node did not connect");
-}
-
-/// Drive a mesh node until **a specific** peer connects.
+/// Wait until **a specific** peer is currently connected without consuming its lifecycle event.
 ///
-/// Dialing a circuit address produces two connections in sequence: first the transport-level one
-/// to the relay, then the relayed one to the target. Waiting for "a" connection therefore returns
-/// on the relay and races the request against a peer the actor has not mapped yet.
+/// These real-socket fixtures run concurrently inside this test binary and alongside the rest of
+/// the workspace on CI. A 20-second event wait intermittently expired on a loaded Linux runner,
+/// before the test reached the dial-suppression assertion. The connection snapshot is the actual
+/// premise these tests need, survives an event that arrived before the waiter, and leaves ordered
+/// events available to the later disconnect assertion. The 90-second outer deadline matches the
+/// circuit-reservation fixture's existing full-suite contention allowance while still bounding a
+/// genuinely dead actor or socket.
 async fn await_peer(node: &MeshService, want: catcoms_rt::PeerId) {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            match node.next_event().await {
-                Some(TransportEvent::PeerConnected(p)) if p == want => return,
-                Some(_) => continue,
-                None => panic!("mesh actor stopped"),
-            }
-        }
-    })
-    .await
-    .expect("the target peer never connected");
+    tokio::time::timeout(Duration::from_secs(90), node.wait_for_peer_connected(want))
+        .await
+        .expect("the target peer never connected before the CI contention deadline")
+        .expect("mesh actor stopped while waiting for the target peer");
 }
 
 /// Reserve a circuit slot on `relay_addr` and return the granted circuit address.
@@ -100,8 +82,12 @@ async fn reserve_circuit(
     relay_addr: &Multiaddr,
     relay_id: libp2p::PeerId,
 ) -> Multiaddr {
-    node.dial(relay_addr.clone()).await.unwrap();
-    await_connected(node).await;
+    // Runtime dialing deliberately refuses a bare socket: without the terminal identity there is
+    // no authenticated target for the actor to bind the connection to. The relay reservation
+    // fixture must exercise the same canonical route production uses.
+    let relay_route: Multiaddr = format!("{relay_addr}/p2p/{relay_id}").parse().unwrap();
+    node.dial(relay_route).await.unwrap();
+    await_peer(node, phase0_peer_id(&relay_id)).await;
     let circuit: Multiaddr = format!("{relay_addr}/p2p/{relay_id}/p2p-circuit")
         .parse()
         .unwrap();
@@ -157,7 +143,7 @@ async fn a_dial_is_suppressed_when_the_peer_is_already_connected() {
     // No listen address: this node only dials.
     let (client, _id) = MeshService::new_tcp(None, &[]).unwrap();
     client.dial(target.clone()).await.unwrap();
-    await_connected(&client).await;
+    await_peer(&client, phase0_peer_id(&relay_id)).await;
     tokio::time::timeout(Duration::from_secs(30), rx.recv())
         .await
         .expect("the relay never saw the first connection")
@@ -321,7 +307,7 @@ async fn the_per_source_prefix_connection_quota_binds() {
     // The first caller from this prefix takes the only slot.
     let (first, _) = MeshService::new_tcp(None, &[]).unwrap();
     first.dial(target.clone()).await.unwrap();
-    await_connected(&first).await;
+    await_peer(&first, phase0_peer_id(&relay_id)).await;
 
     // A second, with a different peer id, is refused. Not slow: refused.
     assert!(

@@ -118,11 +118,11 @@ in [`ARCHITECTURE.md`](ARCHITECTURE.md) §1–§2; **read them; they constrain e
 | `catcoms-mls` | MLS group core (openmls 0.8): `MlsDevice`, `ServerGroup` (create/add/remove/process/epoch/`channel_secret`), single-use device-bound `InviteToken` (now `INVITE_DOMAIN` **v2**, carrying a signature-bound `rendezvous: Vec<String>`; `mint_invite_with_rendezvous`) + `InviteLedger`, `AddOutcome`, `designated_committer`; **`media_secret(call_id)`** (MLS exporter under `MEDIA_EXPORTER_LABEL` → the per-call voice key). |
 | `catcoms-replication` | Encrypted CRDT docs (automerge 0.10): inner-signed `SignedOp`, `SealedOp` (per-epoch channel-key sealing), `EncryptedDoc` (edit/ingest/catch-up). |
 | `catcoms-storage` | Content-addressed `Cid` blob stores (mem + fs); per-file encryption (`FileRef`, per-file wrap nonce); `RetentionIndex` (3-scope expiry, GC with decorrelated eviction + `HolderOracle` probe). |
-| `catcoms-net` | libp2p `MeshService` realizing `MeshTransport` (gossipsub + request/response over Noise+yamux). NAT traversal: relay-client + **circuit-relay-v2** + **DCUtR** hole-punch (`next_direct_upgrade()`), router mapping via libp2p **UPnP IGD**, actor-owned IPv4 **PCP/NAT-PMP**, and a narrow internal **PCPv6 firewall-pinhole** client for stable TCP and UDP/QUIC ports, plus an **AutoNAT v2 client** whose `AutoNatResult` is scoped to one address/server/test. PCPv6 binds an exact GUA to the default gateway and native index from the OS IPv6 route table, uses request-bound 96-bit nonces, requests five-minute leases, honors assigned lifetimes up to 24 hours, and has independent family/interface ownership and stale-worker generations. Lease timing is monotonic; response options are accepted within RFC bounds. Bounded/coalesced `PortMappingSnapshot`, `AutoNatSnapshot`, and `RelayAddressSnapshot` streams retain authoritative current state for late consumers without unbounded diagnostic queues; public mapping/manual owners are reference-counted, withdrawn routes prune evidence, and failed probe/MAP attempts retry. Relay/rendezvous swarms serve v2 dial-backs only after explicit experimental `--enable-autonat`; a first-declared pre-socket guard requires one direct public target at the request connection's exact source IP and charges peer/source-prefix/node/concurrency caps. Same-NAT port probing and metadata remain bounded residuals, so serving stays off by default. Ordinary members never serve anonymous AutoNAT. Standalone zero-knowledge infra: `build_relay_swarm`/`run_relay` and `build_rendezvous_swarm`/`run_rendezvous` (`RelayBehaviour`/`RendezvousBehaviour`). **Rendezvous client** in `MeshBehaviour`: `rendezvous_register`/`rendezvous_discover`; discovered records surface via `next_discovered()` (per-response capped) and are **never auto-dialed**. `add_external_address()` (register without a relay), and the trust-split rendezvous-address validators `validate_operator_rendezvous_addrs()` / `validate_invite_rendezvous_addrs()` (both reject circuit / require one `/p2p/` / distinct PeerIds; the invite one additionally requires a globally routable IP literal, allowing loopback only when the whole set is loopback, while the operator one still permits a DNS name because rung 4 needs one). Address classification for the whole workspace lives in `addr` (P13). Router mapping is opt-in at the library builder and explicitly enabled by the desktop; loopback-only services never touch the gateway. `connection_limits` on every swarm. Tracing-instrumented. |
+| `catcoms-net` | libp2p `MeshService` realizing `MeshTransport` (gossipsub + request/response over Noise+yamux). NAT traversal: relay-client + **circuit-relay-v2** + **DCUtR** hole-punch (`next_direct_upgrade()`), router mapping via libp2p **UPnP IGD**, actor-owned IPv4 **PCP/NAT-PMP**, and a narrow internal **PCPv6 firewall-pinhole** client for stable TCP and UDP/QUIC ports, plus an **AutoNAT v2 client** whose `AutoNatResult` is scoped to one address/server/test. PCPv6 binds an exact GUA to the default gateway and native index from the OS IPv6 route table, uses request-bound 96-bit nonces, requests five-minute leases, honors assigned lifetimes up to 24 hours, and has independent family/interface ownership and stale-worker generations. Lease timing is monotonic; response options are accepted within RFC bounds. Bounded/coalesced `PortMappingSnapshot`, `AutoNatSnapshot`, and `RelayAddressSnapshot` streams retain authoritative current state for late consumers without unbounded diagnostic queues; public mapping/manual owners are reference-counted, withdrawn routes prune evidence, and failed probe/MAP attempts retry. Relay/rendezvous swarms serve v2 dial-backs only after explicit experimental `--enable-autonat`; a first-declared pre-socket guard requires one direct public target at the request connection's exact source IP and charges peer/source-prefix/node/concurrency caps. Same-NAT port probing and metadata remain bounded residuals, so serving stays off by default. Ordinary members never serve anonymous AutoNAT. Standalone zero-knowledge infra: `build_relay_swarm`/`run_relay` and `build_rendezvous_swarm`/`run_rendezvous` (`RelayBehaviour`/`RendezvousBehaviour`). **Rendezvous client** in `MeshBehaviour`: `rendezvous_register`/`rendezvous_discover`; discovered records surface via `next_discovered()` (per-response capped), registration grants/TTLs via `next_registered()`, and neither stream auto-dials. Repair adds fail-closed connected-only request/notify verbs and an actor-revalidated direct-only peer-bound batch of at most two routes. `add_external_address()` (register without a relay), and the trust-split rendezvous-address validators `validate_operator_rendezvous_addrs()` / `validate_invite_rendezvous_addrs()` (both reject circuit / require one `/p2p/` / distinct PeerIds; the invite one additionally requires a globally routable IP literal, allowing loopback only when the whole set is loopback, while the operator one still permits a DNS name because rung 4 needs one). Address classification for the whole workspace lives in `addr` (P13). Router mapping is opt-in at the library builder and explicitly enabled by the desktop; loopback-only services never touch the gateway. `connection_limits` on every swarm. Tracing-instrumented. |
 | `catcoms-discovery` | **Pure** eclipse-resistance layer (no I/O, no ambient time/RNG). `DiscoveryPolicy` ranks discovered candidates into a bounded, Clock-paced/RNG-jittered **dial plan** (the only thing that decides what to dial): member-tag-verified → multi-rendezvous-corroborated → cache → junk-last, ≤1 root/rendezvous, roster-clamped, seq-freshness. Advisory `EclipseDetector` (D/R/S + hysteresis; never gates). Cross-session `AddressCache` (proven members, RNG-jittered eviction, BLAKE3 keyed integrity tag → tamper-detected on load; SQLCipher backing deferred). |
-| `catcoms-sync` | `ChannelSync`: replication + membership over the transport. Blinded **member-only gossip topics keyed under `ns_secret_L`** that rotate on member removal (routing label `L`), grandfathered re-subscription window. The **join handshake** transfers the **routing state** (sealed, signature-bound). Membership **commit propagation**; **missed-commit recovery** with **signed catch-up responses** (nonce+epoch anti-replay) + a **two-pool peer model**; bounded zeroized **past-epoch key window**. Discovery surface: `rendezvous_namespaces()`, the pre-dial **member tag** (`membership_tag`/`verify_membership_tag`), **member PEX** (`PeerDescriptor`, `request_pex`/`publish_self_record`/`ingest_peer_record`/`known_peer_records`), the pre-join **`join_namespace()`**, and `transport()` (so the discovery/dial layer above can drive register/discover/dial). Cached/discovered candidates now retry with bounded monotonic exponential backoff plus jitter; a newer signed address sequence and a completed connection lifecycle reset the delay, so one failed dial no longer suppresses a member until restart. Voice: **`KIND_CALL_SIGNAL`** (authenticated members-only push of an *opaque* SDP/ICE payload; signed, freshness-bound, `from` = the verified signer; **not** deduped, FIFO-bounded) + `media_key`. `SyncStats`. |
+| `catcoms-sync` | `ChannelSync`: replication + membership over the transport. Blinded **member-only gossip topics keyed under `ns_secret_L`** that rotate on member removal (routing label `L`), grandfathered re-subscription window. The **join handshake** transfers the **routing state** (sealed, signature-bound). Membership **commit propagation**; **missed-commit recovery** with **signed catch-up responses** (nonce+epoch anti-replay) + a **two-pool peer model**; bounded zeroized **past-epoch key window**. Discovery surface: rotation-aware/TTL-renewed rendezvous, **member PEX**, sealed address cache, endpoint-scheduled redial, pairwise path evidence, derived HyParView-like active/passive views, local CYCLON age/source diversity, two-helper SWIM-style observations, queued exact-descriptor reciprocal repair and manual bounded redial. A newer signed omission removes previous live/sealed routes; old IPs are not retained as automatic backups. Ordinary members forward only small authenticated repair controls over existing proven paths, never application traffic or anonymous probes. Voice: **`KIND_CALL_SIGNAL`** (authenticated members-only push of an *opaque* SDP/ICE payload; signed, freshness-bound, `from` = the verified signer; **not** deduped, FIFO-bounded) + `media_key`. `SyncStats`. |
 | `catcoms-app` | **Product model**; the UI-facing facade over the stack (so a GUI never touches MLS/automerge). `Server<T,R>` (found/join/open_channel/send_message/messages/members/invite), the canonical chat-message schema (`append_message`/`read_messages`), and the async **event-stream actor** (`spawn` → `ServerActor` commands + `AppEvent` stream: `ChannelUpdated{channel,change}`/`MembersChanged`/`Closed`; voice adds `MediaKey`/`SendCallSignal` commands + a `CallSignal` event). `ChannelUpdated` carries a typed `ChannelChange` (appended / re-rendered / topic / jukebox) and `channel_heads()` serves the unread projection: see [INTERFACES § 10](INTERFACES.md#10-channel-deltas--unread-state-catcoms-app--tauri-bridge--desktop). |
-| `catcoms-log` | `tracing` subscriber init; `init_debug(debug, dir)` writes `debug_log_<ts>.txt`. |
+| `catcoms-log` | `tracing` subscriber init plus the canonical bounded diagnostics hub/ring. Safe admission destructively minimizes runtime text/addresses/targets/names; library-actor trace tokens normalize at the RingLayer and rejoin native operation/event stages. Native event envelopes carry a non-persisted session/trace proof so the webview can return an already-normalized trace without either trusting arbitrary UI hex or computing `H(H(raw))`. Public issue reports use a separate native allowlist renderer with per-row capture mode/epoch. `init_debug(debug, dir)` writes a separately bounded **raw** `debug_log_<ts>.txt`; that file bypasses Safe minimization and may contain arbitrary tracing/console/error prose, so it must be reviewed before sharing. |
 | `apps/desktop` | **Tauri 2 + Svelte 5 desktop app** (its own cargo workspace, excluded from the root). A thin `#[tauri::command]` bridge (`src-tauri`) over the `catcoms-app` actor + a Svelte frontend; the whole product surface (rail/channels/files/status/wiki/DMs/profiles) plus the **WebRTC voice mesh** (all media-plane code is frontend). The WebView is the one manually-verified surface; `npm install && npm run tauri dev`. |
 | `bins/catcomsctl` | Dev CLI. `demo` runs the whole stack end-to-end (in-process); `serve`/`join` run it across **real OS processes over TCP** (optionally `serve --relay`); `relay` and `rendezvous` run the zero-knowledge infra nodes (`--identity <file>` persists the keypair for a **stable peer id across restarts**, so invites embedding the address keep working); `recover` drives the 6d-1b miss-and-heal path; `--debug`/`--stats`. |
 
@@ -282,7 +282,7 @@ TCP** (verified, incl. through a relay).
 | 11u | **desktop UI overhaul; tokens-first "operator terminal" redesign + user customisation.** A declared **token layer** replaced ~90 hardcoded hexes (the old CSS referenced `var(--accent, …)` etc. but *never declared them*; two palettes shipped at once); default preset **Nightshade** (purple-shifted slate) + `aurum`/`verdant`/`garnet`/`slate`, semantic colours have fixed jobs in every theme (green=presence, gold=mentions, red=danger). Reskin: flat **timestamp-gutter** message log (day dividers; grouping never crosses midnight), mono micro-labels, dedicated member column (online/offline groups, role abbrevs), global **status bar** (node/peers/vault/rendezvous/transfers/own-id), squircle rail with hand-drawn **SVG line-icons** (emoji chrome fully replaced; found+fixed `.call-start`'s green never applying under `button.ghost` specificity; the 📎 stays by request). Nav: **surfaces strip** atop the content column + **contextual sidebar** (chat=channels · wiki=pages · files=folders+actions · transfers=clear) killing the wiki double-sidebar; **Ctrl+K quick switcher**. Customisation: Settings → Appearance (preset, accent override, compact density, terminal-chrome scanlines, flatten-bubbles, flat-icons) persisted in `catcoms.appearance`; Discord-style **name styles** (gradient/neon effects, script/caps fonts, swatch picker; `fxClass` now **sanitizes peer-supplied effect ids** before they reach a class attribute); default unicode emoji under the server set in the picker. Frontend-only | ✅ `ba8c20a`, `4ff7b99` |
 | 11v | **server livery + shared server icon** ([`design-livery.md`](design-livery.md)); owner/admin publishes a colour scheme members inherit; per-server user opt-out. `DocType::Livery = 10`, one CRDT doc per server mirroring the Profile path end to end (lazy open, doc sync + **snapshot catch-up**, generic persistence); writes owner/admin-gated at the same policy layer as roles; sizes capped (`MAX_LIVERY_*`); values stored opaquely and **validated client-side** (preset allow-list, `#rrggbb`, colour-token allow-list; recolor-only by construction, semantics untouchable, no URL-shaped values). Precedence: user per-server opt-out > livery > own appearance. **Server icon** rides the same doc (additive `icon` key, 64 KiB cap, own `set_server_icon` command; `set_livery` is a read-modify-write that preserves it); rail shows it live via `livery-changed`, viewers can prefer monograms ("flat server icons"). Round-trip + icon-survival tests | ✅ `9d128fb`, `1bea14a` |
 | 11w | **verify dialog + channel topics.** Out-of-band **identity verification** surface (the eclipse banner's "verify a member out of band" finally has UI): both fingerprints in read-aloud 4-char groups, explicit wording, **local-only** verified marks (`catcoms.verified.<server>`, never gossiped, no crypto weight) → ✓ in roster/profile. **Channel topics**: there is *no backend channel registry* (id = BLAKE3(name), the list is frontend-local), so the topic is a ROOT **LWW scalar in the channel's own doc**; replicates/seals/catches-up like messages, 256-byte cap, **any member** may set (channels are open-create; a topic is content), rides `channel-updated`; header click-to-edit UI. Tests: topic round-trip/cap/multibyte, two-node convergence with a non-owner writer, sealed-store reload. Delivery-states design written ([`design-delivery-states.md`](design-delivery-states.md)): sync-derived (`their_heads` ⊇ op hash), **no read receipts by design**; D1–D3 in progress | ✅ `1757732`, `3c19d07` |
-| 11x | **delivery states + channel topics + member badges.** *Delivery* ([`design-delivery-states.md`](design-delivery-states.md)): neither design route existed (no automerge sync protocol; gossip + full-log pull), so delivery is **signed causal evidence**: a member counts once it authored a change descending from yours (`edit_tracked` returns the change hash at author time; `holders_of` answers a batch in one pass; counts are lower bounds that only rise, silent receipt invisible; **no read receipts by design**). Actor keeps a bounded id→hash map, emits `delivery-changed` (≤1/s/channel); UI: gutter ticks `✕ ◌ ~ ✓ ✓✓` (red only for "no peers reachable"; `--info` blue joins the fixed semantic set) with honest hover copy. *Topics*: no channel registry exists (id = BLAKE3(name)) so the topic is a ROOT LWW scalar in the channel's own doc (256 B, any member, `channel-updated`), click-to-edit in the header. *Badges*: `DocType::Badges = 11`, owner/admin-assigned `fp → {label, color}` chips (roster/profile/role-manager + inline editor); role names reserved backend-side, ignored client-side. Badges re-key to user ids under [`design-multi-device.md`](design-multi-device.md) M3 | ✅ `5b97524` `77f184d` `3c19d07` `1bc07ed` `790b5a2` |
+| 11x | **delivery states + channel topics + member badges.** *Delivery* ([`design-delivery-states.md`](design-delivery-states.md)): signed causal evidence remains the compatibility path, augmented in 2026-08 by an authenticated connected-only receipt for an exact bounded document/change target, so quiet recipients confirm without authoring a reply; evidence is positive within the current roster (counts can fall when membership changes) and **no read receipts exist by design**. Actor keeps a bounded id→hash map, emits a complete bounded `delivery-changed` snapshot (≤1/s/channel); UI replaces omitted/changed rows so stale holders cannot stand in for a new roster. Gutter ticks `✕ ◌ ~ ✓✓` (red only for "no peers reachable"; partial says only how many peers hold it; the double tick requires the whole roster) keep honest hover copy. *Topics*: no channel registry exists (id = BLAKE3(name)) so the topic is a ROOT LWW scalar in the channel's own doc (256 B, any member, `channel-updated`), click-to-edit in the header. *Badges*: `DocType::Badges = 11`, owner/admin-assigned `fp → {label, color}` chips (roster/profile/role-manager + inline editor); role names reserved backend-side, ignored client-side. Badges re-key to user ids under [`design-multi-device.md`](design-multi-device.md) M3 | ✅ `5b97524` `77f184d` `3c19d07` `1bc07ed` `790b5a2` |
 | 11y | **safe livery customisation + events/news + event refs + unlock minigames.** *Customisation* ([`design-livery-customisation-safety.md`](design-livery-customisation-safety.md); raw HTML/CSS is RCE/overlay-phishing in a `csp: null` WebView; **rejected**, incl. for profiles): radius/font/pattern as **catalog ids** in the existing bounded tokens map (client validates per key) + **custom cursor** as inline re-encoded image bytes (own `set_server_cursor`; `set_livery`/icon/cursor mutually preserving, test-pinned; read-side deep validation incl. a minimum-opaque-area anti-griefing floor; `, auto` fallback always). *Events*: the reserved `DocType::Calendar = 4` finally lands; status-path mirror, any-member create, author/owner-admin delete, ⧗ surface (Ctrl+7) + sidebar next-5; **news feed** = inbox Mentions｜News toggle aggregating upcoming events + recent status posts across servers client-side (wiki joins once saves carry timestamps). *Event refs*: `[title](event:ID)`; the "+" picker's fourth kind, seam-tested against the renderer grammar. *Unlock minigames*: Passphrase (recommended) ｜ Spell (24 glyphs, indexed) ｜ Melody (pitch-class piano: on-screen, DAW home row, **Web MIDI**); every method encodes to a scheme-prefixed string into the **unchanged vault KDF**, with a live entropy meter (red <28 / gold <44 / green ≥44 bits). CSP hardening for the WebView remains a named follow-up | ✅ `f253930` `e10515c` `c9a4e66` `e16efc4` `405e896` `5e73e5e` |
 | 11z | **multi-device M1+M2; pairing primitives + the grant ceremony** ([`design-multi-device.md`](design-multi-device.md) v2.2; **adversarially reviewed pre-commit**, BLOCKING findings fixed). Model per owner review: the **origin device is the identity root** (no account key; chain depth 1; master transferable-not-distributable via monotonic `MasterHandoff`), one device per single-use grant. M1 (`f6b7386`): `PairingRequest` / 6-digit **SAS** (domain-separated BLAKE3, bias < 2⁻⁴³) / `DeviceCertificate` + `DeviceRevocation` (carry-the-pubkey verification mirroring `InviteToken::verify_self`; names reject control/bidi/zero-width). M2 (`fe618d3`): the **offline-first paste ceremony**; begin → read (backend stores THE pending ceremony; **mint takes no blob**; TOCTOU closed, the human gate exists backend-side) → SAS-gated popup (pre-mint comparator = **device code**, SAS = post-delivery check; **scope disclosed**; decline **burns the nonce**) → passphrase-sealed all-server bundle (vault primitives verbatim + distinct HKDF label; ≥ 8-char transport passphrase; the sealed bundle is the only object ever linking per-server identities) → open (every cert verified FOR this device; certs **group-bound in the signed payload**). Per-server signing via a narrow `SignDeviceCert` actor command; keys never surface. Dead v1 account-key `cert.rs` (709 lines, zero users) deleted; `/v2` domains prevent cross-verify. M3 (admission via the owner-serialized queue) in progress | ✅ `e44bfe3` `cd8e300` `f6b7386` `fe618d3` |
 | 11z-2 | **multi-device M3–M6; admission, attribution, revocation, carry channels** ([`design-multi-device.md`](design-multi-device.md); M3 **adversarially reviewed**, 3 BLOCKING findings fixed). **M3+M4** (`ba8a8d1`): a companion joins by presenting its group-bound `DeviceCertificate` through the owner-serialized add queue (`CTRL_DEVICE_ADD`, single committer → no fork); the owner-signed `Devices` doc (`DocType::Devices`) gives every member the companion→origin map for attribution; UI nests companions under their member with a mono device tag, owner device panel, "join granted servers" flow. Review fixes: the `Devices` doc entry now carries the **owner's signature** (a certificate proves an origin *wanted* a device, not that the group *admitted* it; an unsigned entry can't poison the depth-1 gate or spoof attribution); the relay path **authenticates before republishing** onto the control topic; a **per-origin device cap** bounds owner-executed Adds; asymmetric freshness; the invite self-gate treats an unreadable roster as "relay, let the owner decide". **M5** (`cca00bb`): `revoke_device` (origin-signed `DeviceRevocation`, owner-enforced MLS Remove, honoured only when the origin matches the companion's *registered* origin so A can't evict B's device) + `remove_member` **cascades** to a kicked member's companion leaves. **M6** (`bcd5e17`): QR + a hand-rolled acoustic FSK modem carry pairing blobs (and invites), both unit-tested. **Deliberate deferral:** `MasterHandoff`'s primitive is committed but inert; consuming it (per-group master state + monotonic seq) is future work; the common flows don't need it. | ✅ `ba8a8d1` `cca00bb` `bcd5e17` |
@@ -307,9 +307,212 @@ and re-verifies it on load. Ordinary interface refresh is also live: one process
 route/interface monitor debounces platform events and wakes every server to poll route-selected
 IPv4/IPv6 sources, reconcile per-source address ownership, update libp2p external addresses, and
 publish one newer signed record before PEX. The roughly-minute discovery poll remains the repair
-path when native monitoring is unavailable or misses an event. Current discovery follow-ups are pairwise reachability
-evidence, reciprocal-dial signalling, swarm-style indirect probes/views, typed member health, and
-TTL-aware rendezvous scheduling; see the checked backlog in `design-postjoin-discovery.md`.
+path when native monitoring is unavailable or misses an event. The first two reciprocal-dial review
+prerequisites are now complete: peer/invite/switchboard discovery routes use one canonical grammar
+with a mandatory terminal id matching the signed/discovered Phase-0 peer, root-path-only WebSocket
+forms, and no network-actor bare-address fallback. `DiscoveryPolicy` meters every address and a
+single desktop-owned `EndpointDialScheduler` bounds attempt/prefix, canonical Phase-0 peer, server,
+and process submissions across untrusted member-discovery paths plus pre-join rendezvous/direct/
+switchboard, two-way reply, and companion-grant paths. The endpoint carries its parser-derived
+principal, so cache/device/raw-libp2p aliases cannot mint parallel peer buckets. Direct routes share
+a physical-socket key; relay routes use a relay/target circuit key so distinct targets at one relay
+do not starve one another, with the shared relay host still bounded by prefix/process caps. Two-way
+proof retries use a live-connected-only actor command and cannot redial from `recent_peers`. The
+default process window is 32 endpoints per minute; counters are bounded, monotonic and session-only.
+Discovery calls transfer generation-bound, non-cloneable permits into the network actor. The
+scheduler's injected monotonic clock is authoritative at both reservation and commit, so a queued
+permit cannot cross the end of its accounting window even when no newer reservation has rolled the
+generation. Duplicate, already-connected, and actor-tracked already-dialling infrastructure
+suppression refund before commit; pending/socket submission commits, so a cancelled caller cannot
+reclaim queued work and an old permit cannot refund a replacement window. Pending infrastructure
+also covers member routes reclassified during an actor drain. Constructor TCP/QUIC routes are
+grouped per terminal peer into one known-peer race and seed the pending state before actor startup;
+state is released on immediate refusal, connection, or outgoing failure. Post-commit failures are
+conservatively spent. Trusted operator-infrastructure connections are not
+all mediated by this scheduler. It still has no separate exact relay-outer-socket lease or
+process-wide in-flight lease, and endpoint signatures do not prove IP/port ownership.
+
+Pairwise path evidence and typed claimed-peer health/actions are now complete. The transport tracks
+concurrent connection ids so relay-to-direct upgrades and partial closes remain truthful; the sync
+layer bounds transient detail/history, expires historical success, and exposes safe action ids to
+both Connectivity and the debug console. The UI no longer translates this device's missing
+connection into “offline.” The explicit `self_asserted` binding remains because signed descriptors
+do not yet prove device-key control of their claimed transport key. Dial counts are scheduler
+submissions rather than asserted transport failures; IPv6-only candidates are diagnostic clues,
+not proof this host lacks an outbound IPv6 route; and admission-only switchboards are not offered
+as post-join repair.
+
+The post-join resilience backlog is complete. The actor now has a fail-closed direct-only
+peer-bound batch, connected-only helper sends, exact-descriptor/replay/rate/expiry-bounded
+reciprocal repair, two-helper SWIM-style evidence, derived HyParView-like active/passive views,
+local CYCLON age/source sampling, a manual anti-click-bounded redial, and TTL-aware rendezvous
+renewal. Probe/result/forward/delivery are separate connected-only authenticated pushes, so no
+remote repair timeout is held inside the sole-owner actor; helpers never carry application
+traffic. Newer route withdrawal removes old sealed-cache addresses.
+The reported same-LAN close/reopen gap has two narrow repairs. After a successful direct
+join, the joiner seals the exact outbound IP route that Noise authenticated for the named inviter
+in `ServerNet` v3 under an explicit `AuthorizedPeer` policy. Direct admission also attempts bounded
+PEX before the first post-join snapshot so the inviter's signed descriptor is present for the
+roster check even if the user closes immediately. Reload and the discovery cadence retry the route
+even with no rendezvous, after canonical peer binding, unique current-roster claim, raw-TCP/QUIC
+host-shape and shared scheduler checks; reconnect logs retain only route shape. New
+helper/reply/switchboard admissions persist `Disabled`. Pre-v3 records decode as `LegacyPending`
+and may migrate once only after a successful overlap in an unambiguous two-member group, using a
+private/loopback route. A real TCP regression snapshots the joiner immediately after direct
+admission, closes both clients, rebinds/restores the inviter, then restores the joiner with the same
+transport identities; they reconnect without a fresh invite and exchange messages and a file.
+For a changed listener or an already-isolated pair, a current member can now send a ten-minute
+`mewtual-reconnect-v1:` code out of band. The receiver verifies the server, current device
+membership, signature, expiry and terminal peer binding, then submits at most four literal-IP
+TCP/QUIC routes through the process-wide scheduler. Applying a code seals only consent for that
+peer; the pasted route becomes durable only after an ordinary Noise-authenticated connection.
+The real-TCP regression now also changes the listener while the old one remains bound, applies the
+code, reconnects and exchanges another message. A Tauri-bridge lifecycle regression seals a DM
+server and continuity state, rejects a wrong password, performs two independent vault
+open/restore/actor/shutdown cycles through the production restore seam, and verifies messages,
+DM metadata and reconnect consent each time.
+This does not provide mDNS/first contact or prove the device key controls its self-asserted
+transport key.
+The remaining honest limits are architectural: no repair can heal complete isolation, submitted
+dials cannot be recalled through the current seam, registration grants have no request id, and
+the reciprocal control protocol is not a dual-key device↔transport ownership proof. See
+`design-postjoin-discovery.md`.
+
+> **Connectivity terminology note:** current UI and diagnostics report a member's self-asserted
+> peer as **claimed path connected / no claimed path**, never proof that the device key controls
+> that transport, that a person is online, or that they are globally reachable. Operational file
+> and delivery availability is stricter: the live peer must previously have served a
+> roster-verified, request-bound catch-up. This supersedes the older roadmap row's “online
+> dots/count”, “no peers online”, and “Online / Last seen” wording.
+
+### 2026-08-28 field-report triage
+
+- **Message close/reopen:** fixed for a direct join to a stable listener by the sealed authenticated
+  route described above. Changed listeners and already-isolated current members have the manual,
+  signed recovery-code path. Real TCP covers stable and changed-address recovery; the desktop
+  bridge covers two complete sealed-vault open/actor/shutdown cycles.
+- **Delivery indicator:** a send accepted by the local actor now says `sent · awaiting
+  confirmation`, not `sending…`. A newly applied remote op now generates a connected-only,
+  authenticated kind-18 receipt for the exact bounded document/change target, so a quiet recipient
+  can confirm without replying. Actor queries and `delivery-changed` events share one monotonic
+  snapshot revision, and the webview refuses an older completion, so a delayed query cannot replace
+  fresher receipt evidence. It is a delivery receipt, never a read receipt.
+- **DM first contact:** the frontend now surfaces the native `join-reply-ready` code while Add
+  friend or Accept is still waiting, explains its deadline, and gives the inviter an in-DM paste/
+  replacement flow. An expired reply is not revived: retry Connect to create a fresh overlapping
+  60-second window. Member recovery remains only for an already-established server; it does not
+  grant membership or repair an expired first-contact reply.
+- **File trust policy:** the found/join onboarding now requires a local on-demand (default),
+  specific-member, or everyone choice before the new server view can issue passive media requests.
+  The per-server policy and exact trusted full device identities are bounded and vault-sealed; the
+  short 32-bit fingerprint is display-only. Server Settings -> File Trust edits them. Passive shared
+  media trust changes bypass the ordinary read-position/draft debounce, and a normal window close
+  waits for the native final continuity snapshot before destroying the WebView. A hard process or
+  operating-system failure can still interrupt the disk write.
+  Passive shared
+  embeds, custom emoji, event images, card thumbnails and call-jukebox tracks obey the policy,
+  while an explicit Load/Play/Open/Download click is always an override. Third-party HTTP(S)
+  images stay click-only in every mode because they can disclose the client address or target
+  loopback/private services. File-index
+  materialization/publication is capped at 256 rows with bounded signed fields. Fetched chunks
+  already occupy one authenticated XChaCha20-Poly1305-sealed
+  vault copy, so keeping a distrusted file packaged does not inherently double storage; explicit
+  export adds a separate plaintext Downloads copy. Storage now inventories each complete encrypted
+  local file and offers that export as “Unlock copy”; partial files remain listed only in aggregate
+  until all chunks are present. Inline media and exports compare an exact inert MIME allow-list with
+  a bounded common-container signature. SVG, mismatches and unknown formats receive a bodyless
+  inline-scheme denial (not an octet-stream body the WebView may sniff), while exports disclose
+  matched/mismatched/unrecognized evidence. Inline head/chunk caches are bound to the exact unique
+  current manifest rather than the member-claimed plaintext CID. This blocks simple
+  type disguise but is not full bitstream validation or a decoder sandbox. Full
+  trust-everyone/specific automatic
+  **whole-share mirroring** remains deferred until the sealing store has a disk quota, otherwise a
+  trusted member can exhaust local storage. Native saves sanitize the filename, use non-overwriting
+  verified staging, and reveal rather than execute, which blocks direct command/path execution.
+  The staging rename/reveal is committed only for the exact unlock generation that began it.
+  Storage verification opens at most four exact references per ciphertext CID; overflow fails the
+  CID and dependent manifests closed instead of turning one held large blob into thousands of
+  actor-blocking decryptions. Native storage cache rows are tied to a process-local server
+  incarnation and frontend promise results to the exact still-unlocked view, closing late
+  publication across lock, leave and same-id reinstall.
+  Content and platform decoders remain untrusted parser/zero-day surfaces. See `THREAT-MODEL.md`.
+- **4K screen streaming:** screen capture now has a live settings panel for 720p through 4K,
+  15--60 fps, quality priority and a per-full-resolution-viewer Mbps cap. Each receiver advertises
+  only the nearest display bucket (720/1080/1440/2160), dynamically derived from its Mewtual window
+  with hysteresis or fixed by the user; the sender independently scales/caps each peer and shows
+  per-peer plus aggregate upload estimates. A screen edge stays parked until its resolution,
+  bitrate and frame-rate cap applies; rejection pauses that edge or stops sharing if it cannot be
+  parked. Resize bursts are bounded to one active plus one latest pending mutation per peer. The
+  WebView performs the compressed WebRTC encode. The same installation-wide preset is now visible
+  in Settings -> Voice & Calls and behind the cog beside the call-stage IN/OUT selectors; numeric
+  resolution/FPS choices explicitly select their persisted defaults. Shared audio defaults off.
+  Surface audio can ride the initial picker; separate mode lets the user add multiple freshly
+  granted application/window sources while sharing, discards those sources' video, mixes them into
+  one audio track with a requested 160-kbps-per-peer cap (shown as planned until the WebView
+  confirms it), and clears every grant on stop/camera swap/leave. The shared-audio track has a
+  persisted 0--200% client-wide master plus ephemeral 0--200% faders for each explicitly granted
+  source; 100% is unity and the UI warns that overlapping boosts can clip. At most eight source
+  grants can be live, and removing the last source stops the mixed output and closes its Web Audio
+  graph. The normal call
+  microphone remains a separate sender and is intentionally not relabelled as part of that mix.
+  H.265/HEVC is preferred when both runtimes expose it, with AV1/VP9/H.264/VP8 fallbacks, and the UI
+  reports the codec actually observed in stats. There is still no application-owned offline media
+  transcoder or guarantee that a particular platform WebView offers H.265.
+- **Regression coverage added in this round:** real-TCP close/reopen and changed-route recovery;
+  recovery-code signature/group/device→peer/expiry/address limits; pending-consent persistence,
+  lost-update and establish+close evidence; restored-server capture-worker installation; explicit
+  receipt quiet-recipient/catch-up/error-prefix paths; current-roster and omitted-snapshot delivery
+  replacement; two independent sealed-vault restore/shutdown cycles with wrong-passphrase refusal;
+  lock-vs-deferred-command ordering; and pure streaming tests for receiver rounding/hysteresis,
+  actual-source scaling, burst coalescing, frame-rate/bitrate caps, rejected-cap parking, detached
+  first attachment and screen→camera invalidation, permission-prompt stop/leave/supersession,
+  stream-preset sanitization/defaults and bounded mixer gain, file-trust fail-closed parsing/full-identity decisions,
+  mixer source-count/graph teardown, exact-container inline-media admission, exact-manifest and
+  exact-`FileRef` inventory/cache binding and per-CID work bounds, stale media/storage publication
+  after lock or server-id reincarnation, exact-generation plaintext export publication,
+  jukebox/cross-server gates/index bounds, and sealed continuity/lock ordering of trust policy.
+- **Native/Linux integration coverage:** `process_recovery_e2e` now crosses actual process,
+  snapshot and TCP boundaries: Bob joins, exits, restores in a second process on a deliberately
+  different listener, reloads an explicitly persisted transport seed, atomically publishes the
+  signed recovery code through a file standing in for copy/paste, and proves two-way messaging
+  after Alice applies it. (The seed file stands in for `ServerNet`; its vault-sealed encoding has
+  separate store coverage.) Linux-only store tests abort a subprocess
+  after the staged record is synced and immediately after rename; readers observe either the
+  complete previous or complete replacement record. The persistence primitive uses unique
+  create-new siblings, rejects staging symlinks, syncs the staged file and, on Unix, its parent
+  directory; a post-rename sync failure is explicitly classified as committed-but-not-durable.
+  The root `vault.bin` now uses the same durable staging shape plus an OS-backed interprocess lock;
+  it fails lock contention promptly as `VaultBusy`, and real child-process tests prove concurrent
+  first creation cannot return mismatched DEKs or hang and conflicting rewraps cannot both succeed.
+  A separate OS session lock is now owned for each `ServerStore` lifetime, preventing two desktop
+  processes from running divergent actors over one vault; a production-constructor child-process
+  regression covers prompt contention, normal release and abort release. Already-mounted UI
+  re-unlock authenticates through a verify-only vault transaction, preserving wrong-passphrase
+  refusal without self-contending on that lifetime lock.
+  New/replacement vault secrets are capped at 4096 bytes. A legacy v1 wrapper using a
+  4097..65536-byte secret is accepted once and atomically migrated to v2 with a fixed,
+  domain-separated prehash before Argon2; larger inputs are rejected. The v2 migration is
+  forward-only, so a v1-only older build cannot reopen the migrated profile. Both wrapper versions
+  are fixed at 89 bytes and hostile lengths are rejected without file-sized allocation.
+  `compose.linux-test.yml` provides a non-root Debian full-suite/process lane plus explicitly
+  root/privileged opt-in netns NAT/relay
+  lanes; ordinary CI also compiles/tests the frontend and separate Tauri workspace on Ubuntu.
+- **Remaining high-value integration coverage:** the recovery test exercises the native core, not
+  two visible Tauri/WebView applications and their IPC/copy-paste controls. WebView-level tests are
+  still needed against each supported platform's real `RTCRtpSender`, capture portal and codec
+  implementation (including H.265 availability/rejection and application-audio choices). The
+  Linux abort test pins the shared atomic-write boundary, but a kill matrix at each Tauri recovery
+  state-machine transition remains. Decoder sandboxing/transcoding also remains architectural work;
+  a headless Docker container cannot prove graphical portal, hardware-codec or decoder isolation.
+  See `LINUX-TESTING.md`.
+
+Status posts now use distinct `status_post/<random-id>` root maps rather than requiring concurrent
+authors to share/create one Automerge list. Readers and all mutations enumerate every legacy list
+conflict, so already-split old feeds recover while simultaneous new posts converge. IDs must be one
+canonical 128-bit lowercase-hex value resolving to exactly one object across both layouts;
+ambiguous/malformed rows are hidden and non-actionable. Older clients do not understand newly keyed
+posts, so status-feed participants must upgrade rather than relying on mixed-version visibility.
+See `INTERFACES.md` §8 for the persistence contract.
 
 ### Earlier blocks (history)
 6d-1b (missed-commit recovery + past-epoch key window) and 6d-2 (fork resolution +
@@ -335,7 +538,7 @@ suite) is **COMPLETE**. Every networking + NAT-traversal path is proven end-to-e
 The consolidated security suite (`security.rs`, 7b) maps the threat model to where each
 property is proven and adds the cross-layer scenarios (eclipse-never-gates-a-removal;
 removed-member-excluded-from-the-rotated-namespace). Deeper adversarial scenarios are
-deferred to the dedicated hardening + security-review phase (**13** in the table above;
+deferred to the dedicated hardening + security-review phase (**14** in the table above;
 it was numbered "10" before the UI overhaul took that number).
 
 **Goal:** members find each other with no hard-coded bootstrap addresses, and an
@@ -356,7 +559,9 @@ routing secret `ns_secret_L`:
   auto-dialed**; the dial decision (and eclipse-resistance) lives a layer up.
 - **Source trust (3d-5, done).** Commit catch-up responses are now **signed** by the
   responder's MLS leaf key, bound to the request; a **two-pool** model separates
-  untrusted candidates from verified `member_peers`. **Closed Sybil-C1.**
+  untrusted candidates from verified `member_peers`. Each session proof retains the
+  signing roster `DeviceId`, so removal drops only departed devices' proofs and does not
+  strand unaffected continuously-connected members. **Closed Sybil-C1.**
 
 **Eclipse-resistance (3d-6…9, done, each adversarially reviewed):**
 - **3d-6**; pure `catcoms-discovery` `DiscoveryPolicy` (rank candidates → bounded,
@@ -428,7 +633,9 @@ authenticated signalling.
   **relay-circuit NAT traversal** (8q) needs no port-forward on either side;
   **rendezvous auto-discovery** works in the UI (join with *no* address in the invite) and
   **post-join steady-state discovery** re-finds the group after a restart with no fresh
-  invite; **UPnP/PCP/NAT-PMP** (11n/11n++) can make a node directly reachable with no relay at all.
+  invite; an established direct join also retains a vault-sealed, roster-rechecked same-LAN route
+  to the named inviter for unchanged-address close/reopen; **UPnP/PCP/NAT-PMP** (11n/11n++) can make
+  a node directly reachable with no relay at all.
   Successful joiners retain their own mapping/AutoNAT background results too; on a failed join
   the temporary listener is dropped, so its mapping cannot help reach the inviter. **AutoNAT v2**
   can verify one candidate from a connected relay/rendezvous, but does not create a route and has
@@ -454,8 +661,10 @@ authenticated signalling.
   ledger + commit log + peer records) written atomically under the vault, an on-disk
   sealing blob store, and a stable per-group **file-wrap key** minted at founding +
   transferred in the join handshake (so files are e2e ciphertext keyed by ciphertext CID).
-  Residual: **no passphrase change/recovery path** (lose it and the servers are
-  unreadable; there is no escrow by design, but there is also no re-key flow), and a
+  Vault-secret rotation is implemented: `change_vault_passphrase` authenticates the current
+  secret and atomically rewraps the same DEK under a fresh salt/nonce. Residual: **no secret-reset
+  or recovery path** (lose every valid secret and the servers are unreadable; there is no escrow
+  by design), and a
   corrupted/partial snapshot surfaces as a load failure rather than a repair.
 - **Network admission is single-committer-only** (only the lowest-leaf-index member
   admits). Concurrent admits / fork resolution + cross-member single-use = 6d-2.
@@ -479,11 +688,11 @@ authenticated signalling.
   bootstrap via `join_ns` with no hard-coded address. The desktop seals the cross-session cache
   beside the server snapshot, re-verifies it on load, and periodically retries its current signed
   candidates with bounded backoff; SQLCipher remains a storage-engine refinement rather than an
-  availability blocker. Residual / deferred: raw non-mapping interface changes are not yet pushed
-  into a new signed record during a live session; pairwise reachability and reciprocal-dial
-  signalling are not represented; `catcomsctl serve --rendezvous`
-  **registers once** and does not yet re-register before the rendezvous TTL lapses; the
-  `join` path uses the **first** rendezvous only (no multi-rendezvous fall-through yet);
+  availability blocker. Raw interface changes, pairwise path evidence, reciprocal repair,
+  SWIM-style helper observations, topology maintenance, manual redial and TTL-aware desktop
+  registration renewal are implemented. Residual / deferred: the CLI's standalone
+  `catcomsctl serve --rendezvous` flow is not the desktop's recurring actor loop; the `join` path
+  uses the **first** rendezvous only (no multi-rendezvous fall-through yet);
   and `--host` must be a raw IP. The net Actor never auto-dials; the dial decision and
   all bounds live in `catcoms-discovery`.
 - **A forged future `CommitRecord`** on the control topic is bounded (gap +

@@ -1,7 +1,7 @@
 {
   "name": "mewtual-desktop",
   "private": true,
-  "version": "0.3.0-alpha.8",
+  "version": "0.3.0-alpha.13",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,6 +10,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "node --experimental-strip-types --import ./scripts/test-dom.mjs --test src/*.test.ts",
     "test:flows": "node scripts/flow-check.mjs",
+    "test:startup": "node scripts/startup-check.mjs",
     "tauri": "tauri",
     "fix-brick": "node scripts/fix-brick.mjs",
     "notices": "node scripts/gen-notices.mjs",

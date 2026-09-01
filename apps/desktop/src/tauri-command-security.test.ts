@@ -33,10 +33,16 @@ function commandSegments(source: string): Map<string, string> {
   return segments;
 }
 
-/** Extract only literal `invoke("name")` calls, tolerating nested TypeScript generic types. */
+/**
+ * Extract literal `invoke("name")` calls, tolerating nested TypeScript generic types.
+ *
+ * `invokeDebugged` counts too. It is the instrumented wrapper, and its callers name their command
+ * exactly as a direct caller would; leaving it out would mean every migrated call site silently
+ * stopped being audited, which would make the instrumentation a way to bypass this check.
+ */
 function invokedCommands(source: string): string[] {
   const names: string[] = [];
-  const marker = /\binvoke\b/g;
+  const marker = /\binvoke(?:Debugged)?\b/g;
   for (let match = marker.exec(source); match; match = marker.exec(source)) {
     let cursor = marker.lastIndex;
     while (/\s/.test(source[cursor] ?? "")) cursor += 1;
@@ -61,12 +67,27 @@ function invokedCommands(source: string): string[] {
   return names;
 }
 
+/**
+ * The one module allowed to invoke a command it was handed rather than one it names.
+ *
+ * `diagnostics.ts` is the instrumented-invoke wrapper: it takes a command name from its caller,
+ * records the trace around the call, and forwards it. Every *caller* of it still passes a literal,
+ * so the guarantee this file exists for is unchanged, and the check below still sees those
+ * literals. Widening this list is a security decision: an indirect invoke is a command name that
+ * cannot be audited by reading the frontend.
+ */
+const INVOKE_WRAPPERS = ["diagnostics.ts"];
+
 function frontendSources(dir: string): string[] {
   const sources: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) sources.push(...frontendSources(path));
-    else if ([".ts", ".svelte"].includes(extname(entry.name)) && !entry.name.endsWith(".test.ts")) {
+    else if (
+      [".ts", ".svelte"].includes(extname(entry.name)) &&
+      !entry.name.endsWith(".test.ts") &&
+      !INVOKE_WRAPPERS.includes(entry.name)
+    ) {
       sources.push(readFileSync(path, "utf8"));
     }
   }
@@ -96,17 +117,92 @@ test("the frontend invokes only registered, security-classified literal commands
 
 test("every non-bootstrap native command visibly crosses the unlocked-session gate", () => {
   const segments = commandSegments(readFileSync(bridgePath, "utf8"));
-  // Commands that must work before, or without, an unlocked session. log_ui is here for the same
-  // reason the vault ones are: a log that only works once you are unlocked cannot record unlock
-  // failing, which is exactly when a user most needs to send one. It writes to the local log file
-  // and nothing else.
-  const bootstrap = new Set(["vault_exists", "unlock", "resume_session", "lock_session", "log_ui"]);
+  // Commands that must work before, or without, an unlocked session. The log_ui pair is here for
+  // the same reason the vault ones are: a log that only works once you are unlocked cannot record
+  // unlock failing, and cannot record the startup errors that leave a user with a blank window,
+  // which is exactly when they most need something to send. Both write into the local diagnostics
+  // pipeline and nothing else, both are bounded, and both are rate-limited natively.
+  const bootstrap = new Set([
+    "vault_exists",
+    "unlock",
+    "resume_session",
+    "lock_session",
+    "log_ui",
+    "log_ui_batch",
+    "record_ui_events",
+  ]);
+  // Helpers that cross the gate on a command's behalf. Each one is verified to do so by the test
+  // below, so recognising it here extends the guarantee transitively rather than punching a hole
+  // in it. A helper added to this list without that proof would silently exempt every command
+  // that calls it, which is the failure mode this whole test exists to prevent.
+  //
+  // `op.actor` is the diagnostics-aware wrapper: it fetches the actor and binds it to the calling
+  // operation's trace in one act, so a command cannot get one without the other. It reaches the
+  // gate through `actor_of`, and the test below checks that it does rather than assuming it.
+  const gatekeepers =
+    "actor_of|actor_instance_of|server_actor_of|require_unlocked_session|require_ui_session_generation|channel_target|op\\.actor";
   for (const [command, segment] of segments) {
     if (bootstrap.has(command)) continue;
     assert.match(
       segment,
-      /(?:actor_of|server_actor_of|require_unlocked_session)\s*\(/,
+      new RegExp(`(?:${gatekeepers})\\s*\\(`),
       `${command} does not visibly cross the native session gate`,
     );
   }
+});
+
+/**
+ * The gate-crossing helpers have to actually cross the gate.
+ *
+ * The test above trusts them on a command's behalf, so if one of them ever stopped calling
+ * `require_unlocked_session` every command that delegates to it would silently become
+ * unauthenticated while the audit kept passing. That is a worse outcome than having no audit,
+ * because it looks like one.
+ */
+test("every helper the session-gate audit trusts does the checking itself", () => {
+  const bridge = readFileSync(bridgePath, "utf8");
+  for (const helper of ["actor_of", "actor_instance_of", "channel_target", "require_ui_session_generation"]) {
+    const start = bridge.indexOf(`async fn ${helper}(`);
+    assert.ok(start > 0, `${helper} is trusted by the audit but does not exist`);
+    // The body runs to the next top-level item; enough to see what it calls.
+    const end = bridge.indexOf("\n}", start);
+    const body = bridge.slice(start, end);
+    assert.match(
+      body,
+      /require_unlocked_session\s*\(/,
+      `${helper} is trusted to gate commands but never checks the session`,
+    );
+  }
+
+  // `op.actor` is a method rather than a free function, so it is found and bounded differently.
+  // It gates transitively, through `actor_of`, which the loop above has just proved does the
+  // checking. Trusting it in the audit without proving this link is what would turn a passing
+  // audit into a false one.
+  const method = bridge.indexOf("    async fn actor(&self, state: &AppState");
+  assert.ok(method > 0, "op.actor is trusted by the audit but does not exist");
+  const body = bridge.slice(method, bridge.indexOf("\n    }", method));
+  assert.match(
+    body,
+    /actor_of\s*\(/,
+    "op.actor is trusted to gate commands but never reaches a helper that checks the session",
+  );
+});
+
+test("instrumented actor handles can only be trace-bound through Operation", () => {
+  const bridge = readFileSync(bridgePath, "utf8");
+  const calls = [...bridge.matchAll(/\.with_trace\s*\(/g)];
+  assert.equal(
+    calls.length,
+    1,
+    "a direct with_trace call can pass the canonical H(raw) instead of the actor token and split correlation",
+  );
+  const method = bridge.indexOf("    fn bind_actor(&self, actor: ServerActor)");
+  assert.ok(method > 0, "Operation.bind_actor is the single trace-binding gateway");
+  const body = bridge.slice(method, bridge.indexOf("\n    }", method));
+  assert.match(body, /actor\.with_trace\(self\.actor_trace\.0\)/);
+  assert.match(
+    bridge,
+    /op\.bind_actor\(entry\.actor\.clone\(\)\)/,
+    "multi-server backup snapshots must bind each actor to the operation",
+  );
 });

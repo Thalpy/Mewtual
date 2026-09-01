@@ -15,6 +15,7 @@
 //! management land with the Tauri bridge (8b), where the real async runtime lives.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use automerge::transaction::Transactable;
 use automerge::{
@@ -35,12 +36,15 @@ use catcoms_storage::{BlobStore, FileManifest};
 // verifies a reassembled download against it.
 pub use catcoms_storage::{Cid, CidHasher, FileRef, SealedBlob};
 use catcoms_sync::{
-    fingerprint, read_published_roster, request_device_join, request_join, request_join_from_reply,
-    request_join_from_switchboards, request_join_via_helper, ChannelSync, SyncError, ROLES_DOC,
+    fingerprint, read_published_roster, request_device_join_tracking,
+    request_join_from_reply_tracking, request_join_from_switchboards_tracking,
+    request_join_tracking, request_join_via_helper_tracking, ChannelSync,
+    PreOwnerConnectionHandoff, SyncError, ROLES_DOC,
 };
 pub use catcoms_sync::{
-    peer_addrs_from_snapshot, InviteJoinPlan, JoinAttempt, JoinOutcome, SwitchboardOffer,
-    SwitchboardRoute, SWITCHBOARD_OFFER_LIFETIME_MS, SWITCHBOARD_OFFER_MAX_FUTURE_MS,
+    peer_addrs_from_snapshot, InviteJoinPlan, JoinAttempt, JoinOutcome, MemberRecoveryApplied,
+    MemberRecoveryCode, MemberRecoveryVerified, SwitchboardOffer, SwitchboardRoute,
+    MEMBER_RECOVERY_LIFETIME_MS, SWITCHBOARD_OFFER_LIFETIME_MS, SWITCHBOARD_OFFER_MAX_FUTURE_MS,
 };
 use catcoms_wire::DocType;
 use thiserror::Error;
@@ -49,7 +53,7 @@ mod actor;
 mod moderation;
 pub mod pairing;
 pub mod store;
-pub use actor::{spawn, AppCommand, AppEvent, ServerActor};
+pub use actor::{spawn, AppCommand, AppEvent, Envelope, ServerActor, Trace, TracedEvent};
 pub use moderation::{
     ModerationEvent, ModerationState, ModerationVote, MAX_MOD_EVIDENCE_BYTES, MAX_MOD_EVIDENCE_IDS,
     MAX_MOD_REASON_BYTES,
@@ -62,7 +66,10 @@ pub use pairing::{
 // The companion device identity a grant is redeemed with (multi-device M3): the bridge holds one
 // `PairingSecrets` and duplicates its device per granted server.
 pub use catcoms_mls::MlsDevice as PairedDevice;
-pub use store::{ServerNet, ServerRecord, ServerStore};
+pub use store::{
+    ReconnectPolicy, ReconnectRoute, ServerNet, ServerRecord, ServerStore, MAX_RECONNECT_ROUTES,
+    MAX_RECONNECT_ROUTE_BYTES,
+};
 
 /// Errors surfaced to the UI/product layer.
 #[derive(Debug, Error)]
@@ -82,6 +89,11 @@ pub enum AppError {
     /// A persistence I/O error (reading/writing the on-disk store).
     #[error("persistence i/o: {0}")]
     Io(String),
+    /// The destination rename committed, but flushing its directory failed. The caller must not
+    /// report a clean rollback: the new complete record is visible, although it may not survive
+    /// sudden power loss. Retrying the same save is safe and reconciles the durability state.
+    #[error("persistence committed but could not be made durable: {0}")]
+    CommittedButNotDurable(String),
     /// A product-layer validation error (e.g. an over-large avatar).
     #[error("{0}")]
     Invalid(String),
@@ -351,25 +363,40 @@ pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
     if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, MESSAGES) {
         for i in 0..doc.length(&list) {
             if let Ok(Some((Value::Object(ObjType::Map), msg))) = doc.get(&list, i) {
-                out.push(ChatMessage {
-                    id: str_field(doc, &msg, MSG_ID),
-                    author: str_field(doc, &msg, AUTHOR),
-                    text: str_field(doc, &msg, TEXT),
-                    ts: int_field(doc, &msg, TS),
-                    edited: int_field(doc, &msg, EDITED),
-                    reactions: read_reactions(doc, &msg),
-                    reply_to: str_field(doc, &msg, REPLY_TO),
-                    pinned: doc.get(&msg, PINNED).ok().flatten().is_some(),
-                });
+                out.push(read_message(doc, &msg));
             }
         }
     }
     out
 }
 
+/// Decode one message map. Both the legacy channel/status list and the conflict-free status
+/// layout below use exactly this inner schema; keeping one decoder prevents compatibility fixes
+/// from making the two representations render differently.
+fn read_message(doc: &AutoCommit, msg: &ObjId) -> ChatMessage {
+    ChatMessage {
+        id: str_field(doc, msg, MSG_ID),
+        author: str_field(doc, msg, AUTHOR),
+        text: str_field(doc, msg, TEXT),
+        ts: int_field(doc, msg, TS),
+        edited: int_field(doc, msg, EDITED),
+        reactions: read_reactions(doc, msg),
+        reply_to: str_field(doc, msg, REPLY_TO),
+        pinned: doc.get(msg, PINNED).ok().flatten().is_some(),
+    }
+}
+
 /// The separator between the emoji and the reactor fingerprint in a flat reaction key. ASCII Unit
 /// Separator (0x1F); a control char that appears in neither emoji nor hex fingerprints.
 const REACTION_SEP: char = '\u{1f}';
+
+/// Whether `emoji` is one this server will store as a reaction key. An emoji carrying the key
+/// separator would forge a second field on the message map, so the flat-key layout only holds if
+/// every document that uses it applies the same rule; hence one predicate rather than a copy per
+/// feed. The length bound is a gossip budget: honest clients send a small fixed set.
+fn valid_reaction_emoji(emoji: &str) -> bool {
+    !emoji.is_empty() && !emoji.contains(REACTION_SEP) && emoji.len() <= 64
+}
 
 /// Read a message map's reactions and group them by emoji. Reactions are stored as flat scalar keys
 /// *directly on the message map*; `"<emoji>\x1f<fingerprint>" = true` (see `toggle_reaction_in_doc`)
@@ -600,6 +627,211 @@ fn delete_message_in_doc(doc: &mut AutoCommit, id: &str) -> Result<bool, Automer
     Ok(false)
 }
 
+// --- the status feed's conflict-free post layout ----------------------------
+//
+// Early status feeds reused the channel `messages` list. If two peers made the first post before
+// either had received the other's list-creation op, Automerge retained both conflicting lists but
+// `get(ROOT, MESSAGES)` could expose only one of them. One peer's posts then appeared to vanish.
+// New status posts are child maps at distinct ROOT keys derived from their random ids. Concurrent
+// authors therefore edit disjoint keys and all posts survive. Readers and mutators retain the old
+// list path so existing documents remain fully usable; this is an additive persistence change.
+
+const STATUS_POST_PREFIX: &str = "status_post/";
+const STATUS_POST_ID_HEX_CHARS: usize = 32;
+
+fn status_post_key(id: &str) -> String {
+    format!("{STATUS_POST_PREFIX}{id}")
+}
+
+fn valid_status_post_id(id: &str) -> bool {
+    id.len() == STATUS_POST_ID_HEX_CHARS
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+#[derive(Clone)]
+enum StatusPostLocation {
+    Keyed { key: String },
+    Legacy { list: ObjId, index: usize },
+}
+
+#[derive(Clone)]
+struct StatusPostCandidate {
+    post: ChatMessage,
+    obj: ObjId,
+    location: StatusPostLocation,
+}
+
+/// Append a status post without requiring peers to agree on a shared container first.
+fn append_status_message(
+    doc: &mut AutoCommit,
+    id: &str,
+    author: &str,
+    text: &str,
+    ts: u64,
+) -> Result<(), AutomergeError> {
+    let msg = doc.put_object(ROOT, status_post_key(id), ObjType::Map)?;
+    doc.put(&msg, MSG_ID, id)?;
+    doc.put(&msg, AUTHOR, author)?;
+    doc.put(&msg, TEXT, text)?;
+    doc.put(&msg, TS, ts as i64)?;
+    Ok(())
+}
+
+/// Enumerate every status candidate, including every Automerge conflict at the legacy reserved
+/// list key and at keyed post properties. This is deliberately status-specific: channel messages
+/// retain their canonical list behavior, while the upgrade path must recover already-conflicted
+/// status lists rather than merely preventing the next conflict.
+fn status_post_candidates(doc: &AutoCommit) -> Result<Vec<StatusPostCandidate>, AutomergeError> {
+    let mut out = Vec::new();
+    for (value, list) in doc.get_all(ROOT, MESSAGES)? {
+        if !matches!(value, Value::Object(ObjType::List)) {
+            continue;
+        }
+        for index in 0..doc.length(&list) {
+            for (value, msg) in doc.get_all(&list, index)? {
+                if matches!(value, Value::Object(ObjType::Map)) {
+                    out.push(StatusPostCandidate {
+                        post: read_message(doc, &msg),
+                        obj: msg,
+                        location: StatusPostLocation::Legacy {
+                            list: list.clone(),
+                            index,
+                        },
+                    });
+                }
+            }
+        }
+    }
+    for key in doc.keys(ROOT) {
+        if !key.starts_with(STATUS_POST_PREFIX) {
+            continue;
+        }
+        for (value, msg) in doc.get_all(ROOT, &key)? {
+            if !matches!(value, Value::Object(ObjType::Map)) {
+                continue;
+            }
+            let post = read_message(doc, &msg);
+            // Empty, non-canonical, or key-mismatched ids are inert. In particular,
+            // `status_post/` + `id=""` must not create a visible row no product command can address.
+            if valid_status_post_id(&post.id) && status_post_key(&post.id) == key {
+                out.push(StatusPostCandidate {
+                    post,
+                    obj: msg,
+                    location: StatusPostLocation::Keyed { key: key.clone() },
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Read legacy list posts plus conflict-free keyed posts in one deterministic oldest-first feed.
+/// A canonical non-empty id is rendered only when it addresses exactly one object across every
+/// representation/conflict. Ambiguous rows are hidden and all mutations fail closed, preventing
+/// authorization against one author followed by mutation of another object with the same id.
+/// Truly old id-less legacy posts remain readable but intentionally non-actionable.
+fn read_status_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
+    let candidates = status_post_candidates(doc).unwrap_or_default();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for candidate in &candidates {
+        if valid_status_post_id(&candidate.post.id) {
+            *counts.entry(candidate.post.id.clone()).or_default() += 1;
+        }
+    }
+    let mut out: Vec<ChatMessage> = candidates
+        .into_iter()
+        .filter(|candidate| {
+            (candidate.post.id.is_empty()
+                && matches!(candidate.location, StatusPostLocation::Legacy { .. }))
+                || (valid_status_post_id(&candidate.post.id)
+                    && counts.get(&candidate.post.id) == Some(&1))
+        })
+        .map(|candidate| candidate.post)
+        .collect();
+    out.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.id.cmp(&b.id)));
+    out
+}
+
+/// Resolve exactly one canonical post across keyed and every legacy-conflict representation.
+/// `None` covers missing, malformed, and ambiguous ids; all three must be non-actionable.
+fn resolve_status_message(
+    doc: &AutoCommit,
+    id: &str,
+) -> Result<Option<StatusPostCandidate>, AutomergeError> {
+    if !valid_status_post_id(id) {
+        return Ok(None);
+    }
+    let mut matches = status_post_candidates(doc)?
+        .into_iter()
+        .filter(|candidate| candidate.post.id == id);
+    let first = matches.next();
+    if first.is_none() || matches.next().is_some() {
+        return Ok(None);
+    }
+    Ok(first)
+}
+
+fn edit_status_message_in_doc(
+    doc: &mut AutoCommit,
+    id: &str,
+    new_text: &str,
+    edited_ts: u64,
+) -> Result<bool, AutomergeError> {
+    let Some(candidate) = resolve_status_message(doc, id)? else {
+        return Ok(false);
+    };
+    doc.put(&candidate.obj, TEXT, new_text)?;
+    doc.put(&candidate.obj, EDITED, edited_ts as i64)?;
+    Ok(true)
+}
+
+fn delete_status_message_in_doc(doc: &mut AutoCommit, id: &str) -> Result<bool, AutomergeError> {
+    let Some(candidate) = resolve_status_message(doc, id)? else {
+        return Ok(false);
+    };
+    match candidate.location {
+        StatusPostLocation::Keyed { key } => doc.delete(ROOT, key)?,
+        StatusPostLocation::Legacy { list, index } => doc.delete(&list, index)?,
+    }
+    Ok(true)
+}
+
+fn toggle_status_reaction_in_doc(
+    doc: &mut AutoCommit,
+    id: &str,
+    emoji: &str,
+    fp: &str,
+) -> Result<bool, AutomergeError> {
+    let Some(candidate) = resolve_status_message(doc, id)? else {
+        return Ok(false);
+    };
+    let key = format!("{emoji}{REACTION_SEP}{fp}");
+    if doc.get(&candidate.obj, &key)?.is_some() {
+        doc.delete(&candidate.obj, &key)?;
+    } else {
+        doc.put(&candidate.obj, &key, true)?;
+    }
+    Ok(true)
+}
+
+fn set_status_pin_in_doc(
+    doc: &mut AutoCommit,
+    id: &str,
+    pinned: bool,
+) -> Result<bool, AutomergeError> {
+    let Some(candidate) = resolve_status_message(doc, id)? else {
+        return Ok(false);
+    };
+    if pinned {
+        doc.put(&candidate.obj, PINNED, true)?;
+    } else {
+        doc.delete(&candidate.obj, PINNED)?;
+    }
+    Ok(true)
+}
+
 fn str_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> String {
     doc.get(obj, key)
         .ok()
@@ -618,6 +850,35 @@ fn int_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> u64 {
         },
         _ => 0,
     }
+}
+
+// --- the status feed's posting policy ---------------------------------------
+//
+// The status feed is the schema above on its own per-server document, so every message helper
+// already reaches it. What it does not inherit from a chat channel is *who may write*: a channel
+// is conversation, the feed is the server announcing itself. That decision is one boolean at the
+// feed document's ROOT, replicated with the feed, so there is no second document that could drift
+// out of step with the posts it governs.
+
+/// The status feed's root key holding its posting policy.
+const STATUS_MAY_POST: &str = "members_may_post";
+
+/// Whether plain members may post to this status feed. Absent (every feed written before the
+/// policy existed) and anything stored under the key that is not a boolean both read as `false`:
+/// a document from a peer that has never heard of the policy, or one carrying junk, closes the
+/// feed rather than opening it.
+fn read_status_may_post(doc: &AutoCommit) -> bool {
+    match doc.get(ROOT, STATUS_MAY_POST) {
+        Ok(Some((Value::Scalar(s), _))) => matches!(s.as_ref(), ScalarValue::Boolean(true)),
+        _ => false,
+    }
+}
+
+/// Set the posting policy: one scalar key at the ROOT (which always exists), so; like `pinned` on
+/// a message map; there is no container two admins could concurrently create and lose one of, and
+/// a concurrent change is a clean last-writer-wins.
+fn write_status_may_post(doc: &mut AutoCommit, allow: bool) -> Result<(), AutomergeError> {
+    doc.put(ROOT, STATUS_MAY_POST, allow)
 }
 
 // --- member profiles --------------------------------------------------------
@@ -1902,6 +2163,11 @@ const F_PATH: &str = "path";
 // mime). The file's bytes are stored/shared as ciphertext keyed by the ciphertext CID; only
 // members with the group file-wrap key can open it. Size/mime/cid are read back from here.
 const F_REF: &str = "ref";
+// Optional v2 origin attestation. Older listings remain readable but are not eligible for
+// specific-uploader automatic media trust, because their author label was only CRDT metadata.
+const F_SIGNER_KEY: &str = "signer_key";
+const F_SIGNATURE: &str = "signature";
+const FILE_ENTRY_ATTEST_DOMAIN: &[u8] = b"catcoms/file-entry-attestation/v1";
 // Circulation expiry for THIS listing (see [`FileExpiry`]): absent = never recorded (a listing
 // written before expiry existed), an explicit `null` = keep forever, an integer = the absolute
 // ms-epoch deadline. Additive: a reader that predates the field ignores it, and a listing
@@ -1963,6 +2229,21 @@ impl FileExpiry {
 /// transport limit. (GB-scale + background/streaming download is a follow-up.)
 pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 
+/// Maximum number of file-index rows this implementation publishes or materializes. A current
+/// malicious member can still append CRDT rows, but rows beyond this deterministic boundary do
+/// not trigger unbounded manifest parsing or Ed25519 verification on every file-list refresh.
+pub const MAX_FILE_ENTRIES: usize = 256;
+/// Maximum number of distinct wrapped-key/reference claims storage inspection will authenticate
+/// against one ciphertext CID. Honest deduplication reuses a byte-identical reference, while a
+/// larger set can only be contradictory or adversarial. Failing that CID closed prevents one held
+/// 8 MiB blob from being decrypted thousands of times inside the single server actor.
+const MAX_FILE_REF_VARIANTS_PER_CID: usize = 4;
+const MAX_FILE_NAME_BYTES: usize = 255;
+const MAX_FILE_AUTHOR_BYTES: usize = 128;
+const MAX_FILE_PATH_BYTES: usize = 2048;
+const MAX_FILE_MIME_BYTES: usize = 255;
+const MAX_FILE_REF_BYTES: usize = 64 * 1024;
+
 /// Plaintext chunk size for large-file transfer. Chosen well under the blob-fetch response cap
 /// (`MAX_BLOB_RESPONSE` = 16 MiB) so each *sealed* chunk (≈ chunk + ~44 B) fits one response.
 ///
@@ -1993,9 +2274,112 @@ pub struct FileRange {
     pub provider: Option<String>,
 }
 
+fn file_manifest_version(file_ref: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"mewtual-file-media-manifest/v1");
+    hasher.update(&(file_ref.len() as u64).to_be_bytes());
+    hasher.update(file_ref);
+    *hasher.finalize().as_bytes()
+}
+
+/// Stable identity of one exact encrypted-chunk reference, including its wrapped key, declared
+/// size and MIME. A ciphertext CID alone identifies only the sealed bytes: a hostile listing can
+/// repeat that CID with a different key/ref, so inventory authentication must bind its verdict to
+/// all of the fields that [`ChannelSync::open_file`] consumes.
+fn file_chunk_ref_version(file_ref: &FileRef) -> [u8; 32] {
+    let encoded = file_ref.encode();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"mewtual-file-chunk-ref/v1");
+    hasher.update(&(encoded.len() as u64).to_be_bytes());
+    hasher.update(&encoded);
+    *hasher.finalize().as_bytes()
+}
+
+/// Bounded exact references for one ciphertext address.
+///
+/// Once the cap is crossed all variants fail closed, including variants authenticated earlier in
+/// the scan. Which hostile row happened to arrive first must never decide which manifest the
+/// storage pane calls verified.
+#[derive(Debug)]
+enum BoundedFileRefs {
+    Exact(HashMap<[u8; 32], FileRef>),
+    Ambiguous,
+}
+
+impl Default for BoundedFileRefs {
+    fn default() -> Self {
+        Self::Exact(HashMap::new())
+    }
+}
+
+impl BoundedFileRefs {
+    fn insert(&mut self, version: [u8; 32], file_ref: FileRef) {
+        let Self::Exact(refs) = self else {
+            return;
+        };
+        if refs.contains_key(&version) {
+            return;
+        }
+        if refs.len() >= MAX_FILE_REF_VARIANTS_PER_CID {
+            *self = Self::Ambiguous;
+            return;
+        }
+        refs.insert(version, file_ref);
+    }
+}
+
+type StorageRefIndex = (
+    HashMap<Cid, BoundedFileRefs>,
+    Vec<([u8; 32], Vec<[u8; 32]>)>,
+    usize,
+);
+
+/// Parse the bounded materialized index once into exact per-CID claims and per-manifest
+/// dependencies. The returned maps are themselves bounded by `MAX_FILE_ENTRIES * MAX_CHUNKS`;
+/// contradictory claims for one CID collapse to `Ambiguous` instead of retaining attacker-sized
+/// variant sets.
+fn storage_ref_index(files: &[FileEntry]) -> StorageRefIndex {
+    let mut refs = HashMap::<Cid, BoundedFileRefs>::new();
+    let mut file_refs = Vec::<([u8; 32], Vec<[u8; 32]>)>::new();
+    let mut invalid_manifests = 0;
+    for entry in files {
+        match FileManifest::decode_or_legacy(&entry.file_ref) {
+            Ok(manifest) if manifest.total_size <= MAX_FILE_BYTES as u64 => {
+                let chunk_versions = manifest
+                    .chunks
+                    .iter()
+                    .map(file_chunk_ref_version)
+                    .collect::<Vec<_>>();
+                file_refs.push((file_manifest_version(&entry.file_ref), chunk_versions));
+                for chunk in manifest.chunks {
+                    let version = file_chunk_ref_version(&chunk);
+                    refs.entry(chunk.ciphertext_cid)
+                        .or_default()
+                        .insert(version, chunk);
+                }
+            }
+            _ => invalid_manifests += 1,
+        }
+    }
+    (refs, file_refs, invalid_manifests)
+}
+
+/// Index metadata that authorizes one inline-media representation.
+///
+/// `manifest_version` binds every later range read to the exact chunk manifest that supplied the
+/// size and MIME. The plaintext CID is member-authored until a whole-file download verifies it,
+/// so it cannot safely serve as that version by itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileMediaHead {
+    pub total_size: u64,
+    pub mime: String,
+    pub manifest_version: [u8; 32],
+}
+
 /// One shared file as the UI sees it. `cid` is the **whole-file plaintext** content address (raw
 /// bytes); the file's stable identity / download+embed handle (a chunked file has no single
-/// ciphertext blob); `author` is the uploader's device fingerprint. The file's bytes are
+/// ciphertext blob); `author` is the uploader's short display fingerprint, while
+/// `author_identity` is the full device identity used for authorization. The file's bytes are
 /// end-to-end encrypted under the group file-wrap key (Phase 9h), chunk by chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
@@ -2009,6 +2393,12 @@ pub struct FileEntry {
     pub cid: Vec<u8>,
     /// The uploader's device fingerprint.
     pub author: String,
+    /// Full content-addressed device identity of the valid attestation signer, or empty for a
+    /// legacy/invalid listing. Never authorize with the 32-bit display fingerprint above.
+    pub author_identity: String,
+    /// Whether the signer is bound to this exact group/name/path/file reference and its short
+    /// display fingerprint matches `author`.
+    pub author_verified: bool,
     /// A virtual folder path for organisation (`""` = root). Embeds live under
     /// `embed/<fp>`, wiki media under `wiki/<page>`, custom emoji under `emoji` (10c–10f).
     pub path: String,
@@ -2032,16 +2422,19 @@ pub struct FileListing {
     pub held_chunks: u32,
     /// Total chunks the file is split into.
     pub total_chunks: u32,
+    /// Digest of the exact current manifest. This is kept with the listing so a storage-health
+    /// verdict can be joined to the same actor snapshot without trusting the plaintext CID.
+    pub manifest_version: [u8; 32],
 }
 
-/// The shared file list with per-file local-availability counts, plus whether **any** catch-up
-/// peer is currently reachable to fetch missing chunks from. `has_peers` is a cheap in-memory
-/// signal; it does NOT prove a given file is held by any peer, only that a fetch could be tried.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The shared file list with per-file local-availability counts, plus whether a live peer has
+/// previously served roster-verified catch-up. `has_peers` is a cheap in-memory signal; it does
+/// NOT prove a given file is held by any peer, only that an authenticated fetch could be tried.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FilesView {
     /// The listed files with availability counts.
     pub files: Vec<FileListing>,
-    /// Whether ≥1 peer (proven member or candidate) is currently known to fetch from.
+    /// Whether ≥1 previously proven catch-up source has a live connection on this device.
     pub has_peers: bool,
 }
 
@@ -2057,12 +2450,25 @@ pub struct StorageHealth {
     pub missing_chunks: usize,
     pub unreadable_chunks: usize,
     pub invalid_manifests: usize,
+    /// Exact manifest digests whose every exact chunk reference passed sealed-record,
+    /// ciphertext-address and file-layer authentication in this scan. Plaintext CIDs are not used
+    /// here: another member can claim the same CID while supplying a different wrapped key/ref.
+    pub verified_manifest_versions: HashSet<[u8; 32]>,
     /// Bytes of verified encrypted file-chunk content (not filesystem allocation or unrelated
     /// avatar/banner blobs).
     pub verified_bytes: u64,
-    /// A live authenticated member connection exists. This means repair can be attempted, not
-    /// that the peer necessarily holds every missing chunk.
+    /// A live peer that proved it could answer a roster-authenticated catch-up earlier this
+    /// session exists. This means repair can be attempted, not that it holds every missing chunk.
     pub has_peers: bool,
+}
+
+/// One atomic actor snapshot used by the storage pane. The health verdict and listing metadata
+/// must be captured from the same index revision; two separate actor commands leave a mutation
+/// window in which a verified old manifest can be paired with an unverified replacement row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StorageSnapshot {
+    pub health: StorageHealth,
+    pub files: FilesView,
 }
 
 /// Result of one explicit storage repair pass.
@@ -2083,6 +2489,41 @@ fn normalize_path(path: &str) -> String {
         .join("/")
 }
 
+fn push_attested_part(out: &mut Vec<u8>, part: &[u8]) {
+    out.extend_from_slice(&(part.len() as u64).to_be_bytes());
+    out.extend_from_slice(part);
+}
+
+/// Canonical, group-bound statement proving which device created one exact file listing.
+fn file_entry_attestation_payload(
+    group_id: &[u8],
+    name: &str,
+    author: &str,
+    path: &str,
+    file_ref: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        FILE_ENTRY_ATTEST_DOMAIN.len()
+            + group_id.len()
+            + name.len()
+            + author.len()
+            + path.len()
+            + file_ref.len()
+            + 5 * 8,
+    );
+    out.extend_from_slice(FILE_ENTRY_ATTEST_DOMAIN);
+    for part in [
+        group_id,
+        name.as_bytes(),
+        author.as_bytes(),
+        path.as_bytes(),
+        file_ref,
+    ] {
+        push_attested_part(&mut out, part);
+    }
+    out
+}
+
 /// Append a file entry (name + author + folder path + encoded `FileRef` + circulation expiry)
 /// to the index doc.
 fn write_file_entry(
@@ -2092,6 +2533,7 @@ fn write_file_entry(
     path: &str,
     file_ref: &[u8],
     expires: FileExpiry,
+    attestation: Option<(&[u8], &[u8])>,
 ) -> Result<(), AutomergeError> {
     let list = match doc.get(ROOT, FILES)? {
         Some((Value::Object(ObjType::List), id)) => id,
@@ -2103,6 +2545,14 @@ fn write_file_entry(
     doc.put(&entry, F_AUTHOR, author)?;
     doc.put(&entry, F_PATH, path)?;
     doc.put(&entry, F_REF, ScalarValue::Bytes(file_ref.to_vec()))?;
+    if let Some((public_key, signature)) = attestation {
+        doc.put(
+            &entry,
+            F_SIGNER_KEY,
+            ScalarValue::Bytes(public_key.to_vec()),
+        )?;
+        doc.put(&entry, F_SIGNATURE, ScalarValue::Bytes(signature.to_vec()))?;
+    }
     put_expiry(doc, &entry, expires)?;
     Ok(())
 }
@@ -2140,24 +2590,97 @@ fn expiry_field(doc: &AutoCommit, obj: &ObjId) -> FileExpiry {
     }
 }
 
+/// Read a string without cloning a hostile oversized scalar out of the Automerge document.
+/// Absent/wrong-type fields retain the legacy empty-string behavior; oversized fields reject the
+/// row because they would make repeated materialization unbounded.
+fn bounded_file_string(doc: &AutoCommit, obj: &ObjId, key: &str, max: usize) -> Option<String> {
+    match doc.get(obj, key) {
+        Ok(Some((Value::Scalar(value), _))) => match value.as_ref() {
+            ScalarValue::Str(text) if text.len() <= max => Some(text.to_string()),
+            ScalarValue::Str(_) => None,
+            _ => Some(String::new()),
+        },
+        _ => Some(String::new()),
+    }
+}
+
+/// Read bytes only after checking their borrowed length, avoiding an attacker-sized clone.
+fn bounded_file_bytes(doc: &AutoCommit, obj: &ObjId, key: &str, max: usize) -> Option<Vec<u8>> {
+    match doc.get(obj, key) {
+        Ok(Some((Value::Scalar(value), _))) => match value.as_ref() {
+            ScalarValue::Bytes(bytes) if bytes.len() <= max => Some(bytes.clone()),
+            ScalarValue::Bytes(_) => None,
+            _ => Some(Vec::new()),
+        },
+        _ => Some(Vec::new()),
+    }
+}
+
 /// Materialize the file index document into the UI's file list (size/mime/cid come from the
 /// decoded `FileRef`; entries with a malformed ref are skipped).
-fn read_file_entries(doc: &AutoCommit) -> Vec<FileEntry> {
+fn read_file_entries(doc: &AutoCommit, group_id: &[u8]) -> Vec<FileEntry> {
     let mut out = Vec::new();
     if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, FILES) {
-        for i in 0..doc.length(&list) {
+        for i in 0..doc.length(&list).min(MAX_FILE_ENTRIES) {
             if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&list, i) {
-                let ref_bytes = bytes_field(doc, &entry, F_REF);
+                let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES)
+                else {
+                    continue;
+                };
                 if let Ok(manifest) = FileManifest::decode_or_legacy(&ref_bytes) {
+                    if manifest.mime.len() > MAX_FILE_MIME_BYTES {
+                        continue;
+                    }
+                    let Some(name) = bounded_file_string(doc, &entry, F_NAME, MAX_FILE_NAME_BYTES)
+                    else {
+                        continue;
+                    };
+                    let Some(author) =
+                        bounded_file_string(doc, &entry, F_AUTHOR, MAX_FILE_AUTHOR_BYTES)
+                    else {
+                        continue;
+                    };
+                    let Some(path) = bounded_file_string(doc, &entry, F_PATH, MAX_FILE_PATH_BYTES)
+                    else {
+                        continue;
+                    };
+                    let public_key = bounded_file_bytes(doc, &entry, F_SIGNER_KEY, 32)
+                        .filter(|bytes| bytes.len() == 32)
+                        .unwrap_or_default();
+                    let signature = bounded_file_bytes(doc, &entry, F_SIGNATURE, 64)
+                        .filter(|bytes| bytes.len() == 64)
+                        .unwrap_or_default();
+                    let signer_id = DeviceId::from_public_key_bytes(&public_key);
+                    let author_verified = public_key.len() == 32
+                        && signature.len() == 64
+                        && fingerprint(&signer_id) == author
+                        && signature
+                            .as_slice()
+                            .try_into()
+                            .is_ok_and(|signature: &[u8; 64]| {
+                                verify_with_public_bytes(
+                                    &public_key,
+                                    &file_entry_attestation_payload(
+                                        group_id, &name, &author, &path, &ref_bytes,
+                                    ),
+                                    signature,
+                                )
+                            });
                     out.push(FileEntry {
-                        name: str_field(doc, &entry, F_NAME),
-                        author: str_field(doc, &entry, F_AUTHOR),
+                        name,
+                        author,
+                        author_identity: if author_verified {
+                            hex::encode(signer_id.as_bytes())
+                        } else {
+                            String::new()
+                        },
+                        author_verified,
                         size: manifest.total_size,
                         mime: manifest.mime.clone(),
                         // The file's identity is the whole-file PLAINTEXT cid (a chunked file has
                         // no single ciphertext blob); this is the download/embed handle.
                         cid: manifest.plaintext_cid.as_bytes().to_vec(),
-                        path: str_field(doc, &entry, F_PATH),
+                        path,
                         file_ref: ref_bytes,
                         expires: expiry_field(doc, &entry),
                     });
@@ -2166,6 +2689,13 @@ fn read_file_entries(doc: &AutoCommit) -> Vec<FileEntry> {
         }
     }
     out
+}
+
+fn raw_file_index_row_count(doc: &AutoCommit) -> usize {
+    match doc.get(ROOT, FILES) {
+        Ok(Some((Value::Object(ObjType::List), list))) => doc.length(&list),
+        _ => 0,
+    }
 }
 
 /// Remove the index entries whose whole-file plaintext CID matches `cid` (a no-op if none do),
@@ -2185,12 +2715,17 @@ fn delete_file_entry(
         Some((Value::Object(ObjType::List), id)) => id,
         _ => return Ok(()),
     };
-    for i in (0..doc.length(&list)).rev() {
+    for i in (0..doc.length(&list).min(MAX_FILE_ENTRIES)).rev() {
         if let Some((Value::Object(ObjType::Map), entry)) = doc.get(&list, i)? {
-            let ref_bytes = bytes_field(doc, &entry, F_REF);
+            let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES) else {
+                continue;
+            };
             if let Ok(manifest) = FileManifest::decode_or_legacy(&ref_bytes) {
-                let folder_matches =
-                    folder.is_none_or(|f| str_field(doc, &entry, F_PATH).as_str() == f);
+                let Some(path) = bounded_file_string(doc, &entry, F_PATH, MAX_FILE_PATH_BYTES)
+                else {
+                    continue;
+                };
+                let folder_matches = folder.is_none_or(|expected| path == expected);
                 if manifest.plaintext_cid.as_bytes() == cid && folder_matches {
                     doc.delete(&list, i)?;
                 }
@@ -2214,13 +2749,17 @@ fn set_file_entry_expiry(
         Some((Value::Object(ObjType::List), id)) => id,
         _ => return Ok(()),
     };
-    for i in 0..doc.length(&list) {
+    for i in 0..doc.length(&list).min(MAX_FILE_ENTRIES) {
         if let Some((Value::Object(ObjType::Map), entry)) = doc.get(&list, i)? {
-            let ref_bytes = bytes_field(doc, &entry, F_REF);
+            let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES) else {
+                continue;
+            };
             if let Ok(manifest) = FileManifest::decode_or_legacy(&ref_bytes) {
-                if manifest.plaintext_cid.as_bytes() == cid
-                    && str_field(doc, &entry, F_PATH).as_str() == folder
-                {
+                let Some(path) = bounded_file_string(doc, &entry, F_PATH, MAX_FILE_PATH_BYTES)
+                else {
+                    continue;
+                };
+                if manifest.plaintext_cid.as_bytes() == cid && path == folder {
                     put_expiry(doc, &entry, expires)?;
                 }
             }
@@ -2329,6 +2868,9 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// mapping is gone, so older messages report no delivery state at all rather than a wrong
     /// one. Only own messages are tracked; a peer's delivery is not ours to display.
     own_message_changes: HashMap<u128, VecDeque<(String, ChangeHash)>>,
+    /// Total order of delivery snapshots issued by this actor session. Queries and emitted events
+    /// share it, so a delayed IPC query can never overwrite a newer event in the webview.
+    delivery_snapshot_revision: u64,
     /// A cheap (crypto-free) content signature of the `Devices` document at the last reconcile.
     /// Re-validating that registry costs one signature check per entry, so it is rebuilt only
     /// when the document actually changed; not on every tick. `None` = never reconciled.
@@ -2345,31 +2887,35 @@ pub const MAX_TRACKED_OWN_MESSAGES: usize = 50;
 pub struct DeliveryState {
     /// The message id, as it appears in [`ChatMessage::id`].
     pub id: String,
-    /// How many **other** members have proved they hold this message. Evidence-based and
-    /// one-sided: it only ever rises, and `0` means "no proof yet", *not* "not delivered"; so
-    /// a renderer must show nothing rather than a failure for `0`.
+    /// How many **other current-roster** members have proved they hold this message. Evidence is
+    /// positive and one-sided, but the count may fall when membership changes. `0` means "no proof
+    /// yet", *not* "not delivered", so a renderer must not turn it into a failure by itself.
     pub delivered: usize,
-    /// How many members are reachable right now; the same count that drives the presence
-    /// indicators ([`Server::online_members`]). Independent of `delivered`, which can exceed it
-    /// (a member that received the message and has since gone offline still holds it).
+    /// How many current members claim a transport peer connected here; the same self-asserted
+    /// projection that drives [`Server::online_members`]. Independent of `delivered`, which can
+    /// exceed it (a member that received the message and has since disconnected still holds it).
     pub reachable: usize,
-    /// Whether this node has **any** transport peer connected at all.
-    ///
-    /// Deliberately separate from `reachable`, and the only honest basis for a "nothing can leave
-    /// this device" claim. `reachable` resolves connections to member fingerprints through signed
-    /// peer records, so a peer whose record has not arrived (or whose peer id changed) is missing
-    /// from it while ops still gossip to it perfectly well. Counting that as "no peers reachable"
-    /// painted a red failure on messages that had already been received.
+    /// Whether this node has a live peer that previously served a roster-verified signed catch-up.
+    /// This is intentionally stricter than `reachable`: a self-asserted descriptor claim or bare
+    /// relay/rendezvous socket cannot suppress a queued warning.
     pub any_peer: bool,
 }
 
-/// A UI-facing view of one member: a short device-id **fingerprint** (display names are
-/// not shared on the wire yet, so the roster identifies members by their content-
-/// addressed device id) and whether it is **this** device.
+/// One complete delivery view plus its actor-issued order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeliverySnapshot {
+    pub revision: u64,
+    pub states: Vec<DeliveryState>,
+}
+
+/// A UI-facing view of one member: a short device-id **fingerprint** for display, the full
+/// content-addressed identity for authorization, and whether it is **this** device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberView {
     /// Short hex fingerprint of the member's device id (first 4 bytes).
     pub fingerprint: String,
+    /// Full device id. This is the value security-sensitive local policy must retain and compare.
+    pub identity: String,
     /// Whether this is the local device.
     pub is_self: bool,
 }
@@ -2390,6 +2936,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            delivery_snapshot_revision: 0,
             devices_sig: None,
         })
     }
@@ -2407,15 +2954,23 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         invite: &InviteToken,
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
+        let mut connection_handoff = PreOwnerConnectionHandoff::default();
         // Bound the whole join so a never-finalizing owner (an Option-C admin invite whose owner
         // stays offline) can't wedge the joiner forever; the sync layer stays runtime-agnostic.
         let (group, routing) = tokio::time::timeout(
             std::time::Duration::from_secs(JOIN_TIMEOUT_SECS),
-            request_join(&transport, inviter, &device, invite),
+            request_join_tracking(
+                &transport,
+                &mut connection_handoff,
+                inviter,
+                &device,
+                invite,
+            ),
         )
         .await
         .map_err(|_| AppError::JoinTimeout)??;
         let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
         // Seed the inviter as an untrusted **candidate** peer. `request_join` ran straight on the
         // transport, before this `ChannelSync` existed, so without this a brand-new member starts
         // life knowing nobody at all and cannot ask anyone for anything (PEX included) until the
@@ -2427,6 +2982,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            delivery_snapshot_revision: 0,
             devices_sig: None,
         })
     }
@@ -2446,13 +3002,22 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         invite: &InviteToken,
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
+        let mut connection_handoff = PreOwnerConnectionHandoff::default();
         let (group, routing) = tokio::time::timeout(
             std::time::Duration::from_secs(JOIN_TIMEOUT_SECS),
-            request_join_via_helper(&transport, helper, inviter, &device, invite),
+            request_join_via_helper_tracking(
+                &transport,
+                &mut connection_handoff,
+                helper,
+                inviter,
+                &device,
+                invite,
+            ),
         )
         .await
         .map_err(|_| AppError::JoinTimeout)??;
         let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
         // Both are only candidates until a roster-verified catch-up proves them. The helper is the
         // currently reachable bootstrap; retaining the inviter as well lets discovery recover the
         // direct topology as soon as its route works.
@@ -2463,6 +3028,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            delivery_snapshot_revision: 0,
             devices_sig: None,
         })
     }
@@ -2483,9 +3049,44 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         reply_joiner_peer: &[u8],
         expires_at_ms: u64,
     ) -> Result<(Self, PeerId), AppError> {
+        Self::join_from_reply_with_handoff(
+            transport,
+            PreOwnerConnectionHandoff::default(),
+            device,
+            rng,
+            clock,
+            display_name,
+            first_contact,
+            inviter,
+            invite,
+            reply_joiner_nonce,
+            reply_joiner_peer,
+            expires_at_ms,
+        )
+        .await
+    }
+
+    /// Reply-code join after a bridge-side proof wait has already consumed lifecycle events.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn join_from_reply_with_handoff(
+        transport: T,
+        mut connection_handoff: PreOwnerConnectionHandoff,
+        device: MlsDevice,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        first_contact: PeerId,
+        inviter: PeerId,
+        invite: &InviteToken,
+        reply_joiner_nonce: [u8; 16],
+        reply_joiner_peer: &[u8],
+        expires_at_ms: u64,
+    ) -> Result<(Self, PeerId), AppError> {
         let device_id = device.device_id();
-        let (group, routing, contact) = request_join_from_reply(
+        let (group, routing, contact) = request_join_from_reply_tracking(
             &transport,
+            &mut connection_handoff,
             first_contact,
             inviter,
             &device,
@@ -2497,6 +3098,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         )
         .await?;
         let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
         sync.note_candidate_peer(inviter);
         sync.note_candidate_peer(contact);
         Ok((
@@ -2505,6 +3107,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 display_name: display_name.into(),
                 device_id,
                 own_message_changes: HashMap::new(),
+                delivery_snapshot_revision: 0,
                 devices_sig: None,
             },
             contact,
@@ -2526,8 +3129,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         join_plan: &[u8],
     ) -> Result<(Self, PeerId), AppError> {
         let device_id = device.device_id();
-        let join = request_join_from_switchboards(
+        let mut connection_handoff = PreOwnerConnectionHandoff::default();
+        let join = request_join_from_switchboards_tracking(
             &transport,
+            &mut connection_handoff,
             first_contact,
             allowed_contacts,
             inviter,
@@ -2543,6 +3148,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
         };
         let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
         sync.note_candidate_peer(inviter);
         sync.note_candidate_peer(contact);
         Ok((
@@ -2551,6 +3157,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 display_name: display_name.into(),
                 device_id,
                 own_message_changes: HashMap::new(),
+                delivery_snapshot_revision: 0,
                 devices_sig: None,
             },
             contact,
@@ -2615,12 +3222,14 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
         let now_ms = clock.now_ms();
+        let mut connection_handoff = PreOwnerConnectionHandoff::default();
         // Bounded like the invite join: an owner that never comes online to serialize the Add
         // must not wedge the device forever.
         let (group, routing) = tokio::time::timeout(
             std::time::Duration::from_secs(JOIN_TIMEOUT_SECS),
-            request_device_join(
+            request_device_join_tracking(
                 &transport,
+                &mut connection_handoff,
                 contact,
                 &device,
                 &grant.certificate,
@@ -2631,6 +3240,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         .await
         .map_err(|_| AppError::JoinTimeout)??;
         let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.adopt_pre_owner_connections(connection_handoff);
         // Same reasoning as the invite join: the contact that relayed this admission is the one
         // peer a fresh companion device has, so seed it as a candidate.
         sync.note_candidate_peer(contact);
@@ -2639,6 +3249,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            delivery_snapshot_revision: 0,
             devices_sig: None,
         })
     }
@@ -2667,6 +3278,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            delivery_snapshot_revision: 0,
             devices_sig: None,
         })
     }
@@ -2772,6 +3384,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 append_message(d, &id, &author, text, ts, &reply_to)
             })
             .await?;
+        self.sync
+            .track_delivery_target(DocType::Channel, channel, change);
         // Remember which automerge change carried this message, so its delivery state can be
         // read back later (`delivery_snapshot`). Bounded ring: the UI only ever shows state for
         // recent own messages.
@@ -2787,12 +3401,25 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// refused if the message isn't authored by this device (a modified client could bypass it, as
     /// with all CRDT content; see THREAT-MODEL.md). A no-op edit (same text) is dropped, so the
     /// `post` always carries a real change (automerge suppresses a same-value `put`).
+    ///
+    /// An empty `id` is refused before any of that. It is the id every message written before ids
+    /// existed carries ([`ChatMessage::id`]), so it names all of them and none of them: the author
+    /// check below would pass on the caller's *own* id-less message while the write matched
+    /// whichever id-less message the document holds first, putting one member's words under
+    /// another member's fingerprint. Honest-client gating is the whole of what protects this
+    /// document (the documented R6 residual), and a gate that passes on one message while the
+    /// write lands on another is not gating anything.
     pub async fn edit_message(
         &mut self,
         channel: u128,
         id: &str,
         new_text: &str,
     ) -> Result<(), AppError> {
+        if id.is_empty() {
+            return Err(AppError::Invalid(
+                "a message with no id cannot be addressed".into(),
+            ));
+        }
         let me = self.my_fingerprint();
         let Some(current) = self
             .messages(channel)
@@ -2821,7 +3448,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// anyone's (moderation). Honest-client gating (a modified client could post a raw delete op
     /// for any message regardless; the documented R6 residual). Errors if the message is gone or
     /// you may not delete it.
+    ///
+    /// An empty `id` is refused for the reason [`Server::edit_message`] gives: it names every
+    /// message written before ids existed rather than one of them, so the delete would land on
+    /// whichever of those the document happens to hold first.
     pub async fn delete_message(&mut self, channel: u128, id: &str) -> Result<(), AppError> {
+        if id.is_empty() {
+            return Err(AppError::Invalid(
+                "a message with no id cannot be addressed".into(),
+            ));
+        }
         let me = self.my_fingerprint();
         let Some(msg) = self.messages(channel).into_iter().find(|m| m.id == id) else {
             return Err(AppError::Invalid("no such message".into()));
@@ -2843,16 +3479,24 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// Toggle this member's `emoji` reaction on the message `id` in a channel (add if absent,
     /// remove if present). Anyone may react to any message. Errors if the message doesn't exist.
+    ///
+    /// An empty `id` is refused with the other trust-boundary checks, for the reason
+    /// [`Server::edit_message`] gives: it names every message written before ids existed rather
+    /// than one of them, so the reaction would land on whichever the document holds first.
     pub async fn toggle_reaction(
         &mut self,
         channel: u128,
         id: &str,
         emoji: &str,
     ) -> Result<(), AppError> {
-        // Enforce the flat-key invariant at the trust boundary: a non-empty emoji that can't contain
-        // the key separator, with a sane length bound (honest clients send a small fixed set).
-        if emoji.is_empty() || emoji.contains(REACTION_SEP) || emoji.len() > 64 {
+        // Enforce the flat-key invariant at the trust boundary, before anything reaches the doc.
+        if !valid_reaction_emoji(emoji) {
             return Err(AppError::Invalid("bad emoji".into()));
+        }
+        if id.is_empty() {
+            return Err(AppError::Invalid(
+                "a message with no id cannot be addressed".into(),
+            ));
         }
         let me = self.my_fingerprint();
         if !self.messages(channel).iter().any(|m| m.id == id) {
@@ -2871,10 +3515,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Pin or unpin a message (by id) in a channel. **Owner/admin only** (honest-client gating, like
     /// message deletion; the documented R6 residual). Errors if the message is gone, you may not
     /// pin, or the pin state is already as requested (no redundant op).
+    ///
+    /// An empty `id` is refused for the reason [`Server::edit_message`] gives: it names every
+    /// message written before ids existed rather than one of them, so the pin would land on
+    /// whichever the document holds first.
     pub async fn set_pin(&mut self, channel: u128, id: &str, pinned: bool) -> Result<(), AppError> {
         if !matches!(self.my_role(), Role::Owner | Role::Admin) {
             return Err(AppError::Invalid(
                 "only an owner/admin can pin messages".into(),
+            ));
+        }
+        if id.is_empty() {
+            return Err(AppError::Invalid(
+                "a message with no id cannot be addressed".into(),
             ));
         }
         let Some(msg) = self.messages(channel).into_iter().find(|m| m.id == id) else {
@@ -3167,6 +3820,37 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// gets its **own fresh** deadline rather than inheriting the twin's; re-sharing the same
     /// bytes under a new name is a new act of sharing. Nothing enforces the deadline yet; see
     /// [`FileExpiry`].
+    /// Sign the exact listing fields that a local trust policy later treats as uploader identity.
+    /// The replicated op already authenticates who posted a CRDT change, but its materialized
+    /// `author` scalar could otherwise be rewritten independently by a modified client.
+    fn file_entry_attestation(
+        &self,
+        name: &str,
+        author: &str,
+        path: &str,
+        file_ref: &[u8],
+    ) -> Result<(Vec<u8>, [u8; 64]), AppError> {
+        if name.len() > MAX_FILE_NAME_BYTES
+            || author.len() > MAX_FILE_AUTHOR_BYTES
+            || path.len() > MAX_FILE_PATH_BYTES
+            || file_ref.len() > MAX_FILE_REF_BYTES
+        {
+            return Err(AppError::Invalid(
+                "file listing metadata is too large".into(),
+            ));
+        }
+        let public_key = self.sync.my_public_key();
+        if fingerprint(&DeviceId::from_public_key_bytes(&public_key)) != author {
+            return Err(AppError::Invalid(
+                "local file author does not match this device key".into(),
+            ));
+        }
+        let payload =
+            file_entry_attestation_payload(&self.sync.group_id(), name, author, path, file_ref);
+        let signature = self.sync.sign_blob(&payload)?;
+        Ok((public_key, signature))
+    }
+
     pub async fn add_file(
         &mut self,
         name: &str,
@@ -3208,9 +3892,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // file's identity is its whole-file plaintext cid.
         let author = self.my_fingerprint();
         let folder = normalize_path(path);
+        if name.len() > MAX_FILE_NAME_BYTES
+            || mime.len() > MAX_FILE_MIME_BYTES
+            || folder.len() > MAX_FILE_PATH_BYTES
+        {
+            return Err(AppError::Invalid(
+                "file listing metadata is too large".into(),
+            ));
+        }
         // Clock-injected (never ambient): the default one-month circulation deadline.
         let expires = FileExpiry::At(self.sync.now_ms().saturating_add(FILE_EXPIRY_DEFAULT_MS));
         let plaintext_cid = Cid::of(bytes);
+        let index_rows = self.file_index_row_count();
         // Dedup on the plaintext cid against the live index (a deleted entry is removed from the
         // list, so only still-shared files match; re-storing after a delete is harmless anyway).
         let listed = self.files();
@@ -3228,18 +3921,38 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 }
                 return Ok(plaintext_cid); // already shared under this exact name + folder
             }
+            if index_rows >= MAX_FILE_ENTRIES {
+                return Err(AppError::Invalid(format!(
+                    "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
+                )));
+            }
             // Same content, new name/folder: list it again against the SAME sealed blobs; but
             // with its own fresh deadline, not the twin's.
             let ref_bytes = twin.file_ref.clone();
+            let (public_key, signature) =
+                self.file_entry_attestation(name, &author, &folder, &ref_bytes)?;
             self.sync
                 .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                    write_file_entry(d, name, &author, &folder, &ref_bytes, expires)
+                    write_file_entry(
+                        d,
+                        name,
+                        &author,
+                        &folder,
+                        &ref_bytes,
+                        expires,
+                        Some((&public_key, &signature)),
+                    )
                 })
                 .await?;
             if let Some(p) = progress {
                 let _ = p.send((1, 1)).await;
             }
             return Ok(plaintext_cid);
+        }
+        if index_rows >= MAX_FILE_ENTRIES {
+            return Err(AppError::Invalid(format!(
+                "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
+            )));
         }
         let chunk_count = bytes.len().max(1).div_ceil(CHUNK_BYTES);
         let total_steps = chunk_count + 1; // the final step publishes the index entry
@@ -3351,8 +4064,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let author = self.my_fingerprint();
         let folder = normalize_path(path);
+        if name.len() > MAX_FILE_NAME_BYTES
+            || mime.len() > MAX_FILE_MIME_BYTES
+            || folder.len() > MAX_FILE_PATH_BYTES
+        {
+            self.discard_upload_chunks(&chunks);
+            return Err(AppError::Invalid(
+                "file listing metadata is too large".into(),
+            ));
+        }
         // Clock-injected (never ambient): the default one-month circulation deadline.
         let expires = FileExpiry::At(self.sync.now_ms().saturating_add(FILE_EXPIRY_DEFAULT_MS));
+        let index_rows = self.file_index_row_count();
         let listed = self.files();
         let twin = listed
             .iter()
@@ -3370,14 +4093,35 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             if already_here {
                 return Ok(plaintext_cid); // already shared under this exact name + folder
             }
+            if index_rows >= MAX_FILE_ENTRIES {
+                return Err(AppError::Invalid(format!(
+                    "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
+                )));
+            }
             // Same content, new name/folder: list it again against the SAME sealed blobs; but
             // with its own fresh deadline, not the twin's.
+            let (public_key, signature) =
+                self.file_entry_attestation(name, &author, &folder, &twin_ref)?;
             self.sync
                 .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                    write_file_entry(d, name, &author, &folder, &twin_ref, expires)
+                    write_file_entry(
+                        d,
+                        name,
+                        &author,
+                        &folder,
+                        &twin_ref,
+                        expires,
+                        Some((&public_key, &signature)),
+                    )
                 })
                 .await?;
             return Ok(plaintext_cid);
+        }
+        if index_rows >= MAX_FILE_ENTRIES {
+            self.discard_upload_chunks(&chunks);
+            return Err(AppError::Invalid(format!(
+                "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
+            )));
         }
         let manifest = FileManifest {
             plaintext_cid,
@@ -3400,9 +4144,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             self.sync.promote_staged_blob(&chunk.ciphertext_cid)?;
         }
         let ref_bytes = manifest.encode();
+        let (public_key, signature) =
+            self.file_entry_attestation(name, &author, &folder, &ref_bytes)?;
         self.sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                write_file_entry(d, name, &author, &folder, &ref_bytes, expires)
+                write_file_entry(
+                    d,
+                    name,
+                    &author,
+                    &folder,
+                    &ref_bytes,
+                    expires,
+                    Some((&public_key, &signature)),
+                )
             })
             .await?;
         Ok(plaintext_cid)
@@ -3442,9 +4196,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// The shared files listed in the index (metadata only; bytes are fetched on download).
     pub fn files(&self) -> Vec<FileEntry> {
+        let group_id = self.sync.group_id();
         self.sync
             .doc(DocType::FileIndex, FILE_INDEX_DOC)
-            .map(|d| read_file_entries(d.doc()))
+            .map(|d| read_file_entries(d.doc(), &group_id))
+            .unwrap_or_default()
+    }
+
+    /// Raw replicated row count, including malformed rows that fail materialization. Publication
+    /// must use this rather than `files().len()`: otherwise hostile invalid rows can push a newly
+    /// published honest entry beyond the reader cap and make a successful upload invisible.
+    fn file_index_row_count(&self) -> usize {
+        self.sync
+            .doc(DocType::FileIndex, FILE_INDEX_DOC)
+            .map(|encrypted| raw_file_index_row_count(encrypted.doc()))
             .unwrap_or_default()
     }
 
@@ -3567,18 +4332,38 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// walking a long track re-read chunk 0, dropped the chunk it was playing, and re-read that
     /// too: a file every byte of which was already on this disk could still stall the deck. This
     /// touches no blob, no disk and no network.
-    pub fn file_head(&self, cid: &Cid) -> Option<(u64, String)> {
-        let entry = self
+    pub fn file_head(&self, cid: &Cid) -> Option<FileMediaHead> {
+        let (entry, manifest, manifest_version) = self.unique_media_entry(cid)?;
+        Some(FileMediaHead {
+            total_size: manifest.total_size,
+            mime: entry.mime,
+            manifest_version,
+        })
+    }
+
+    /// Resolve one CID to exactly one current chunk manifest.
+    ///
+    /// A replicated index may contain several legitimate names/paths for identical content, but
+    /// every such row must carry byte-identical `file_ref` bytes. A malicious member can otherwise
+    /// repeat a benign plaintext CID while naming different encrypted chunks; treating the CID as
+    /// the cache identity would authorize those replacement bytes under a stale MIME decision.
+    fn unique_media_entry(&self, cid: &Cid) -> Option<(FileEntry, FileManifest, [u8; 32])> {
+        let mut entries = self
             .files()
             .into_iter()
-            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])?;
+            .filter(|entry| entry.cid.as_slice() == &cid.as_bytes()[..]);
+        let entry = entries.next()?;
+        let manifest_version = file_manifest_version(&entry.file_ref);
+        if entries.any(|candidate| file_manifest_version(&candidate.file_ref) != manifest_version) {
+            return None;
+        }
         let manifest = FileManifest::decode_or_legacy(&entry.file_ref).ok()?;
         // The same guard `read_file_range` applies: a member authors the manifest, so an absurd
         // declared size must not become a `Content-Range` the player then chases.
         if manifest.total_size > MAX_FILE_BYTES as u64 {
             return None;
         }
-        Some((manifest.total_size, entry.mime))
+        Some((entry, manifest, manifest_version))
     }
 
     /// Read a byte range of a listed file's plaintext.
@@ -3595,21 +4380,21 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     pub async fn read_file_range(
         &mut self,
         cid: &Cid,
+        expected_manifest_version: [u8; 32],
         start: u64,
         max_len: usize,
     ) -> Result<FileRange, AppError> {
-        let Some(entry) = self
-            .files()
-            .into_iter()
-            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
-        else {
+        let Some((entry, manifest, manifest_version)) = self.unique_media_entry(cid) else {
             return Err(AppError::Invalid(
-                "no such file in this server's index".into(),
+                "no unique file manifest in this server's index".into(),
             ));
         };
+        if manifest_version != expected_manifest_version {
+            return Err(AppError::Invalid(
+                "file manifest changed after media authorization".into(),
+            ));
+        }
         let mime = entry.mime.clone();
-        let manifest = FileManifest::decode_or_legacy(&entry.file_ref)
-            .map_err(|_| AppError::Invalid("corrupt file reference".into()))?;
         let total_size = manifest.total_size;
         if total_size > MAX_FILE_BYTES as u64 {
             return Err(AppError::Invalid(
@@ -3724,15 +4509,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// reachable" flag, for the file browser's availability indicator. Zero network cost; purely
     /// local blob-store + in-memory peer-set checks. See [`FilesView`].
     pub fn files_view(&self) -> FilesView {
-        let files = self
-            .files()
+        self.files_view_from_entries(self.files())
+    }
+
+    fn files_view_from_entries(&self, entries: Vec<FileEntry>) -> FilesView {
+        let files = entries
             .into_iter()
             .map(|entry| {
                 let (held_chunks, total_chunks) = self.chunk_holding(&entry);
+                let manifest_version = file_manifest_version(&entry.file_ref);
                 FileListing {
                     entry,
                     held_chunks,
                     total_chunks,
+                    manifest_version,
                 }
             })
             .collect();
@@ -3746,18 +4536,37 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// cryptographic checks but no network requests and no mutation.
     pub fn storage_health(&self) -> StorageHealth {
         let files = self.files();
-        let mut refs: HashMap<Cid, FileRef> = HashMap::new();
-        let mut invalid_manifests = 0;
-        for entry in &files {
-            match FileManifest::decode_or_legacy(&entry.file_ref) {
-                Ok(manifest) if manifest.total_size <= MAX_FILE_BYTES as u64 => {
-                    for chunk in manifest.chunks {
-                        refs.entry(chunk.ciphertext_cid).or_insert(chunk);
-                    }
-                }
-                _ => invalid_manifests += 1,
-            }
+        self.storage_health_for_entries(&files)
+    }
+
+    /// Capture the exact file rows and their cryptographic local-health verdict in one actor turn.
+    pub fn storage_snapshot(&self) -> StorageSnapshot {
+        let files = self.files();
+        StorageSnapshot {
+            health: self.storage_health_for_entries(&files),
+            files: self.files_view_from_entries(files),
         }
+    }
+
+    fn storage_health_for_entries(&self, files: &[FileEntry]) -> StorageHealth {
+        self.storage_health_for_entries_with(files, |ciphertext, file_ref| {
+            self.sync.open_file(ciphertext, file_ref).is_ok()
+        })
+    }
+
+    fn storage_health_for_entries_with<F>(
+        &self,
+        files: &[FileEntry],
+        mut open_file: F,
+    ) -> StorageHealth
+    where
+        F: FnMut(&[u8], &FileRef) -> bool,
+    {
+        // Aggregate byte counts remain deduplicated by ciphertext CID, but authentication work and
+        // whole-file verdicts are keyed by the exact FileRef. Those identities cannot be merged:
+        // the same sealed bytes paired with a different wrapped key are a different claim. More
+        // than the small exact-ref cap is treated as ambiguity, not multiplied crypto work.
+        let (refs, file_refs, invalid_manifests) = storage_ref_index(files);
 
         let mut health = StorageHealth {
             listed_files: files.len(),
@@ -3766,47 +4575,71 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             has_peers: self.has_fetch_peers(),
             ..StorageHealth::default()
         };
-        for (cid, file_ref) in refs {
-            match self.sync.get_blob(&cid) {
-                Some(ciphertext) => match self.sync.open_file(&ciphertext, &file_ref) {
-                    Ok(_) => {
-                        health.verified_chunks += 1;
-                        health.verified_bytes = health
-                            .verified_bytes
-                            .saturating_add(ciphertext.len() as u64);
+        let mut verified_refs = HashSet::new();
+        for (cid, exact_refs) in refs {
+            match exact_refs {
+                BoundedFileRefs::Ambiguous => health.unreadable_chunks += 1,
+                BoundedFileRefs::Exact(exact_refs) => match self.sync.get_blob(&cid) {
+                    Some(ciphertext) => {
+                        let mut all_refs_verified = true;
+                        for (version, file_ref) in exact_refs {
+                            if open_file(&ciphertext, &file_ref) {
+                                verified_refs.insert(version);
+                            } else {
+                                all_refs_verified = false;
+                            }
+                        }
+                        if all_refs_verified {
+                            health.verified_chunks += 1;
+                            health.verified_bytes = health
+                                .verified_bytes
+                                .saturating_add(ciphertext.len() as u64);
+                        } else {
+                            health.unreadable_chunks += 1;
+                        }
                     }
-                    Err(_) => health.unreadable_chunks += 1,
+                    None if self.sync.has_blob(&cid) => health.unreadable_chunks += 1,
+                    None => health.missing_chunks += 1,
                 },
-                None if self.sync.has_blob(&cid) => health.unreadable_chunks += 1,
-                None => health.missing_chunks += 1,
             }
         }
+        health.verified_manifest_versions = file_refs
+            .into_iter()
+            .filter_map(|(manifest, refs)| {
+                (!refs.is_empty() && refs.iter().all(|version| verified_refs.contains(version)))
+                    .then_some(manifest)
+            })
+            .collect();
         health
     }
 
-    /// Re-fetch every missing or unreadable referenced chunk from the best connected member, then
-    /// verify the whole set again. The sync/storage path authenticates the responder and CID before
-    /// replacing an unreadable record; no unreferenced blob is garbage-collected here.
+    /// Re-fetch every repairable missing or unreadable referenced chunk from the best connected
+    /// member, then verify the whole set again. Contradictory over-cap exact references remain
+    /// visibly unreadable without a fetch: content addressing would return the same ciphertext and
+    /// cannot reconcile different wrapped keys. The sync/storage path authenticates the responder
+    /// and CID before replacing an unreadable record; no unreferenced blob is garbage-collected.
     pub async fn repair_storage(&mut self) -> Result<StorageRepair, AppError> {
         let before = self.storage_health();
         let mut candidates = HashSet::new();
-        for entry in self.files() {
-            let Ok(manifest) = FileManifest::decode_or_legacy(&entry.file_ref) else {
+        let files = self.files();
+        let (refs, _, _) = storage_ref_index(&files);
+        for (cid, exact_refs) in refs {
+            let BoundedFileRefs::Exact(exact_refs) = exact_refs else {
+                // Fetching the same content-addressed ciphertext cannot reconcile contradictory
+                // wrapped keys. Leave this CID visibly unreadable without wasting peer traffic.
                 continue;
             };
-            if manifest.total_size > MAX_FILE_BYTES as u64 {
-                continue;
-            }
-            for chunk in manifest.chunks {
-                let cid = chunk.ciphertext_cid;
-                let readable = self
-                    .sync
-                    .get_blob(&cid)
-                    .and_then(|bytes| self.sync.open_file(&bytes, &chunk).ok())
-                    .is_some();
-                if !readable {
-                    candidates.insert(cid);
-                }
+            let readable = self
+                .sync
+                .get_blob(&cid)
+                .map(|bytes| {
+                    exact_refs
+                        .values()
+                        .all(|chunk| self.sync.open_file(&bytes, chunk).is_ok())
+                })
+                .unwrap_or(false);
+            if !readable {
+                candidates.insert(cid);
             }
         }
         for cid in &candidates {
@@ -3822,19 +4655,31 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         })
     }
 
-    /// Whether ≥1 transport peer is connected **right now**; a cheap, accurate proxy for "a
-    /// missing chunk could be fetched". Maintained on connect/disconnect (does NOT go stale like the
-    /// catch-up source lists), though it does not prove any peer holds a particular file. Zero
-    /// network cost (an in-memory peer-set check).
+    /// Whether ≥1 live peer previously served a roster-verified, request-bound signed catch-up;
+    /// a cheap proxy for "a missing chunk could be fetched". A self-asserted descriptor claim or
+    /// bare relay/rendezvous socket is deliberately excluded: neither proves that connection can
+    /// serve group data. This does not prove the peer holds a particular file, and every fetch is
+    /// authenticated again. Zero network cost (an in-memory session-state check).
     pub fn has_fetch_peers(&self) -> bool {
-        self.sync.has_connected_peer()
+        self.sync.has_proven_connected_member_peer()
     }
 
-    /// The fingerprints of current members reachable right now (a live connection), for the
-    /// roster's presence indicators. Best-effort + authenticated; see
-    /// [`ChannelSync::connected_member_fingerprints`].
+    /// Current members whose self-asserted peer id has a live connection here, for local route
+    /// presence diagnostics. This is neither proof that the member controls that transport nor
+    /// that the person is online; see [`ChannelSync::connected_member_fingerprints`].
     pub fn online_members(&self) -> Vec<String> {
         self.sync.connected_member_fingerprints()
+    }
+
+    /// What this node knows about reaching each current member, for the debug console's network
+    /// view. Local state only; see [`ChannelSync::member_routes`].
+    pub fn member_routes(&self) -> Vec<catcoms_sync::MemberRoute> {
+        self.sync.member_routes()
+    }
+
+    /// Cheap session-local invalidation epoch for [`Self::member_routes`].
+    pub fn member_route_revision(&self) -> u64 {
+        self.sync.member_route_revision()
     }
 
     /// Every inbound join attempt this node served this session, newest first, with why each was
@@ -3853,34 +4698,51 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.now_ms()
     }
 
+    /// Clone the injected runtime clock for actor-owned timers.
+    ///
+    /// Keeping throttles on this seam makes lifecycle and retry behavior deterministic in tests
+    /// and avoids accidentally mixing protocol time with ambient operating-system time.
+    pub(crate) fn runtime_clock(&self) -> Arc<dyn Clock + Send> {
+        self.sync.runtime_clock()
+    }
+
     /// Delivery state for this device's recent messages in `channel`, oldest first
     /// (`docs/design-delivery-states.md`, D2). Empty for a channel this session has not sent to
     ///; including every channel right after a restart, since the `message id → change` mapping
     /// is deliberately not persisted.
     ///
-    /// Read-only over state that already exists: `delivered` comes from the document's own causal
-    /// evidence ([`ChannelSync::peers_with_change`]) and `reachable` from the presence set that
-    /// drives [`Server::online_members`]. No new wire traffic, and nothing here is observable by
-    /// anyone else.
-    pub fn delivery_snapshot(&mut self, channel: u128) -> Vec<DeliveryState> {
-        let Some(recent) = self.own_message_changes.get(&channel) else {
-            return Vec::new();
-        };
-        let (ids, changes): (Vec<String>, Vec<ChangeHash>) = recent.iter().cloned().unzip();
-        let reachable = self.online_members().len();
-        let any_peer = self.sync.has_connected_peer();
-        let holders = self
-            .sync
-            .peers_with_changes(DocType::Channel, channel, &changes);
-        ids.into_iter()
-            .zip(holders)
-            .map(|(id, peers)| DeliveryState {
-                id,
-                delivered: peers.len(),
-                reachable,
-                any_peer,
+    /// Read-only over state that already exists: `delivered` comes from causal evidence plus
+    /// already-received explicit receipts ([`ChannelSync::peers_with_change`]), `reachable` from
+    /// the self-asserted route projection that drives [`Server::online_members`], and `any_peer`
+    /// from a live peer that has already served a roster-verified catch-up. This query creates no
+    /// wire traffic; receipt frames are sent separately when remote changes are applied.
+    pub fn delivery_snapshot(&mut self, channel: u128) -> DeliverySnapshot {
+        self.delivery_snapshot_revision = self.delivery_snapshot_revision.saturating_add(1);
+        let revision = self.delivery_snapshot_revision;
+        // Clone the bounded (<= 50) row list before querying sync, whose evidence lookup requires
+        // mutable access. Holding a map borrow across that lookup would either be rejected by Rust
+        // or invite a future refactor to split one coherent actor snapshot into two turns.
+        let recent = self.own_message_changes.get(&channel).cloned();
+        let states = recent
+            .map(|recent| {
+                let (ids, changes): (Vec<String>, Vec<ChangeHash>) = recent.into_iter().unzip();
+                let reachable = self.online_members().len();
+                let any_peer = self.sync.has_proven_connected_member_peer();
+                let holders = self
+                    .sync
+                    .peers_with_changes(DocType::Channel, channel, &changes);
+                ids.into_iter()
+                    .zip(holders)
+                    .map(|(id, peers)| DeliveryState {
+                        id,
+                        delivered: peers.len(),
+                        reachable,
+                        any_peer,
+                    })
+                    .collect()
             })
-            .collect()
+            .unwrap_or_default();
+        DeliverySnapshot { revision, states }
     }
 
     /// Pending incoming DM (friend) requests, each as `(sender fingerprint, sender display name,
@@ -4146,13 +5008,24 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Post to the status feed (authored by this device's fingerprint, clock-stamped).
+    ///
+    /// The feed is the server addressing its members rather than a conversation between them, so
+    /// a plain member is refused unless an owner/admin has opened it with
+    /// [`Server::set_status_members_may_post`]. Honest-client gating, like a pin or a delete: a
+    /// modified client could append the raw op regardless (the documented R6 residual), so this
+    /// shapes what the app offers, not what the document can be made to hold.
     pub async fn post_status(&mut self, text: &str) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) && !self.status_members_may_post() {
+            return Err(AppError::Invalid(
+                "only an owner or admin can post to the status feed".into(),
+            ));
+        }
         let author = self.my_fingerprint();
         let ts = self.sync.now_ms();
         let id = self.sync.random_id();
         self.sync
             .post(DocType::Status, STATUS_DOC, |d| {
-                append_message(d, &id, &author, text, ts, "")
+                append_status_message(d, &id, &author, text, ts)
             })
             .await?;
         Ok(())
@@ -4162,7 +5035,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     pub fn statuses(&self) -> Vec<ChatMessage> {
         self.sync
             .doc(DocType::Status, STATUS_DOC)
-            .map(|d| read_messages(d.doc()))
+            .map(|d| read_status_messages(d.doc()))
             .unwrap_or_default()
     }
 
@@ -4172,6 +5045,175 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .sync
             .request_catchup(peer, DocType::Status, STATUS_DOC)
             .await?)
+    }
+
+    /// Edit the text of one of **your own** status posts (by id). Authorship is the whole claim to
+    /// a post's wording, so not even an owner may reword someone else's; moderation removes a post
+    /// (`delete_status`) rather than putting different words in its author's mouth. Honest-client
+    /// gating, as everywhere in a CRDT (see THREAT-MODEL.md). A no-op edit (same text) is dropped,
+    /// so the `post` always carries a real change.
+    ///
+    /// An empty `id` is refused first, exactly as in [`Server::edit_message`]: it is the id every
+    /// post written before ids existed carries, so the author check below would pass on the
+    /// caller's own id-less post while the write landed on the first id-less post in the document,
+    /// whoever wrote it. Rewording somebody else's announcement is the one thing this method says
+    /// cannot happen, so the guard sits here and not in the composer: the command is reachable from
+    /// the webview directly, and honest-client gating only holds while the id names one post.
+    pub async fn edit_status(&mut self, id: &str, new_text: &str) -> Result<(), AppError> {
+        if !valid_status_post_id(id) {
+            return Err(AppError::Invalid(
+                "a status post with a malformed id cannot be addressed".into(),
+            ));
+        }
+        let me = self.my_fingerprint();
+        let Some(current) = self
+            .statuses()
+            .into_iter()
+            .find(|m| m.id == id && m.author == me)
+        else {
+            return Err(AppError::Invalid(
+                "you can only edit your own status posts".into(),
+            ));
+        };
+        if current.text == new_text {
+            return Ok(()); // unchanged; don't post a redundant op
+        }
+        let edited = self.sync.now_ms();
+        let id = id.to_string();
+        let new_text = new_text.to_string();
+        self.sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                edit_status_message_in_doc(d, &id, &new_text, edited).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Delete a status post (by id): **your own**, or; if you are the owner/admin; anyone's
+    /// (moderation). Honest-client gating, exactly as for a chat message (the documented R6
+    /// residual). Errors if the post is gone or you may not delete it.
+    ///
+    /// An empty `id` is refused for the reason [`Server::edit_status`] gives: it names every post
+    /// written before ids existed rather than one of them, so the delete would land on whichever of
+    /// those the document happens to hold first.
+    pub async fn delete_status(&mut self, id: &str) -> Result<(), AppError> {
+        if !valid_status_post_id(id) {
+            return Err(AppError::Invalid(
+                "a status post with a malformed id cannot be addressed".into(),
+            ));
+        }
+        let me = self.my_fingerprint();
+        let Some(post) = self.statuses().into_iter().find(|m| m.id == id) else {
+            return Err(AppError::Invalid("no such status post".into()));
+        };
+        let moderator = matches!(self.my_role(), Role::Owner | Role::Admin);
+        if post.author != me && !moderator {
+            return Err(AppError::Invalid(
+                "you can only delete your own status posts".into(),
+            ));
+        }
+        let id = id.to_string();
+        self.sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                delete_status_message_in_doc(d, &id).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Toggle this member's `emoji` reaction on the status post `id` (add if absent, remove if
+    /// present). **Anyone may react**, whoever may post: reading the feed is the one thing every
+    /// member does, and a reaction is how they answer it. Errors if the post doesn't exist.
+    ///
+    /// An empty `id` is refused with the other trust-boundary checks, for the reason
+    /// [`Server::edit_status`] gives: it names every post written before ids existed rather than
+    /// one of them, so the reaction would land on whichever the document holds first.
+    pub async fn toggle_status_reaction(&mut self, id: &str, emoji: &str) -> Result<(), AppError> {
+        // Enforce the flat-key invariant at the trust boundary, before anything reaches the doc.
+        if !valid_reaction_emoji(emoji) {
+            return Err(AppError::Invalid("bad emoji".into()));
+        }
+        if !valid_status_post_id(id) {
+            return Err(AppError::Invalid(
+                "a status post with a malformed id cannot be addressed".into(),
+            ));
+        }
+        let me = self.my_fingerprint();
+        if !self.statuses().iter().any(|m| m.id == id) {
+            return Err(AppError::Invalid("no such status post".into()));
+        }
+        let id = id.to_string();
+        let emoji = emoji.to_string();
+        self.sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                toggle_status_reaction_in_doc(d, &id, &emoji, &me).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Pin or unpin a status post (by id): the feed's way of holding an announcement above the
+    /// scroll. **Owner/admin only** (honest-client gating, like a channel pin). Several posts may
+    /// be pinned at once, as in a channel. Errors if the post is gone, you may not pin, or the pin
+    /// state is already as requested (no redundant op).
+    ///
+    /// An empty `id` is refused for the reason [`Server::edit_status`] gives: it names every post
+    /// written before ids existed rather than one of them, so the pin would land on whichever the
+    /// document holds first.
+    pub async fn set_status_pin(&mut self, id: &str, pinned: bool) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner/admin can pin status posts".into(),
+            ));
+        }
+        if !valid_status_post_id(id) {
+            return Err(AppError::Invalid(
+                "a status post with a malformed id cannot be addressed".into(),
+            ));
+        }
+        let Some(post) = self.statuses().into_iter().find(|m| m.id == id) else {
+            return Err(AppError::Invalid("no such status post".into()));
+        };
+        if post.pinned == pinned {
+            return Ok(()); // already in the requested state; don't post a redundant op
+        }
+        let id = id.to_string();
+        self.sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                set_status_pin_in_doc(d, &id, pinned).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Whether plain members may post to the status feed. **`false` by default**, so a server that
+    /// has never touched the setting; including every server founded before it existed; keeps the
+    /// feed as an announcement channel until someone deliberately opens it.
+    pub fn status_members_may_post(&self) -> bool {
+        self.sync
+            .doc(DocType::Status, STATUS_DOC)
+            .map(|d| read_status_may_post(d.doc()))
+            .unwrap_or_default()
+    }
+
+    /// Open (`true`) or close (`false`) the status feed to plain members. **Owner or admin only**
+    /// (honest-client gating, like the wiki review window). An unchanged policy is a no-op, so
+    /// re-asserting the current setting costs no op.
+    pub async fn set_status_members_may_post(&mut self, allow: bool) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can change who may post to the status feed".into(),
+            ));
+        }
+        if self.status_members_may_post() == allow {
+            return Ok(()); // already the requested policy; don't post a redundant op
+        }
+        self.sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                write_status_may_post(d, allow)
+            })
+            .await?;
+        Ok(())
     }
 
     /// Open (create/subscribe) the per-server **calendar**; the shared document holding the
@@ -5771,6 +6813,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .into_iter()
             .map(|id| MemberView {
                 fingerprint: fingerprint(&id),
+                identity: hex::encode(id.as_bytes()),
                 is_self: id == me,
             })
             .collect()
@@ -5820,6 +6863,59 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.set_rendezvous_nodes(nodes);
     }
 
+    /// Share one process-level endpoint budget across this server and every sibling group actor.
+    /// This must be installed before eager cached redial on restore.
+    pub fn set_endpoint_dial_scheduler(
+        &mut self,
+        scheduler: catcoms_discovery::EndpointDialScheduler,
+    ) {
+        self.sync.set_endpoint_dial_scheduler(scheduler);
+    }
+
+    /// Install this device's sealed, Noise-authenticated direct reconnect hints. Private routes
+    /// stay local and are never folded into peer exchange or the shared address cache.
+    pub fn set_local_reconnect_routes(&mut self, routes: Vec<(PeerId, String)>) {
+        self.sync.set_local_reconnect_routes(routes);
+    }
+
+    /// Retry sealed local reconnect hints after re-checking the current roster, exact peer
+    /// binding, canonical route grammar and shared endpoint budget.
+    pub async fn dial_local_reconnect_routes(&mut self) -> usize {
+        self.sync.dial_local_reconnect_routes().await
+    }
+
+    /// Produce this existing member's short-lived, signed out-of-band route update.
+    pub fn mint_member_recovery_code(
+        &mut self,
+        candidates: Vec<String>,
+    ) -> Result<MemberRecoveryCode, AppError> {
+        self.sync
+            .mint_member_recovery_code(candidates)
+            .map_err(|error| AppError::Invalid(error.to_string()))
+    }
+
+    /// Authenticate a recovery code without starting network work. The desktop uses this phase
+    /// to durably record the short-lived peer permission before any submitted dial can complete.
+    pub fn verify_member_recovery_code(
+        &self,
+        code: &str,
+    ) -> Result<MemberRecoveryVerified, AppError> {
+        self.sync
+            .verify_member_recovery_code(code)
+            .map_err(|error| AppError::Invalid(error.to_string()))
+    }
+
+    /// Verify a current member's signed route update and submit its bounded peer-bound dial.
+    pub async fn apply_member_recovery_code(
+        &mut self,
+        code: &str,
+    ) -> Result<MemberRecoveryApplied, AppError> {
+        self.sync
+            .apply_member_recovery_code(code)
+            .await
+            .map_err(|error| AppError::Invalid(error.to_string()))
+    }
+
     /// Whether steady-state rendezvous discovery is configured (so the actor drives its tick).
     pub fn has_rendezvous(&self) -> bool {
         self.sync.has_rendezvous()
@@ -5830,9 +6926,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.drive_discovery().await;
     }
 
-    /// Await the next rendezvous-discovered peer (inert without rendezvous configured).
-    pub async fn next_discovered(&mut self) -> Option<DiscoveredPeer> {
-        self.sync.next_discovered().await
+    /// Await the next discovered record or registration TTL grant.
+    pub async fn next_postjoin_discovery_event(
+        &mut self,
+    ) -> Option<catcoms_sync::PostJoinDiscoveryEvent> {
+        self.sync.next_postjoin_discovery_event().await
+    }
+
+    /// Apply one registration TTL grant to the renewal scheduler.
+    pub fn note_rendezvous_registered(
+        &mut self,
+        registration: catcoms_rt::RendezvousRegistration,
+    ) -> bool {
+        self.sync.note_rendezvous_registered(registration)
     }
 
     /// Dial a discovered peer if the [`DiscoveryPolicy`](catcoms_discovery::DiscoveryPolicy)
@@ -5920,6 +7026,24 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.dial_cached_peers().await
     }
 
+    /// Run one bounded SWIM/reciprocal/topology repair pass.
+    pub async fn drive_mesh_repair(&mut self) -> usize {
+        self.sync.drive_mesh_repair().await
+    }
+
+    pub fn has_pending_reciprocal(&self) -> bool {
+        self.sync.has_pending_reciprocal()
+    }
+
+    pub async fn drive_pending_reciprocal(&mut self) -> usize {
+        self.sync.drive_pending_reciprocal().await
+    }
+
+    /// Explicit fallback redial that preserves every shared safety budget.
+    pub async fn manual_fallback_redial(&mut self) -> catcoms_sync::ManualRedialOutcome {
+        self.sync.manual_fallback_redial().await
+    }
+
     /// Serialize the address cache for sealing beside this server's snapshot.
     /// `integrity_key` comes from [`ServerStore::address_cache_key`](crate::store::ServerStore::address_cache_key).
     pub fn address_cache_bytes(&self, integrity_key: &[u8; 32]) -> Vec<u8> {
@@ -5985,6 +7109,23 @@ mod tests {
     use rand_core::SeedableRng;
 
     const GENERAL: u128 = 1;
+
+    /// Deterministic transport identities keep product-layer fixtures honest about the
+    /// canonical `/p2p/<PeerId>` route binding enforced by steady-state discovery.
+    fn test_libp2p_peer(n: u8) -> libp2p::PeerId {
+        libp2p::identity::Keypair::ed25519_from_bytes([n; 32])
+            .unwrap()
+            .public()
+            .to_peer_id()
+    }
+
+    fn test_transport_peer(n: u8) -> PeerId {
+        catcoms_net::phase0_peer_id(&test_libp2p_peer(n))
+    }
+
+    fn test_peer_route(n: u8, base: &str) -> String {
+        format!("{base}/p2p/{}", test_libp2p_peer(n))
+    }
 
     /// Let `s` apply everything currently queued for it, then stop.
     ///
@@ -6859,11 +8000,38 @@ mod tests {
     // not anything above them does. This drives the same entry points the actor's discovery tick
     // drives, and asserts on the product-facing answer (`online_members`).
 
+    #[test]
+    fn an_unclaimed_infrastructure_connection_is_not_a_fetchable_member() {
+        let hub = Hub::new();
+        let mut server = Server::found(
+            hub.join(PeerId::from_u64(1)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(99),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        let relay = PeerId::from_u64(9_999);
+        let mut handoff = PreOwnerConnectionHandoff::default();
+        assert!(handoff.observe(&catcoms_rt::TransportEvent::PeerConnected(relay)));
+        server.sync.adopt_pre_owner_connections(handoff);
+
+        assert!(
+            server.sync.has_connected_peer(),
+            "the transport fact exists for relay/rendezvous bookkeeping"
+        );
+        assert!(server.online_members().is_empty());
+        assert!(
+            !server.has_fetch_peers(),
+            "an unclaimed infrastructure socket cannot be labelled as a member/blob source"
+        );
+    }
+
     #[tokio::test]
     async fn two_members_exchange_records_and_report_each_other_online() {
         let hub = Hub::new();
-        let alice_peer = PeerId::from_u64(1);
-        let bob_peer = PeerId::from_u64(2);
+        let alice_peer = test_transport_peer(1);
+        let bob_peer = test_transport_peer(2);
         let mut alice = Server::found(
             hub.join(alice_peer),
             MlsDevice::generate().unwrap(),
@@ -6901,10 +8069,16 @@ mod tests {
         // sequence block. (Addresses are the reachable ones; loopback and LAN entries are
         // stripped at publish, so a stand-in public address is what a real node would carry.)
         alice
-            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/9000".into()], 65_536)
+            .publish_self_record(
+                vec![test_peer_route(1, "/ip4/203.0.113.1/tcp/9000")],
+                65_536,
+            )
             .unwrap();
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/9000".into()], 65_536)
-            .unwrap();
+        bob.publish_self_record(
+            vec![test_peer_route(2, "/ip4/203.0.113.2/tcp/9000")],
+            65_536,
+        )
+        .unwrap();
 
         // What the actor's discovery tick now does: one PEX pass each, nobody naming a peer.
         let (_, _) = tokio::join!(bob.drive_pex(), alice.sync_once());
@@ -6928,8 +8102,9 @@ mod tests {
         // This returned an empty list for the entire life of the feature.
         let snap = alice.snapshot().unwrap();
         let addrs = peer_addrs_from_snapshot(&snap).unwrap();
+        let bob_route = test_peer_route(2, "/ip4/203.0.113.2/tcp/9000");
         assert!(
-            addrs.contains(&"/ip4/203.0.113.2/tcp/9000".to_string()),
+            addrs.contains(&bob_route),
             "the cross-session re-dial has Bob's address to dial, got {addrs:?}"
         );
 
@@ -6947,7 +8122,7 @@ mod tests {
         // was unconditionally true for any roster above the floor, so CAUTION fired about 30s
         // after startup, forever, in every real group. Four members, all reachable, must be quiet.
         let hub = Hub::new();
-        let alice_peer = PeerId::from_u64(1);
+        let alice_peer = test_transport_peer(1);
         let clock = ManualClock::new(1_000);
         let mut alice = Server::found(
             hub.join(alice_peer),
@@ -6959,17 +8134,20 @@ mod tests {
         .unwrap();
         alice.subscribe_control().await.unwrap();
         alice
-            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/9000".into()], 65_536)
+            .publish_self_record(
+                vec![test_peer_route(1, "/ip4/203.0.113.1/tcp/9000")],
+                65_536,
+            )
             .unwrap();
 
         let mut members = Vec::new();
-        for (n, nonce) in [(2u64, 11u8), (3, 12), (4, 13)] {
+        for (n, nonce) in [(2u8, 11u8), (3, 12), (4, 13)] {
             let invite = alice.mint_invite([nonce; 16], u64::MAX, vec![]).unwrap();
             let (joined, _) = tokio::join!(
                 Server::join(
-                    hub.join(PeerId::from_u64(n)),
+                    hub.join(test_transport_peer(n)),
                     MlsDevice::generate().unwrap(),
-                    ChaCha20Rng::seed_from_u64(n),
+                    ChaCha20Rng::seed_from_u64(u64::from(n)),
                     Box::new(clock.clone()),
                     "member",
                     alice_peer,
@@ -6978,8 +8156,11 @@ mod tests {
                 alice.sync_once(),
             );
             let mut m = joined.unwrap();
-            m.publish_self_record(vec![format!("/ip4/203.0.113.{n}/tcp/9000")], 65_536)
-                .unwrap();
+            m.publish_self_record(
+                vec![test_peer_route(n, &format!("/ip4/203.0.113.{n}/tcp/9000"))],
+                65_536,
+            )
+            .unwrap();
             members.push(m);
         }
         assert_eq!(alice.member_count(), 4);
@@ -7134,6 +8315,51 @@ mod tests {
         assert!(alice.edit_message(GENERAL, "mid-01", "x").await.is_err());
         alice.delete_message(GENERAL, "mid-01").await.unwrap();
         assert!(!alice.messages(GENERAL).iter().any(|m| m.id == "mid-01"));
+    }
+
+    /// A channel that has carried messages since before ids existed holds several rows whose id is
+    /// `""`, and matching on that field cannot tell them apart. `edit_message` is where that stops
+    /// being untidy and becomes a rewrite: the author check runs over the caller's own messages and
+    /// the write runs over everybody's, so an empty id passes the first on one message and lands
+    /// the second on another. Found by adversarial review.
+    #[tokio::test]
+    async fn a_channel_command_with_no_message_id_is_refused_rather_than_aimed_at_random() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        let mine = alice.my_fingerprint();
+
+        // Two id-less messages, somebody else's first, injected as if they had arrived over gossip
+        // from a client that predated ids.
+        alice
+            .sync
+            .post(DocType::Channel, GENERAL, move |d| {
+                append_message(d, "", "beefbeef", "theirs", 5, "")
+            })
+            .await
+            .unwrap();
+        alice
+            .sync
+            .post(DocType::Channel, GENERAL, move |d| {
+                append_message(d, "", &mine, "mine", 6, "")
+            })
+            .await
+            .unwrap();
+
+        assert!(alice.edit_message(GENERAL, "", "mine now").await.is_err());
+        assert!(alice.delete_message(GENERAL, "").await.is_err());
+        assert!(alice.set_pin(GENERAL, "", true).await.is_err());
+        assert!(alice.toggle_reaction(GENERAL, "", "👍").await.is_err());
+
+        // Both messages are exactly as they were: the same words under the same fingerprints, and
+        // the one that would have been hit is the one the caller never wrote.
+        let msgs = alice.messages(GENERAL);
+        assert_eq!(msgs.len(), 2, "nothing was deleted");
+        assert_eq!(msgs[0].text, "theirs");
+        assert_eq!(msgs[0].author, "beefbeef");
+        assert_eq!(msgs[0].edited, 0, "and nobody's words were replaced");
+        assert!(!msgs[0].pinned);
+        assert!(msgs[0].reactions.is_empty());
+        assert_eq!(msgs[1].text, "mine");
     }
 
     #[tokio::test]
@@ -7623,11 +8849,12 @@ mod tests {
         // proves it yet; so her snapshot still reports no delivery, which the UI must render as
         // "unknown" rather than as a failure.
         let snapshot = alice.delivery_snapshot(GENERAL);
-        assert_eq!(snapshot.len(), 1, "only own messages are tracked");
-        assert_eq!(snapshot[0].id, msgs[0].id);
-        assert_eq!(snapshot[0].delivered, 0);
+        let first_delivery_revision = snapshot.revision;
+        assert_eq!(snapshot.states.len(), 1, "only own messages are tracked");
+        assert_eq!(snapshot.states[0].id, msgs[0].id);
+        assert_eq!(snapshot.states[0].delivered, 0);
         assert!(
-            bob.delivery_snapshot(GENERAL).is_empty(),
+            bob.delivery_snapshot(GENERAL).states.is_empty(),
             "Bob has sent nothing, so he has nothing to report"
         );
 
@@ -7643,11 +8870,15 @@ mod tests {
         assert!(alice.sync_once().await.unwrap());
         assert_eq!(alice.channel_topic(GENERAL), "bob was here");
         let snapshot = alice.delivery_snapshot(GENERAL);
-        assert_eq!(snapshot[0].delivered, 1, "Bob provably holds the message");
+        assert!(snapshot.revision > first_delivery_revision);
+        assert_eq!(
+            snapshot.states[0].delivered, 1,
+            "Bob provably holds the message"
+        );
         // `reachable` is the presence count, tracked independently; the in-memory hub models no
         // connect/disconnect, so it stays 0 here even though delivery is proven. The two are not
         // a fraction: a member can hold a message and be offline.
-        assert_eq!(snapshot[0].reachable, alice.online_members().len());
+        assert_eq!(snapshot.states[0].reachable, alice.online_members().len());
 
         // The calendar is its own document (`DocType::Calendar`), caught up exactly like the
         // channel; so an event Alice created reaches the joiner.
@@ -8305,6 +9536,179 @@ mod tests {
         assert_eq!(repair.health.missing_chunks, 0);
         assert_eq!(repair.health.unreadable_chunks, 0);
         assert_eq!(repair.health.verified_chunks, 1);
+        assert_eq!(repair.health.verified_manifest_versions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn storage_health_binds_completeness_to_the_exact_chunk_reference() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        alice
+            .add_file(
+                "safe.png",
+                "image/png",
+                "safe",
+                b"authenticated image bytes",
+            )
+            .await
+            .unwrap();
+        let original = alice.files().remove(0);
+        let original_version = file_manifest_version(&original.file_ref);
+        let original_manifest = FileManifest::decode_or_legacy(&original.file_ref).unwrap();
+
+        // Repeat the exact ciphertext address but alter the wrapped key. Presence checks report
+        // both rows as held; only an exact-FileRef open distinguishes this unreadable claim.
+        let mut hostile_manifest = original_manifest.clone();
+        hostile_manifest.chunks[0].wrapped_key.ciphertext[0] ^= 1;
+        let hostile_ref = hostile_manifest.encode();
+        let hostile_version = file_manifest_version(&hostile_ref);
+        let author = alice.my_fingerprint();
+        let (public_key, signature) = alice
+            .file_entry_attestation("hostile.png", &author, "hostile", &hostile_ref)
+            .unwrap();
+        alice
+            .sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |doc| {
+                write_file_entry(
+                    doc,
+                    "hostile.png",
+                    &author,
+                    "hostile",
+                    &hostile_ref,
+                    FileExpiry::Never,
+                    Some((&public_key, &signature)),
+                )
+            })
+            .await
+            .unwrap();
+
+        let snapshot = alice.storage_snapshot();
+        assert_eq!(snapshot.files.files.len(), 2);
+        assert!(snapshot
+            .files
+            .files
+            .iter()
+            .all(|listing| listing.held_chunks == listing.total_chunks));
+        assert_eq!(snapshot.health.referenced_chunks, 1);
+        assert_eq!(snapshot.health.verified_chunks, 0);
+        assert_eq!(snapshot.health.unreadable_chunks, 1);
+        assert!(snapshot
+            .health
+            .verified_manifest_versions
+            .contains(&original_version));
+        assert!(!snapshot
+            .health
+            .verified_manifest_versions
+            .contains(&hostile_version));
+    }
+
+    #[tokio::test]
+    async fn storage_health_bounds_same_cid_exact_reference_work() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        alice
+            .add_file("seed.bin", "application/octet-stream", "", b"held")
+            .await
+            .unwrap();
+        let seed = alice.files().remove(0);
+        let seed_manifest = FileManifest::decode_or_legacy(&seed.file_ref).unwrap();
+        let seed_chunk = seed_manifest.chunks[0].clone();
+        let mut hostile_entries = Vec::with_capacity(MAX_FILE_ENTRIES);
+
+        // Exercise the materialized index's full 256 rows × 32 chunks. Every chunk points at the
+        // same held ciphertext but carries a distinct wrapped-key claim. Without the per-CID cap,
+        // a storage-pane read would perform 8,192 opens of the same (potentially 8 MiB) blob while
+        // the server actor could process no messages or sync work.
+        for row in 0..MAX_FILE_ENTRIES {
+            let mut chunks = Vec::with_capacity(catcoms_storage::MAX_CHUNKS as usize);
+            for index in 0..catcoms_storage::MAX_CHUNKS as usize {
+                let ordinal = row * catcoms_storage::MAX_CHUNKS as usize + index;
+                let mut chunk = seed_chunk.clone();
+                chunk.size = CHUNK_BYTES as u64;
+                chunk.wrapped_key.ciphertext[..4].copy_from_slice(&(ordinal as u32).to_be_bytes());
+                chunks.push(chunk);
+            }
+            let manifest = FileManifest {
+                plaintext_cid: Cid::of(&(row as u64).to_be_bytes()),
+                total_size: MAX_FILE_BYTES as u64,
+                mime: "application/octet-stream".into(),
+                chunks,
+            };
+            let mut entry = seed.clone();
+            entry.name = format!("hostile-{row}.bin");
+            entry.size = MAX_FILE_BYTES as u64;
+            entry.cid = manifest.plaintext_cid.as_bytes().to_vec();
+            entry.file_ref = manifest.encode();
+            hostile_entries.push(entry);
+        }
+
+        let mut open_count = 0usize;
+        let health =
+            alice.storage_health_for_entries_with(&hostile_entries, |_ciphertext, _file_ref| {
+                open_count += 1;
+                true
+            });
+        assert!(open_count <= MAX_FILE_REF_VARIANTS_PER_CID);
+        assert_eq!(
+            open_count, 0,
+            "an over-cap CID fails closed before decryption"
+        );
+        assert_eq!(health.referenced_chunks, 1);
+        assert_eq!(health.unreadable_chunks, 1);
+        assert_eq!(health.verified_chunks, 0);
+        assert!(health.verified_manifest_versions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn storage_repair_leaves_over_cap_exact_references_visibly_unrepairable() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        alice
+            .add_file("seed.bin", "application/octet-stream", "", b"held")
+            .await
+            .unwrap();
+        let seed = alice.files().remove(0);
+        let seed_manifest = FileManifest::decode_or_legacy(&seed.file_ref).unwrap();
+        let author = alice.my_fingerprint();
+
+        // The original plus four distinct variants crosses the cap. Fetching cannot help: all
+        // five claims name the same already-held ciphertext, so repair must do no peer work and
+        // must retain the unreadable verdict instead of reporting a false recovery.
+        for index in 0..MAX_FILE_REF_VARIANTS_PER_CID {
+            let mut hostile = seed_manifest.clone();
+            hostile.chunks[0].wrapped_key.ciphertext[..4]
+                .copy_from_slice(&(index as u32 + 1).to_be_bytes());
+            let hostile_ref = hostile.encode();
+            let name = format!("hostile-{index}.bin");
+            let (public_key, signature) = alice
+                .file_entry_attestation(&name, &author, "hostile", &hostile_ref)
+                .unwrap();
+            alice
+                .sync
+                .post(DocType::FileIndex, FILE_INDEX_DOC, |doc| {
+                    write_file_entry(
+                        doc,
+                        &name,
+                        &author,
+                        "hostile",
+                        &hostile_ref,
+                        FileExpiry::Never,
+                        Some((&public_key, &signature)),
+                    )
+                })
+                .await
+                .unwrap();
+        }
+
+        let before = alice.storage_health();
+        assert_eq!(before.unreadable_chunks, 1);
+        assert_eq!(before.verified_chunks, 0);
+        let repair = alice.repair_storage().await.unwrap();
+        assert_eq!(repair.attempted_chunks, 0);
+        assert_eq!(repair.recovered_chunks, 0);
+        assert_eq!(repair.health.unreadable_chunks, 1);
+        assert_eq!(repair.health.verified_chunks, 0);
+        assert!(repair.health.verified_manifest_versions.is_empty());
     }
 
     #[tokio::test]
@@ -8414,6 +9818,442 @@ mod tests {
         assert_eq!(feed[0].text, "server is live");
         assert_eq!(feed[0].author, alice.my_fingerprint());
         assert_eq!(feed[0].ts, 1_000);
+    }
+
+    /// A founder and a joiner on one server, both with the status feed open. Every rule the feed
+    /// adds is about *who* is acting, so a second identity is the fixture rather than a detail of
+    /// it; the joiner is a plain member, which is the role the rules actually bite on.
+    async fn status_duo(
+        clock: &ManualClock,
+    ) -> (
+        Server<MemNetwork, ChaCha20Rng>,
+        Server<MemNetwork, ChaCha20Rng>,
+    ) {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = Server::found(
+            hub.join(alice_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(clock.clone()),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+        let invite = alice.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(clock.clone()),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = bob.unwrap();
+        alice.open_status().await.unwrap();
+        bob.open_status().await.unwrap();
+        (alice, bob)
+    }
+
+    /// The id of the feed post reading `text`. Ids are random, and a merged list is not obliged to
+    /// keep the order two peers appended in, so the tests address a post by what it says.
+    fn status_id(server: &Server<MemNetwork, ChaCha20Rng>, text: &str) -> String {
+        server
+            .statuses()
+            .into_iter()
+            .find(|m| m.text == text)
+            .unwrap_or_else(|| panic!("no status post reading {text:?}"))
+            .id
+    }
+
+    #[tokio::test]
+    async fn the_status_feed_is_owner_only_until_a_member_is_let_in() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob) = status_duo(&clock).await;
+        assert!(
+            !alice.status_members_may_post(),
+            "a feed nobody has configured is the server announcing itself"
+        );
+
+        assert!(matches!(
+            bob.post_status("i have opinions").await,
+            Err(AppError::Invalid(_))
+        ));
+        drain_sync(&mut alice).await;
+        assert!(
+            alice.statuses().is_empty(),
+            "a refused post reaches the shared document not at all"
+        );
+        alice.post_status("we open at eight").await.unwrap();
+
+        // A member cannot let themselves in; the owner can, and the answer is shared state.
+        assert!(matches!(
+            bob.set_status_members_may_post(true).await,
+            Err(AppError::Invalid(_))
+        ));
+        alice.set_status_members_may_post(true).await.unwrap();
+        drain_sync(&mut bob).await;
+        assert!(bob.status_members_may_post());
+        bob.post_status("i have opinions").await.unwrap();
+        assert_eq!(bob.statuses().len(), 2);
+
+        // Closing it again refuses the next one; the posts already made stay.
+        alice.set_status_members_may_post(false).await.unwrap();
+        drain_sync(&mut bob).await;
+        assert!(matches!(
+            bob.post_status("more opinions").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert_eq!(bob.statuses().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_status_post_is_reworded_only_by_the_member_who_wrote_it() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob) = status_duo(&clock).await;
+        alice.post_status("we open at eight").await.unwrap();
+        drain_sync(&mut bob).await;
+        let id = status_id(&alice, "we open at eight");
+
+        // Bob can read it and still may not reword it; nor could an owner reword his, which is
+        // why moderation removes a post rather than editing one.
+        assert!(matches!(
+            bob.edit_status(&id, "we open at nine").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.edit_status("no-such-post", "hello").await,
+            Err(AppError::Invalid(_))
+        ));
+
+        clock.advance_ms(1_000);
+        alice.edit_status(&id, "we open at nine").await.unwrap();
+        assert_eq!(alice.statuses()[0].text, "we open at nine");
+        assert_eq!(alice.statuses()[0].edited, T0 + 1_000);
+
+        // Re-saving the same words is dropped, so the "edited" stamp does not creep.
+        clock.advance_ms(1_000);
+        alice.edit_status(&id, "we open at nine").await.unwrap();
+        assert_eq!(alice.statuses()[0].edited, T0 + 1_000);
+
+        drain_sync(&mut bob).await;
+        assert_eq!(bob.statuses()[0].text, "we open at nine");
+    }
+
+    #[test]
+    fn concurrent_first_status_posts_survive_a_merge() {
+        // Neither fork has seen a status container from the other. The legacy shared-list layout
+        // lost one side in precisely this case; disjoint root keys must preserve both posts.
+        let mut base = AutoCommit::new();
+        let mut alice = base.fork();
+        let mut bob = base.fork();
+        append_status_message(
+            &mut alice,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "alice",
+            "owner notice",
+            T0,
+        )
+        .unwrap();
+        append_status_message(
+            &mut bob,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "bob",
+            "member reply",
+            T0,
+        )
+        .unwrap();
+
+        alice.merge(&mut bob).unwrap();
+        assert_eq!(
+            read_status_messages(&alice)
+                .into_iter()
+                .map(|post| post.text)
+                .collect::<Vec<_>>(),
+            vec!["owner notice".to_string(), "member reply".to_string()]
+        );
+    }
+
+    #[test]
+    fn conflicting_legacy_status_lists_are_recovered_and_independently_mutable() {
+        let alice_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let bob_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut base = AutoCommit::new();
+        let mut alice = base.fork();
+        let mut bob = base.fork();
+        append_message(&mut alice, alice_id, "alice", "old notice", T0, "").unwrap();
+        append_message(&mut bob, bob_id, "bob", "old reply", T0, "").unwrap();
+        alice.merge(&mut bob).unwrap();
+        assert_eq!(read_status_messages(&alice).len(), 2);
+
+        for (id, text, reactor) in [
+            (alice_id, "updated notice", "carol"),
+            (bob_id, "updated reply", "dave"),
+        ] {
+            assert!(edit_status_message_in_doc(&mut alice, id, text, T0 + 1).unwrap());
+            assert!(toggle_status_reaction_in_doc(&mut alice, id, "ok", reactor).unwrap());
+            assert!(set_status_pin_in_doc(&mut alice, id, true).unwrap());
+        }
+        let posts = read_status_messages(&alice);
+        assert_eq!(posts.len(), 2);
+        assert!(posts.iter().all(|post| post.edited == T0 + 1));
+        assert!(posts.iter().all(|post| post.pinned));
+        assert_eq!(posts[0].text, "updated notice");
+        assert_eq!(posts[1].text, "updated reply");
+
+        assert!(delete_status_message_in_doc(&mut alice, alice_id).unwrap());
+        assert_eq!(read_status_messages(&alice)[0].id, bob_id);
+        assert!(delete_status_message_in_doc(&mut alice, bob_id).unwrap());
+        assert!(read_status_messages(&alice).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_status_id_is_hidden_and_every_public_mutation_fails_closed() {
+        let mut alice = founder();
+        alice.open_status().await.unwrap();
+        let id = "cccccccccccccccccccccccccccccccc";
+        alice
+            .sync
+            .post(DocType::Status, STATUS_DOC, |doc| {
+                append_message(doc, id, "alice", "legacy Alice post", T0, "")?;
+                append_status_message(doc, id, "bob", "keyed Bob post", T0)
+            })
+            .await
+            .unwrap();
+        assert!(
+            alice.statuses().is_empty(),
+            "an ambiguous id is not actionable UI state"
+        );
+
+        let before: Vec<ChatMessage> =
+            status_post_candidates(alice.sync.doc(DocType::Status, STATUS_DOC).unwrap().doc())
+                .unwrap()
+                .into_iter()
+                .map(|candidate| candidate.post)
+                .collect();
+        assert!(alice.edit_status(id, "changed").await.is_err());
+        assert!(alice.delete_status(id).await.is_err());
+        assert!(alice.toggle_status_reaction(id, "ok").await.is_err());
+        assert!(alice.set_status_pin(id, true).await.is_err());
+        let after: Vec<ChatMessage> =
+            status_post_candidates(alice.sync.doc(DocType::Status, STATUS_DOC).unwrap().doc())
+                .unwrap()
+                .into_iter()
+                .map(|candidate| candidate.post)
+                .collect();
+        assert_eq!(
+            after, before,
+            "authorization failure must leave both objects untouched"
+        );
+    }
+
+    #[test]
+    fn an_empty_keyed_status_id_is_inert() {
+        let mut doc = AutoCommit::new();
+        let msg = doc
+            .put_object(ROOT, STATUS_POST_PREFIX, ObjType::Map)
+            .unwrap();
+        doc.put(&msg, MSG_ID, "").unwrap();
+        doc.put(&msg, AUTHOR, "mallory").unwrap();
+        doc.put(&msg, TEXT, "unaddressable").unwrap();
+        doc.put(&msg, TS, T0 as i64).unwrap();
+
+        assert!(read_status_messages(&doc).is_empty());
+        assert!(!edit_status_message_in_doc(&mut doc, "", "changed", T0 + 1).unwrap());
+        assert!(!toggle_status_reaction_in_doc(&mut doc, "", "ok", "mallory").unwrap());
+        assert!(!set_status_pin_in_doc(&mut doc, "", true).unwrap());
+        assert!(!delete_status_message_in_doc(&mut doc, "").unwrap());
+        assert_eq!(str_field(&doc, &msg, TEXT), "unaddressable");
+    }
+
+    #[tokio::test]
+    async fn a_status_post_is_deleted_by_its_author_or_a_moderator_and_nobody_else() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob) = status_duo(&clock).await;
+        alice.set_status_members_may_post(true).await.unwrap();
+        drain_sync(&mut bob).await;
+
+        alice.post_status("the owner's notice").await.unwrap();
+        bob.post_status("bob's first").await.unwrap();
+        bob.post_status("bob's second").await.unwrap();
+        drain_sync(&mut alice).await;
+        drain_sync(&mut bob).await;
+        assert_eq!(bob.statuses().len(), 3);
+
+        let owners = status_id(&bob, "the owner's notice");
+        let first = status_id(&bob, "bob's first");
+        let second = status_id(&bob, "bob's second");
+
+        assert!(matches!(
+            bob.delete_status(&owners).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            bob.delete_status("no-such-post").await,
+            Err(AppError::Invalid(_))
+        ));
+        bob.delete_status(&first).await.unwrap();
+        // The owner may take down a member's post; that is the moderation route.
+        alice.delete_status(&second).await.unwrap();
+
+        drain_sync(&mut alice).await;
+        drain_sync(&mut bob).await;
+        assert_eq!(alice.statuses().len(), 1);
+        assert_eq!(alice.statuses()[0].id, owners);
+        assert_eq!(bob.statuses().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_status_reaction_goes_on_and_comes_off_again() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob) = status_duo(&clock).await;
+        alice.post_status("we open at eight").await.unwrap();
+        drain_sync(&mut bob).await;
+        let id = status_id(&alice, "we open at eight");
+
+        // Reacting is not posting: the member a closed feed refuses may still answer it.
+        assert!(!bob.status_members_may_post());
+        bob.toggle_status_reaction(&id, "🎉").await.unwrap();
+        let feed = bob.statuses();
+        assert_eq!(feed[0].reactions.len(), 1);
+        assert_eq!(feed[0].reactions[0].emoji, "🎉");
+        assert_eq!(feed[0].reactions[0].by, vec![bob.my_fingerprint()]);
+        drain_sync(&mut alice).await;
+        assert_eq!(
+            alice.statuses()[0].reactions[0].by,
+            vec![bob.my_fingerprint()]
+        );
+
+        bob.toggle_status_reaction(&id, "🎉").await.unwrap();
+        assert!(bob.statuses()[0].reactions.is_empty());
+
+        // The trust-boundary rules chat applies apply here too: a post that exists, and an emoji
+        // that cannot smuggle the flat key's separator onto the message map.
+        assert!(matches!(
+            bob.toggle_status_reaction("no-such-post", "🎉").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            bob.toggle_status_reaction(&id, "a\u{1f}b").await,
+            Err(AppError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn pinning_a_status_post_is_owner_or_admin_only() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob) = status_duo(&clock).await;
+        alice.post_status("we open at eight").await.unwrap();
+        alice.post_status("and close at six").await.unwrap();
+        drain_sync(&mut bob).await;
+        let first = status_id(&alice, "we open at eight");
+        let second = status_id(&alice, "and close at six");
+
+        assert!(matches!(
+            bob.set_status_pin(&first, true).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.set_status_pin("no-such-post", true).await,
+            Err(AppError::Invalid(_))
+        ));
+
+        // Several announcements may be held above the scroll at once, as in a channel.
+        alice.set_status_pin(&first, true).await.unwrap();
+        alice.set_status_pin(&second, true).await.unwrap();
+        assert!(alice.statuses().iter().all(|m| m.pinned));
+
+        alice.set_status_pin(&first, true).await.unwrap(); // redundant; posts nothing
+        alice.set_status_pin(&first, false).await.unwrap();
+        let feed = alice.statuses();
+        assert!(!feed.iter().find(|m| m.id == first).unwrap().pinned);
+        assert!(feed.iter().find(|m| m.id == second).unwrap().pinned);
+
+        drain_sync(&mut bob).await;
+        let bobs = bob.statuses();
+        assert!(!bobs.iter().find(|m| m.id == first).unwrap().pinned);
+        assert!(bobs.iter().find(|m| m.id == second).unwrap().pinned);
+    }
+
+    /// The four addressed feed commands, given the id that addresses nothing.
+    ///
+    /// `""` is what every post written before ids existed carries, so it names all of them at once
+    /// and the document match cannot tell them apart. The sharp edge is `edit_status`: its author
+    /// check runs over the caller's own posts while the write runs over everybody's, so Alice
+    /// asking to edit "her" id-less post would have reworded whichever id-less post the document
+    /// holds first; here, Bob's. Found by adversarial review.
+    #[tokio::test]
+    async fn a_feed_command_with_no_post_id_is_refused_rather_than_aimed_at_random() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, bob) = status_duo(&clock).await;
+        let his = bob.my_fingerprint();
+        let mine = alice.my_fingerprint();
+
+        // Two id-less posts, Bob's first, injected as if they had arrived over gossip from a
+        // client that predated ids.
+        alice
+            .sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                append_message(d, "", &his, "bob's old notice", 5, "")
+            })
+            .await
+            .unwrap();
+        alice
+            .sync
+            .post(DocType::Status, STATUS_DOC, move |d| {
+                append_message(d, "", &mine, "alice's old notice", 6, "")
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            alice.edit_status("", "mine now").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.delete_status("").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.set_status_pin("", true).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.toggle_status_reaction("", "🎉").await,
+            Err(AppError::Invalid(_))
+        ));
+
+        // Both posts are exactly as they were: the same words under the same fingerprints.
+        let feed = alice.statuses();
+        assert_eq!(feed.len(), 2, "nothing was deleted");
+        assert_eq!(feed[0].text, "bob's old notice");
+        assert_eq!(feed[0].author, bob.my_fingerprint());
+        assert_eq!(feed[0].edited, 0, "and nobody's words were replaced");
+        assert!(!feed[0].pinned);
+        assert!(feed[0].reactions.is_empty());
+        assert_eq!(feed[1].text, "alice's old notice");
+    }
+
+    #[tokio::test]
+    async fn a_status_post_and_the_feeds_posting_policy_both_reach_a_joiner() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob) = status_duo(&clock).await;
+        alice.post_status("we open at eight").await.unwrap();
+        alice.set_status_members_may_post(true).await.unwrap();
+        drain_sync(&mut bob).await;
+
+        let feed = bob.statuses();
+        assert_eq!(feed.len(), 1);
+        assert_eq!(feed[0].text, "we open at eight");
+        assert_eq!(feed[0].author, alice.my_fingerprint());
+        assert!(
+            bob.status_members_may_post(),
+            "the policy rides the feed document, so it is shared state and not a local preference"
+        );
     }
 
     #[tokio::test]
@@ -9173,9 +11013,13 @@ mod tests {
             .add_file("clip.bin", "video/mp4", "", &data)
             .await
             .unwrap();
+        let manifest_version = alice.file_head(&cid).unwrap().manifest_version;
 
         // A window wholly inside the first chunk.
-        let head = alice.read_file_range(&cid, 0, 1024).await.unwrap();
+        let head = alice
+            .read_file_range(&cid, manifest_version, 0, 1024)
+            .await
+            .unwrap();
         assert_eq!(head.bytes, data[..1024]);
         assert_eq!(head.total_size, n as u64);
         assert_eq!(head.mime, "video/mp4");
@@ -9187,18 +11031,24 @@ mod tests {
         // A window straddling the first/second chunk boundary: the case plain chunk indexing
         // gets wrong.
         let start = CHUNK_BYTES as u64 - 10;
-        let span = alice.read_file_range(&cid, start, 20).await.unwrap();
+        let span = alice
+            .read_file_range(&cid, manifest_version, start, 20)
+            .await
+            .unwrap();
         assert_eq!(span.bytes, data[start as usize..start as usize + 20]);
 
         // A window in the short tail chunk, clamped to the end of the file.
         let tail_start = (CHUNK_BYTES * 2) as u64 + 4000;
-        let tail = alice.read_file_range(&cid, tail_start, 8192).await.unwrap();
+        let tail = alice
+            .read_file_range(&cid, manifest_version, tail_start, 8192)
+            .await
+            .unwrap();
         assert_eq!(tail.bytes, data[tail_start as usize..]);
         assert_eq!(tail.bytes.len(), 242, "the read stops at the end of file");
 
         // Seeking past the end is a normal thing for a player to probe; it is not an error.
         let past = alice
-            .read_file_range(&cid, n as u64 + 99, 512)
+            .read_file_range(&cid, manifest_version, n as u64 + 99, 512)
             .await
             .unwrap();
         assert!(past.bytes.is_empty());
@@ -9206,11 +11056,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn media_reads_reject_ambiguous_and_stale_manifest_versions() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let safe = b"\x89PNG\r\n\x1a\nsafe image";
+        let replacement = b"ID3replacement audio";
+        let cid = alice
+            .add_file("safe.png", "image/png", "safe", safe)
+            .await
+            .unwrap();
+        let old_version = alice.file_head(&cid).unwrap().manifest_version;
+        let donor_cid = alice
+            .add_file("donor.mp3", "audio/mpeg", "donor", replacement)
+            .await
+            .unwrap();
+        let donor = alice
+            .files()
+            .into_iter()
+            .find(|entry| entry.cid == donor_cid.as_bytes().to_vec())
+            .unwrap();
+        let mut forged = FileManifest::decode_or_legacy(&donor.file_ref).unwrap();
+        forged.plaintext_cid = cid;
+        let forged_ref = forged.encode();
+        let author = alice.my_fingerprint();
+        let (public_key, signature) = alice
+            .file_entry_attestation("replacement.mp3", &author, "forged", &forged_ref)
+            .unwrap();
+        alice
+            .sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |doc| {
+                write_file_entry(
+                    doc,
+                    "replacement.mp3",
+                    &author,
+                    "forged",
+                    &forged_ref,
+                    FileExpiry::Never,
+                    Some((&public_key, &signature)),
+                )
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            alice.file_head(&cid).is_none(),
+            "the same claimed plaintext CID with two manifests must be denied as ambiguous"
+        );
+
+        alice.delete_file_at(&cid, "safe").await.unwrap();
+        let replacement_head = alice.file_head(&cid).expect("forged row remains current");
+        assert_ne!(replacement_head.manifest_version, old_version);
+        assert!(
+            alice
+                .read_file_range(&cid, old_version, 0, 64)
+                .await
+                .is_err(),
+            "a MIME decision captured for the removed manifest cannot authorize replacement bytes"
+        );
+        assert_eq!(
+            alice
+                .read_file_range(&cid, replacement_head.manifest_version, 0, 64)
+                .await
+                .unwrap()
+                .bytes,
+            replacement
+        );
+    }
+
+    #[tokio::test]
     async fn a_media_range_refuses_a_file_that_is_not_listed() {
         let mut alice = founder();
         alice.open_files().await.unwrap();
         let missing = Cid::of(b"nothing here");
-        assert!(alice.read_file_range(&missing, 0, 16).await.is_err());
+        assert!(alice
+            .read_file_range(&missing, [0; 32], 0, 16)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -9847,6 +11768,10 @@ mod tests {
             .unwrap();
 
         let entry = alice.files().remove(0);
+        assert!(
+            entry.author_verified,
+            "new listings bind their origin device"
+        );
         assert_eq!(
             entry.expires,
             FileExpiry::At(T0 + FILE_EXPIRY_DEFAULT_MS),
@@ -9885,6 +11810,7 @@ mod tests {
                     "docs",
                     &legacy_ref,
                     FileExpiry::Unrecorded,
+                    None,
                 )
             })
             .await
@@ -9900,11 +11826,264 @@ mod tests {
         // content is still downloadable through the legacy listing.
         assert_eq!(legacy.path, "docs");
         assert_eq!(legacy.author, author);
+        assert!(
+            !legacy.author_verified,
+            "legacy author labels are not cryptographic proof"
+        );
         assert_eq!(legacy.cid, cid.as_bytes().to_vec());
         assert_eq!(alice.download_file(&cid).await.unwrap(), b"hello".to_vec());
         // The modern entry alongside it is unaffected.
         let modern = files.iter().find(|e| e.name == "doc.txt").unwrap();
         assert_eq!(modern.expires, FileExpiry::At(T0 + FILE_EXPIRY_DEFAULT_MS));
+        assert!(modern.author_verified);
+    }
+
+    #[tokio::test]
+    async fn a_file_origin_attestation_rejects_relabelled_metadata() {
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_with_clock(&clock);
+        alice.open_files().await.unwrap();
+        alice
+            .add_file("safe.png", "image/png", "embed", b"image bytes")
+            .await
+            .unwrap();
+        let original = alice.files().remove(0);
+        let (public_key, signature) = alice
+            .file_entry_attestation(
+                &original.name,
+                &original.author,
+                &original.path,
+                &original.file_ref,
+            )
+            .unwrap();
+        let group_id = alice.sync.group_id();
+        let canonical = file_entry_attestation_payload(
+            &group_id,
+            &original.name,
+            &original.author,
+            &original.path,
+            &original.file_ref,
+        );
+        assert!(verify_with_public_bytes(
+            &public_key,
+            &canonical,
+            &signature
+        ));
+        let mut changed_ref = original.file_ref.clone();
+        changed_ref.push(0);
+        for (field, payload) in [
+            (
+                "group",
+                file_entry_attestation_payload(
+                    b"another group",
+                    &original.name,
+                    &original.author,
+                    &original.path,
+                    &original.file_ref,
+                ),
+            ),
+            (
+                "name",
+                file_entry_attestation_payload(
+                    &group_id,
+                    "renamed.png",
+                    &original.author,
+                    &original.path,
+                    &original.file_ref,
+                ),
+            ),
+            (
+                "author",
+                file_entry_attestation_payload(
+                    &group_id,
+                    &original.name,
+                    "ffffffff",
+                    &original.path,
+                    &original.file_ref,
+                ),
+            ),
+            (
+                "path",
+                file_entry_attestation_payload(
+                    &group_id,
+                    &original.name,
+                    &original.author,
+                    "another-folder",
+                    &original.file_ref,
+                ),
+            ),
+            (
+                "file reference",
+                file_entry_attestation_payload(
+                    &group_id,
+                    &original.name,
+                    &original.author,
+                    &original.path,
+                    &changed_ref,
+                ),
+            ),
+        ] {
+            assert!(
+                !verify_with_public_bytes(&public_key, &payload, &signature),
+                "changing {field} must invalidate the listing attestation"
+            );
+        }
+        let mut changed_key = public_key.clone();
+        changed_key[0] ^= 1;
+        assert!(!verify_with_public_bytes(
+            &changed_key,
+            &canonical,
+            &signature
+        ));
+        let mut changed_signature = signature;
+        changed_signature[0] ^= 1;
+        assert!(!verify_with_public_bytes(
+            &public_key,
+            &canonical,
+            &changed_signature
+        ));
+        let author = original.author.clone();
+        let file_ref = original.file_ref.clone();
+        alice
+            .sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                // A modified client copied a valid attestation but changed the displayed name.
+                write_file_entry(
+                    d,
+                    "malicious.png",
+                    &author,
+                    "embed",
+                    &file_ref,
+                    FileExpiry::Never,
+                    Some((&public_key, &signature)),
+                )
+            })
+            .await
+            .unwrap();
+
+        let tampered = alice
+            .files()
+            .into_iter()
+            .find(|entry| entry.name == "malicious.png")
+            .unwrap();
+        assert!(!tampered.author_verified);
+    }
+
+    #[tokio::test]
+    async fn file_index_materialization_and_publication_capacity_are_deterministically_bounded() {
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_with_clock(&clock);
+        alice.open_files().await.unwrap();
+        alice
+            .add_file("safe.png", "image/png", "embed", b"image bytes")
+            .await
+            .unwrap();
+        let original = alice.files().remove(0);
+        let (public_key, signature) = alice
+            .file_entry_attestation(
+                &original.name,
+                &original.author,
+                &original.path,
+                &original.file_ref,
+            )
+            .unwrap();
+        let group_id = alice.sync.group_id();
+
+        let mut hostile = AutoCommit::new();
+        for _ in 0..(MAX_FILE_ENTRIES + 7) {
+            write_file_entry(
+                &mut hostile,
+                &original.name,
+                &original.author,
+                &original.path,
+                &original.file_ref,
+                FileExpiry::Never,
+                Some((&public_key, &signature)),
+            )
+            .unwrap();
+        }
+        assert_eq!(raw_file_index_row_count(&hostile), MAX_FILE_ENTRIES + 7);
+        let materialized = read_file_entries(&hostile, &group_id);
+        assert_eq!(materialized.len(), MAX_FILE_ENTRIES);
+        assert!(materialized.iter().all(|entry| entry.author_verified));
+
+        let mut malformed = AutoCommit::new();
+        let list = malformed.put_object(ROOT, FILES, ObjType::List).unwrap();
+        for i in 0..MAX_FILE_ENTRIES {
+            malformed.insert_object(&list, i, ObjType::Map).unwrap();
+        }
+        assert_eq!(raw_file_index_row_count(&malformed), MAX_FILE_ENTRIES);
+        assert!(read_file_entries(&malformed, &group_id).is_empty());
+    }
+
+    #[test]
+    fn file_index_mutations_never_scan_or_change_the_unbounded_tail() {
+        let bytes = b"bounded mutation";
+        let (chunk, _) = catcoms_storage::seal_file(
+            bytes,
+            "text/plain",
+            &[9u8; 32],
+            &mut ChaCha20Rng::seed_from_u64(88),
+        )
+        .unwrap();
+        let manifest = FileManifest {
+            plaintext_cid: Cid::of(bytes),
+            total_size: bytes.len() as u64,
+            mime: "text/plain".into(),
+            chunks: vec![chunk],
+        };
+        manifest.validate_layout().unwrap();
+        let file_ref = manifest.encode();
+        let cid = manifest.plaintext_cid;
+        let mut doc = AutoCommit::new();
+        for _ in 0..(MAX_FILE_ENTRIES + 7) {
+            write_file_entry(
+                &mut doc,
+                "bounded.txt",
+                "author",
+                "docs",
+                &file_ref,
+                FileExpiry::Never,
+                None,
+            )
+            .unwrap();
+        }
+
+        set_file_entry_expiry(&mut doc, cid.as_bytes(), "docs", FileExpiry::At(T0 + 1)).unwrap();
+        let (_, list) = doc.get(ROOT, FILES).unwrap().unwrap();
+        for index in 0..MAX_FILE_ENTRIES {
+            let (_, entry) = doc.get(&list, index).unwrap().unwrap();
+            assert_eq!(expiry_field(&doc, &entry), FileExpiry::At(T0 + 1));
+        }
+        for index in MAX_FILE_ENTRIES..(MAX_FILE_ENTRIES + 7) {
+            let (_, entry) = doc.get(&list, index).unwrap().unwrap();
+            assert_eq!(expiry_field(&doc, &entry), FileExpiry::Never);
+        }
+
+        delete_file_entry(&mut doc, cid.as_bytes(), Some("docs")).unwrap();
+        assert_eq!(raw_file_index_row_count(&doc), 7);
+        let (_, list) = doc.get(ROOT, FILES).unwrap().unwrap();
+        for index in 0..7 {
+            let (_, entry) = doc.get(&list, index).unwrap().unwrap();
+            assert_eq!(expiry_field(&doc, &entry), FileExpiry::Never);
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_file_listing_fields_fail_closed() {
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_with_clock(&clock);
+        alice.open_files().await.unwrap();
+        let oversized_name = "n".repeat(MAX_FILE_NAME_BYTES + 1);
+        assert!(alice
+            .add_file(&oversized_name, "image/png", "embed", b"bytes")
+            .await
+            .is_err());
+        assert_eq!(
+            alice.clear_staged_uploads(),
+            0,
+            "bounds are checked before sealing"
+        );
     }
 
     #[tokio::test]

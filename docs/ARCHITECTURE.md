@@ -11,10 +11,11 @@ code was written), the honest residual risks, and the phased build plan.
 | Stack | Rust core (shared `rlib`+`cdylib`) + Svelte 5 UI, packaged via **Tauri 2** to Linux/Windows/Android from one codebase. |
 | Group crypto | **MLS (RFC 9420)** via `openmls`, ciphersuite `0x0003` (X25519 + ChaCha20-Poly1305 + SHA-256 + Ed25519), `PrivateMessage` wire format only. One MLS group == one server/connection. Per-**device** identity (a human with N devices = N leaves). |
 | Channels | NOT separate groups; each channel/wiki/status/calendar/moderation document derives an independent key via the MLS exporter secret + a canonical, injective `(doc_type, doc_id)` context. |
-| Delivery | Encrypted **CRDT documents** (`automerge`) synced P2P. Chat logs are append-oriented; policy documents are not assumed append-only without protocol enforcement. |
-| Networking | **rust-libp2p** (QUIC + TCP + WSS; *no WebRTC in v1*). Direct reachability uses stable ports plus best-effort **UPnP IGD, IPv4 PCP/NAT-PMP, and IPv6 PCP firewall pinholes**; zero-knowledge **circuit-relay v2 + DCUtR** hole-punching and authenticated rendezvous cover harder networks; **AutoNAT v2** performs scoped dial-back testing through explicitly enabled relay/rendezvous nodes. PCPv6 binds the exact global listener address to that interface's scoped default router, requests short leases for TCP and UDP/QUIC, and honors the router's assigned lifetime up to 24 hours. AutoNAT serving is experimental and off by default; its pre-socket guard enforces exact source/target matching, direct public-address shape, global/per-prefix/per-peer rate buckets and concurrency caps. Invites embed bootstrap multiaddrs. A 60-second `JoinReply` lets the inviter (or one explicitly authorized current-member helper) dial a joiner's validated public routes back. Separately, an opted-in current member can publish a two-minute signed **switchboard offer**; a fresh, explicitly labelled assisted invite may endorse up to three such members, and the joiner must consent before they are contacted after direct routes fail. A switchboard forwards only the admission exchange to the invite's named inviter and must catch up the exact MLS Add before becoming the joiner's first member path; it never signs/adopts the Welcome or becomes a general circuit relay. |
+| Delivery | Encrypted **CRDT documents** (`automerge`) synced P2P. Chat logs are append-oriented; policy documents are not assumed append-only without protocol enforcement. A newly applied remote op queues an authenticated, connected-only delivery receipt for its exact document/change hash; causal descendant evidence remains the compatibility fallback. Receipts prove delivery, never reading. |
+| Networking | **rust-libp2p** (QUIC + TCP + WSS for the application mesh). Direct reachability uses stable ports plus best-effort **UPnP IGD, IPv4 PCP/NAT-PMP, and IPv6 PCP firewall pinholes**; zero-knowledge **circuit-relay v2 + DCUtR** hole-punching and authenticated rendezvous cover harder networks; **AutoNAT v2** performs scoped dial-back testing through explicitly enabled relay/rendezvous nodes. PCPv6 binds the exact global listener address to that interface's scoped default router, requests short leases for TCP and UDP/QUIC, and honors the router's assigned lifetime up to 24 hours. AutoNAT serving is experimental and off by default; its pre-socket guard enforces exact source/target matching, direct public-address shape, global/per-prefix/per-peer rate buckets and concurrency caps. Invites embed bootstrap multiaddrs. A 60-second `JoinReply` lets the inviter (or one explicitly authorized current-member helper) dial a joiner's validated public routes back. Separately, an opted-in current member can publish a two-minute signed **switchboard offer**; a fresh, explicitly labelled assisted invite may endorse up to three such members, and the joiner must consent before they are contacted after direct routes fail. A switchboard forwards only the admission exchange to the invite's named inviter and must catch up the exact MLS Add before becoming the joiner's first member path; it never signs/adopts the Welcome or becomes a general circuit relay. An already-admitted but isolated member can create a ten-minute, member-signed `MemberRecoveryCode` containing at most four direct literal-IP, terminal-peer-bound candidates. The recipient verifies its exact current device→transport binding and seals expiring consent before the bounded dial; only a later outbound Noise-authenticated route is promoted, without destroying the last proven contact on failure. |
+| Live media | Calls and screen shares use WebRTC separately from the libp2p application mesh. A receiver advertises only its nearest 720p/1080p/1440p/2160p display bucket (with resize hysteresis); a screen sender parks each edge, applies per-peer resolution/bitrate/frame-rate limits, and only then attaches the screen track. Client-wide presets are exposed both in Settings and from the call-stage cog. Screen audio defaults off; the user may request the selected surface's audio or grant multiple independently chosen application/window sources, which are mixed locally into one audio sender and forgotten when sharing stops. Its 160-kbps-per-peer cap is reported as planned unless the WebView applies it. Permission-prompt results carry lifecycle leases so stop, leave, lock, mode changes, and competing requests stop late tracks rather than resurrecting capture. It reports the estimated aggregate mesh upload and prefers H.265/AV1/VP9 with compatible fallbacks when the WebView exposes them. Runtime stats, not preference order, are the source of truth for the negotiated codec. |
 | Invites | Strictly **single-use, device-bound** (one device per invite); revocable/expirable. |
-| Files | Content-addressed over **ciphertext**. Expiry default **1 month**, adjustable global → per-server → per-file; "expired" = evicted from cache / dropped from auto-share, still re-fetchable by CID. Health checks authenticate storage seals/CIDs and decrypt file refs; repair may overwrite a corrupt local record only with authenticated, CID-valid peer bytes. |
+| Files | Content-addressed over **ciphertext**. New listings carry a group-bound device signature over author/name/path/file-ref so per-uploader local trust cannot be bypassed by rewriting the CRDT `author` scalar; unsigned legacy listings remain usable but cannot satisfy specific-uploader auto-load. Expiry default **1 month**, adjustable global → per-server → per-file; "expired" = evicted from cache / dropped from auto-share, still re-fetchable by CID. Health checks authenticate storage seals/CIDs and decrypt file refs; repair may overwrite a corrupt local record only with authenticated, CID-valid peer bytes. |
 | Moderation | One group-bound, independently signed moderation document per server. Warnings attest to bounded snapshots; kick votes are advisory; only the owner-only MLS removal path changes membership. The log is not yet protocol-enforced append-only (threat-model R7). |
 | Local continuity & backup | Drafts/read positions are bounded and vault-sealed. Backup is an opaque, non-overwriting copy of a freshly snapshotted sealed vault. Secret changes atomically rewrap the same DEK; automated restore is not implied. |
 
@@ -57,6 +58,26 @@ is broken. The load-bearing fixes:
    sibling device removes another) and `mint_invite` gated behind the auth-bound key;
    per-server "relay-only / hide my IP" mode; pure-Rust crypto on the hot path;
    metadata-index aging/re-keying.
+9. **Discovery egress is peer-bound and process-bounded.** Every peer/invite/switchboard/companion
+   grant route
+   accepted for dialing uses one canonical supported multiaddr grammar with a non-zero TCP or
+   UDP/QUIC socket and a terminal `/p2p/<PeerId>` matching the signed/discovered transport
+   identity. Untrusted records use IP literals; DNS and dangerous local/private/link-local,
+   multicast and transitional ranges fail closed outside the explicitly local invite case. The
+   sync classifier deliberately retains non-routed documentation/benchmark literals as
+   deterministic test stand-ins; those can only consume bounded retry tokens. `DiscoveryPolicy`
+   charges addresses rather than peers, then
+   one desktop-owned `EndpointDialScheduler` applies monotonic per-process, per-server, canonical
+   Phase-0-peer, attempt, and IPv4 `/24`/IPv6 `/48` caps before submission. The parser embeds that
+   peer principal in each opaque endpoint so cache, rendezvous, and pre-join callers cannot select
+   different accounting identities. A direct attempt is keyed by its physical socket, excluding
+   the claimed terminal id; a relayed attempt is keyed as the authenticated relay/target circuit,
+   while the relay's outer host remains bounded by the prefix and process caps. PeerId/sequence
+   rotation therefore cannot reset a direct socket, prefix, server, or process bucket. The transport
+   refuses a dial command with no terminal peer rather than falling back to an address-only socket
+   dial. Two-way reply retries use the same scheduler for each new socket pass; their proof request
+   may continue only over a connection that is live when the network actor handles it, without
+   consulting the ordinary recent-peer redial cache.
 
 ## 3. Honest residual risks
 
@@ -85,9 +106,59 @@ is broken. The load-bearing fixes:
   route-selected IPv4/IPv6 sources, while the roughly-minute pass remains a fallback. A changed
   sample republishes one address epoch; exact route ownership prevents raw-interface removal from
   withdrawing an identical mapping/manual/relay route. It intentionally does not merge
-  withdrawn public IPs forever because an ISP can reassign them. A fully isolated device whose current address is unknown to every peer still needs
+  withdrawn public IPs forever because an ISP can reassign them; a newer zero-route descriptor
+  also removes the prior sealed cache row, so restart cannot resurrect it. Route signatures and matching
+  peer ids still do not prove ownership of an IP/port before the bounded first packet is sent.
+  Scheduler counters are transient and reset with the process. The scheduler owns the one injected
+  monotonic clock used for both reservation and commit. A generation-bound, non-cloneable permit
+  moves into the network actor with each discovery dial command; commit rechecks the window deadline
+  under the scheduler lock, so queued old-window work cannot start merely because no later
+  reservation happened to roll the generation. Actor-side duplicate, already-connected, or
+  already-dialling suppression drops/refunds the permit before commit. The peer-wide check covers
+  member dials later reclassified as infrastructure; constructor TCP/QUIC routes for one peer are
+  grouped into one known-peer address race and enter the pending ledger by exact libp2p
+  `ConnectionId`. Constructor peers are protected from remote eviction but are not thereby
+  classified as infrastructure, so an inviter reached over a bootstrap/relay route may still race a
+  newly learned direct member address. Pending infrastructure attempts are released only by the
+  matching connection/error id; an unrelated inbound connection cannot clear them. The actor commits only immediately before the endpoint enters the
+  pending/socket-start path. Caller cancellation after enqueue therefore cannot refund work the actor
+  will still perform, and an old-window command cannot decrement a replacement window. A failure
+  after commit is conservatively spent even if libp2p rejects before a socket completes. A relay circuit
+  has its own attempt key so unrelated targets at one relay do not starve each other, but the shared
+  outer relay socket is not separately leased at the exact-socket scope; it is bounded only by the
+  relay-host prefix and process caps. Libp2p's pending-outgoing cap is still per swarm, so this slice
+  does not yet provide a process-wide in-flight/concurrency lease. A fully isolated device whose
+  current address is unknown to every peer still needs
   out-of-band signalling, rendezvous/relay infrastructure, or a reachable member; swarm sampling
   cannot manufacture a route from no contact.
+- Connected current members now provide a bounded baseline repair control plane. A node pushes at
+  most two session-proven active members an authenticated probe for one exact descriptor; each
+  helper answers later with a separately authenticated, exact-attempt-bound result. One positive
+  observation may queue a short reciprocal request A→C→B; every hop is a connected-only
+  asynchronous push, and B revalidates current roster, exact descriptor hashes/sequences, helper
+  signature, expiry, replay and rate limits before submitting
+  at most one IPv4 and one IPv6 direct route through the shared endpoint scheduler. Two signed
+  negatives are suspicion only. Helpers never dial during a probe and never carry application
+  traffic; switchboards remain opt-in admission-only, while general circuit relay hosting remains
+  a separate opt-in role. HyParView/CYCLON-like active/passive selection and local age/source
+  metadata improve which peers are tried but cannot repair a partition with no surviving edge.
+- Pairwise route evidence is a bounded, session-only refinement of aggregate transport liveness.
+  Libp2p reports a sorted/deduplicated IPv4/IPv6/DNS/memory + TCP/QUIC/WebSocket/circuit snapshot
+  after connection edges, including relay-to-direct DCUtR upgrades and partial closes. The sync
+  layer accepts detail only while `PeerConnected` remains live, caps custom transports again,
+  retains historical success for at most 24 monotonic hours, and never serializes it. Admission
+  paths that temporarily inspect pushed proof/Welcome requests coalesce any lifecycle
+  edges they dequeue into a bounded final-state handoff, which the new sync owner adopts once;
+  ordinary pre-owner connection waits use a non-consuming watch. Connectivity exposes typed
+  claimed-peer health/actions, refreshes on path changes even when aggregate presence
+  is unchanged (plus a bounded visible-view refresh for time-derived expiry), and says “no claimed
+  path,” never “offline.” Dial counters describe scheduler submissions/cooldown, not
+  unobserved per-address failures, and IPv6 candidate shape is not presented as an outbound-route
+  test. A
+  signed peer record is still a self-asserted device-to-transport binding, so this evidence is not
+  proof that the member controls that live transport key or is reachable from another network.
+  Reciprocal repair is intentionally not a dual-key ownership proof and does not strengthen that
+  binding.
 - A **fully compromised device** exposes its current keys and plaintext; PCS only heals
   *after* the device is removed.
 - **Already-fetched files cannot be un-shared.**

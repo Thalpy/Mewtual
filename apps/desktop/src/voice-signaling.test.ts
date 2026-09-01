@@ -73,11 +73,19 @@ test("a heartbeat that omits vid does not retract a live screen share", () => {
   // mute states. Folding one of those in used to zero vid, which tore the picture down on every
   // viewer seconds after it started while the sender's own preview kept playing.
   const sharing = mergePeerState(undefined, { t: "s", mic: 0, inst: 0, vid: 2 });
-  assert.deepEqual(sharing, { mic: false, inst: false, vid: 2 });
+  assert.deepEqual(sharing, { mic: false, inst: false, vid: 2, rx: 1080 });
 
   const afterPing = mergePeerState(sharing, { mic: 1, inst: 0 });
   assert.equal(afterPing.vid, 2, "an absent vid is not a claim that the video stopped");
   assert.equal(afterPing.mic, true, "the states the ping does carry still apply");
+});
+
+test("receiver resolution is coarse, validated and retained across partial heartbeats", () => {
+  const first = mergePeerState(undefined, { mic: 0, inst: 0, rx: 2160 });
+  assert.equal(first.rx, 2160);
+  assert.equal(mergePeerState(first, { mic: 1 }).rx, 2160);
+  assert.equal(mergePeerState(first, { mic: 1, rx: 901 }).rx, 2160);
+  assert.equal(mergePeerState(undefined, { mic: 0, rx: "2160" }).rx, 1080);
 });
 
 test("stopping the video is believed, and nothing is invented for a peer we never heard from", () => {

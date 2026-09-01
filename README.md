@@ -297,10 +297,11 @@ apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
 ```
 
 As with a Windows source build, the result has no auto-update wiring: `tauri.official.conf.json`'s
-updater endpoint and key are only merged in by the Windows `release.yml` workflow. Nothing in this
-repository's CI has built `apps/desktop` on Linux yet either: `ci.yml`'s `ubuntu-latest` job tests
-the root Rust workspace, which explicitly excludes the desktop app's own Cargo workspace. Treat
-this as a starting point, not a path GitHub Actions has already verified end to end.
+updater endpoint and key are only merged in by the Windows `release.yml` workflow. CI now runs the
+frontend suite/check/build and the separate Tauri test/check workspace against Ubuntu's WebKitGTK
+development libraries. This proves the Linux build surface, not graphical portal, PipeWire or
+hardware-codec behavior; see [Linux testing](docs/LINUX-TESTING.md) for the Docker lanes and the
+real-desktop media boundary.
 
 ## Try the protocol from the CLI
 
@@ -323,6 +324,12 @@ cargo run -p catcomsctl -- serve --port 9000 --invite-file invite.txt
 # Terminal 2: redeem the invite and join
 cargo run -p catcomsctl -- join --invite-file invite.txt
 ```
+
+For automated two-client product checks, the real-TCP test, and the current manual desktop
+procedure, see [Two-client testing](docs/TWO-CLIENT-TESTING.md). The packaged two-desktop-process
+smoke harness described there is planned and is clearly separated from commands available today.
+Current implementation and verification progress across the remaining roadmap is tracked in
+[Development sweep](docs/DEVELOPMENT-SWEEP.md).
 
 For a relayed connection:
 

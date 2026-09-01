@@ -1,0 +1,83 @@
+name: Two-client acceptance
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * *"
+  pull_request:
+    paths:
+      - ".github/workflows/two-client.yml"
+      - "scripts/two-client-*.sh"
+      - "scripts/two-client-*.ps1"
+      - "bins/catcomsctl/**"
+      - "crates/catcoms-app/**"
+      - "crates/catcoms-net/**"
+      - "crates/catcoms-sync/**"
+      - "crates/catcoms-discovery/**"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  process-smoke:
+    name: two processes (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build test client
+        run: cargo build -p catcomsctl
+      - name: Run Linux two-process smoke
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/two-client-smoke.sh --skip-build
+      - name: Run Windows two-process smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\two-client-smoke.ps1 -SkipBuild
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-client-smoke-${{ runner.os }}
+          path: target/two-client-smoke/
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux-nat:
+    name: Linux NAT (${{ matrix.scenario }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [direct-mapped, relay-only]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build test client
+        run: cargo build -p catcomsctl
+      - name: Install optional topology tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping
+      - name: Run isolated topology
+        shell: bash
+        run: >-
+          sudo bash scripts/two-client-netns.sh
+          --scenario "${{ matrix.scenario }}"
+          --binary "$GITHUB_WORKSPACE/target/debug/catcomsctl"
+          --artifacts "$GITHUB_WORKSPACE/target/two-client-netns/${{ matrix.scenario }}"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-client-netns-${{ matrix.scenario }}
+          path: target/two-client-netns/${{ matrix.scenario }}/
+          if-no-files-found: warn
+          retention-days: 7
+

@@ -11,8 +11,8 @@ use std::time::Duration;
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_net::{
-    build_memory_rendezvous_swarm, phase0_peer_id, run_rendezvous, validate_rendezvous_addrs,
-    MeshService,
+    build_memory_rendezvous_swarm, build_memory_swarm, phase0_peer_id, run_rendezvous,
+    validate_rendezvous_addrs, MeshService,
 };
 use catcoms_rt::{ManualClock, MeshTransport, OsCryptoRng, PeerId, SystemClock, TransportEvent};
 use catcoms_sync::{join_namespace, request_join, ChannelSync};
@@ -46,13 +46,17 @@ async fn joiner_discovers_inviter_via_join_ns_then_joins_with_no_hardcoded_addr(
     let rz_id = *rz.local_peer_id();
     rz.listen_on(rz_addr.clone()).unwrap();
     let rz_task = tokio::spawn(run_rendezvous(rz));
+    let rz_dial: Multiaddr = format!("{rz_addr}/p2p/{rz_id}").parse().unwrap();
 
     // --- Alice (inviter): listens directly, founds a group, connects to the rendezvous,
     //     advertises her address, and registers under BOTH the pre-join join_ns and her
     //     steady-state member namespace. ---
     let a_addr: Multiaddr = "/memory/660067".parse().unwrap();
-    let a_mesh =
-        MeshService::new_memory(Some(a_addr.clone()), std::slice::from_ref(&rz_addr)).unwrap();
+    let mut a_swarm = build_memory_swarm();
+    let a_id = *a_swarm.local_peer_id();
+    a_swarm.listen_on(a_addr.clone()).unwrap();
+    a_swarm.dial(rz_dial.clone()).unwrap();
+    let a_mesh = MeshService::spawn(a_swarm);
     let a_peer = a_mesh.local_peer();
     wait_connected(&a_mesh, phase0_peer_id(&rz_id)).await;
 
@@ -69,19 +73,16 @@ async fn joiner_discovers_inviter_via_join_ns_then_joins_with_no_hardcoded_addr(
 
     // Mint an invite carrying ONLY the rendezvous address (no direct server bootstrap).
     let nonce = [9u8; 16];
-    let rz_multiaddr = format!("{rz_addr}/p2p/{rz_id}");
     let invite = asy
-        .mint_invite_with_rendezvous(nonce, u64::MAX, vec![], vec![rz_multiaddr])
+        .mint_invite_with_rendezvous(nonce, u64::MAX, vec![], vec![rz_dial.to_string()])
         .unwrap();
     let group_id = invite.group_id.clone();
 
     // Register under join_ns (pre-join, invite-derivable) and the member namespace.
     let join_ns = join_namespace(&group_id, &nonce, &rz_id.to_bytes());
     let member_ns = asy.rendezvous_namespaces(&rz_id.to_bytes())[0].clone();
-    asy.transport()
-        .add_external_address(a_addr.clone())
-        .await
-        .unwrap();
+    let a_route: Multiaddr = format!("{a_addr}/p2p/{a_id}").parse().unwrap();
+    asy.transport().add_external_address(a_route).await.unwrap();
     asy.transport()
         .rendezvous_register(&join_ns, rz_id)
         .await
@@ -101,7 +102,7 @@ async fn joiner_discovers_inviter_via_join_ns_then_joins_with_no_hardcoded_addr(
     let alice_loop = tokio::spawn(async move { while asy.run_once().await.unwrap_or(false) {} });
 
     // --- Bob (joiner): knows ONLY the rendezvous address (plus the pasted invite). ---
-    let b_mesh = MeshService::new_memory(None, std::slice::from_ref(&rz_addr)).unwrap();
+    let b_mesh = MeshService::new_memory(None, std::slice::from_ref(&rz_dial)).unwrap();
     wait_connected(&b_mesh, phase0_peer_id(&rz_id)).await;
 
     // Validate the invite's rendezvous set, derive the SAME join_ns, and discover Alice.
@@ -132,6 +133,7 @@ async fn joiner_discovers_inviter_via_join_ns_then_joins_with_no_hardcoded_addr(
         peer: discovered.peer.to_bytes(),
         addresses: discovered.addresses.iter().map(|a| a.to_string()).collect(),
         source: Source::Rendezvous(rz_id.to_bytes()),
+        freshness: catcoms_discovery::FreshnessPrincipal::Transport(discovered.peer.to_bytes()),
         seq: 1,
         tag_verified: false,
     };

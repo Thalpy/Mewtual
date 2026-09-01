@@ -12,20 +12,22 @@
 //! during the brief pre-event recovery work may at worst drop an in-flight catch-up,
 //! which the recovery machinery re-detects on the next inbound event (self-healing).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use catcoms_crypto::{DeviceCertificate, DeviceId};
-use catcoms_rt::{CryptoRngCore, MeshTransport, PeerId};
+use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use catcoms_storage::{Cid, FileRef};
 
 use crate::{
-    ChannelHead, ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileRange,
-    FileUsage, FilesView, InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView,
+    ChannelHead, ChannelInfo, ChatMessage, DeliverySnapshot, DeliveryState, DeviceEntry, FileEntry,
+    FileMediaHead, FileRange, FileUsage, FilesView, InboxItem, JoinAttempt, JukeEntry, Livery,
+    MemberBadge, MemberRecoveryApplied, MemberRecoveryCode, MemberRecoveryVerified, MemberView,
     MessageStats, ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair,
-    SwitchboardOffer, WikiPendingEdit, WikiRevision,
+    StorageSnapshot, SwitchboardOffer, WikiPendingEdit, WikiRevision,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -46,6 +48,151 @@ const PEX_REQUEST_MS: u64 = 3_000;
 /// A fetched + decrypted file chunk: its plaintext bytes plus the provider that served it (or an
 /// error string). One chunk per command keeps the actor responsive during a large download.
 type ChunkResult = Result<(Vec<u8>, Option<String>), String>;
+
+/// The user-visible operation a command belongs to, carried across the actor boundary.
+///
+/// # Why this exists
+///
+/// Diagnostics could follow an operation from the webview to native persistence and no further.
+/// Everything the actor did *in response* was a separate, uncorrelated record, so a
+/// `ChannelUpdated` arriving two seconds after a send carried no evidence of being that send's
+/// consequence. That is precisely the question the whole correlation architecture exists to
+/// answer: given "my message did not arrive", which of the ten stages failed. Six of them were
+/// past this line.
+///
+/// # Why it is an opaque integer
+///
+/// This crate emits diagnostics through the `tracing` facade and owns no diagnostic state, which
+/// is what keeps it independent of whichever binary is observing it. A trace is therefore a number
+/// it carries and never interprets; the binary that minted it knows what it means.
+///
+/// **Local only.** A trace identifies one device's own work. It is never put on the peer-to-peer
+/// wire: doing so would let a remote peer correlate this device's operations, which is the exact
+/// linkage the session-scoped reference model exists to prevent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Trace(pub u64);
+
+impl Trace {
+    /// No operation: internal work, or a command from a caller that did not mint one.
+    pub const NONE: Trace = Trace(0);
+
+    /// Whether this stands for an operation at all.
+    ///
+    /// Zero means absent rather than "operation zero". Correlating on it would gather every
+    /// unrelated piece of internal work that also had none.
+    pub fn is_set(self) -> bool {
+        self.0 != 0
+    }
+
+    /// The sixteen hex characters a trace is quoted by, matching the diagnostics rendering.
+    pub fn as_hex(self) -> String {
+        format!("{:016x}", self.0)
+    }
+}
+
+/// A command plus the operation that issued it.
+///
+/// An envelope rather than a field on each of the fifty [`AppCommand`] variants. The variants
+/// describe *what to do*; which operation asked is a property of the delivery, and threading it
+/// through every variant would have meant fifty edits for one fact and fifty chances to forget it
+/// on the next command somebody adds.
+#[derive(Debug)]
+pub struct Envelope {
+    pub trace: Trace,
+    pub command: AppCommand,
+}
+
+/// An event plus the operation that caused it, or [`Trace::NONE`] for spontaneous work.
+///
+/// An inbound message from a peer genuinely has no local operation behind it, and says so, which
+/// is the distinction that separates "this appeared because I sent it" from "this appeared because
+/// somebody else did".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TracedEvent {
+    pub trace: Trace,
+    pub event: AppEvent,
+}
+
+/// The command channel, with the caller's operation attached to whatever goes down it.
+///
+/// A wrapper with the same `send` shape as the `mpsc::Sender` it replaces, so the fifty existing
+/// call sites read exactly as they did. The alternative was fifty near-identical edits whose only
+/// effect was to construct an envelope.
+#[derive(Debug, Clone)]
+struct CommandSender {
+    tx: mpsc::Sender<Envelope>,
+    trace: Trace,
+}
+
+impl CommandSender {
+    async fn send(&self, command: AppCommand) -> Result<(), mpsc::error::SendError<Envelope>> {
+        self.tx
+            .send(Envelope {
+                trace: self.trace,
+                command,
+            })
+            .await
+    }
+}
+
+/// The event channel, which stamps each event with the command being handled when it was sent.
+///
+/// The actor handles one command at a time, so "what is in progress" is a single value rather than
+/// something that has to be threaded through every helper. It is atomic only because a `&EventSink`
+/// crosses `.await` points inside a `Send` task; nothing contends for it.
+#[derive(Debug)]
+struct EventSink {
+    tx: mpsc::Sender<TracedEvent>,
+    current: std::sync::atomic::AtomicU64,
+}
+
+impl EventSink {
+    fn new(tx: mpsc::Sender<TracedEvent>) -> Self {
+        EventSink {
+            tx,
+            current: std::sync::atomic::AtomicU64::new(Trace::NONE.0),
+        }
+    }
+
+    /// Take a command out of its envelope and adopt its operation for the duration of handling it.
+    ///
+    /// Called at the head of the command arm of the actor's `select!`, so every event the arm goes
+    /// on to emit is attributed to the command that caused it without any arm having to say so.
+    fn begin(&self, envelope: Option<Envelope>) -> Option<AppCommand> {
+        let (trace, command) = match envelope {
+            Some(envelope) => (envelope.trace, Some(envelope.command)),
+            None => (Trace::NONE, None),
+        };
+        self.current
+            .store(trace.0, std::sync::atomic::Ordering::Relaxed);
+        if trace.is_set() {
+            // The stage that separates a slow actor from a deep mailbox. Without it, a command that
+            // took two seconds is indistinguishable from one that waited behind another for two
+            // seconds, and those have completely different fixes.
+            tracing::debug!(
+                target: "catcoms_app",
+                trace = %trace.as_hex(),
+                "ACTOR.COMMAND.RECEIVED"
+            );
+        }
+        command
+    }
+
+    /// Leave whatever operation was in progress.
+    ///
+    /// Called when the actor turns to work nobody asked for: an inbound op from a peer is not the
+    /// consequence of the last local command, and attributing it to one would invent a causal link
+    /// that a reader would then trust.
+    fn idle(&self) {
+        self.current
+            .store(Trace::NONE.0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    async fn send(&self, event: AppEvent) -> Result<(), mpsc::error::SendError<TracedEvent>> {
+        let trace = Trace(self.current.load(std::sync::atomic::Ordering::Relaxed));
+        self.tx.send(TracedEvent { trace, event }).await
+    }
+}
 
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
@@ -277,12 +424,20 @@ pub enum AppCommand {
     StorageHealth {
         reply: oneshot::Sender<StorageHealth>,
     },
+    /// Capture file listings and their verified local-storage verdict in one actor turn.
+    StorageSnapshot {
+        reply: oneshot::Sender<StorageSnapshot>,
+    },
     /// Re-fetch missing/unreadable file chunks, then return the verified result.
     RepairStorage {
         reply: oneshot::Sender<Result<StorageRepair, String>>,
     },
     /// Query the fingerprints of members reachable right now (presence).
     OnlineMembers { reply: oneshot::Sender<Vec<String>> },
+    /// Query what this node knows about reaching each member (the debug console's network view).
+    MemberRoutes {
+        reply: oneshot::Sender<Vec<catcoms_sync::MemberRoute>>,
+    },
     /// Query the recent inbound join attempts this node served, newest first (operator
     /// diagnostics; see `Server::join_attempts`).
     JoinAttempts {
@@ -292,7 +447,7 @@ pub enum AppCommand {
     /// on open instead of waiting for the next throttled `DeliveryChanged`.
     DeliverySnapshot {
         channel: u128,
-        reply: oneshot::Sender<Vec<DeliveryState>>,
+        reply: oneshot::Sender<DeliverySnapshot>,
     },
     /// Query pending incoming DM (friend) requests: `(sender fp, sender name, invite bytes)`.
     DmRequests {
@@ -333,12 +488,13 @@ pub enum AppCommand {
     /// of it: what the media protocol needs before it can answer a `Range` request at all.
     FileHead {
         cid: Vec<u8>,
-        reply: oneshot::Sender<Option<(u64, String)>>,
+        reply: oneshot::Sender<Option<FileMediaHead>>,
     },
     /// Read one window of a file's plaintext, for the media protocol: whole-file reads do not fit
     /// a player that wants to start on the first chunk and seek by the second.
     ReadFileRange {
         cid: Vec<u8>,
+        expected_manifest_version: [u8; 32],
         start: u64,
         max_len: usize,
         reply: oneshot::Sender<Result<FileRange, String>>,
@@ -369,11 +525,44 @@ pub enum AppCommand {
     WikiPinnedCids { reply: oneshot::Sender<Vec<String>> },
     /// Pull the file index from `peer` (e.g. right after joining).
     CatchUpFiles { peer: PeerId },
-    /// Post to the server status feed.
-    PostStatus { text: String },
+    /// Post to the server status feed (owner/admin, or anyone once the feed is opened to members).
+    PostStatus {
+        text: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Query the status feed.
     Statuses {
         reply: oneshot::Sender<Vec<ChatMessage>>,
+    },
+    /// Edit one of your own status posts (by id).
+    EditStatus {
+        id: String,
+        text: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Delete a status post (by id): your own, or anyone's as an owner/admin.
+    DeleteStatus {
+        id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Toggle this member's emoji reaction on a status post (by id).
+    ToggleStatusReaction {
+        id: String,
+        emoji: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Pin or unpin a status post (by id) (owner/admin).
+    SetStatusPin {
+        id: String,
+        pinned: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Query whether plain members may post to the status feed.
+    StatusMembersMayPost { reply: oneshot::Sender<bool> },
+    /// Open or close the status feed to plain members (owner/admin only).
+    SetStatusMembersMayPost {
+        allow: bool,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Pull the status feed from `peer` (e.g. right after joining).
     CatchUpStatus { peer: PeerId },
@@ -587,6 +776,33 @@ pub enum AppCommand {
     /// rendezvous configured; the PEX half always runs, because members exchange records over
     /// whatever connections they have with no infrastructure involved.
     DriveDiscovery,
+    /// Replace the transient local-only reconnect hints after the bridge observes a currently
+    /// live outbound member route. Validation and membership checks remain inside `ChannelSync`.
+    SetLocalReconnectRoutes { routes: Vec<(PeerId, String)> },
+    /// Mint a short-lived, member-signed recovery code containing only safe direct listener
+    /// routes. The code is intended for an already-authorized group member over an out-of-band
+    /// channel; it is not an invitation and cannot add a device to the roster.
+    MintMemberRecovery {
+        candidates: Vec<String>,
+        reply: oneshot::Sender<Result<MemberRecoveryCode, String>>,
+    },
+    /// Authenticate a recovery code without performing its dial. The bridge persists this exact,
+    /// expiring peer authority before it sends [`AppCommand::ApplyMemberRecovery`].
+    VerifyMemberRecovery {
+        code: String,
+        reply: oneshot::Sender<Result<MemberRecoveryVerified, String>>,
+    },
+    /// Verify and submit the routes in another current member's recovery code. Authentication of
+    /// the resulting socket still happens in the transport handshake before it becomes live.
+    ApplyMemberRecovery {
+        code: String,
+        reply: oneshot::Sender<Result<MemberRecoveryApplied, String>>,
+    },
+    /// Explicit user-triggered isolation repair. The sync layer retains the anti-click cooldown
+    /// and every shared egress limit; the reply distinguishes no routes from safety deferral.
+    ManualFallbackRedial {
+        reply: oneshot::Sender<catcoms_sync::ManualRedialOutcome>,
+    },
     /// (Re)publish this device's own signed peer record with `addresses` at `seq`. Sent by the
     /// bridge when this node's reachability changes (a UPnP mapping arriving, say), so members
     /// learn the new address instead of holding a dead one.
@@ -672,6 +888,9 @@ pub enum AppEvent {
     /// The set of members reachable right now (a live connection) changed; `online` is their
     /// fingerprints, for the roster's presence indicators + the file-availability hint.
     ConnectivityChanged { online: Vec<String> },
+    /// Typed claimed-peer route evidence changed without necessarily changing aggregate presence.
+    /// This catches relay/direct upgrades, partial closes, fresh records, and retry transitions.
+    MemberRoutesChanged,
     /// The fresh, connected standing-switchboard offer set changed or expired. The UI should
     /// re-fetch its typed status instead of retaining an old host indefinitely.
     SwitchboardsChanged,
@@ -680,7 +899,7 @@ pub enum AppEvent {
     /// can render it directly without polling.
     DeliveryChanged {
         channel: u128,
-        states: Vec<DeliveryState>,
+        snapshot: DeliverySnapshot,
     },
     /// The set of pending incoming DM (friend) requests changed; the UI should re-fetch them.
     DmRequestsChanged,
@@ -694,10 +913,28 @@ pub enum AppEvent {
 /// A handle to a running server actor: send commands, run queries.
 #[derive(Debug, Clone)]
 pub struct ServerActor {
-    cmd_tx: mpsc::Sender<AppCommand>,
+    cmd_tx: CommandSender,
 }
 
 impl ServerActor {
+    /// A handle whose commands belong to one operation.
+    ///
+    /// The join between the caller's diagnostics and the actor's. A caller that has minted a trace
+    /// for "the user pressed send" uses this so the actor's work, and every event that work
+    /// produces, lands under that same trace rather than in a separate record that has to be lined
+    /// up by timestamp afterwards.
+    ///
+    /// A cheap clone, not a mutation: the untraced handle keeps working, and two operations can be
+    /// in flight without either adopting the other's trace.
+    pub fn with_trace(&self, trace: u64) -> ServerActor {
+        ServerActor {
+            cmd_tx: CommandSender {
+                tx: self.cmd_tx.tx.clone(),
+                trace: Trace(trace),
+            },
+        }
+    }
+
     /// Create a channel in the shared directory.
     pub async fn create_channel(&self, name: impl Into<String>) -> Result<ChannelInfo, String> {
         let (reply, rx) = oneshot::channel();
@@ -1577,6 +1814,20 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// Capture file listings and their cryptographic health without an index mutation window.
+    pub async fn storage_snapshot(&self) -> StorageSnapshot {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::StorageSnapshot { reply })
+            .await
+            .is_err()
+        {
+            return StorageSnapshot::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Attempt repair of missing/unreadable referenced chunks.
     pub async fn repair_storage(&self) -> Result<StorageRepair, String> {
         let (reply, rx) = oneshot::channel();
@@ -1605,6 +1856,37 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// Fetch what this node knows about reaching each member (the debug console's network view).
+    pub async fn member_routes(&self) -> Vec<catcoms_sync::MemberRoute> {
+        self.try_member_routes().await.unwrap_or_default()
+    }
+
+    /// Fallible member-route query for user-facing diagnostics.
+    ///
+    /// An empty live roster and a stopped actor are different facts. Callers that retain the last
+    /// diagnostic snapshot use this form so actor failure becomes "snapshot unavailable" instead
+    /// of a successful empty result that erases evidence.
+    pub async fn try_member_routes(&self) -> Result<Vec<catcoms_sync::MemberRoute>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::MemberRoutes { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())
+    }
+
+    /// Request one explicit safety-bounded fallback redial pass.
+    pub async fn manual_fallback_redial(
+        &self,
+    ) -> Result<catcoms_sync::ManualRedialOutcome, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::ManualFallbackRedial { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())
+    }
+
     /// Fetch the recent inbound join attempts this node served, newest first.
     pub async fn join_attempts(&self) -> Vec<JoinAttempt> {
         let (reply, rx) = oneshot::channel();
@@ -1620,17 +1902,13 @@ impl ServerActor {
     }
 
     /// Fetch delivery state for this device's recent messages in a channel (oldest first).
-    pub async fn delivery_snapshot(&self, channel: u128) -> Vec<DeliveryState> {
+    pub async fn delivery_snapshot(&self, channel: u128) -> Result<DeliverySnapshot, String> {
         let (reply, rx) = oneshot::channel();
-        if self
-            .cmd_tx
+        self.cmd_tx
             .send(AppCommand::DeliverySnapshot { channel, reply })
             .await
-            .is_err()
-        {
-            return Vec::new();
-        }
-        rx.await.unwrap_or_default()
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())
     }
 
     /// Fetch pending incoming DM (friend) requests: `(sender fp, sender name, invite bytes)`.
@@ -1740,7 +2018,7 @@ impl ServerActor {
     }
 
     /// The size and declared type of a listed file. See [`AppCommand::FileHead`].
-    pub async fn file_head(&self, cid: Vec<u8>) -> Option<(u64, String)> {
+    pub async fn file_head(&self, cid: Vec<u8>) -> Option<FileMediaHead> {
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -1757,6 +2035,7 @@ impl ServerActor {
     pub async fn read_file_range(
         &self,
         cid: Vec<u8>,
+        expected_manifest_version: [u8; 32],
         start: u64,
         max_len: usize,
     ) -> Result<FileRange, String> {
@@ -1765,6 +2044,7 @@ impl ServerActor {
             .cmd_tx
             .send(AppCommand::ReadFileRange {
                 cid,
+                expected_manifest_version,
                 start,
                 max_len,
                 reply,
@@ -1864,12 +2144,23 @@ impl ServerActor {
         let _ = self.cmd_tx.send(AppCommand::CatchUpFiles { peer }).await;
     }
 
-    /// Post to the status feed (a `StatusUpdated` event follows).
-    pub async fn post_status(&self, text: impl Into<String>) {
-        let _ = self
+    /// Post to the status feed (a `StatusUpdated` event follows on success). Refused for a plain
+    /// member while the feed is closed to members, which is why the caller gets the answer back
+    /// rather than a post that quietly never happened.
+    pub async fn post_status(&self, text: impl Into<String>) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
             .cmd_tx
-            .send(AppCommand::PostStatus { text: text.into() })
-            .await;
+            .send(AppCommand::PostStatus {
+                text: text.into(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
     /// Fetch the status feed.
@@ -1884,6 +2175,93 @@ impl ServerActor {
             return Vec::new();
         }
         rx.await.unwrap_or_default()
+    }
+
+    /// Edit one of your own status posts (by id).
+    pub async fn edit_status(&self, id: String, text: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::EditStatus { id, text, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Delete a status post (by id): your own, or anyone's as an owner/admin.
+    pub async fn delete_status(&self, id: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::DeleteStatus { id, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Toggle this member's emoji reaction on a status post (by id).
+    pub async fn toggle_status_reaction(&self, id: String, emoji: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ToggleStatusReaction { id, emoji, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Pin or unpin a status post (by id) (owner/admin).
+    pub async fn set_status_pin(&self, id: String, pinned: bool) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetStatusPin { id, pinned, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Whether plain members may post to the status feed. A stopped server reads as `false`, the
+    /// same answer an unread feed gives, so a UI that cannot reach the actor offers no posting box
+    /// rather than one whose posts would be refused.
+    pub async fn status_members_may_post(&self) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::StatusMembersMayPost { reply })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Open or close the status feed to plain members; owner/admin only (a `StatusUpdated` event
+    /// follows).
+    pub async fn set_status_members_may_post(&self, allow: bool) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetStatusMembersMayPost { allow, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
     /// Pull the status feed from `peer`.
@@ -2391,6 +2769,64 @@ impl ServerActor {
             .map_err(|_| ())
     }
 
+    /// Install bridge-observed, vault-sealed local reconnect hints into the running server.
+    /// The actor owns the authoritative roster and reparses every route before retaining it.
+    pub async fn set_local_reconnect_routes(
+        &self,
+        routes: Vec<(PeerId, String)>,
+    ) -> Result<(), ()> {
+        self.cmd_tx
+            .send(AppCommand::SetLocalReconnectRoutes { routes })
+            .await
+            .map_err(|_| ())
+    }
+
+    /// Create an out-of-band recovery code for a member that has lost every usable route to this
+    /// server. Candidate filtering and signing happen inside the server actor, where the current
+    /// roster, transport identity and deterministic clock are authoritative.
+    pub async fn mint_member_recovery(
+        &self,
+        candidates: Vec<String>,
+    ) -> Result<MemberRecoveryCode, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::MintMemberRecovery {
+                candidates,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor stopped".to_string())?
+    }
+
+    /// Apply a current member's signed recovery code without granting membership or trusting the
+    /// advertised route. The eventual Noise-authenticated connection remains the proof boundary.
+    pub async fn apply_member_recovery(
+        &self,
+        code: String,
+    ) -> Result<MemberRecoveryApplied, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::ApplyMemberRecovery { code, reply: tx })
+            .await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor stopped".to_string())?
+    }
+
+    /// Authenticate a current member's signed recovery code without starting a socket attempt.
+    /// Applying repeats the checks, so expiry or roster movement between phases fails safely.
+    pub async fn verify_member_recovery(
+        &self,
+        code: String,
+    ) -> Result<MemberRecoveryVerified, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::VerifyMemberRecovery { code, reply: tx })
+            .await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor stopped".to_string())?
+    }
+
     /// (Re)publish this device's signed peer record. `seq` must come from this launch's reserved
     /// peer-record sequence block (see `ServerNet::reserve_record_seq_block`).
     pub async fn publish_self_record(&self, addresses: Vec<String>, seq: u64) {
@@ -2414,17 +2850,78 @@ impl ServerActor {
     }
 }
 
+/// Return the injected-clock delay until any dirty delivery snapshot can be recomputed.
+///
+/// A channel stays dirty when an acknowledgement arrives inside its throttle window. Without a
+/// separately scheduled wake, that acknowledgement would remain invisible until some unrelated
+/// later network event happened to drive the actor again.
+fn next_delivery_delay(
+    now_ms: u64,
+    delivery: &HashMap<u128, (u64, Vec<DeliveryState>)>,
+    dirty: &HashSet<u128>,
+) -> Option<u64> {
+    dirty
+        .iter()
+        .map(|channel| {
+            delivery.get(channel).map_or(0, |(last_ms, _)| {
+                DELIVERY_THROTTLE_MS.saturating_sub(now_ms.saturating_sub(*last_ms))
+            })
+        })
+        .min()
+}
+
+/// Recompute every dirty channel whose throttle has elapsed and return only changed snapshots.
+///
+/// Channel ids are sorted before processing so tests and UI event ordering do not depend on the
+/// randomized iteration order of a `HashSet`. Entries that are still throttled deliberately stay
+/// dirty; the actor's next loop iteration schedules the earliest remaining injected-clock wake.
+fn recompute_due_delivery<T, R>(
+    server: &mut Server<T, R>,
+    delivery: &mut HashMap<u128, (u64, Vec<DeliveryState>)>,
+    dirty: &mut HashSet<u128>,
+) -> Vec<(u128, DeliverySnapshot)>
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now_ms = server.runtime_clock().monotonic_ms();
+    let mut channels = dirty.iter().copied().collect::<Vec<_>>();
+    channels.sort_unstable();
+
+    let mut changed = Vec::new();
+    for channel in channels {
+        if delivery
+            .get(&channel)
+            .is_some_and(|(last_ms, _)| now_ms.saturating_sub(*last_ms) < DELIVERY_THROTTLE_MS)
+        {
+            continue;
+        }
+
+        let snapshot = server.delivery_snapshot(channel);
+        dirty.remove(&channel);
+        let did_change = match delivery.insert(channel, (now_ms, snapshot.states.clone())) {
+            Some((_, previous)) => previous != snapshot.states,
+            None => !snapshot.states.is_empty(),
+        };
+        if did_change {
+            changed.push((channel, snapshot));
+        }
+    }
+    changed
+}
+
 /// Move `server` into a background task. Returns a [`ServerActor`] handle, a receiver of
 /// [`AppEvent`]s, and the task's [`JoinHandle`].
 pub fn spawn<T, R>(
     mut server: Server<T, R>,
-) -> (ServerActor, mpsc::Receiver<AppEvent>, JoinHandle<()>)
+) -> (ServerActor, mpsc::Receiver<TracedEvent>, JoinHandle<()>)
 where
     T: MeshTransport + Send + 'static,
     R: CryptoRngCore + Send + 'static,
 {
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<AppCommand>(64);
-    let (event_tx, event_rx) = mpsc::channel::<AppEvent>(256);
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Envelope>(64);
+    let (raw_events, event_rx) = mpsc::channel::<TracedEvent>(256);
+    let event_tx = EventSink::new(raw_events);
     let handle = tokio::spawn(async move {
         // Per open channel: a content signature of its messages, topic and jukebox (see
         // `channel_delta`), so an edit/delete/add all surface a `ChannelUpdated` that says which
@@ -2489,7 +2986,7 @@ where
         if let Err(e) = server.open_status().await {
             tracing::warn!(error = %e, "open_status failed");
         }
-        let mut status_count = server.statuses().len();
+        let mut last_statuses = status_snapshot(&server);
         // …and the calendar, so the server's scheduled events reach this client.
         if let Err(e) = server.open_calendar().await {
             tracing::warn!(error = %e, "open_calendar failed");
@@ -2515,15 +3012,34 @@ where
         let mut last_moderation = server.moderation_state();
         let mut last_eclipse = false;
         let mut last_online = server.online_members();
+        let mut last_member_route_revision = server.member_route_revision();
         let mut last_switchboards = server.connected_switchboard_offers();
         let mut last_dm_requests = server.dm_requests();
         // Per channel: when delivery state was last recomputed, and what it was; the throttle
         // plus the change detector for `DeliveryChanged`.
         let mut delivery: HashMap<u128, (u64, Vec<DeliveryState>)> = HashMap::new();
+        // A sync event inside the throttle window must not be forgotten. Dirty channels are
+        // coalesced here and revisited by an injected-clock timer even if the network goes idle.
+        let mut delivery_dirty = HashSet::new();
         loop {
+            let delivery_clock = server.runtime_clock();
+            let delivery_delay =
+                next_delivery_delay(delivery_clock.monotonic_ms(), &delivery, &delivery_dirty);
+            let delivery_wake = async move {
+                match delivery_delay {
+                    Some(delay_ms) => {
+                        delivery_clock.sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::pin!(delivery_wake);
             tokio::select! {
                 biased;
-                cmd = cmd_rx.recv() => match cmd {
+                // `begin` unwraps the envelope and adopts the caller's operation for as long as
+                // this arm runs, so every event the arm emits is attributed to the command that
+                // caused it without any of the fifty arms below having to mention it.
+                cmd = cmd_rx.recv() => match event_tx.begin(cmd) {
                     Some(AppCommand::CreateChannel { name, reply }) => {
                         let res = server.create_channel(&name).await.map_err(|e| e.to_string());
                         // The creator already opened this document as part of create_channel.
@@ -2925,12 +3441,18 @@ where
                     Some(AppCommand::StorageHealth { reply }) => {
                         let _ = reply.send(server.storage_health());
                     }
+                    Some(AppCommand::StorageSnapshot { reply }) => {
+                        let _ = reply.send(server.storage_snapshot());
+                    }
                     Some(AppCommand::RepairStorage { reply }) => {
                         let res = server.repair_storage().await.map_err(|e| e.to_string());
                         let _ = reply.send(res);
                     }
                     Some(AppCommand::OnlineMembers { reply }) => {
                         let _ = reply.send(server.online_members());
+                    }
+                    Some(AppCommand::MemberRoutes { reply }) => {
+                        let _ = reply.send(server.member_routes());
                     }
                     Some(AppCommand::JoinAttempts { reply }) => {
                         let _ = reply.send(server.join_attempts());
@@ -3003,13 +3525,19 @@ where
                     }
                     Some(AppCommand::ReadFileRange {
                         cid,
+                        expected_manifest_version,
                         start,
                         max_len,
                         reply,
                     }) => {
                         let res = match <[u8; 32]>::try_from(cid.as_slice()) {
                             Ok(arr) => server
-                                .read_file_range(&Cid::from_bytes(arr), start, max_len)
+                                .read_file_range(
+                                    &Cid::from_bytes(arr),
+                                    expected_manifest_version,
+                                    start,
+                                    max_len,
+                                )
                                 .await
                                 .map_err(|e| e.to_string()),
                             Err(_) => Err("bad content address".to_string()),
@@ -3073,22 +3601,73 @@ where
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
-                    Some(AppCommand::PostStatus { text }) => {
-                        if let Err(e) = server.post_status(&text).await {
-                            tracing::warn!(error = %e, "post_status failed");
-                        }
-                        if status_changed(&server, &mut status_count) {
+                    Some(AppCommand::PostStatus { text, reply }) => {
+                        let res = server.post_status(&text).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if status_changed(&server, &mut last_statuses) {
                             let _ = event_tx.send(AppEvent::StatusUpdated).await;
                         }
                     }
                     Some(AppCommand::Statuses { reply }) => {
                         let _ = reply.send(server.statuses());
                     }
+                    Some(AppCommand::EditStatus { id, text, reply }) => {
+                        let res = server
+                            .edit_status(&id, &text)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if status_changed(&server, &mut last_statuses) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::DeleteStatus { id, reply }) => {
+                        let res = server.delete_status(&id).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if status_changed(&server, &mut last_statuses) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::ToggleStatusReaction { id, emoji, reply }) => {
+                        let res = server
+                            .toggle_status_reaction(&id, &emoji)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if status_changed(&server, &mut last_statuses) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::SetStatusPin { id, pinned, reply }) => {
+                        let res = server
+                            .set_status_pin(&id, pinned)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if status_changed(&server, &mut last_statuses) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::StatusMembersMayPost { reply }) => {
+                        let _ = reply.send(server.status_members_may_post());
+                    }
+                    Some(AppCommand::SetStatusMembersMayPost { allow, reply }) => {
+                        let res = server
+                            .set_status_members_may_post(allow)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        // The policy rides the feed document, so a UI that re-reads the feed on
+                        // this event also re-reads who may write to it.
+                        if status_changed(&server, &mut last_statuses) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                    }
                     Some(AppCommand::CatchUpStatus { peer }) => {
                         if let Err(e) = server.request_status_catchup(peer).await {
                             tracing::warn!(error = %e, "status catch-up failed");
                         }
-                        if status_changed(&server, &mut status_count) {
+                        if status_changed(&server, &mut last_statuses) {
                             let _ = event_tx.send(AppEvent::StatusUpdated).await;
                         }
                     }
@@ -3349,6 +3928,11 @@ where
                             last_eclipse = caution;
                             let _ = event_tx.send(AppEvent::EclipseChanged { caution }).await;
                         }
+                        // Same-LAN routes are deliberately absent from signed public peer records.
+                        // Retry the exact outbound routes this installation previously proved,
+                        // independent of rendezvous configuration, so simultaneous restarts heal
+                        // when the member that owns the listener comes online second.
+                        server.dial_local_reconnect_routes().await;
                         if server.has_rendezvous() {
                             server.drive_discovery().await;
                             // ONE overall timeout bounds the whole drain to a single window, so an
@@ -3358,8 +3942,13 @@ where
                                 std::time::Duration::from_millis(DISCOVERY_DRAIN_MS),
                                 async {
                                     for _ in 0..MAX_DISCOVERED_PER_TICK {
-                                        match server.next_discovered().await {
-                                            Some(d) => server.ingest_discovered(d).await,
+                                        match server.next_postjoin_discovery_event().await {
+                                            Some(catcoms_sync::PostJoinDiscoveryEvent::Discovered(d)) => {
+                                                server.ingest_discovered(d).await;
+                                            }
+                                            Some(catcoms_sync::PostJoinDiscoveryEvent::Registered(registration)) => {
+                                                server.note_rendezvous_registered(registration);
+                                            }
                                             None => break, // transport closed
                                         }
                                     }
@@ -3412,11 +4001,62 @@ where
                         // dynamic-IP epoch until the *next* minute tick, even though its fresh
                         // signature is precisely the signal that should bypass retry backoff.
                         server.cache_known_records();
+                        // SWIM observations, reciprocal signalling and HyParView promotion share
+                        // one bounded repair pass. Helpers inspect only live proven paths; all
+                        // resulting sockets remain behind the ordinary policy + endpoint budget.
+                        server.drive_mesh_repair().await;
                         server.dial_cached_peers().await;
+                        // PEX can authenticate the signed descriptor for a transport identity
+                        // that was already connected before this pass. In that ordering there is
+                        // no later transport event to announce the now-resolved member as online,
+                        // so refresh presence here as well as in the transport-event arm. The UI
+                        // must not have to wait for a message or another socket transition before
+                        // it learns that the existing connection belongs to this roster member.
+                        let online = server.online_members();
+                        if online != last_online {
+                            last_online = online.clone();
+                            let _ = event_tx.send(AppEvent::ConnectivityChanged { online }).await;
+                        }
+                        let route_revision = server.member_route_revision();
+                        if route_revision != last_member_route_revision {
+                            last_member_route_revision = route_revision;
+                            let _ = event_tx.send(AppEvent::MemberRoutesChanged).await;
+                        }
                         let switchboards = server.connected_switchboard_offers();
                         if switchboards != last_switchboards {
                             last_switchboards = switchboards;
                             let _ = event_tx.send(AppEvent::SwitchboardsChanged).await;
+                        }
+                    }
+                    Some(AppCommand::SetLocalReconnectRoutes { routes }) => {
+                        server.set_local_reconnect_routes(routes);
+                    }
+                    Some(AppCommand::MintMemberRecovery { candidates, reply }) => {
+                        let result = server
+                            .mint_member_recovery_code(candidates)
+                            .map_err(|error| error.to_string());
+                        let _ = reply.send(result);
+                    }
+                    Some(AppCommand::VerifyMemberRecovery { code, reply }) => {
+                        let result = server
+                            .verify_member_recovery_code(&code)
+                            .map_err(|error| error.to_string());
+                        let _ = reply.send(result);
+                    }
+                    Some(AppCommand::ApplyMemberRecovery { code, reply }) => {
+                        let result = server
+                            .apply_member_recovery_code(&code)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = reply.send(result);
+                    }
+                    Some(AppCommand::ManualFallbackRedial { reply }) => {
+                        let outcome = server.manual_fallback_redial().await;
+                        let _ = reply.send(outcome);
+                        let route_revision = server.member_route_revision();
+                        if route_revision != last_member_route_revision {
+                            last_member_route_revision = route_revision;
+                            let _ = event_tx.send(AppEvent::MemberRoutesChanged).await;
                         }
                     }
                     Some(AppCommand::PublishSelfRecord { addresses, seq }) => {
@@ -3471,8 +4111,29 @@ where
                         break;
                     }
                 },
-                cont = server.sync_once() => match cont {
+                // A receipt may be the final network event in a quiet room. Wake from the same
+                // injected clock used to start the throttle so the last coalesced state is still
+                // surfaced without waiting for unrelated traffic.
+                _ = &mut delivery_wake => {
+                    event_tx.idle();
+                    for (channel, snapshot) in recompute_due_delivery(
+                        &mut server,
+                        &mut delivery,
+                        &mut delivery_dirty,
+                    ) {
+                        let _ = event_tx
+                            .send(AppEvent::DeliveryChanged { channel, snapshot })
+                            .await;
+                    }
+                },
+                // Work nobody asked for. An op arriving from a peer is not the consequence of the
+                // last local command, and attributing it to one would invent a causal link that a
+                // reader would go on to trust.
+                cont = server.sync_once() => { event_tx.idle(); match cont {
                     Ok(true) => {
+                        if server.has_pending_reciprocal() {
+                            server.drive_pending_reciprocal().await;
+                        }
                         sync_channels(
                             &mut server,
                             &mut last_channels,
@@ -3507,7 +4168,7 @@ where
                         if files_changed(&server, &mut file_count) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
-                        if status_changed(&server, &mut status_count) {
+                        if status_changed(&server, &mut last_statuses) {
                             let _ = event_tx.send(AppEvent::StatusUpdated).await;
                         }
                         if events_changed(&server, &mut last_events) {
@@ -3532,6 +4193,16 @@ where
                                 .send(AppEvent::ConnectivityChanged { online })
                                 .await;
                         }
+                        // A DCUtR upgrade or one partial close does not change aggregate presence,
+                        // but it can change the Connectivity verdict from relay to direct (or
+                        // back). The session-local revision is bumped only by mutations that can
+                        // affect a current member row, avoiding an O(roster x addresses) compare
+                        // and preventing unclaimed Internet-peer churn from driving UI refreshes.
+                        let route_revision = server.member_route_revision();
+                        if route_revision != last_member_route_revision {
+                            last_member_route_revision = route_revision;
+                            let _ = event_tx.send(AppEvent::MemberRoutesChanged).await;
+                        }
                         let switchboards = server.connected_switchboard_offers();
                         if switchboards != last_switchboards {
                             last_switchboards = switchboards;
@@ -3539,24 +4210,17 @@ where
                         }
                         // Delivery: a peer's inbound op may be the evidence that it received one of
                         // our messages. Recomputing walks the channel's change graph, so it is
-                        // rate-limited per channel; the event then fires only on a real change.
-                        for channel in counts.keys().copied().collect::<Vec<_>>() {
-                            let now = server.now_ms();
-                            if let Some((at, _)) = delivery.get(&channel) {
-                                if now.saturating_sub(*at) < DELIVERY_THROTTLE_MS {
-                                    continue;
-                                }
-                            }
-                            let states = server.delivery_snapshot(channel);
-                            let changed = match delivery.insert(channel, (now, states.clone())) {
-                                Some((_, previous)) => previous != states,
-                                None => !states.is_empty(),
-                            };
-                            if changed {
-                                let _ = event_tx
-                                    .send(AppEvent::DeliveryChanged { channel, states })
-                                    .await;
-                            }
+                        // rate-limited per channel; throttled channels remain dirty and receive a
+                        // deterministic timer wake if no later network event arrives.
+                        delivery_dirty.extend(counts.keys().copied());
+                        for (channel, snapshot) in recompute_due_delivery(
+                            &mut server,
+                            &mut delivery,
+                            &mut delivery_dirty,
+                        ) {
+                            let _ = event_tx
+                                .send(AppEvent::DeliveryChanged { channel, snapshot })
+                                .await;
                         }
                         // A DM (friend) request may have arrived over this group; surface a change.
                         if dm_requests_changed(&server, &mut last_dm_requests) {
@@ -3574,11 +4238,20 @@ where
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }
-                },
+                } },
             }
         }
     });
-    (ServerActor { cmd_tx }, event_rx, handle)
+    (
+        ServerActor {
+            cmd_tx: CommandSender {
+                tx: cmd_tx,
+                trace: Trace::NONE,
+            },
+        },
+        event_rx,
+        handle,
+    )
 }
 
 /// Notice channel-directory changes, subscribe newly-discovered channel documents, and recover
@@ -3588,7 +4261,7 @@ async fn sync_channels<T, R>(
     server: &mut Server<T, R>,
     last: &mut Vec<ChannelInfo>,
     sigs: &mut HashMap<u128, ChannelSignature>,
-    event_tx: &mpsc::Sender<AppEvent>,
+    event_tx: &EventSink,
     catchup_peer: Option<PeerId>,
     locally_created: Option<u128>,
 ) where
@@ -3625,13 +4298,19 @@ async fn sync_channels<T, R>(
 }
 
 /// The last-seen fingerprint of one channel's rendered content, kept per open channel so a change
-/// can be classified rather than merely detected. The three signatures are separate because they
-/// answer separate questions, and `ids` is the set of message ids: an arrival is "an id we have
-/// never seen", which is the one definition a concurrent append+delete cannot fool.
+/// can be classified rather than merely detected. The parts are separate because they answer
+/// separate questions, and `ids` is the set of message ids: an arrival is "an id we have never
+/// seen", which is the one definition a concurrent append+delete cannot fool.
+///
+/// `jukebox` holds the queue itself rather than a digest of it. The message log is the only
+/// unbounded part here, so a queue capped at [`crate::MAX_JUKEBOX_ENTRIES`] entries is cheap to
+/// keep whole, and a digest can only ever lose: it can report "nothing moved" for a queue that
+/// moved, which is the one answer this record must not give, since it exists to settle "the
+/// queue changed but the UI did not".
 #[derive(Default)]
 struct ChannelSignature {
     topic: u64,
-    jukebox: u64,
+    jukebox: Vec<JukeEntry>,
     messages: u64,
     ids: std::collections::HashSet<u64>,
 }
@@ -3663,14 +4342,10 @@ where
     // The topic and the jukebox queue ride the same channel document and the same rendered header,
     // so a peer's edit still has to reach the UI; it just no longer claims to be a message.
     let topic = hash_of(server.channel_topic(channel));
-    let jukebox = {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for e in &server.jukebox(channel) {
-            e.id.hash(&mut h);
-            e.name.hash(&mut h);
-        }
-        h.finish()
-    };
+    // Compared whole. Folding each entry's id and name into a hash lost every other field, so a
+    // peer re-pointing a queued track at a different content address (same id, same display name)
+    // read as an unchanged queue and never reached the UI.
+    let jukebox = server.jukebox(channel);
     // A content signature (not just the count) so an EDIT; which doesn't change the count; is
     // detected too, both locally and when a peer's edit arrives. Cheap over a channel's message
     // list, which this actor already materializes on every sync tick.
@@ -3728,15 +4403,33 @@ where
     }
 }
 
-/// Whether the status feed count changed since last seen (updating the record).
-fn status_changed<T, R>(server: &Server<T, R>, last: &mut usize) -> bool
+/// What [`status_changed`] compares: the feed's posts, and the policy deciding whether this
+/// member is offered anywhere to write. Both ride the same document and both change what is
+/// rendered, so both belong in the comparison.
+type StatusSnapshot = (Vec<ChatMessage>, bool);
+
+/// The status feed's current posts + posting policy.
+fn status_snapshot<T, R>(server: &Server<T, R>) -> StatusSnapshot
 where
     T: MeshTransport,
     R: CryptoRngCore,
 {
-    let n = server.statuses().len();
-    if *last != n {
-        *last = n;
+    (server.statuses(), server.status_members_may_post())
+}
+
+/// Whether the status feed changed since last seen (updating the record). A count of posts was
+/// enough while the feed only grew; an edit, a reaction, a pin and a policy change each leave the
+/// number of posts exactly where it was, and each still has to reach the UI. Both states are in
+/// memory at this moment, so comparing them can only be more truthful than folding either into a
+/// digest first.
+fn status_changed<T, R>(server: &Server<T, R>, last: &mut StatusSnapshot) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = status_snapshot(server);
+    if now != *last {
+        *last = now;
         true
     } else {
         false
@@ -3930,7 +4623,7 @@ where
 async fn sync_profiles<T, R>(
     server: &mut Server<T, R>,
     last_profiles: &mut HashMap<String, Profile>,
-    event_tx: &mpsc::Sender<AppEvent>,
+    event_tx: &EventSink,
 ) where
     T: MeshTransport,
     R: CryptoRngCore,
@@ -3957,7 +4650,7 @@ async fn sync_profiles<T, R>(
 mod tests {
     use super::*;
     use crate::Server;
-    use catcoms_mls::MlsDevice;
+    use catcoms_mls::{InviteToken, MlsDevice};
     use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
@@ -3966,30 +4659,87 @@ mod tests {
 
     const GENERAL: u128 = 1;
 
+    #[tokio::test]
+    async fn fallible_member_routes_distinguishes_a_stopped_actor_from_an_empty_view() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let actor = ServerActor {
+            cmd_tx: CommandSender {
+                tx,
+                trace: Trace::NONE,
+            },
+        };
+
+        assert_eq!(
+            actor.try_member_routes().await.unwrap_err(),
+            "server stopped"
+        );
+        assert!(
+            actor.member_routes().await.is_empty(),
+            "the compatibility convenience remains an empty fallback"
+        );
+    }
+
     fn founder(
         hub: &std::sync::Arc<Hub>,
         peer: PeerId,
         name: &str,
         seed: u64,
     ) -> Server<MemNetwork, ChaCha20Rng> {
+        founder_with_clock(hub, peer, name, seed, &ManualClock::new(1_000))
+    }
+
+    fn founder_with_clock(
+        hub: &std::sync::Arc<Hub>,
+        peer: PeerId,
+        name: &str,
+        seed: u64,
+        clock: &ManualClock,
+    ) -> Server<MemNetwork, ChaCha20Rng> {
         Server::found(
             hub.join(peer),
             MlsDevice::generate().unwrap(),
             ChaCha20Rng::seed_from_u64(seed),
-            Box::new(ManualClock::new(1_000)),
+            Box::new(clock.clone()),
             name,
         )
         .unwrap()
     }
 
     /// Drain events until the next `ChannelUpdated` for `channel`, returning what it says moved.
-    async fn next_change(events: &mut mpsc::Receiver<AppEvent>, channel: u128) -> ChannelChange {
+    async fn next_change(events: &mut mpsc::Receiver<TracedEvent>, channel: u128) -> ChannelChange {
+        next_traced_change(events, channel).await.1
+    }
+
+    async fn wait_for_appended(events: &mut mpsc::Receiver<TracedEvent>, channel: u128) {
+        loop {
+            match events.recv().await {
+                Some(TracedEvent {
+                    event:
+                        AppEvent::ChannelUpdated {
+                            channel: updated,
+                            change,
+                        },
+                    ..
+                }) if updated == channel && change.messages_appended => return,
+                Some(_) => continue,
+                None => panic!("recipient actor closed"),
+            }
+        }
+    }
+
+    /// As [`next_change`], but keeping the operation the event was attributed to.
+    async fn next_traced_change(
+        events: &mut mpsc::Receiver<TracedEvent>,
+        channel: u128,
+    ) -> (Trace, ChannelChange) {
         timeout(Duration::from_secs(5), async {
             loop {
                 match events.recv().await {
-                    Some(AppEvent::ChannelUpdated { channel: c, change }) if c == channel => {
-                        return change
-                    }
+                    Some(TracedEvent {
+                        trace,
+                        event: AppEvent::ChannelUpdated { channel: c, change },
+                    }) if c == channel => return (trace, change),
                     Some(_) => continue,
                     None => panic!("actor closed"),
                 }
@@ -3997,6 +4747,148 @@ mod tests {
         })
         .await
         .expect("no channel update arrived")
+    }
+
+    /// The link P3-004 says is missing: an event has to name the operation that caused it.
+    ///
+    /// Without it a `ChannelUpdated` arriving two seconds after a send is indistinguishable from
+    /// one caused by somebody else's message, so "did my send reach the UI" cannot be answered from
+    /// the record at all. Every stage before this one was already correlated and none of them could
+    /// establish the thing anybody actually wanted to know.
+    #[tokio::test]
+    async fn an_event_names_the_operation_that_caused_it() {
+        let hub = Hub::new();
+        let (actor, mut events, handle) = spawn(founder(&hub, PeerId::from_u64(1), "alice", 1));
+        actor.open_channel(GENERAL).await;
+
+        let mine = 0x7f2c_0000_0000_0001;
+        actor.with_trace(mine).send_message(GENERAL, "hi").await;
+        let (trace, change) = next_traced_change(&mut events, GENERAL).await;
+        assert!(change.messages_appended);
+        assert_eq!(
+            trace,
+            Trace(mine),
+            "the update carries the send that caused it"
+        );
+
+        // A handle with no trace is not a handle carrying somebody else's.
+        actor.send_message(GENERAL, "and again").await;
+        let (trace, _) = next_traced_change(&mut events, GENERAL).await;
+        assert_eq!(trace, Trace::NONE, "an untraced command adopts nothing");
+        assert!(!trace.is_set());
+
+        actor.shutdown().await;
+        let _ = handle.await;
+    }
+
+    /// Two operations in flight at once must not borrow each other's identity.
+    ///
+    /// The failure this rules out is the one that would make the whole mechanism worse than
+    /// nothing: a trace that gathers another operation's stages does not merely fail to explain a
+    /// bug, it explains it wrongly, and the reader has no way to tell.
+    #[tokio::test]
+    async fn concurrent_operations_keep_their_own_stages() {
+        let hub = Hub::new();
+        let (actor, mut events, handle) = spawn(founder(&hub, PeerId::from_u64(1), "alice", 1));
+        actor.open_channel(GENERAL).await;
+
+        let first = actor.with_trace(0xaaaa);
+        let second = actor.with_trace(0xbbbb);
+        // Issued together, so the actor interleaves them however it likes.
+        let (a, b) = tokio::join!(
+            first.send_reply(GENERAL, "from a", String::new()),
+            second.send_reply(GENERAL, "from b", String::new()),
+        );
+        a.unwrap();
+        b.unwrap();
+
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let (trace, _) = next_traced_change(&mut events, GENERAL).await;
+            seen.push(trace);
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![Trace(0xaaaa), Trace(0xbbbb)],
+            "each send produced exactly one update, under its own trace"
+        );
+
+        actor.shutdown().await;
+        let _ = handle.await;
+    }
+
+    /// Somebody else's message must not be attributed to my last command.
+    ///
+    /// The dangerous direction. A trace that merely *misses* a stage leaves a gap a reader can see;
+    /// a trace that gathers an unrelated one asserts a causal link that never existed, and the
+    /// reader has no way to tell. Here Bob's arrival lands on Alice while her own traced send is
+    /// the most recent thing she handled, which is exactly when a sticky trace would claim it.
+    #[tokio::test]
+    async fn a_peers_message_is_not_attributed_to_my_last_command() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice_srv = founder(&hub, alice_peer, "alice", 1);
+        alice_srv.subscribe_control().await.unwrap();
+        alice_srv.open_channel(GENERAL).await.unwrap();
+        let invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (alice, mut alice_events, alice_handle) = spawn(alice_srv);
+
+        let bob_srv = Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(2),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+            alice_peer,
+            &invite,
+        )
+        .await
+        .unwrap();
+        let (bob, bob_events, bob_handle) = spawn(bob_srv);
+        bob.open_channel(GENERAL).await;
+
+        // Alice's own send, under a trace she will recognise.
+        let mine = 0x7f2c_0000_0000_0002;
+        // The actor tracks a channel's content signature from the moment it is opened *through the
+        // actor*, which is what decides whether a change is reported at all.
+        alice.open_channel(GENERAL).await;
+        alice
+            .with_trace(mine)
+            .send_reply(GENERAL, "hi bob", String::new())
+            .await
+            .expect("alice's own send");
+        let (trace, _) = next_traced_change(&mut alice_events, GENERAL).await;
+        assert_eq!(trace, Trace(mine), "her own send is hers");
+
+        // Bob answers. Alice learns about it through her sync loop, not through a command, and she
+        // sends nothing further, so the next arrival she reports can only be his.
+        bob.send_message(GENERAL, "hi alice").await;
+        let seen = timeout(Duration::from_secs(60), async {
+            loop {
+                match alice_events.recv().await {
+                    Some(TracedEvent {
+                        trace,
+                        event: AppEvent::ChannelUpdated { channel, change },
+                    }) if channel == GENERAL && change.messages_appended => return trace,
+                    Some(_) => continue,
+                    None => panic!("alice's actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("alice never saw bob's message");
+        assert_eq!(
+            seen,
+            Trace::NONE,
+            "an arrival from a peer belongs to no local operation, and must not borrow one"
+        );
+
+        alice.shutdown().await;
+        bob.shutdown().await;
+        let _ = alice_handle.await;
+        let _ = bob_handle.await;
+        drop(bob_events);
     }
 
     /// One channel document holds messages, the topic and the jukebox queue. The UI raises unread
@@ -4054,6 +4946,47 @@ mod tests {
         let _ = handle.await;
     }
 
+    /// Every member may write any key of the shared channel document, so an entry already in the
+    /// queue can come back pointing at a different file while its id, name and queue time stay
+    /// put. A signature that folded only id and name called that queue unchanged, so the UI kept
+    /// offering the previous track and the person debugging it saw "the event says nothing moved".
+    #[tokio::test]
+    async fn requeueing_an_entry_onto_a_different_file_reads_as_a_queue_change() {
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_channel(GENERAL).await.unwrap();
+        server.jukebox_add(GENERAL, "ab", "purr.mp3").await.unwrap();
+
+        let mut sigs = HashMap::new();
+        assert!(
+            channel_delta(&server, GENERAL, &mut sigs).is_none(),
+            "first sight of a channel only seeds the record"
+        );
+
+        let mut entry = server.jukebox(GENERAL).remove(0);
+        entry.cid = "cd".into();
+        server
+            .sync
+            .post(crate::DocType::Channel, GENERAL, move |d| {
+                crate::add_juke_entry_in_doc(d, &entry)
+            })
+            .await
+            .unwrap();
+
+        let change = channel_delta(&server, GENERAL, &mut sigs).expect(
+            "a queue entry now naming another file is a change the UI has to be told about",
+        );
+        assert!(
+            change.jukebox,
+            "and it is a queue change, not a message one"
+        );
+        assert!(!change.messages_appended && !change.messages_changed && !change.topic);
+        assert!(
+            channel_delta(&server, GENERAL, &mut sigs).is_none(),
+            "a quiet tick after it must not invent a second one"
+        );
+    }
+
     /// Unread state has to survive an explicit lock and a restart, neither of which the live event
     /// stream covers. The heads are the state it gets rebuilt from, so own messages must not count.
     #[tokio::test]
@@ -4096,7 +5029,7 @@ mod tests {
             .expect("event timeout")
             .expect("actor closed");
         assert_eq!(
-            ev,
+            ev.event,
             AppEvent::ChannelUpdated {
                 channel: GENERAL,
                 change: ChannelChange {
@@ -4174,11 +5107,10 @@ mod tests {
         timeout(Duration::from_secs(60), async {
             loop {
                 match bob_events.recv().await {
-                    Some(AppEvent::ChannelUpdated { channel, change })
-                        if channel == GENERAL && change.messages_appended =>
-                    {
-                        break
-                    }
+                    Some(TracedEvent {
+                        event: AppEvent::ChannelUpdated { channel, change },
+                        ..
+                    }) if channel == GENERAL && change.messages_appended => break,
                     Some(_) => continue,
                     None => panic!("bob actor closed"),
                 }
@@ -4197,6 +5129,160 @@ mod tests {
         bob.shutdown().await;
         let _ = alice_handle.await;
         let _ = bob_handle.await;
+    }
+
+    /// Two acknowledgements can arrive during one throttle interval and then the room can go
+    /// completely quiet. The second receipt still needs to reach the UI: relying on a third
+    /// network event left the last sender status stuck indefinitely.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_throttled_delivery_receipt_gets_an_injected_clock_wake() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let alice_clock = ManualClock::new(1_000);
+        let mut alice_srv = founder_with_clock(&hub, alice_peer, "alice", 1, &alice_clock);
+        alice_srv.subscribe_control().await.unwrap();
+        alice_srv.open_channel(GENERAL).await.unwrap();
+        alice_srv
+            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/22487".into()], 1)
+            .unwrap();
+        let alice_record = alice_srv.sync.self_record().unwrap().clone();
+        let bob_invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (alice, mut alice_events, alice_handle) = spawn(alice_srv);
+
+        let mut bob_srv = Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(2),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+            alice_peer,
+            &bob_invite,
+        )
+        .await
+        .unwrap();
+        bob_srv.subscribe_control().await.unwrap();
+        assert!(bob_srv.sync.ingest_peer_record(alice_record.clone()));
+        let mut bob_connections = catcoms_sync::PreOwnerConnectionHandoff::default();
+        bob_connections.observe(&catcoms_rt::TransportEvent::PeerConnected(alice_peer));
+        bob_srv.sync.adopt_pre_owner_connections(bob_connections);
+
+        // Minting through the actor guarantees the second invite includes Bob's committed
+        // membership rather than using Alice's pre-join group state.
+        let carol_invite = alice
+            .mint_invite([8u8; 16], u64::MAX, vec![])
+            .await
+            .unwrap();
+        let carol_invite = InviteToken::decode(&carol_invite).unwrap();
+        let mut carol_srv = Server::join(
+            hub.join(PeerId::from_u64(3)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(3),
+            Box::new(ManualClock::new(1_000)),
+            "carol",
+            alice_peer,
+            &carol_invite,
+        )
+        .await
+        .unwrap();
+        assert!(carol_srv.sync.ingest_peer_record(alice_record));
+        let mut carol_connections = catcoms_sync::PreOwnerConnectionHandoff::default();
+        carol_connections.observe(&catcoms_rt::TransportEvent::PeerConnected(alice_peer));
+        carol_srv
+            .sync
+            .adopt_pre_owner_connections(carol_connections);
+
+        // Bob was intentionally not spawned yet, so Carol's membership commit is queued at his
+        // transport and can be applied deterministically before Alice authors at the new epoch.
+        timeout(Duration::from_secs(10), async {
+            while bob_srv.member_count() != 3 {
+                assert!(bob_srv.sync_once().await.unwrap());
+            }
+        })
+        .await
+        .expect("Bob did not learn Carol's membership");
+
+        let (bob, mut bob_events, bob_handle) = spawn(bob_srv);
+        bob.open_channel(GENERAL).await;
+        let (carol, mut carol_events, carol_handle) = spawn(carol_srv);
+        carol.open_channel(GENERAL).await;
+
+        alice.send_message(GENERAL, "quiet acknowledgement").await;
+        timeout(
+            Duration::from_secs(10),
+            wait_for_appended(&mut bob_events, GENERAL),
+        )
+        .await
+        .expect("Bob did not receive Alice's message");
+        timeout(
+            Duration::from_secs(10),
+            wait_for_appended(&mut carol_events, GENERAL),
+        )
+        .await
+        .expect("Carol did not receive Alice's message");
+
+        // Other post-send protocol traffic can establish the throttled baseline at zero before
+        // the first receipt arrives. Poll the underlying authenticated state slowly enough to
+        // leave the biased command arm idle between reads. This establishes that both requests
+        // were accepted while the injected clock remains fixed, not by introducing a third
+        // network event.
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if alice
+                    .delivery_snapshot(GENERAL)
+                    .await
+                    .expect("Alice actor is live")
+                    .states
+                    .first()
+                    .is_some_and(|state| state.delivered == 2)
+                {
+                    return;
+                }
+                // Yield without advancing either wall or monotonic time. The actor can service
+                // its network arm, while the throttle remains pinned at the original instant.
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Alice did not authenticate both receipts");
+
+        while let Ok(event) = alice_events.try_recv() {
+            if let AppEvent::DeliveryChanged { channel, snapshot } = event.event {
+                if channel == GENERAL {
+                    let delivered = snapshot.states.first().map_or(0, |state| state.delivered);
+                    assert_ne!(delivered, 2, "the throttle elapsed before clock advance");
+                }
+            }
+        }
+
+        alice_clock.advance_ms(DELIVERY_THROTTLE_MS);
+        let final_delivered = timeout(Duration::from_secs(10), async {
+            loop {
+                match alice_events.recv().await {
+                    Some(TracedEvent {
+                        event: AppEvent::DeliveryChanged { channel, snapshot },
+                        ..
+                    }) if channel == GENERAL => {
+                        if let Some(state) = snapshot.states.first() {
+                            if state.delivered == 2 {
+                                return state.delivered;
+                            }
+                        }
+                    }
+                    Some(_) => continue,
+                    None => panic!("Alice's actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("the dirty delivery snapshot did not receive its timer wake");
+        assert_eq!(final_delivered, 2);
+
+        alice.shutdown().await;
+        bob.shutdown().await;
+        carol.shutdown().await;
+        let _ = alice_handle.await;
+        let _ = bob_handle.await;
+        let _ = carol_handle.await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4237,7 +5323,10 @@ mod tests {
         let received = timeout(Duration::from_secs(5), async {
             loop {
                 match alice_events.recv().await {
-                    Some(AppEvent::CallSignal { from_fp, payload }) => break (from_fp, payload),
+                    Some(TracedEvent {
+                        event: AppEvent::CallSignal { from_fp, payload },
+                        ..
+                    }) => break (from_fp, payload),
                     Some(_) => continue,
                     None => panic!("alice actor closed"),
                 }

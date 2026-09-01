@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 catcoms-rt = { path = "../catcoms-rt" }
 catcoms-crypto = { path = "../catcoms-crypto" }
+catcoms-discovery = { path = "../catcoms-discovery" }
 catcoms-mls = { path = "../catcoms-mls" }
 catcoms-sync = { path = "../catcoms-sync" }
 catcoms-storage = { path = "../catcoms-storage" }

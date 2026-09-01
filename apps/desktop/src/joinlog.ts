@@ -100,7 +100,7 @@ export const OUTCOME_COPY: Record<string, OutcomeCopy> = {
   "admission-failed": {
     label: "admission failed",
     note:
-      "Every check passed and the admission itself still failed. This one is a bug or a malformed client: turn on the debug log in Settings, reproduce, and share the file.",
+      "Every check passed and the admission itself still failed. This one is a bug or a malformed client: turn on the raw debug log in Settings, reproduce, review the file for private or sensitive text, then share it privately with someone you trust.",
     tone: "alarm",
   },
 };
@@ -169,6 +169,15 @@ export type Connectivity = {
   mesh_observations?: string[];
   steps: DiagStep[];
   last_error: string;
+  /**
+   * The trace this attempt belongs to, in the short form a person quotes.
+   *
+   * The join key between this panel and the diagnostic record. The two were separate accounts of
+   * the same minute with nothing tying them together, so relating one to the other meant matching
+   * wall-clock times by eye. Optional because a report produced before the field existed, or by an
+   * older build, still has to render.
+   */
+  trace?: string;
 };
 
 /// The honest summary of what this node has observed about its reachability.
@@ -378,6 +387,9 @@ export function formatConnectivity(c: Connectivity | null): string {
   out.push(
     `Mewtual connectivity report (${c.action}${c.subject ? ` ${c.subject}` : ""}, ${stamp(c.at)})`,
   );
+  // The join key, in what people actually paste. Without it a reader has this report and a debug
+  // console export describing the same minute, and no way to line them up except by clock.
+  if (c.trace) out.push(`Trace: ${c.trace}`);
   const reach = reachabilitySummary(c);
   out.push(`Observed reachability: ${reach.verdict}`);
   out.push(`  ${reach.detail}`);

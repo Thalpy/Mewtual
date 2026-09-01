@@ -582,6 +582,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "catcoms-crypto",
+ "catcoms-discovery",
  "catcoms-mls",
  "catcoms-rt",
  "catcoms-storage",
@@ -611,12 +612,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcoms-diagnostics"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "catcoms-rt",
+ "tracing",
+]
+
+[[package]]
 name = "catcoms-discovery"
 version = "0.0.0"
 dependencies = [
  "blake3",
  "catcoms-rt",
  "catcoms-wire",
+ "multiaddr",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -625,9 +636,10 @@ dependencies = [
 name = "catcoms-log"
 version = "0.0.0"
 dependencies = [
+ "catcoms-diagnostics",
+ "catcoms-rt",
  "chrono",
  "tracing",
- "tracing-appender",
  "tracing-subscriber",
 ]
 
@@ -721,6 +733,7 @@ dependencies = [
  "catcoms-storage",
  "catcoms-wire",
  "futures",
+ "hex",
  "thiserror 2.0.18",
  "tracing",
  "zeroize",
@@ -795,9 +808,9 @@ dependencies = [
 
 [[package]]
 name = "chacha20"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -4035,11 +4048,12 @@ dependencies = [
 
 [[package]]
 name = "mewtual-desktop"
-version = "0.3.0-alpha.8"
+version = "0.3.0-alpha.13"
 dependencies = [
  "base64 0.22.1",
  "bytes",
  "catcoms-app",
+ "catcoms-diagnostics",
  "catcoms-discovery",
  "catcoms-log",
  "catcoms-mls",
@@ -4050,6 +4064,8 @@ dependencies = [
  "libp2p",
  "n0-watcher",
  "netwatch",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "tauri",
@@ -5589,7 +5605,7 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
 dependencies = [
- "chacha20 0.10.0",
+ "chacha20 0.10.2",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
 ]
@@ -6656,12 +6672,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "symlink"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7973cce6668464ea31f176d85b13c7ab3bba2cb3b77a2ed26abd7801688010a"
-
-[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7468,19 +7478,6 @@ dependencies = [
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
-]
-
-[[package]]
-name = "tracing-appender"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
-dependencies = [
- "crossbeam-channel",
- "symlink",
- "thiserror 2.0.18",
- "time",
- "tracing-subscriber",
 ]
 
 [[package]]

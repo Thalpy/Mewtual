@@ -175,6 +175,53 @@ export type JukeEntry = {
 };
 
 /**
+ * Did the queue actually change?
+ *
+ * Compared entry by entry rather than through [`queueDigest`]. Both lists are in memory at the
+ * same moment, so hashing them first can only lose information: a digest is a fixed number of bits
+ * standing in for an unbounded input, and the single case this comparison exists to catch is the
+ * one where an event claims a change the document does not show. A digest collision there reports
+ * "unchanged" and hides precisely the disagreement being looked for. An exact comparison of a
+ * bounded list has no such failure mode.
+ *
+ * Ids only, and in order. A reorder is a change; a rename is not, because names are user content
+ * and the ids already determine the queue completely.
+ */
+export function queueChanged(before: readonly JukeEntry[], after: readonly JukeEntry[]): boolean {
+  if (before.length !== after.length) return true;
+  for (let at = 0; at < before.length; at += 1) {
+    if (before[at].id !== after[at].id) return true;
+  }
+  return false;
+}
+
+/**
+ * A short, stable name for a queue's contents, for the log line.
+ *
+ * Order matters, because a reorder is a change. Only the entry ids go in: names are user content
+ * and have no business in a value that ends up in a diagnostic record, and the ids already
+ * determine the queue completely.
+ *
+ * This is a display value. A collision costs nothing here but a confusing readout, so never use it
+ * to decide whether something changed: that is [`queueChanged`], which compares the entries.
+ */
+export function queueDigest(entries: readonly JukeEntry[]): string {
+  if (!entries.length) return "empty";
+  // FNV-1a over the ids in order. Not a cryptographic claim, just a cheap stable fingerprint that
+  // is the same on both sides of a comparison and short enough to sit in a log line.
+  let hash = 0x811c9dc5;
+  for (const entry of entries) {
+    for (let at = 0; at < entry.id.length; at += 1) {
+      hash ^= entry.id.charCodeAt(at);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    hash ^= 0x2c; // a separator, so ["ab","c"] and ["a","bc"] differ
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${entries.length}:${hash.toString(16).padStart(8, "0")}`;
+}
+
+/**
  * The queue in the order the deck will play it: when it was added, with the id as the tiebreak so
  * two machines that received the same two adds in different orders still agree. Tracks nobody
  * would serve are dropped, so the deck does not stop on one.
@@ -219,12 +266,59 @@ export function deckAdvance(
  * `Number.isInteger` check is not enough, because `1e308` passes it, survives JSON, and satisfies
  * `1e308 + 1 === 1e308`. Two to the fortieth is a trillion presses: unreachable by use, and a
  * decade of headroom below `Number.MAX_SAFE_INTEGER` for the increment to stay exact.
+ *
+ * This is only the arithmetic bound, and on its own it is not a defence: a peer can simply name
+ * it. [`JUKE_SEQ_LEAD`] is the rule that decides whether a revision is believable at all, and
+ * [`jukeSeqSpent`] is what happens if one gets here anyway.
  */
 export const MAX_JUKE_SEQ = 2 ** 40;
+
+/**
+ * How far past the transport it is already following a deck will believe a peer.
+ *
+ * A revision is an assertion by whoever sent it, not a fact, and the deck has no way to check one.
+ * Taking the highest number in the room on trust meant a single frame naming a huge revision owned
+ * the deck for everybody, permanently: nobody could count past it and it outlived the sender
+ * leaving the room. Bounding the jump keeps the counter near what this deck has actually watched
+ * happen, so the worst a poisoned frame can do is take the deck once and the next honest press
+ * takes it straight back.
+ *
+ * The bound is deliberately loose, because being wrong is not symmetric. Too tight and a deck that
+ * missed a burst of presses (a partition, a laptop that slept) refuses the room it came back to
+ * and follows nothing until the user leaves and rejoins. Sixty-five thousand presses is hours of
+ * somebody leaning on skip, and still under a millionth of [`MAX_JUKE_SEQ`].
+ */
+export const JUKE_SEQ_LEAD = 2 ** 16;
+
+/**
+ * The highest revision a deck that is following nothing yet will believe.
+ *
+ * Somebody who has just walked in has no observation to measure a claim against, so the only
+ * question left is whether a room could plausibly have counted this high. A million presses is
+ * years of unbroken playback in a room that never once emptied; past that the number is somebody's
+ * invention rather than a history.
+ *
+ * It has to be its own, larger bound: measuring an arrival against [`JUKE_SEQ_LEAD`] would lock a
+ * long-running room out to everyone who did not happen to be there at the start.
+ */
+export const JUKE_SEQ_COLD_CEILING = 2 ** 20;
 
 /** Is a peer-supplied transport revision one this deck can safely order and increment past? */
 export function validJukeSeq(seq: unknown): seq is number {
   return typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 0 && seq <= MAX_JUKE_SEQ;
+}
+
+/**
+ * Is this a revision no later press could ever outrank?
+ *
+ * The deadlock the bounds above exist to prevent, written as a question the code can ask. If a
+ * deck does end up holding a revision at the ceiling anyway (an older build adopted one, or a
+ * bound here turns out to be wrong), the safe answer is not to clamp the next press to the same
+ * number: that hands the deck to whoever put it there and never gives it back. A spent revision is
+ * one nothing defends, so the press starts a fresh generation and every deck sheds the same claim.
+ */
+export function jukeSeqSpent(seq: number): boolean {
+  return seq >= MAX_JUKE_SEQ;
 }
 
 /** The transport currently being followed, as far as deciding who wins is concerned. */
@@ -237,19 +331,42 @@ export type JukeClaim = { seq: number; fromFp: string };
  * pressing at the same moment resolve identically on every machine. A frame that is not newer is
  * still adopted when it comes from the DJ already being followed: that is the five-second
  * re-announce, which keeps the deck alive and corrects drift.
+ *
+ * Newer is not enough on its own. The revision is a claim by a peer this deck has no reason to
+ * trust, so it also has to be a number this deck could believe: within [`JUKE_SEQ_LEAD`] of the
+ * transport already being followed, or under [`JUKE_SEQ_COLD_CEILING`] when nothing is.
  */
 export function jukeClaimWins(current: JukeClaim | null, incoming: JukeClaim): boolean {
   if (!validJukeSeq(incoming.seq)) return false;
-  if (!current) return true;
+  // Following nothing, so there is no observation to measure against and the only question left is
+  // whether a room could have counted this far. This is also how a late arrival picks up a room
+  // that has been playing for hours, so the ceiling has to be generous.
+  if (!current) return incoming.seq <= JUKE_SEQ_COLD_CEILING;
+  // A claim nothing could outrank is not worth defending, because defending it is the deadlock.
+  // Anything countable beats it, which is how a deck that reached the ceiling gets out again. Two
+  // spent claims still settle by fingerprint, so every machine drops the same one rather than the
+  // pair of them swapping DJ back and forth.
+  const spent = jukeSeqSpent(current.seq);
+  if (spent && !jukeSeqSpent(incoming.seq)) return true;
+  if (!spent && incoming.seq > current.seq + JUKE_SEQ_LEAD) return false;
   if (incoming.seq > current.seq) return true;
   if (incoming.seq < current.seq) return false;
   return incoming.fromFp >= current.fromFp;
 }
 
-/** The revision a press claims. Bounded, so a poisoned value cannot wedge the deck forever. */
+/**
+ * The revision a press claims: one past the highest thing this deck can see, which is what makes a
+ * press outrank everything it has heard.
+ *
+ * It does not clamp, and that is the point. Clamping to [`MAX_JUKE_SEQ`] meant that at the ceiling
+ * every press produced the same number, the fingerprint tiebreak decided the room for good, and no
+ * lower peer could reclaim the deck however long it waited. A floor with nowhere left to go is
+ * discarded instead and the counting starts again from one, which [`jukeClaimWins`] takes over a
+ * spent claim for exactly this reason.
+ */
 export function nextJukeSeq(mine: number, adopted: number | null): number {
   const floor = Math.max(validJukeSeq(mine) ? mine : 0, validJukeSeq(adopted) ? adopted : 0);
-  return Math.min(floor + 1, MAX_JUKE_SEQ);
+  return jukeSeqSpent(floor) ? 1 : floor + 1;
 }
 
 /** Everything the deck's position depends on. `element` is null unless it holds the live track. */

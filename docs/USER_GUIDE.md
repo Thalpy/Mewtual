@@ -114,13 +114,19 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   across the full space between **Forward** and **Minimise**. Each item appears only once in an
   unlocked session. Hover or keyboard-focus a headline to pause it; click it to open the exact
   item (including switching server/channel and flashing a message). Non-message headlines use the
-  short three-pip news cue configured under **Settings → Notifications**.
+  short three-pip news cue configured under **Settings → Notifications**; the **♪** chip in a
+  server's **Announcements** header is a shortcut to that server's own switch.
 
 ### Server Space
 
 - Open the 360° server room from the rail's orbit button or with **Ctrl/Cmd+O**. Drag empty
   space to look around; drag a server to move it; hold on empty space and draw a loop to lasso
   several servers. Drops make room automatically, so icons do not overlap.
+- **Billboard signals**; a server whose announcements you haven't read wears a **herald**: a slow
+  ripple plus a small **◈ N** count at the billboard's bottom left. The other corners keep their
+  own signals (unread chat top right, a mention flare top left, voice bottom right). **Hover** a
+  billboard for a small card showing that server's latest announcement; clicking is unchanged and
+  enters the server. With motion effects off, the ripple is a static ring.
 - Create named **neighbourhoods** in **Settings → Server Space**. Every neighbourhood then
   appears in the panel inside Space, even while it is empty. Press its **＋** to add or remove
   servers, click its name to look at it, or drag a server directly onto its panel row or floating
@@ -207,6 +213,14 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   your other communities.
 - Open **Inbox** for every message that mentions you or replies to you across all servers and DMs.
   Switch it to **News** for recent announcements and upcoming events across your communities.
+- In **News**, every announcement you haven't read is highlighted in the list, and **Mark all read**
+  clears them across every server at once. **Filter chips** (**All · Announcements · Events**, plus a
+  server picker once you're in more than one) narrow the list, a **Pinned** section carries each
+  server's latest pinned announcement, and clicking any row lands on the exact post and flashes it
+  rather than just opening the surface.
+- The rail's **Inbox** badge counts your outstanding mentions plus each unread announcement. Events
+  never raise it; an event's time is when it *starts*, not when it was written, so it can't honestly
+  be something you haven't seen. The ticker and the news cue still announce event changes.
 
 ### Notification sounds
 
@@ -442,8 +456,19 @@ type a `code`, choose its display size and upload an image. Then anyone types `:
   silence the wiki forever. Admins see the queue (with diffs) under **Review** above the
   page list; authors see an "awaiting review" note on the page. While review is on,
   rename/delete are owner/admin-only, and files embedded in pending edits stay pinned.
-- **Announcements**; a per-server feed of short community updates. Supports the same rich text,
-  text effects, and media embeds as chat.
+- **Announcements**; a per-server feed of short community updates, with the same rich text, text
+  effects and media embeds as chat. **Who may post** is the first chip in the surface header: the
+  **owner and admins** by default, and an owner/admin can click it to switch that server to
+  **anyone may post**. The setting travels with the server like the wiki's review window, and it is
+  the same honest-client enforcement as deleting a message (§8), not a key-level permission.
+- **Reacting, editing, pinning**; anyone can **react** to an announcement (the chat emoji picker,
+  server custom emoji included); its **author** can edit it, which shows the same edited mark chat
+  uses; the **author, the owner or an admin** can delete it; and an owner/admin can **pin** posts
+  into a highlighted block at the top of the feed. A **NEW** divider sits above the announcements
+  you haven't read and the surface's tab carries their count; opening the surface marks them read.
+  The header's second chip (**♪**) turns this server's three-pip news cue on or off for you; it's
+  the same **News ticker** switch as **Server settings → Notifications**, just closer to hand. It
+  stays on this device and no other member sees or shares it.
 - **Events**; a per-server calendar (**Ctrl+7**). Any member can add one with a title,
   start/end time, description and an optional **image**; the image is shared like any other
   file and shows on the event itself and on every link to it. The event's author, an owner or
@@ -562,6 +587,12 @@ wiki, and roles; they share nothing.
   actors may stay online to receive encrypted updates. It is not a defence against malware that
   already controls the process or operating system.
 - **Metadata.** Peers/relays can observe *that* you communicate (timing, IPs), not *what*.
+- **Raw debug logs need review before sharing.** The optional file in **Settings → Diagnostics** is
+  not filtered through the in-app console's Safe capture. It may contain arbitrary frontend
+  console/error and native app/tracing prose, including names, message fragments, filenames and
+  paths, URLs, addresses, identifiers, tokens, serialized objects and stack traces. Inspect the
+  actual file and share it only with someone you trust. Automatic public diagnostic issues use a
+  separate minimized report.
 - **Remote images contact their host.** An HTTP(S) image pasted into chat is lazy-loaded with no
   referrer, but its host can still see your IP and request timing. Files shared through Mewtual's
   encrypted fileshare do not make that third-party request.

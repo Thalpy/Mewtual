@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
@@ -39,7 +39,9 @@
     mayEditWikiStructure,
     mayPublishLivery,
     moderationSurfaceOpen,
+    sessionContinuationCurrent,
     scopeCurrent,
+    unlockedScopeCurrent,
   } from "./viewscope";
   import { pastedImageUrl, safeRemoteUrl } from "./remote-media";
   import { scheduleNewsChime } from "./news-chime";
@@ -55,24 +57,67 @@
     completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, saveSpaceGuide,
   } from "./native-download";
   import {
+    newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
+  } from "./vault-secret-change";
+  import { safeMediaMime } from "./media-safe";
+  import { storageRepairNotice } from "./storage-local";
+  import { disposeStreamAudioGraph } from "./stream-audio";
+  import {
     bufferIce, directionIdle, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState, videoSlotPlan,
-    VIDEO_BITRATE, type SlotDirection, type VideoKind,
+    VIDEO_BITRATE, type PeerState, type SlotDirection, type VideoKind,
   } from "./voice-signaling";
   import {
+    DEFAULT_STREAM_SETTINGS, MAX_STREAM_AUDIO_SOURCES, PeerVideoBudgetController, captureResolutionKnownAfterConstraint,
+    estimatedMeshMbps, isStreamHeight,
+    nearestStreamHeight, normalizeStreamAudioLevel, parseStreamSettings, peerStreamPlan, preferEfficientVideoCodecs,
+    receivingHeightForViewport, recommendedStreamMbps, screenAudioSourceSlotAvailable, streamResolutionLabel,
+    shouldClearScreenAudioOnModeChange, streamAudioGain,
+    type PeerBudgetResult, type PeerStreamPlan, type StreamFrameRate, type StreamHeight,
+    type StreamAudioMode, type StreamQuality, type StreamSettings,
+  } from "./streaming";
+  import {
     deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, jukeClaimWins, mediaChoices,
-    mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, resolveCallName, stallChip,
-    validJukeSeq, STALL_ANNOUNCE_MS,
+    mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, queueChanged, queueDigest, resolveCallName,
+    stallChip, validJukeSeq, STALL_ANNOUNCE_MS,
     type FetchPhase, type JukeEntry, type MediaFilter, type MediaKind,
   } from "./jukebox";
   import {
-    CLOCK_SKEW_GRACE_MS, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
-    unreadFromHeads, type ChannelHead,
+    CLOCK_SKEW_GRACE_MS, NO_READ_MARK, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
+    transitionApplied, transitionMismatch, unreadChannels, unreadDecision, unreadFromHeads,
+    type ChannelChange, type ChannelHead, type ReadMark, type UnreadDecision, type UnreadState,
   } from "./unread";
   import {
-    deliveryClass, deliveryGlyph, deliveryLabel, deliveryTip, deliveryVerdict, mergeDelivery,
+    NO_STATUS_READ, firstStatusUnreadIndex, isNewsItemUnseen, isStatusUnread, keyNewsRows,
+    markStatusRead, newsCeilings, newsFilter, newsUnseenByServer, newsUnseenCount, sameStatusCursor,
+    splitNewsSections, statusCeiling, statusCursorFor, statusIsObserved, statusSurfaceOpen,
+    statusUnreadCount,
+    type NewsKindFilter, type StatusCursors, type StatusObservation, type StatusPost,
+    type StatusReadCursor,
+  } from "./statusread.ts";
+  import {
+    clearDeliverySnapshotAfterFailedQuery,
+    deliveryClass, deliveryGlyph, deliveryLabel, deliveryTip, deliveryVerdict,
+    replaceDeliverySnapshot,
     type DeliveryEvidence,
   } from "./delivery";
-  import { installUiLogging } from "./uilog";
+  import { DEBUG_LOG_FILE_DISCLOSURE, installUiLogging, type UiLogging } from "./uilog";
+  import { drainStartupLog, endStartupCapture } from "./startup-log";
+  import {
+    classifyInvokeFailure,
+    errorText,
+    eventCorrelation,
+    makeInvokeDebugged,
+    makeRecorder,
+    makeResync,
+    makeSeqTracker,
+    makeTraceSource,
+    needsResync,
+    type EventCursor,
+    type EventCorrelation,
+    type EventEnvelope,
+    // Aliased: this file already has a `UiEvent`, which is a calendar entry.
+    type UiEvent as DiagEvent,
+  } from "./diagnostics";
   import {
     TRANSFER_CHUNK_BYTES,
     formatBytes, formatRate, sampleRate, transferPieces, uploadContract,
@@ -95,6 +140,12 @@
     type ModerationEvent, type ModerationState, type TimelineMessage,
   } from "./moderation";
   import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
+  import {
+    DEFAULT_FILE_TRUST_POLICY, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
+    mayLoadJukeboxFile, scopedMediaKey, toggleTrustedAuthor,
+    type FileTrustMode, type FileTrustPolicies, type FileTrustPolicy,
+  } from "./file-trust";
+  import { acceptCapture, chooseMicrophoneSender, MediaCaptureSession } from "./media-capture";
   import {
     type NameEffect, type NameEffectId, type NameEffectOptions, animatedEffect,
     decodeNameEffects, defaultNameEffect, effectConfigured, effectEnabled, effectOptions, encodeNameEffects,
@@ -138,6 +189,14 @@
     withOrderedSwitchboardStatus,
   } from "./joinreply";
   import { callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, type MappedPort } from "./callroutes";
+  // Types only. The console's own logic and markup live in DebugConsole.svelte, which is loaded
+  // on demand; this file needs just enough to describe what it hands over.
+  import {
+    memberRoutesVisible, mergeMemberRouteRead, routeActionLabel, routeActionScopeLabel, routeChip,
+    routeExplanation, routeHistoricalAge, routeIndirectEvidence, routeIsConnected, routePathLabel, routeState,
+    shouldRefreshMemberRoutes,
+    type DbgSection, type DebugVoicePeer, type MemberRoute,
+  } from "./debug-console";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -148,11 +207,11 @@
   };
   const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "😮", "😢", "🔥", "👀"];
   type Channel = { id: string; name: string };
-  type Member = { fingerprint: string; you: boolean };
+  type Member = { fingerprint: string; identity: string; you: boolean };
   type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; description: string; bubble: string; avatar: string; banner: string };
   // `expires`: ms-epoch deadline for this listing's CIRCULATION, or null. `expires_known` tells
   // "explicitly kept forever" (known + null) from "recorded before expiry existed" (!known).
-  type UiFile = { name: string; size: number; mime: string; cid: string; author: string; path: string; held: number; total: number; expires: number | null; expires_known: boolean };
+  type UiFile = { name: string; size: number; mime: string; cid: string; author: string; author_identity: string; author_verified: boolean; path: string; held: number; total: number; expires: number | null; expires_known: boolean };
   // Where a file is referenced across the server (Properties → "Used in"). `pinned` mirrors
   // `wiki_pages.length > 0`: a wiki-embedded file never drops out of circulation.
   type UiFileUsage = { wiki_pages: string[]; status_count: number; chat_count: number; event_count: number; pinned: boolean };
@@ -194,6 +253,16 @@
   function viewCurrent(gen: number, server: number | null): boolean {
     return scopeCurrent({ generation: gen, server }, { generation: viewGeneration, server: activeServerId });
   }
+  // Sensitive storage results need a stronger continuation gate than ordinary view data: a native
+  // result can resolve immediately before lock while its Promise callback remains queued until the
+  // lock has already cleared every visible value and cache.
+  function unlockedViewCurrent(gen: number, server: number | null): boolean {
+    return unlockedScopeCurrent(
+      { generation: gen, server },
+      { generation: viewGeneration, server: activeServerId },
+      locked,
+    );
+  }
   // DM-home mode: the rail's DMs circle is active and the sidebar shows the friends/DM list. Kept in
   // sync with the active group's kind by switchServer (a DM ⇒ dmHome, a server ⇒ not).
   let dmHome = $state(false);
@@ -228,6 +297,10 @@
   });
   let showAdd = $state(false); // showing the found/join form to add a server
   let startTab = $state<"join" | "found">("join"); // which start-surface tab is open; join is the common case
+  // Chosen before founding/joining so no newly opened server can render shared media under an
+  // implicit policy. Specific-member trust starts empty until the roster is authenticated.
+  let onboardingFileTrust = $state<FileTrustMode>("on-demand");
+  let fileTrustPolicies = $state<FileTrustPolicies>({});
   // Roving-tabindex arrows for the start tabs: with two tabs, either arrow means "the other one".
   function startTabArrows(e: KeyboardEvent) {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
@@ -258,9 +331,9 @@
     backupBusy = true;
     backupResult = null;
     try {
-      backupResult = await invoke("create_backup");
+      backupResult = (await invokeDebugged<typeof backupResult>("create_backup")).value;
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     } finally {
       backupBusy = false;
     }
@@ -294,6 +367,7 @@
     { id: "invites", label: "Invites", cat: "People" },
     { id: "joinlog", label: "Join Log", cat: "People" },
     { id: "emoji", label: "Emoji & Stickers", cat: "Content" },
+    { id: "filetrust", label: "File Trust", cat: "Content" },
     { id: "calls", label: "Calls & Relay", cat: "Voice" },
     { id: "leave", label: "Leave Server", cat: "Danger", danger: true },
   ];
@@ -351,7 +425,7 @@
     { group: "App & network", title: "Quick switcher", detail: "Jump to channels, surfaces, servers and DMs without hunting through the rails.", where: "Anywhere in the unlocked app", shortcut: "Ctrl+K", target: "quick" },
     { group: "App & network", title: "Server Space", detail: "Arrange servers in a navigable 360-degree room; group them into interactive neighbourhoods, search, auto-arrange, or use a custom backdrop.", where: "Left rail → Orbit", shortcut: "Ctrl+O", target: "space" },
     { group: "App & network", title: "Appearance", detail: "Themes, accent, density, text scale, clock style, reduced motion, and local opt-outs for shared livery, message frames and arrivals.", where: "Settings → Appearance", target: "settings:appearance" },
-    { group: "App & network", title: "Connectivity & diagnostics", detail: "Configure rendezvous defaults, inspect the latest connection attempt and opt into a privacy-labelled debug log.", where: "Settings → Network / Diagnostics", target: "settings:diagnostics" },
+    { group: "App & network", title: "Connectivity & diagnostics", detail: "Configure rendezvous defaults, inspect the latest connection attempt and manage the privacy-labelled raw debug log.", where: "Settings → Network / Diagnostics", target: "settings:diagnostics" },
     { group: "App & network", title: "Connectivity assistant", detail: "See honest three-state connection evidence, live peer counts and concrete recovery suggestions without claiming unproven internet reachability.", where: "Server sidebar → Connectivity", target: "surface:connectivity" },
     { group: "App & network", title: "Backup & recovery", detail: "Export a coherent sealed vault copy while seeing the offline-guessing, metadata and old-secret exposure tradeoffs. Automated restore remains staged follow-up work.", where: "Settings → Backup & Recovery", target: "settings:backup" },
     { group: "App & network", title: "Signed updates", detail: "Check for a newer signed release and choose whether to install, defer or skip it.", where: "Settings → Updates", target: "settings:updates" },
@@ -941,6 +1015,7 @@
   let vaultChangeMismatch = $state(false);
   let vaultChangeBusy = $state(false);
   let vaultChangeError = $state("");
+  let vaultDurabilityWarning = $state("");
   let changingVaultSecret = $derived(vaultChangeStep !== "");
 
   // --- First run --------------------------------------------------------------------------
@@ -1008,6 +1083,12 @@
       return;
     }
     if (vaultChangeStep === "new") {
+      const inputError = newVaultSecretError(secret);
+      if (inputError) {
+        vaultChangeError = inputError;
+        clearUnlockEntry();
+        return;
+      }
       if (secret === vaultChangeCurrent) {
         vaultChangeError = "Choose a different secret from the current one.";
         clearUnlockEntry();
@@ -1027,10 +1108,11 @@
     }
     vaultChangeBusy = true;
     try {
-      await invoke("change_vault_secret", {
+      const result = await invoke<VaultSecretChangeResult>("change_vault_secret", {
         currentSecret: vaultChangeCurrent,
         newSecret: vaultChangeFirst,
       });
+      const notice = vaultSecretChangeNotice(result);
       vaultChangeCurrent = "";
       vaultChangeFirst = "";
       vaultChangeMismatch = false;
@@ -1038,7 +1120,8 @@
       clearUnlockEntry();
       settingsPage = "vault";
       showSettings = true;
-      toast("Vault secret changed. Existing backups still use their old secret.", "ok", 6500);
+      vaultDurabilityWarning = notice.kind === "committed-uncertain" ? notice.message : "";
+      toast(notice.message, notice.kind === "confirmed" ? "ok" : "warn", notice.kind === "confirmed" ? 6500 : 12000);
     } catch (e) {
       // A wrong current secret is intentionally indistinguishable from a damaged wrapper here.
       // Drop both transient strings and restart authentication; never leave them in the form.
@@ -1057,6 +1140,13 @@
   function setupCapture() {
     const s = unlockSecret();
     if (!s) return;
+    const inputError = newVaultSecretError(s);
+    if (inputError) {
+      error = inputError;
+      clearUnlockEntry();
+      return;
+    }
+    error = "";
     setupFirst = s;
     setupMismatch = false;
     clearUnlockEntry();
@@ -1979,6 +2069,7 @@
   let joinSwitchboardConsent = $state(false);
   type JoinReplyReady = { code: string; expires_at_ms: number; candidate_count: number };
   let joinReplyReady = $state<JoinReplyReady | null>(null);
+  let joinAttemptPending = $state(false);
   let joinReplyNow = $state(Date.now());
   let joinReplyExpired = $derived(
     joinReplyReady !== null && joinReplyIsExpired(joinReplyReady.expires_at_ms, joinReplyNow),
@@ -1986,6 +2077,19 @@
   let joinReplyInput = $state("");
   let joinReplyApplying = $state(false);
   let joinReplyNeedsReplace = $state(false);
+  // Invalidates delayed native reply applications when the user locks or switches groups. A
+  // reply contains private listener routes and must never follow the UI into another group.
+  let joinReplyOperation = 0;
+  type MemberRecoveryReady = { code: string; expires_at_ms: number; candidate_count: number };
+  type MemberRecoveryApplied = { fingerprint: string; submitted_routes: number };
+  let memberRecoveryReady = $state<MemberRecoveryReady | null>(null);
+  let memberRecoveryServer = $state<number | null>(null);
+  let memberRecoveryExpired = $derived(
+    memberRecoveryReady !== null && joinReplyIsExpired(memberRecoveryReady.expires_at_ms, joinReplyNow),
+  );
+  let memberRecoveryInput = $state("");
+  let memberRecoveryBusy = $state(false);
+  let memberRecoveryOperation = 0;
   let copied = $state(false);
   let newChannel = $state("");
 
@@ -2432,27 +2536,71 @@
     }
   }
 
-  // Jump-to-unread: per `server:channel`, the timestamp of the newest message you've seen. It and
-  // composer drafts are sealed into the unlocked vault: neither sensitive text nor reading habits
-  // fall back to plaintext browser storage.
-  let readMarks = $state<Record<string, number>>({});
+  // Jump-to-unread: per `server:channel`, how far this device has read. The id is the cursor and
+  // the timestamp only positions the divider, because a timestamp is the sender's clock and every
+  // sender in a channel is running a different one. Marks and composer drafts are sealed into the
+  // unlocked vault: neither sensitive text nor reading habits fall back to plaintext storage.
+  let readMarks = $state<Record<string, ReadMark>>({});
+  /** This device's read position in a channel, or a fresh mark when it has never been read. */
+  function readMarkOf(key: string): ReadMark {
+    return readMarks[key] ?? NO_READ_MARK;
+  }
   let dividerTs = $state(Number.POSITIVE_INFINITY);
   let uiStateSaveTimer: ReturnType<typeof setTimeout> | undefined;
-  let uiStateReady = false;
-  let uiStateSaveFailed = false;
+  let uiStateSaveChain: Promise<void> = Promise.resolve();
+  // Server actions remain hidden until the sealed continuity snapshot (including
+  // file-trust policy) has been restored. This must be reactive: the load
+  // completes asynchronously after unlock.
+  let uiStateReady = $state(false);
+  let uiStateSaveFailed = $state(false);
+  let uiStateFailureToast = 0;
   let uiStateLoadGeneration = 0;
+  function queueUiStateSave(json: string): Promise<void> {
+    // Native lock/generation checks order this queue against a final lock snapshot. This local
+    // chain additionally prevents two ordinary same-session saves from overtaking one another.
+    const generation = uiStateLoadGeneration;
+    const save = uiStateSaveChain.then(() => {
+      if (locked || generation !== uiStateLoadGeneration) {
+        throw new Error("the UI session changed before continuity could be saved");
+      }
+      return invoke<void>("save_ui_state", { json });
+    });
+    uiStateSaveChain = save.catch(() => {});
+    return save;
+  }
+  function continuityJson(): string {
+    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies });
+  }
+  /**
+   * Seal the current continuity snapshot without the ordinary typing/read-position debounce.
+   * Security-sensitive trust changes use this path so an immediate normal close cannot silently
+   * restore a more permissive policy. A hard process/OS failure can still interrupt any disk write.
+   */
+  async function saveUiStateImmediately(): Promise<boolean> {
+    if (!uiStateReady || locked) return false;
+    clearTimeout(uiStateSaveTimer);
+    try {
+      await queueUiStateSave(continuityJson());
+      uiStateSaveFailed = false;
+      if (uiStateFailureToast) {
+        updateToast(uiStateFailureToast, "Vault preferences saved", "ok", 2500);
+        uiStateFailureToast = 0;
+      }
+      return true;
+    } catch (e) {
+      console.warn("UI continuity save failed", e);
+      const message = "Vault preferences, drafts, and read positions were not saved; retry before closing";
+      if (uiStateFailureToast) updateToast(uiStateFailureToast, message, "err", 0);
+      else uiStateFailureToast = toast(message, "err", 0);
+      uiStateSaveFailed = true;
+      return false;
+    }
+  }
   function scheduleUiStateSave() {
     if (!uiStateReady || locked) return;
     clearTimeout(uiStateSaveTimer);
     uiStateSaveTimer = setTimeout(() => {
-      const json = JSON.stringify({ version: 1, drafts, readMarks });
-      void invoke("save_ui_state", { json }).then(() => {
-        uiStateSaveFailed = false;
-      }).catch((e) => {
-        console.warn("UI continuity save failed", e);
-        if (!uiStateSaveFailed) toast("Draft/read-position save failed; this session is still usable", "err", 8000);
-        uiStateSaveFailed = true;
-      });
+      void saveUiStateImmediately();
     }, 250);
   }
   async function loadUiContinuity(generation: number) {
@@ -2465,9 +2613,7 @@
       try {
         const migration = planLegacyReadMarkMigration(next, localStorage.getItem("catcoms.readmarks"));
         if (migration.saveBeforeRemoval) {
-          await invoke("save_ui_state", {
-            json: JSON.stringify(migration.state),
-          });
+          await queueUiStateSave(JSON.stringify(migration.state));
         }
         if (migration.removeLegacy) {
           localStorage.removeItem("catcoms.readmarks");
@@ -2479,14 +2625,23 @@
       if (generation !== uiStateLoadGeneration || locked) return;
       drafts = next.drafts;
       readMarks = next.readMarks;
+      statusCursors = next.statusCursors;
+      fileTrustPolicies = next.fileTrustPolicies;
     } catch (e) {
       if (generation !== uiStateLoadGeneration || locked) return;
       console.warn("UI continuity load failed", e);
       drafts = {};
       readMarks = {};
+      statusCursors = {};
+      fileTrustPolicies = {};
       error = `Durable history could not be authenticated and was not loaded: ${e}`;
     } finally {
-      if (generation === uiStateLoadGeneration && !locked) uiStateReady = true;
+      if (generation === uiStateLoadGeneration && !locked) {
+        uiStateReady = true;
+        // Anything marked read while this was in flight was held rather than written, because the
+        // assignments above would have overwritten it. Replay it now, against what actually loaded.
+        flushPendingStatusMarks();
+      }
     }
   }
   function chanKey(): string | null {
@@ -2495,7 +2650,7 @@
   }
   function captureDivider() {
     const k = chanKey();
-    dividerTs = k ? (readMarks[k] ?? Number.POSITIVE_INFINITY) : Number.POSITIVE_INFINITY;
+    dividerTs = k && readMarks[k] ? readMarks[k].ts : Number.POSITIVE_INFINITY;
   }
   // The newest timestamp in the loaded conversation this machine is willing to believe. A message
   // timestamp is the SENDER's clock, so used raw as a cursor one broken clock (or one member
@@ -2510,10 +2665,28 @@
     const k = chanKey();
     if (!k || !messages.length) return;
     const latest = messages.reduce((a, m) => Math.max(a, readTs(m)), 0);
-    if ((readMarks[k] ?? 0) < latest) {
-      readMarks[k] = latest;
-      scheduleUiStateSave();
+    // The cursor is the newest message somebody ELSE wrote, because that is what the durable scan
+    // compares against: own messages never make a channel unread. Where several share the newest
+    // millisecond this takes the last of them, which is the order the log itself renders.
+    let id = "";
+    let newest = -1;
+    for (const m of messages) {
+      if (m.author === myFp) continue;
+      const ts = readTs(m);
+      if (ts >= newest) {
+        newest = ts;
+        id = m.id;
+      }
     }
+    const mark = readMarkOf(k);
+    // The id can move while the timestamp does not: two messages in the same millisecond are a
+    // real arrival that a timestamp comparison cannot see. Checking both is what makes the second
+    // one count.
+    if (mark.ts >= latest && mark.id === id) return;
+    // An id is only ever replaced by another id. A window holding none of somebody else's
+    // messages is not evidence that the cursor should go back to being a bare timestamp.
+    readMarks[k] = { ts: Math.max(mark.ts, latest), id: id || mark.id };
+    scheduleUiStateSave();
   }
   // Is there a message here from somebody else that this device has not read past yet? Measured
   // against the saved mark rather than `dividerTs`, which is deliberately frozen at the value the
@@ -2521,8 +2694,12 @@
   function activeChannelHasUnseen(): boolean {
     const k = chanKey();
     if (!k) return false;
-    const mark = readMarks[k] ?? 0;
-    return messages.some((m) => m.author !== myFp && readTs(m) > mark);
+    const mark = readMarkOf(k);
+    // Position by id where the mark has one and the row is loaded: the log is already in order,
+    // so "after the one I read" needs no clock and survives a batch sharing one millisecond.
+    const at = mark.id ? messages.findIndex((m) => m.id === mark.id) : -1;
+    if (at >= 0) return messages.slice(at + 1).some((m) => m.author !== myFp);
+    return messages.some((m) => m.author !== myFp && readTs(m) > mark.ts);
   }
   // Index of the first message newer than the read boundary (-1 if all read).
   // Own messages never count as unread: sending shouldn't raise a "New messages" divider.
@@ -2559,12 +2736,13 @@
   let pendingSendNonce = 0;
   let members = $state(1);
   let roster = $state<Member[]>([]);
-  // Fingerprints of members reachable right now (a live connection): drives the roster's online
-  // dots + the online count. Refreshed with the roster and updated live by 'connectivity-changed'.
+  // Fingerprints whose signed-but-self-asserted peer id has a live connection here. This drives
+  // claimed-path diagnostics only; it is not proof that the member controls that transport or is
+  // personally online. Refreshed with the roster and updated by 'connectivity-changed'.
   let onlineMembers = $state<Set<string>>(new Set());
   // Per-member presence timing OBSERVED this session for the active server (wall-clock ms): when we
-  // saw a member come online / go offline. Only set on a transition we witnessed, so durations are
-  // honest (a member already online at load shows "Online" with no fabricated duration). Per-server.
+  // saw a claimed path connect/disconnect. Only set on a transition we witnessed, so durations are
+  // honest (a path already connected at load gets no fabricated duration). Per-server.
   let onlineSince = $state<Record<string, number>>({});
   let lastSeen = $state<Record<string, number>>({});
   // Ticks every 60s so relative presence times ("Last seen 5m ago") stay current without a reload.
@@ -2580,14 +2758,14 @@
   // The member column is split into an "online" then an "offline" group (the offline group is
   // omitted entirely when empty). Both are filtered by the roster search first. Companion
   // devices never appear top-level: they nest under their origin (multi-device M4), and a
-  // member counts as online when ANY of their devices is reachable.
+  // member enters the claimed-path group when ANY device claims a currently-live transport.
   let memberOnline = (m: Member) =>
     m.you ||
     onlineMembers.has(m.fingerprint) ||
     Object.entries(deviceMap).some(([fp, d]) => d.origin === m.fingerprint && onlineMembers.has(fp));
   let onlineRoster = $derived(filteredRoster.filter((m) => !deviceMap[m.fingerprint] && memberOnline(m)));
   let offlineRoster = $derived(filteredRoster.filter((m) => !deviceMap[m.fingerprint] && !memberOnline(m)));
-  // Members reachable right now (self always counts): the roster header's "N online".
+  // Claimed paths connected here (self always counts), for the roster's diagnostic count.
   let onlineCount = $derived(roster.filter((m) => m.you || onlineMembers.has(m.fingerprint)).length);
   // Compact mono abbreviation for a role badge in a narrow roster row (owner → OWN, admin → ADM).
   function roleAbbr(role: string): string {
@@ -2595,8 +2773,8 @@
   }
   let profiles = $state<Record<string, Prof>>({});
   let files = $state<UiFile[]>([]);
-  // Whether ≥1 peer is currently reachable to fetch missing chunks from (a soft availability hint;
-  // refreshed alongside the file list). Distinguishes "downloadable" from "no peers online".
+  // Whether ≥1 live peer previously proved it could serve authenticated catch-up (a conservative
+  // availability hint refreshed with the file list). This is stricter than `onlineMembers`.
   let hasPeers = $state(false);
   let uploading = $state(false);
   let folder = $state(""); // current folder in the Files tab
@@ -2604,7 +2782,19 @@
   let dragOver = $state(false); // composer drag-over highlight
   let statuses = $state<Msg[]>([]);
   let statusDraft = $state("");
-  let statusEl = $state<HTMLUListElement | undefined>(undefined);
+  // The scroll box holding both the pinned block and the feed, so a `status:ID` chip finds its post
+  // by id wherever the pin state has put it, and one rich-click delegate covers the whole surface.
+  let statusEl = $state<HTMLElement | undefined>(undefined);
+  // Whether plain members may post to THIS server's feed. `false` until the read answers, matching
+  // the backend's default and its answer for a stopped actor: a composer that is not offered is a
+  // smaller wrong than one that is offered and then refuses everything typed into it.
+  let statusPolicy = $state(false);
+  let statusPolicyBusy = $state(false);
+  // Inline edit + the reaction quick-picker for one announcement, exactly as chat holds them.
+  let statusEditingId = $state("");
+  let statusEditDraft = $state("");
+  let statusEditEl = $state<HTMLTextAreaElement | undefined>(undefined);
+  let statusReactionPickerFor = $state("");
 
   // Custom emoji (10f): files under the "emoji" folder. code -> cid, and resolved code -> URL.
   let emojiUrls = $state<Record<string, string>>({});
@@ -2874,6 +3064,7 @@
     pinned_local_estimated_bytes: number;
     categories: Array<{ name: string; files: number; logical_bytes: number; local_estimated_bytes: number; pinned_files: number }>;
     largest_files: Array<{ name: string; path: string; cid: string; mime: string; logical_bytes: number; local_estimated_bytes: number; pinned: boolean; held: number; total: number }>;
+    local_files: Array<{ name: string; path: string; cid: string; mime: string; logical_bytes: number; local_estimated_bytes: number; pinned: boolean; held: number; total: number }>;
   };
   let storageHealth = $state<StorageHealth | null>(null);
   // The Rust bridge is the authoritative once-per-process cache (and survives frontend HMR).
@@ -3006,16 +3197,22 @@
       return;
     }
     try {
+      // One trace for the whole sweep rather than one per message: a moderator deleting eleven
+      // messages performed one action, and eleven unrelated traces would hide that the failure on
+      // the ninth belonged to the same operation as the eight that worked.
+      const sweep = traceSource.next();
       for (const message of selected) {
-        await invoke("delete_message", {
-          server, channel: message.channel, msgId: message.id,
-        });
+        await invokeDebugged(
+          "delete_message",
+          { server, channel: message.channel, msgId: message.id },
+          { trace: sweep },
+        );
       }
       moderationSelected = new Set();
       moderationDeleteArmed = false;
       await refreshModeration();
       if (view === "chat") await refresh();
-    } catch (e) { error = String(e); }
+    } catch (e) { error = errorText(e); }
   }
   function toggleCaseEvidence(id: string) {
     const next = new Set(caseEvidence);
@@ -3814,7 +4011,7 @@
     const endTs = evEnd ? new Date(evEnd).getTime() : 0;
     if (!evTitle.trim() || !startTs) return;
     try {
-      await invoke("create_event", { server: activeServerId, title: evTitle, body: evBody, startTs, endTs, image: evImage });
+      await invokeDebugged("create_event", { server: activeServerId, title: evTitle, body: evBody, startTs, endTs, image: evImage });
       evTitle = ""; evBody = ""; evStart = ""; evEnd = ""; evImage = "";
       await refreshEvents();
     } catch (e) {
@@ -3867,9 +4064,24 @@
     return `${day} · ${t}${end}`;
   }
 
-  // News feed (inbox): recent status posts + upcoming events across every server.
+  // News feed (inbox): every server's announcements + its live events, in one list.
   // Client-side aggregation over existing per-server invokes: nothing new on the wire.
-  type NewsItem = { server: number; serverName: string; kind: "status" | "event"; ts: number; text: string; author: string };
+  //
+  // This is also the single source the announcement indicators are all read from. The rail's inbox
+  // badge, the News rows, the billboard beacons in the orbit view and the surface-bar tab count are
+  // four ways of asking which announcements this person has not seen, and answering them from four
+  // places is how they end up disagreeing. `id` and `pinned` ride along for the same reason: the
+  // read cursor settles a same-millisecond tie by id, and the Pinned section needs to know without
+  // a second fetch. Only the active server's tab count reads the live `statuses` instead, because
+  // it has a fresher copy of the one feed it is counting.
+  type NewsRow = {
+    server: number; serverName: string; kind: "status" | "event";
+    id: string; ts: number; text: string; author: string; pinned: boolean;
+  };
+  // A row as the tab renders it: the aggregation's row plus the key `keyNewsRows` stamped on it.
+  // The key is minted where the list is built rather than spelled out of the row at render time,
+  // because a row's own fields do not identify it -- see `keyNewsRows`.
+  type NewsItem = NewsRow & { key: string };
   let inboxMode = $state<"mentions" | "news">("mentions");
   let newsItems = $state<NewsItem[]>([]);
   let newsLoading = $state(false);
@@ -3880,7 +4092,7 @@
     // loads are routine: without a generation the first to finish clears the spinner for the rest.
     const generation = ++newsGeneration;
     newsLoading = true;
-    const items: NewsItem[] = [];
+    const items: NewsRow[] = [];
     const now = Date.now();
     await Promise.all(
       servers.filter((s) => !s.isDm).map(async (s) => {
@@ -3889,11 +4101,14 @@
             invoke<Msg[]>("get_statuses", { server: s.id }),
             invoke<UiEvent[]>("get_events", { server: s.id }).catch(() => [] as UiEvent[]),
           ]);
-          for (const st of sts.slice(-5))
-            items.push({ server: s.id, serverName: s.name, kind: "status", ts: st.ts, text: st.text, author: st.author });
+          // The whole feed, not a recent slice. A count that stops at five cannot say how many
+          // announcements are waiting, and the badges above are asking exactly that; the display
+          // list does its own trimming below, where trimming is only a matter of screen space.
+          for (const st of sts)
+            items.push({ server: s.id, serverName: s.name, kind: "status", id: st.id, ts: st.ts, text: st.text, author: st.author, pinned: st.pinned });
           for (const ev of evs)
             if (eventLive(ev, now))
-              items.push({ server: s.id, serverName: s.name, kind: "event", ts: ev.start_ts, text: ev.title, author: ev.author });
+              items.push({ server: s.id, serverName: s.name, kind: "event", id: ev.id, ts: ev.start_ts, text: ev.title, author: ev.author, pinned: false });
         } catch {
           /* unreachable server actor: skip it */
         }
@@ -3902,15 +4117,114 @@
     if (generation !== newsGeneration) return; // a later load owns the list and the spinner
     newsLoading = false;
     if (locked) return; // as loadInbox: the lock cleared this, and it is cross-server text
-    newsItems = items;
+    newsItems = keyNewsRows(items);
   }
-  let newsUpcoming = $derived(newsItems.filter((n) => n.kind === "event").sort((a, b) => a.ts - b.ts));
-  let newsFeed = $derived(newsItems.filter((n) => n.kind === "status").sort((a, b) => b.ts - a.ts).slice(0, 30));
+  // Every announcement mutation on every peer -- a post, an edit, a reaction, a pin, a policy
+  // change -- arrives as the same "status-updated" event, and each one used to re-read both feeds
+  // of every server on the spot. A member reacting three times running is one burst, not three
+  // aggregations, so the trailing edge wins and the whole cross-server pass runs once. Short enough
+  // that the badges still move while the person who caused it is still looking at them.
+  let newsAggregateTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleNewsAggregation() {
+    clearTimeout(newsAggregateTimer);
+    newsAggregateTimer = setTimeout(() => {
+      newsAggregateTimer = undefined;
+      void loadNews();
+    }, 400);
+  }
+
+  // How far this person has read each server's announcements, so the four surfaces above can each
+  // ask without a round-trip on every render. Durability is the sealed UI-state record's job, the
+  // same one that carries drafts and chat read marks: what somebody has read is a reading habit,
+  // and reading habits do not fall back to plaintext storage. Hydrated by `loadUiContinuity`,
+  // written through here, and dropped by `lockScreen` along with the marks it sits beside.
+  let statusCursors = $state<StatusCursors>({});
+  function saveStatusCursor(server: number, cursor: StatusReadCursor) {
+    statusCursors[server] = cursor;
+    // Debounced and best-effort, exactly as the chat marks are: a vault write that fails costs this
+    // device the mark rather than the feed, and the indicators simply announce these posts once
+    // more next launch, which is the safe direction.
+    scheduleUiStateSave();
+  }
+  // Marks taken before the sealed record has finished loading, replayed as soon as it has.
+  //
+  // `restoreReloaded` clears `locked` before `loadUiContinuity` resolves, so the Inbox is on screen
+  // and live for the whole of that read: "Mark all read" can land while the hydration that assigns
+  // `statusCursors` wholesale is still in flight. Writing the mark there loses it in silence --
+  // `scheduleUiStateSave` seals nothing before the record has loaded, and the load then overwrites
+  // what was written -- so the badge clears and comes back a moment later with no error to explain
+  // it. Held rather than refused, because refusing is still dropping somebody's click: replaying it
+  // re-runs the mark against the cursor that actually loaded, which is what would have happened had
+  // the click landed a moment later. One entry per server, because a later snapshot of a feed
+  // covers everything an earlier snapshot of it did.
+  const pendingStatusMarks = new Map<number, StatusPost[]>();
+  function flushPendingStatusMarks() {
+    if (!pendingStatusMarks.size) return;
+    const held = [...pendingStatusMarks];
+    pendingStatusMarks.clear();
+    for (const [server, posts] of held) markStatusesRead(server, posts);
+  }
+  // Takes the read-state module's own shape rather than `Msg`, because both callers hold a
+  // different record of the same posts: the surface has the server's live feed, and "Mark all read"
+  // has the News rows this aggregation built. Both carry the id and timestamp the mark is made of.
+  /** Cover everything in `posts` as read for `server`, and persist it if that moved the mark. */
+  function markStatusesRead(server: number, posts: StatusPost[]) {
+    if (!posts.length) return;
+    if (!uiStateReady) {
+      // Nothing to mark against yet, and nowhere to seal it: see `pendingStatusMarks`.
+      if (!locked) pendingStatusMarks.set(server, posts);
+      return;
+    }
+    const previous = statusCursorFor(statusCursors, server);
+    const next = markStatusRead(posts, Date.now(), previous);
+    if (sameStatusCursor(next, previous)) return; // nothing moved, so nothing to seal
+    saveStatusCursor(server, next);
+  }
+
+  // The News tab's chips. The kind filter and the server filter are one predicate, so the list and
+  // anything counting alongside it cannot end up disagreeing about what a chip means.
+  let newsKindFilter = $state<NewsKindFilter>("all");
+  let newsServerFilter = $state<number | null>(null);
+  let newsMatches = $derived(newsItems.filter(newsFilter(newsKindFilter, newsServerFilter)));
+  let newsUpcoming = $derived(newsMatches.filter((n) => n.kind === "event").sort((a, b) => a.ts - b.ts));
+  // Pinned and Recent are one cut, not two filters: the latest pin per server heads the tab, and
+  // "Recent announcements" is everything else, so a pinned post is lifted rather than listed twice.
+  // An older pin is not in the Pinned section, so it still appears in the feed where its date puts
+  // it -- the exclusion is of the rows actually shown above, not of pinned rows in general.
+  let newsSections = $derived(splitNewsSections(newsMatches, 30));
+  let newsFeed = $derived(newsSections.feed);
+  let newsPinned = $derived(newsSections.pinned);
+  // Each server's read ceiling over the feed this aggregation holds, which is what a row's stamp is
+  // settled against before it is measured. Derived from the whole list rather than per section, so
+  // a chip cannot change what a row is compared with; recomputed with the list, as chat's is.
+  let newsTsCeilings = $derived(newsCeilings(newsItems, Date.now()));
+  // Unfiltered on purpose: a chip narrows what is listed, never what is outstanding, and a badge
+  // that empties because someone picked a filter is a badge that has stopped meaning anything.
+  let newsUnseenNow = $derived(newsUnseenCount(newsItems, statusCursors, newsTsCeilings));
+  let newsServersListed = $derived.by(() => {
+    const seen = new Map<number, string>();
+    for (const n of newsItems) if (!seen.has(n.server)) seen.set(n.server, n.serverName);
+    return [...seen].map(([id, name]) => ({ id, name }));
+  });
+  /** Advance every server's mark over the posts this aggregation actually fetched. */
+  function markAllNewsRead() {
+    const byServer = new Map<number, NewsItem[]>();
+    for (const n of newsItems) {
+      if (n.kind !== "status") continue; // an event's ts is when it starts, not when it was written
+      const held = byServer.get(n.server);
+      if (held) held.push(n);
+      else byServer.set(n.server, [n]);
+    }
+    for (const [server, posts] of byServer) markStatusesRead(server, posts);
+    newsUnseen = false;
+  }
   function jumpToNews(n: NewsItem) {
     navStepStart(); // the server hop and the surface hop are one move, not two
     inboxView = false;
     switchServer(n.server)
       .then(() => switchView(n.kind === "event" ? "events" : "status"))
+      // The row named one post, so land on it rather than on the feed it sits somewhere in.
+      .then(() => (n.kind === "status" && n.id ? openStatusRef(n.id) : undefined))
       .finally(navStepEnd);
   }
 
@@ -4141,16 +4455,16 @@
     if (h < 24) return `${h}h`;
     return `${Math.round(h / 24)}d`;
   }
-  // The presence detail line for a member: "You" / "Online" / "Online · 5m" / "Last seen 5m ago" /
-  // "Offline". Durations only appear for transitions we actually observed this session.
+  // Presence is a member's self-asserted peer id plus local transport evidence, never proof that
+  // the person controls that transport or is online. Durations only use observed transitions.
   function presenceText(fp: string, you: boolean): string {
     if (you) return "You";
     if (onlineMembers.has(fp)) {
       const since = onlineSince[fp];
-      return since ? `Online · ${relTime(nowTick - since)}` : "Online";
+      return since ? `Claimed path connected · ${relTime(nowTick - since)}` : "Claimed path connected";
     }
     const ls = lastSeen[fp];
-    return ls ? `Last seen ${relTime(nowTick - ls)} ago` : "Offline";
+    return ls ? `Last claimed path ${relTime(nowTick - ls)} ago` : "No claimed path connected";
   }
   function fmtSize(n: number): string {
     if (n < 1024) return `${n} B`;
@@ -4387,6 +4701,8 @@
   // 200 MB file cannot be turned into a JS string by the act of rendering a message.
   function loadEmoji(code: string, cid: string) {
     if (activeServerId === null) return;
+    const file = files.find((candidate) => candidate.cid === cid);
+    if (!file || !mayAutoLoadSharedFile(file)) return;
     emojiUrls = { ...emojiUrls, [code]: sharedMediaUrl(cid, activeServerId) };
   }
 
@@ -4494,6 +4810,12 @@
       // activity head against the read marks that just loaded. Without this pass, a message
       // received during a lock or across a restart is silently lost from the indicators.
       rebuildAllUnread();
+      // The announcement indicators are the same rebuild, for the same reason: posts made while
+      // this device was closed or locked raised no event anyone was awake to hear, so the counts
+      // come from the feeds themselves rather than from what this session witnessed. It waits on
+      // the continuity load with the unread pass because the read cursors are what turn those
+      // feeds into a count instead of an announcement of everything that ever happened.
+      void loadNews();
     });
     refreshAllDmRequests();
     loadInbox();
@@ -4508,7 +4830,9 @@
     // latency that exists anyway, and a failed unlock aborts it below.
     if (unlockMethod === "sigil") startSummon();
     try {
-      const reloaded = await invoke<Reloaded[]>("unlock", { passphrase: secret });
+      // The passphrase is an argument and never a recorded field: invokeDebugged records the
+      // command name and its outcome, not what it was called with.
+      const { value: reloaded } = await invokeDebugged<Reloaded[]>("unlock", { passphrase: secret });
       passphrase = "";
       sigilStrokes = [];
       sigilDrawing = [];
@@ -4531,7 +4855,15 @@
   // but every window onto the vault's contents is cleared and getting back in costs the
   // passphrase again. Re-entering calls `unlock`, which no-ops on an already-open vault and hands
   // back the registered servers, so no actor or transport is duplicated.
-  function lockScreen() {
+  function lockScreen(nativeAlreadyLocked = false) {
+    // Lock also cancels calls still waiting on a native permission prompt; those have not yet set
+    // `inCall`, so the ordinary leave path alone cannot see or invalidate them.
+    callLifecycleSession.invalidate();
+    micCaptureSession.invalidate();
+    videoCaptureSession.invalidate();
+    mediaUrls = {};
+    emojiUrls = {};
+    storageHealthCache.clear();
     if (locked) return;
     // Lock wins over an in-progress secret change and drops every transient secret first.
     vaultChangeCurrent = "";
@@ -4550,12 +4882,28 @@
     }
     clearTimeout(uiStateSaveTimer);
     clearTimeout(inboxTimer);
+    clearTimeout(newsAggregateTimer); // a pending re-aggregation must not read feeds behind the lock
     if (inboxIdle !== undefined && "cancelIdleCallback" in window) window.cancelIdleCallback(inboxIdle);
     inboxIdle = undefined;
-    const continuityJson = uiStateReady ? JSON.stringify({ version: 1, drafts, readMarks }) : null;
+    const finalContinuityJson = uiStateReady ? continuityJson() : null;
     try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
     if (inCall) leaveVoice(); // never leave a hot mic behind a lock screen
-    void invoke("lock_session", { uiStateJson: continuityJson }).catch((e) => console.warn("Session locked; final UI continuity save failed", e));
+    // Reply/recovery codes carry current listener routes. Clear them synchronously and ignore any
+    // native event from work that the lock invalidated; the native generation gate independently
+    // prevents the same stale work from registering or sealing a server.
+    joinReplyReady = null;
+    joinReplyInput = "";
+    joinReplyApplying = false;
+    joinReplyNeedsReplace = false;
+    joinReplyOperation += 1;
+    memberRecoveryOperation += 1;
+    memberRecoveryReady = null;
+    memberRecoveryServer = null;
+    memberRecoveryInput = "";
+    memberRecoveryBusy = false;
+    if (!nativeAlreadyLocked) {
+      void invoke("lock_session", { uiStateJson: finalContinuityJson }).catch((e) => console.warn("Session locked; final UI continuity save failed", e));
+    }
     spaceOpen = false; // and no server names floating behind it either
     showSettings = false;
     showServerSettings = false;
@@ -4587,10 +4935,13 @@
     inboxItems = [];
     newsItems = [];
     serverIcons = {};
-    delivery = {};
+    deliverySnapshot = { revision: 0, reports: {} };
     draft = "";
     drafts = {};
     readMarks = {};
+    statusCursors = {}; // a reading habit, sealed beside the marks above and dropped with them
+    fileTrustPolicies = {}; // member trust choices name relationships and leave the screen too
+    pendingStatusMarks.clear(); // and a mark still waiting on hydration is not replayed behind a lock
     uiStateReady = false;
     uiStateSaveFailed = false;
     uiStateLoadGeneration += 1;
@@ -4608,11 +4959,13 @@
     }
     busy = true;
     error = "";
+    const operationGeneration = viewGeneration;
     try {
-      const r = await invoke<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false });
+      const { value: r } = await invokeDebugged<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       addServer(r, displayName);
     } catch (e) {
-      error = String(e);
+      if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = errorText(e);
     } finally {
       busy = false;
     }
@@ -4622,11 +4975,13 @@
     busy = true;
     error = "";
     joinReplyReady = null;
+    const operationGeneration = viewGeneration;
     try {
       const { hex, turn } = unwrapInvite(joinInvite);
       const previewMatchesCode = joinPreviewCode === hex;
       if (!previewMatchesCode) {
         joinPreview = await invoke<InvitePreview>("preview_invite", { inviteHex: hex });
+        if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
         joinPreviewCode = hex;
         joinSwitchboardConsent = false;
       }
@@ -4637,12 +4992,14 @@
       );
       // Do not let the click that first reveals the extra-member privacy boundary also cross it.
       if (assistedAction === "preview") return;
-      const r = await invoke<Found>("join_server", {
+      joinAttemptPending = true;
+      const { value: r } = await invokeDebugged<Found>("join_server", {
         inviteHex: hex,
         displayName,
         isDm: false,
         allowSwitchboards: assistedAction === "switchboard",
       });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       if (turn) storeServerTurn(r.server, turn); // inherit the operator's shared TURN
       addServer(r, displayName);
       joinInvite = "";
@@ -4651,9 +5008,11 @@
       joinSwitchboardConsent = false;
       joinReplyReady = null;
     } catch (e) {
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       joinReplyReady = null;
       error = String(e);
     } finally {
+      joinAttemptPending = false;
       busy = false;
     }
   }
@@ -4661,21 +5020,72 @@
   async function applyJoinReply(replace = false) {
     const server = activeServerId;
     if (server === null || !joinReplyInput.trim()) return;
+    const operationGeneration = viewGeneration;
+    const operation = ++joinReplyOperation;
+    const code = joinReplyInput.trim();
     joinReplyApplying = true;
     joinReplyNeedsReplace = false;
     error = "";
     try {
-      const applied = await invoke<{ helper: boolean }>("apply_join_reply", { server, code: joinReplyInput.trim(), replace });
+      const applied = await invoke<{ helper: boolean }>("apply_join_reply", { server, code, replace });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       notice = applied.helper
         ? "Connection reply accepted. Dialling as a member helper; only the admission handshake will be forwarded."
         : "Connection reply accepted. Dialling the joiner now; keep both apps open.";
       joinReplyInput = "";
     } catch (e) {
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       const message = String(e);
       if (joinReplyNeedsReplacement(message)) joinReplyNeedsReplace = true;
       error = message;
     } finally {
-      joinReplyApplying = false;
+      if (joinReplyOperation === operation) joinReplyApplying = false;
+    }
+  }
+
+  async function mintMemberRecovery() {
+    const server = activeServerId;
+    if (server === null) return;
+    const operationGeneration = viewGeneration;
+    const operation = ++memberRecoveryOperation;
+    memberRecoveryBusy = true;
+    error = "";
+    try {
+      const ready = await invoke<MemberRecoveryReady>("mint_member_recovery", { server });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
+      memberRecoveryReady = ready;
+      memberRecoveryServer = server;
+      notice = "Recovery code ready. Send it privately to a current member of this group; it expires in ten minutes.";
+    } catch (e) {
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
+      memberRecoveryReady = null;
+      memberRecoveryServer = null;
+      error = String(e);
+    } finally {
+      if (memberRecoveryOperation === operation) memberRecoveryBusy = false;
+    }
+  }
+
+  async function applyMemberRecovery() {
+    const server = activeServerId;
+    if (server === null || !memberRecoveryInput.trim()) return;
+    const operationGeneration = viewGeneration;
+    const operation = ++memberRecoveryOperation;
+    memberRecoveryBusy = true;
+    error = "";
+    try {
+      const applied = await invoke<MemberRecoveryApplied>("apply_member_recovery", {
+        server,
+        code: memberRecoveryInput.trim(),
+      });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
+      memberRecoveryInput = "";
+      notice = `Submitted ${applied.submitted_routes} recovery route${applied.submitted_routes === 1 ? "" : "s"} for ${applied.fingerprint.slice(0, 8)}. Waiting for the authenticated connection...`;
+      void Promise.all([refreshMemberRoutes(), refreshConnectivity()]);
+    } catch (e) {
+      if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = String(e);
+    } finally {
+      if (memberRecoveryOperation === operation) memberRecoveryBusy = false;
     }
   }
 
@@ -4686,15 +5096,17 @@
     if (!name) return;
     busy = true;
     error = "";
+    const operationGeneration = viewGeneration;
     try {
       // Derive my profile name from the current profile or fall back to "me"
       const myProfileName = (pName.trim() || name).trim() || "me";
-      const r = await invoke<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
+      const { value: r } = await invokeDebugged<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       addServer(r, name);
       dmName = "";
       showNewDm = false;
     } catch (e) {
-      error = String(e);
+      if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = String(e);
     } finally {
       busy = false;
     }
@@ -4706,17 +5118,23 @@
     if (!name) return;
     busy = true;
     error = "";
+    joinReplyReady = null;
+    const operationGeneration = viewGeneration;
     try {
       // Derive my profile name from the current profile or fall back to "me"
       const myProfileName = (pName.trim() || name).trim() || "me";
-      const r = await invoke<Found>("join_server", { inviteHex: dmInvite.trim(), displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: name });
+      joinAttemptPending = true;
+      const { value: r } = await invokeDebugged<Found>("join_server", { inviteHex: dmInvite.trim(), displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: name });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
+      joinReplyReady = null;
       addServer(r, name);
       dmName = "";
       dmInvite = "";
       showAddFriend = false;
     } catch (e) {
-      error = String(e);
+      if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = String(e);
     } finally {
+      joinAttemptPending = false;
       busy = false;
     }
   }
@@ -4727,7 +5145,17 @@
       ...servers,
       { id: r.server, name, channels, active: r.channel, unread: [], invite: "", isDm: r.is_dm },
     ];
+    if (!r.is_dm) {
+      // A numeric native id can be reused after a leave + restart. Onboarding is authoritative for
+      // this newly joined group and must overwrite any orphaned policy rather than inherit it.
+      fileTrustPolicies = {
+        ...fileTrustPolicies,
+        [r.server]: { mode: onboardingFileTrust, trustedAuthors: [] },
+      };
+      void saveUiStateImmediately();
+    }
     showAdd = false;
+    onboardingFileTrust = "on-demand";
     // A server adopts the name as your profile (existing behaviour); a DM's label is the friend's
     // name, so leave your profile alone.
     if (!r.is_dm) pName = name;
@@ -4744,10 +5172,12 @@
     error = "";
     notice = "";
     menu = null;
+    const operationGeneration = viewGeneration;
     try {
       // Derive my profile name from the current profile or fall back to "me"
       const myProfileName = (pName.trim() || name).trim() || "me";
-      const r = await invoke<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
+      const { value: r } = await invokeDebugged<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       // Add the DM to the list without switching away from the current server.
       servers = [
         ...servers,
@@ -4761,7 +5191,7 @@
         ? `Friend request sent to ${name}: they'll see it in their DMs.`
         : `Couldn't reach ${name} right now. Open DMs to share a friend code instead.`;
     } catch (e) {
-      error = String(e);
+      if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = String(e);
     } finally {
       busy = false;
     }
@@ -4800,16 +5230,22 @@
   async function acceptDmRequest(req: DmRequest) {
     busy = true;
     error = "";
+    joinReplyReady = null;
+    const operationGeneration = viewGeneration;
     try {
       // Derive my profile name from the current profile or fall back to "me"
       const myProfileName = (pName.trim() || req.from_name).trim() || "me";
-      const r = await invoke<Found>("join_server", { inviteHex: req.invite, displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: req.from_name });
+      joinAttemptPending = true;
+      const { value: r } = await invokeDebugged<Found>("join_server", { inviteHex: req.invite, displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: req.from_name });
+      if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
+      joinReplyReady = null;
       addServer(r, req.from_name);
       await invoke("dismiss_dm_request", { server: req.server, fromFp: req.from_fp });
       dmRequests = dmRequests.filter((x) => !(x.server === req.server && x.from_fp === req.from_fp));
     } catch (e) {
-      error = String(e);
+      if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = String(e);
     } finally {
+      joinAttemptPending = false;
       busy = false;
     }
   }
@@ -4867,6 +5303,8 @@
     caseEvidence = new Set();
     moderationUserFilter = "";
     storageHealth = null;
+    storageChecking = false;
+    storageRepairing = false;
     storageRepairNote = "";
     messages = [];
     messageRenderCache.clear();
@@ -4874,10 +5312,25 @@
     messageWindowScope = "";
     chatStickToBottom = true;
     channelTopic = "";
-    delivery = {};
+    deliverySnapshot = { revision: 0, reports: {} };
     roster = [];
     members = 0;
     onlineMembers = new Set();
+    memberRoutes = [];
+    memberRoutesReceivedAt = 0;
+    memberRoutesUnavailable = false;
+    manualRedialNote = "";
+    joinReplyReady = null;
+    joinReplyOperation += 1;
+    joinReplyInput = "";
+    joinReplyApplying = false;
+    joinReplyNeedsReplace = false;
+    joinAttemptPending = false;
+    memberRecoveryOperation += 1;
+    memberRecoveryReady = null;
+    memberRecoveryServer = null;
+    memberRecoveryInput = "";
+    memberRecoveryBusy = false;
     profiles = {};
     // Roles gate the privileged surfaces, so the empty map is the safe transient: unprivileged
     // until this group's own roles resolve.
@@ -4896,6 +5349,15 @@
     showWikiHistory = false;
     wikiHistorySel = "";
     statuses = [];
+    // The policy is this server's, and so is anything half-done to a post of its feed. The
+    // composer draft included: it has no per-server home the way a channel draft does, so left
+    // alone it follows you into the next server's noticeboard and sits behind the lock screen,
+    // which is the one place this function exists to leave nothing.
+    statusPolicy = false;
+    statusDraft = "";
+    statusEditingId = "";
+    statusEditDraft = "";
+    statusReactionPickerFor = "";
     events = [];
     moderation = { events: [], votes: [] };
     moderationMessages = [];
@@ -4916,6 +5378,7 @@
     // Custom emoji are per-server but emojiUrls is keyed by CODE, so two servers defining the same
     // :code: would show the first one's image on the second.
     emojiUrls = {};
+    mediaUrls = {};
     joinAttempts = []; // who tried to join THIS server: never carried to the next one
     // The wiki editor and the chat/fileshare affordances below used to be reset only by
     // switchServer, so the paths that end with no active group (leaving your last server, empty
@@ -4987,6 +5450,8 @@
     loadVerified(id); // this server's locally-verified members
     loadDraftFor(chanKey()); // restore this server's active-channel draft
     captureDivider(); // snapshot the read boundary for this server's active channel
+    // The announcement cursors need no per-server step: every server's arrived with the vault at
+    // unlock, so `statusCursorFor` can already answer for this one before anything renders.
     // One barrier, not two. refreshModeration used to be awaited AFTER this batch because it read
     // the privileged message corpus and so had to see this server's roles first; it now fetches
     // only the case/vote state everyone needs in chat, and the corpus loads with the surface that
@@ -5048,11 +5513,19 @@
   }
 
   async function leaveServer(id: number) {
+    // Leaving a server is also a privacy boundary. End its independent WebRTC session before the
+    // native request can hang or fail so a forgotten server can never retain a hot mic, display or
+    // separately granted application-audio source.
+    if (inCall && callServer === id) leaveVoice();
     try {
       await invoke("leave_server", { server: id });
     } catch (e) {
       error = String(e);
+      return;
     }
+    const { [id]: _removedTrust, ...remainingTrust } = fileTrustPolicies;
+    fileTrustPolicies = remainingTrust;
+    void saveUiStateImmediately();
     servers = servers.filter((s) => s.id !== id);
     if (activeServerId === id) {
       if (servers.length) switchServer(servers[0].id);
@@ -5112,7 +5585,7 @@
     messageWindowScope = "";
     chatStickToBottom = true;
     channelTopic = "";
-    delivery = {};
+    deliverySnapshot = { revision: 0, reports: {} };
     cur.active = id;
     loadDraftFor(chanKey()); // restore the target channel's draft
     if (showSearch && !keepSearch) closeSearch();
@@ -5156,10 +5629,10 @@
     editingTopic = false;
     if (t === channelTopic) return;
     try {
-      await invoke("set_channel_topic", { server: activeServerId, channel: cur.active, topic: t });
+      await invokeDebugged("set_channel_topic", { server: activeServerId, channel: cur.active, topic: t });
       channelTopic = t;
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
 
@@ -5242,6 +5715,81 @@
   function chatOnScreenNow(): boolean {
     return chatIsObserved(chatSurfaceState(true));
   }
+  /** One channel's badge state right now, as a transition record needs to describe it. */
+  function unreadStateOf(server: number, channel: string): UnreadState {
+    const s = servers.find((x) => x.id === server);
+    return {
+      // A badge for a channel the catalog does not list goes nowhere: `markChannelUnread`
+      // returns early. That silent drop is the one this record exists to stop hiding.
+      listed: !!s && s.channels.some((c) => c.id === channel),
+      unread: s?.unread.includes(channel) ?? false,
+    };
+  }
+  /** A decision taken when the event arrived, waiting for the badge to actually move. */
+  type PendingUnread = { decision: UnreadDecision; before: UnreadState; isActive: boolean };
+  /**
+   * Read what a channel update means for unread state, at the moment the event arrives.
+   *
+   * Deliberately does not decide anything: the branches below still own the behaviour. This
+   * observes the same inputs they use so a badge that failed to appear leaves evidence of which
+   * condition accounted for it rather than none at all.
+   *
+   * Split from the recording because the two happen at different times. The surface state that
+   * decides "seen" is only true of the moment the event landed, while whether a badge moved is
+   * only knowable after the refresh that moves it. Reading both at once is what let the log say
+   * `mark_unread` about a transition that never happened.
+   *
+   * Only arrivals are recorded loudly. A reaction or a topic rename firing this on every keystroke
+   * would drown the section it is meant to explain, so those return `null`.
+   */
+  function beginUnreadDecision(server: number, channel: string, change: ChannelChange): PendingUnread | null {
+    const isActive = server === activeServerId && channel === cur?.active;
+    const decision = unreadDecision(change, chatSurfaceState(chatStickToBottom), isActive);
+    if (decision.decision === "not_an_arrival") return null;
+    return { decision, before: unreadStateOf(server, channel), isActive };
+  }
+  /**
+   * Write down what the decision actually did, once the badge has had its chance to move.
+   *
+   * The invariant worth being able to check afterwards is that an arrival either produces an
+   * unread transition or a valid explanation of why it was already seen. A record that cannot
+   * tell those apart from a transition that was attempted and silently dropped is not evidence of
+   * anything, so a disagreement between the two is reported at `warn` under its own name.
+   */
+  function finishUnreadDecision(
+    pending: PendingUnread | null,
+    server: number,
+    channel: string,
+    correlation: EventCorrelation = {},
+  ) {
+    if (!pending) return;
+    const after = unreadStateOf(server, channel);
+    const t = { decision: pending.decision, before: pending.before, after };
+    const mismatch = transitionMismatch(t);
+    diagRecord({
+      section: "channels",
+      code: "UNREAD.DECISION",
+      level: mismatch ? "warn" : "debug",
+      // The decision joins the operation that caused it. "I sent a message and no badge appeared"
+      // and "someone sent me one and no badge appeared" are different bugs, and the trace is what
+      // separates them without guessing from timestamps.
+      ...correlation,
+      fields: {
+        decision: pending.decision.decision,
+        reason: pending.decision.reason,
+        active_channel: pending.isActive,
+        // The transition, not just the conclusion: "marked unread" on a channel that was already
+        // unread is a different event from one that changed the badge, and the review's invariant
+        // is about transitions.
+        was_unread: pending.before.unread,
+        now_unread: after.unread,
+        listed: after.listed,
+        applied: transitionApplied(t),
+        // Present only when there is one, so its absence is not a field to read past.
+        ...(mismatch ? { mismatch } : {}),
+      },
+    });
+  }
   /**
    * Reconcile the active conversation's indicators with what is actually on screen.
    *
@@ -5294,13 +5842,30 @@
       const s = servers.find((x) => x.id === server);
       if (!s) return;
       const known = new Set(s.channels.map((c) => c.id));
-      const rebuilt = unreadFromHeads(
+      const verdicts = unreadFromHeads(
         heads,
-        (channel) => readMarks[chatScopeKey(server, channel)] ?? 0,
+        (channel) => readMarkOf(chatScopeKey(server, channel)),
         Date.now(),
         (channel) => known.has(channel),
       );
+      const rebuilt = unreadChannels(verdicts);
       if (rebuilt.length) s.unread = [...new Set([...s.unread, ...rebuilt])];
+      // Which cursor the scan actually got to decide by. A rebuild that fell back to timestamps
+      // for most of a server is the signal that read marks predate stable ids, and it is the
+      // difference between "no badges because nothing arrived" and "no badges because the
+      // comparison could not be made honestly".
+      diagRecord({
+        section: "channels",
+        code: "UNREAD.REBUILD",
+        level: "debug",
+        fields: {
+          heads: heads.length,
+          badged: rebuilt.length,
+          by_message_id: verdicts.filter((v) => v.cursor === "message_id").length,
+          by_timestamp: verdicts.filter((v) => v.cursor === "timestamp").length,
+          skewed: verdicts.filter((v) => v.reason === "implausible_timestamp").length,
+        },
+      });
       // The conversation on screen is the one exception: it is being looked at right now.
       if (server === activeServerId && cur?.active) settleReadState();
     } catch {
@@ -5317,29 +5882,35 @@
   // completion points.
   const channelEventRefresh = new CoalescedAsyncRefresh(refresh);
 
-  // Delivery states for OWN messages (docs/design-delivery-states.md). Evidence-based lower
-  // bounds: a member is counted only once it has provably built on the message, so counts
-  // only rise and 0 means "no proof yet", never "failed". Red is reserved for the one true
-  // negative signal we have: no peers reachable at all.
+  // Delivery states for OWN messages (docs/design-delivery-states.md). A member is counted only
+  // once it has proven receipt or built on the message. The current-roster count may fall after
+  // membership changes or bounded evidence eviction; 0 still means "no present proof", never
+  // "failed". Red is reserved for the one true negative signal: no peers reachable at all.
   type DeliveryState = { id: string; delivered: number; reachable: number; any_peer: boolean };
-  let delivery = $state<Record<string, DeliveryState>>({});
+  type DeliverySnapshot = { revision: number; states: DeliveryState[] };
+  let deliverySnapshot = $state({ revision: 0, reports: {} as Record<string, DeliveryState> });
+  let delivery = $derived(deliverySnapshot.reports);
   async function refreshDelivery() {
     const gen = viewGeneration;
     const server = activeServerId;
     const channel = cur?.active;
+    // A failed request may only clear the view it was sent for. A delivery event that advances
+    // this watermark while the request is in flight wins over that older failure.
+    const requestedAtRevision = deliverySnapshot.revision;
     if (server === null || !channel) {
-      delivery = {};
+      deliverySnapshot = { revision: 0, reports: {} };
       return;
     }
     try {
-      const list = await invoke<DeliveryState[]>("get_delivery", { server, channel });
+      const snapshot = await invoke<DeliverySnapshot>("get_delivery", { server, channel });
       if (!viewCurrent(gen, server) || cur?.active !== channel) return;
-      const map: Record<string, DeliveryState> = {};
-      for (const s of list) map[s.id] = { id: s.id, ...mergeDelivery(delivery[s.id], s) };
-      delivery = map;
+      deliverySnapshot = replaceDeliverySnapshot(deliverySnapshot, snapshot);
     } catch {
       if (!viewCurrent(gen, server) || cur?.active !== channel) return;
-      delivery = {}; // older backend or closed actor: ticks simply don't render
+      deliverySnapshot = clearDeliverySnapshotAfterFailedQuery(
+        deliverySnapshot,
+        requestedAtRevision,
+      ); // closed actor: ticks simply don't render
     }
   }
   // Index of your most recent message in the log (-1 if none): the one message whose state is
@@ -5359,8 +5930,9 @@
       latest: mi === lastOwnIdx,
     };
   }
-  // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ partial ·
-  // ✓ all reachable confirmed · ✓✓ the whole roster confirmed. Shown on EVERY message of yours
+  // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ held by
+  // part of the roster · ✓✓ the whole roster confirmed. We intentionally do not infer "all live
+  // peers confirmed" from two unrelated counts. Shown on EVERY message of yours
   // the actor still has evidence for, not only the newest: the point of a per-message tick is to
   // be able to look back up the log and see which ones landed.
   function deliveryTick(m: Msg, mi: number): { g: string; cls: string; tip: string } | null {
@@ -5434,6 +6006,23 @@
       // peer. Surfacing an error banner over a cosmetic lookup would be worse than the gap.
     }
   }
+  async function refreshCallFiles() {
+    const server = callServer;
+    const channel = callChannel;
+    const lease = activeCallLease;
+    if (!inCall || server === null || !channel || !callLifecycleSession.isCurrent(lease)) return;
+    try {
+      const listing = await invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", { server });
+      if (!inCall || callServer !== server || callChannel !== channel ||
+        activeCallLease !== lease || !callLifecycleSession.isCurrent(lease)) return;
+      callFiles = listing.files;
+      if (jukeNow) void jukeApply(false);
+    } catch {
+      // Absence of a current authenticated listing fails closed in jukeApply. The room transport
+      // may continue; this listener simply cannot fetch or decode the referenced track.
+      if (inCall && callServer === server && callChannel === channel && activeCallLease === lease) callFiles = [];
+    }
+  }
   async function refreshFiles() {
     const gen = viewGeneration;
     const server = activeServerId;
@@ -5460,53 +6049,68 @@
     }
   }
   async function refreshStorageHealth() {
-    if (activeServerId === null) return;
+    if (activeServerId === null || locked) return;
+    const gen = viewGeneration;
     const server = activeServerId;
     const cached = storageHealthCache.get(server);
     if (cached) {
-      storageHealth = cached;
+      if (unlockedViewCurrent(gen, server)) storageHealth = cached;
       return;
     }
     storageChecking = true;
     try {
       const report = await invoke<StorageHealth>("get_storage_health", { server });
+      if (!unlockedViewCurrent(gen, server)) return;
       storageHealthCache.set(server, report);
-      if (activeServerId === server) storageHealth = report;
+      storageHealth = report;
     } catch (e) {
-      if (activeServerId === server) error = String(e);
+      if (unlockedViewCurrent(gen, server)) error = String(e);
     } finally {
-      // Keyed: a late probe from the server you left must not clear the spinner for the one you
-      // opened, which is still reading.
-      if (activeServerId === server) storageChecking = false;
+      // Exact-scope and unlock gated: stale work may neither refill cleared state after lock nor
+      // clear the spinner for a newer probe in another visit to this server.
+      if (unlockedViewCurrent(gen, server)) storageChecking = false;
     }
   }
   async function repairStorage() {
-    if (activeServerId === null || storageRepairing) return;
+    if (activeServerId === null || storageRepairing || locked) return;
+    const gen = viewGeneration;
+    const server = activeServerId;
     storageRepairing = true;
     storageRepairNote = "";
     try {
-      const server = activeServerId;
       const result = await invoke<{ attempted_chunks: number; recovered_chunks: number; health: StorageHealth }>(
         "repair_storage", { server },
       );
+      if (!unlockedViewCurrent(gen, server)) return;
       storageHealthCache.set(server, result.health);
-      if (activeServerId === server) storageHealth = result.health;
-      storageRepairNote = result.attempted_chunks
-        ? `Checked ${result.attempted_chunks} damaged or missing chunks; recovered ${result.recovered_chunks}.`
-        : "Everything referenced by this server already verifies.";
+      storageHealth = result.health;
+      storageRepairNote = storageRepairNotice(result);
       await refreshFiles();
     } catch (e) {
-      error = String(e);
+      if (unlockedViewCurrent(gen, server)) error = String(e);
     } finally {
-      storageRepairing = false;
+      if (unlockedViewCurrent(gen, server)) storageRepairing = false;
     }
+  }
+
+  async function exportStoredFile(cid: string) {
+    let listed = files.find((file) => file.cid === cid);
+    if (!listed) {
+      await refreshFiles();
+      listed = files.find((file) => file.cid === cid);
+    }
+    if (!listed) {
+      toast("That file is no longer listed in this server.", "warn", 5000);
+      return;
+    }
+    await downloadFile(listed);
   }
   // Lowercase-hex cids embedded in a live wiki page (the never-decay set).
   let wikiPinned = $state<Set<string>>(new Set());
   const isPinned = (cid: string) => wikiPinned.has(cid.toLowerCase());
 
   // The availability of a file for the browser indicator: held locally / partially downloaded /
-  // fetchable from peers / no peers online: or actively downloading. Reactive (reads files,
+  // fetchable from a previously authenticated live peer / no proven path: or actively downloading. Reactive (reads files,
   // downloads, hasPeers). The colour conveys it; `label` is the status text.
   type Avail = { cls: string; icon: string; label: string };
   function availOf(f: UiFile): Avail {
@@ -5517,13 +6121,13 @@
     if (dl && (dl.status === "queued" || dl.status === "waiting"))
       return hasPeers
         ? { cls: "downloading", icon: "↓", label: "Waiting for source" }
-        : { cls: "offline", icon: "○", label: "No peers online" };
+        : { cls: "offline", icon: "○", label: "No proven member path" };
     if (f.total > 0 && f.held >= f.total)
       return { cls: "local", icon: "●", label: "On this device" };
     if (f.held > 0)
       return { cls: "partial", icon: "◐", label: `Partial ${f.held}/${f.total}` };
     if (hasPeers) return { cls: "remote", icon: "○", label: "Downloadable" };
-    return { cls: "offline", icon: "○", label: "No peers online" };
+    return { cls: "offline", icon: "○", label: "No proven member path" };
   }
   async function refreshStatuses() {
     const gen = viewGeneration;
@@ -5549,6 +6153,81 @@
       if (viewCurrent(gen, srv)) error = String(e);
     }
   }
+  // --- the Announcements surface's own reads ----------------------------------------------------
+  // The composer is offered to whoever the backend would accept: owner/admin always, everyone else
+  // only while this server's policy is open. It decides what is drawn, never what is allowed.
+  let canPostStatus = $derived(canModerate || statusPolicy);
+  // This person's news cue for this server: a local preference, nothing replicated and nothing any
+  // other member can see. The chip reads the EFFECTIVE answer (master switch, then the global
+  // category, then this server's override) so it can never claim a cue the master switch has
+  // silenced, and a click writes an explicit "on"/"off" rather than reverting to inherit, because a
+  // control with two visible states needs two states it can actually write.
+  let statusCueOn = $derived(soundPolicy("news", activeServerId).enabled);
+  function toggleStatusCue() {
+    if (activeServerId === null) return;
+    setServerSoundEnabled("news", statusCueOn ? "off" : "on");
+  }
+  let statusCursor = $derived(activeServerId === null ? NO_STATUS_READ : statusCursorFor(statusCursors, activeServerId));
+  // The newest stamp in this feed this machine is willing to believe, which every unread question
+  // below is asked against: a post above it is judged where the ceiling puts it, exactly as the
+  // mark that covered it was written. Recomputed only when the rows change, as chat's is.
+  let statusTsCeiling = $derived(statusCeiling(statuses, Date.now()));
+  // Zero for a DM, which has no noticeboard: the tab is not offered there, and a chip counting a
+  // surface nobody can open is a chip that can never be cleared.
+  let statusUnreadNow = $derived(cur?.isDm ? 0 : statusUnreadCount(statuses, statusCursor, statusTsCeiling));
+  // Pinned posts render in their own block above the feed and are left out of it, so a pin lifts a
+  // post rather than duplicating it. Both halves keep `get_statuses`' newest-first order.
+  let pinnedStatuses = $derived(statuses.filter((s) => s.pinned));
+  let statusFeed = $derived(statuses.filter((s) => !s.pinned));
+  // The read boundary as it stood when this surface was opened, and the server it was taken for.
+  //
+  // Opening the surface marks it read, so the live cursor moves in the same frame the feed renders
+  // and a divider drawn against it would disappear exactly as you arrived to look at it. The
+  // snapshot is what the divider and the unread cards are measured against, and it is released on
+  // the way out so returning takes a fresh one. Chat keeps a boundary of its own for this reason
+  // (`captureDivider`); this is the announcements' copy of the same idea.
+  let statusDividerCursor = $state<StatusReadCursor>(NO_STATUS_READ);
+  let statusDividerFor = $state<number | null>(null);
+  // Falls back to the live cursor until the snapshot exists, so the first render of a surface shows
+  // the boundary the store already holds rather than a feed briefly claiming to be entirely unread.
+  let statusBoundary = $derived(statusDividerFor === activeServerId ? statusDividerCursor : statusCursor);
+  let statusNewCount = $derived(statusUnreadCount(statuses, statusBoundary, statusTsCeiling));
+  // Where the NEW divider sits: above the oldest unread post, which in a newest-first array is the
+  // LAST unread index. Computed over the feed the divider is drawn in, so the pinned block (which
+  // is out of chronological order by construction) cannot drag it to the wrong row.
+  let statusDividerAt = $derived(firstStatusUnreadIndex(statusFeed, statusBoundary, statusTsCeiling, "newest-first"));
+  // Reading the surface is what marks it read: the switch onto it, and anything arriving while it
+  // is the visible surface and somebody is actually there. Everything this writes is untracked,
+  // because a read of one's own write is a loop; the posts, the surface and whether the window is
+  // being looked at are the inputs that should re-run it.
+  //
+  // Two questions, deliberately not one. Being ON the surface owns the divider: the boundary is
+  // snapshotted on arrival and released on the way out, so alt-tabbing away and back must not move
+  // the NEW line somebody left mid-read. Being on the surface AND looking at it owns the mark,
+  // because `markStatusesRead` is durable -- an announcement landing while the app sits unfocused
+  // on this tab would otherwise be marked read forever by a refresh nobody witnessed. Both terms
+  // are `$state`, so returning to the window re-runs this and reads it then, with the divider it
+  // was left with still in place. This is chat's rule (`chatIsObserved`) for this surface.
+  $effect(() => {
+    const surface: StatusObservation = {
+      view, inboxView, spaceOpen, isDm: !!cur?.isDm, windowFocused, documentVisible,
+    };
+    const onSurface = statusSurfaceOpen(surface);
+    const observed = statusIsObserved(surface);
+    const server = activeServerId;
+    const posts = statuses;
+    untrack(() => {
+      if (!onSurface || server === null) {
+        statusDividerFor = null;
+        return;
+      }
+      if (statusDividerFor !== server) {
+        statusDividerCursor = statusCursorFor(statusCursors, server);
+        statusDividerFor = server;
+      }
+      if (observed) markStatusesRead(server, posts);
+    });
+  });
   // The media plane's own report. The mesh and the call are two separate NAT-traversal stacks, so
   // "chat works" says nothing about whether a call will, and until this was surfaced there was
   // nowhere to look when one failed. See get_call_transport.
@@ -5583,6 +6262,16 @@
   let joinAttempts = $state<JoinAttempt[]>([]);
   let joinLogCopied = $state(false);
   let connectivity = $state<Connectivity | null>(null);
+  /** Current-server route evidence. Unlike presence, each row says exactly what this device knows. */
+  let memberRoutes = $state<MemberRoute[]>([]);
+  /** Wall-clock receipt time used only to advance a backend-provided historical age on screen. */
+  let memberRoutesReceivedAt = $state(0);
+  /** A failed local read retains the same-server snapshot but strips it of current-evidence status. */
+  let memberRoutesUnavailable = $state(false);
+  let manualRedialBusy = $state(false);
+  let manualRedialNote = $state("");
+  let connectedMemberRouteCount = $derived(memberRoutes.filter(routeIsConnected).length);
+  const memberRouteRefreshGeneration = new Map<number, number>();
   type SwitchboardStatus = {
     offered: boolean;
     eligible: boolean;
@@ -5594,8 +6283,33 @@
   const switchboardRefreshGeneration = new Map<number, number>();
   let connectivityRefreshGeneration = 0;
   let connCopied = $state(false);
-  let debugLog = $state<{ enabled: boolean; active: boolean; dir: string; file: string } | null>(null);
+  /**
+   * The debug log's preference and its actual sink health, which are separate on purpose.
+   *
+   * `enabled` is what the user asked for; `state` is what the writer is doing. They used to be one
+   * boolean assigned from the preference, so a process that never managed to open a file still
+   * reported itself active. Someone could then reproduce a hard bug on the strength of that word
+   * and find nothing to send, which spends the reproduction and returns nothing.
+   */
+  type DebugLogState = {
+    enabled: boolean;
+    active: boolean;
+    state: "stopped" | "active" | "degraded" | "failed";
+    error: string;
+    session: string;
+    dir: string;
+    file: string;
+    events_written: number;
+    bytes_written: number;
+    events_dropped: number;
+    events_truncated: number;
+    queue_depth: number;
+    queue_high_water: number;
+    session_quota_bytes: number;
+  };
+  let debugLog = $state<DebugLogState | null>(null);
   let debugLogBusy = $state(false);
+  let debugLogTested = $state(false);
 
   async function refreshJoinAttempts() {
     const gen = viewGeneration;
@@ -5630,6 +6344,74 @@
         connectivityRefreshGeneration,
       );
     }
+  }
+  async function refreshMemberRoutesNow() {
+    const server = activeServerId;
+    if (server === null) {
+      memberRoutes = [];
+      memberRoutesReceivedAt = 0;
+      memberRoutesUnavailable = false;
+      return;
+    }
+    const generation = (memberRouteRefreshGeneration.get(server) ?? 0) + 1;
+    memberRouteRefreshGeneration.set(server, generation);
+    try {
+      const routes = await invoke<MemberRoute[]>("get_member_routes", { server });
+      // A slow response for the previous server must never put its fingerprints or route evidence
+      // under the newly selected server's heading.
+      if (memberRouteRefreshGeneration.get(server) !== generation) return;
+      const merged = mergeMemberRouteRead(
+        activeServerId,
+        server,
+        memberRoutes,
+        memberRoutesUnavailable,
+        routes,
+      );
+      if (!merged.applied) return;
+      memberRoutes = merged.routes;
+      memberRoutesUnavailable = merged.unavailable;
+      memberRoutesReceivedAt = Date.now();
+    } catch {
+      if (memberRouteRefreshGeneration.get(server) !== generation) return;
+      const merged = mergeMemberRouteRead(
+        activeServerId,
+        server,
+        memberRoutes,
+        memberRoutesUnavailable,
+        null,
+      );
+      if (!merged.applied) return;
+      memberRoutes = merged.routes;
+      memberRoutesUnavailable = merged.unavailable;
+    }
+  }
+  async function manualFallbackRedial() {
+    const server = activeServerId;
+    if (server === null || manualRedialBusy) return;
+    manualRedialBusy = true;
+    manualRedialNote = "";
+    try {
+      const outcome = await invoke<string>("manual_fallback_redial", { server });
+      if (activeServerId !== server) return;
+      manualRedialNote = outcome === "submitted"
+        ? "A policy-approved retry pass was submitted. This does not mean every candidate was attempted or connected."
+        : outcome === "cooling_down"
+          ? "A recent manual retry is still cooling down. Automatic recovery remains active."
+          : outcome === "no_routes"
+            ? "No current signed member record contains a policy-approved route to retry."
+            : "The shared dial-safety budget deferred this retry; automatic recovery will try later.";
+      await refreshMemberRoutes();
+    } catch (e) {
+      if (activeServerId === server) manualRedialNote = `Retry unavailable: ${String(e)}`;
+    } finally {
+      manualRedialBusy = false;
+    }
+  }
+  // Connection/path events can arrive in bursts. Keep at most one local actor read active and one
+  // coalesced follow-up; generation/server checks above still reject a slow response after switch.
+  const memberRouteRefresh = new CoalescedAsyncRefresh(async () => refreshMemberRoutesNow());
+  function refreshMemberRoutes(): Promise<void> {
+    return memberRouteRefresh.request();
   }
   async function refreshSwitchboards() {
     const server = activeServerId;
@@ -5695,6 +6477,104 @@
       debugLogBusy = false;
     }
   }
+  /**
+   * Put a marked record through the whole pipeline and re-read the sink's health.
+   *
+   * The only control here that proves anything. Every other signal on this page is inferred from a
+   * preference or from state captured at startup, so a sink that has since filled its quota or lost
+   * its file still looks fine. This emits now, waits for the writer, and reports what came back.
+   */
+  async function testDebugLog() {
+    debugLogBusy = true;
+    try {
+      debugLog = await invoke("test_debug_logging");
+      debugLogTested = true;
+      setTimeout(() => (debugLogTested = false), 4000);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      debugLogBusy = false;
+    }
+  }
+  /** How the sink's state reads to someone who did not write it. */
+  function debugLogSummary(d: DebugLogState): { tone: "ok" | "warn" | "danger" | "faint"; text: string } {
+    if (d.state === "failed") {
+      return { tone: "danger", text: d.error || "Not writing, and the reason was not recorded." };
+    }
+    if (d.state === "degraded") {
+      return {
+        tone: "warn",
+        text: d.events_dropped
+          ? `Writing, but ${d.events_dropped.toLocaleString()} record(s) never reached the file.`
+          : "Writing, but close enough to this session's limit to matter.",
+      };
+    }
+    if (d.state === "active") {
+      return {
+        tone: "ok",
+        text: `Writing. ${d.events_written.toLocaleString()} entries, ${formatBytes(d.bytes_written)} so far.`,
+      };
+    }
+    return {
+      tone: "faint",
+      text: d.enabled
+        ? "Not writing yet. A log can only be opened when the app starts, so restart Mewtual."
+        : "Not writing, because you have logging switched off.",
+    };
+  }
+  // ---- debug console (docs/design-debug-console.md) ------------------------------------
+  //
+  // The console itself lives in DebugConsole.svelte, lazily imported like the other overlays.
+  // This file keeps only what routing needs: whether it is open, which section it opens on, and
+  // the plain snapshots it is given. Nothing application-owned crosses that boundary, so the
+  // console cannot reach into state it has no business touching, and a 20,000 line file does not
+  // grow a diagnostics suite inside it.
+  let showDebugConsole = $state(false);
+  let dbgSection = $state<DbgSection>("overview");
+  type DebugConsoleComponent = (typeof import("./DebugConsole.svelte"))["default"];
+  let DebugConsole = $state<DebugConsoleComponent | null>(null);
+  let debugConsoleLoading = false;
+  let debugConsoleError = $state("");
+  async function loadDebugConsole() {
+    if (DebugConsole || debugConsoleLoading) return;
+    debugConsoleLoading = true;
+    debugConsoleError = "";
+    try {
+      DebugConsole = (await import("./DebugConsole.svelte")).default;
+    } catch (cause) {
+      debugConsoleError = String(cause);
+    } finally {
+      debugConsoleLoading = false;
+    }
+  }
+  $effect(() => {
+    if (showDebugConsole && !DebugConsole) void loadDebugConsole();
+  });
+  function openDebugConsole(section: DbgSection = "overview") {
+    dbgSection = section;
+    showDebugConsole = true;
+    showSettings = false;
+  }
+  function closeDebugConsole() {
+    showDebugConsole = false;
+  }
+  /**
+   * The live call flattened into plain data, taken when the console asks rather than held.
+   *
+   * `RTCPeerConnection` fields change without notifying anything, so handing over the objects would
+   * render whatever was true at the last unrelated redraw. A snapshot on the console's own poll is
+   * simpler and honest about how fresh it is.
+   */
+  function debugVoicePeers(): DebugVoicePeer[] {
+    return Object.entries(callPeers).map(([fp, p]) => ({
+      fingerprint: fp,
+      connection: p.pc.connectionState,
+      ice: p.pc.iceConnectionState,
+      signaling: p.pc.signalingState,
+      path: peerTransport[fp] ?? "unknown",
+    }));
+  }
+
   async function copyJoinLog() {
     await copyText(formatJoinLog(joinAttempts));
     joinLogCopied = true;
@@ -5775,12 +6655,120 @@
   async function postStatus() {
     const text = statusDraft.trim();
     if (!text || activeServerId === null) return;
-    statusDraft = "";
+    // Kept until the invoke returns, not cleared on the way in: a member posting into a feed that
+    // is closed to them is now refused natively, and clearing first would take the words with it.
     try {
-      await invoke("post_status", { server: activeServerId, text });
+      await invokeDebugged("post_status", { server: activeServerId, text });
+      statusDraft = "";
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
+  }
+  // Who may post here. The read rides the feed document, so a policy someone else changed arrives
+  // as the same "status-updated" event the posts do and is re-read there.
+  async function refreshStatusPolicy() {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) return;
+    try {
+      const next = await invoke<boolean>("get_status_policy", { server });
+      if (!viewCurrent(gen, server)) return; // a late answer would gate the feed you opened instead
+      statusPolicy = next;
+    } catch {
+      /* unreachable server actor: the closed default already stands */
+    }
+  }
+  async function toggleStatusPolicy() {
+    if (activeServerId === null || statusPolicyBusy) return;
+    statusPolicyBusy = true;
+    try {
+      await invokeDebugged("set_status_policy", { server: activeServerId, membersMayPost: !statusPolicy });
+      await refreshStatusPolicy();
+    } catch (e) {
+      error = errorText(e);
+    } finally {
+      statusPolicyBusy = false;
+    }
+  }
+  async function startStatusEdit(s: Msg) {
+    statusEditingId = s.id;
+    statusEditDraft = s.text;
+    // A card's edit box replaces prose in the middle of a scrolled list, so the caret goes to it
+    // rather than leaving the person to find where the thing they just asked to edit ended up.
+    await tick();
+    statusEditEl?.focus();
+  }
+  function cancelStatusEdit() {
+    statusEditingId = "";
+    statusEditDraft = "";
+  }
+  async function saveStatusEdit(s: Msg) {
+    const text = statusEditDraft.trim();
+    if (!text || activeServerId === null) {
+      cancelStatusEdit();
+      return;
+    }
+    cancelStatusEdit();
+    if (text === s.text) return; // no change
+    try {
+      await invokeDebugged("edit_status", { server: activeServerId, msgId: s.id, text });
+    } catch (e) {
+      error = errorText(e);
+    }
+  }
+  async function deleteStatus(s: Msg) {
+    if (activeServerId === null || !s.id) return;
+    try {
+      await invokeDebugged("delete_status", { server: activeServerId, msgId: s.id });
+    } catch (e) {
+      error = errorText(e);
+    }
+  }
+  function toggleStatusReactionPicker(s: Msg) {
+    statusReactionPickerFor = statusReactionPickerFor === s.id ? "" : s.id;
+  }
+  async function toggleStatusReaction(s: Msg, emoji: string) {
+    statusReactionPickerFor = "";
+    if (activeServerId === null || !s.id) return;
+    try {
+      await invokeDebugged("toggle_status_reaction", { server: activeServerId, msgId: s.id, emoji });
+    } catch (e) {
+      error = errorText(e);
+    }
+  }
+  async function toggleStatusPin(s: Msg) {
+    if (activeServerId === null || !s.id) return;
+    try {
+      await invokeDebugged("set_status_pin", { server: activeServerId, msgId: s.id, pinned: !s.pinned });
+    } catch (e) {
+      error = errorText(e);
+    }
+  }
+  // The ⋯ menu on an announcement card. Every entry here is also gated natively; this decides what
+  // is worth offering, and a role read arriving late can only ever hide an action, never allow one.
+  function statusMenu(s: Msg): MenuItem[] {
+    const items: MenuItem[] = [{ label: "Copy text", icon: "⧉", onSelect: () => copyText(s.text) }];
+    if (s.id) {
+      items.push({ label: "Copy link", icon: "🔗", onSelect: () => copyText(statusMarker(s.text, s.id)) });
+      items.push({ label: "React…", icon: "☺", onSelect: () => (statusReactionPickerFor = s.id) });
+      if (canModerate) {
+        items.push({ label: s.pinned ? "Unpin" : "Pin to the top", icon: "📌", onSelect: () => toggleStatusPin(s) });
+      }
+      if (s.author === myFp) {
+        items.push({ divider: true });
+        items.push({ label: "Edit", icon: "✎", onSelect: () => startStatusEdit(s) });
+      }
+      if (s.author === myFp || canModerate) {
+        if (s.author !== myFp) items.push({ divider: true });
+        items.push({
+          label: "Delete",
+          icon: "🗑",
+          danger: true,
+          onSelect: () => confirmInMenu("Delete this announcement?", () => deleteStatus(s)),
+        });
+      }
+    }
+    return items;
   }
 
   function switchView(v: Tab) {
@@ -5789,14 +6777,26 @@
       toast("Moderation is available to this server's owner and admins", "info", 3500);
       v = "chat";
     }
+    // Announcements are a server's noticeboard. A DM has no membership to address and no policy
+    // worth operating -- its founder is Owner, so the other person would be refused the composer
+    // and shown a policy chip they cannot touch. Guarded here rather than only in the surface bar,
+    // because Ctrl+3, quick-switch and restored history all arrive through this one door.
+    if (v === "status" && cur?.isDm) {
+      toast("Announcements are a server noticeboard; a DM does not have one", "info", 3500);
+      v = "chat";
+    }
     view = v;
     if (v === "wiki") refreshWiki();
     if (v === "files") refreshFiles(); // re-evaluate availability each time the tab opens
-    if (v === "status") refreshStatuses(); // a read that failed during the switch gets a retry here
+    // The policy is read with the surface rather than with the server, because it is only ever
+    // needed by the surface and a server switch already carries enough round-trips.
+    if (v === "status") { refreshStatuses(); void refreshStatusPolicy(); } // a read that failed during the switch gets a retry here
     if (v === "events") refreshEvents();
     if (v === "moderation") refreshModeration();
     if (v === "storage" || v === "downloads") refreshStorageHealth();
-    if (v === "connectivity") void Promise.all([refreshConnectivity(), refreshSwitchboards()]);
+    if (v === "connectivity") {
+      void Promise.all([refreshConnectivity(), refreshMemberRoutes(), refreshSwitchboards()]);
+    }
   }
 
   // Delegated click handler for rendered rich text: [[wiki links]] navigate to the wiki tab.
@@ -6342,6 +7342,17 @@
       toast("Copied to clipboard", "ok", 1800);
     } catch {
       toast("Clipboard unavailable: select and copy the text manually", "err", 3500);
+    }
+  }
+
+  /** Clipboard boundary for callers whose success message depends on a real write. */
+  async function copyTextRequired(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Copied to clipboard", "ok", 1800);
+    } catch (error) {
+      toast("Clipboard unavailable: select and copy the text manually", "err", 3500);
+      throw error;
     }
   }
 
@@ -6997,7 +8008,7 @@
       // would queue an EMPTY proposal that eventually auto-creates a blank page. So members
       // under review just open the editor; their first real save becomes the proposal.
       if (!wikiPages.includes(name) && mayEditWikiStructure(wikiReviewDays, canModerate)) {
-        await invoke("save_wiki_page", { server: activeServerId, name, body: "" });
+        await invokeDebugged("save_wiki_page", { server: activeServerId, name, body: "" });
         await refreshWiki();
       }
       await openWikiPage(name);
@@ -7057,7 +8068,7 @@
   async function saveWikiPage() {
     if (!activeWikiPage || activeServerId === null) return;
     try {
-      const queued = await invoke<boolean>("save_wiki_page", { server: activeServerId, name: activeWikiPage, body: wikiBody });
+      const { value: queued } = await invokeDebugged<boolean>("save_wiki_page", { server: activeServerId, name: activeWikiPage, body: wikiBody });
       wikiDirty = false;
       wikiDrafts.delete(activeWikiPage);
       if (queued) {
@@ -7367,18 +8378,24 @@
       ts: started,
     };
     let ticket: UploadTicket | undefined;
+    // One trace for the whole upload, not one per command. Begin, every slice and finish are three
+    // commands and one operation, and the failure worth catching is an upload that begins and never
+    // ends: a reservation left holding a slot with no record of what became of it. That is only
+    // detectable if all three phases carry the same identifier.
+    const upload = traceSource.next();
     try {
       // Checked, not trusted: the ticket is the whole streaming contract, and a field this side
       // cannot read is a fault worth naming here rather than one the native side reports later
       // as a malformed slice. A ticket rejected here leaves its native reservation for the idle
       // sweep, which is the same position a failed begin leaves it in.
       ticket = uploadContract(
-        await invoke<unknown>("begin_file_upload", {
-          server,
-          uploadId,
-          mime,
-          size: file.size,
-        }),
+        (
+          await invokeDebugged<unknown>(
+            "begin_file_upload",
+            { server, uploadId, mime, size: file.size },
+            { trace: upload, fields: { size: file.size } },
+          )
+        ).value,
       );
       const { token, chunkTotal, sliceBytes } = ticket;
       if (uploads[key]) uploads[key].total = chunkTotal;
@@ -7395,14 +8412,22 @@
           u.status = "uploading";
           u.updatedAt = Date.now();
         }
-        await invoke("push_file_chunk", { server, token, offset, data });
+        // Deliberately the plain invoke. A slice is not an operation: a large file is thousands of
+        // them, and recording each one would bury the upload it belongs to under its own progress.
+        // Begin and finish bracket the transfer; what happened in between is the difference
+        // between them.
+        await invoke("push_file_chunk", { server, token, offset, data, trace: upload });
         const sent = uploads[key];
         if (sent && sent.status !== "done" && sent.status !== "failed") {
           sent.progress = Math.max(sent.progress, (end / file.size) * (chunkTotal / spans));
           sent.updatedAt = Date.now();
         }
       }
-      const cid = await invoke<string>("finish_file_upload", { server, token, name, path });
+      const { value: cid } = await invokeDebugged<string>(
+        "finish_file_upload",
+        { server, token, name, path },
+        { trace: upload },
+      );
       if (uploads[key]) {
         uploads[key].status = "done";
         uploads[key].progress = 1;
@@ -7416,14 +8441,18 @@
       // begin_file_upload is what failed.
       if (ticket) {
         try {
-          await invoke("cancel_file_upload", { server, token: ticket.token });
+          await invokeDebugged(
+            "cancel_file_upload",
+            { server, token: ticket.token },
+            { trace: upload },
+          );
         } catch {
           // Cancelling a failed upload is best-effort: the original error is the one to report.
         }
       }
       if (uploads[key]) {
         uploads[key].status = "failed";
-        uploads[key].error = String(e);
+        uploads[key].error = errorText(e);
         uploads[key].updatedAt = Date.now();
       }
       throw e;
@@ -7497,7 +8526,115 @@
 
   // Only embeddable media types render inline; anything else is shown as a download chip.
   function safeMime(mime: string): string {
-    return /^(image|video|audio)\/[a-z0-9.+-]+$/i.test(mime || "") ? mime.toLowerCase() : "";
+    return safeMediaMime(mime);
+  }
+
+  function fileTrustFor(server: number | null = activeServerId): FileTrustPolicy {
+    return server === null
+      ? DEFAULT_FILE_TRUST_POLICY
+      : fileTrustPolicyFor(fileTrustPolicies, server);
+  }
+
+  function mayAutoLoadSharedFile(file: UiFile, server: number | null = activeServerId): boolean {
+    return server !== null && mayAutoLoadFile(fileTrustFor(server), file.author_identity, file.author_verified);
+  }
+
+  function setFileTrustMode(mode: FileTrustMode) {
+    if (activeServerId === null) return;
+    const current = fileTrustFor(activeServerId);
+    fileTrustPolicies = {
+      ...fileTrustPolicies,
+      [activeServerId]: { ...current, mode },
+    };
+    revokePassiveMedia();
+    void saveUiStateImmediately();
+  }
+
+  function toggleTrustedFileAuthor(identity: string) {
+    if (activeServerId === null) return;
+    const current = fileTrustFor(activeServerId);
+    fileTrustPolicies = {
+      ...fileTrustPolicies,
+      [activeServerId]: toggleTrustedAuthor(current, identity),
+    };
+    revokePassiveMedia();
+    void saveUiStateImmediately();
+  }
+
+  /**
+   * Revoke already-mounted passive decoder/network capabilities when local trust is tightened.
+   * Imperatively resolved chat markup does not rerender merely because a policy object changed,
+   * so it must be returned to an inert button/text placeholder here as well as clearing caches.
+   */
+  function revokePassiveMedia() {
+    mediaUrls = {};
+    emojiUrls = {};
+    if (typeof document === "undefined" || activeServerId === null) return;
+    const server = activeServerId;
+    for (const element of Array.from(document.querySelectorAll<HTMLElement>("[data-embed-cid][data-resolved]"))) {
+      const cid = element.dataset.embedCid ?? "";
+      const file = files.find((candidate) => candidate.cid === cid);
+      if (!file || mayAutoLoadSharedFile(file, server)) continue;
+      if (element instanceof HTMLMediaElement) {
+        element.pause();
+        element.removeAttribute("src");
+        element.load();
+      } else if (element instanceof HTMLImageElement) {
+        element.removeAttribute("src");
+      }
+      const mime = safeMime(file.mime);
+      if (mime) element.replaceWith(mediaLoadChip(file, mime, element.getAttribute("alt") || file.name, server));
+    }
+    for (const image of Array.from(document.querySelectorAll<HTMLImageElement>("img.remote-image"))) {
+      if (mayAutoLoadRemoteUrl(fileTrustFor(server))) continue;
+      const url = safeRemoteUrl(image.dataset.remoteUrl ?? image.src);
+      image.removeAttribute("src");
+      if (url && !mayAutoLoadRemoteUrl(fileTrustFor(server))) {
+        image.replaceWith(remoteImageLoadChip(url, image.alt || "Remote image"));
+      }
+    }
+    for (const image of Array.from(document.querySelectorAll<HTMLImageElement>("img.ref-card-thumb[data-thumb-cid]"))) {
+      const cid = image.dataset.thumbCid ?? "";
+      const file = files.find((candidate) => candidate.cid === cid);
+      if (file && mayAutoLoadSharedFile(file, server)) continue;
+      const card = image.closest<HTMLElement>(".ref-card");
+      image.removeAttribute("src");
+      image.remove();
+      card?.classList.remove("has-thumb");
+    }
+    for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>("button.media-load-chip[data-load-cid]"))) {
+      const cid = button.dataset.loadCid ?? "";
+      const file = files.find((candidate) => candidate.cid === cid);
+      if (!file || !mayAutoLoadSharedFile(file, server)) continue;
+      const mime = safeMime(button.dataset.loadMime ?? file.mime);
+      if (mime) button.replaceWith(buildMediaEl(mime, mediaUrl(server, cid), button.dataset.loadAlt ?? file.name, cid));
+    }
+    if (mayAutoLoadRemoteUrl(fileTrustFor(server))) {
+      for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>("button.media-load-chip[data-remote-url]"))) {
+        const url = safeRemoteUrl(button.dataset.remoteUrl ?? "");
+        if (url) button.replaceWith(remoteImage(url, button.dataset.remoteAlt ?? "Remote image"));
+      }
+    }
+    for (const card of Array.from(document.querySelectorAll<HTMLElement>(".ref-card:not(.has-thumb)"))) {
+      const cid = (card.getAttribute("data-file-cid") ?? "").toLowerCase();
+      const status = card.getAttribute("data-status-id") ?? "";
+      const event = card.getAttribute("data-event-id") ?? "";
+      const page = card.getAttribute("data-wikilink") ?? "";
+      const spec = cid ? fileCardSpec(cid) : status ? statusCardSpec(status) : event ? eventCardSpec(event) : wikiCardSpec(page);
+      if (spec?.thumb) attachCardThumb(card, spec.thumb, server);
+    }
+    // Inline custom emoji were created imperatively. Recreate the original placeholder so the
+    // ordinary resolver can load it again only if the new policy permits the attested file.
+    for (const image of Array.from(document.querySelectorAll<HTMLImageElement>("img.emoji[data-emoji-code]"))) {
+      const code = image.dataset.emojiCode ?? "";
+      const placeholder = document.createElement("span");
+      placeholder.dataset.emoji = code;
+      placeholder.textContent = `:${code}:`;
+      image.removeAttribute("src");
+      image.replaceWith(placeholder);
+    }
+    for (const cid of [...events.map((event) => event.image), evImage].filter(Boolean)) ensureMedia(cid);
+    if (jukeNow) void jukeApply(false);
   }
 
   function buildMediaEl(mime: string, url: string, alt: string, cid: string): HTMLElement {
@@ -7532,6 +8669,20 @@
     return b;
   }
 
+  /** Passive embeds stay inert under on-demand trust; this click is the explicit fetch grant. */
+  function mediaLoadChip(file: UiFile, mime: string, alt: string, server: number): HTMLElement {
+    const button = document.createElement("button");
+    button.className = "embed-chip media-load-chip";
+    button.textContent = `Load ${mime.startsWith("image/") ? "image" : mime.startsWith("video/") ? "video" : "audio"} from ${nameOf(file.author)}`;
+    button.title = "This fetches authenticated bytes into Mewtual's encrypted vault, then lets the platform media decoder open them.";
+    button.dataset.loadCid = file.cid;
+    button.dataset.loadMime = mime;
+    button.dataset.loadAlt = alt;
+    button.dataset.loadServer = String(server);
+    button.onclick = () => button.replaceWith(buildMediaEl(mime, mediaUrl(server, file.cid), alt, file.cid));
+    return button;
+  }
+
   // Shared media renders straight from the catcoms-media: protocol rather than being pulled into
   // the webview first. The old path fetched the whole decrypted file over IPC, turned it into a
   // base64 data: URL, and kept up to 48 of those alive at once: one embedded 200 MB video was
@@ -7543,15 +8694,25 @@
   }
 
   // Stream URLs for markup that binds a `src` (the events tab's poster images) rather than
-  // building its own element the way the embed/card resolvers do. Keyed by cid. Filling these is
+  // building its own element the way the embed/card resolvers do. Keyed by server + cid: a CID
+  // learned in one group must never become a native media capability in another group. Filling is
   // now just address arithmetic: the element streams from the protocol handler, so there is
   // nothing to fetch here and nothing to fail. A poster only needs to be a listed media file.
   let mediaUrls = $state<Record<string, string>>({});
+  function preparedMedia(cid: string): string {
+    if (activeServerId === null) return "";
+    const file = files.find((candidate) => candidate.cid === cid);
+    if (!file || !safeMime(file.mime) || !mayAutoLoadSharedFile(file, activeServerId)) return "";
+    return mediaUrls[scopedMediaKey(activeServerId, cid)] ?? "";
+  }
   function ensureMedia(cid: string) {
-    if (!cid || mediaUrls[cid] || activeServerId === null) return;
+    if (!cid || activeServerId === null) return;
+    const server = activeServerId;
     const file = files.find((f) => f.cid === cid);
-    if (!file || !safeMime(file.mime)) return; // not in the file index yet: retried on update
-    mediaUrls = { ...mediaUrls, [cid]: sharedMediaUrl(cid, activeServerId) };
+    if (!file || !safeMime(file.mime) || !mayAutoLoadSharedFile(file)) return; // retried on index/policy update
+    const key = scopedMediaKey(server, cid);
+    if (mediaUrls[key]) return;
+    mediaUrls = { ...mediaUrls, [key]: sharedMediaUrl(cid, server) };
   }
   $effect(() => {
     const wanted = [...events.map((e) => e.image), evImage].filter(Boolean);
@@ -7583,6 +8744,10 @@
         span.replaceWith(downloadChip(file));
         continue;
       }
+      if (!mayAutoLoadSharedFile(file, server)) {
+        span.replaceWith(mediaLoadChip(file, mime, alt, server));
+        continue;
+      }
       span.replaceWith(buildMediaEl(mime, mediaUrl(server, cid), alt, cid));
     }
   }
@@ -7596,7 +8761,19 @@
     img.className = "embed-media embed-image remote-image";
     img.title = "Remote image · click to view full size";
     img.dataset.remoteImage = "1";
+    img.dataset.remoteUrl = url;
     return img;
+  }
+
+  function remoteImageLoadChip(url: string, alt: string): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.className = "embed-chip media-load-chip";
+    button.textContent = "Load remote image";
+    button.title = "Remote images disclose your IP to their host and are decoded by the platform image stack.";
+    button.dataset.remoteUrl = url;
+    button.dataset.remoteAlt = alt;
+    button.onclick = () => button.replaceWith(remoteImage(url, alt));
+    return button;
   }
 
   // Resolve explicit remote-image markdown and bare direct image/Giphy links. The renderer emits
@@ -7606,13 +8783,24 @@
     for (const span of Array.from(container.querySelectorAll<HTMLElement>("[data-remote-url]:not([data-resolved])"))) {
       span.dataset.resolved = "1";
       const url = safeRemoteUrl(span.dataset.remoteUrl ?? "");
-      if (url) span.replaceWith(remoteImage(url, span.dataset.alt ?? "Remote image"));
+      if (url) {
+        // Message author labels are display metadata, not a signed origin proof. Specific-member
+        // file trust therefore cannot authorize a third-party URL, even if the label is forged to
+        // look like a selected member.
+        const allowed = mayAutoLoadRemoteUrl(fileTrustFor());
+        span.replaceWith(allowed
+          ? remoteImage(url, span.dataset.alt ?? "Remote image")
+          : remoteImageLoadChip(url, span.dataset.alt ?? "Remote image"));
+      }
     }
     for (const a of Array.from(container.querySelectorAll<HTMLAnchorElement>("a[href]:not([data-remote-checked])"))) {
       a.dataset.remoteChecked = "1";
       const url = pastedImageUrl(a.href);
       if (!url) continue;
-      a.replaceWith(remoteImage(url, a.textContent?.trim() || "Remote image"));
+      const allowed = mayAutoLoadRemoteUrl(fileTrustFor());
+      a.replaceWith(allowed
+        ? remoteImage(url, a.textContent?.trim() || "Remote image")
+        : remoteImageLoadChip(url, a.textContent?.trim() || "Remote image"));
     }
   }
 
@@ -7755,10 +8943,13 @@
 
   /** Hang an image on a card; a card whose picture cannot be fetched just reads as text. */
   function attachCardThumb(card: HTMLElement, cid: string, server: number) {
-    const mime = safeMime(files.find((f) => f.cid === cid)?.mime ?? "");
-    if (!mime.startsWith("image/")) return;
+    const file = files.find((f) => f.cid === cid);
+    const mime = safeMime(file?.mime ?? "");
+    if (!file || !mime.startsWith("image/") || !mayAutoLoadSharedFile(file, server)) return;
     const img = document.createElement("img");
     img.className = "ref-card-thumb";
+    img.dataset.thumbCid = cid;
+    img.dataset.thumbServer = String(server);
     img.src = sharedMediaUrl(cid, server);
     img.alt = "";
     // The element does the fetching now, so a picture nobody is sharing fails here rather than in
@@ -8057,7 +9248,7 @@
 
   function transferConnected(t: TransferRow): boolean {
     if (t.direction === "upload" || t.status === "done") return true;
-    return onlineCount > 1 || t.done >= t.total ||
+    return hasPeers || t.done >= t.total ||
       (t.status === "downloading" && transferNow - t.updatedAt < 3_000);
   }
 
@@ -8093,7 +9284,7 @@
     const pct = Math.round(t.progress * 100);
     if (t.status === "done") return t.direction === "upload" ? "✓ Available" : "✓ Saved";
     if (t.status === "failed") {
-      return t.direction === "download" && onlineCount <= 1 ? "No connection" : "✕ Failed";
+      return t.direction === "download" && !hasPeers ? "No proven member path" : "✕ Failed";
     }
     if (t.direction === "upload") {
       if (t.status === "reading") return `Preparing ${pct}%`;
@@ -8115,7 +9306,7 @@
     if (t.direction === "download") {
       lines.push(`Data ready: ${formatBytes(t.bytesDone)} / ${formatBytes(t.bytesTotal)}`);
       if (t.savedPath) lines.push(`Saved to: ${t.savedPath}`);
-      lines.push(`Source: ${t.provider ? `${nameOf(t.provider)}${transferConnected(t) ? "" : " (last source; now offline)"}` : transferConnected(t) ? "finding a reachable member" : "no member connected"}`);
+      lines.push(`Source: ${t.provider ? `${nameOf(t.provider)}${transferConnected(t) ? "" : " (last source; no proven path now)"}` : transferConnected(t) ? "finding an authenticated source" : "no proven member path"}`);
       if (t.speed > 0 && t.status === "downloading") lines.push(`Speed: ${formatRate(t.speed)}`);
       if (t.heldBefore > 0) lines.push(`Already held when started: ${t.heldBefore} chunk${t.heldBefore === 1 ? "" : "s"}`);
     } else {
@@ -8239,7 +9430,7 @@
     }
     fileTextState = "loading";
     try {
-      const base64 = await invoke<string>("download_file", { server: id, cid: f.cid });
+      const { value: base64 } = await invokeDebugged<string>("download_file", { server: id, cid: f.cid });
       // Guard against the pane being closed or switched while the fetch was in flight.
       if (fileInfo?.cid !== f.cid) return;
       const decoded = decodeTextFile(Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)));
@@ -8298,7 +9489,7 @@
   }
 
   // --- toasts: visible feedback for otherwise-silent work (uploads, saves, renames) --------------
-  type Toast = { id: number; kind: "info" | "ok" | "err"; text: string };
+  type Toast = { id: number; kind: "info" | "ok" | "warn" | "err"; text: string };
   let toasts = $state<Toast[]>([]);
   let toastSeq = 0;
   const toastTimers = new Map<number, ReturnType<typeof setTimeout>>();
@@ -8467,7 +9658,15 @@
   let flashStatusId = $state("");
   async function openStatusRef(id: string) {
     if (!id) return;
+    // The one route to this surface that does not pass through switchView, so it carries the same
+    // refusal: a `status:` chip pasted into a DM names a noticeboard a DM does not have, and
+    // following it would open the very surface the surface bar declines to offer there.
+    if (cur?.isDm) {
+      toast("Announcements are a server noticeboard; a DM does not have one", "info", 3500);
+      return;
+    }
     view = "status";
+    void refreshStatusPolicy(); // this route reaches the surface without going through switchView
     if (!statuses.some((s) => s.id === id)) await refreshStatuses();
     await tick();
     if (!statuses.some((s) => s.id === id)) {
@@ -8562,7 +9761,7 @@
     // which is what false gives it. The old key built `null:channel`, which said the same thing
     // by accident rather than on purpose.
     if (!myFp || activeServerId === null) return false;
-    const seen = readMarks[chatScopeKey(activeServerId, channel)] ?? 0;
+    const seen = readMarkOf(chatScopeKey(activeServerId, channel)).ts;
     // Same clock ceiling the read marks use: a sender-chosen timestamp far in the future must not
     // decide, either way, whether something addressed to me still counts as unseen.
     const ceiling = readCeiling(msgs.map((m) => m.ts), Date.now());
@@ -8636,7 +9835,7 @@
     // An entry timestamped beyond any believable clock skew cannot be measured against a read mark
     // honestly, and calling it unseen would hand it a badge that reading can never clear.
     if (!Number.isFinite(it.ts) || it.ts > Date.now() + CLOCK_SKEW_GRACE_MS) return false;
-    return it.ts > (readMarks[chatScopeKey(it.server, it.channel)] ?? 0);
+    return it.ts > readMarkOf(chatScopeKey(it.server, it.channel)).ts;
   }
   let inboxUnseenCount = $derived(inboxItems.filter(inboxUnseen).length);
   // The entry's channel name, resolved from the server's known channel list (names are a UI concern).
@@ -8695,6 +9894,12 @@
     // This peer's one video slot. Held rather than looked up, because once a video stops the
     // sender has no track to recognise it by and searching for one finds nothing.
     vidSender: RTCRtpSender | null;
+    // Microphone ownership is explicit because a parked audio sender is indistinguishable from
+    // other empty slots, and screen audio is a separate audio sender that must never be replaced.
+    micSender: RTCRtpSender | null;
+    // Screen audio is one mixed track regardless of how many applications the user adds. Keeping
+    // its sender parked lets a source be added/removed without multiplying SDP sections forever.
+    screenAudioSender: RTCRtpSender | null;
   };
   let inCall = $state(false);
   let callMuted = $state(false);
@@ -8712,12 +9917,16 @@
   let callServer = $state<number | null>(null); // the server the room is on
   let callServerName = $state(""); // the room's server, for chrome that must not say "here"
   let callSelfFp = $state(""); // identity on callServer; the viewed server may change mid-call
+  let activeCallLease = 0; // binds async call-only caches to this exact room lifecycle
   // Names and avatars on the call surfaces MUST resolve against the room's server, never the
   // viewed one. `profiles` is replaced wholesale on every server switch (see refreshProfiles),
   // so reading it from the call bar re-labelled you and every peer the moment you clicked
   // another server: your own name changed under you, and the dock read as though the call had
   // moved with you. This map is fetched once for callServer and is cleared only on leave.
   let callProfiles = $state<Record<string, Prof>>({});
+  // Calls survive navigation to another server, so the jukebox must never consult `files`, which
+  // belongs to the currently viewed server. This index is pinned to callServer for its full life.
+  let callFiles = $state<UiFile[]>([]);
   // True while the user is looking at a different server from the one the call is on. The dock
   // uses it to say where the call actually is instead of silently implying "here".
   let callElsewhere = $derived(inCall && callServer !== null && callServer !== activeServerId);
@@ -8754,6 +9963,8 @@
     return known.includes("relayed") ? "relayed" : "direct";
   });
   let localStream: MediaStream | null = null;
+  const micCaptureSession = new MediaCaptureSession();
+  const callLifecycleSession = new MediaCaptureSession();
   const callPeers: Record<string, CallPeer> = {};
   // Trickle ICE may beat the offer over independent Tauri invokes. Hold it until that peer has a
   // remote description instead of throwing it away and making the call depend on event timing.
@@ -8884,16 +10095,35 @@
     return new TextDecoder().decode(Uint8Array.from(atob(b), (c) => c.charCodeAt(0)));
   }
   async function sendSignal(server: number, targetFp: string, msg: Record<string, unknown>): Promise<boolean> {
+    // The message kind is a protocol enum (offer, answer, ice, bye), never anything a person
+    // wrote, so it is safe to record and it is what turns a wall of identical warnings into
+    // "every ice candidate failed while the offer got through".
+    const kind = typeof msg.type === "string" ? msg.type : "unknown";
     try {
-      const delivered = await invoke<boolean>("send_call_signal", {
+      const { value: delivered } = await invokeDebugged<boolean>("send_call_signal", {
         server,
         targetFp,
         payload: b64enc(JSON.stringify(msg)),
       });
-      if (!delivered) console.warn("voice signal had no member route", { server, targetFp, type: msg.type });
+      // The incident this whole section exists for: the roster shows a claimed path and the
+      // transport has nowhere to send to. A run of these is a call that is about to die, and it
+      // used to be a console.warn nobody had open.
+      if (!delivered) {
+        diagRecord({
+          section: "voice",
+          code: "VOICE.SIGNAL.NO_MEMBER_ROUTE",
+          level: "warn",
+          fields: { kind },
+        });
+      }
       return delivered;
     } catch (e) {
-      console.warn("voice signal failed", { server, targetFp, type: msg.type, error: String(e) });
+      diagRecord({
+        section: "voice",
+        code: "VOICE.SIGNAL.FAILED",
+        level: "warn",
+        fields: { kind, failure: classifyInvokeFailure(e) },
+      });
       return false;
     }
   }
@@ -8963,6 +10193,9 @@
     micDev = id;
     try { localStorage.setItem("catcoms.call.micDev", id); } catch { /* ignore */ }
     if (!inCall) return;
+    const lease = micCaptureSession.begin();
+    const server = callServer;
+    const channel = callChannel;
     let next: MediaStream;
     try {
       next = await navigator.mediaDevices.getUserMedia({
@@ -8973,32 +10206,72 @@
       error = "Couldn't switch to that microphone.";
       return;
     }
+    const accepted = acceptCapture(
+      micCaptureSession,
+      lease,
+      next,
+      inCall && server !== null && callServer === server && !!channel && callChannel === channel,
+    );
+    if (!accepted) return;
+    next = accepted;
     const track = next.getAudioTracks()[0];
-    if (!track) return;
+    if (!track) {
+      for (const capturedTrack of next.getTracks()) capturedTrack.stop();
+      return;
+    }
     track.enabled = !callMuted; // a hot swap must never quietly un-mute you
+    const previous = localStream;
+    localStream = next;
+    if (previous) for (const previousTrack of previous.getTracks()) previousTrack.stop();
+    addAnalyser("me", next); // leaveVoice can now stop this track during any sender await below
     for (const p of Object.values(callPeers)) {
       // An empty sender is a fair target (a swap while muted), but never the video slot: parked
       // or not, handing it an audio track is a kind mismatch that throws.
-      const s = p.pc.getSenders().find((x) => x.track?.kind === "audio")
-        ?? p.pc.getSenders().find((x) => !x.track && x !== p.vidSender);
-      if (s) { try { await s.replaceTrack(track); } catch { /* edge gone */ } }
+      const s = chooseMicrophoneSender(
+        p.pc.getSenders(), p.micSender, p.vidSender, p.screenAudioSender,
+      );
+      if (s) {
+        p.micSender = s;
+        try { await s.replaceTrack(track); } catch { /* edge gone */ }
+      } else {
+        try { p.micSender = p.pc.addTrack(track, next); } catch { /* edge gone */ }
+      }
     }
-    if (localStream) for (const t of localStream.getTracks()) t.stop();
-    localStream = next;
-    addAnalyser("me", next); // the meter was watching the track that just went away
   }
-  async function ensureMic(announce = true): Promise<MediaStream | null> {
+  async function ensureMic(
+    announce = true,
+    adopt = true,
+    joiningContext: { server: number; channel: string; callLease: number } | null = null,
+  ): Promise<MediaStream | null> {
     if (localStream) return localStream;
+    const lease = micCaptureSession.begin();
+    const server = joiningContext?.server ?? callServer;
+    const channel = joiningContext?.channel ?? callChannel;
+    const stillWanted = () => micCaptureSession.isCurrent(lease) && (
+      joiningContext
+        ? callLifecycleSession.isCurrent(joiningContext.callLease)
+        : inCall && callServer === server && callChannel === channel
+    );
     // Try the remembered input first; a device that has since vanished must not block the call.
     const tries: (MediaTrackConstraints | boolean)[] = micDev
       ? [{ deviceId: { exact: micDev } }, true]
       : [true];
     for (const audio of tries) {
+      if (!stillWanted()) return null;
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
+        const captured = await navigator.mediaDevices.getUserMedia({ audio, video: false });
+        const accepted = acceptCapture(
+          micCaptureSession,
+          lease,
+          captured,
+          stillWanted(),
+        );
+        if (!accepted) return null;
+        if (adopt) localStream = accepted;
         void refreshAudioDevices();
-        return localStream;
+        return accepted;
       } catch {
+        if (!stillWanted()) return null;
         /* remembered device gone: fall back to the system default */
       }
     }
@@ -9021,7 +10294,7 @@
     for (const t of stream.getAudioTracks()) t.enabled = true;
     for (const p of Object.values(callPeers)) {
       for (const t of stream.getTracks()) {
-        try { p.pc.addTrack(t, stream); } catch { /* already added on this edge */ }
+        try { p.micSender = p.pc.addTrack(t, stream); } catch { /* already added on this edge */ }
       }
     }
     addAnalyser("me", stream);
@@ -9036,7 +10309,20 @@
       el.autoplay = true;
       document.body.appendChild(el);
     }
-    el.srcObject = stream;
+    // A peer can send its microphone and one separately mixed screen-audio track. Feeding the
+    // latest arriving stream straight to the element would replace (and silence) the earlier one,
+    // so aggregate all of that peer's live audio tracks into one local playback stream.
+    let aggregate = remoteAudioStreams[fp];
+    if (!aggregate) {
+      aggregate = new MediaStream();
+      remoteAudioStreams[fp] = aggregate;
+    }
+    for (const track of stream.getAudioTracks()) {
+      if (aggregate.getTracks().some((candidate) => candidate.id === track.id)) continue;
+      aggregate.addTrack(track);
+      track.addEventListener("ended", () => aggregate?.removeTrack(track), { once: true });
+    }
+    el.srcObject = aggregate;
     el.muted = callDeafened || !!voiceMutedPeers[fp];
     const v = loadPeerVol(fp);
     el.volume = v;
@@ -9056,7 +10342,141 @@
   let callHeld = $state<number[]>([]); // notes I am sounding into the call
   let remoteHeld = $state<Record<string, number[]>>({}); // fp -> notes they are sounding
   const remoteWave: Record<string, OscillatorType> = {}; // fp -> their last announced timbre
-  let peerMeta = $state<Record<string, { mic: boolean; inst: boolean; vid: number }>>({}); // their broadcast states (vid: 0 none, 1 camera, 2 screen)
+  let peerMeta = $state<Record<string, PeerState>>({}); // mute/video plus their coarse receive bucket
+  function loadStreamSettings(): StreamSettings {
+    try {
+      return parseStreamSettings(JSON.parse(localStorage.getItem("catcoms.call.stream.v1") ?? "{}"));
+    } catch {
+      return { ...DEFAULT_STREAM_SETTINGS };
+    }
+  }
+  let streamSettings = $state<StreamSettings>(loadStreamSettings());
+  let streamSettingsOpen = $state(false);
+  let actualStream = $state<{
+    width: number;
+    height: number;
+    fps: number;
+    constraintError: string;
+  } | null>(null);
+  type PeerBudgetUi = PeerBudgetResult & { lastApplied?: PeerStreamPlan };
+  let peerVideoBudget = $state<Record<string, PeerBudgetUi>>({});
+  const peerVideoBudgetController = new PeerVideoBudgetController();
+  let peerVideoCodec = $state<Record<string, string>>({});
+  function loadReceiveResolution(): "auto" | StreamHeight {
+    try {
+      const stored = localStorage.getItem("catcoms.call.receive-resolution");
+      if (stored === "auto") return "auto";
+      const numeric = Number(stored);
+      return isStreamHeight(numeric) ? numeric : "auto";
+    } catch {
+      return "auto";
+    }
+  }
+  const initialReceiveResolution = loadReceiveResolution();
+  let receiveResolutionMode = $state<"auto" | StreamHeight>(initialReceiveResolution);
+  let receiveHeight = $state<StreamHeight>(
+    initialReceiveResolution === "auto" ? 1080 : initialReceiveResolution,
+  );
+  let streamReceiverHeights = $derived(
+    callParticipants.map((fingerprint) => peerMeta[fingerprint]?.rx ?? 1080),
+  );
+  let streamSourceHeight = $derived(actualStream?.height || streamSettings.resolution);
+  let streamEstimatedTotal = $derived(
+    estimatedMeshMbps(streamSettings, streamReceiverHeights, streamSourceHeight),
+  );
+  let streamBudgetFailed = $derived(
+    Object.values(peerVideoBudget).some((budget) =>
+      budget.state === "failed" || budget.state === "paused" || budget.state === "stop-required"
+    ),
+  );
+  let streamRecommended = $derived(recommendedStreamMbps(streamSettings));
+
+  function saveStreamSettings(next: StreamSettings) {
+    streamSettings = next;
+    try { localStorage.setItem("catcoms.call.stream.v1", JSON.stringify(next)); } catch { /* optional */ }
+    void applyStreamSettings();
+  }
+  function setStreamResolution(value: string) {
+    const resolution = Number(value);
+    if (isStreamHeight(resolution)) saveStreamSettings({ ...streamSettings, resolution });
+  }
+  function setStreamFrameRate(value: string) {
+    const frameRate = Number(value);
+    if (frameRate === 15 || frameRate === 24 || frameRate === 30 || frameRate === 60) {
+      saveStreamSettings({ ...streamSettings, frameRate });
+    }
+  }
+  function setStreamQuality(quality: StreamQuality) {
+    saveStreamSettings({ ...streamSettings, quality });
+  }
+  function setStreamMbps(value: string) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      saveStreamSettings({ ...streamSettings, mbpsPerPeer: Math.min(50, Math.max(0.5, parsed)) });
+    }
+  }
+  function setStreamAudioMode(audioMode: StreamAudioMode) {
+    const previousMode = streamSettings.audioMode;
+    saveStreamSettings({ ...streamSettings, audioMode });
+    if (shouldClearScreenAudioOnModeChange(previousMode, audioMode)) {
+      screenAudioCaptureSession.invalidate();
+    }
+    if (myVideo !== "screen") return;
+    if (shouldClearScreenAudioOnModeChange(previousMode, audioMode)) clearScreenAudioSources();
+    if (audioMode === "surface") {
+      // getDisplayMedia must make the user choose again; a settings toggle cannot silently grant
+      // a different capture source or reinterpret separately selected application audio.
+      screenAudioError = "Restart sharing to choose screen/window audio under this mode.";
+    }
+  }
+  function setStreamAudioMasterLevel(value: string) {
+    const audioLevel = normalizeStreamAudioLevel(Number(value), streamSettings.audioLevel);
+    saveStreamSettings({ ...streamSettings, audioLevel });
+    if (screenAudioMaster && screenAudioContext) {
+      try {
+        screenAudioMaster.gain.setTargetAtTime(streamAudioGain(audioLevel), screenAudioContext.currentTime, 0.015);
+      } catch {
+        screenAudioMaster.gain.value = streamAudioGain(audioLevel);
+      }
+    }
+  }
+  function setReceiveResolution(value: string) {
+    const numeric = Number(value);
+    receiveResolutionMode = value === "auto" ? "auto" : isStreamHeight(numeric) ? numeric : "auto";
+    if (receiveResolutionMode !== "auto") receiveHeight = receiveResolutionMode;
+    try { localStorage.setItem("catcoms.call.receive-resolution", String(receiveResolutionMode)); } catch { /* optional */ }
+    pushInstState();
+    if (inCall && callServer !== null && callChannel) {
+      broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight });
+    }
+  }
+
+  // Auto mode follows the largest 16:9 picture this Mewtual window could display. Only the rounded
+  // bucket is signalled; exact window/monitor dimensions remain local. Debounce plus helper-level
+  // hysteresis prevents a resize drag from continually touching every sender's parameters.
+  $effect(() => {
+    if (receiveResolutionMode !== "auto" || typeof window === "undefined") return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const update = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const physical = receivingHeightForViewport(window.innerWidth, window.innerHeight, window.devicePixelRatio);
+        const next = nearestStreamHeight(physical, receiveHeight);
+        if (next === receiveHeight) return;
+        receiveHeight = next;
+        pushInstState();
+        if (inCall && callServer !== null && callChannel) {
+          broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: next });
+        }
+      }, 180);
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("resize", update);
+    };
+  });
   let instMutedPeers = $state<Record<string, boolean>>({}); // my per-peer instrument mutes
   let callDeafened = $state(false);
   let myTimbre = $state<OscillatorType>(((): OscillatorType => {
@@ -9126,6 +10546,7 @@
       mic: callMuted ? 1 : 0,
       inst: instRxMuted ? 1 : 0,
       vid: myVid(),
+      rx: receiveHeight,
     });
   }
   function pushInstState() {
@@ -9138,7 +10559,13 @@
     let m: Record<string, unknown>;
     try { m = JSON.parse(raw) as Record<string, unknown>; } catch { return; }
     if (m.t === "s") {
-      peerMeta = { ...peerMeta, [fp]: mergePeerState(peerMeta[fp], m) };
+      const before = peerMeta[fp];
+      const after = mergePeerState(before, m);
+      peerMeta = { ...peerMeta, [fp]: after };
+      if (after.rx !== before?.rx && myVideo === "screen") {
+        const sender = callPeers[fp]?.vidSender;
+        if (sender) void capVideo(sender, "screen", fp);
+      }
       return;
     }
     if (m.t !== "n") return;
@@ -9397,6 +10824,36 @@
     }
     return count;
   }
+  // The herald beacon's numbers, off the same aggregation the Inbox and the rail badge read. A
+  // billboard is beaconed only while its server has unread announcements; the corners it does not
+  // touch keep their existing signals (unread top-right, mentions top-left, voice bottom-right).
+  let spaceStatusCounts = $derived(newsUnseenByServer(newsItems, statusCursors, newsTsCeilings));
+  // The newest announcement per server, for the headline card a hovered beacon shows. Every
+  // server's, not just the beaconed ones, so the card can still say what the last post was.
+  let spaceStatusLatest = $derived.by(() => {
+    const latest: Record<number, NewsItem> = {};
+    for (const n of newsItems) {
+      if (n.kind !== "status") continue;
+      const held = latest[n.server];
+      if (!held || n.ts > held.ts) latest[n.server] = n;
+    }
+    return latest;
+  });
+  // Which billboard the pointer is over. Tracked on the button's own enter/leave rather than by
+  // hit-testing the space, so it cannot touch the drag/lasso pointer machinery; a carry or a lasso
+  // clears it, because a card hanging off a server being flown across the sky is just in the way.
+  let spaceHeraldHover = $state<number | null>(null);
+  // The card's own box, so it can be kept inside the viewport. Clamped here rather than left to the
+  // browser because the card is `pointer-events: none` chrome floating over a rotating scene: a
+  // billboard near the edge would otherwise hang the card half off-screen with nothing to scroll.
+  // The card itself is derived below, beside the projection it reads its position from.
+  //
+  // Both numbers reach the stylesheet as custom properties rather than being written out a second
+  // time there. A card the CSS renders taller than what this placement assumed hangs the difference
+  // off the top of the viewport with nothing able to scroll it back, and a snippet is as many lines
+  // as its words make it, so the card holds itself to the height below and its body stops instead
+  // of growing past it.
+  const SPACE_HERALD_CARD = { w: 244, h: 96 };
   function stopSpaceCameraTween() {
     if (spaceCameraRaf) cancelAnimationFrame(spaceCameraRaf);
     spaceCameraRaf = 0;
@@ -9446,6 +10903,7 @@
     spaceSearchOpen = false;
     spaceClusterOpen = null;
     spaceClusterDrop = null;
+    spaceHeraldHover = null;
     if (spaceOpen) {
       // Migrate an older or hand-edited layout too, rather than only preventing
       // new drops from overlapping from this point onward.
@@ -9458,6 +10916,7 @@
       refreshSpaceAccents();
       void refreshSpacePresence();
       void loadInbox();
+      void loadNews(); // the billboards' herald beacons read the same aggregation the Inbox does
     }
   }
   // Where the placed servers land on screen this frame. While carrying, the group's
@@ -9480,6 +10939,26 @@
       out.push({ s, x: pr.x, y: pr.y, scale: pr.scale, carried: carriedIds.has(s.id) });
     }
     return out;
+  });
+  // The headline card for a hovered herald, positioned off the same projection the billboards use.
+  // Nothing while a carry or a lasso is running: a card hanging off a server being flown across the
+  // sky is only in the way of the gesture moving it.
+  let spaceHerald = $derived.by(() => {
+    if (spaceHeraldHover === null || spaceCarried || spaceLasso) return null;
+    const server = spaceHeraldHover;
+    const placed = spacePlaced.find((it) => it.s.id === server);
+    const count = spaceStatusCounts[server] ?? 0;
+    if (!placed || !count) return null;
+    const half = SPACE_HERALD_CARD.w / 2;
+    const lift = spaceState.serverSize / 2 + 16;
+    const left = Math.min(Math.max(spaceVw / 2 + placed.x, half + 8), Math.max(half + 8, spaceVw - half - 8));
+    // Above the billboard by default, below it when there is no room, so the card never covers the
+    // thing it is describing and never leaves the top of the view.
+    const above = spaceVh / 2 + placed.y - lift - SPACE_HERALD_CARD.h;
+    // Below, it clears the hover name chip the billboard already draws under itself.
+    const below = spaceVh / 2 + placed.y + lift + 22;
+    const top = above >= 8 ? above : Math.min(below, Math.max(8, spaceVh - SPACE_HERALD_CARD.h - 8));
+    return { server, name: placed.s.name, left, top, count, latest: spaceStatusLatest[server] ?? null };
   });
   // Servers with no place yet (new joins) wait in the tray until hung.
   let spaceUnplaced = $derived(spaceOpen ? railServers.filter((s) => !spaceState.placements[s.id]) : []);
@@ -9584,6 +11063,11 @@
   }
   function newSpaceDrag(e: PointerEvent, mode: SpaceDragMode, serverId: number | undefined = undefined) {
     spaceCursorFrom(e);
+    // A press is the start of a gesture, and every gesture that follows takes the pointer capture
+    // that stops the billboard's own mouseleave ever arriving. Without this the herald card is
+    // still hanging in the sky after a carry, describing a server the pointer left long ago: the
+    // card must not outlive the pointer that summoned it.
+    spaceHeraldHover = null;
     spaceDrag = {
       id: e.pointerId,
       sx: e.clientX,
@@ -10153,12 +11637,16 @@
   // perfectly in sync while THIS machine is silent, and the deck has to be able to say which.
   let jukeBlocked = $state(false); // the webview refuses to start audio without a gesture
   let jukeLocalFail = $state(""); // this listener could not fetch or decode the current track
+  let jukeTrustBlocked = $state<"" | "consent" | "unavailable">("");
+  // Explicit playback approval is local and call-scoped. It is not persisted as a silent trust
+  // expansion and is still useful only when callServer has an authenticated safe-media listing.
+  const jukeExplicitApprovals = new Set<string>();
   let bufferTimer: ReturnType<typeof setTimeout> | undefined; // debounce for the chip above
   let jukeNudging = $state(false); // easing back onto the DJ's clock rather than snapping
   // Audio or video, from the current track's name (a queue entry carries no mime) and the share's
   // declared type when the share is the one in view.
   let jukeKind = $derived<MediaKind>(
-    jukeNow ? mediaKind(jukeNow.name, files.find((f) => f.cid === jukeNow?.cid)?.mime ?? "") : "other",
+    jukeNow ? mediaKind(jukeNow.name, callFiles.find((f) => f.cid === jukeNow?.cid)?.mime ?? "") : "other",
   );
   const JUKE_DJ_GONE_MS = 15000; // silence longer than three pings means the DJ walked away
 
@@ -10276,13 +11764,48 @@
       jukeQueueStale = false;
       return;
     }
+    // The contents, not a digest of them. Copied because the refresh below awaits, and the live
+    // array can be replaced while it does.
+    const before = jukeQueue.slice();
     try {
       const next = await invoke<JukeEntry[]>("get_jukebox", { server, channel });
-      if (!jukeQueueCurrent(generation, server, channel)) return;
+      if (!jukeQueueCurrent(generation, server, channel)) {
+        // A refresh that resolved for a room the user has since left. Recorded rather than
+        // dropped: "the refresh started but applied to a different channel" is one of the ways a
+        // queue goes stale, and it is indistinguishable from "no refresh happened" without this.
+        diagRecord({
+          section: "channels",
+          code: "JUKEBOX.REFRESH.SUPERSEDED",
+          level: "debug",
+          fields: { entries: next.length },
+        });
+        return;
+      }
+      diagRecord({
+        section: "channels",
+        code: "JUKEBOX.REFRESH.APPLIED",
+        level: "debug",
+        fields: {
+          entries_before: jukeQueue.length,
+          entries_after: next.length,
+          // The one that matters. An event said the jukebox moved and the queue came back
+          // identical: the event and the document disagree, which used to be indistinguishable
+          // from a queue that legitimately had not changed since the last look. Decided by
+          // comparing the entries, so a digest collision cannot report this one as quiet.
+          changed: queueChanged(before, next),
+          digest: queueDigest(next),
+        },
+      });
       jukeQueue = next;
       jukeQueueStale = false;
-    } catch {
+    } catch (e) {
       if (!jukeQueueCurrent(generation, server, channel)) return;
+      diagRecord({
+        section: "channels",
+        code: "JUKEBOX.REFRESH.FAILED",
+        level: "warn",
+        fields: { failure: classifyInvokeFailure(e) },
+      });
       // "The read failed" is not "the queue is empty". Blanking it here made a closed actor or a
       // dropped call look exactly like a room whose playlist somebody had just cleared.
       jukeQueueStale = true;
@@ -10293,11 +11816,11 @@
     const channel = callChannel;
     if (server === null || !channel) return;
     try {
-      await invoke<string>("jukebox_add", { server, channel, cid, name: name.slice(0, 200) });
+      await invokeDebugged<string>("jukebox_add", { server, channel, cid, name: name.slice(0, 200) });
       jukeFailed.delete(cid); // a re-add is also a retry
       await refreshJukebox();
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
   async function jukeRemoveTrack(id: string) {
@@ -10305,10 +11828,10 @@
     const channel = callChannel;
     if (server === null || !channel) return;
     try {
-      await invoke("jukebox_remove", { server, channel, entry: id });
+      await invokeDebugged("jukebox_remove", { server, channel, entry: id });
       await refreshJukebox();
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
   // Claim the deck: my press outranks everything I have heard, and I apply it to myself on the same
@@ -10348,7 +11871,10 @@
     jukeHeard = jukeAdopted.at;
     jukeStale = false;
     // Local health is per track: moving the room on clears whatever this machine could not play.
-    if (!same) jukeLocalFail = "";
+    if (!same) {
+      jukeLocalFail = "";
+      jukeTrustBlocked = "";
+    }
     jukeNow = entry || cid ? { entry, cid, name, paused, dj: fromFp === callSelfFp ? "" : fromFp } : null;
     if (!jukeNow) {
       jukeDur = 0;
@@ -10366,6 +11892,23 @@
     const cid = now.cid;
     const server = callServer;
     if (server === null) return;
+    const file = callFiles.find((candidate) => candidate.cid === cid);
+    const mime = file ? safeMime(file.mime) : "";
+    if (!file || !(mime.startsWith("audio/") || mime.startsWith("video/"))) {
+      jukeTrustBlocked = "unavailable";
+      parkJukeboxMedia();
+      return;
+    }
+    const approvalKey = scopedMediaKey(server, cid);
+    if (!mayLoadJukeboxFile(
+      fileTrustFor(server), file.author_identity, file.author_verified,
+      jukeExplicitApprovals.has(approvalKey),
+    )) {
+      jukeTrustBlocked = "consent";
+      parkJukeboxMedia();
+      return;
+    }
+    jukeTrustBlocked = "";
     // The element streams straight out of the vault, so there is no fetch-then-play step any
     // more: playback starts on the first chunk instead of the last, and a seek costs one chunk.
     // A track nobody can serve now surfaces as an element error rather than a thrown fetch,
@@ -10407,6 +11950,22 @@
     const live = jukeNow;
     if (!live || live.paused) jukePause(el);
     else void jukeStart(el);
+  }
+  function parkJukeboxMedia() {
+    if (!jukeAudio) return;
+    jukeAudio.pause();
+    jukeAudio.removeAttribute("src");
+    jukeAudio.load();
+    jukeDur = 0;
+    jukeFetch = null;
+    jukeBuffering = false;
+    jukeBlocked = false;
+  }
+  function approveCurrentJukeboxTrack() {
+    if (!jukeNow || callServer === null) return;
+    jukeExplicitApprovals.add(scopedMediaKey(callServer, jukeNow.cid));
+    jukeTrustBlocked = "";
+    void jukeApply(false);
   }
   /**
    * Start the deck, and remember if the webview would not let us.
@@ -10647,6 +12206,9 @@
     jukeFetch = null;
     jukeBlocked = false;
     jukeLocalFail = "";
+    jukeTrustBlocked = "";
+    jukeExplicitApprovals.clear();
+    callFiles = [];
     clearTimeout(bufferTimer);
     jukeBuffering = false;
     jukeNudging = false;
@@ -10730,15 +12292,245 @@
   // check: every sender uploads its video once per peer, so this is for small rooms; the SFU
   // hookup is the scale path.
   let camStream: MediaStream | null = null; // whatever the slot currently captures
+  const videoCaptureSession = new MediaCaptureSession();
   let myVideo = $state<"" | "cam" | "screen">("");
   let localVideoStream = $state<MediaStream | null>(null); // the self-preview tile reads this
   let remoteStreams = $state<Record<string, MediaStream>>({}); // fp -> their video stream
+  const remoteAudioStreams: Record<string, MediaStream> = {};
+  type ScreenAudioCapture = {
+    id: string;
+    label: string;
+    stream: MediaStream;
+    node: MediaStreamAudioSourceNode;
+    gain: GainNode;
+  };
+  let screenAudioSources = $state<{ id: string; label: string; level: number }[]>([]);
+  let screenAudioError = $state("");
+  const screenAudioCaptures = new Map<string, ScreenAudioCapture>();
+  let screenAudioContext: AudioContext | null = null;
+  let screenAudioDestination: MediaStreamAudioDestinationNode | null = null;
+  let screenAudioMaster: GainNode | null = null;
+  let screenAudioSourceId = 0;
+  const screenAudioCaptureSession = new MediaCaptureSession();
+
+  /** The one Opus input sent to every peer, no matter how many application sources feed it. */
+  function screenAudioTrack(): MediaStreamTrack | null {
+    return screenAudioSources.length ? screenAudioDestination?.stream.getAudioTracks()[0] ?? null : null;
+  }
+
+  async function capScreenAudio(sender: RTCRtpSender) {
+    try {
+      const parameters = sender.getParameters();
+      parameters.encodings = parameters.encodings?.length
+        ? parameters.encodings.map((encoding) => ({ ...encoding, maxBitrate: 160_000 }))
+        : [{ maxBitrate: 160_000 }];
+      await sender.setParameters(parameters);
+    } catch {
+      // WebViews may reject a pre-negotiation audio parameter change. Opus remains bounded by its
+      // negotiated defaults; unlike video, this does not risk an unbounded 4K-class encode.
+    }
+  }
+
+  function syncScreenAudioPeer(peer: CallPeer) {
+    const track = myVideo === "screen" ? screenAudioTrack() : null;
+    if (peer.screenAudioSender) {
+      void peer.screenAudioSender.replaceTrack(track).then(() => {
+        if (track && peer.screenAudioSender) void capScreenAudio(peer.screenAudioSender);
+      }).catch(() => { /* the edge is closing */ });
+      return;
+    }
+    if (!track || !screenAudioDestination) return;
+    try {
+      peer.screenAudioSender = peer.pc.addTrack(track, screenAudioDestination.stream);
+      void capScreenAudio(peer.screenAudioSender);
+    } catch (e) {
+      console.warn("voice: could not add mixed screen audio", { peer: peer.fp, error: String(e) });
+    }
+  }
+
+  function syncScreenAudioPeers() {
+    for (const peer of Object.values(callPeers)) syncScreenAudioPeer(peer);
+  }
+
+  async function addScreenAudioStream(
+    stream: MediaStream,
+    fallbackLabel: string,
+    stillWanted: () => boolean = () => true,
+    syncNow = true,
+  ) {
+    if (!screenAudioSourceSlotAvailable(screenAudioCaptures.size)) {
+      for (const track of stream.getTracks()) track.stop();
+      screenAudioError = `At most ${MAX_STREAM_AUDIO_SOURCES} application-audio sources can be mixed at once.`;
+      return false;
+    }
+    const tracks = stream.getAudioTracks();
+    if (!tracks.length) {
+      for (const track of stream.getTracks()) track.stop();
+      screenAudioError = "That source did not provide audio. Choose a tab/window with audio enabled in the picker.";
+      return false;
+    }
+    // A permission prompt can resolve after stop/leave/mode-change invalidates the lease. Reject it
+    // before creating an AudioContext or destination, otherwise a capture with no registered row
+    // could strand an invisible live graph outside ordinary teardown.
+    if (!stillWanted()) {
+      for (const track of stream.getTracks()) track.stop();
+      return false;
+    }
+    try {
+      const context = screenAudioContext ??= new AudioContext();
+      const destination = screenAudioDestination ??= context.createMediaStreamDestination();
+      let master = screenAudioMaster;
+      if (!master) {
+        master = context.createGain();
+        master.connect(destination);
+        screenAudioMaster = master;
+      }
+      master.gain.value = streamAudioGain(streamSettings.audioLevel);
+      // Do not await `resume()`: an OS prompt has already handed us live capture tracks, and an
+      // unresolved WebView promise here would leave both these tracks and the calling screen-video
+      // stream outside the teardown registries. Build/register the graph synchronously so stop,
+      // leave and lock always own the capture before another UI event can run.
+      if (context.state === "suspended") {
+        void context.resume().catch((e) => {
+          if (screenAudioContext === context) {
+            screenAudioError = `This WebView could not start the audio mix: ${String(e)}`;
+          }
+        });
+      }
+      if (!stillWanted() || screenAudioContext !== context || screenAudioDestination !== destination || screenAudioMaster !== master) {
+        for (const track of stream.getTracks()) track.stop();
+        if (!screenAudioCaptures.size) disposeScreenAudioGraph();
+        return false;
+      }
+      const id = `source-${++screenAudioSourceId}`;
+      const node = context.createMediaStreamSource(stream);
+      const gain = context.createGain();
+      gain.gain.value = 1;
+      node.connect(gain);
+      gain.connect(master);
+      const label = tracks[0].label || fallbackLabel;
+      screenAudioCaptures.set(id, { id, label, stream, node, gain });
+      screenAudioSources = [...screenAudioSources, { id, label, level: 100 }];
+      screenAudioError = "";
+      for (const track of tracks) {
+        // One granted source may expose multiple audio tracks. The first one ending retires and
+        // stops the whole grant so no surviving track can continue capturing without a visible row.
+        track.addEventListener("ended", () => removeScreenAudioSource(id), { once: true });
+      }
+      if (syncNow) syncScreenAudioPeers();
+      return true;
+    } catch (e) {
+      for (const track of stream.getTracks()) track.stop();
+      if (!screenAudioCaptures.size) disposeScreenAudioGraph();
+      screenAudioError = `This WebView could not mix that audio source: ${String(e)}`;
+      return false;
+    }
+  }
+
+  function setScreenAudioSourceLevel(id: string, value: string) {
+    const capture = screenAudioCaptures.get(id);
+    if (!capture || !screenAudioContext) return;
+    const current = screenAudioSources.find((source) => source.id === id)?.level ?? 100;
+    const level = normalizeStreamAudioLevel(Number(value), current);
+    try {
+      capture.gain.gain.setTargetAtTime(streamAudioGain(level), screenAudioContext.currentTime, 0.015);
+    } catch {
+      capture.gain.gain.value = streamAudioGain(level);
+    }
+    screenAudioSources = screenAudioSources.map((source) => source.id === id ? { ...source, level } : source);
+  }
+
+  function removeScreenAudioSource(id: string, stop = true) {
+    const capture = screenAudioCaptures.get(id);
+    if (!capture) return;
+    screenAudioCaptures.delete(id);
+    try { capture.node.disconnect(); } catch { /* already disconnected */ }
+    try { capture.gain.disconnect(); } catch { /* already disconnected */ }
+    if (stop) for (const track of capture.stream.getTracks()) track.stop();
+    screenAudioSources = screenAudioSources.filter((source) => source.id !== id);
+    syncScreenAudioPeers();
+    if (!screenAudioCaptures.size) disposeScreenAudioGraph();
+  }
+
+  function disposeScreenAudioGraph() {
+    const context = screenAudioContext;
+    const destination = screenAudioDestination;
+    const master = screenAudioMaster;
+    screenAudioContext = null;
+    screenAudioDestination = null;
+    screenAudioMaster = null;
+    disposeStreamAudioGraph(destination, master, context);
+  }
+
+  function clearScreenAudioSources() {
+    const captures = [...screenAudioCaptures.values()];
+    screenAudioCaptures.clear();
+    screenAudioSources = [];
+    for (const capture of captures) {
+      try { capture.node.disconnect(); } catch { /* already disconnected */ }
+      try { capture.gain.disconnect(); } catch { /* already disconnected */ }
+      for (const track of capture.stream.getTracks()) track.stop();
+    }
+    syncScreenAudioPeers();
+    disposeScreenAudioGraph();
+  }
+
+  /**
+   * Browser APIs cannot enumerate arbitrary application audio for privacy reasons. Each press
+   * opens the platform capture chooser; Mewtual discards its picture and mixes only the granted
+   * audio. Repeating it is the portable approximation of OBS's per-application source list.
+   */
+  async function addSeparateScreenAudioSource() {
+    if (myVideo !== "screen") return;
+    if (!screenAudioSourceSlotAvailable(screenAudioCaptures.size)) {
+      screenAudioError = `Remove a source before adding another (maximum ${MAX_STREAM_AUDIO_SOURCES}).`;
+      return;
+    }
+    const videoLease = videoCaptureSession.current();
+    const audioLease = screenAudioCaptureSession.begin();
+    const server = callServer;
+    const channel = callChannel;
+    screenAudioError = "";
+    try {
+      const captured = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true,
+        systemAudio: "include",
+        windowAudio: "window",
+      } as DisplayMediaStreamOptions);
+      const picked = acceptCapture(
+        screenAudioCaptureSession,
+        audioLease,
+        captured,
+        videoCaptureSession.isCurrent(videoLease) && inCall && callServer === server && callChannel === channel && myVideo === "screen" &&
+          streamSettings.audioMode === "separate",
+      );
+      if (!picked) return;
+      for (const track of picked.getVideoTracks()) {
+        picked.removeTrack(track);
+        track.stop();
+      }
+      await addScreenAudioStream(
+        picked,
+        `Audio source ${screenAudioSources.length + 1}`,
+        () => videoCaptureSession.isCurrent(videoLease) && screenAudioCaptureSession.isCurrent(audioLease) && inCall && callServer === server &&
+          callChannel === channel && myVideo === "screen" && streamSettings.audioMode === "separate",
+      );
+    } catch {
+      screenAudioError = "Audio-source selection was cancelled or is not supported by this WebView.";
+    }
+  }
   function dropRemoteVideo(fp: string, stream: MediaStream) {
     if (remoteStreams[fp] !== stream) return; // an ended track from a replaced, older stream
     const { [fp]: _s, ...rest } = remoteStreams;
     remoteStreams = rest;
   }
   async function startVideo(kind: "cam" | "screen") {
+    const lease = videoCaptureSession.begin();
+    const audioLease = screenAudioCaptureSession.begin();
+    const requestedAudioMode = streamSettings.audioMode;
+    const server = callServer;
+    const channel = callChannel;
     let s: MediaStream;
     try {
       s = kind === "cam"
@@ -10746,21 +12538,142 @@
             // Mesh-friendly by construction: each peer gets its own encode, so keep frames small.
             video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24 } },
           })
-        : await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        : await navigator.mediaDevices.getDisplayMedia({
+            video: {
+              width: {
+                ideal: Math.round((streamSettings.resolution * 16) / 9),
+                max: Math.round((streamSettings.resolution * 16) / 9),
+              },
+              height: { ideal: streamSettings.resolution, max: streamSettings.resolution },
+              frameRate: { ideal: streamSettings.frameRate, max: streamSettings.frameRate },
+            },
+            audio: requestedAudioMode === "surface",
+            systemAudio: requestedAudioMode === "surface" ? "include" : "exclude",
+            windowAudio: requestedAudioMode === "surface" ? "window" : "exclude",
+          } as DisplayMediaStreamOptions);
     } catch {
-      error = kind === "cam" ? "Couldn't access the camera (permission denied or no device)." : "Screen share was cancelled or unavailable.";
+      if (videoCaptureSession.isCurrent(lease)) {
+        error = kind === "cam" ? "Couldn't access the camera (permission denied or no device)." : "Screen share was cancelled or unavailable.";
+      }
       return;
     }
+    const accepted = acceptCapture(
+      videoCaptureSession,
+      lease,
+      s,
+      inCall && server !== null && callServer === server && !!channel && callChannel === channel,
+    );
+    if (!accepted) return;
+    s = accepted;
     const track = s.getVideoTracks()[0];
-    if (!track) return;
+    if (!track) {
+      for (const capturedTrack of s.getTracks()) capturedTrack.stop();
+      error = "That capture source did not provide video.";
+      return;
+    }
+    // A camera swap or a fresh screen picker must end the previous session's independently granted
+    // application audio. Otherwise changing the picture could leave an invisible old source live.
+    if (screenAudioSources.length) clearScreenAudioSources();
+    if (kind === "screen") {
+      peerVideoBudget = {};
+      const surfaceAudio = s.getAudioTracks();
+      if (surfaceAudio.length) {
+        for (const audio of surfaceAudio) s.removeTrack(audio);
+        if (requestedAudioMode === "surface" && screenAudioCaptureSession.isCurrent(audioLease) && streamSettings.audioMode === "surface") {
+          await addScreenAudioStream(
+            new MediaStream(surfaceAudio),
+            "Selected surface audio",
+            () => videoCaptureSession.isCurrent(lease) && screenAudioCaptureSession.isCurrent(audioLease) && inCall && callServer === server &&
+              callChannel === channel && streamSettings.audioMode === "surface",
+            false,
+          );
+        } else {
+          for (const audio of surfaceAudio) audio.stop();
+        }
+      } else if (requestedAudioMode === "surface" && screenAudioCaptureSession.isCurrent(audioLease)) {
+        screenAudioError = "The selected surface did not provide audio. You can switch to separate sources and add one explicitly.";
+      }
+      // Text/edges benefit from the browser's screen-content encoder path where supported.
+      try { track.contentHint = streamSettings.quality === "motion" ? "motion" : "detail"; } catch { /* advisory */ }
+      const settings = track.getSettings();
+      actualStream = {
+        width: settings.width ?? 0,
+        height: settings.height ?? 0,
+        fps: Math.round(settings.frameRate ?? 0),
+        constraintError: "",
+      };
+    }
+    if (!videoCaptureSession.isCurrent(lease) || !inCall || callServer !== server || callChannel !== channel) {
+      for (const capturedTrack of s.getTracks()) capturedTrack.stop();
+      return;
+    }
     const old = camStream;
     camStream = s;
     localVideoStream = s;
     myVideo = kind;
     track.onended = () => stopVideo(); // the browser's own "stop sharing" chrome ends the track
     for (const p of Object.values(callPeers)) fillVideoSlot(p, track, s, kind);
+    if (kind === "screen") syncScreenAudioPeers();
     if (old) for (const t of old.getTracks()) t.stop();
     pushInstState(); // vid state rides the same channel as the mute states
+  }
+
+  let streamSettingsApplyGeneration = 0;
+  let streamSettingsApplyQueue: Promise<void> = Promise.resolve();
+
+  /** Serialize panel changes; an older browser Promise may never overwrite a newer selection. */
+  function applyStreamSettings(): Promise<void> {
+    const generation = ++streamSettingsApplyGeneration;
+    const requested = { ...streamSettings };
+    const apply = streamSettingsApplyQueue
+      .catch(() => { /* a later selection still runs after an older browser failure */ })
+      .then(() => applyStreamSettingsNow(generation, requested));
+    streamSettingsApplyQueue = apply.catch(() => {});
+    return apply;
+  }
+
+  /** Apply one current setting snapshot to the capture and every independent peer encoding. */
+  async function applyStreamSettingsNow(generation: number, requested: StreamSettings) {
+    if (generation !== streamSettingsApplyGeneration) return;
+    if (myVideo !== "screen" || !camStream) return;
+    const track = camStream.getVideoTracks()[0];
+    if (!track) return;
+    let constraintError = "";
+    try {
+      await track.applyConstraints({
+        width: {
+          ideal: Math.round((requested.resolution * 16) / 9),
+          max: Math.round((requested.resolution * 16) / 9),
+        },
+        height: { ideal: requested.resolution, max: requested.resolution },
+        frameRate: { ideal: requested.frameRate, max: requested.frameRate },
+      });
+      track.contentHint = requested.quality === "motion" ? "motion" : "detail";
+    } catch (e) {
+      constraintError = String(e);
+      console.warn("voice: the selected capture constraints were not fully available", String(e));
+    }
+    if (generation !== streamSettingsApplyGeneration || track !== camStream?.getVideoTracks()[0]) return;
+    // Read this even on failure. Capture constraints are advisory; peer scaling must start from
+    // what the browser is actually producing, not what the settings panel requested.
+    const settings = track.getSettings();
+    if (!captureResolutionKnownAfterConstraint(!!constraintError, settings.height)) {
+      error = "Screen sharing stopped because this WebView rejected the requested resolution and did not report the actual capture size.";
+      stopVideo();
+      return;
+    }
+    const sourceHeight = settings.height || actualStream?.height || requested.resolution;
+    actualStream = {
+      width: settings.width ?? 0,
+      height: settings.height ?? 0,
+      fps: Math.round(settings.frameRate ?? 0),
+      constraintError,
+    };
+    await Promise.all(Object.values(callPeers).map((peer) =>
+      peer.vidSender
+        ? capVideo(peer.vidSender, "screen", peer.fp, requested, sourceHeight)
+        : Promise.resolve()
+    ));
   }
   // The transceiver carrying a peer's video slot, and what direction it is currently in. A slot
   // whose transceiver has gone, or whose connection has closed under it, reads as stopped: that
@@ -10779,14 +12692,88 @@
   // same sender and the two do not cost the same. Mapping over the existing encodings rather than
   // replacing them keeps whatever else negotiation put there; before the first negotiation there
   // is nothing to map, and the capture constraints still bound it either way.
-  function capVideo(sender: RTCRtpSender, kind: VideoKind) {
+  async function capVideo(
+    sender: RTCRtpSender,
+    kind: VideoKind,
+    fingerprint: string,
+    requested = streamSettings,
+    sourceHeight = actualStream?.height || requested.resolution,
+  ) {
+    if (kind === "screen") {
+      const result = await peerVideoBudgetController.apply(
+        sender,
+        requested,
+        peerMeta[fingerprint]?.rx ?? 1080,
+        sourceHeight,
+        true,
+        camStream?.getVideoTracks()[0],
+      );
+      if (result.state === "stale") return;
+      const previous = peerVideoBudget[fingerprint];
+      peerVideoBudget[fingerprint] = result.state !== "applied"
+        ? {
+            ...result,
+            lastApplied: previous?.state === "applied" ? previous.plan : previous?.lastApplied,
+          }
+        : result;
+      const peer = callPeers[fingerprint];
+      if (result.state === "paused") {
+        if (peer?.vidSender === sender) {
+          const slot = vidSlot(peer);
+          const idle = directionIdle(slot.direction);
+          if (idle && slot.tr) slot.tr.direction = idle;
+        }
+        console.warn("voice: paused an edge whose video budget was refused", {
+          peer: fingerprint,
+          error: result.error,
+        });
+        return;
+      }
+      if (result.state === "stop-required") {
+        if (myVideo !== "screen" || callPeers[fingerprint]?.vidSender !== sender) return;
+        error = `Screen sharing stopped because ${callNameOf(fingerprint)}'s encoder cap could not be enforced.`;
+        stopVideo();
+        return;
+      }
+      if (result.state === "failed") {
+        console.warn("voice: could not apply this peer's video budget", {
+          peer: fingerprint,
+          error: result.error,
+        });
+        return;
+      }
+      if (result.state === "applied" && peer?.vidSender === sender && camStream) {
+        const slot = vidSlot(peer);
+        const sending = videoSlotPlan({ hasSender: true, direction: slot.direction }).direction;
+        if (sending && slot.tr) slot.tr.direction = sending;
+      }
+      return;
+    }
     try {
       const prm = sender.getParameters();
+      const maxBitrate = VIDEO_BITRATE.cam;
       prm.encodings = prm.encodings?.length
-        ? prm.encodings.map((e) => ({ ...e, maxBitrate: VIDEO_BITRATE[kind] }))
-        : [{ maxBitrate: VIDEO_BITRATE[kind] }];
-      void sender.setParameters(prm);
+        ? prm.encodings.map((encoding) => ({
+            ...encoding,
+            maxBitrate,
+          }))
+        : [{
+            maxBitrate,
+          }];
+      await sender.setParameters(prm);
     } catch { /* pre-negotiation, or an edge closing: the constraints above still cap it */ }
+  }
+
+  function preferVideoCodecs(transceiver: RTCRtpTransceiver | null) {
+    if (!transceiver?.setCodecPreferences || !RTCRtpReceiver.getCapabilities) return;
+    try {
+      const codecs = RTCRtpReceiver.getCapabilities("video")?.codecs ?? [];
+      if (codecs.length) transceiver.setCodecPreferences(preferEfficientVideoCodecs(codecs));
+    } catch (e) {
+      // Capability and preference support differs between WebView runtimes. Negotiation's default
+      // list remains a compatible fallback, and stats below report what actually won.
+      console.warn("voice: efficient video codec preference was unavailable", String(e));
+    }
   }
   // Put a track into one peer's video slot: reuse the slot if it still exists, open one if not.
   // Reuse is the common path and costs no renegotiation at all; the direction flip only happens
@@ -10797,25 +12784,50 @@
     const plan = videoSlotPlan({ hasSender: !!p.vidSender, direction: slot.direction });
     try {
       if (plan.action === "reuse" && p.vidSender) {
+        if (kind === "screen") {
+          // The controller parks first, applies the exact receiver-rounded budget, then reattaches.
+          // Keeping attachment inside that serialized operation prevents a slow WebView encoder
+          // from sending a default uncapped screen while `setParameters` is still pending.
+          const idle = directionIdle(slot.direction);
+          if (idle && slot.tr) slot.tr.direction = idle;
+          preferVideoCodecs(slot.tr);
+          void capVideo(p.vidSender, kind, p.fp);
+          return;
+        }
+        peerVideoBudgetController.invalidate(p.vidSender);
         // Same m-line: a cam/screen swap never renegotiates. replaceTrack rejects rather than
         // throwing when the edge has gone under us, so the failure is caught on the promise.
         p.vidSender.replaceTrack(track).catch((e: unknown) =>
           console.warn("voice: video swap was refused", { peer: p.fp, error: String(e) }));
         if (plan.direction && slot.tr) slot.tr.direction = plan.direction;
-        capVideo(p.vidSender, kind);
+        preferVideoCodecs(slot.tr);
+        capVideo(p.vidSender, kind, p.fp);
+        return;
+      }
+      if (kind === "screen") {
+        // A trackless sendrecv transceiver preserves the bidirectional video slot without exposing
+        // a frame. `capVideo` is the only operation allowed to attach the screen track.
+        const transceiver = p.pc.addTransceiver("video", { direction: "sendrecv", streams: [stream] });
+        p.vidSender = transceiver.sender;
+        preferVideoCodecs(transceiver);
+        void capVideo(transceiver.sender, kind, p.fp);
         return;
       }
       const sn = p.pc.addTrack(track, stream); // first video: onnegotiationneeded takes it from here
       p.vidSender = sn;
-      capVideo(sn, kind);
+      preferVideoCodecs(p.pc.getTransceivers().find((transceiver) => transceiver.sender === sn) ?? null);
+      capVideo(sn, kind, p.fp);
     } catch (e) {
       console.warn("voice: could not put video on this edge", { peer: p.fp, error: String(e) });
     }
   }
   function stopVideo() {
+    videoCaptureSession.invalidate();
+    screenAudioCaptureSession.invalidate();
     if (!camStream) return;
     for (const p of Object.values(callPeers)) {
       if (!p.vidSender) continue;
+      peerVideoBudgetController.invalidate(p.vidSender);
       // Park the slot, never removeTrack it. removeTrack retires the transceiver for good (addTrack
       // will not reuse one that has sent), so restarting a share would add a second video section
       // to the SDP each time. replaceTrack(null) stops the frames; dropping the send half is what
@@ -10827,10 +12839,13 @@
         if (idle && slot.tr) slot.tr.direction = idle;
       } catch { /* edge closing: the slot goes with it */ }
     }
+    clearScreenAudioSources();
     for (const t of camStream.getTracks()) t.stop();
     camStream = null;
     localVideoStream = null;
     myVideo = "";
+    actualStream = null;
+    peerVideoBudget = {};
     pushInstState();
   }
   function toggleVideo(kind: "cam" | "screen") {
@@ -10946,6 +12961,25 @@
   async function sniffTransport(fp: string, pc: RTCPeerConnection) {
     try {
       const stats = await pc.getStats();
+      let codecId = "";
+      stats.forEach((stat) => {
+        const outbound = stat as RTCStats & {
+          kind?: string;
+          mediaType?: string;
+          codecId?: string;
+          bytesSent?: number;
+        };
+        if (
+          outbound.type === "outbound-rtp" &&
+          (outbound.kind === "video" || outbound.mediaType === "video") &&
+          (outbound.bytesSent ?? 0) > 0 &&
+          outbound.codecId
+        ) codecId = outbound.codecId;
+      });
+      const codec = codecId
+        ? (stats.get(codecId) as (RTCStats & { mimeType?: string }) | undefined)?.mimeType
+        : undefined;
+      if (codec) peerVideoCodec = { ...peerVideoCodec, [fp]: codec.replace(/^video\//i, "").toUpperCase() };
       let pairId = "";
       stats.forEach((s) => {
         const t = s as RTCStats & { selectedCandidatePairId?: string };
@@ -11046,14 +13080,19 @@
       ignoreOffer: false,
       lastRetry: 0,
       vidSender: null,
+      micSender: null,
+      screenAudioSender: null,
     };
-    if (localStream) for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
+    if (localStream) {
+      for (const t of localStream.getAudioTracks()) peer.micSender = pc.addTrack(t, localStream);
+    }
     // A joiner arriving while my video is live gets it in the very first offer. It goes through
     // the same slot bookkeeping as everyone else's, so their edge is capped and reusable from the
     // start rather than being the one edge that behaves differently.
     if (camStream && myVideo) {
       const vt = camStream.getVideoTracks()[0];
       if (vt) fillVideoSlot(peer, vt, camStream, myVideo);
+      if (myVideo === "screen") syncScreenAudioPeer(peer);
     }
     // The instrument channel: negotiated (same id on both ends) and created BEFORE the offer, so
     // the SCTP section rides the first SDP exchange and nothing ever renegotiates for it. An old
@@ -11112,11 +13151,16 @@
     }
     delete waitingIce[fp];
     document.getElementById(`call-audio-${fp}`)?.remove();
+    delete remoteAudioStreams[fp];
     callParticipants = Object.keys(callPeers);
     const { [fp]: _drop, ...rest } = callPeerStates;
     callPeerStates = rest;
     const { [fp]: _path, ...paths } = peerTransport;
     peerTransport = paths;
+    const { [fp]: _codec, ...codecs } = peerVideoCodec;
+    peerVideoCodec = codecs;
+    const { [fp]: _budget, ...budgets } = peerVideoBudget;
+    peerVideoBudget = budgets;
     // Silence and forget anything they were sounding; a dead edge must not drone on.
     stopAllFrom(fp);
     const { [fp]: _h, ...rh } = remoteHeld;
@@ -11287,9 +13331,14 @@
   async function joinVoice(channel: string, server: number, name: string) {
     if (inCall && callChannel === channel && callServer === server) return;
     if (inCall) leaveVoice();
+    const joinLease = callLifecycleSession.begin();
+    micCaptureSession.invalidate();
+    callFiles = [];
+    jukeExplicitApprovals.clear();
     let selfFp = "";
     try {
       const membersHere = await invoke<Member[]>("get_members", { server });
+      if (!callLifecycleSession.isCurrent(joinLease)) return;
       selfFp = membersHere.find((m) => m.you)?.fingerprint ?? "";
     } catch (e) {
       error = `Couldn't read the voice room's member list: ${String(e)}`;
@@ -11299,20 +13348,28 @@
       error = "Couldn't identify this device on the voice room's server.";
       return;
     }
-    callServer = server;
-    callSelfFp = selfFp;
     // A missing or refused microphone is no longer a reason not to join. The room is also where
     // the jukebox and the instruments live, and neither needs one: the data channel carries the
     // instruments and the deck rides the mesh, so a peer with no mic is a full participant in
     // everything except talking. The dock offers the mic in place if one turns up later.
-    micOn = (await ensureMic(false)) !== null;
+    const joinedMic = await ensureMic(false, false, { server, channel, callLease: joinLease });
+    if (!callLifecycleSession.isCurrent(joinLease)) {
+      if (joinedMic) for (const track of joinedMic.getTracks()) track.stop();
+      return;
+    }
+    localStream = joinedMic;
+    micOn = joinedMic !== null;
+    callServer = server;
+    callSelfFp = selfFp;
     callChannel = channel;
     callChannelName = name;
     // Snapshot the room's server identity now, while we are certainly on it. Everything the
     // dock renders afterwards has to survive the user walking off to another server.
     callServerName = servers.find((s) => s.id === server)?.name ?? "";
-    void refreshCallProfiles();
     inCall = true;
+    activeCallLease = joinLease;
+    void refreshCallProfiles();
+    void refreshCallFiles();
     callMuted = false;
     focusOpen = false;
     focusDismissed = false; // a new call earns a fresh chance to take the window
@@ -11323,13 +13380,13 @@
     alertedRooms.delete(roomKey(server, channel));
     recordPresence(server, channel, callSelfFp);
     void refreshJukebox(); // the room's queue, whatever the DJ is currently on
-    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid() }); // announce + trigger existing members to offer
+    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight }); // announce + trigger existing members to offer
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
       if (callChannel && callServer !== null) {
         // vid rides the heartbeat for the same reason mic does: it is the only thing that repairs
         // a data-channel state message that never arrived, and the video tile is gated on it.
-        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid() });
+        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight });
         recordPresence(callServer, callChannel, callSelfFp); // keep my own presence fresh
         jukeTick(); // the DJ's re-announce (and the listener's DJ-left check) ride this tick
         // Re-read the winning candidate pair: an ICE restart can migrate a live call from
@@ -11341,6 +13398,12 @@
     }, 5000);
   }
   function leaveVoice() {
+    // Permission prompts are not cancellable. Invalidate before any teardown so a chooser that
+    // resolves after this point can only stop its returned tracks, never adopt them.
+    videoCaptureSession.invalidate();
+    screenAudioCaptureSession.invalidate();
+    micCaptureSession.invalidate();
+    callLifecycleSession.invalidate();
     if (callChannel) broadcast({ callId: callChannel, type: "bye" });
     releaseMappedCallPorts(); // give the router its ports back; the lease is bounded regardless
     instReleaseAll(); // lift my own notes (and tell peers) before the edges go down
@@ -11348,6 +13411,8 @@
       for (const t of camStream.getTracks()) t.stop();
       camStream = null;
     }
+    clearScreenAudioSources();
+    screenAudioError = "";
     localVideoStream = null;
     myVideo = "";
     remoteStreams = {};
@@ -11379,8 +13444,10 @@
     callServer = null;
     callServerName = "";
     callSelfFp = "";
+    activeCallLease = 0;
     callProfiles = {};
     peerTransport = {};
+    peerVideoCodec = {};
     secInfoOpen = false;
     for (const fp of Object.keys(waitingIce)) delete waitingIce[fp];
   }
@@ -11426,7 +13493,13 @@
       // states matter to the UI. mergePeerState is what keeps an older build's ping, which has
       // no `vid` field at all, from reading as "they stopped sharing".
       if (currentRoom && typeof msg.mic === "number") {
-        peerMeta = { ...peerMeta, [fromFp]: mergePeerState(peerMeta[fromFp], msg) };
+        const before = peerMeta[fromFp];
+        const after = mergePeerState(before, msg);
+        peerMeta = { ...peerMeta, [fromFp]: after };
+        if (after.rx !== before?.rx && myVideo === "screen") {
+          const sender = callPeers[fromFp]?.vidSender;
+          if (sender) capVideo(sender, "screen", fromFp);
+        }
       }
       if (type === "voice-ping") {
         const peer = callPeers[fromFp];
@@ -11474,6 +13547,9 @@
       if (peer.ignoreOffer) return;
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+        for (const transceiver of pc.getTransceivers()) {
+          if (transceiver.receiver.track.kind === "video") preferVideoCodecs(transceiver);
+        }
         await flushWaitingIce(peer);
         await pc.setLocalDescription(); // no-arg picks "answer" from the have-remote-offer state
         void sendSignal(server, fromFp, { callId: cid, type: "answer", sdp: pc.localDescription });
@@ -11578,7 +13654,11 @@
     markMessageArrivals([pendingId]);
     await tick();
     try {
-      await invoke("send_message", { server, channel, text, replyTo: reply_to });
+      // The one path instrumented end to end, and the pattern the rest adopt. The trace is
+      // allocated here, travels with the command, and stamps every native stage, so a send that
+      // goes nowhere can be read as one story rather than two halves lined up by timestamp.
+      // Nothing about the message itself is recorded: not its text, not its length.
+      await invokeDebugged("send_message", { server, channel, text, replyTo: reply_to });
       sending = false;
       // The channel-updated event normally refreshes this too, but the command acknowledgement is
       // the deterministic local completion point. Do not leave the just-sent message dependent on
@@ -11623,18 +13703,18 @@
     cancelEdit();
     if (text === m.text) return; // no change
     try {
-      await invoke("edit_message", { server: activeServerId, channel: ch, msgId: m.id, text });
+      await invokeDebugged("edit_message", { server: activeServerId, channel: ch, msgId: m.id, text });
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
   async function deleteMessage(m: Msg) {
     const ch = cur?.active;
     if (activeServerId === null || !ch) return;
     try {
-      await invoke("delete_message", { server: activeServerId, channel: ch, msgId: m.id });
+      await invokeDebugged("delete_message", { server: activeServerId, channel: ch, msgId: m.id });
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
 
@@ -11648,9 +13728,9 @@
     reactionPickerFor = "";
     if (activeServerId === null || !ch || !m.id) return;
     try {
-      await invoke("toggle_reaction", { server: activeServerId, channel: ch, msgId: m.id, emoji });
+      await invokeDebugged("toggle_reaction", { server: activeServerId, channel: ch, msgId: m.id, emoji });
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
   // A reaction emoji can be a unicode glyph or a custom `:name:` (a server emoji file). Returns the
@@ -11667,9 +13747,9 @@
     const ch = cur?.active;
     if (activeServerId === null || !ch || !m.id) return;
     try {
-      await invoke("set_pin", { server: activeServerId, channel: ch, msgId: m.id, pinned: !m.pinned });
+      await invokeDebugged("set_pin", { server: activeServerId, channel: ch, msgId: m.id, pinned: !m.pinned });
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
 
@@ -12550,20 +14630,196 @@
   // to follow the real window state, which also changes by snap, double-click and the OS.
   const appWindow = getCurrentWindow();
   let winMaximized = $state(false);
+  let windowCloseInFlight = false;
+  // The live frontend-logging installation, kept so unmount can stop it. Not reactive state: it is
+  // held purely so the teardown has something to call.
+  let uiLogging: UiLogging | null = null;
+
+  // ---- correlation across the IPC boundary --------------------------------------------------
+  //
+  // A user-visible operation here crosses ten stages between the click and the render, and until
+  // now nothing carried one identifier through them. "My message did not arrive" could not be
+  // narrowed to a stage, and two concurrent sends were indistinguishable in the record.
+  //
+  // Everything below is bounded and batched; see diagnostics.ts. The cost on the hot path is a
+  // counter increment and an array push.
+  const traceSource = makeTraceSource(Math.floor(Math.random() * 0xffffffff));
+  // The send is awaited rather than fired and forgotten. Firing it with `void` and a swallowing
+  // `catch` retired the batch the moment it was handed over and dropped the rejection outside the
+  // batcher, so the pipeline reported perfect health exactly when the bridge was unhealthy.
+  const diagRecorder = makeRecorder(
+    (events) => invoke<{ offered: number; accepted: number }>("record_ui_events", { events }),
+    { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+  );
+  /**
+   * Whether the diagnostics are capturing anything at all.
+   *
+   * Starts true because capture starts on and is never persisted, so a fresh webview always begins
+   * beside a fresh process that is recording. The native side says otherwise by emitting
+   * `capture-changed`, which only happens when somebody moves the control.
+   *
+   * The point of knowing here rather than only natively: off has to mean the app stops paying, not
+   * that it keeps building records and has them thrown away on the other side of an IPC call.
+   */
+  let captureOn = true;
+
+  /** Follow the native capture setting, in both of the webview's producers. */
+  function setCapture(on: boolean) {
+    captureOn = on;
+    diagRecorder.setCapturing(on);
+  }
+
+  /** Record one structured observation from the webview. */
+  function diagRecord(event: DiagEvent) {
+    diagRecorder.record(event);
+  }
+  const invokeDebugged = makeInvokeDebugged(invoke, diagRecord, traceSource);
+  const seqTracker = makeSeqTracker();
+  /**
+   * Notice a missing or repeated event.
+   *
+   * A gap means the backend changed something the webview was never told about, which is a stale
+   * UI with no other evidence. A repeat usually means a listener got installed twice, which is the
+   * failure the logging lifecycle fix was about and is worth catching if it ever returns.
+   */
+  /**
+   * The trace an emitted event carries, or undefined for one no local operation caused.
+   *
+   * The native side stamps it as `__trace` alongside `__seq`, so a listener can say "this arrived"
+   * under the same operation as the command that produced it. Without it the two halves were
+   * separate records that had to be lined up by wall clock, which is the correlation-by-timestamp
+   * the trace exists to replace.
+   */
+  // A default rather than an optional parameter. This file's TypeScript is stripped by annotation
+  // removal, which leaves the `?` of `trace?: string` behind as a syntax error the browser only
+  // reports at load, as "Mewtual failed to start" with a stack of no frames. A default reads the
+  // same at every call site and survives the transform.
+  /**
+   * Re-read the projections a lost event leaves wrong.
+   *
+   * Not a guess about which one went missing: a gap says something was lost, and only sometimes
+   * which family it belonged to. These are the projections built *from* the event stream, so they
+   * are the ones that can silently disagree with the backend, and each of them has an authoritative
+   * source to be rebuilt from. `rebuildUnread` in particular already exists for the same reason in
+   * a different situation: after a lock or a restart the badges have no event left to raise them.
+   */
+  const resync = makeResync(
+    async () => {
+      diagRecord({ section: "ipc", code: "UI.RESYNC.STARTED", level: "warn" });
+      for (const s of servers) await refreshChannels(s.id);
+      rebuildAllUnread();
+      if (activeServerId !== null && cur?.active) await channelEventRefresh.request(true);
+      // A lost member-route or membership event otherwise leaves Connectivity stale forever.
+      // Refresh only while that projection is visible; the backend read is local and bounded.
+      if (memberRoutesVisible(activeServerId, view)) await refreshMemberRoutes();
+      diagRecord({
+        section: "ipc",
+        code: "UI.RESYNC.APPLIED",
+        level: "info",
+        fields: { servers: servers.length },
+      });
+    },
+    {
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    },
+  );
+
+  /**
+   * Every native event passes through here, on its way to the handler that wanted it.
+   *
+   * One wrapper rather than a call in each listener, because the one that gets forgotten is the one
+   * whose gaps go unnoticed: this used to check `channel-updated` alone, so a lost `files-updated`
+   * or `members-changed` left the UI wrong with nothing recorded and nothing repaired.
+   */
+  function noteEvent(name: string, payload: unknown) {
+    const envelope = (payload ?? undefined) as EventEnvelope | undefined;
+    const correlation = envelope ? eventCorrelation(envelope) : {};
+    // The stage that proves the webview received what the backend sent. A backend that emitted and
+    // a webview that never heard used to look identical from either side, and that is precisely
+    // the shape of a stale unread badge.
+    if (correlation.trace) {
+      diagRecord({
+        section: "ipc",
+        code: "UI.EVENT.RECEIVED",
+        level: "debug",
+        ...correlation,
+        fields: { event: name },
+      });
+    }
+    const anomaly = seqTracker.observe(name, envelope);
+    if (!anomaly) return;
+    diagRecord({
+      section: "ipc",
+      code:
+        anomaly.kind === "repeat"
+          ? "IPC.EVENT.REPEATED"
+          : anomaly.kind === "generation"
+            ? "IPC.EVENT.STREAM_CHANGED"
+            : anomaly.kind === "unstamped"
+              ? "IPC.EVENT.UNSTAMPED"
+              : "IPC.EVENT.SEQUENCE_GAP",
+      level: "warn",
+      ...correlation,
+      fields: {
+        event: anomaly.event,
+        anomaly: anomaly.kind,
+        ...("missed" in anomaly ? { expected: anomaly.expected, received: anomaly.received, missed: anomaly.missed } : {}),
+        ...("previous" in anomaly ? { previous: anomaly.previous, received: anomaly.received } : {}),
+      },
+    });
+    // Detecting without repairing meant the record could say the UI had gone stale while the UI
+    // stayed stale. A repeat is the one anomaly that needs no repair: the same event twice leaves
+    // the projection correct and the fault is in the delivery.
+    if (needsResync(anomaly)) resync.request(anomaly.kind + ":" + anomaly.event);
+  }
+
+  /**
+   * `listen`, with the stream's bookkeeping checked on the way past.
+   *
+   * A shim with the same shape as the real one, so every existing listener is covered without any
+   * of them having to remember to opt in.
+   */
+  function listen<T>(name: string, handler: (event: { payload: T }) => void): Promise<UnlistenFn> {
+    return tauriListen<T>(name, (event) => {
+      noteEvent(name, event.payload);
+      handler(event);
+    });
+  }
   const syncMaximized = () => void appWindow.isMaximized().then((m) => (winMaximized = m));
 
   onMount(() => {
-    // First thing, before anything can fail: from here on, what the webview sees reaches the
-    // debug log rather than a devtools console nobody has open. The native side drops these when
-    // logging is off, so this costs nothing when the user has opted out.
-    installUiLogging(
-      (level, message) => {
-        void invoke("log_ui", { level, message }).catch(() => {
-          /* the log is not worth an error of its own */
-        });
+    // From here on, what the webview sees reaches the native diagnostics rather than a devtools
+    // console nobody has open. Records arrive batched: one IPC call per console.warn is most
+    // expensive exactly when the webview is emitting fastest, which is the moment worth capturing.
+    //
+    // The handle is kept and stopped on unmount. F5 and HMR remount this component while the
+    // native process stays alive, and the previous version threw the cleanup away, so every
+    // remount layered another console wrapper and left another pair of window listeners attached.
+    // One exception then arrived several times over and a retry loop looked like it was
+    // accelerating when it was the logger multiplying.
+    uiLogging = installUiLogging(
+      (records) => {
+        // Off means off here too. The hooks stay installed, because reinstalling them on every
+        // capture change is how the duplicate-listener bug this cleanup exists for came back; what
+        // stops is the sending. Reported as accepted rather than lost: the user asked for it.
+        if (!captureOn) return Promise.resolve({ offered: records.length, accepted: records.length });
+        return invoke<{ offered: number; accepted: number }>("log_ui_batch", { records });
       },
-      { console: globalThis.console, addEventListener: window.addEventListener.bind(window) },
+      {
+        console: globalThis.console,
+        addEventListener: window.addEventListener.bind(window),
+        removeEventListener: window.removeEventListener.bind(window),
+      },
     );
+    // Anything that failed before this component existed: a module that threw while evaluating, a
+    // dynamic import that never resolved. main.ts buffered them because there was nowhere else to
+    // put them, and this is the first moment the bridge can take them.
+    const startup = drainStartupLog();
+    if (startup.length) {
+      void invoke("log_ui_batch", { records: startup }).catch(() => {});
+    }
+    endStartupCapture();
     syncMaximized();
     // Reconnect a controller that was already granted and already plugged in, silently. Waiting
     // for the instrument drawer to be opened once was half of why MIDI felt like a coin toss.
@@ -12588,9 +14844,54 @@
         } else chooseGate();
       })
       .catch(chooseGate);
+    // Where the stream is, before listening to it. Read first on purpose: anything emitted between
+    // this answer and the listeners going live is genuinely missed, and seeding is what makes that
+    // a detected gap rather than an invisible one. Unseeded, the tracker takes whatever it sees
+    // first as its baseline, so a remount hides everything it slept through.
+    void invoke<EventCursor>("get_event_cursor")
+      .then((cursor) => seqTracker.seed(cursor))
+      .catch(() => {
+        /* locked, or an older backend: the tracker falls back to its first sighting */
+      });
     const subs: Promise<UnlistenFn>[] = [
       appWindow.onResized(() => syncMaximized()),
       appWindow.onFocusChanged(({ payload }) => (windowFocused = payload)),
+      appWindow.onCloseRequested(async (event) => {
+        // The WebView debounce is not a durability boundary. Hold an ordinary window close until
+        // native code has committed the latest vault continuity snapshot and closed the UI session;
+        // `destroy()` then bypasses a second close-request event. A hard process/OS failure can
+        // still interrupt storage and is intentionally not presented as transactionally safe.
+        event.preventDefault();
+        if (windowCloseInFlight) return;
+        windowCloseInFlight = true;
+        callLifecycleSession.invalidate();
+        micCaptureSession.invalidate();
+        videoCaptureSession.invalidate();
+        screenAudioCaptureSession.invalidate();
+        if (inCall) leaveVoice();
+        clearTimeout(uiStateSaveTimer);
+        const finalContinuityJson = !locked && uiStateReady ? continuityJson() : null;
+        let nativeLocked = false;
+        try {
+          if (!locked) {
+            await invoke("lock_session", { uiStateJson: finalContinuityJson });
+            nativeLocked = true;
+          }
+          await appWindow.destroy();
+        } catch (e) {
+          // `destroy()` can fail after native locking succeeded. In that case the WebView remains
+          // visible but can no longer read the vault, so immediately apply the same plaintext/UI
+          // teardown as Ctrl+L without issuing a redundant native lock command.
+          if (nativeLocked) lockScreen(true);
+          windowCloseInFlight = false;
+          error = `Could not safely close the vault: ${e}`;
+        }
+      }),
+      // Capture is a native setting, and the webview is one of the things that feeds it. Told
+      // rather than polled: the mode only moves when somebody moves it.
+      listen<{ mode: string }>("capture-changed", (e) => {
+        setCapture(e.payload.mode !== "off");
+      }),
       listen<{ server: number }>("channels-changed", (e) => {
         void refreshChannels(e.payload.server);
       }),
@@ -12601,13 +14902,26 @@
         messages_changed: boolean;
         topic: boolean;
         jukebox: boolean;
+        __seq?: number;
+        __trace?: string;
+        __trace_proof?: string;
       }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
+        // Which operation this update belongs to, when a local one caused it. An arrival from
+        // somebody else carries none, which is itself the answer to "was this mine".
+        const correlation = eventCorrelation(e.payload);
         // One channel document holds the message log, the topic and the jukebox queue, so the
         // event says which of them moved. Only an arrival may raise an unread badge or ring:
         // reacting to an old message, renaming the topic and queueing a track all used to look
         // exactly like somebody talking.
         const change = readChannelChange(e.payload);
+        // Why this update did or did not raise a badge. Read here, against the surface state that
+        // actually decided it, and written down further below once the badge has had its chance to
+        // move: "reacted to an old message", "the window was behind something" and "they were
+        // looking straight at it" are three very different answers, all three of which used to
+        // produce silence, and "we tried and nothing happened" is a fourth that used to be
+        // indistinguishable from success.
+        const pendingUnread = beginUnreadDecision(server, channel, change);
         spaceActivityAt[server] = Date.now();
         if (server === activeServerId && view === "moderation") void refreshModeration();
         // A new or edited message may be addressed to me → the cross-server inbox may have a new
@@ -12621,8 +14935,28 @@
           if (change.topic) refreshTopic();
           if (!change.messagesAppended && !change.messagesChanged) return; // nothing in the log moved
           channelEventRefresh.request(true).then(() => {
+            // The last stage of the operation, and the one that answers the original question. A
+            // send whose trace ends at TAURI.COMMAND.PERSISTED reached the disk; a send whose trace
+            // ends here reached the screen, and until this existed there was no way to tell those
+            // apart from the record.
+            if (correlation.trace) {
+              diagRecord({
+                section: "channels",
+                code: "UI.REFRESH.APPLIED",
+                level: "debug",
+                ...correlation,
+                fields: {
+                  rows: messages.length,
+                  // Whether the rows on screen are this conversation's at all. A refresh that
+                  // settled onto a different channel is not this operation arriving.
+                  in_scope: scopeHoldsConversation(messageWindowScope, server, channel),
+                },
+              });
+            }
             // The refresh settles read state for us: seen if the log is genuinely on screen,
-            // unread if this channel is merely selected behind something else.
+            // unread if this channel is merely selected behind something else. Which of those it
+            // did is only knowable now, which is why the record waits until here.
+            finishUnreadDecision(pendingUnread, server, channel, correlation);
             if (!change.messagesAppended) return; // an edit or a reaction never announces itself
             // Announce unless the log is on screen. Focus alone was not enough: the window can be
             // focused with Files, the wiki or a call surface over the channel. Scrolled-up counts
@@ -12664,12 +14998,19 @@
             void notifyLatestChannelMessage(server, channel, "detect");
           }
         }
+        // Outside the guard on purpose. An arrival for a channel the catalog does not list falls
+        // straight through it and raises nothing, and a record written before that point would
+        // have claimed the badge went up.
+        finishUnreadDecision(pendingUnread, server, channel, correlation);
       }),
       listen<{ server: number; count: number }>("members-changed", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) {
           refreshMembers();
           if (view === "files") refreshFiles(); // membership change ⇒ re-check fetch availability
+          if (shouldRefreshMemberRoutes(activeServerId, view, e.payload.server)) {
+            void refreshMemberRoutes();
+          }
         }
       }),
       listen<{ server: number }>("profiles-updated", (e) => {
@@ -12684,6 +15025,7 @@
           refreshFiles();
           if (view === "storage" || view === "downloads") refreshStorageHealth();
         }
+        if (inCall && e.payload.server === callServer) void refreshCallFiles();
       }),
       listen<{
         server: number;
@@ -12740,11 +15082,25 @@
       }),
       listen<{ server: number }>("status-updated", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
-        if (e.payload.server === activeServerId) refreshStatuses();
+        if (e.payload.server === activeServerId) {
+          refreshStatuses();
+          // The policy rides the feed document, so this event is also how a policy change arrives --
+          // but only the announcements surface renders anything that reads it, and both routes onto
+          // that surface refresh it on the way in. Every other surface would be paying a round-trip
+          // per reaction anybody makes, for an answer nothing on screen is asking.
+          if (view === "status") void refreshStatusPolicy();
+        }
         if (!(e.payload.server === activeServerId && view === "status" && document.hasFocus())) {
           newsUnseen = true;
         }
-        if (inboxView && inboxMode === "news") { newsUnseen = false; loadNews(); }
+        // Re-aggregated whether or not anyone is looking at the Inbox: the badge on the rail, the
+        // beacons in the orbit view and the surface-bar count all read that list, and a list only
+        // refreshed while the Inbox happens to be open leaves the other three telling last hour's
+        // story. Debounced because the event fires for every edit, reaction, pin and policy change
+        // as well as every post, and each aggregation is two reads per server on every peer that
+        // heard it; the active server's own feed is refreshed immediately above, untouched.
+        if (inboxView && inboxMode === "news") newsUnseen = false;
+        scheduleNewsAggregation();
       }),
       listen<{ server: number }>("wiki-updated", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
@@ -12760,11 +15116,11 @@
         refreshServerIconFor(e.payload.server); // rail icon may have changed for any server
         if (e.payload.server === activeServerId) refreshLivery();
       }),
-      listen<{ server: number; channel: string; states: DeliveryState[] }>("delivery-changed", (e) => {
+      listen<{ server: number; channel: string; revision: number; states: DeliveryState[] }>("delivery-changed", (e) => {
         if (e.payload.server !== activeServerId || e.payload.channel !== cur?.active) return;
-        // Merged, not assigned: a report that happens to see fewer holders has not unproved the
-        // ones already counted, and letting it overwrite them is what made a settled tick flicker.
-        for (const s of e.payload.states) delivery[s.id] = { id: s.id, ...mergeDelivery(delivery[s.id], s) };
+        // The actor reports receipts filtered through the current roster. A removed holder must
+        // not remain as an anonymous count that can stand in for a newly-added member.
+        deliverySnapshot = replaceDeliverySnapshot(deliverySnapshot, e.payload);
       }),
       listen<{ server: number }>("badges-changed", (e) => {
         if (e.payload.server === activeServerId) refreshBadges();
@@ -12805,29 +15161,43 @@
             }
           onlineMembers = next;
           refreshFiles(); // a peer came/went: re-evaluate the availability hint (has_peers)
+          if (view === "connectivity") void refreshMemberRoutes();
+        }
+      }),
+      listen<{ server: number }>("member-routes-changed", (e) => {
+        // Aggregate presence can stay unchanged while DCUtR replaces a relay with a direct path,
+        // or while one of several live paths closes. Refresh the typed row only when it is visible.
+        if (shouldRefreshMemberRoutes(activeServerId, view, e.payload.server)) {
+          void refreshMemberRoutes();
         }
       }),
       listen<JoinReplyReady>("join-reply-ready", (e) => {
         // The native join command deliberately remains pending while its listener and NAT mapping
         // stay alive. This event gives the human the return signalling channel without moving the
         // punch deadline into a throttled webview timer.
+        if (locked || !joinAttemptPending) return;
         joinReplyReady = e.payload;
         notice = "Send the connection reply back to the inviter now; keep this app open.";
       }),
-      listen<number>("reachability-changed", (e) => {
+      // These two used to arrive as a bare server id, which is a payload with nowhere to put the
+      // stream's bookkeeping: they were the two event families whose gaps could never be detected.
+      listen<{ server: number }>("reachability-changed", (e) => {
         // Router mapping and AutoNAT settle after founding/joining returns. Both onboarding and
         // Settings use this same report. Refresh that server's cached invite too: the event can
         // arrive while another server is active, and copied codes must never retain an expired
         // mapping or relay route.
         if (locked) return;
-        if (reachabilityEventAffectsReport(connectivity, e.payload)) refreshConnectivity();
-        if (e.payload === activeServerId && view === "connectivity") refreshSwitchboards();
-        void refreshInviteFor(e.payload);
+        const server = e.payload.server;
+        if (reachabilityEventAffectsReport(connectivity, server)) refreshConnectivity();
+        if (server === activeServerId && view === "connectivity") {
+          void Promise.all([refreshMemberRoutes(), refreshSwitchboards()]);
+        }
+        void refreshInviteFor(server);
       }),
-      listen<number>("switchboard-changed", (e) => {
-        const decision = switchboardEventRefreshDecision(locked, activeServerId, e.payload);
+      listen<{ server: number }>("switchboard-changed", (e) => {
+        const decision = switchboardEventRefreshDecision(locked, activeServerId, e.payload.server);
         if (decision.refreshStatus) refreshSwitchboards();
-        if (decision.refreshInvite) void refreshInviteFor(e.payload);
+        if (decision.refreshInvite) void refreshInviteFor(e.payload.server);
       }),
       listen<{ server: number; caution: boolean }>("eclipse-changed", (e) => {
         if (e.payload.server === activeServerId) eclipseCaution = e.payload.caution;
@@ -12939,6 +15309,7 @@
         else if (fileInfo) closeFileInfo();
         else if (showWikiHelp) showWikiHelp = false;
         else if (showFeedback) showFeedback = false;
+        else if (showDebugConsole) closeDebugConsole();
         else if (showServerSettings) showServerSettings = false;
         else if (showSettings) showSettings = false;
         else if (showSearch) closeSearch();
@@ -13055,10 +15426,12 @@
     window.addEventListener("blur", onBlur);
     window.addEventListener("mousedown", onMouseNav);
     const stopTextEffects = mountTextEffectRuntime();
-    // Keep relative presence times current.
+    // Keep relative presence times current. The same bounded visible-view refresh is what lets
+    // backend cooldown and 24-hour history expiry become visible without unrelated network churn.
     const tick = setInterval(() => {
       nowTick = Date.now();
       pruneTicker(); // stale news stops being news
+      if (memberRoutesVisible(activeServerId, view)) void refreshMemberRoutes();
     }, 60_000);
     // A moving transfer must stop looking active when no new chunk has arrived. This small UI-only
     // clock drives that freshness check; it does not poll the network or alter transfer state.
@@ -13105,6 +15478,11 @@
       clearTimeout(updateTimer);
       clearInterval(pingTimer);
       subs.forEach((p) => p.then((un) => un()));
+      // Last, so anything the teardown above logs still has somewhere to go. Stopping restores the
+      // console, removes both window listeners and sends whatever is still queued; without it a
+      // remount leaves the old hooks live and every event gets recorded twice.
+      uiLogging?.stop();
+      uiLogging = null;
     };
   });
 </script>
@@ -13198,6 +15576,47 @@
   </div>
 {/snippet}
 
+{#snippet memberRecoveryPanel()}
+  <section class="member-recovery">
+    <header><div><strong>Reconnect an existing member</strong><span class="muted small">For changed listener addresses or an isolated pair. This never admits a new member.</span></div></header>
+    <div class="member-recovery-actions">
+      <button class="ghost small" disabled={memberRecoveryBusy || activeServerId === null} onclick={mintMemberRecovery}>
+        {memberRecoveryBusy ? "Working..." : "Create my recovery code"}
+      </button>
+      {#if memberRecoveryReady && memberRecoveryServer === activeServerId && !memberRecoveryExpired}
+        <button class="ghost small" onclick={() => copyText(memberRecoveryReady?.code ?? "")}>Copy code</button>
+      {/if}
+    </div>
+    {#if memberRecoveryReady && memberRecoveryServer === activeServerId && !memberRecoveryExpired}
+      <textarea class="invite-code" readonly rows="3" value={memberRecoveryReady.code}></textarea>
+      <p class="muted small">Send privately to another current member. It contains {memberRecoveryReady.candidate_count} bounded direct route{memberRecoveryReady.candidate_count === 1 ? "" : "s"} and expires {fmtTime(memberRecoveryReady.expires_at_ms)}.</p>
+    {:else if memberRecoveryReady && memberRecoveryServer === activeServerId}
+      <p class="muted small">That recovery code expired. Create a fresh code before sending it.</p>
+    {/if}
+    <label>
+      <span class="muted small">Code from the isolated member</span>
+      <textarea class="invite-code" rows="3" bind:value={memberRecoveryInput} placeholder="paste mewtual-reconnect-v1 code"></textarea>
+    </label>
+    <button class="ghost small" disabled={memberRecoveryBusy || !memberRecoveryInput.trim() || activeServerId === null} onclick={applyMemberRecovery}>
+      {memberRecoveryBusy ? "Checking..." : "Verify and reconnect"}
+    </button>
+    <p class="muted small">A valid code only submits route attempts. The member appears connected after the normal encrypted transport handshake proves the peer identity.</p>
+  </section>
+{/snippet}
+
+{#snippet outboundJoinReplyPanel()}
+  {#if joinReplyReady && !joinReplyExpired}
+    <section class="dm-reply-ready">
+      <strong>Direct route did not answer - send this reply now</strong>
+      <p class="muted small">Keep this app open. Send the reply to the friend who issued the code; they paste it into their DM's connection-reply box before it expires.</p>
+      <textarea class="invite-code" readonly rows="3" value={joinReplyReady.code}></textarea>
+      <button class="ghost small" onclick={() => copyText(joinReplyReady?.code ?? "")}>Copy connection reply</button>
+    </section>
+  {:else if joinReplyReady}
+    <p class="muted small">That connection reply expired. Retry Connect to generate a fresh one, and keep both apps open.</p>
+  {/if}
+{/snippet}
+
 {#snippet nameTag(fp: string)}
   {@const p = profiles[fp]}
   {@render styledName(nameOf(fp), p?.color ?? "", p?.font ?? "", p?.effect ?? "")}
@@ -13262,6 +15681,139 @@
       {callNameOf(fp).slice(0, 1).toUpperCase()}
     </span>
   {/if}
+{/snippet}
+
+<!-- One stream panel, rendered in the compact stage and the full-window focus view. The sender
+     controls capture/quality; every receiver independently advertises only a rounded bucket. -->
+{#snippet streamSettingsPanel(global: boolean)}
+  <section class="stream-panel" aria-label="Screen stream settings">
+    <header class="stream-panel-head">
+      <div><span class="stage-label">SCREEN STREAM</span><strong>{global ? "Client-wide defaults" : "Per-viewer adaptive encode"}</strong></div>
+      {#if !global}<button class="ghost small" aria-label="Close stream settings" onclick={() => (streamSettingsOpen = false)}>x</button>{/if}
+    </header>
+    {#if global}
+      <p class="muted small stream-global-note">These defaults belong to this Mewtual client and apply in every server. The in-call cog edits the same values.</p>
+    {/if}
+    <div class="stream-fields">
+      <label>
+        <span>Capture resolution</span>
+        <!-- A select has no useful HTML `value` attribute. Svelte must bind the DOM property
+             after its options exist or WebView2 can leave the closed control with no label. -->
+        <select bind:value={streamSettings.resolution} onchange={(event) => setStreamResolution(event.currentTarget.value)}>
+          <option value={720}>720p</option>
+          <option value={1080}>1080p</option>
+          <option value={1440}>1440p</option>
+          <option value={2160}>4K (2160p)</option>
+        </select>
+      </label>
+      <label>
+        <span>Frame rate</span>
+        <select bind:value={streamSettings.frameRate} onchange={(event) => setStreamFrameRate(event.currentTarget.value)}>
+          <option value={15}>15 fps</option><option value={24}>24 fps</option>
+          <option value={30}>30 fps</option><option value={60}>60 fps</option>
+        </select>
+      </label>
+      <label>
+        <span>Max Mbps per full-size viewer</span>
+        <input type="number" min="0.5" max="50" step="0.5" value={streamSettings.mbpsPerPeer} onchange={(event) => setStreamMbps(event.currentTarget.value)} />
+      </label>
+      <label>
+        <span>My receiving resolution</span>
+        <select bind:value={receiveResolutionMode} onchange={(event) => setReceiveResolution(event.currentTarget.value)}>
+          <option value="auto">Auto from this window</option>
+          <option value={720}>720p</option><option value={1080}>1080p</option>
+          <option value={1440}>1440p</option><option value={2160}>4K</option>
+        </select>
+      </label>
+    </div>
+    <fieldset class="stream-quality">
+      <legend>Quality priority</legend>
+      <button class:active={streamSettings.quality === "motion"} onclick={() => setStreamQuality("motion")}>Smooth motion</button>
+      <button class:active={streamSettings.quality === "balanced"} onclick={() => setStreamQuality("balanced")}>Balanced</button>
+      <button class:active={streamSettings.quality === "detail"} onclick={() => setStreamQuality("detail")}>Sharp detail</button>
+    </fieldset>
+    <fieldset class="stream-quality stream-audio-mode">
+      <legend>Shared audio</legend>
+      <button type="button" class:active={streamSettings.audioMode === "none"} onclick={() => setStreamAudioMode("none")}>No shared audio</button>
+      <button type="button" class:active={streamSettings.audioMode === "surface"} onclick={() => setStreamAudioMode("surface")}>With screen/window</button>
+      <button type="button" class:active={streamSettings.audioMode === "separate"} onclick={() => setStreamAudioMode("separate")}>Separate sources</button>
+    </fieldset>
+    {#if streamSettings.audioMode !== "none"}
+      <label class="stream-master-level">
+        <span><b>Shared-audio master</b><small>Applies to the stream audio track, not your call microphone</small></span>
+        <input aria-label="Shared audio master level" type="range" min="0" max="200" step="1" value={streamSettings.audioLevel} oninput={(event) => setStreamAudioMasterLevel(event.currentTarget.value)} />
+        <output>{streamSettings.audioLevel}%</output>
+      </label>
+    {/if}
+    {#if streamSettings.audioMode === "separate"}
+      <div class="stream-audio-sources">
+        <p class="muted small">Choose applications independently from the shared picture. Add game, browser, or other audio one at a time; Mewtual mixes them into one stream track and never saves the grants.</p>
+        {#if myVideo === "screen"}
+          <div class="stream-source-actions">
+            <button type="button" class="ghost small" disabled={!screenAudioSourceSlotAvailable(screenAudioSources.length)} onclick={addSeparateScreenAudioSource}>+ Add audio source</button>
+            <span class="muted small">{screenAudioSources.length}/{MAX_STREAM_AUDIO_SOURCES} sources · the chooser may show a picture too; only its audio is sent.</span>
+          </div>
+          {#if !screenAudioSources.length}
+            <p class="muted small">No application audio selected. The screen share is silent apart from your normal call microphone.</p>
+          {/if}
+        {:else}
+          <p class="muted small">Start sharing, then use the in-call cog to add each audio source. Browsers require a fresh visible choice every session.</p>
+        {/if}
+      </div>
+    {:else if streamSettings.audioMode === "surface"}
+      <p class="muted small">The capture chooser will offer audio from the selected tab, window, or system where the WebView supports it. System audio can include Mewtual voices; separate application sources avoid that echo.</p>
+    {/if}
+    {#if screenAudioSources.length}
+      <div class="stream-mixer" aria-label="Streamer audio mixer">
+        <div><b>STREAMER AUDIO MIXER</b><span class="muted small">0% mutes · 100% unity · boosts can clip when sources overlap</span></div>
+        <ul class="stream-source-list">
+          {#each screenAudioSources as source (source.id)}
+            <li>
+              <span title={source.label}>{source.label}</span>
+              <input aria-label={`${source.label} level`} type="range" min="0" max="200" step="1" value={source.level} oninput={(event) => setScreenAudioSourceLevel(source.id, event.currentTarget.value)} />
+              <output>{source.level}%</output>
+              <button type="button" class="ghost small" aria-label={`Remove ${source.label}`} onclick={() => removeScreenAudioSource(source.id)}>Remove</button>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
+    {#if screenAudioError}<p class="stream-warning">{screenAudioError}</p>{/if}
+    <div class="stream-summary">
+      <span><b>{streamResolutionLabel(receiveHeight)}</b> my advertised receive bucket{receiveResolutionMode === "auto" ? " - window-derived" : " - fixed"}</span>
+      <span><b>{streamEstimatedTotal.toFixed(1)} Mbps</b> planned screen upload for {callParticipants.length} {callParticipants.length === 1 ? "viewer" : "viewers"}, plus audio and overhead</span>
+      {#if screenAudioSources.length}<span><b>One mixed audio track</b> from {screenAudioSources.length} selected {screenAudioSources.length === 1 ? "source" : "sources"}; {(callParticipants.length * 0.16).toFixed(2)} Mbps is the planned total cap, but the negotiated WebView default may differ</span>{/if}
+      {#if actualStream}
+        <span><b>{actualStream.width}x{actualStream.height} @ {actualStream.fps || "?"} fps</b> actual browser capture</span>
+      {:else}
+        <span>Actual capture and negotiated codec appear after sharing starts.</span>
+      {/if}
+    </div>
+    {#if streamSettings.mbpsPerPeer < streamRecommended}
+      <p class="stream-warning">This cap is below the roughly {streamRecommended.toFixed(1)} Mbps suggested for {streamResolutionLabel(streamSettings.resolution)} at {streamSettings.frameRate} fps; text or motion may blur.</p>
+    {/if}
+    {#if actualStream?.constraintError}
+      <p class="stream-warning">The WebView could not apply the selected capture constraints. Per-viewer scaling uses the actual {actualStream.height || "unknown"}p capture instead.</p>
+    {/if}
+    {#if streamBudgetFailed}
+      <p class="stream-warning">At least one viewer's encoder rejected its latest cap, so that screen-share edge is paused. If Mewtual cannot park an uncapped edge, sharing stops for everyone.</p>
+    {/if}
+    {#if callParticipants.length}
+      <ul class="stream-peers">
+        {#each callParticipants as fingerprint (fingerprint)}
+          {@const plan = peerStreamPlan(streamSettings, peerMeta[fingerprint]?.rx ?? 1080, streamSourceHeight)}
+          {@const budget = peerVideoBudget[fingerprint]}
+          <li>
+            <span>{callNameOf(fingerprint)}</span>
+            <span>{streamResolutionLabel(plan.receiveHeight)} requested to {streamResolutionLabel(plan.transportHeight)} transport</span>
+            <span>{budget?.state === "applied" ? "applied up to" : budget?.state === "paused" ? "paused - cap rejected at" : budget?.state === "stop-required" ? "sharing stopped - cap rejected at" : budget?.state === "failed" ? "cap failed at" : "planned up to"} {plan.estimatedMbps.toFixed(1)} Mbps{peerVideoCodec[fingerprint] ? ` - ${peerVideoCodec[fingerprint]}` : " - codec negotiating"}</span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    <p class="muted small">WebRTC compresses each peer encode independently. Mewtual prefers H.265 when both WebViews offer it, then AV1, VP9, H.264 and VP8; the row shows the codec actually negotiated. Exact window and monitor dimensions are never shared.</p>
+    {#if !global}<button type="button" class="ghost small stream-open-global" onclick={() => { streamSettingsOpen = false; openSettings("voice"); }}>Open client-wide Voice &amp; Calls settings</button>{/if}
+  </section>
 {/snippet}
 
 {#snippet textEffectButton(target: TextEffectTarget, label = "Text effects")}
@@ -13976,7 +16528,7 @@
   {#each Object.entries(deviceMap).filter(([, d]) => d.origin === originFp) as [cfp, d] (cfp)}
     {@const conline = onlineMembers.has(cfp)}
     <li class="member-row companion" title={cfp}>
-      <span class="presence" class:online={conline} title={conline ? "Device online" : "Device offline"}>●</span>
+      <span class="presence" class:online={conline} title={conline ? "Device's claimed path is connected" : "No claimed device path is connected"}>●</span>
       <span class="dev-tag">· {d.name}</span>
     </li>
   {/each}
@@ -14548,7 +17100,15 @@
            thing the chip must never say. Reading a held file off this disk and pulling one off a
            peer feel completely different to wait through, so they are named differently rather
            than both being "FETCHING". -->
-      {#if jukeBlocked}
+      {#if jukeTrustBlocked === "consent"}
+        <button
+          class="juke-chip warn juke-chip-btn"
+          title="This track is not trusted for automatic playback on this device. Click to allow it for this call."
+          onclick={approveCurrentJukeboxTrack}
+        >LOAD TRACK</button>
+      {:else if jukeTrustBlocked === "unavailable"}
+        <span class="juke-chip gone" title="The call server has no authenticated safe-media listing for this track.">TRACK UNAVAILABLE</span>
+      {:else if jukeBlocked}
         <button
           class="juke-chip warn juke-chip-btn"
           title="This webview will not start audio until you interact with it. Click to start playing."
@@ -14951,7 +17511,16 @@
     {/each}
   {:else if view === "status" && !dm}
     <h3><span>Announcements</span></h3>
-    <p class="muted small">A slow feed for this server: one post at a time, no replies.</p>
+    <p class="muted small">
+      {canModerate
+        ? "A slow noticeboard for this server. Post, pin what matters, and decide who else may."
+        : canPostStatus
+          ? "A slow noticeboard for this server. Every member may post here; edit your own, react to any."
+          : "A slow noticeboard for this server. The owner and admins post; everyone reacts."}
+    </p>
+    {#if statusNewCount}
+      <p class="muted small">{statusNewCount} new since you last looked.</p>
+    {/if}
   {:else if !dm}
     <h3><span>Channels</span> <span class="key">[ctrl+k]</span></h3>
     <ul class="channel-list">
@@ -15557,6 +18126,11 @@
       {/if}
       {/if}
     </div>
+  {:else if !uiStateReady}
+    <div class="start gate" aria-busy="true">
+      {@render brandMark("opening your vault")}
+      <p class="muted small">Loading encrypted preferences before servers can fetch shared content.</p>
+    </div>
   {:else if servers.length === 0 || showAdd}
     <div class="start">
       {@render brandMark(servers.length ? "" : "your vault is ready")}
@@ -15573,6 +18147,22 @@
         <span class="muted">Display name</span>
         <input bind:value={displayName} placeholder="display name" />
       </label>
+      <fieldset class="file-trust-onboarding">
+        <legend>Before this server can fetch shared media automatically</legend>
+        <label class:selected={onboardingFileTrust === "on-demand"}>
+          <input type="radio" name="onboarding-file-trust" value="on-demand" bind:group={onboardingFileTrust} />
+          <span><b>On demand</b><small>Fetch only after I press Load, Play, Open, or Download.</small></span>
+        </label>
+        <label class:selected={onboardingFileTrust === "specific"}>
+          <input type="radio" name="onboarding-file-trust" value="specific" bind:group={onboardingFileTrust} />
+          <span><b>Specific people</b><small>Start blocked; choose trusted members after the authenticated roster arrives.</small></span>
+        </label>
+        <label class:selected={onboardingFileTrust === "everyone"}>
+          <input type="radio" name="onboarding-file-trust" value="everyone" bind:group={onboardingFileTrust} />
+          <span><b>Everyone here</b><small>Allow every member's authenticated shared media to load automatically. External URLs still require a click.</small></span>
+        </label>
+        <p class="muted small">Files fetched into Mewtual stay encrypted in its vault. Opening or exporting content still hands untrusted bytes to a decoder or another app.</p>
+      </fieldset>
       <div class="start-tabs" role="tablist" aria-label="Join or found a server">
         <button
           type="button"
@@ -15887,8 +18477,8 @@
             onclick={openInbox}
           >
             {@render icoInbox()}
-            {#if inboxUnseenCount || newsUnseen}
-              <span class="rail-badge">{inboxUnseenCount + (newsUnseen ? 1 : 0)}</span>
+            {#if inboxUnseenCount || newsUnseenNow}
+              <span class="rail-badge">{inboxUnseenCount + newsUnseenNow}</span>
             {/if}
           </button>
           <div class="rail-sep"></div>
@@ -15936,44 +18526,79 @@
             <button class="ghost small inbox-refresh" onclick={() => (inboxMode === "mentions" ? loadInbox() : loadNews())} disabled={inboxMode === "mentions" ? inboxLoading : newsLoading}>↻ Refresh</button>
           </div>
           {#if inboxMode === "news"}
+            <!-- One row, drawn the same wherever it appears. Announcements carry the unseen mark;
+                 events never do, because an event's time is when it starts, not when it was
+                 written, so it would read as unread until the day it happened. -->
+            {#snippet newsRow(n: NewsItem)}
+              <li class="inbox-item" class:unseen={isNewsItemUnseen(n, statusCursors, newsTsCeilings)}>
+                <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
+                  <div class="inbox-meta">
+                    {#if n.kind === "event"}
+                      <span class="inbox-tag event-tag">⧗ event</span>
+                    {:else}
+                      <span class="inbox-tag reply-tag">◇ announcement</span>
+                    {/if}
+                    {#if n.pinned}<span class="inbox-tag pin-tag">📌 pinned</span>{/if}
+                    <span class="inbox-where">{n.serverName}</span>
+                    <span class="inbox-time" title={new Date(n.ts).toLocaleString()}>{n.kind === "event" ? dayLabel(n.ts) : fmtTime(n.ts)}</span>
+                  </div>
+                  <div class="inbox-body"><span class="inbox-text">{@html renderMessage(n.text, "")}</span></div>
+                </button>
+              </li>
+            {/snippet}
+            <div class="news-filters">
+              <div class="news-chips" role="group" aria-label="Filter news by kind">
+                <button class="news-chip" class:active={newsKindFilter === "all"} onclick={() => (newsKindFilter = "all")}>All</button>
+                <button class="news-chip" class:active={newsKindFilter === "status"} onclick={() => (newsKindFilter = "status")}>Announcements</button>
+                <button class="news-chip" class:active={newsKindFilter === "event"} onclick={() => (newsKindFilter = "event")}>Events</button>
+              </div>
+              {#if newsServersListed.length > 1}
+                <select
+                  class="news-server"
+                  aria-label="Filter news by server"
+                  value={newsServerFilter === null ? "" : String(newsServerFilter)}
+                  onchange={(e) => (newsServerFilter = e.currentTarget.value ? Number(e.currentTarget.value) : null)}
+                >
+                  <option value="">Every server</option>
+                  {#each newsServersListed as s (s.id)}
+                    <option value={String(s.id)}>{s.name}</option>
+                  {/each}
+                </select>
+              {/if}
+              <button class="ghost small news-mark" disabled={!newsUnseenNow} onclick={markAllNewsRead}>
+                Mark all read{newsUnseenNow ? ` (${newsUnseenNow})` : ""}
+              </button>
+            </div>
             {#if newsLoading && !newsItems.length}
               <p class="muted inbox-empty">Loading…</p>
             {:else}
-              {#if newsUpcoming.length}
-                <h3 class="ev-h"><span>Upcoming events</span></h3>
+              {#if newsPinned.length}
+                <h3 class="ev-h"><span>Pinned</span></h3>
                 <ul class="inbox-list" use:richClicks>
-                  {#each newsUpcoming as n (n.server + ":" + n.kind + ":" + n.ts + n.text)}
-                    <li class="inbox-item">
-                      <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
-                        <div class="inbox-meta">
-                          <span class="inbox-tag event-tag">⧗ event</span>
-                          <span class="inbox-where">{n.serverName}</span>
-                          <span class="inbox-time" title={new Date(n.ts).toLocaleString()}>{dayLabel(n.ts)}</span>
-                        </div>
-                        <div class="inbox-body"><span class="inbox-text">{@html renderMessage(n.text, "")}</span></div>
-                      </button>
-                    </li>
+                  {#each newsPinned as n (n.key)}
+                    {@render newsRow(n)}
                   {/each}
                 </ul>
               {/if}
-              <h3 class="ev-h"><span>Recent announcements</span></h3>
-              {#if !newsFeed.length}
-                <p class="muted inbox-empty">No announcements yet: servers' Announcements surfaces feed this.</p>
-              {:else}
+              {#if newsUpcoming.length}
+                <h3 class="ev-h"><span>Upcoming events</span></h3>
                 <ul class="inbox-list" use:richClicks>
-                  {#each newsFeed as n (n.server + ":" + n.ts + ":" + n.author)}
-                    <li class="inbox-item">
-                      <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
-                        <div class="inbox-meta">
-                          <span class="inbox-tag reply-tag">◇ announcement</span>
-                          <span class="inbox-where">{n.serverName}</span>
-                          <span class="inbox-time" title={new Date(n.ts).toLocaleString()}>{fmtTime(n.ts)}</span>
-                        </div>
-                        <div class="inbox-body"><span class="inbox-text">{@html renderMessage(n.text, "")}</span></div>
-                      </button>
-                    </li>
+                  {#each newsUpcoming as n (n.key)}
+                    {@render newsRow(n)}
                   {/each}
                 </ul>
+              {/if}
+              {#if newsKindFilter !== "event"}
+                <h3 class="ev-h"><span>Recent announcements</span></h3>
+                {#if !newsFeed.length}
+                  <p class="muted inbox-empty">No announcements yet: servers' Announcements surfaces feed this.</p>
+                {:else}
+                  <ul class="inbox-list" use:richClicks>
+                    {#each newsFeed as n (n.key)}
+                      {@render newsRow(n)}
+                    {/each}
+                  </ul>
+                {/if}
               {/if}
             {/if}
           {:else if inboxLoading && !inboxItems.length}
@@ -16051,6 +18676,7 @@
               <button disabled={busy || !dmName.trim() || !dmInvite.trim()}>Connect</button>
             </form>
           {/if}
+          {@render outboundJoinReplyPanel()}
           {#if dmList.length > 1}
             <label class="dm-sort">
               <span class="muted small">Sort</span>
@@ -16086,6 +18712,16 @@
               <textarea class="invite-code" readonly rows="2" value={cur.invite}></textarea>
               <button class="ghost small" onclick={copyInvite}>{copied ? "Copied!" : "Copy code"}</button>
             </div>
+          {/if}
+          {#if cur?.isDm}
+            <details class="dm-connection-repair">
+              <summary>Connection and recovery codes</summary>
+              <p class="muted small">First connection: paste the reply produced by the friend who is joining this DM.</p>
+              <textarea class="invite-code" rows="3" bind:value={joinReplyInput} placeholder="paste mewtual-reply-v1 code"></textarea>
+              <button class="ghost small" disabled={joinReplyApplying || !joinReplyInput.trim()} onclick={() => applyJoinReply(false)}>{joinReplyApplying ? "Dialling..." : "Dial friend"}</button>
+              {#if joinReplyNeedsReplace}<button class="ghost small danger-btn" disabled={joinReplyApplying} onclick={() => applyJoinReply(true)}>Confirm different joiner</button>{/if}
+              {@render memberRecoveryPanel()}
+            </details>
           {/if}
           {#if cur?.isDm}
             {@render contextNav(true)}
@@ -16142,9 +18778,14 @@
               <span class="sb-ico">▤</span>files
               {#if files.length}<span class="tab-count">{files.length}</span>{/if}
             </button>
-            <button type="button" class:active={view === "status"} onclick={() => switchView("status")}>
-              <span class="sb-ico">◇</span>announcements
-            </button>
+            <!-- Servers only: a DM has no noticeboard to read or post to, which is why the insert
+                 picker hides the same tab and the News aggregation skips DM feeds entirely. -->
+            {#if !cur.isDm}
+              <button type="button" class:active={view === "status"} onclick={() => switchView("status")}>
+                <span class="sb-ico">◇</span>announcements
+                {#if statusUnreadNow}<span class="tab-count unread" title={`${statusUnreadNow} unread announcement${statusUnreadNow === 1 ? "" : "s"}`}>{statusUnreadNow}</span>{/if}
+              </button>
+            {/if}
             <button type="button" class:active={view === "wiki"} onclick={() => switchView("wiki")}>
               <span class="sb-ico">✎</span>wiki
             </button>
@@ -16430,6 +19071,7 @@
               <li
                 class="frame-{messageFrame.shape}"
                 data-mi={mi}
+                data-author={m.author}
                 class:own={m.author === myFp}
                 class:grouped
                 class:unread={isUnread(m)}
@@ -16867,12 +19509,30 @@
                   </ol>
                 </section>
               </div>
+              <section class="storage-local">
+                <header>
+                  <div><h3>ENCRYPTED ON THIS DEVICE</h3><p class="muted small">These complete files are already held as authenticated vault ciphertext. “Unlock copy” writes a separate plaintext file to Downloads for external apps; the encrypted managed copy remains, so disk use can temporarily approach twice the file size. Mewtual’s jukebox and previews do not need a plaintext export.</p></div>
+                  <span>{storageHealth.local_files.length} local</span>
+                </header>
+                <div class="storage-local-list">
+                  {#each storageHealth.local_files as file (file.cid)}
+                    <article>
+                      <span class="storage-rank">{safeMime(file.mime) ? "◉" : "◆"}</span>
+                      <div><b>{file.name}</b><small>{file.path || "root"} · {file.mime || "unknown type"} · {fmtSize(file.logical_bytes)} · vault-encrypted</small></div>
+                      <button class="ghost small" onclick={() => exportStoredFile(file.cid)}>Unlock copy…</button>
+                    </article>
+                  {:else}
+                    <p class="muted small">No complete shared files are stored on this device yet. Partial downloads remain encrypted too, but cannot be exported until every chunk is present.</p>
+                  {/each}
+                </div>
+                <p class="muted small storage-type-note"><strong>Media check:</strong> inline playback and unlocked exports compare common image/audio/video container signatures with the declared type. A match rejects simple disguise; it does not prove the file is benign or the operating-system decoder is free of vulnerabilities. SVG and unrecognized media stay out of inline decoding.</p>
+              </section>
               <section class="storage-pinned">
                 <span class="storage-pin-icon">📌</span>
                 <div><h3>Pinned by the wiki</h3><p class="muted small">{storageHealth.pinned_files} unique file{storageHealth.pinned_files === 1 ? "" : "s"} · {fmtSize(storageHealth.pinned_local_estimated_bytes)} local estimate · {fmtSize(storageHealth.pinned_logical_bytes)} logical. Wiki embeds are retained regardless of their circulation date.</p></div>
               </section>
               <section class="repair-card">
-                <div><h3>Authenticated repair</h3><p class="muted small">Re-fetches only missing or unreadable CIDs. A peer signs the response and the bytes must hash to the requested address before they replace a corrupt local record.</p><span class:ok-t={storageHealth.has_peers} class:fail-t={!storageHealth.has_peers}>{storageHealth.has_peers ? "A member was connected at check time" : "No member was connected at check time"}</span></div>
+                <div><h3>Authenticated repair</h3><p class="muted small">Re-fetches only missing or unreadable CIDs. A peer signs the response and the bytes must hash to the requested address before they replace a corrupt local record.</p><span class:ok-t={storageHealth.has_peers} class:fail-t={!storageHealth.has_peers}>{storageHealth.has_peers ? "A proven member path was live at check time" : "No proven member path was live at check time"}</span></div>
                 <button disabled={storageRepairing || (!storageHealth.missing_chunks && !storageHealth.unreadable_chunks)} onclick={repairStorage}>{storageRepairing ? "Repairing…" : "Repair now"}</button>
               </section>
               {#if storageRepairNote}<p class="storage-note">{storageRepairNote}</p>{/if}
@@ -16880,11 +19540,66 @@
           </div>
         {:else if view === "connectivity"}
           <div class="operations-pane tab-pane">
-            <header class="ops-head"><div><span class="stx-crumb">SERVER // OPERATIONS // CONNECTIVITY</span><h2>Connectivity assistant</h2><p class="muted small">What this device can prove, what it merely attempted, and what to try next.</p></div><button class="ghost small" onclick={refreshConnectivity}>Refresh</button></header>
+            <header class="ops-head"><div><span class="stx-crumb">SERVER // OPERATIONS // CONNECTIVITY</span><h2>Connectivity assistant</h2><p class="muted small">What this device can prove, what it merely attempted, and what to try next.</p></div><button class="ghost small" onclick={() => void Promise.all([refreshConnectivity(), refreshMemberRoutes(), refreshSwitchboards()])}>Refresh</button></header>
             {#if connectivity?.action}
               {@render connDetail(connectivity)}
-              <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
-            {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Live peer presence above is still current.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
+              <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" disabled={manualRedialBusy || activeServerId === null} onclick={manualFallbackRedial}>{manualRedialBusy ? "Retrying…" : "Retry group routes now"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
+              {#if manualRedialNote}<p class="muted small">{manualRedialNote}</p>{/if}
+            {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Current member-path evidence below is still available.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
+            {@render memberRecoveryPanel()}
+            <section class="connection-member-health" aria-labelledby="connection-member-health-title">
+              <header>
+                <div>
+                  <h3 id="connection-member-health-title">MEMBER PATHS</h3>
+                  <p class="muted small">What this device can currently reach, how the path runs, and safe next actions. “No claimed path” never means the person is offline.</p>
+                </div>
+                {#if memberRoutesUnavailable}
+                  <span class="hosting-state" data-ready={false}>SNAPSHOT UNAVAILABLE</span>
+                {:else}
+                  <span class="hosting-state" data-ready={connectedMemberRouteCount > 0}>{connectedMemberRouteCount} CLAIMED PEER{connectedMemberRouteCount === 1 ? "" : "S"} CONNECTED</span>
+                {/if}
+              </header>
+              {#if memberRoutesUnavailable}
+                <p class="muted small">The current member-route snapshot could not be read. Retained rows below are labelled as the last snapshot and are not current reachability evidence.</p>
+              {/if}
+              {#if memberRoutes.length}
+                <div class="member-route-grid">
+                  {#each memberRoutes as route (route.fingerprint)}
+                    {@const routeStatusChip = routeChip(routeState(route))}
+                    {@const chip = memberRoutesUnavailable ? { label: `LAST: ${routeStatusChip.label}`, tone: "warn" } : routeStatusChip}
+                    {@const historicalAge = routeHistoricalAge(route, memberRoutesReceivedAt, nowTick)}
+                    {@const indirectEvidence = memberRoutesUnavailable ? null : routeIndirectEvidence(route)}
+                    <article>
+                      <div class="member-route-head">
+                        <b>{nameOf(route.fingerprint)}</b>
+                        <span class="chip {chip.tone}">{chip.label}</span>
+                      </div>
+                      <p>{memberRoutesUnavailable ? "This was the last local snapshot; current claimed-peer connection state is unavailable." : routeExplanation(route, (connectivity?.advertised ?? []).some((address) => address.startsWith("/ip6/")))}</p>
+                      {#if indirectEvidence}<p class="muted small">{indirectEvidence}</p>{/if}
+                      {#if route.active_paths.length}
+                        <small>{memberRoutesUnavailable ? "Last snapshot" : "Now"}: {route.active_paths.map(routePathLabel).join(", ")}</small>
+                      {:else if route.last_success && historicalAge !== null}
+                        <small>Last path opened {relTime(historicalAge)} ago: {routePathLabel(route.last_success.path)}. Historical only.</small>
+                      {:else if route.candidate_families.length || route.candidate_transports.length}
+                        <small>Candidates: {route.candidate_families.join(", ") || "family unknown"} · {route.candidate_transports.join(", ") || "transport unknown"}</small>
+                      {/if}
+                      {#if route.actions.length && !memberRoutesUnavailable}
+                        <ul>
+                          {#each route.actions as action}
+                            <li><span>{routeActionLabel(action)}</span><small>{routeActionScopeLabel(action)}</small></li>
+                          {/each}
+                        </ul>
+                      {/if}
+                    </article>
+                  {/each}
+                </div>
+              {:else if memberRoutesUnavailable}
+                <p class="muted small">No retained route snapshot is available.</p>
+              {:else}
+                <p class="muted small">No other current member routes to assess.</p>
+              {/if}
+              <p class="muted small hosting-disclosure">A member signs the peer identity and addresses in its record, but this protocol version does not yet prove that the member's device key controls that transport key. A live row is therefore evidence about the claimed peer path on this device—not proof that the person is online or directly reachable from elsewhere.</p>
+            </section>
             <!-- The media plane's own evidence. It lives here rather than in a panel of its own
                  because "why will my call not connect" and "why will my server not connect" are
                  the same question asked about two stacks, and answering them in two places is how
@@ -16951,7 +19666,7 @@
               <header>
                 <div>
                   <h3 id="connection-hosting-title">GROUP HOSTING</h3>
-                  <p><b>{Math.max(onlineCount - 1, 0)}</b> of <b>{Math.max(members - 1, 0)}</b> other members are connected now.</p>
+                  <p><b>{Math.max(onlineCount - 1, 0)}</b> of <b>{Math.max(members - 1, 0)}</b> other members claim a peer connected here now.</p>
                 </div>
                 <span class="hosting-state" data-ready={(switchboardStatus?.online.length ?? 0) > 0}>{switchboardStatus?.online.length ?? 0} SWITCHBOARD{switchboardStatus?.online.length === 1 ? "" : "S"} ONLINE</span>
               </header>
@@ -17041,44 +19756,174 @@
             {/if}
           </ul>
         {:else if view === "status"}
-          <h2>Announcements</h2>
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <form
-            class="composer"
-            class:drag-over={dragOver}
-            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
-            ondragleave={() => (dragOver = false)}
-            ondrop={(e) => onComposerDrop("status", e)}
-            onsubmit={(e) => { e.preventDefault(); postStatus(); }}
-          >
-            <label class="attach" title="Attach image / video / audio">
-              📎
-              <input
-                type="file"
-                accept="image/*,video/*,audio/*"
-                multiple
-                disabled={uploading}
-                onchange={(e) => { embedFiles("status", e.currentTarget.files); e.currentTarget.value = ''; }}
-              />
-            </label>
-            {@render textEffectButton("announcement", "Announcement text effects")}
-            <textarea bind:this={announcementInputEl} bind:value={statusDraft} rows="1" onselect={() => onTextEffectSelection("announcement")} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Write an announcement…"}></textarea>
-            <button type="submit" disabled={uploading}>Post</button>
-          </form>
-          <ul class="status-list tab-pane" bind:this={statusEl} use:richClicks>
-            {#each statuses as s}
-              <li data-sid={s.id} class:flash={!!s.id && s.id === flashStatusId}>
-                <span class="status-head">
-                  {@render avatarTag(s.author)}
-                  {@render nameTag(s.author)}
-                  <span class="time">{fmtTime(s.ts)}</span>
+          <!-- One post card, drawn the same in the pinned block and in the feed: the two differ in
+               where they sit, not in what an announcement is or what may be done to it. -->
+          {#snippet statusCard(s: Msg)}
+            <li
+              data-sid={s.id}
+              class:flash={!!s.id && s.id === flashStatusId}
+              class:unread={isStatusUnread(s, statusBoundary, statusTsCeiling)}
+              use:contextMenu={() => statusMenu(s)}
+            >
+              <span class="status-head">
+                {@render avatarTag(s.author)}
+                {@render nameTag(s.author)}
+                <span class="time" title={new Date(s.ts).toLocaleString()}>{fmtTime(s.ts)}</span>
+                {#if s.pinned}<span class="status-pinned" title="Pinned to the top of this feed">{@render icoPin()}</span>{/if}
+                {#if s.id && statusEditingId !== s.id}
+                  <span class="status-actions">
+                    <button class="msg-action" type="button" title="Add reaction" aria-label="Add reaction" onclick={() => toggleStatusReactionPicker(s)}>{@render icoCat()}</button>
+                    {#if s.author === myFp}
+                      <button class="msg-action" type="button" title="Edit" aria-label="Edit announcement" onclick={() => startStatusEdit(s)}>✎</button>
+                    {/if}
+                    <button class="msg-action" type="button" title="More actions" aria-label="More actions" onclick={(e) => openMenu(e, statusMenu(s))}>⋯</button>
+                  </span>
+                {/if}
+              </span>
+              {#if s.id && statusEditingId === s.id}
+                <div class="msg-edit">
+                  <textarea
+                    bind:this={statusEditEl}
+                    bind:value={statusEditDraft}
+                    rows="2"
+                    onkeydown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); saveStatusEdit(s); } else if (e.key === "Escape") { e.preventDefault(); cancelStatusEdit(); } }}
+                  ></textarea>
+                  <div class="msg-edit-actions">
+                    <button class="ghost small" onclick={() => saveStatusEdit(s)}>Save</button>
+                    <button class="ghost small" onclick={cancelStatusEdit}>Cancel</button>
+                    <span class="muted small">Enter to save · Esc to cancel</span>
+                  </div>
+                </div>
+              {:else}
+                <span class="status-text">
+                  {@html renderMessage(s.text, myMentionName)}{#if s.edited}<span class="edited-tag muted" title={"edited " + new Date(s.edited).toLocaleString()}> (edited)</span>{/if}
                 </span>
-                <span class="status-text">{@html renderMessage(s.text, myMentionName)}</span>
-              </li>
+              {/if}
+              {#if s.reactions.length || (s.id && statusReactionPickerFor === s.id)}
+                <div class="reactions">
+                  {#each s.reactions as r (r.emoji)}
+                    {@const rcode = customEmojiCode(r.emoji)}
+                    <button
+                      class="reaction"
+                      class:mine={r.by.includes(myFp)}
+                      title={r.by.map(nameOf).join(", ")}
+                      aria-pressed={r.by.includes(myFp)}
+                      aria-label={`${r.emoji}, ${r.by.length}, ${r.by.includes(myFp) ? "remove your reaction" : "react"}`}
+                      onclick={() => toggleStatusReaction(s, r.emoji)}
+                    >
+                      {#if rcode && emojiUrls[rcode]}
+                        <img class="r-emoji-img" src={emojiUrls[rcode]} alt={r.emoji} />
+                      {:else}
+                        <span class="r-emoji">{r.emoji}</span>
+                      {/if}
+                      {r.by.length}
+                    </button>
+                  {/each}
+                  {#if s.id}
+                    <button class="reaction add-reaction" title="Add reaction" aria-label="Add reaction" onclick={() => toggleStatusReactionPicker(s)}>＋</button>
+                  {/if}
+                  {#if s.id && statusReactionPickerFor === s.id}
+                    <div class="reaction-picker" role="menu">
+                      {#each QUICK_EMOJI as e}
+                        <button class="qe" type="button" aria-label={`React with ${e}`} onclick={() => toggleStatusReaction(s, e)}>{e}</button>
+                      {/each}
+                      {#each Object.keys(emojiMap) as code}
+                        <button class="qe" type="button" aria-label={`React with :${code}:`} onclick={() => toggleStatusReaction(s, `:${code}:`)}>
+                          {#if emojiUrls[code]}<img src={emojiUrls[code]} alt={code} />{:else}<span class="muted small">:{code}:</span>{/if}
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </li>
+          {/snippet}
+          <!-- The header carries the two things a reader most wants to know about this feed before
+               reading it: who is allowed to post to it, and whether it will make a sound. -->
+          <h2 class="status-topline">
+            <span class="status-title">Announcements</span>
+            {#if canModerate}
+              <button
+                type="button"
+                class="status-chip"
+                class:on={statusPolicy}
+                disabled={statusPolicyBusy}
+                title={statusPolicy ? "Members may post here: click to close the feed to the owner and admins" : "Only the owner and admins post here: click to open the feed to every member"}
+                onclick={toggleStatusPolicy}
+              >◈ {statusPolicy ? "anyone may post" : "owner & admins post"}</button>
             {:else}
-              <li class="muted">No announcements yet.</li>
-            {/each}
-          </ul>
+              <span class="status-chip" class:on={statusPolicy} title="Who may post to this feed">◈ {statusPolicy ? "anyone may post" : "owner & admins post"}</span>
+            {/if}
+            <button
+              type="button"
+              class="status-chip"
+              class:on={statusCueOn}
+              disabled={!soundOn}
+              title={!soundOn
+                ? "Notification sounds are switched off for this device in Settings"
+                : statusCueOn
+                  ? "This server's news cue plays on this device: click to silence it here"
+                  : "This server's news cue is silent on this device: click to hear it here"}
+              onclick={toggleStatusCue}
+            >♪ {soundOn && statusCueOn ? "news cue on" : "news cue off"}</button>
+          </h2>
+          {#if canPostStatus}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <form
+              class="composer"
+              class:drag-over={dragOver}
+              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragleave={() => (dragOver = false)}
+              ondrop={(e) => onComposerDrop("status", e)}
+              onsubmit={(e) => { e.preventDefault(); postStatus(); }}
+            >
+              <label class="attach" title="Attach image / video / audio">
+                📎
+                <input
+                  type="file"
+                  accept="image/*,video/*,audio/*"
+                  multiple
+                  disabled={uploading}
+                  onchange={(e) => { embedFiles("status", e.currentTarget.files); e.currentTarget.value = ''; }}
+                />
+              </label>
+              {@render textEffectButton("announcement", "Announcement text effects")}
+              <textarea bind:this={announcementInputEl} bind:value={statusDraft} rows="1" onselect={() => onTextEffectSelection("announcement")} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Write an announcement…"}></textarea>
+              <button type="submit" disabled={uploading}>Post</button>
+            </form>
+          {:else}
+            <p class="muted small status-closed">Only the owner and admins post here.</p>
+          {/if}
+          <div class="status-board tab-pane" bind:this={statusEl} use:richClicks>
+            {#if pinnedStatuses.length}
+              <h3 class="ev-h"><span>Pinned</span></h3>
+              <ul class="status-list status-pins">
+                {#each pinnedStatuses as s}
+                  {@render statusCard(s)}
+                {/each}
+              </ul>
+            {/if}
+            <!-- Unkeyed, as this list has always been: a post old enough to predate minted ids has
+                 an empty one, and two of those would be the same key. Which card holds the open
+                 editor is decided by `statusEditingId` per row, not by list identity. -->
+            <ul class="status-list">
+              {#each statusFeed as s, i}
+                {@render statusCard(s)}
+                <!-- `statusDividerAt` names the OLDEST unread post, and this feed runs newest-first,
+                     so the boundary goes UNDER that row and everything above it is new. Drawn after
+                     the card for exactly that reason: above it would put the oldest unread post on
+                     the read side of its own boundary. It stays put while the surface is open even
+                     as the read mark advances past it, because a boundary that vanishes as you look
+                     at it tells you nothing. -->
+                {#if i === statusDividerAt}
+                  <li class="status-divider" aria-label="New announcements above"><span>NEW</span></li>
+                {/if}
+              {/each}
+              {#if !statusFeed.length && !pinnedStatuses.length}
+                <li class="muted">No announcements yet.</li>
+              {/if}
+            </ul>
+          </div>
         {:else if view === "wiki"}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
@@ -17353,8 +20198,8 @@
               <div class="ev-image-row">
                 {#if evImage}
                   <span class="ev-image-pick">
-                    {#if mediaUrls[evImage]}
-                      <img class="ev-image-preview" src={mediaUrls[evImage]} alt="The event's poster" />
+                    {#if preparedMedia(evImage)}
+                      <img class="ev-image-preview" src={preparedMedia(evImage)} alt="The event's poster" />
                     {:else}
                       <span class="muted small">Image attached</span>
                     {/if}
@@ -17385,8 +20230,8 @@
                     {#if e.body}<div class="ev-body">{@html renderMessage(e.body, "")}</div>{/if}
                     <div class="ev-meta">by {@render nameTag(e.author)}</div>
                   </div>
-                  {#if e.image && mediaUrls[e.image]}
-                    <img class="ev-poster" src={mediaUrls[e.image]} alt={`Poster for ${plainSummary(e.title, 100)}`} />
+                  {#if e.image && preparedMedia(e.image)}
+                    <img class="ev-poster" src={preparedMedia(e.image)} alt={`Poster for ${plainSummary(e.title, 100)}`} />
                   {/if}
                   {#if e.author === myFp || canModerate}
                     {#if confirmDeleteEventId === e.id}
@@ -17504,7 +20349,7 @@
 
       {#if !dmHome && cur && !cur.isDm}
         <aside class="members-col" aria-label="Members">
-          <h3><span>Members · {onlineCount}/{members}</span></h3>
+          <h3><span>Members · {onlineCount}/{members} claimed here</span></h3>
           {#if roster.length > 6}
             <input class="list-search" bind:value={rosterFilter} placeholder="Search members…" />
           {/if}
@@ -17512,7 +20357,7 @@
             <p class="muted small">{groupLoading ? "Loading members…" : rosterFilter.trim() ? "No matching members." : "No members to show."}</p>
           {/if}
           {#if onlineRoster.length}
-            <h3><span>online: {onlineRoster.length}</span></h3>
+            <h3><span>claimed path connected: {onlineRoster.length}</span></h3>
             <ul>
               {#each onlineRoster as m (m.fingerprint)}
                 {@render memberRow(m, true)}
@@ -17521,7 +20366,7 @@
             </ul>
           {/if}
           {#if offlineRoster.length}
-            <h3><span>offline: {offlineRoster.length}</span></h3>
+            <h3><span>no claimed path: {offlineRoster.length}</span></h3>
             <ul>
               {#each offlineRoster as m (m.fingerprint)}
                 {@render memberRow(m, false)}
@@ -17537,9 +20382,9 @@
     <footer class="statusbar">
       <span class="seg"><span class="sb-dot"></span><span class="ok-t">node online</span></span>
       {#if cur && !dmHome && !inboxView}
-        <span class="seg">peers <span><span class="ok-t">{Math.max(onlineCount - 1, 0)}</span>/{Math.max(members - 1, 0)}</span></span>
+        <span class="seg">claimed paths <span><span class="ok-t">{Math.max(onlineCount - 1, 0)}</span>/{Math.max(members - 1, 0)}</span></span>
       {/if}
-      <button class="seg sb-lock" title="Lock now (Ctrl+L): clears everything on screen and asks for your passphrase again. The node stays online." onclick={lockScreen}>
+      <button class="seg sb-lock" title="Lock now (Ctrl+L): clears everything on screen and asks for your passphrase again. The node stays online." onclick={() => lockScreen()}>
         {@render icoLock()} vault <span class="ok-t">unlocked</span>
       </button>
       {#if rendezvous.trim()}<span class="seg">rendezvous <span class="ok-t">set</span></span>{/if}
@@ -17775,7 +20620,17 @@
                 </select>
               </label>
             {/if}
+            <button
+              type="button"
+              class="ghost stage-stream-cog"
+              class:on={streamSettingsOpen}
+              aria-expanded={streamSettingsOpen}
+              aria-label="Screen stream settings"
+              title="Screen stream resolution, quality, bitrate and audio sources"
+              onclick={() => (streamSettingsOpen = !streamSettingsOpen)}
+            >{@render icoGear()}</button>
           </div>
+          {#if streamSettingsOpen}{@render streamSettingsPanel(false)}{/if}
         </div>
 
         <!-- The deck sits between what you do and what you play: it is the room's, not yours. -->
@@ -17895,6 +20750,9 @@
           <button class="ghost focus-btn" class:on={myVideo === "screen"} aria-pressed={myVideo === "screen"} title={myVideo === "screen" ? "Stop sharing your screen" : "Share your screen"} aria-label="Share your screen" onclick={() => toggleVideo("screen")}>
             {@render icoScreen()}
           </button>
+          <button class="ghost focus-btn" class:on={streamSettingsOpen} aria-expanded={streamSettingsOpen} title="Screen stream settings" aria-label="Screen stream settings" onclick={() => (streamSettingsOpen = !streamSettingsOpen)}>
+            {@render icoGear()}
+          </button>
           <button class="ghost focus-btn" class:on={instOpen} aria-expanded={instOpen} title="Instrument drawer" aria-label="Instruments" onclick={toggleInstDrawer}>
             {@render icoNote()}
           </button>
@@ -17902,6 +20760,8 @@
             {@render icoHangup()}
           </button>
         </div>
+
+        {#if streamSettingsOpen}<div class="focus-stream-panel">{@render streamSettingsPanel(false)}</div>{/if}
 
         <div class="focus-dock juke-dock-slot">{@render jukeDock()}</div>
 
@@ -18076,7 +20936,7 @@
                     {@const b = badges[fp]}
                     <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""} title="Badge assigned by a server admin">{b.label}</span>
                   {/if}
-                  <span class="muted small">{fp === myFp || onlineMembers.has(fp) ? "online" : "offline"}</span>
+                  <span class="muted small">{fp === myFp ? "this device" : onlineMembers.has(fp) ? "claimed path connected" : "no claimed path"}</span>
                 </div>
               </div>
             </div>
@@ -18319,9 +21179,11 @@
               {@const mentions = spaceMentionCounts[it.s.id] ?? 0}
               {@const voice = spaceVoiceCount(it.s.id)}
               {@const recent = it.s.unread.length > 0 || (spaceActivityAt[it.s.id] ?? 0) > nowTick - 5 * 60_000}
+              {@const heralds = spaceStatusCounts[it.s.id] ?? 0}
               <button
                 class="sp-srv"
                 class:sp-unread={it.s.unread.length > 0}
+                class:sp-heralded={heralds > 0}
                 class:sp-recent={recent}
                 class:sp-carried={it.carried}
                 class:sp-enter-target={spaceEntering === it.s.id}
@@ -18329,9 +21191,11 @@
                 class:sp-search-dim={!!spaceSearch && !spaceSearchMatches.some((s) => s.id === it.s.id)}
                 style={`left:${spaceVw / 2 + it.x}px; top:${spaceVh / 2 + it.y}px; --sp-s:${it.scale.toFixed(3)}; --sp-delay:${-((it.s.id % 13) * 0.17).toFixed(2)}s;${spaceAccents[it.s.id] ? ` --sp-a:${spaceAccents[it.s.id]};` : ""}`}
                 data-name={it.s.name}
-                title={`${it.s.name} · ${online} online${mentions ? ` · ${mentions} mention${mentions === 1 ? "" : "s"}` : ""}${voice ? ` · ${voice} in voice` : ""}`}
+                title={`${it.s.name} · ${online} claimed path${online === 1 ? "" : "s"} here${mentions ? ` · ${mentions} mention${mentions === 1 ? "" : "s"}` : ""}${voice ? ` · ${voice} in voice` : ""}${heralds ? ` · ${heralds} unread announcement${heralds === 1 ? "" : "s"}` : ""}`}
                 onpointerdown={(e) => onSpaceServerDown(e, it.s.id)}
                 onclick={() => spaceIconClick(it.s.id)}
+                onmouseenter={() => (spaceHeraldHover = it.s.id)}
+                onmouseleave={() => { if (spaceHeraldHover === it.s.id) spaceHeraldHover = null; }}
                 use:contextMenu={() => spaceServerMenu(it.s)}
               >
                 {#if serverIcons[it.s.id] && appearance.icons !== "flat"}
@@ -18343,16 +21207,48 @@
                   <span class="rail-badge">{it.s.unread.length}</span>
                 {/if}
                 {#if online > 1}
-                  <span class="sp-orbiters" aria-label={`${online} online`}>
+                  <span class="sp-orbiters" aria-label={`${online} claimed paths here`}>
                     {#each Array(Math.min(8, online - 1)) as _, i}<i style={`--sp-dot:${i}; --sp-dots:${Math.min(8, online - 1)}`}></i>{/each}
                     {#if online > 9}<b>+{online - 9}</b>{/if}
                   </span>
                 {/if}
                 {#if mentions}<span class="sp-mention-flare" title={`${mentions} unseen mention${mentions === 1 ? "" : "s"}`}>!</span>{/if}
                 {#if voice}<span class="sp-voice-signal" title={`${voice} in voice`}><i></i><i></i><i></i></span>{/if}
+                {#if heralds}
+                  <!-- The herald: slow rings out of the billboard plus a pip in the one corner the
+                       other signals leave free. With motion off the rings settle into a single
+                       standing ring, so the beacon is still visible to someone who has asked the
+                       whole interface to hold still. -->
+                  <span class="sp-herald-ripple" class:still={fxMotionOff} aria-hidden="true"><i></i><i></i></span>
+                  <span class="sp-herald" title={`${heralds} unread announcement${heralds === 1 ? "" : "s"}`}>◈ {heralds}</span>
+                {/if}
               </button>
             {/each}
           </div>
+
+          {#if spaceHerald}
+            <!-- Display only, and deliberately outside the icon layer: it never takes the pointer,
+                 so a drag begun on the billboard under it keeps every event it would have had. -->
+            <div
+              class="sp-herald-card"
+              style={`left:${spaceHerald.left}px; top:${spaceHerald.top}px; --sp-herald-w:${SPACE_HERALD_CARD.w}px; --sp-herald-h:${SPACE_HERALD_CARD.h}px`}
+              aria-hidden="true"
+            >
+              <span class="sp-herald-where">{spaceHerald.name}</span>
+              {#if spaceHerald.latest}
+                <span class="sp-herald-line">{msgSnippet(spaceHerald.latest.text, 90)}</span>
+                <!-- No author name: `nameOf` resolves against the server you are standing in, and
+                     this card describes one you are not, so it would attribute the post to whoever
+                     happens to share that fingerprint's profile here. -->
+                <span class="sp-herald-meta">
+                  <span>{relTime(nowTick - spaceHerald.latest.ts)} ago</span>
+                  <b>◈ {spaceHerald.count} unread</b>
+                </span>
+              {:else}
+                <span class="sp-herald-meta"><b>◈ {spaceHerald.count} unread</b></span>
+              {/if}
+            </div>
+          {/if}
 
           {#if spaceLasso}
             <svg class="sp-lasso" viewBox={`0 0 ${spaceVw} ${spaceVh}`} preserveAspectRatio="none" aria-hidden="true">
@@ -18700,13 +21596,20 @@
             {:else if settingsPage === "vault"}
               <div class="stx-crumb">SETTINGS // ACCOUNT // VAULT &amp; LOCK</div>
               <h1>Vault &amp; Lock</h1>
+              {#if vaultDurabilityWarning}
+                <section class="set-section backup-risk">
+                  <h3>New secret active — durability uncertain</h3>
+                  <p class="muted small">{vaultDurabilityWarning} Do not discard the new secret or assume the old secret still opens the live vault. Create a fresh encrypted backup once the filesystem is healthy.</p>
+                  <button class="ghost small" onclick={() => (vaultDurabilityWarning = "")}>I have kept the new secret</button>
+                </section>
+              {/if}
               <section class="set-section">
                 <p class="muted small">
                   Everything you are lives in an encrypted vault on this machine, sealed by the
                   secret you chose at setup (passphrase, spell, or melody). Locking clears the
                   screen and asks for it again; the node stays online underneath.
                 </p>
-                <button class="ghost" onclick={lockScreen}>Lock now [Ctrl+L]</button>
+                <button class="ghost" onclick={() => lockScreen()}>Lock now [Ctrl+L]</button>
               </section>
               <section class="set-section">
                 <h3>Change vault secret</h3>
@@ -19142,6 +22045,10 @@
                 <button type="button" class="ghost small" onclick={() => (settingsPage = "devices")}>Open Devices</button>
               </section>
               <section class="set-section">
+                <h3>Screen sharing</h3>
+                {@render streamSettingsPanel(true)}
+              </section>
+              <section class="set-section">
                 <h3>NAT traversal</h3>
                 <p class="muted small">
                   Voice is peer-to-peer + end-to-end encrypted. To connect across networks, peers use a
@@ -19253,12 +22160,29 @@
               <div class="stx-crumb">SETTINGS // CONNECTION // DIAGNOSTICS</div>
               <h1>Diagnostics</h1>
               <section class="set-section">
+                <h3>Debug console</h3>
+                <p class="muted small">
+                  A live view of what this app is doing: which members it can reach and why not,
+                  what the network layer is attempting, backend and frontend errors, and the voice
+                  stack during a call. It reads memory this session already holds, so it is always
+                  ready and does not need the log file below to be switched on first.
+                </p>
+                <div class="invite-actions">
+                  <button class="ghost" onclick={() => openDebugConsole("overview")}>Open debug console</button>
+                </div>
+              </section>
+              <section class="set-section">
                 <h3>Connection report</h3>
                 {#if connectivity && connectivity.action}
                   {@const reach = reachabilitySummary(connectivity)}
                   <p class="muted small">
                     The last thing this app tried: <b>{connectivity.action === "found" ? "founding" : "joining"}</b>
                     {connectivity.subject ? ` (${connectivity.subject})` : ""}, {fmtLocal(connectivity.at)}.
+                    {#if connectivity.trace}
+                      <!-- The join key between this panel and the debug console. Relating the two
+                           used to mean matching wall-clock times by eye. -->
+                      Trace <span class="fp">{connectivity.trace}</span>.
+                    {/if}
                   </p>
                   <p class="muted small">Observed reachability: <b>{reach.verdict}</b>. {reach.detail}</p>
                   <div class="invite-actions">
@@ -19273,8 +22197,17 @@
               <section class="set-section">
                 <h3>Debug log</h3>
                 <p class="muted small">
-                  Off by default. When on, Mewtual writes a text log next to its data so you can
-                  reproduce a problem and send the file to someone who can read it.
+                  On by default during the alpha. Mewtual writes a text log next to its data so you
+                  can reproduce a problem and send the file to someone who can read it. Turning it
+                  off is permanent until you turn it back on.
+                </p>
+                <!-- Two different things, said plainly. The file and the in-app record are separate
+                     sinks with separate settings, and a reader who assumes this checkbox is the
+                     one off switch would believe nothing is being recorded when something is. -->
+                <p class="muted small">
+                  This controls the file only. The debug console keeps its own record in memory,
+                  which is never written anywhere unless you copy or save it; turn that off, or
+                  change how much of it is kept, under Capture in the console itself.
                 </p>
                 {#if debugLog}
                   <label class="toggle">
@@ -19282,9 +22215,17 @@
                       onchange={(e) => toggleDebugLog(e.currentTarget.checked)} />
                     <span>Keep a debug log</span>
                   </label>
-                  {#if debugLog.enabled && !debugLog.active}
-                    <p class="muted small">Restart Mewtual to start writing: a log can only be opened when the app starts.</p>
-                  {:else if !debugLog.enabled && debugLog.active}
+                  <!-- Preference and reality, always both. The gap between them is the whole
+                       reason this reads the sink instead of echoing the checkbox above. -->
+                  {@const health = debugLogSummary(debugLog)}
+                  <div class="dbg-kv">
+                    <span class="k">You asked for</span>
+                    <span class="v">{debugLog.enabled ? "A debug log" : "No debug log"}</span>
+                    <span class="k">Actually</span>
+                    <span class="v"><span class="chip {health.tone}">{debugLog.state.toUpperCase()}</span></span>
+                  </div>
+                  <p class="muted small">{health.text}</p>
+                  {#if !debugLog.enabled && debugLog.active}
                     <p class="muted small">Still writing this session's log. It stops at the next restart.</p>
                   {/if}
                   <div class="field">
@@ -19292,22 +22233,42 @@
                     <input readonly value={debugLog.dir} />
                   </div>
                   {#if debugLog.file}
-                    <p class="muted small">This session's file: <span class="fp">{debugLog.file}</span></p>
+                    <p class="muted small">
+                      This session's file: <span class="fp">{debugLog.file}</span>
+                      {#if debugLog.session}<span class="muted"> (session {debugLog.session})</span>{/if}
+                    </p>
                   {:else}
                     <p class="muted small">Files are named <code>debug_log_&lt;date&gt;_&lt;time&gt;.txt</code>.</p>
                   {/if}
+                  {#if debugLog.events_dropped > 0}
+                    <!-- Never a silent gap: a period with no lines has to be distinguishable from
+                         a period whose lines were lost. -->
+                    <p class="dbg-note">
+                      {debugLog.events_dropped.toLocaleString()} entries did not reach the file, so
+                      this log has holes in it. That happens when the app emits faster than the disk
+                      accepts, or after the session's size limit stopped the writer.
+                    </p>
+                  {/if}
+                  {#if debugLog.events_truncated > 0}
+                    <!-- A different thing from a hole, and worth saying separately: these lines are
+                         present, and somebody reading one needs to know its tail is missing before
+                         they draw a conclusion from half of an error message. -->
+                    <p class="dbg-note">
+                      {debugLog.events_truncated.toLocaleString()} entries were too long and were
+                      cut short. They are in the file, each marked, with the beginning intact.
+                    </p>
+                  {/if}
                   <div class="invite-actions">
                     <button class="ghost small" onclick={() => copyText(debugLog?.dir ?? "")}>Copy folder path</button>
+                    <button class="ghost small" disabled={debugLogBusy} onclick={testDebugLog}>
+                      {debugLogTested ? "Checked" : "Write a test entry"}
+                    </button>
                   </div>
                 {:else}
                   <p class="muted small">This build cannot report the log setting.</p>
                 {/if}
                 <p class="muted small">
-                  <b>Before you share one:</b> a debug log can contain your LAN and public IP
-                  addresses and port, the addresses of peers you connected to, peer and device
-                  identifiers, and when you were online and how much you transferred. It does
-                  <b>not</b> contain message text, file contents, names or any key material.
-                  Treat it as "who I talked to and when".
+                  <b>Before you share one:</b> {DEBUG_LOG_FILE_DISCLOSURE}
                 </p>
               </section>
             {:else if settingsPage === "updates"}
@@ -19403,6 +22364,30 @@
           </button>
         </div>
       </div>
+    {/if}
+
+    {#if showDebugConsole}
+      {#if DebugConsole}
+        <DebugConsole
+          section={dbgSection}
+          {servers}
+          {activeServerId}
+          activeFileCount={files.length}
+          device={callTransport}
+          version={APP_VERSION}
+          nameOf={(fp) => nameOf(fp)}
+          voice={debugVoicePeers}
+          onclose={closeDebugConsole}
+          onrefreshdevice={() => void refreshCallTransport()}
+          oncopy={(text) => copyTextRequired(text)}
+        />
+      {:else if debugConsoleError}
+        <div class="dbg" role="dialog" aria-label="Debug console">
+          <div class="dbg-content">
+            <div class="dbg-empty">The debug console could not be loaded: {debugConsoleError}</div>
+          </div>
+        </div>
+      {/if}
     {/if}
 
     {#if showServerSettings}
@@ -19520,6 +22505,41 @@
                   <label><span class="muted small">Credential</span><input type="password" bind:value={srvTurnCred} onchange={saveSrvTurn} /></label>
                 </div>
               </div>
+              </section>
+            {:else if serverSettingsPage === "filetrust"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // FILE TRUST</div>
+              <h1>File Trust</h1>
+              <section class="set-section file-trust-settings">
+                <h3>Automatic fetch and decoding on this device</h3>
+                <p class="muted small">This is your local, vault-sealed choice. It does not endorse a member to anyone else and it never blocks an explicit Load, Play, Open, or Download click.</p>
+                {#if uiStateSaveFailed}
+                  <div class="warn-box" role="alert">
+                    <b>File trust has not been saved to the vault.</b>
+                    <p class="muted small">This screen enforces your new choice now, but a restart could restore the previous policy.</p>
+                    <button type="button" class="ghost small" onclick={scheduleUiStateSave}>Retry saving</button>
+                  </div>
+                {/if}
+                <div class="file-trust-modes">
+                  <button type="button" class:active={fileTrustFor().mode === "on-demand"} onclick={() => setFileTrustMode("on-demand")}><b>On demand</b><small>Nothing passive</small></button>
+                  <button type="button" class:active={fileTrustFor().mode === "specific"} onclick={() => setFileTrustMode("specific")}><b>Specific people</b><small>Only selected origins</small></button>
+                  <button type="button" class:active={fileTrustFor().mode === "everyone"} onclick={() => setFileTrustMode("everyone")}><b>Everyone</b><small>All authenticated member media; external URLs stay click-only</small></button>
+                </div>
+                {#if fileTrustFor().mode === "specific"}
+                  <div class="file-trust-members">
+                    {#each roster as member (member.identity)}
+                      <label>
+                        <input type="checkbox" checked={fileTrustFor().trustedAuthors.includes(member.identity)} onchange={() => toggleTrustedFileAuthor(member.identity)} />
+                        <span>
+                          {@render nameTag(member.fingerprint)}
+                          <small class="fp" title={`Full device identity: ${member.identity}`}>{member.identity}</small>
+                        </span>
+                      </label>
+                    {:else}
+                      <p class="muted small">No authenticated members are available to choose yet.</p>
+                    {/each}
+                  </div>
+                {/if}
+                <p class="muted small"><b>At-rest protection:</b> fetched chunks are authenticated and encrypted as one vault copy. An explicit export creates a separate plaintext copy in Downloads. This policy does not sandbox a media decoder.</p>
               </section>
             {:else if serverSettingsPage === "livery"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // LIVERY</div>
@@ -19765,7 +22785,7 @@
                       {@render nameTag(d.origin)}
                       <span class="dev-tag">· {d.name}</span>
                       <span class="fp small">{cfp.slice(0, 8)}</span>
-                      <span class="muted small">{onlineMembers.has(cfp) ? "online" : "offline"}</span>
+                      <span class="muted small">{onlineMembers.has(cfp) ? "claimed path connected" : "no claimed path"}</span>
                       {#if d.origin === myFp}
                         {#if confirmRevokeFp === cfp}
                           <button class="ghost small danger-btn" onclick={() => revokeDevice(cfp)}>Confirm revoke</button>

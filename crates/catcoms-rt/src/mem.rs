@@ -15,7 +15,8 @@ use tokio::sync::oneshot;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::transport::{
-    MeshTransport, PeerId, ProtocolId, Responder, Topic, TransportError, TransportEvent,
+    DialSubmission, MeshTransport, PeerId, ProtocolId, Responder, Topic, TransportError,
+    TransportEvent, MAX_PEER_DIAL_BATCH,
 };
 
 #[derive(Debug, Default)]
@@ -138,6 +139,56 @@ impl MeshTransport for MemNetwork {
         rx.await.map_err(|_| TransportError::NoResponse)
     }
 
+    async fn request_connected(
+        &self,
+        peer: PeerId,
+        proto: ProtocolId,
+        data: Bytes,
+    ) -> Result<Bytes, TransportError> {
+        // A node registered in the in-memory hub is its equivalent of a currently live route;
+        // there is no recent-address cache and therefore no implicit redial to suppress.
+        self.request(peer, proto, data).await
+    }
+
+    async fn notify_connected(
+        &self,
+        peer: PeerId,
+        proto: ProtocolId,
+        data: Bytes,
+    ) -> Result<(), TransportError> {
+        let (responder, _rx) = Responder::channel();
+        self.hub.deliver(
+            peer,
+            TransportEvent::Request {
+                from: self.local,
+                proto,
+                data,
+                responder,
+            },
+        )
+    }
+
+    async fn dial_peer_batch(
+        &self,
+        peer: PeerId,
+        addresses: &[String],
+    ) -> Result<Vec<DialSubmission>, TransportError> {
+        if addresses.is_empty() || addresses.len() > MAX_PEER_DIAL_BATCH {
+            return Err(TransportError::InvalidDialBatch);
+        }
+        if !self
+            .hub
+            .state
+            .lock()
+            .expect("hub mutex poisoned")
+            .inboxes
+            .contains_key(&peer)
+        {
+            return Err(TransportError::Unreachable(peer));
+        }
+        Ok(vec![DialSubmission::Submitted; addresses.len()])
+    }
+
     async fn next_event(&self) -> Option<TransportEvent> {
         let mut guard = self.rx.lock().await;
         guard.recv().await
@@ -229,6 +280,63 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, TransportError::Unreachable(_)));
+    }
+
+    #[tokio::test]
+    async fn connected_only_notification_is_queued_without_waiting_for_a_reply() {
+        let hub = Hub::new();
+        let a = hub.join(PeerId::from_u64(1));
+        let b = hub.join(PeerId::from_u64(2));
+
+        a.notify_connected(b.local_peer(), ProtocolId("repair"), bytes("please-dial"))
+            .await
+            .unwrap();
+        match b.next_event().await {
+            Some(TransportEvent::Request {
+                from, proto, data, ..
+            }) => {
+                assert_eq!(from, a.local_peer());
+                assert_eq!(proto, ProtocolId("repair"));
+                assert_eq!(data, bytes("please-dial"));
+            }
+            other => panic!("expected connected-only notification, got {other:?}"),
+        }
+
+        assert!(matches!(
+            a.notify_connected(
+                PeerId::from_u64(404),
+                ProtocolId("repair"),
+                bytes("no implicit dial"),
+            )
+            .await,
+            Err(TransportError::Unreachable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn peer_bound_batch_is_small_nonempty_and_requires_a_live_hub_peer() {
+        let hub = Hub::new();
+        let a = hub.join(PeerId::from_u64(1));
+        let b = hub.join(PeerId::from_u64(2));
+        let routes = vec!["route-v4".to_string(), "route-v6".to_string()];
+
+        assert_eq!(
+            a.dial_peer_batch(b.local_peer(), &routes).await.unwrap(),
+            vec![DialSubmission::Submitted, DialSubmission::Submitted]
+        );
+        assert!(matches!(
+            a.dial_peer_batch(b.local_peer(), &[]).await,
+            Err(TransportError::InvalidDialBatch)
+        ));
+        assert!(matches!(
+            a.dial_peer_batch(b.local_peer(), &["a".into(), "b".into(), "c".into()],)
+                .await,
+            Err(TransportError::InvalidDialBatch)
+        ));
+        assert!(matches!(
+            a.dial_peer_batch(PeerId::from_u64(404), &routes).await,
+            Err(TransportError::Unreachable(_))
+        ));
     }
 
     #[tokio::test]

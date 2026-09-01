@@ -10,6 +10,7 @@ catcoms-rt = { path = "../catcoms-rt" }
 catcoms-wire = { path = "../catcoms-wire" }
 tracing.workspace = true
 blake3 = "1"
+multiaddr = "0.18"
 thiserror.workspace = true
 
 [dev-dependencies]
