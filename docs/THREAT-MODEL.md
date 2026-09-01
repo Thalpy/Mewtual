@@ -150,6 +150,11 @@ table with the commit that closed it.
   local detail and still require review before sharing. Webview-origin trace ids are normalized
   under the process-local diagnostic salt; a native trace crossing back through the renderer is
   accepted unchanged only with its session/trace-bound proof, which is never stored or rendered.
+  The optional raw debug file is a different sink and does not pass through Safe admission. Any
+  native tracing or frontend console/error value that passes its target/level filter can reach disk,
+  including names, message fragments, paths, URLs, tokens, serialized objects, and stack traces.
+  Its size/rate bounds are availability and retention controls, not a privacy filter; the user must
+  inspect the actual file before sharing it.
   After Tauri decodes an invoke body, structured UI commands retain at most 256 events and 32 fields
   per event. This does not impose a byte cap on Tauri's already-materialized JSON request: a compromised unlocked
   webview can still spend native parsing time/memory with an oversized request body, so a transport-

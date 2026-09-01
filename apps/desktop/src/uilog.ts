@@ -26,6 +26,18 @@ import { makeOutbox, type SendOutcome } from "./diagnostics.ts";
 
 export type UiLogLevel = "error" | "warn" | "info" | "debug";
 
+/**
+ * User-facing disclosure for the optional raw file sink.
+ *
+ * Keep this beside the capture code rather than hand-copying a shorter promise into Settings.
+ * `formatLogArgs` deliberately retains arbitrary console arguments and Error stacks, and native
+ * `record_ui_log` forwards that prose to the tracing file layer without passing through the Safe
+ * diagnostics ring. The useful debugging detail and the privacy cost therefore have one canonical
+ * description that tests can pin.
+ */
+export const DEBUG_LOG_FILE_DISCLOSURE =
+  "This raw file is not filtered through Safe diagnostics. It can include arbitrary frontend console/error and native app/tracing text, including names, message fragments, filenames and paths, URLs, addresses, identifiers, tokens, stack traces, and anything sensitive an error or trace happens to print. Review the actual file before sharing it, and share it only with someone you trust.";
+
 /** One line for the native side, as `log_ui_batch` accepts it. */
 export type UiLogRecord = {
   level: UiLogLevel;

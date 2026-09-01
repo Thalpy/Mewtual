@@ -100,7 +100,7 @@ export const OUTCOME_COPY: Record<string, OutcomeCopy> = {
   "admission-failed": {
     label: "admission failed",
     note:
-      "Every check passed and the admission itself still failed. This one is a bug or a malformed client: turn on the debug log in Settings, reproduce, and share the file.",
+      "Every check passed and the admission itself still failed. This one is a bug or a malformed client: turn on the raw debug log in Settings, reproduce, review the file for private or sensitive text, then share it privately with someone you trust.",
     tone: "alarm",
   },
 };

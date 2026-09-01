@@ -20,14 +20,22 @@
 //! * stable identifiers: libp2p peer ids, device-id fingerprints, group ids, invite nonce
 //!   prefixes, content addresses (CIDs) of files and avatars;
 //! * activity metadata: when this device connected, to whom, how many messages/ops/blobs moved
-//!   and when, which documents were opened, and which channels exist by internal id.
+//!   and when, which documents were opened, and which channels exist by internal id;
+//! * arbitrary frontend console/error and native application/tracing prose: uncaught messages,
+//!   filenames, paths, URLs, Error stacks, unhandled rejection values, serialized objects, and
+//!   event fields. Those values are length/rate bounded, but they are not classified or minimized
+//!   before this raw file sink sees them.
 //!
-//! It does **not** contain message text, file contents, wiki bodies, display names, passphrases
-//! or any key material: the payloads are sealed before they reach any code that logs, and no
-//! subscriber here reaches inside them. At [`APP_FILE_FILTER`] the transport crates are held at
-//! `info`, which is what keeps per-connection address churn out of an ordinary log.
+//! Consequently the file has **no categorical content-exclusion guarantee**. Current application
+//! paths seal message/file/wiki payloads before routine logging and no known call site deliberately
+//! logs a passphrase or key, but a present or future console, error, or tracing call can still
+//! include names, message fragments, tokens, or other sensitive text. The raw file layer does not
+//! pass through the [`catcoms_diagnostics`] Safe-capture boundary; only the separately attached
+//! in-memory ring and native public-report renderer get those guarantees. [`APP_FILE_FILTER`]
+//! limits which targets and levels reach disk, but it does not sanitize values in an event that
+//! passes the filter.
 //!
-//! Treat a debug log as "who I talked to and when", and share it accordingly.
+//! Review the actual file before sharing it, and share it only with someone you trust.
 
 use std::path::Path;
 use std::sync::OnceLock;

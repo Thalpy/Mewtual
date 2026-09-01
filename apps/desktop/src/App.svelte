@@ -100,7 +100,7 @@
     replaceDeliverySnapshot,
     type DeliveryEvidence,
   } from "./delivery";
-  import { installUiLogging, type UiLogging } from "./uilog";
+  import { DEBUG_LOG_FILE_DISCLOSURE, installUiLogging, type UiLogging } from "./uilog";
   import { drainStartupLog, endStartupCapture } from "./startup-log";
   import {
     classifyInvokeFailure,
@@ -425,7 +425,7 @@
     { group: "App & network", title: "Quick switcher", detail: "Jump to channels, surfaces, servers and DMs without hunting through the rails.", where: "Anywhere in the unlocked app", shortcut: "Ctrl+K", target: "quick" },
     { group: "App & network", title: "Server Space", detail: "Arrange servers in a navigable 360-degree room; group them into interactive neighbourhoods, search, auto-arrange, or use a custom backdrop.", where: "Left rail → Orbit", shortcut: "Ctrl+O", target: "space" },
     { group: "App & network", title: "Appearance", detail: "Themes, accent, density, text scale, clock style, reduced motion, and local opt-outs for shared livery, message frames and arrivals.", where: "Settings → Appearance", target: "settings:appearance" },
-    { group: "App & network", title: "Connectivity & diagnostics", detail: "Configure rendezvous defaults, inspect the latest connection attempt and opt into a privacy-labelled debug log.", where: "Settings → Network / Diagnostics", target: "settings:diagnostics" },
+    { group: "App & network", title: "Connectivity & diagnostics", detail: "Configure rendezvous defaults, inspect the latest connection attempt and manage the privacy-labelled raw debug log.", where: "Settings → Network / Diagnostics", target: "settings:diagnostics" },
     { group: "App & network", title: "Connectivity assistant", detail: "See honest three-state connection evidence, live peer counts and concrete recovery suggestions without claiming unproven internet reachability.", where: "Server sidebar → Connectivity", target: "surface:connectivity" },
     { group: "App & network", title: "Backup & recovery", detail: "Export a coherent sealed vault copy while seeing the offline-guessing, metadata and old-secret exposure tradeoffs. Automated restore remains staged follow-up work.", where: "Settings → Backup & Recovery", target: "settings:backup" },
     { group: "App & network", title: "Signed updates", detail: "Check for a newer signed release and choose whether to install, defer or skip it.", where: "Settings → Updates", target: "settings:updates" },
@@ -22268,11 +22268,7 @@
                   <p class="muted small">This build cannot report the log setting.</p>
                 {/if}
                 <p class="muted small">
-                  <b>Before you share one:</b> a debug log can contain your LAN and public IP
-                  addresses and port, the addresses of peers you connected to, peer and device
-                  identifiers, and when you were online and how much you transferred. It does
-                  <b>not</b> contain message text, file contents, names or any key material.
-                  Treat it as "who I talked to and when".
+                  <b>Before you share one:</b> {DEBUG_LOG_FILE_DISCLOSURE}
                 </p>
               </section>
             {:else if settingsPage === "updates"}

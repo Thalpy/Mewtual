@@ -587,6 +587,12 @@ wiki, and roles; they share nothing.
   actors may stay online to receive encrypted updates. It is not a defence against malware that
   already controls the process or operating system.
 - **Metadata.** Peers/relays can observe *that* you communicate (timing, IPs), not *what*.
+- **Raw debug logs need review before sharing.** The optional file in **Settings → Diagnostics** is
+  not filtered through the in-app console's Safe capture. It may contain arbitrary frontend
+  console/error and native app/tracing prose, including names, message fragments, filenames and
+  paths, URLs, addresses, identifiers, tokens, serialized objects and stack traces. Inspect the
+  actual file and share it only with someone you trust. Automatic public diagnostic issues use a
+  separate minimized report.
 - **Remote images contact their host.** An HTTP(S) image pasted into chat is lazy-loaded with no
   referrer, but its host can still see your IP and request timing. Files shared through Mewtual's
   encrypted fileshare do not make that third-party request.

@@ -71,6 +71,14 @@ test("an unknown outcome id degrades to the id rather than an empty row", () => 
   assert.equal(describeOutcome("").label, "unknown");
 });
 
+test("the admission failure never presents the raw debug file as content-free", () => {
+  const copy = describeOutcome("admission-failed").note;
+  assert.match(copy, /raw debug log/);
+  assert.match(copy, /review the file for private or sensitive text/);
+  assert.match(copy, /someone you trust/);
+  assert.doesNotMatch(copy, /safe to share|contains no|does not contain/i);
+});
+
 test("the pasted join log is deterministic and carries the invite nonce", () => {
   const attempts: JoinAttempt[] = [
     {

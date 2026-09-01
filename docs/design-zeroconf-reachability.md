@@ -701,13 +701,17 @@ rejected", and **neither party could find out why**. Three causes, all closed:
    invite-ledger oracle. This is the *operator's* half only.
 2. **The desktop app installed no tracing subscriber at all**, so every `tracing::warn!` in the
    whole stack was discarded and no log file existed anywhere. `run()` now calls
-   `catcoms_log::init_debug_with` in `setup`, gated on a flag file under the app data dir,
-   **off by default**, toggled in Settings / Diagnostics which also states the folder. The file
-   filter is `APP_FILE_FILTER`, narrower than the CLI's blanket `debug`: the transport crates
-   stay at `info`, because at `debug` they narrate every address and connection the node sees.
-   `catcoms-log`'s module docs now say plainly what a debug log may contain (addresses, peer and
-   device ids, activity metadata) and what it never contains (message text, file contents, names,
-   key material), because the file exists to be shared.
+   `catcoms_log::init_debug_with` in `setup`, gated on an opt-out flag under the app data dir.
+   It is **on by default during the alpha**; Settings / Diagnostics states the folder and lets the
+   user turn it off persistently. This privacy-sensitive default must be reconsidered before a
+   general release. The file filter is `APP_FILE_FILTER`, narrower than the CLI's blanket `debug`:
+   the transport crates stay at `info`, because at `debug` they narrate every address and
+   connection the node sees.
+   `catcoms-log`'s module docs now say plainly that this is a raw sink: besides addresses, peer and
+   device ids, and activity metadata, arbitrary frontend console/error and native app/tracing prose
+   can include names, message fragments, paths, URLs, tokens, or other sensitive values.
+   Length/rate/retention bounds do not sanitize it, so Settings tells the user to inspect the actual
+   file before sharing it privately.
 3. **Nothing surfaced what an attempt actually did.** A `Connectivity` record in the bridge
    captures, per found/join: the advertised addresses, the UPnP result (distinguishing
    no-gateway from timed-out from an address), the AutoNAT v2 result, an ordered step log

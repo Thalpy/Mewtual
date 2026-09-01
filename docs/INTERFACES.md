@@ -689,6 +689,11 @@ missing/invalid proof causes normalization rather than trust. After Tauri has de
 JSON body, structured UI commands retain at most 256 events and 32 ordered fields per event;
 omitted fields increment the canonical row's dropped-field count. This is a ring/command work bound,
 not a pre-parse IPC byte limit.
+The optional `catcoms-log` debug file is a separate raw tracing sink, not an export of this Safe
+ring. It can retain arbitrary native tracing and frontend console/error prose—including names,
+message fragments, paths, URLs, tokens, serialized objects, and stacks—whenever a call site emits
+them. Its rate, line, queue, rotation, and session-size bounds limit work and retention; they do not
+provide content minimization. Users must review that file before sharing it.
 `set_capture_mode` preserves per-section levels, while the separate `reset_section_capture` command
 restores recommended levels. Turning capture Off stops new admission but does not retroactively erase
 bounded history. Local Copy/Save reports are honestly labelled and receive validator disclosure

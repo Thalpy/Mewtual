@@ -383,6 +383,14 @@ The Settings checkbox controls the **file**. The console's in-memory record is a
 its own control, under Capture in the console, and it is never written anywhere unless the user
 presses copy or save.
 
+The file is also deliberately **raw**, not a serialized Safe-ring view. Frontend console arguments,
+uncaught error messages and filenames, stacks, rejection values, and native tracing fields can be
+written after only rate/length/retention bounds. Those bounds stop runaway work and disk growth; they
+do not prove that a line contains no name, path, URL, token, message fragment, or other sensitive
+text. Settings therefore tells the user to inspect the actual file and share it only with somebody
+they trust. Automatic public issue creation remains separate and reads only the native allowlisted
+ring renderer.
+
 They are deliberately separate, for the reason in decision 2.3: the console has to be usable while
 a problem is happening, and making it depend on having enabled a file beforehand and restarted puts
 it out of reach in exactly the situation it exists for. What was wrong was that the Settings page

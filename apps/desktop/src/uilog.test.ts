@@ -6,10 +6,25 @@ import {
   makeBatcher,
   makeRepeatCollapser,
   uiLoggingState,
+  DEBUG_LOG_FILE_DISCLOSURE,
   MAX_QUEUE,
   MAX_UI_LOG_CHARS,
   type UiLogRecord,
 } from "./uilog.ts";
+
+test("the raw-file disclosure names arbitrary prose instead of promising content exclusion", () => {
+  assert.match(DEBUG_LOG_FILE_DISCLOSURE, /not filtered through Safe diagnostics/i);
+  assert.match(DEBUG_LOG_FILE_DISCLOSURE, /frontend console\/error/);
+  assert.match(DEBUG_LOG_FILE_DISCLOSURE, /native app\/tracing/);
+  assert.match(DEBUG_LOG_FILE_DISCLOSURE, /message fragments/);
+  assert.match(DEBUG_LOG_FILE_DISCLOSURE, /paths/);
+  assert.match(DEBUG_LOG_FILE_DISCLOSURE, /tokens/);
+  assert.match(DEBUG_LOG_FILE_DISCLOSURE, /Review the actual file before sharing it/);
+  assert.doesNotMatch(
+    DEBUG_LOG_FILE_DISCLOSURE,
+    /does not contain|never contains|content[- ]free|safe to share/i,
+  );
+});
 
 test("strings pass through and join", () => {
   assert.equal(formatLogArgs(["voice signal failed", "peer a1b2"]), "voice signal failed peer a1b2");
