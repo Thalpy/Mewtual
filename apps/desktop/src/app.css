@@ -15221,3 +15221,79 @@ button.jam-take-play.on {
   align-items: center;
   gap: 4px;
 }
+/* Osc stack as layers: collapsed rows read like mixer channels; one unfolds at a time. */
+.jam-layer {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-elev);
+}
+.jam-layer.open {
+  border-color: var(--accent);
+}
+button.jam-layer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 9px;
+  background: transparent;
+  color: var(--text-2);
+  border-radius: var(--r);
+}
+.jam-layer.open .jam-layer-head {
+  color: var(--accent-hi);
+}
+.jam-layer-sum {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.jam-layer-sum.lvl {
+  color: var(--muted);
+  min-width: 2em;
+  text-align: right;
+}
+.jam-lvlbar {
+  flex: 1;
+  min-width: 24px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--bg-0);
+  overflow: hidden;
+}
+.jam-lvlbar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  opacity: 0.85;
+}
+.jam-layer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 9px 8px;
+}
+button.jam-layer-add {
+  border: 1px dashed var(--border);
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  padding: 4px 0;
+  text-align: center;
+}
+button.jam-layer-add:hover {
+  color: var(--accent-hi);
+  border-color: var(--accent);
+}
+/* Opening a fold (EDIT, TAKES, REMAP) can push the surface past its height cap; without a
+   reserved gutter the arriving scrollbar steals ~10px of width, the wrapping tile rows re-wrap
+   and the centred drawer lurches sideways: the reported "swish". The gutter is reserved up
+   front so unfolding only ever grows the surface downward. */
+.stage,
+.focus-dock {
+  scrollbar-gutter: stable;
+}

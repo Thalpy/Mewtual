@@ -197,7 +197,7 @@
   import { JamFrameDecoder } from "./jam-wire";
   import { jamPatchId, legacyJamPatch, validateJamPatch } from "./jam-patch";
   import type { JamSourceChannel } from "./jam-channel";
-  import { JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_CACHE_PER_PEER, JAM_REMOTE_HOLD_MAX_MS, TAKE_MAX_DURATION_MS, type JamMetronome, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
+  import { JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_CACHE_PER_PEER, JAM_REMOTE_HOLD_MAX_MS, PATCH_OSC_WAVES, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
   import { JamClockProbeTracker, JamClockSync, JamMetronomeClock, type JamClick } from "./jam-clock";
   import { JamTakeRecorder, parseJamTakeJson } from "./jam-recorder";
   import { jamTakeSheetSvg } from "./jam-sheet";
@@ -10350,7 +10350,6 @@
   const remoteHeldAt = new Map<string, number>(); // "fp:note" -> when the UI saw the note-on
   let jamAbuseMuted = $state<Record<string, boolean>>({}); // flood auto-mutes; receive-side only
   let jamMode = $state<"keys" | "pads">(loadCallSetting("jammode", "keys") === "pads" ? "pads" : "keys");
-  let jamLegacyOnly = $state(loadCallSetting("jamlegacy", "off") === "on"); // simple waves only, signals nothing
   let padFlash = $state<Record<number, string>>({}); // pad -> "me" | fp of the latest hit
   const padFlashTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const JAM_PAD_KEYS = ["a", "s", "d", "f", "g", "h", "j", "k", "l", ";"];
@@ -10416,7 +10415,6 @@
       jamMyQ = 0;
       jamSelfChan = jamEngine.openSource("me"); // fingerprints are hex; "me" can never collide
       jamEngine.beginSourceSession(jamSelfChan, jamMySn);
-      jamEngine.setLegacyOnly(jamLegacyOnly);
       jamEngine.setDeafened(callDeafened);
     }
     return jamEngine;
@@ -10659,8 +10657,7 @@
     } catch { return { piano: {}, pads: {} }; }
   }
   let jamKeymap = $state(loadJamKeymap());
-  let keymapOpen = $state(false);
-  let keymapCapture = $state<{ kind: "piano" | "pads"; index: number } | null>(null);
+  let keymapCapture = $state<{ kind: "piano" | "pads"; index: number } | null>(null); // armed from Settings · Voice & Calls
   let pianoKeys = $derived.by(() => {
     const keys = [...PIANO_DEFAULT_KEYS];
     for (const [slot, key] of Object.entries(jamKeymap.piano)) keys[Number(slot)] = key;
@@ -10830,8 +10827,16 @@
     clearInterval(jamRecTimer);
     jamRecTimer = undefined;
     if (keep && take.events.length) {
+      // Trim the lead-in: time is stamped from the REC press, so waiting before playing left
+      // seconds of dead air at the front of every take: silent "broken" jukebox playback and
+      // rows of empty lead bars on the sheet. A 300ms pickup survives; the music starts where
+      // the music starts. Events are sorted, so the first one is the earliest.
+      const lead = Math.max(0, (take.events[0]?.ms ?? 0) - 300);
+      const trimmed = lead
+        ? { ...take, events: take.events.map((event) => ({ ...event, ms: event.ms - lead })) }
+        : take;
       jamTakeSeq += 1;
-      jamTakes = [...jamTakes, { id: jamTakeSeq, take, gaps: jamRecGaps }];
+      jamTakes = [...jamTakes, { id: jamTakeSeq, take: trimmed, gaps: jamRecGaps }];
     }
     jamRecUi = "off";
     pushInstState();
@@ -11217,14 +11222,41 @@
     myPatchName = "CUSTOM";
     jamPatchDirty();
   }
+  // The osc stack as LAYERS (the owner-picked direction): every collapsed layer is a one-line
+  // summary with its level bar, so the blend reads like a little mixer; exactly one layer opens
+  // its controls at a time. Nothing is lost to the fold: wave/semitones/cents/level all live in
+  // the open layer, and the other editor sections are untouched by this.
+  let jamOscOpen = $state<number | null>(0);
+  function jamWaveIndex(wave: OscillatorType): number {
+    return PATCH_OSC_WAVES.indexOf(wave as (typeof PATCH_OSC_WAVES)[number]);
+  }
+  function jamOscTile(w: number): { wave: OscillatorType; label: string; d: string } {
+    const wave = PATCH_OSC_WAVES[w] ?? "sine";
+    return INST_TILES.find((tile) => tile.wave === wave) ?? INST_TILES[0];
+  }
+  function jamOscSummary(osc: JamOsc): string {
+    const parts = [jamOscTile(osc.w).label];
+    if (osc.t !== 0) parts.push(`${osc.t > 0 ? "+" : ""}${osc.t} st`);
+    if (osc.c !== 0) parts.push(`${osc.c > 0 ? "+" : ""}${osc.c} ct`);
+    return parts.join(" · ");
+  }
+  function jamOscAdd() {
+    if (!myPatch || myPatch.o.length >= 3) return;
+    jamOscCount(myPatch.o.length + 1);
+    jamOscOpen = (myPatch?.o.length ?? 1) - 1; // the new layer opens, ready to shape
+  }
+  function jamOscRemove(index: number) {
+    if (!myPatch || myPatch.o.length <= 1) return;
+    const next = JSON.parse(JSON.stringify(myPatch)) as JamPatch;
+    next.o.splice(index, 1);
+    myPatch = next;
+    myPatchName = "CUSTOM";
+    if (jamOscOpen !== null && jamOscOpen >= next.o.length) jamOscOpen = next.o.length - 1;
+    jamPatchDirty();
+  }
   function setJamMode(mode: "keys" | "pads") {
     jamMode = mode;
     try { localStorage.setItem("catcoms.call.jammode", mode); } catch { /* ignore */ }
-  }
-  function toggleJamLegacyOnly() {
-    jamLegacyOnly = !jamLegacyOnly;
-    try { localStorage.setItem("catcoms.call.jamlegacy", jamLegacyOnly ? "on" : "off"); } catch { /* ignore */ }
-    jamEngine?.setLegacyOnly(jamLegacyOnly);
   }
   // Per-peer voice volume (0..1), remembered per fingerprint.
   let peerVolumes = $state<Record<string, number>>({});
@@ -12849,14 +12881,19 @@
       try {
         const { value: base64 } = await invokeDebugged<string>("download_file", { server, cid });
         text = new TextDecoder().decode(Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)));
-      } catch {
+      } catch (e) {
+        diagRecord({ section: "channels", code: "JUKEBOX.TAKE.FETCH_FAILED", level: "warn", fields: { failure: classifyInvokeFailure(e) } });
         if (jukeNow?.cid === cid) { jukeFetch = null; jukeFail(cid); }
         return;
       }
       if (jukeNow?.cid !== cid) { jukeFetch = null; return; } // the room moved on mid-fetch
       const parsed = parseJamTakeJson(text);
       jukeFetch = null;
-      if (!parsed.ok) { jukeFail(cid); return; }
+      if (!parsed.ok) {
+        diagRecord({ section: "channels", code: "JUKEBOX.TAKE.INVALID", level: "warn", fields: { error: parsed.error } });
+        jukeFail(cid);
+        return;
+      }
       take = parsed.take;
       jukeTakeCache.set(cid, take);
     }
@@ -12872,7 +12909,16 @@
     if (jamPlay?.deckCid === cid && !jamPlay.done && Math.abs(jamPlayElapsed() - targetMs) <= 2000) {
       return; // in step with the room; a ping needs no restart
     }
+    diagRecord({
+      section: "channels",
+      code: "JUKEBOX.TAKE.STARTED",
+      level: "debug",
+      fields: { events: take.events.length, offset_ms: Math.round(targetMs), first_event_ms: take.events[0]?.ms ?? -1 },
+    });
     void jamStartTakePlayback(take, targetMs, null, cid);
+    // No media element means the "webview will not start audio" chip has nothing to watch; the
+    // suspended-synth case is surfaced here instead, and every deck press tries a resume.
+    if (jamEngine && jamEngine.context.state === "suspended") jukeBlocked = true;
   }
   function approveCurrentJukeboxTrack() {
     if (!jukeNow || callServer === null) return;
@@ -12905,6 +12951,7 @@
   }
   /** The user's click, which is the one thing an autoplay policy is waiting for. */
   function jukeUnblock() {
+    jukeWakeSynth(); // a blocked take deck is a suspended synth, not a refusing element
     const el = jukeAudio;
     if (!el) return;
     void jukeStart(el);
@@ -13022,14 +13069,23 @@
   }
   // Controls. Every one of them broadcasts and applies through jukeSend, so pressing anything here
   // is what makes me the DJ.
+  // Takes replay through the jam engine, whose AudioContext may still be suspended; presses are
+  // user gestures, so they are exactly when a resume is allowed to succeed.
+  function jukeWakeSynth() {
+    if (jamEngine && jamEngine.context.state === "suspended") {
+      void jamEngine.context.resume().then(() => { jukeBlocked = false; }).catch(() => { /* next press */ });
+    }
+  }
   function jukePlayEntry(id: string) {
     const e = jukeQueue.find((x) => x.id === id);
     if (!e) return;
+    jukeWakeSynth();
     jukeFailed.delete(e.cid); // an explicit press is also a retry of a track that would not fetch
     jukeSend(e.id, e.cid, e.name, 0, false);
   }
   function jukeToggle() {
     if (!inCall) return;
+    jukeWakeSynth();
     if (!jukeNow || !jukeNow.cid) {
       const first = jukePlayable()[0];
       if (first) jukePlayEntry(first.id);
@@ -16300,15 +16356,19 @@
       }
       // The same home row, routed into the call instead of the lock. `!locked` keeps the two
       // apart: while locked the branch above owns these keys and has already returned.
+      // A remap capture in flight (armed from Settings) eats exactly one printable key; Escape
+      // backs out. It outranks every shortcut below while armed, which is the whole point of it.
+      if (!locked && keymapCapture && !e.ctrlKey && !e.metaKey && !e.altKey && !typingTarget(e.target)) {
+        e.preventDefault();
+        if (e.key === "Escape") keymapCapture = null;
+        else {
+          const k = e.key.toLowerCase();
+          if (k.length === 1 && !e.repeat) keymapBind(k);
+        }
+        return;
+      }
       if (!locked && inCall && instOpen && (stageOpen || focusOpen) && !e.ctrlKey && !e.metaKey && !e.altKey && !typingTarget(e.target)) {
         const k = e.key.toLowerCase();
-        // A remap capture in flight eats exactly one printable key; Escape backs out of it.
-        if (keymapCapture) {
-          e.preventDefault();
-          if (e.key === "Escape") keymapCapture = null;
-          else if (k.length === 1 && !e.repeat) keymapBind(k);
-          return;
-        }
         if (jamMode === "pads") {
           // The home row (or its remap), but as one-shot pads: no keyup, chokes engine-side.
           const pad = padByKey[k];
@@ -18097,53 +18157,15 @@
         <button class="ghost jam-mode-btn" class:on={jamMode === "keys"} aria-pressed={jamMode === "keys"} title="The piano surface" onclick={() => setJamMode("keys")}>KEYS</button>
         <button class="ghost jam-mode-btn" class:on={jamMode === "pads"} aria-pressed={jamMode === "pads"} title="The drum pads (your friends keep whichever surface they picked)" onclick={() => setJamMode("pads")}>PADS</button>
       </div>
+      <button
+        class="ghost jam-cog"
+        title="Instrument settings: remap the piano and pad keys (Settings · Voice &amp; Calls)"
+        aria-label="Instrument settings"
+        onclick={() => openSettings("voice")}
+      >{@render icoGear()}</button>
       <span class="stage-spacer"></span>
       {#if midiName}<span class="inst-midi">MIDI · {midiName}</span>{/if}
-      <button
-        class="ghost jam-legacy"
-        class:on={jamLegacyOnly}
-        aria-pressed={jamLegacyOnly}
-        title={jamLegacyOnly ? "Hearing simple waves only. Click to render friends' full patches again." : "Hearing friends' full patches. Click to fall back to their simple waves (nobody is told)."}
-        onclick={toggleJamLegacyOnly}
-      >LEGACY ONLY</button>
-      <button
-        class="ghost jam-legacy"
-        class:on={keymapOpen}
-        aria-expanded={keymapOpen}
-        title="Remap which keys play the piano and pads (this device only)"
-        onclick={() => { keymapOpen = !keymapOpen; keymapCapture = null; }}
-      >REMAP</button>
     </div>
-
-    {#if keymapOpen}
-      <div class="jam-keymap">
-        <div class="jam-edit-hd"><span>piano keys</span></div>
-        <div class="jam-km-grid">
-          {#each pianoKeys as key, pc (pc)}
-            {@const capturing = keymapCapture?.kind === "piano" && keymapCapture.index === pc}
-            <button class="ghost jam-km" class:cap={capturing} title={`Rebind ${pc === 12 ? "the top C" : NOTE_NAMES[pc]}`} onclick={() => (keymapCapture = { kind: "piano", index: pc })}>
-              <span class="jam-km-note">{pc === 12 ? "C+" : NOTE_NAMES[pc]}</span>
-              <span class="jam-km-key">{capturing ? "…" : key}</span>
-            </button>
-          {/each}
-        </div>
-        <div class="jam-edit-hd"><span>drum pads</span></div>
-        <div class="jam-km-grid">
-          {#each padKeys as key, pad (pad)}
-            {@const capturing = keymapCapture?.kind === "pads" && keymapCapture.index === pad}
-            <button class="ghost jam-km" class:cap={capturing} title={`Rebind ${JAM_KIT[pad].name}`} onclick={() => (keymapCapture = { kind: "pads", index: pad })}>
-              <span class="jam-km-note">{JAM_KIT[pad].name}</span>
-              <span class="jam-km-key">{capturing ? "…" : key}</span>
-            </button>
-          {/each}
-        </div>
-        <div class="jam-km-foot">
-          <span class="jam-edit-note">{keymapCapture ? "Press the new key (Esc cancels)." : "Click a slot, then press its new key. Call instruments only; the vault melody keeps its fixed keys."}</span>
-          <span class="stage-spacer"></span>
-          <button class="ghost jam-save-btn" onclick={keymapReset}>RESET</button>
-        </div>
-      </div>
-    {/if}
 
     <!-- The shared grid. The click each ear hears is local; what is shared is WHERE the beats
          are. Live playing stays campfire-loose; anything stamped on this grid lands tight. -->
@@ -18279,24 +18301,41 @@
     {#if jamEditOpen && myPatch}
       <div class="jam-edit">
         <div class="jam-sect">
-          <div class="jam-edit-hd">
-            <span>osc stack</span>
-            <span class="stage-spacer"></span>
-            <button class="ghost small inst-oct-btn" title="Remove an oscillator" aria-label="Remove an oscillator" onclick={() => jamOscCount((myPatch?.o.length ?? 1) - 1)}>−</button>
-            <button class="ghost small inst-oct-btn" title="Add an oscillator (3 max)" aria-label="Add an oscillator" onclick={() => jamOscCount((myPatch?.o.length ?? 1) + 1)}>＋</button>
-          </div>
+          <div class="jam-edit-hd"><span>osc stack</span></div>
           {#each myPatch?.o ?? [] as osc, i (i)}
-            <div class="jam-osc">
-              {#each INST_TILES as t, wi (t.wave)}
-                <button class="ghost jam-osc-w" class:on={osc.w === wi} title={`Oscillator ${i + 1}: ${t.wave}`} onclick={() => jamEditOsc(i, "w", wi)}>{t.label}</button>
-              {/each}
-            </div>
-            <div class="jam-knobs">
-              {@render jamKnob({ label: "st", value: osc.t, min: -24, max: 24, disp: String(osc.t), set: (v) => jamEditOsc(i, "t", v) })}
-              {@render jamKnob({ label: "ct", value: osc.c, min: -50, max: 50, disp: String(osc.c), set: (v) => jamEditOsc(i, "c", v) })}
-              {@render jamKnob({ label: "lvl", value: osc.l, min: 0, max: 100, disp: String(osc.l), set: (v) => jamEditOsc(i, "l", v) })}
+            {@const openLayer = jamOscOpen === i}
+            <div class="jam-layer" class:open={openLayer}>
+              <button class="ghost jam-layer-head" aria-expanded={openLayer} title={openLayer ? "Fold this layer" : "Open this layer's controls"} onclick={() => (jamOscOpen = openLayer ? null : i)}>
+                <svg class="inst-wv" viewBox="0 0 26 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d={jamOscTile(osc.w).d} />
+                </svg>
+                <span class="jam-layer-sum">{jamOscSummary(osc)}</span>
+                <span class="jam-lvlbar"><i style={`width:${osc.l}%`}></i></span>
+                <span class="jam-layer-sum lvl">{osc.l}</span>
+              </button>
+              {#if openLayer}
+                <div class="jam-layer-body">
+                  <div class="jam-osc">
+                    {#each INST_TILES as t (t.wave)}
+                      {@const wi = jamWaveIndex(t.wave)}
+                      <button class="ghost jam-osc-w" class:on={osc.w === wi} title={`Layer ${i + 1}: ${t.wave}`} onclick={() => jamEditOsc(i, "w", wi)}>{t.label}</button>
+                    {/each}
+                    {#if (myPatch?.o.length ?? 1) > 1}
+                      <button class="ghost jam-tile-del" title="Remove this layer" aria-label="Remove this layer" onclick={() => jamOscRemove(i)}>✕</button>
+                    {/if}
+                  </div>
+                  <div class="jam-knobs">
+                    {@render jamKnob({ label: "st", value: osc.t, min: -24, max: 24, disp: String(osc.t), set: (v) => jamEditOsc(i, "t", v) })}
+                    {@render jamKnob({ label: "ct", value: osc.c, min: -50, max: 50, disp: String(osc.c), set: (v) => jamEditOsc(i, "c", v) })}
+                    {@render jamKnob({ label: "lvl", value: osc.l, min: 0, max: 100, disp: String(osc.l), set: (v) => jamEditOsc(i, "l", v) })}
+                  </div>
+                </div>
+              {/if}
             </div>
           {/each}
+          {#if (myPatch?.o.length ?? 3) < 3}
+            <button class="ghost jam-layer-add" title="Add an oscillator layer (3 max)" onclick={jamOscAdd}>＋ layer</button>
+          {/if}
         </div>
         <div class="jam-sect">
           <div class="jam-edit-hd"><span>envelope</span></div>
@@ -23478,6 +23517,41 @@
                 <p class="muted small">Microphone and output pickers live on the call stage (they swap live, mid-call) and are remembered here between calls.</p>
                 <p class="muted small">A MIDI keyboard for the call instrument is set up in Settings → Devices, along with a monitor for checking one that is not behaving.</p>
                 <button type="button" class="ghost small" onclick={() => (settingsPage = "devices")}>Open Devices</button>
+              </section>
+              <section class="set-section">
+                <h3>Instrument keys</h3>
+                <p class="muted small">
+                  Which keys play the call piano and drum pads, on this device only. Click a slot, then press
+                  its new key (Esc cancels); a key can hold one slot per instrument, so a rebind steals it from
+                  the old slot. The vault's melody unlock keeps its fixed keys; this never touches it.
+                </p>
+                <div class="jam-keymap">
+                  <div class="jam-edit-hd"><span>piano keys</span></div>
+                  <div class="jam-km-grid">
+                    {#each pianoKeys as key, pc (pc)}
+                      {@const capturing = keymapCapture?.kind === "piano" && keymapCapture.index === pc}
+                      <button class="ghost jam-km" class:cap={capturing} title={`Rebind ${pc === 12 ? "the top C" : NOTE_NAMES[pc]}`} onclick={() => (keymapCapture = capturing ? null : { kind: "piano", index: pc })}>
+                        <span class="jam-km-note">{pc === 12 ? "C+" : NOTE_NAMES[pc]}</span>
+                        <span class="jam-km-key">{capturing ? "…" : key}</span>
+                      </button>
+                    {/each}
+                  </div>
+                  <div class="jam-edit-hd"><span>drum pads</span></div>
+                  <div class="jam-km-grid">
+                    {#each padKeys as key, pad (pad)}
+                      {@const capturing = keymapCapture?.kind === "pads" && keymapCapture.index === pad}
+                      <button class="ghost jam-km" class:cap={capturing} title={`Rebind ${JAM_KIT[pad].name}`} onclick={() => (keymapCapture = capturing ? null : { kind: "pads", index: pad })}>
+                        <span class="jam-km-note">{JAM_KIT[pad].name}</span>
+                        <span class="jam-km-key">{capturing ? "…" : key}</span>
+                      </button>
+                    {/each}
+                  </div>
+                  <div class="jam-km-foot">
+                    <span class="jam-edit-note">{keymapCapture ? "Press the new key (Esc cancels)." : "Changes apply immediately, in and out of calls."}</span>
+                    <span class="stage-spacer"></span>
+                    <button class="ghost jam-save-btn" onclick={keymapReset}>RESET</button>
+                  </div>
+                </div>
               </section>
               <section class="set-section">
                 <h3>Screen sharing</h3>

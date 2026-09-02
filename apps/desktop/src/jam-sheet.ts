@@ -157,16 +157,20 @@ function staffLines(out: Draw, x: number, y: number, width: number, count: numbe
   }
 }
 
-function drawNote(out: Draw, x: number, y: number, glyph: ReturnType<typeof durationGlyph>, sharp: boolean) {
+function drawNote(out: Draw, x: number, y: number, glyph: ReturnType<typeof durationGlyph>, sharp: boolean, stemDown: boolean) {
   const open = glyph === "whole" || glyph === "half";
   out.push(`<ellipse cx="${x}" cy="${y}" rx="4.6" ry="3.4" class="${open ? "nh open" : "nh"}"/>`);
   if (sharp) out.push(`<text x="${x - 12}" y="${y + 3.5}" class="acc">#</text>`);
   if (glyph !== "whole") {
-    const stemTop = y - 26;
-    out.push(`<line x1="${x + 4.4}" y1="${y - 1}" x2="${x + 4.4}" y2="${stemTop}" class="stem"/>`);
+    // Standard engraving: stems point up from the right of the head below the middle line, and
+    // down from the left of the head above it, so high notes stop towering over the staff.
+    const stemX = stemDown ? x - 4.4 : x + 4.4;
+    const stemEnd = stemDown ? y + 26 : y - 26;
+    const flagDir = stemDown ? -12 : 12;
+    out.push(`<line x1="${stemX}" y1="${stemDown ? y + 1 : y - 1}" x2="${stemX}" y2="${stemEnd}" class="stem"/>`);
     if (glyph === "eighth" || glyph === "sixteenth") {
-      out.push(`<path d="M${x + 4.4} ${stemTop} q7 3 8 12" class="flag"/>`);
-      if (glyph === "sixteenth") out.push(`<path d="M${x + 4.4} ${stemTop + 6} q7 3 8 12" class="flag"/>`);
+      out.push(`<path d="M${stemX} ${stemEnd} q7 ${flagDir / 4} 8 ${flagDir}" class="flag"/>`);
+      if (glyph === "sixteenth") out.push(`<path d="M${stemX} ${stemEnd + (stemDown ? -6 : 6)} q7 ${flagDir / 4} 8 ${flagDir}" class="flag"/>`);
     }
   }
 }
@@ -206,7 +210,8 @@ export function renderSheetSvg(score: SheetScore, names: readonly string[], titl
     `.nh{fill:#111}.nh.open{fill:#fff;stroke:#111;stroke-width:1.6}.stem{stroke:#111;stroke-width:1.4}` +
     `.flag{stroke:#111;stroke-width:1.4;fill:none}.acc{font-size:11px;fill:#111}.clef{font-size:34px;fill:#111}` +
     `.who{font-size:13px;fill:#333;font-style:italic}.ttl{font-size:19px;fill:#111}.sub{font-size:12px;fill:#555}` +
-    `.xh{stroke:#111;stroke-width:1.6}.ped{font-size:9px;fill:#666;font-family:monospace}.led{stroke:#444;stroke-width:1}</style>` +
+    `.xh{stroke:#111;stroke-width:1.6}.ped{font-size:9px;fill:#666;font-family:monospace}.led{stroke:#444;stroke-width:1}` +
+    `.bt{stroke:#b9b2a0;stroke-width:0.6;stroke-dasharray:2 4}</style>` +
     `<rect x="0" y="0" width="${PAGE_W}" height="${height}" fill="#fffdf6"/>` +
     `<text x="${LEFT_PAD}" y="30" class="ttl">${esc(title)}</text>` +
     `<text x="${LEFT_PAD}" y="48" class="sub">${score.bpm} bpm · ${score.beatsPerBar}/4 · ${score.bars} bars · a Mewtual jam transcript (plain values, no ties)</text>`;
@@ -225,6 +230,14 @@ function drawPitchSection(out: Draw, score: SheetScore, part: SheetPart, top: nu
     out.push(`<text x="${LEFT_PAD - 42}" y="${staffBottom - (part.clef === "treble" ? 9 : 18)}" class="clef">${part.clef === "treble" ? "\u{1D11E}" : "\u{1D122}"}</text>`);
     for (let bar = 0; bar <= BARS_PER_LINE; bar += 1) {
       out.push(`<line x1="${LEFT_PAD + bar * BAR_W}" y1="${staffTop}" x2="${LEFT_PAD + bar * BAR_W}" y2="${staffBottom}" class="bar"/>`);
+      // Faint beat guides inside each bar: a transcript quantizes to where you actually played,
+      // and without the grid drawn, honest off-beat placement reads as random smearing.
+      if (bar < BARS_PER_LINE) {
+        for (let beat = 1; beat < score.beatsPerBar; beat += 1) {
+          const guideX = LEFT_PAD + bar * BAR_W + (beat / score.beatsPerBar) * BAR_W;
+          out.push(`<line x1="${guideX}" y1="${staffTop}" x2="${guideX}" y2="${staffBottom}" class="bt"/>`);
+        }
+      }
     }
     const firstSix = line * BARS_PER_LINE * score.barSix;
     const lastSixOnLine = firstSix + BARS_PER_LINE * score.barSix;
@@ -239,7 +252,7 @@ function drawPitchSection(out: Draw, score: SheetScore, part: SheetPart, top: nu
       for (let ledger = 10; ledger <= staffPos; ledger += 2) {
         out.push(`<line x1="${x - 8}" y1="${staffBottom - ledger * (STAFF_GAP / 2)}" x2="${x + 8}" y2="${staffBottom - ledger * (STAFF_GAP / 2)}" class="led"/>`);
       }
-      drawNote(out, x, yNote, durationGlyph(note.lenSix), isSharp(note.midi % 12));
+      drawNote(out, x, yNote, durationGlyph(note.lenSix), isSharp(note.midi % 12), staffPos >= 4);
     }
   }
 }
