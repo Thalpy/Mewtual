@@ -221,6 +221,23 @@ impl NetworkChangeSignal {
     }
 }
 
+/// One immutable final UI snapshot waiting to cross the native lock commit boundary.
+///
+/// It lives natively because a webview remount destroys JavaScript promises. A later close with no
+/// local snapshot can still consume this exact transaction instead of overtaking and losing it.
+#[derive(Debug)]
+struct PendingUiLockSnapshot {
+    generation: u64,
+    json: String,
+}
+
+/// Latest native continuity result, retained until the next authenticated UI generation.
+#[derive(Clone, Debug)]
+struct UiLockCompletion {
+    generation: u64,
+    error: Option<String>,
+}
+
 /// App state managed by Tauri: every running server keyed by a bridge-assigned id, plus the
 /// on-disk store once the user has unlocked it with a passphrase (`None` = in-memory only).
 #[derive(Default)]
@@ -279,6 +296,12 @@ struct AppState {
     /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
     /// reply event or server registration to occur after `lock_session` itself has completed.
     ui_session_commit: Mutex<()>,
+    /// The newest exact Ctrl+L/close snapshot registered before either command waits on the shared
+    /// commit mutex. A remounted close can consume it even though its JS coordinator is gone.
+    pending_ui_lock_snapshot: Mutex<Option<PendingUiLockSnapshot>>,
+    /// Lets a remounted close report a completed older snapshot failure instead of treating its own
+    /// snapshot-less idempotent lock as proof that continuity succeeded.
+    last_ui_lock_completion: Mutex<Option<UiLockCompletion>>,
     /// The **new device's** half of an in-flight grant ceremony (multi-device M2): the device
     /// identity + single-use nonce minted by `pairing_begin`, held until the grant bundle is
     /// pasted back. One slot; starting a new ceremony abandons any previous one; and, like
@@ -2254,19 +2277,23 @@ fn port_is_bindable(port: u16) -> bool {
 }
 
 /// Ask the OS for a port that is free for both TCP and UDP, so the TCP and QUIC listeners can
-/// share one number. The OS only hands out a free *TCP* port, so the UDP half is re-probed and the
-/// draw retried; a handful of attempts is plenty in practice.
+/// share one number. Hold the TCP reservation while probing UDP: dropping it and immediately
+/// rebinding the same TCP port is not reliable on Windows and used to produce a spurious zero even
+/// though the OS had just selected a usable port. Both reservations are released together before
+/// libp2p binds, so the final hand-off remains inherently racy but does not race against ourselves.
 fn os_chosen_port() -> u16 {
     for _ in 0..16 {
-        let Ok(probe) = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) else {
+        let v4 = std::net::Ipv4Addr::UNSPECIFIED;
+        let Ok(tcp_probe) = std::net::TcpListener::bind((v4, 0)) else {
             return 0;
         };
-        let Ok(local) = probe.local_addr() else {
+        let Ok(local) = tcp_probe.local_addr() else {
             return 0;
         };
         let port = local.port();
-        drop(probe);
-        if port_is_bindable(port) {
+        if let Ok(udp_probe) = std::net::UdpSocket::bind((v4, port)) {
+            drop(udp_probe);
+            drop(tcp_probe);
             return port;
         }
     }
@@ -11696,6 +11723,87 @@ async fn authenticate_mounted_store(
     Ok(true)
 }
 
+/// Resolve continuity debt from the locked UI generation before reopening native IPC.
+///
+/// A write failure retains the exact validated snapshot, so every unlock attempt retries it and
+/// remains locked until persistence succeeds. Malformed state cannot become valid by retrying; its
+/// first unlock attempt surfaces the loss and consumes only that error, making a repeated unlock an
+/// explicit acknowledgement instead of permanently stranding the vault gate.
+async fn settle_ui_lock_continuity_before_unlock(
+    state: &AppState,
+    expected_generation: u64,
+) -> Result<(), String> {
+    let pending = {
+        let mut slot = state.pending_ui_lock_snapshot.lock().await;
+        if matches!(slot.as_ref(), Some(snapshot) if snapshot.generation <= expected_generation) {
+            slot.take()
+        } else {
+            None
+        }
+    };
+
+    if let Some(snapshot) = pending {
+        let result = match validate_ui_state_json(&snapshot.json) {
+            Err(error) => Err(error),
+            Ok(()) => {
+                let store = state.store.lock().await;
+                match store.as_ref() {
+                    Some(store) => store
+                        .save_ui_state(snapshot.json.as_bytes(), &mut OsCryptoRng)
+                        .map_err(|error| error.to_string()),
+                    None => Err("unlock the vault before saving UI state".to_string()),
+                }
+            }
+        };
+        if let Err(error) = result {
+            let generation = snapshot.generation;
+            let mut slot = state.pending_ui_lock_snapshot.lock().await;
+            let replace = match slot.as_ref() {
+                Some(current) => current.generation <= generation,
+                None => true,
+            };
+            if replace {
+                *slot = Some(snapshot);
+            }
+            *state.last_ui_lock_completion.lock().await = Some(UiLockCompletion {
+                generation,
+                error: Some(error.clone()),
+            });
+            return Err(format!(
+                "the vault is still locked because its latest screen state could not be saved: {error}; fix the storage problem and try again"
+            ));
+        }
+
+        // A successful retry resolves the old completion error for this generation. Return here
+        // instead of interpreting that stale error below as an irrecoverable malformed snapshot.
+        // Do not clear a newer completion: a concurrent lock publishes its generation before it
+        // waits for the commit guard held by our caller.
+        let mut completion = state.last_ui_lock_completion.lock().await;
+        if matches!(completion.as_ref(), Some(previous) if previous.generation <= expected_generation)
+        {
+            *completion = None;
+        }
+        return Ok(());
+    }
+
+    let mut completion = state.last_ui_lock_completion.lock().await;
+    if let Some(previous) = completion.as_ref() {
+        if previous.generation <= expected_generation {
+            if let Some(error) = previous.error.as_ref() {
+                let message = format!(
+                    "the vault is still locked because its latest screen state was invalid and could not be saved: {error}; unlock again to continue without that latest screen state"
+                );
+                // No retryable snapshot exists for malformed input. Consume the warning only after
+                // surfacing it once, so a deliberate second unlock is the acknowledgement.
+                *completion = None;
+                return Err(message);
+            }
+            *completion = None;
+        }
+    }
+    Ok(())
+}
+
 /// Commit a successful authentication only if no newer explicit lock began while Argon2, disk
 /// reads, or actor reloads were in flight. The generation is checked on both sides of updating the
 /// flags because `lock_session_inner` deliberately invalidates commands before awaiting this
@@ -11710,6 +11818,7 @@ async fn finalize_unlock_session(
     if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
+    settle_ui_lock_continuity_before_unlock(state, expected_generation).await?;
     let servers = if include_running_servers {
         Some(running_servers(state).await)
     } else {
@@ -11923,8 +12032,90 @@ async fn resume_session(state: State<'_, AppState>) -> Result<Option<Vec<Reloade
 async fn lock_session(
     state: State<'_, AppState>,
     ui_state_json: Option<String>,
-) -> Result<(), String> {
-    lock_session_inner(&state, ui_state_json).await
+) -> Result<LockSessionOutcome, String> {
+    // Tauri requires async commands borrowing `State` to use a `Result` return. The outer error is
+    // reserved for bridge/dispatch failure; application-level continuity failure stays inside the
+    // resolved outcome so the webview knows native locking completed.
+    Ok(lock_session_outcome_inner(&state, ui_state_json).await)
+}
+
+/// IPC-visible lock completion. A continuity error is data-loss evidence, not evidence that the
+/// security boundary remained open, so it must not be collapsed into a rejected command.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct LockSessionOutcome {
+    continuity_error: Option<String>,
+}
+
+async fn lock_session_outcome_inner(
+    state: &AppState,
+    ui_state_json: Option<String>,
+) -> LockSessionOutcome {
+    LockSessionOutcome {
+        continuity_error: lock_session_inner(state, ui_state_json).await.err(),
+    }
+}
+
+/// Result of a native-owned window close. If this response reaches the webview then native locking
+/// is complete; successful destruction normally removes the recipient before it can observe one.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct CloseVaultWindowOutcome {
+    continuity_error: Option<String>,
+    deferred: bool,
+    destroy_error: Option<String>,
+}
+
+/// Lock the UI session and decide whether the close may proceed. Kept separate from the actual
+/// Tauri window mutation so the security/durability policy is deterministic under unit tests.
+async fn close_vault_window_plan_inner(
+    state: &AppState,
+    ui_state_json: Option<String>,
+    discard_continuity_error: bool,
+) -> (LockSessionOutcome, bool) {
+    let had_local_snapshot = ui_state_json.is_some();
+    let mut outcome = lock_session_outcome_inner(state, ui_state_json).await;
+    // After a remount the JS snapshot is gone, but a prior native lock may already have consumed
+    // it. Preserve that transaction's result rather than letting this snapshot-less idempotent lock
+    // overwrite a failure with `Ok(())`.
+    if !had_local_snapshot && outcome.continuity_error.is_none() {
+        if let Some(completion) = state.last_ui_lock_completion.lock().await.as_ref() {
+            outcome.continuity_error.clone_from(&completion.error);
+        }
+    }
+    let may_destroy = outcome.continuity_error.is_none() || discard_continuity_error;
+    (outcome, may_destroy)
+}
+
+/// Native owns the lock -> final snapshot -> destroy sequence. The frontend's ordinary close
+/// handler cannot enforce this ordering with an ACL-granted `destroy()` call alone, and a webview
+/// remount cannot retain a JavaScript Promise for an earlier Ctrl+L request. Calling the same
+/// idempotent native lock again crosses `ui_session_commit`; when the current webview retained the
+/// snapshot it submits those exact immutable bytes again.
+#[tauri::command]
+async fn close_vault_window(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ui_state_json: Option<String>,
+    discard_continuity_error: bool,
+) -> Result<CloseVaultWindowOutcome, String> {
+    let (lock, may_destroy) =
+        close_vault_window_plan_inner(&state, ui_state_json, discard_continuity_error).await;
+    if !may_destroy {
+        return Ok(CloseVaultWindowOutcome {
+            continuity_error: lock.continuity_error,
+            deferred: true,
+            destroy_error: None,
+        });
+    }
+
+    let destroy_error = match app.get_webview_window("main") {
+        Some(window) => window.destroy().err().map(|error| error.to_string()),
+        None => Some("the main window no longer exists".to_string()),
+    };
+    Ok(CloseVaultWindowOutcome {
+        continuity_error: lock.continuity_error,
+        deferred: false,
+        destroy_error,
+    })
 }
 
 /// Testable core of the explicit lock operation. Closing the command boundary is unconditional:
@@ -11934,28 +12125,69 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
     // Invalidate old work before awaiting anything. The commit mutex is acquired next so, once
     // this function returns, an old join can neither emit its private reply nor register/persist.
     state.session_lock_requested.store(true, Ordering::Release);
-    state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+    let lock_generation = state
+        .ui_session_generation
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1);
+    // Register before either session mutex await. A later close from a remounted webview carries no
+    // JS snapshot, but it can still save this exact native transaction if it reaches commit first.
+    if let Some(json) = ui_state_json {
+        let mut pending = state.pending_ui_lock_snapshot.lock().await;
+        let replace = match pending.as_ref() {
+            Some(snapshot) => snapshot.generation <= lock_generation,
+            None => true,
+        };
+        if replace {
+            *pending = Some(PendingUiLockSnapshot {
+                generation: lock_generation,
+                json,
+            });
+        }
+    }
     *state.session_resumable.lock().await = false;
     let _session_commit = state.ui_session_commit.lock().await;
     // Save the final draft/read snapshot and close IPC as one ordered native operation. Two
     // separate fire-and-forget commands could race, causing the save to arrive after the lock and
     // be correctly rejected by the new session gate.
-    let save_result = if let Some(json) = ui_state_json {
-        match validate_ui_state_json(&json) {
-            Err(error) => Err(error),
+    let pending_snapshot = state.pending_ui_lock_snapshot.lock().await.take();
+    let completed_generation = pending_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.generation);
+    let (save_result, retry_snapshot) = match pending_snapshot {
+        Some(snapshot) => match validate_ui_state_json(&snapshot.json) {
+            Err(error) => (Err(error), None),
             Ok(()) => {
                 let guard = state.store.lock().await;
-                match guard.as_ref() {
+                let result = match guard.as_ref() {
                     Some(store) => store
-                        .save_ui_state(json.as_bytes(), &mut OsCryptoRng)
+                        .save_ui_state(snapshot.json.as_bytes(), &mut OsCryptoRng)
                         .map_err(|error| error.to_string()),
                     None => Err("unlock the vault before saving UI state".to_string()),
-                }
+                };
+                let retry = result.as_ref().err().map(|_| snapshot);
+                (result, retry)
             }
-        }
-    } else {
-        Ok(())
+        },
+        None => (Ok(()), None),
     };
+    if let Some(snapshot) = retry_snapshot {
+        // Disk failures can be transient. Retain exact bytes for the warning's second close or a
+        // remounted webview; malformed input is intentionally not retained and retried forever.
+        let mut pending = state.pending_ui_lock_snapshot.lock().await;
+        let replace = match pending.as_ref() {
+            Some(current) => current.generation <= snapshot.generation,
+            None => true,
+        };
+        if replace {
+            *pending = Some(snapshot);
+        }
+    }
+    if let Some(generation) = completed_generation {
+        *state.last_ui_lock_completion.lock().await = Some(UiLockCompletion {
+            generation,
+            error: save_result.clone().err(),
+        });
+    }
     // The media cache holds decrypted chunks of shared files. Locking must drop them along with
     // the rest of the session's plaintext, not leave a film resident until something evicts it.
     state.media_cache.lock().await.clear();
@@ -14071,6 +14303,7 @@ pub fn run() {
             vault_exists,
             resume_session,
             lock_session,
+            close_vault_window,
             unlock,
             found_server,
             preview_invite,
@@ -16929,17 +17162,74 @@ mod tests {
             "explicit lock must purge cached plaintext file metadata"
         );
 
-        // Validation errors are returned to the caller, but the security boundary still closes.
+        // Validation errors are returned as a completed-lock outcome, rather than an ambiguous IPC
+        // rejection, and the security boundary still closes.
         *state.session_resumable.lock().await = true;
-        assert!(lock_session_inner(&state, Some("not json".into()))
-            .await
-            .is_err());
+        let outcome = lock_session_outcome_inner(&state, Some("not json".into())).await;
+        assert!(outcome.continuity_error.is_some());
         assert_eq!(
             require_unlocked_session(&state).await.unwrap_err(),
             "the vault is locked"
         );
         // The vault remains mounted so actors and persistence may continue behind the UI lock.
         assert!(state.store.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn native_close_defers_one_continuity_failure_then_allows_acknowledged_exit() {
+        let state = AppState::default();
+        *state.session_resumable.lock().await = true;
+
+        let (first, first_may_destroy) =
+            close_vault_window_plan_inner(&state, Some("not json".into()), false).await;
+        assert!(first.continuity_error.is_some());
+        assert!(!first_may_destroy, "the first failure must remain visible");
+        assert_eq!(
+            require_unlocked_session(&state).await.unwrap_err(),
+            "the vault is locked",
+            "the warning is shown only after the native boundary closed",
+        );
+
+        let (acknowledged, second_may_destroy) =
+            close_vault_window_plan_inner(&state, Some("not json".into()), true).await;
+        assert!(acknowledged.continuity_error.is_some());
+        assert!(
+            second_may_destroy,
+            "a repeated close explicitly accepts loss of only the latest screen snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn remounted_close_consumes_the_exact_native_pending_lock_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let latest = r#"{"version":1,"drafts":{"room":"before remount"},"readMarks":{}}"#;
+
+        // This is the native transaction left behind after the Ctrl+L webview was remounted. The
+        // new component has no JS snapshot and therefore calls close with `None`.
+        *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
+            generation: 1,
+            json: latest.into(),
+        });
+        let (outcome, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
+        assert!(outcome.continuity_error.is_none());
+        assert!(may_destroy);
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .load_ui_state()
+                .unwrap(),
+            latest.as_bytes(),
+            "snapshot-less remounted close must finish the exact pending native transaction",
+        );
+        assert!(state.pending_ui_lock_snapshot.lock().await.is_none());
     }
 
     #[tokio::test]
@@ -17105,6 +17395,101 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn remounted_unlock_retries_the_exact_native_continuity_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = false;
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let latest = r#"{"version":1,"drafts":{"room":"survives remount"},"readMarks":{}}"#;
+
+        // A reloaded webview has no JavaScript coordinator or Promise. Native state is therefore
+        // the only durable-in-process record that the prior resolved lock outcome reported a
+        // failed write and retained these exact bytes.
+        *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
+            generation,
+            json: latest.into(),
+        });
+        *state.last_ui_lock_completion.lock().await = Some(UiLockCompletion {
+            generation,
+            error: Some("injected first write failure".into()),
+        });
+
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .expect("unlock must retry the native snapshot before reopening IPC");
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .load_ui_state()
+                .unwrap(),
+            latest.as_bytes(),
+        );
+        assert!(state.pending_ui_lock_snapshot.lock().await.is_none());
+        assert!(state.last_ui_lock_completion.lock().await.is_none());
+        assert!(*state.session_resumable.lock().await);
+    }
+
+    #[tokio::test]
+    async fn failed_unlock_retry_keeps_the_exact_snapshot_and_vault_locked() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.session_resumable.lock().await = false;
+        state.session_lock_requested.store(true, Ordering::Release);
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let latest = r#"{"version":1,"drafts":{"room":"retry me"},"readMarks":{}}"#;
+        *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
+            generation,
+            json: latest.into(),
+        });
+
+        let error = finalize_unlock_session(&state, generation, false)
+            .await
+            .err()
+            .expect("persistence failure must refuse to unlock");
+        assert!(error.contains("still locked"));
+        assert_eq!(
+            state
+                .pending_ui_lock_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .map(|snapshot| snapshot.json.as_str()),
+            Some(latest),
+            "a failed retry must retain the immutable bytes rather than accept older continuity",
+        );
+        assert!(!*state.session_resumable.lock().await);
+        assert!(state.session_lock_requested.load(Ordering::Acquire));
+
+        // Model a transient persistence problem clearing. The next unlock retries the same native
+        // transaction and only then reopens the IPC boundary.
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .expect("the retained exact snapshot should be retryable");
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .load_ui_state()
+                .unwrap(),
+            latest.as_bytes(),
+        );
+        assert!(state.pending_ui_lock_snapshot.lock().await.is_none());
+        assert!(state.last_ui_lock_completion.lock().await.is_none());
+        assert!(*state.session_resumable.lock().await);
+    }
+
     #[test]
     fn a_committed_secret_rewrap_is_never_reported_as_unchanged() {
         let result = vault_secret_change_result(Err(
@@ -17133,7 +17518,20 @@ mod tests {
                 .unwrap(),
             "the test pauses the unlock after real vault authentication"
         );
-        lock_session_inner(&state, None).await.unwrap();
+        let newer_generation = state
+            .ui_session_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        state.session_lock_requested.store(true, Ordering::Release);
+        let newer_snapshot = r#"{"version":1,"drafts":{"room":"newer lock"},"readMarks":{}}"#;
+        *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
+            generation: newer_generation,
+            json: newer_snapshot.into(),
+        });
+        *state.last_ui_lock_completion.lock().await = Some(UiLockCompletion {
+            generation: newer_generation,
+            error: Some("newer lock still owns this continuity debt".into()),
+        });
 
         assert!(
             finalize_unlock_session(&state, stale_generation, true)
@@ -17147,6 +17545,26 @@ mod tests {
         );
         assert!(state.session_lock_requested.load(Ordering::Acquire));
         assert!(!*state.session_resumable.lock().await);
+        assert_eq!(
+            state
+                .pending_ui_lock_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .map(|snapshot| snapshot.json.as_str()),
+            Some(newer_snapshot),
+            "a stale unlock must not retire a newer lock's exact snapshot",
+        );
+        assert_eq!(
+            state
+                .last_ui_lock_completion
+                .lock()
+                .await
+                .as_ref()
+                .map(|completion| completion.generation),
+            Some(newer_generation),
+            "a stale unlock must not erase the newer lock's user-visible failure evidence",
+        );
     }
 
     #[tokio::test]

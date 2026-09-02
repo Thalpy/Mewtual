@@ -9,7 +9,11 @@ export const TAURI_COMMAND_GROUPS = {
   local_session_and_vault: {
     boundary: "Local vault/session state; secrets and filesystem paths must remain native-side.",
     commands: [
-      "vault_exists", "resume_session", "lock_session", "unlock", "get_ui_state", "save_ui_state",
+      "vault_exists", "resume_session", "lock_session", "close_vault_window", "unlock", "get_ui_state", "save_ui_state",
+      // Called from the OS close handler even when the vault gate is already visible. It does not
+      // bypass the session boundary: native code unconditionally closes that boundary under the
+      // commit mutex before it may destroy the sole main webview. A first continuity error defers
+      // destruction, and only a repeated close acknowledges loss of that latest UI snapshot.
       "create_backup", "change_vault_secret", "get_debug_logging", "set_debug_logging",
       // Emits a marked record and re-reads the sink's health, so Settings can report what the
       // writer is doing rather than what the preference asked for. Gated like the pair above.

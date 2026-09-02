@@ -127,6 +127,9 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
     "unlock",
     "resume_session",
     "lock_session",
+    // This command is the lock boundary for OS close, including an already-visible vault gate. Its
+    // focused Rust tests prove native locking precedes either deferral or acknowledged destroy.
+    "close_vault_window",
     "log_ui",
     "log_ui_batch",
     "record_ui_events",

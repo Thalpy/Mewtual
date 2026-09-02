@@ -112,6 +112,7 @@
     makeSeqTracker,
     makeTraceSource,
     needsResync,
+    vaultUnlockErrorText,
     type EventCursor,
     type EventCorrelation,
     type EventEnvelope,
@@ -140,6 +141,9 @@
     type ModerationEvent, type ModerationState, type TimelineMessage,
   } from "./moderation";
   import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
+  import {
+    NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
+  } from "./window-close";
   import {
     DEFAULT_FILE_TRUST_POLICY, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
     mayLoadJukeboxFile, scopedMediaKey, toggleTrustedAuthor,
@@ -192,10 +196,10 @@
   // Types only. The console's own logic and markup live in DebugConsole.svelte, which is loaded
   // on demand; this file needs just enough to describe what it hands over.
   import {
-    memberRoutesVisible, mergeMemberRouteRead, routeActionLabel, routeActionScopeLabel, routeChip,
+    debugLogSettingsStatus, memberRoutesVisible, mergeMemberRouteRead, routeActionLabel, routeActionScopeLabel, routeChip,
     routeExplanation, routeHistoricalAge, routeIndirectEvidence, routeIsConnected, routePathLabel, routeState,
     shouldRefreshMemberRoutes,
-    type DbgSection, type DebugVoicePeer, type MemberRoute,
+    type DbgSection, type DebugLogSink, type DebugVoicePeer, type MemberRoute,
   } from "./debug-console";
 
   type Reaction = { emoji: string; by: string[] };
@@ -4824,15 +4828,26 @@
 
   async function unlock(secret = unlockSecret()) {
     if (!secret) return;
+    // Close and unlock are competing generation changes. The close handler sets this before its
+    // first await, so an unlock can never reopen native IPC underneath an older close operation.
+    if (windowCloseInFlight) return;
     unlocking = true;
     error = "";
     // The summon starts alongside the KDF call and never gates it: the animation fills
     // latency that exists anyway, and a failed unlock aborts it below.
     if (unlockMethod === "sigil") startSummon();
     try {
+      // Ctrl+L clears the webview immediately but native persistence can still be finishing. Join
+      // that exact request before authenticating a new generation; otherwise a late old lock could
+      // invalidate the session immediately after this unlock appears to succeed.
+      await nativeVaultLock.settle();
       // The passphrase is an argument and never a recorded field: invokeDebugged records the
       // command name and its outcome, not what it was called with.
       const { value: reloaded } = await invokeDebugged<Reloaded[]>("unlock", { passphrase: secret });
+      // The prior session's native lock promise (settled or otherwise) must never be reused after
+      // an authenticated unlock establishes a new command generation.
+      nativeVaultLock.reset();
+      closeAfterContinuityError = false;
       passphrase = "";
       sigilStrokes = [];
       sigilDrawing = [];
@@ -4844,7 +4859,9 @@
       restoreReloaded(reloaded);
     } catch (e) {
       abortSummon(); // wrong secret ⇒ no cat: the failure must read as a failure
-      error = String(e);
+      // `unlock` returns a typed AppError. Stringifying that object produces only
+      // "[object Object]"; the shared reader preserves its useful message, code and trace.
+      error = vaultUnlockErrorText(e);
     } finally {
       unlocking = false;
     }
@@ -4902,7 +4919,16 @@
     memberRecoveryInput = "";
     memberRecoveryBusy = false;
     if (!nativeAlreadyLocked) {
-      void invoke("lock_session", { uiStateJson: finalContinuityJson }).catch((e) => console.warn("Session locked; final UI continuity save failed", e));
+      // Retain this exact promise. An OS close racing Ctrl+L must wait for the snapshot captured
+      // above instead of destroying the window or submitting a second, already-cleared snapshot.
+      void nativeVaultLock.begin(finalContinuityJson).then(
+        (outcome) => {
+          if (outcome.continuity_error) {
+            console.warn("Session locked; final UI continuity save failed", outcome.continuity_error);
+          }
+        },
+        (e) => console.warn("Could not confirm the native session lock", e),
+      );
     }
     spaceOpen = false; // and no server names floating behind it either
     showSettings = false;
@@ -6291,21 +6317,10 @@
    * reported itself active. Someone could then reproduce a hard bug on the strength of that word
    * and find nothing to send, which spends the reproduction and returns nothing.
    */
-  type DebugLogState = {
-    enabled: boolean;
-    active: boolean;
-    state: "stopped" | "active" | "degraded" | "failed";
-    error: string;
+  type DebugLogState = DebugLogSink & {
     session: string;
     dir: string;
-    file: string;
-    events_written: number;
-    bytes_written: number;
-    events_dropped: number;
-    events_truncated: number;
     queue_depth: number;
-    queue_high_water: number;
-    session_quota_bytes: number;
   };
   let debugLog = $state<DebugLogState | null>(null);
   let debugLogBusy = $state(false);
@@ -6495,32 +6510,6 @@
     } finally {
       debugLogBusy = false;
     }
-  }
-  /** How the sink's state reads to someone who did not write it. */
-  function debugLogSummary(d: DebugLogState): { tone: "ok" | "warn" | "danger" | "faint"; text: string } {
-    if (d.state === "failed") {
-      return { tone: "danger", text: d.error || "Not writing, and the reason was not recorded." };
-    }
-    if (d.state === "degraded") {
-      return {
-        tone: "warn",
-        text: d.events_dropped
-          ? `Writing, but ${d.events_dropped.toLocaleString()} record(s) never reached the file.`
-          : "Writing, but close enough to this session's limit to matter.",
-      };
-    }
-    if (d.state === "active") {
-      return {
-        tone: "ok",
-        text: `Writing. ${d.events_written.toLocaleString()} entries, ${formatBytes(d.bytes_written)} so far.`,
-      };
-    }
-    return {
-      tone: "faint",
-      text: d.enabled
-        ? "Not writing yet. A log can only be opened when the app starts, so restart Mewtual."
-        : "Not writing, because you have logging switched off.",
-    };
   }
   // ---- debug console (docs/design-debug-console.md) ------------------------------------
   //
@@ -14629,8 +14618,14 @@
   // empty parts of it are a drag region and these three drive the window. The maximise glyph has
   // to follow the real window state, which also changes by snap, double-click and the OS.
   const appWindow = getCurrentWindow();
+  const nativeVaultLock = new NativeVaultLockCoordinator(
+    (uiStateJson) => invoke<NativeVaultLockOutcome>("lock_session", { uiStateJson }),
+  );
   let winMaximized = $state(false);
   let windowCloseInFlight = false;
+  // The first continuity failure leaves a confirmed-locked window open with a warning. Repeating
+  // close is the user's explicit acknowledgement that exiting without that latest snapshot is OK.
+  let closeAfterContinuityError = false;
   // The live frontend-logging installation, kept so unmount can stop it. Not reactive state: it is
   // held purely so the teardown has something to call.
   let uiLogging: UiLogging | null = null;
@@ -14863,6 +14858,12 @@
         // still interrupt storage and is intentionally not presented as transactionally safe.
         event.preventDefault();
         if (windowCloseInFlight) return;
+        // Do not let a close race an unlock which already crossed the bridge. Once that attempt
+        // settles, the user can close again against one unambiguous native session generation.
+        if (unlocking) {
+          error = "Wait for this unlock attempt to finish, then close Mewtual again.";
+          return;
+        }
         windowCloseInFlight = true;
         callLifecycleSession.invalidate();
         micCaptureSession.invalidate();
@@ -14870,21 +14871,43 @@
         screenAudioCaptureSession.invalidate();
         if (inCall) leaveVoice();
         clearTimeout(uiStateSaveTimer);
-        const finalContinuityJson = !locked && uiStateReady ? continuityJson() : null;
-        let nativeLocked = false;
+        const finalContinuityJson = locked
+          ? nativeVaultLock.snapshot()
+          : (uiStateReady ? continuityJson() : null);
         try {
-          if (!locked) {
-            await invoke("lock_session", { uiStateJson: finalContinuityJson });
-            nativeLocked = true;
-          }
-          await appWindow.destroy();
-        } catch (e) {
-          // `destroy()` can fail after native locking succeeded. In that case the WebView remains
-          // visible but can no longer read the vault, so immediately apply the same plaintext/UI
-          // teardown as Ctrl+L without issuing a redundant native lock command.
-          if (nativeLocked) lockScreen(true);
+          // Native code owns lock -> snapshot -> destroy ordering. This also crosses the same
+          // commit mutex as a Ctrl+L request that survived a webview remount; in the ordinary
+          // same-webview race it receives that request's exact immutable snapshot again.
+          const result = await invoke<NativeVaultCloseOutcome>("close_vault_window", {
+            uiStateJson: finalContinuityJson,
+            discardContinuityError: closeAfterContinuityError,
+          });
+          // A response means the window deliberately remained alive (continuity warning or native
+          // destroy failure) and native locking is confirmed, so frontend teardown is now safe.
+          lockScreen(true);
           windowCloseInFlight = false;
-          error = `Could not safely close the vault: ${e}`;
+          if (result.deferred) {
+            closeAfterContinuityError = true;
+            error = `The vault is locked, but Mewtual could not save the latest screen state: ${result.continuity_error}. Close the window again to exit without that latest screen state.`;
+          } else if (result.destroy_error) {
+            error = `The vault is locked, but the window could not close: ${result.destroy_error}`;
+          }
+        } catch (e) {
+          // A rejected bridge response cannot tell us whether native locking ran. Never leave a
+          // merely visual lock over potentially authorized IPC: destroy the webview directly, and
+          // if that capability also fails, restart the process so native state is unquestionably
+          // gone. Only when all three paths fail do we keep the existing view and describe native
+          // state as unknown, with the conservative instruction to treat it as unlocked.
+          try {
+            await appWindow.destroy();
+          } catch (destroyError) {
+            try {
+              await relaunch();
+            } catch (restartError) {
+              windowCloseInFlight = false;
+              error = `Mewtual could not confirm the native vault lock or close this window. Treat this session as unlocked; save your work and try again. Lock error: ${errorText(e)}. Window error: ${errorText(destroyError)}. Restart error: ${errorText(restartError)}.`;
+            }
+          }
         }
       }),
       // Capture is a native setting, and the webview is one of the things that feeds it. Told
@@ -22198,8 +22221,8 @@
                 <h3>Debug log</h3>
                 <p class="muted small">
                   On by default during the alpha. Mewtual writes a text log next to its data so you
-                  can reproduce a problem and send the file to someone who can read it. Turning it
-                  off is permanent until you turn it back on.
+                  can reproduce a problem and send the file to someone who can read it. The switch
+                  controls the next launch; it cannot start or stop the current session's file.
                 </p>
                 <!-- Two different things, said plainly. The file and the in-app record are separate
                      sinks with separate settings, and a reader who assumes this checkbox is the
@@ -22213,20 +22236,17 @@
                   <label class="toggle">
                     <input type="checkbox" checked={debugLog.enabled} disabled={debugLogBusy}
                       onchange={(e) => toggleDebugLog(e.currentTarget.checked)} />
-                    <span>Keep a debug log</span>
+                    <span>Write a debug log on next launch</span>
                   </label>
-                  <!-- Preference and reality, always both. The gap between them is the whole
-                       reason this reads the sink instead of echoing the checkbox above. -->
-                  {@const health = debugLogSummary(debugLog)}
-                  <div class="dbg-kv">
-                    <span class="k">You asked for</span>
-                    <span class="v">{debugLog.enabled ? "A debug log" : "No debug log"}</span>
-                    <span class="k">Actually</span>
-                    <span class="v"><span class="chip {health.tone}">{debugLog.state.toUpperCase()}</span></span>
-                  </div>
-                  <p class="muted small">{health.text}</p>
-                  {#if !debugLog.enabled && debugLog.active}
-                    <p class="muted small">Still writing this session's log. It stops at the next restart.</p>
+                  <!-- Current evidence gets one plain sentence. A second sentence appears only
+                       when changing the next-launch preference cannot affect this process. -->
+                  {@const logStatus = debugLogSettingsStatus(debugLog)}
+                  <p class="muted small">
+                    <span class="chip {logStatus.tone}">{logStatus.label}</span>
+                    {logStatus.detail}
+                  </p>
+                  {#if logStatus.restartNotice}
+                    <p class="muted small">{logStatus.restartNotice}</p>
                   {/if}
                   <div class="field">
                     <span class="muted small">Log folder</span>

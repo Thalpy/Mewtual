@@ -14,6 +14,7 @@ import {
   makeTraceSource,
   needsResync,
   shortTrace,
+  vaultUnlockErrorText,
   type SendOutcome,
   type UiEvent,
 } from "./diagnostics.ts";
@@ -688,6 +689,20 @@ test("a typed error never renders as [object Object]", () => {
   const shown = errorText({ code: "SESSION.LOCKED", message: "session is locked", trace: "0001" });
   assert.equal(shown, "session is locked (SESSION.LOCKED · 0001)");
   assert.ok(!shown.includes("object Object"));
+});
+
+test("the vault gate explains an unlock refusal in user terms and keeps its support ids", () => {
+  assert.equal(
+    vaultUnlockErrorText({
+      message: "decryption/authentication failed",
+      code: "VAULT.OPEN.REFUSED",
+      trace: "trace-7",
+      retryable: true,
+      remediation: "amend_input",
+    }),
+    "That passphrase did not unlock this vault. Check it and try again. (VAULT.OPEN.REFUSED · trace-7)",
+  );
+  assert.equal(vaultUnlockErrorText("vault unavailable"), "vault unavailable");
 });
 
 test("an Error instance is stringified rather than mistaken for a typed error", () => {

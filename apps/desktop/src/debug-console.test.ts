@@ -11,6 +11,7 @@ import {
   captureModeNote,
   captureHistory,
   copyBundle,
+  debugLogSettingsStatus,
   dropNote,
   retentionStatus,
   sinkLines,
@@ -648,6 +649,36 @@ test("logging asked for but never started is a different sentence from logging t
   assert.match(s.sink, /switched on but this session opened no file/);
   assert.match(s.sink, /when the app starts/, "and says the thing that would fix it");
   assert.ok(!promisesCompleteness(s.text));
+});
+
+test("settings separates the current log writer from the next-launch preference", () => {
+  const writing = debugLogSettingsStatus(sink());
+  assert.equal(writing.label, "Writing now");
+  assert.match(writing.detail, /1,284 entries/);
+  assert.equal(writing.restartNotice, "", "matching current and next-launch states need no second row");
+
+  const stopping = debugLogSettingsStatus(sink({ enabled: false }));
+  assert.equal(stopping.label, "Writing now", "the checkbox cannot rewrite this process's subscriber");
+  assert.match(stopping.restartNotice, /off for the next launch/);
+  assert.match(stopping.restartNotice, /keep writing until you restart/);
+
+  const starting = debugLogSettingsStatus(sink({ active: false, state: "stopped", file: "" }));
+  assert.equal(starting.label, "Not writing");
+  assert.match(starting.restartNotice, /on for the next launch/);
+  assert.match(starting.restartNotice, /Restart Mewtual/);
+});
+
+test("settings gives failed and degraded writers plain current-session labels", () => {
+  const failed = debugLogSettingsStatus(
+    sink({ active: false, state: "failed", error: "permission denied", file: "" }),
+  );
+  assert.equal(failed.label, "Could not write log");
+  assert.equal(failed.detail, "permission denied");
+  assert.equal(failed.restartNotice, "", "a restart must not be promised to repair a real failure");
+
+  const degraded = debugLogSettingsStatus(sink({ state: "degraded", events_dropped: 7 }));
+  assert.equal(degraded.label, "Writing with gaps");
+  assert.match(degraded.detail, /7 record\(s\) did not reach/);
 });
 
 test("a sink with a non-zero dropped count cannot imply it kept what the ring lost", () => {
