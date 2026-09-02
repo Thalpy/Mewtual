@@ -1,14 +1,16 @@
 # Design: the creative suite (draw, doodle, flipnote, emoji sound, play, knock)
 
-Status: proposal, revision 6, for review. Nothing here has shipped. Revision 5 clarified that
-"avatar" means a member's chosen server profile picture and bound boss rendering to a named
-content address. Revision 6 addresses the fifth review: round priority is a per-identity rank
-with no sender-chosen input and no generation counter (2.14), players are named identities in
-the committed descriptor (2.14), P1 is a monotonic epoch-close protocol with verifiable
-checkpoints and a current-epoch registry for every logical document (2.9), catch-up pages are
-dependency-complete (2.9), and the medium findings on the avatar decoder exception, async fetch
-races, backend-owned avatar cids, the 128-bit successor id, option schemas and state bounds are
-folded in.
+Status: proposal, revision 8, for review. Nothing here has shipped. Revision 7 removed the
+close-record circularity, sourced the consented avatar from local attested state, and ordered
+rounds by rank then id. Revision 8 addresses the seventh review: the registry is discovered by
+walking winning closes forward from a fixed root, with full-projection seeds and lineage, and
+no existence probing (2.9); a frozen epoch is rebuilt atomically from the retained closures and
+excluded history is removed rather than hidden (2.9); closes and seeds are quarantined with
+per-author processing budgets and never enter the durable log until retained (2.9); live and
+queued rounds are kept apart from dead ones so re-announces are valid (2.14); equivocations
+collapse to one candidate per identity and election and dead-set growth is budgeted per identity
+(2.14); the consented avatar record is installed in two durable phases (2.12); and the medium
+findings on intent ids and caps, cursor binding, and seed size are folded in.
 
 Builds on the jam layer (`docs/INTERFACES.md` section 12, `apps/desktop/src/jam-*.ts`), the
 livery palette (`design-livery.md`), the sealed blob store with its staging area, the fileshare
@@ -43,17 +45,30 @@ picture a member has chosen for their server profile, never a camera image of th
 - Real audio samples on emoji. Sounds are synth patches.
 - Anti-cheat for games. Scores are host-reported and labelled so.
 - Preventing the single lowest-ranked member of a call from disrupting a game round.
-  Disruption is made attributable, visible and mutable, not impossible (2.14).
+  Disruption is made attributable, visible and muteable, not impossible (2.14).
 - Persisting Pictochat drawings automatically. Pinning is the bridge into chat.
 - Drawings or games visible to members not in the call.
 - Direct-person ringing. Rooms only.
 - Durable scoreboards of any kind.
 - Cryptographic proof that a pinned drawing's pixels are unmodified (2.13).
 - Retention enforcement. Recorded inputs only (2.10).
+- Authority stronger than honest-client for studio content. Every document in this suite may be
+  written by any member; the platform work in 2.9 guarantees convergence and bounded resources,
+  not that a member cannot write bad content.
 
 ## 2. Settled decisions
 
 Each of these is a fork. Change deliberately.
+
+### 2.0 Conventions for hashes and canonical bytes
+
+Every hash in this document is `H(domain, part1, part2, ...)` = SHA-256 over the concatenation
+of, for each part in order, a 4-byte big-endian length followed by the part's bytes. `domain` is
+an ASCII string. String parts are UTF-8 with no normalization unless stated. Integers are
+8-byte big-endian. Identities are the 32 raw device-id bytes. Change hashes are their 32 raw
+bytes. "Canonical JSON" means the serialization the jam patch validator already uses: object
+keys sorted by UTF-16 code unit, no whitespace, integers only, strings escaped per RFC 8259 in
+the shortest form. Every derivation ships a golden vector in the slice that introduces it.
 
 ### 2.1 `pix:v1` is a byte-exact binary format decoded by our own code
 
@@ -109,9 +124,11 @@ per-channel capability every callback must present. Drawing and games reuse that
 own negotiated channels, `draw` (id 8, ordered) and `play` (id 9, ordered), with their own
 buckets. The admission code moves into `rt-admission.ts` (C0b), no behaviour change for jam.
 
-Each new channel also gets semantic limits on top of the byte bucket (2.7, 2.14). Every per-peer
-key in this suite is the **full device identity**, canonical 64-character lowercase hex exactly
-as `MemberView.identity` already exposes it (2.18).
+Every frame type in this suite has an exact key set; unknown or missing keys reject; every
+string field has a fixed length or a stated maximum; every frame fits 200 bytes after the
+1024-byte pre-parse cap. Each new channel also gets semantic limits on top of the byte bucket
+(2.7, 2.14). Every per-peer key in this suite is the **full device identity**, canonical
+64-character lowercase hex exactly as `MemberView.identity` already exposes it (2.18).
 
 ### 2.4 An emoji's sound is an `emoji-sound:v1` envelope in its own folder
 
@@ -157,10 +174,10 @@ per-server settings.
 
 ### 2.7 The draw protocol is a versioned state machine
 
-Every frame carries the sender session `sn` (the per-call-join nonce jam uses) and a per-sender
-uint32 `q` shared across all draw frames for one `sn`. A receiver keeps, per authenticated draw
-channel capability, the highest `q` seen and rejects anything at or below it, and rejects
-`q == 0xffff_ffff`; a sender approaching it reopens under a fresh `sn`.
+Every frame carries the sender session `sn` (the per-call-join nonce jam uses, 16 lowercase
+hex) and a per-sender uint32 `q` shared across all draw frames for one `sn`. A receiver keeps,
+per authenticated draw channel capability, the highest `q` seen and rejects anything at or
+below it, and rejects `q == 0xffff_ffff`; a sender approaching it reopens under a fresh `sn`.
 
 ```
 {t:"b", v:1, sn, q, d}                       begin drawing d
@@ -172,8 +189,8 @@ channel capability, the highest `q` seen and rejects anything at or below it, an
 {t:"x", sn, q, d}                            discard before finish, retract after
 {t:"r", sn, q, rq}                           replay request
 {t:"y", sn, q, rq, d, h, n, i, s, c, w, p}   replay response segment i of n
-{t:"c", sn, q, obj, fr, on, ask}             flipnote frame claim (2.10)
-{t:"pv", sn, q, nv}                          presence: non-verbal flag (2.12)
+{t:"c", sn, q, obj, fr, on, ask}             flipnote frame claim (2.10); obj and fr 32 hex
+{t:"pv", sn, q, nv}                          presence: non-verbal flag 0|1 (2.12)
 ```
 
 Rules: `d` strictly increasing per session; one open drawing per sender; a second `b` discards
@@ -210,12 +227,12 @@ and the validator accepted it). Over-cap merges keep cells in ascending `(step, 
 to 4096 and the 64 smallest patch ids, flagging the rest.
 
 Export. Let `T = 15000`. Header: `group` = the stable group id the jam recorder uses; `call` =
-lowercase hex SHA-256 over the canonical JSON array `["catcoms-score-export:v1", <score id>]`;
-`met` = `{bpm, bpb}`; `parts` = `[exporter identity]`; `lanes` = `[{src:0, sn}]` with `sn` =
-the first 16 hex of SHA-256 over `["catcoms-score-lane:v1", <score id>]`, last character `1` if
-all zeros; `patches` in ascending id order. Timing: `on = floor(s * T / bpm)`,
-`off = floor((s + 1) * T / bpm) - 1`, integer by construction, `off > on` for every valid bpm.
-Events sorted by `(ms, off_before_on, row, kind)` then `q` assigned from 0. Canonical JSON.
+hex of `H("catcoms-score-export:v1", score id)`; `met` = `{bpm, bpb}`; `parts` = `[exporter
+identity]`; `lanes` = `[{src:0, sn}]` with `sn` = the first 16 hex of
+`H("catcoms-score-lane:v1", score id)`, last character `1` if all zeros; `patches` in ascending
+id order. Timing: `on = floor(s * T / bpm)`, `off = floor((s + 1) * T / bpm) - 1`, integer by
+construction, `off > on` for every valid bpm. Events sorted by `(ms, off_before_on, row, kind)`
+then `q` assigned from 0. Canonical JSON.
 
 Invariant, tested: **every accepted score exports to a take that `validateJamTake` accepts**,
 and the exporter runs the validator before sharing.
@@ -227,105 +244,161 @@ types (next free discriminants after `Moderation = 14`):
 
 | DocType | Id | One per | Holds |
 |---|---|---|---|
-| `StudioIndex = 15` | per epoch, see registry | channel | `{ v:1, channel, epoch, objects: { <object id>: {kind, title, created_by, ts, expiry, deleted?} } }` |
-| `StudioObject = 16` | per epoch, see registry | score or flipnote | the `jam-score:v1` or `flipnote:v1` root |
-| `PostReplies = 17` | per epoch, see registry | announcement post | doodle replies (2.11) |
-| `DocRegistry = 18` | per epoch, chained from a fixed root | server | current epoch of every logical document below |
+| `StudioIndex = 15` | per epoch | channel | `{ v:1, kind:"index", channel, epoch, objects: { <object id>: {kind, title, created_by, ts, expiry, deleted?} } }` |
+| `StudioObject = 16` | per epoch | score or flipnote | the `jam-score:v1` or `flipnote:v1` root |
+| `PostReplies = 17` | per epoch | announcement post | doodle replies (2.11) |
+| `DocRegistry = 18` | per epoch, rooted at a fixed id | server | current epoch of every logical document above, plus lineage |
 
 Every root carries `kind`, its logical key (`channel`, or `id` and `channel`, or `post`) and
 `epoch`, validated against the registry entry it was reached from; a mismatch ignores the
-document. Events: `AppEvent::StudioUpdated { channel, object: Option<id> }` and
-`AppEvent::PostRepliesUpdated { post }`, plus `AppEvent::RegistryUpdated`.
+document. Events: `AppEvent::StudioUpdated { channel, object: Option<id> }`,
+`AppEvent::PostRepliesUpdated { post }`, `AppEvent::RegistryUpdated`.
 
 **Materialization caps bound the visible document, not its history.** The replication layer
 retains every accepted signed operation, so a member overwriting one cell forever keeps the
 visible map at one entry while growing disk, memory, sync and verification work on every peer
-without limit. This is true of every document type today; the studio would make it cheaper.
-Paging catch-up divides that work without bounding it, and any scheme that picks "the accepted
-set" by ranking over whatever a peer currently holds either keeps an unbounded log so late
-changes can be re-ranked, or drops at ingest and forks. So **P1 is a monotonic epoch-close
-protocol**, and every new remotely writable document type in this suite depends on it. Its
-shape, decided here so the slices do not improvise:
+without limit. So **P1 is a monotonic epoch-close protocol**, and every new remotely writable
+document type in this suite depends on it. What P1 guarantees is bounded resources and
+convergence among peers holding the same information; authority stays honest-client (section 1).
+Its shape, decided here so the slices do not improvise:
 
-**Logical documents and epochs.** A logical document (one studio index, one studio object, one
-post's replies, the registry itself) is a chain of epoch documents. Each epoch is an ordinary
-replicated document with its own 128-bit id. Epoch 0 of the registry has the fixed id
-`u128 = first 16 bytes of SHA-256("catcoms-registry-root:v1" || server id)`. Every other
-epoch id is `first 16 bytes of SHA-256 over the canonical JSON array
-["catcoms-doc-epoch:v1", <doc type tag>, <logical key>, epoch, <close change hash>]`, so a
-successor is named by the exact close it descends from. C5a ships a golden vector for both.
+**Logical documents and epochs.** A logical document is a chain of epoch documents, each an
+ordinary replicated document with its own 128-bit id. Epoch 0's id is the first 16 bytes of
+`H("catcoms-doc-epoch0:v1", doc type tag, logical key)` (for the registry, the logical key is
+the server id). Every later epoch's id is derived from the close it descends from (below), so a
+chain is **forward-walkable**: holding any epoch, a peer can compute its successor's id from that
+epoch's winning close, and the current epoch is the deepest one reachable from epoch 0 through
+valid winning closes. There is no existence probe anywhere in this protocol; an empty catch-up
+response means only that one provider had nothing.
 
-**Close.** Any member may write a close change into an epoch document:
-`close = { heads: [<change hash>...], successor: <u128> }`. `heads` is an exact, causally
-closed head set: every change reachable from `heads` is inside the epoch and there is no change
-in the closer's view outside it. `successor` must equal the derivation above for this close.
-A close is **valid** only if the signed ops reachable from `heads` total at least half the
-budget (budget: 20,000 changes or 4 MiB, whichever first), which every peer can verify once it
-holds those ancestors, so closes cannot be spammed to advance epochs cheaply. At most one close
-per author per epoch counts; further closes by the same author are ignored.
+**Budget.** An epoch's budget is 20,000 changes and 4 MiB of signed ops. Both are hard maxima.
 
-**Frozen epoch.** Once a peer holds a valid close, the epoch's ingest rule becomes: accept a
-change only if it is an ancestor of the heads of some valid close it holds, or is itself a
-close. Everything else for that epoch id is dropped at ingest, deterministically for every peer
-that holds the same closes, and a peer that lacks ancestors fetches them by catch-up. The
-frozen log is therefore bounded by the union of the accepted closes' ancestor sets plus at most
-one close per member.
+**Close.** Any member may write a close change into an epoch document: `close = { heads:
+[<change hash>...] }`, at most 64 heads, nothing else. Its **successor id** is
+`first 16 bytes of H("catcoms-doc-epoch:v1", doc type tag, logical key, epoch + 1, close
+change hash)`, derived after the change is hashed. A close is **valid** only if its closure
+(every change reachable from `heads`) satisfies all of: at least 10,000 changes or at least
+2 MiB; at most 20,000 changes; at most 4 MiB.
 
-**Winner.** If several valid closes exist, the one with the smallest change hash wins. Peers
-with partial information may follow a loser transiently; the registry entry names the winner's
-successor, and a peer that later learns of a smaller-hash close switches. Edits written into a
-losing successor are re-applied by their authors' clients into the winner (below), so they are
-not lost, and the losing successor is abandoned and droppable.
+**Quarantine before the log.** A close, and any change that arrives for an epoch the peer
+already knows to be closing, is held in a bounded quarantine and never appended to the durable
+op log until it is retained under the rules below. Quarantine bounds: 16 closes per epoch and
+2 MiB of non-close changes per epoch, oldest evicted. Close processing is budgeted per author:
+at most one close validation in flight per author per epoch, at most 4 validations per author
+per epoch per hour, and a close naming heads the peer does not hold triggers at most 3 provider
+fetch attempts before it is parked and re-examined only when a missing head arrives through
+ordinary gossip. Invalid closes go into a negative cache by change hash for the epoch's life.
+A cheap close naming nonexistent heads therefore costs the peer at most three bounded fetches
+and one cache entry, and an author cannot churn candidates faster than the hourly budget.
 
-**Checkpoint.** The successor's initial content is not an ordinary change. It is a
-**seed snapshot**: the materialization of exactly `heads`, serialized canonically (sorted keys,
-canonical list order) and loaded into a fresh Automerge document under a fixed actor id derived
-from the successor id, with insertions in canonical order. Two peers that build the seed from
-the same `heads` therefore produce byte-identical changes with identical hashes, which Automerge
-merges as one; there is no concurrent object creation and no silently chosen subtree. A peer
-that receives a successor whose seed does not match its own recomputation from `heads` rejects
-that seed and builds its own; since the correct seed is unique, all honest peers converge.
+**Equivocation.** If an author writes several valid closes in one epoch, the one with the
+smallest change hash counts and the others are ignored, identically for peers holding the same
+set. Grinding this chooses only which valid bounded closure that author freezes.
 
-**Post-close edits.** A change to a closed epoch that is not an ancestor of the winning heads is
-late: it is dropped at ingest and does not appear in the frozen materialization. The writing
-client keeps its local edit intents until it sees them acknowledged in the epoch it wrote them
-to; on learning of a close (online or after being offline) it replays unacknowledged intents into
-the current successor. No peer ever migrates another peer's late edits, so materialization stays
-deterministic and the author stays responsible for its own writes.
+**Candidates and retention.** A peer retains at most 8 candidate closes per epoch, the 8 with
+the smallest change hash among valid ones, and the dependency-closed union of exactly their
+closures: at most 32 MiB plus 8 closes, regardless of member count.
 
-**Registry.** `DocRegistry` maps `(doc type tag, logical key)` to `{epoch, doc id}` and is
-itself a logical document under the same protocol. A fresh peer starts at the fixed root id and
-walks the close chain: each frozen registry epoch's winning close names its successor. The
-registry receives one small change per rotation of any logical document, and a rotation costs
-its initiator at least half a budget of real signed ops, so the registry grows by one entry per
-2 MiB of traffic and rotates rarely. Registry lookups resolve the current epoch for every
-logical document, including `StudioIndex` and `PostReplies`, so there is no parent-pointer gap.
+**Freezing rebuilds the document.** Whenever the retained candidate set changes, the peer
+**reconstructs** the epoch's `EncryptedDoc` from scratch out of the dependency-closed union of
+the retained closures, then atomically replaces the live document, its log and its persisted
+snapshot with the reconstruction. Changes already ingested before the first close that lie
+outside that union are thereby removed, not hidden: they leave the Automerge state, the log,
+snapshots and materialization alike, so a peer that ingested a stray branch before the close
+and a peer restored solely from the winning closure hold identical epochs. Content is projected
+from the **winner** only (below); the union is retained so a later candidate change does not
+require refetching. After freezing, the ingest rule is: accept only changes inside a retained
+closure, or closes (through quarantine).
 
-**Catch-up cursor is Automerge heads, never a numeric index**, and every response page is
-**topologically ordered and dependency-complete relative to the supplied heads**: a page never
-contains a change whose dependency is neither in the requester's heads nor earlier in the same
-page, so each page advances the requester's heads. The head list is capped at 64 entries; a
-requester with more sends the 64 most recent by its own order and accepts redundant changes. A
-provider that does not recognise a supplied head responds "unknown heads" and the requester
-restarts from empty heads with another provider, or with the same one if none other exists.
+**Winner.** Among retained candidates, the close with the smallest change hash wins. Peers with
+partial information may follow a loser transiently and switch when they learn of a smaller-hash
+close; every switch is a rebuild as above.
 
-**Per-author quota within an epoch** is unnecessary under this protocol and is dropped: the
-close bounds the epoch and the ingest rate limit bounds the pace. **Ingest rate limit per
-author, defence in depth**: sustained 10 changes per second, burst 50, per author per epoch
-document, dropped at ingest; not relied on for correctness.
+**Seed.** The successor's initial content is a **seed change**: an ordinary signed change,
+transported and persisted like every other, whose content is the materialization of exactly the
+winning `heads`, serialized canonically, applied under actor id
+`H("catcoms-seed-actor:v1", successor id, writer identity)`, encoded size at most 2 MiB (below
+the sealed-op ceiling, verified in P1 with the maximal score and flipnote seeds). The winning
+close's author writes it; if none appears within 60 s of a peer observing the winner, any member
+may. Seeds are **quarantined until selected**: the successor document is not opened for reading
+or editing until one seed is selected, and selection is: among seeds the peer has verified
+against its own recomputation from the closure, the one from the smallest writer identity; a
+peer that cannot yet verify (it lacks the previous epoch's closure) selects the smallest-identity
+seed provisionally, shows "seed not yet verified", and **disables editing** until it has fetched
+that closure (bounded by one budget) and verified. If verification or a newly arrived seed
+changes the selected writer, the successor is rebuilt from the selected seed and the peer's own
+intents (below) are replayed onto it. Non-selected seeds stay quarantined and never enter the
+successor's log, so later edits can never attach to a non-selected or unverified seed. A wrong
+seed is attributable to its writer and grants nothing an ordinary bad edit would not.
+
+**Post-close edits and durable intents.** A change to a closed epoch that is not in the winning
+closure is late: dropped, absent from the frozen materialization. The writing client keeps
+every local edit intent, vault-sealed, until it observes that intent's effect inside the winning
+closure or inside a verified selected seed. Each intent has a stable id
+`H("catcoms-intent:v1", logical key, writer identity, local nonce)` written into the change it
+produces (a hidden `iid` on the value, or an entry under `applied/<iid>` for list insertions),
+and replay is idempotent: an intent whose `iid` is already present in the target epoch is
+confirmed, not re-applied, so a crash between replaying a frame insertion and recording its
+confirmation cannot duplicate the frame. Caps: 64 KiB per intent, 10,000 intents and 4 MiB per
+logical document, 64 MiB across the vault; beyond a cap the oldest are dropped with a visible
+warning. No peer ever migrates another peer's late edits.
+
+**Registry.** `DocRegistry` is a logical document under exactly the same protocol, rooted at the
+fixed epoch-0 id above, so its current epoch is found by walking closes forward from that root.
+Two properties make the walk cheap and lossless:
+
+- Every registry seed carries the **complete pointer projection** of the closed epoch, so a
+  pointer present in epoch `n` is present in every later seed until explicitly deleted; nothing
+  is lost across rotations and no republication is needed.
+- Every registry seed also carries `lineage`, the ordered list of winning close hashes from
+  epoch 0 to its predecessor (32 bytes each, at most 4096 entries), so a peer that reaches any
+  registry epoch can verify, hop by hop and lazily, that it descends from the root, and two
+  peers that reach different candidates for "current" compare lineages: the longer valid
+  lineage wins, and equal-length lineages that diverge resolve at the divergence point by the
+  winner rule.
+
+A joiner starts at the root and walks forward; each hop fetches one bounded epoch. A current
+member's catch-up response may carry a **hint** (a registry epoch id and its lineage) that lets
+the joiner start its walk near the top; the hint is verified by walking, not trusted, and a
+forged far-future epoch is unreachable because it has no valid close chain from the root. In
+practice `n` is tiny: a registry change is one pointer update per rotation of any logical
+document, each rotation costs at least half a budget of real ops in that document, and the
+registry itself rotates after roughly 10,000 such updates. Tests: a forged far-future registry
+epoch is never adopted; providers with partial epoch sets; an empty newly created epoch; a
+pointer surviving five rotations without any writer touching it; restoration after 500
+rotations in a bounded number of requests.
+
+**Catch-up is cursor-driven; heads only prune.** A request carries up to 64 of the requester's
+heads and an optional opaque provider cursor. A response page is **topologically ordered and
+dependency-complete** relative to the requester's heads plus earlier changes on the same page,
+and returns a new cursor. The cursor is an HMAC under a provider-local secret over
+`(provider identity, requester identity, doc type, doc id, frozen-log generation, position,
+expiry)`, expiry 10 minutes; a provider whose log was rebuilt (any freeze) bumps the generation,
+so an old position is never interpreted against new contents and the provider answers "restart".
+Progress is guaranteed by the cursor: a page may include changes the requester already holds,
+which apply idempotently, and a requester with more than 64 heads still advances. Tests: 65 and
+20,000 concurrent heads, a reversed-arrival dependency case, provider failover mid-transfer with
+no skipped or duplicated application, a provider rebuild forcing restart.
+
+**Ingest rate limit per author, defence in depth**: sustained 10 changes per second, burst 50,
+per author per epoch document, dropped at ingest; not relied on for correctness.
 
 Studio-side behaviour on top: the editor coalesces writes (a cell is written only when its value
-changes; a burst commits at most 4 times per second), and a document at or past its budget is
-shown as "rotating" while a close is written.
+changes; a burst commits at most 4 times per second), and a document at or past its lower bound
+is shown as "rotating" while a close is written.
 
-Tests, owned by P1: concurrent closers with different partial histories converging on the
-smallest-hash close; a late lower-ranked change arriving after the close and being dropped
-identically everywhere; an offline writer replaying intents into the successor; a crash after
-the close change and before the registry entry (the next member to observe the close writes the
-entry; the successor id is derivable from the close alone); fresh restoration of the registry
-chain, a studio index and a replies document; an invalid close (under half budget) ignored; two
-closes by one author counted once; seed snapshot byte-identity across peers; a reversed-arrival
-dependency case where naive paging would make no head progress and the ordered page does.
+Tests, owned by P1: excluded changes ingested before the winning close are absent after the
+freeze, after snapshot and after restore, and the peer's epoch equals one restored solely from
+the closure; concurrent closers with different partial histories converging on the smallest-hash
+winner with a rebuild on switch; an equivocating author reduced to one close; a ninth candidate
+not retained; an oversized closure rejected; a close naming unknown heads parked after three
+fetches; the hourly per-author validation budget; a late change dropped identically
+everywhere; an acknowledged edit outside the winning heads replayed from a retained intent and
+not duplicated across a crash mid-replay; an offline writer replaying intents; a crash after the
+close and before the registry pointer (any observer derives the successor and writes the
+pointer); a wrong seed rejected by recomputation and the successor rebuilt onto the selected
+seed with intents replayed; editing disabled while a seed is unverified; the maximal score and
+flipnote seeds under 2 MiB; the registry tests above; golden vectors for every derivation.
 
 Authorization is honest-client. Conflicts: where this document says "last writer wins", the
 exact rule is Automerge's concurrent-put resolution (`get` returns the value with the greatest
@@ -394,50 +467,59 @@ Caps: 64 replies per post, 4 per author, 64 KiB each. Chat doodles are a message
 `{cid, bytes, expiry}` with `reply_to` set, one per message. Both publish through
 `publish_pix`, fetch bounded, and are enumerated. `PostReplies` depends on P1.
 
-### 2.12 Avatar consent rides the capability-bound data channel and names the pixels it covers
+### 2.12 Avatar consent rides the capability-bound data channel and names locally attested pixels
 
 Presence pings travel on the reordered, replayable signal path, and a delayed old `hello` can
 recover a peer and make old session state look current again. Nothing that authorizes the use
-of a member's avatar may depend on that path. So consent and non-verbal state do not use
-presence pings at all:
+of a member's avatar may depend on that path, and nothing may depend on the profile document
+either, because profile entries are keyed by the four-byte fingerprint and written by
+convention, so a colliding identity can overwrite a member's own entry.
 
-- **Transport.** Avatar consent is a frame on the `play` channel,
-  `{t:"pf", sn, q, on:0|1, cid}`; non-verbal is `{t:"pv", sn, q, nv}` on the `draw` channel.
-  Both are ordered by the channel's `q`, bound to the channel's capability, and impossible to
-  replay from an earlier session because that session's channel no longer exists. A `hello`,
-  delayed or replayed, can at most trigger the existing renegotiation; it rebinds nothing this
-  suite reads.
+- **Transport.** Avatar consent is `{t:"pf", sn, q, on, cid}` on the `play` channel: exact
+  keys, `on` 0 or 1, `cid` exactly 64 lowercase hex, `sn` 16 lowercase hex, unknown or missing
+  keys reject. Non-verbal is `{t:"pv", sn, q, nv}` on the `draw` channel, `nv` 0 or 1. Both are
+  ordered by the channel's `q`, bound to the channel's capability, and impossible to replay from
+  an earlier session because that session's channel no longer exists. A `hello`, delayed or
+  replayed, can at most trigger the existing renegotiation; it rebinds nothing this suite reads.
 - **Freshness.** The sender restates each frame every 5 s; a receiver reads `on` or `nv` as false
   unless restated within 15 s, and as false the moment the channel closes.
-- **The pixels are named, by the backend.** `cid` is the content address of the avatar the member
-  consents to show, at most 64 KiB (the existing avatar cap). The sender obtains it from a new
-  backend query `my_avatar_cid()`, which reads this device's own profile record where
-  `set_profile` already stores `avatar_cid`; the UI never reconstructs or accepts that value
-  from its own state. A receiver renders as a boss **only** a blob whose address equals the
-  `cid` from that member's own authenticated consent frame, fetched through
-  `request_blob_bounded`, never an avatar resolved through the profile document or any
-  fingerprint-keyed map.
+- **The pixels are named from locally attested state, installed in two durable phases.** The
+  backend keeps a **vault-sealed record keyed by (server id, this device's full identity)**
+  holding the cid of the avatar this device last published successfully. `my_avatar_cid()`
+  reads only that record, never the profile document. Replacing or clearing an avatar is a
+  two-phase operation: first the record is durably cleared (the vault write completes before
+  anything else happens), then the profile is published, then the new cid is durably installed
+  only after publication reports success. A crash or vault-write failure at any point leaves
+  the record empty, so consent is off; the member sets the avatar again to restore it. An
+  installation from before this record existed has no record and no consent until the member
+  sets an avatar. The sender places the recorded cid in its consent frame; with no record the
+  consent control is greyed with an explanation.
+- **Receivers render only the named blob.** A receiver renders as a boss **only** a blob whose
+  address equals the `cid` in that member's own authenticated consent frame, fetched through
+  `request_blob_bounded` at the 64 KiB avatar cap, never an avatar resolved through the profile
+  document or any fingerprint-keyed map.
 - **Decoder exception, stated.** Avatars are opaque JPEG, PNG, GIF or WebP bytes that the app
   already sniffs by magic and renders through an image element. The boss path reuses exactly
-  that existing, size-bounded platform-decoder surface and adds nothing to it: the fetched blob
-  is sniffed the same way, an unrecognised magic is rejected before rendering, and the blob is
-  never handed to any other decoder.
+  that existing, size-bounded platform-decoder surface: the fetched blob is sniffed the same way,
+  an unrecognised magic is rejected before rendering, and the blob goes to no other decoder.
 - **Async completion rechecks.** When the bounded fetch completes, the receiver renders only if
-  the delivering channel capability is still current, the consent for that identity is still
-  fresh and `on`, and the fetched cid equals the cid in the latest consent frame. Otherwise the
-  result is discarded. A revocation or an avatar replacement racing an in-flight fetch therefore
-  cannot paint a stale or unconsented image.
+  the delivering channel capability is still current, consent for that identity is still fresh
+  and `on`, and the fetched cid equals the cid in the latest consent frame; otherwise the result
+  is discarded.
 - **Receivers enforce independently**: a conforming client stops rendering the avatar the moment
   its own consent view is false or stale, whatever the host's state frames say. The host also
   must not start a round with an avatar it does not hold consent for.
 - What this governs: conforming clients. A member who already fetched an avatar can reuse it.
 
-Tests: consent from A cannot set B's; old-session frames replayed after a new session are
-rejected by capability; a replayed `hello` after a new session does not restore consent;
-consent lapses after 15 s and on channel close; a receiver hides an avatar the host still
-sends; a boss cid over 64 KiB is rejected; an unrecognised image magic is rejected; a fetch
-completing after revocation and a fetch completing after the avatar changed both discard; the
-four-byte-collision fixture renders only the named blob.
+Tests: a colliding identity overwriting the profile entry before the query does not change the
+consented cid; the record survives restart; a crash after the clear and before publication, and
+a crash after publication and before the install, both leave consent off; a vault-write failure
+at either phase leaves consent off; clearing the avatar clears the record; consent from A cannot
+set B's; old-session frames replayed after a new session are rejected by capability; a replayed
+`hello` does not restore consent; consent lapses after 15 s and on channel close; a receiver
+hides an avatar the host still sends; a cid over 64 KiB is rejected; an unrecognised image
+magic is rejected; fetches completing after revocation or avatar change discard; the
+four-byte-collision fixture renders only the named blob; malformed `pf` frames reject.
 
 ### 2.13 Attribution says what the evidence supports
 
@@ -447,25 +529,40 @@ id `d`, and the author's `h` recorded for corroboration. Scores read "reported b
 ### 2.14 Games: identity rank, chained rounds, named players, liveness, terminal state
 
 **Rank is fixed per identity per call and contains no sender choice.**
-`k = SHA-256("catcoms-play-rank:v1" || callId || senderIdentity)`, compared as bytes. Every
-selection in this section (concurrent starts, queue promotion, foreign collisions) uses `k`.
-There is no seed, option, nonce or generation in the ranking, so nothing can be ground offline;
-a new device identity would need admission to the group through the existing invite rules and
-is visible in the roster. The one member whose `k` is smallest in a call wins every collision
-they choose to force; that is the residual named in the non-goals, and it is one specific,
-attributable person rather than anyone who can compute hashes.
+`k = H("catcoms-play-rank:v1", callId, senderIdentity)`, compared as bytes. The one member
+whose `k` is smallest in a call wins every collision they choose to force; that is the residual
+named in the non-goals: one specific, attributable, muteable person.
+
+**Total order.** Candidates are ordered by `(k, r)`: `k` primary, round id `r` secondary.
 
 **Rounds are chained, not numbered.** A start frame is
-`{t:"g", v:1, sn, q, on:1, prev, r, desc}` with `r = SHA-256("catcoms-play-round:v1" ||
-callId || senderIdentity || prev || canonical(desc))` as 64 hex, `prev` the `r` of the round
-this one follows (or 64 zeros for a first round), and `desc` the committed descriptor. The
-receiver recomputes `r`; a mismatch rejects. The simulation seed is derived, never chosen:
-`seed = first 4 bytes of SHA-256("catcoms-play-seed:v1" || r)`. A re-announce with a changed
-`desc` is a different round. Tombstones remember ended rounds' `r` for 10 minutes; a proposal
-whose `r` is tombstoned rejects.
+`{t:"g", v:1, sn, q, on:1, prev, r, desc}` with `r = H("catcoms-play-round:v1", callId,
+senderIdentity, prev, canonical(desc))` as 64 hex, `prev` the `r` of the round this one follows
+(64 zeros for a first round), and `desc` the committed descriptor. The receiver recomputes `r`;
+a mismatch rejects. The simulation seed is derived, never chosen: the first 4 bytes of
+`H("catcoms-play-seed:v1", r)`. A re-announce with a changed `desc` is a different round.
 
-**Committed descriptor**, canonical JSON (sorted keys, no whitespace), all integers except
-identities:
+**Three sets, kept apart.**
+
+- **Live and queued**: the live round's `r` and the `next` queue's `r` values. An exact
+  re-announce of one of these from the same authenticated host refreshes it; that is how
+  liveness and queue expiry work, and it is never a rejection.
+- **Dead**: the `r` of every round that ended (stop, terminal, host silence, foreign loss) and
+  of every candidate that lost an election. A proposal naming a dead `r` rejects for the rest of
+  the call.
+- **One candidate per (identity, prev)**: for a given election (`prev`), a receiver keeps at
+  most one candidate per proposer identity, the smallest `(k, r)` it has seen from them; a
+  different descriptor from the same identity for the same `prev` replaces it if smaller and is
+  otherwise dropped, and neither outcome adds to the dead set. So one identity sending different
+  descriptors to different peers still yields one winner everywhere, and an identity cannot fill
+  anyone's dead set by equivocating.
+
+Dead-set growth is budgeted per identity: each identity may contribute at most 64 dead entries
+per call (its own ended rounds and lost candidacies); beyond that, its proposals are refused
+while everyone else's continue. The global dead set is additionally capped at 4096 as a hard
+bound; the per-identity budget means no single member can reach it.
+
+**Committed descriptor**, canonical JSON, all integers except identities:
 
 ```
 { game: "paddle" | "swat",
@@ -480,36 +577,34 @@ may continue with the slot idle or end the round; the same identity re-claims it
 channel reopens. The host need not be a player.
 
 **Receiver state.** `live = {r, prev, host, desc, lastSeen}` or none; `L` = `live.r` if live,
-else the `r` of the last round that ended here (or zeros); `next` = at most 4 queued
-proposals with `prev == live.r`, each expiring 30 s after its last re-announce.
+else the `r` of the last round that ended here (or zeros); `next` = at most 4 queued proposals
+with `prev == live.r`, each expiring 30 s after its last re-announce.
 
-**Transition table** for an admitted proposal `(rp, prevp, hostp)`:
+**Transition table** for a proposal `(rp, prevp, hostp)` whose `rp` is not dead and which
+survives the one-candidate rule:
 
 | Condition | Action |
 |---|---|
-| `rp` tombstoned | reject |
-| not live, `prevp == L` | adopt as the election; competes with other candidates having the same `prevp` by smallest `k`, at any time |
+| `rp` is live or queued and `hostp` is its host | refresh `lastSeen` or queue expiry |
+| not live, `prevp == L` | adopt as the election; competes with other candidates having the same `prevp` by smallest `(k, r)`, at any time; losers go dead |
 | not live, `prevp != L` | foreign: adopt (the only live game we know of) and set `L` accordingly |
-| live, `prevp == live.prev` | same-election candidate: smallest `k` wins, at any time |
-| live, `prevp == live.r` | queue in `next`; refresh expiry on re-announce |
+| live, `prevp == live.prev` | same-election candidate: smallest `(k, r)` wins, at any time; loser goes dead |
+| live, `prevp == live.r` | queue in `next` |
 | live, otherwise | foreign collision: see below |
-
-There is no generation number to jump or rewind; "old" proposals are recognised by tombstoned
-`r`, and a stale `prev` simply lands in the foreign path.
 
 **Foreign collision** (a live round meets a live round of another lineage, the healed-partition
 case): a single frame never ends a game. The foreign proposal becomes a candidate and is promoted
 only after a second re-announce at least 2 s after the first. Two live rounds then resolve by the
-smaller host `k`; the losing host sends stop for its own round, its `r` is tombstoned, and every
-peer adopts the winner. A member can force this deliberately, and wins only if their `k` is the
-smaller; the UI names them ("X started a competing round"), the per-peer play mute ignores their
-proposals entirely, and moderation applies.
+smaller host `(k, r)`; the losing host sends stop for its own round, the loser goes dead, and
+every peer adopts the winner. A member can force this deliberately and wins only if their `k` is
+the smaller; the UI names them ("X started a competing round"), the per-peer play mute ignores
+their proposals entirely, and moderation applies.
 
 **Liveness.** The host re-announces its start frame every 2 s. Proposals and re-announces share a
 per-sender budget of one per 2 s, burst 3. A live round whose host has not re-announced for 6 s
-(receiver-observed) is presumed gone: the round ends, its `r` is tombstoned, and the unexpired
-`next` candidate with the smallest `k` whose proposer is still connected starts after a 2 s
-election window; if none, the room is idle. Queued proposals are revalidated at start.
+(receiver-observed) is presumed gone: the round goes dead, and the unexpired `next` candidate
+with the smallest `(k, r)` whose proposer is still connected starts after a 2 s election window;
+if none, the room is idle. Queued proposals are revalidated at start.
 
 **Ordering.** `sn` and `q` follow the draw rules. Re-announces are new frames with fresh `q`.
 Every non-proposal frame names `r`. Inputs `{t:"i", sn, q, r, k}` from slot owners; state
@@ -531,16 +626,20 @@ host only, at most once per `r`, after which any state or terminal for that `r` 
 
 **Results** are per call: each `z` appends one entry to an in-memory history capped at 20.
 
-Tests: offline seed and option grinding has no effect on selection; concurrent starts with
-different descriptors resolve by `k`; reversed queue arrival still promotes the smallest `k`;
-repeated old-lineage proposals rejected by tombstone; a partition where one side played three
-rounds converging on recovery by host `k`; a next-round proposal during a live round queued,
-expiring after 30 s, revalidated at start; a changed `desc` treated as a different round; a
-mismatched `r` rejected; a single foreign frame not ending a game; input from a non-slot
-identity rejected; a player reconnecting to its slot; non-host state, stop and terminal
-rejected; duplicate and out-of-order `q` and `tick`; duplicate fly ids, out-of-range
-coordinates and oversized arrays rejected; `winner` out of range rejected; a second terminal
-for one `r` rejected; host silence for 6 s; the state bucket; the result history cap.
+Tests: a live host's 2 s re-announce and a queued candidate's refresh are accepted for the life
+of the round; offline seed and option grinding has no effect on selection; one identity sending
+two descriptors with reversed delivery on two peers converging on the same `(k, r)` winner with
+no dead-set growth; 5,000 distinct descriptors from one higher-ranked identity refused after its
+budget while others keep playing; concurrent starts with different descriptors resolving by
+`(k, r)`; reversed queue arrival promoting the smallest `(k, r)`; an old round re-proposed after
+a channel reopen rejected by the dead set; a partition where one side played three rounds
+converging on recovery; a next-round proposal during a live round queued, expiring after 30 s,
+revalidated at start; a changed `desc` treated as a different round; a mismatched `r` rejected;
+a single foreign frame not ending a game; input from a non-slot identity rejected; a player
+reconnecting to its slot; non-host state, stop and terminal rejected; duplicate and
+out-of-order `q` and `tick`; duplicate fly ids, out-of-range coordinates and oversized arrays
+rejected; `winner` out of range rejected; a second terminal for one `r` rejected; host silence
+for 6 s; the state bucket; the result history cap.
 
 ### 2.15 A knock is a bounded take carried inside each authenticated ring
 
@@ -572,11 +671,11 @@ sfx_n     u16 LE   0..4096
 sfx       sfx_n x ( frame u16 LE, patch u8, note u8 )
 ```
 
-The no-score take: `group` = the stable group id; `call` = lowercase hex SHA-256 over
-`["catcoms-flipnote-export:v1", <flipnote id>, epoch]`; `met` = `{bpm:120, bpb:4}`; `parts` =
+The no-score take: `group` = the stable group id; `call` = hex of
+`H("catcoms-flipnote-export:v1", flipnote id, epoch)`; `met` = `{bpm:120, bpb:4}`; `parts` =
 `[exporter identity]`; `lanes` = `[{src:0, sn}]` with `sn` derived from
-`["catcoms-flipnote-lane:v1", <flipnote id>]` as in 2.8; `patches` = the union; `events` =
-`[]`. With a score, the take is the 2.8 export with its patch array replaced by the union. Caps:
+`H("catcoms-flipnote-lane:v1", flipnote id)` as in 2.8; `patches` = the union; `events` = `[]`.
+With a score, the take is the 2.8 export with its patch array replaced by the union. Caps:
 frames 8 MiB, take 512 KiB, sfx 16 KiB, whole export 9 MiB. Decoding validates every length
 before allocating and re-runs `validateJamTake`. Tests: a byte-exact no-score golden vector; a
 64-patch score plus one disjoint sfx patch refused; a 63-patch score plus one sfx patch
@@ -616,7 +715,7 @@ replay keys, rank and host attribution.
 | doodle, frame | sealed blob via `publish_pix`, fetched bounded | `pix:v1` | 64 KiB encoded |
 | stamp | `emoji/` fileshare entry via `add_file` | `pix:v1` | 64 KiB encoded |
 | emoji sound | `emoji-sound/<code>.json` | `emoji-sound:v1` | 4 KiB |
-| registry | `DocRegistry` epoch chain from a fixed root | logical key to current epoch | one entry per logical document |
+| registry | `DocRegistry` epoch chain from a fixed root | full pointer projection plus lineage | 4096 epochs |
 | studio index | `StudioIndex` epoch per channel | objects map with expiry | 64 objects |
 | score | `StudioObject` epoch | `jam-score:v1` | 64 patches, 4096 cells |
 | flipnote | `StudioObject` epoch + blobs | `flipnote:v1` | 8 MiB frames, 999 frames, 4096 sfx, union 64 |
@@ -624,11 +723,17 @@ replay keys, rank and host attribution.
 | announcement doodles | `PostReplies` epoch per post | replies map with expiry | 64 per post, 4 per author |
 | chat doodle | message attachment `{cid, bytes, expiry}` | pix cid | 1 per message |
 | knock | local vault-sealed settings, sent in each ring | `JamKnock` | 3 s, 32 events |
-| avatar consent | `play` channel `t:"pf"` with backend-supplied cid | 0/1 + cid | 15 s freshness |
+| consented avatar cid | vault-sealed local state keyed by (server, identity), two-phase install | cid | one per server |
+| avatar consent | `play` channel `t:"pf"` | 0/1 + 64 hex cid | 15 s freshness |
 | non-verbal | `draw` channel `t:"pv"` | 0/1 | 15 s freshness |
 | frame claims | `draw` channel `t:"c"` | ephemeral | 90 s receiver-observed |
+| round dead set | in-memory per call | round ids | 64 per identity, 4096 hard |
 | round results | in-memory call history | per game | 20 per call |
-| epoch history | per epoch document | signed ops | closed at 20,000 changes or 4 MiB; close valid at half |
+| epoch history | per epoch document | signed ops | 20,000 changes and 4 MiB hard; close valid from 10,000 or 2 MiB |
+| frozen epoch retention | per epoch document | union of candidate closures | 8 candidates, 32 MiB |
+| quarantine | per epoch document | closes, changes, seeds | 16 closes, 2 MiB changes |
+| seed | successor's first change | canonical materialization | 2 MiB |
+| edit intents | vault-sealed local state | stable ids | 64 KiB each, 10,000 and 4 MiB per document, 64 MiB total |
 
 ## 4. Wire summary
 
@@ -638,8 +743,8 @@ replay keys, rank and host attribution.
 - **Call signal.** `ring:v1` per 2.15. `CallSignal` carries the full sender identity inbound
   and `SendCallSignal` takes one outbound (2.18). Presence pings are unchanged.
 - **`inst` (id 7).** Unchanged.
-- **Replication.** Close changes, seed snapshots, the registry chain, and heads-based
-  dependency-complete catch-up pages, all owned by P1.
+- **Replication.** Close changes, seed changes, registry hints, and cursor-driven
+  dependency-complete catch-up pages with bound cursors, all owned by P1.
 
 ## 5. UI
 
@@ -650,37 +755,42 @@ replay keys, rank and host attribution.
 - **Announcements.** A doodle wall under each post.
 - **Studio.** Per-channel surface listing flipnotes, scores, exports, expiry and rotation state;
   timeline, canvas, onion skin, score; claims with countdown and Pass; conflicted frames as
-  "another version by X".
+  "another version by X"; "seed not yet verified" (read-only) and "wrong seed by X" states.
 - **Settings.** Emoji sounds; broadcast clicks (with the legacy-wave caveat); knocks off, quiet
-  hours, default knock editor; adapt drawings to my theme; "use my avatar as a boss" and
-  non-verbal preferences; open Draw when a non-verbal member draws; GB cam.
+  hours, default knock editor; adapt drawings to my theme; "use my avatar as a boss" (greyed
+  with an explanation when no locally attested avatar exists) and non-verbal preferences; open
+  Draw when a non-verbal member draws; GB cam.
 
 ## 6. Threat notes
 
 - **Identity.** Every per-peer key is the full device identity in one encoding (2.18).
-- **Avatars.** A boss avatar renders only from the cid its owner's backend named in a
-  capability-bound, fresh consent frame, through the existing bounded avatar image path with
-  magic sniffing, with async completion rechecked against capability, freshness, identity and
-  cid (2.12).
+- **Avatars.** The consented cid comes from vault-sealed local state installed in two durable
+  phases around this device's own publication, never from the convention-owned profile
+  document; a boss renders only from that cid, through the existing bounded avatar image path
+  with magic sniffing, with async completion rechecked (2.12).
 - **Untrusted bytes.** `pix:v1` and `pixa:v1` decode with caps enforced before allocation;
   fetches are bounded by declared size before storage; patches everywhere reuse the jam
-  validator; document roots are strict-decoded and self-describing.
-- **History.** Epochs close on verifiable head sets with half-budget proof, frozen epochs
-  accept only ancestors of accepted closes, seeds are byte-deterministic, late edits are the
-  author's to replay, and the registry chain gives every logical document a discoverable current
-  epoch (2.9).
+  validator; document roots and every frame are strict-decoded.
+- **History.** Epochs close on verifiable head sets with lower and upper bounds; closes, stray
+  changes and seeds are quarantined with per-author processing budgets and never enter the log
+  until retained; freezing rebuilds the document from retained closures and removes excluded
+  history from state, log and snapshots; seeds are recomputable, selected before use, and
+  editing waits for verification; late edits replay idempotently from durable intents; the
+  registry is forward-walkable from a fixed root with lossless seeds and lineage (2.9).
 - **Amplification and floods.** Own byte buckets, byte caps before parse, exhaustion auto-mute,
   semantic limits on begins, finishes, replays, proposals, re-announces, state frames and
   retained bytes. Rings are bounded post-parse on decoded bytes and rate-limited by the core.
-- **Availability.** Round selection uses an identity rank with no sender input; a single frame
-  never ends a game; the lowest-ranked member of a call can disrupt rounds and is named, mutable
-  and moderatable.
+- **Availability.** Round selection uses `(k, r)` with no sender input in `k`; a single frame
+  never ends a game; live and queued rounds are refreshed, not rejected, by their host's
+  re-announces; the dead set lasts the call with per-identity budgets; the lowest-ranked member
+  of a call can disrupt rounds and is named, muteable and moderatable.
 - **Harassment.** Per-peer hide covers attention, sound, storage, replay and auto-open.
   Non-verbal mode raises no budget.
 - **Privacy.** Strokes are content and any recipient can retain them; disclosed once in the
-  Draw tab. Local preferences are vault-sealed. `pix:v1` carries no metadata.
+  Draw tab. Local preferences and intents are vault-sealed. `pix:v1` carries no metadata.
 - **Honest-client boundary.** Studio authorization, sidecar authority, attribution fields,
-  reported scores, consent flags and claims are honest-client and labelled so.
+  reported scores, consent flags, claims, seed content and registry content are honest-client
+  and labelled so.
 - **Clocks.** Scheduling and receiver-observed freshness only. Expiry deadlines come from the
   backend `Clock`.
 
@@ -690,7 +800,7 @@ replay keys, rank and host attribution.
 
 | Prereq | Delivers | Blocks |
 |---|---|---|
-| P1 | the epoch-close protocol of 2.9: close changes with half-budget validity, frozen-epoch ingest, smallest-hash winner, deterministic seed snapshots, author-replayed late edits, the `DocRegistry` chain from a fixed root, heads-based dependency-complete catch-up with capped heads and provider restart, per-author ingest rate limit; its own adversarial review; golden vectors for both id derivations | C3a, C5a, and everything after them |
+| P1 | the epoch-close protocol of 2.9: heads-only closes with lower and upper closure bounds, successor ids derived from the close hash, quarantine with per-author processing budgets and negative cache, equivocation and candidate-retention rules, freeze-by-reconstruction with atomic replacement, seed changes with quarantine, verification, selection and rebuild, durable idempotent intents with stable ids and caps, the forward-walkable registry with full-projection seeds, lineage and hints, cursor-driven dependency-complete catch-up with bound cursors and restart, per-author ingest rate limit; its own adversarial review; golden vectors for every derivation | C3a, C5a, and everything after them |
 | P2 | retention enforcement consulting `wiki_pinned_cids()` and `creative_pinned_cids()`; not blocking | none |
 
 **Slices.** Each is one reviewable PR with its own tests.
@@ -699,7 +809,7 @@ replay keys, rank and host attribution.
 |---|---|---|
 | C0a | `pix:v1` codec, golden vectors, rejection tests | none |
 | C0b | `rt-admission.ts` extracted; jam tests unchanged | none |
-| C0c | `publish_pix`, `request_blob_bounded` with tests, `creative_pinned_cids()` skeleton reading `get_all`, `my_avatar_cid()` backend query | none |
+| C0c | `publish_pix`, `request_blob_bounded` with tests, `creative_pinned_cids()` skeleton reading `get_all`, the two-phase vault-sealed consented-avatar record around `set_profile` and `my_avatar_cid()` | none |
 | C0d | full identity (lowercase hex) through `CallSignal` inbound and `SendCallSignal` outbound; call state re-keyed; four-byte-collision fixture | none |
 | C1 | canvas component; stamp editor writing a `.pix` fileshare entry through `add_file`; picker renders `.pix` | C0a |
 | C2a | `emoji-sound:v1` envelope, folder, binding and authority rules, picker glyph, local click, settings toggle | C0a |
@@ -709,7 +819,7 @@ replay keys, rank and host attribution.
 | C4a | `draw` channel transport, state machine, `pv` frame, semantic limits; debug list only | C0b, C0d |
 | C4b | Draw tab, strip, history, attention rules, blips, hide-peer, non-verbal badge and auto-open preference | C4a |
 | C4c | pin to chat with 2.13 attribution; replay on join | C4b, C3b |
-| C5a | `StudioIndex` and `StudioObject` under the registry, self-describing roots, typed events, bounds, materialization, expiry, editor coalescing | P1, C0c |
+| C5a | `StudioIndex` and `StudioObject` under the registry, self-describing roots, typed events, bounds, materialization, expiry, editor coalescing, intent retention UI | P1, C0c |
 | C5b | score editor and CRDT cell writes | C5a, C2a |
 | C5c | deterministic take export and the export invariant suite | C5b |
 | C6a | `flipnote:v1` root, frame records with `bytes`, patch union rule, over-cap materialization, export records, enumerator coverage | C5a |
@@ -717,7 +827,7 @@ replay keys, rank and host attribution.
 | C6c | soundtrack and sfx playback | C6b, C5c |
 | C6d | `pixa:v1` export with the no-score golden vector, local GIF save | C6c |
 | C7 | knock: local default, editor, `ring:v1` with the decoded-byte check, ring dialog, callee preferences and teardown | C2a, C0d |
-| C8a | `play` channel, identity rank, chained rounds with committed descriptors and named players, transition table, foreign-collision promotion, liveness, queue, ordering, terminal frame, state bucket, per-peer play mute, `pf` consent frame with backend cid and async rechecks | C0b, C0c, C0d |
+| C8a | `play` channel, `(k, r)` ordering, chained rounds with committed descriptors and named players, live/queued/dead sets with per-identity budgets, one candidate per identity and election, transition table, foreign-collision promotion, liveness, ordering, terminal frame, state bucket, per-peer play mute, strict `pf` consent frame with the locally attested cid and async rechecks | C0b, C0c, C0d |
 | C8b | paddle schema and game | C8a |
 | C8c | swat schema and game with emoji and consenting members' avatars rendered only from named cids through the existing avatar image path | C8a, C2a |
 | C8d | per-call results in the Play tab and bounded history | C8a |
