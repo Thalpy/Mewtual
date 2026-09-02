@@ -11423,6 +11423,43 @@ async fn save_space_layout(
     })
 }
 
+/// Export a jam-take sheet transcript to Downloads and reveal it without executing it.
+///
+/// The content is frontend-generated SVG (jam-sheet.ts), never peer bytes: the checks below pin
+/// the name to the exporter's own fixed shape and the body to an SVG document within a bounded
+/// size, so this command cannot be repurposed to drop arbitrary peer content into Downloads.
+#[tauri::command]
+async fn save_jam_sheet(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    svg: String,
+) -> Result<SavedFileResult, String> {
+    require_unlocked_session(&state).await?;
+    let valid_name = name.len() <= 64
+        && name.ends_with(".svg")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+    if !valid_name {
+        return Err("the sheet export has an unexpected file name".into());
+    }
+    if svg.len() > 4_000_000 || !svg.starts_with("<svg") || !svg.trim_end().ends_with("</svg>") {
+        return Err("the sheet export is not a Mewtual sheet transcript".into());
+    }
+    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    let path = write_download(&downloads, &name, svg.as_bytes())?;
+    let warning = reveal_path(&path)
+        .err()
+        .map(|error| format!("The sheet was saved, but Downloads could not be opened: {error}"));
+    Ok(SavedFileResult {
+        path: path.to_string_lossy().into_owned(),
+        displayed: warning.is_none(),
+        warning,
+        content_validation: None,
+    })
+}
+
 /// What a streamed save needs from the running app: somewhere to get chunks, and an answer to
 /// "is this still allowed to happen?".
 ///
@@ -14437,6 +14474,7 @@ pub fn run() {
             open_external_url,
             save_and_open_space_guide,
             save_space_layout,
+            save_jam_sheet,
             save_group_file
         ])
         .run(tauri::generate_context!())

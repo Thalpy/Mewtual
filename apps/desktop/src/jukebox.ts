@@ -8,7 +8,11 @@
  */
 
 /** What a queued file is, as far as the deck cares. */
-export type MediaKind = "audio" | "video" | "other";
+export type MediaKind = "audio" | "video" | "take" | "other";
+
+/** The jam-take export format: a validated event log the deck replays through the jam synth. */
+export const JAM_TAKE_EXT = ".jamtake";
+export const JAM_TAKE_MIME = "application/x-mewtual-jamtake";
 
 /** The custom scheme the webview plays shared media through. */
 export const MEDIA_SCHEME = "catcoms-media";
@@ -62,7 +66,9 @@ const AUDIO_EXT = new Set(["mp3", "m4a", "aac", "ogg", "oga", "opus", "flac", "w
  * at all, so a listener reading the queue has nothing else to go on.
  */
 export function mediaKind(name: string, mime = ""): MediaKind {
-  const type = mime.trim().toLowerCase().split("/")[0];
+  const trimmedMime = mime.trim().toLowerCase();
+  if (trimmedMime === JAM_TAKE_MIME || name.trim().toLowerCase().endsWith(JAM_TAKE_EXT)) return "take";
+  const type = trimmedMime.split("/")[0];
   if (type === "video") return "video";
   if (type === "audio") return "audio";
   const dot = name.lastIndexOf(".");
@@ -73,7 +79,7 @@ export function mediaKind(name: string, mime = ""): MediaKind {
 }
 
 /** What the "add from share" picker is currently listing. */
-export type MediaFilter = "all" | "audio" | "video";
+export type MediaFilter = "all" | "audio" | "video" | "take";
 
 /** The least a file has to say for the picker to place it. */
 export type MediaChoice = { cid: string; name: string; mime: string };

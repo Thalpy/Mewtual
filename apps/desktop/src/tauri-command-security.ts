@@ -164,6 +164,9 @@ export const TAURI_COMMAND_GROUPS = {
     boundary: "URLs and files cross into the OS; exact allowlists, bounds and non-shell launch/write paths required.",
     commands: [
       "open_issue_url", "open_public_diagnostics_issue", "open_external_url", "save_and_open_space_guide", "save_space_layout",
+      // Sheet-music export: frontend-rendered SVG only (name shape + document prefix pinned
+      // native-side), so peer bytes can never ride it into Downloads.
+      "save_jam_sheet",
       // Atomic public-diagnostics launcher. It accepts no report/title/URL payload: native code
       // reads the bounded ring, renders the typed allowlist, constructs the exact fixed tracker URL
       // and launches it. Only the exact full publication envelope is returned for clipboard fallback

@@ -14676,3 +14676,548 @@ button.dbg-mode.on {
   font: inherit;
   color: inherit;
 }
+
+/* ===================== Jam layer: patch tiles, editor, drum pads ===================== */
+/* Tokens only (livery/preset compliant). The one literal is #131218 text on a peer's
+   name-colour fill, matching the piano's rheld precedent: peer colours are identity, not theme. */
+.jam-mode {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-left: 0.5rem;
+}
+.jam-mode-btn {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  padding: 2px 10px;
+  border-radius: 0;
+  color: var(--muted);
+}
+.jam-mode-btn.on {
+  background: var(--accent-dim);
+  color: var(--accent-hi);
+}
+.jam-legacy {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+.jam-legacy.on {
+  color: var(--warn);
+  border-color: var(--warn-brd);
+  background: var(--warn-dim);
+}
+.jam-ctl-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border-soft);
+  margin: 0 2px;
+}
+.jam-pads {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  padding: 4px 0;
+}
+.jam-pad {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 64px;
+  padding: 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  cursor: pointer;
+  color: var(--text-2);
+}
+.jam-pad.hit {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.jam-pad-nm {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.jam-pad-ky {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  opacity: 0.7;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0 5px;
+}
+.jam-edit {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 6px 0 2px;
+}
+.jam-edit-col {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.jam-edit-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+  text-transform: uppercase;
+  margin-top: 2px;
+}
+.jam-osc {
+  display: flex;
+  gap: 4px;
+}
+.jam-osc-w {
+  font-family: var(--mono);
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 2px 7px;
+  color: var(--muted);
+}
+.jam-osc-w.on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+.jam-prm {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  color: var(--muted);
+}
+.jam-prm span {
+  width: 2.4em;
+  flex: none;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.jam-prm b {
+  width: 3.2em;
+  flex: none;
+  text-align: right;
+  font-weight: 400;
+  color: var(--text-2);
+}
+.jam-prm input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+  height: 14px;
+}
+.jam-edit-note {
+  font-size: 0.66rem;
+  color: var(--muted);
+  line-height: 1.45;
+  margin-top: 4px;
+}
+.jam-flood .inst-notes {
+  color: var(--warn);
+}
+
+/* Jam metronome transport */
+.jam-met {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 0 4px;
+}
+.jam-met-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text-2);
+}
+.jam-met-btn.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.jam-met-btn.ro {
+  color: var(--muted);
+  cursor: default;
+}
+.jam-met-bpm {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.jam-met-lbl {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.jam-met-sig {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 2px 7px;
+}
+.jam-met-sig.ro {
+  border-color: transparent;
+  color: var(--muted);
+}
+.jam-pips {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.jam-pip {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+}
+.jam-pip.bar {
+  border-color: var(--accent);
+}
+.jam-pip.beat {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 7px 1px color-mix(in oklab, var(--accent) 55%, transparent);
+}
+.jam-met-bar {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--muted);
+}
+.jam-met-chip {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.1em;
+  border-radius: 999px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+}
+.jam-met-chip.ok {
+  color: var(--ok);
+  border-color: var(--ok-brd);
+  background: var(--ok-dim);
+}
+.jam-met-chip.warn {
+  color: var(--warn);
+  border-color: var(--warn-brd);
+  background: var(--warn-dim);
+}
+
+/* Jam feedback round: wrapping tile row, knob editor, remap, takes, recording banner */
+.inst-ctl,
+.inst-head {
+  flex-wrap: wrap; /* the register +/- (and the head chips) must never hide past a scroll */
+  row-gap: 4px;
+}
+.jam-edit {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); /* narrow docks stack, never squeeze */
+}
+.jam-edit-hd {
+  white-space: nowrap;
+}
+.jam-osc-w {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 2px 0;
+  text-align: center;
+}
+.jam-sect {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.jam-knobs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.jam-knob {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  width: 44px;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+  border-radius: var(--r);
+}
+.jam-knob:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.jam-knob-face {
+  width: 30px;
+  height: 30px;
+}
+.jam-knob-ring {
+  fill: var(--bg-elev);
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+.jam-knob:hover .jam-knob-ring,
+.jam-knob:focus-visible .jam-knob-ring {
+  stroke: var(--accent);
+}
+.jam-knob-tick {
+  stroke: var(--accent-hi);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.jam-knob-lbl {
+  font-family: var(--mono);
+  font-size: 0.54rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.jam-knob-val {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  color: var(--text-2);
+}
+.jam-save {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.jam-save-name {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  padding: 4px 7px;
+}
+button.jam-save-btn {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text-2);
+  background: transparent;
+}
+button.jam-save-btn.on {
+  background: var(--ok-dim);
+  border-color: var(--ok-brd);
+  color: var(--ok);
+}
+button.jam-save-btn.rec {
+  color: var(--danger);
+  border-color: var(--danger-brd);
+  background: var(--danger-dim);
+}
+button.jam-tile-del {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  align-self: center;
+}
+button.jam-tile-del:hover {
+  color: var(--danger);
+  border-color: var(--danger-brd);
+}
+.jam-keymap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r);
+  padding: 8px 10px;
+  margin: 2px 0 4px;
+}
+.jam-km-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+button.jam-km {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 3px 7px;
+  color: var(--muted);
+  background: transparent;
+}
+button.jam-km.cap {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent-hi);
+}
+.jam-km-key {
+  border: 1px solid var(--border-soft);
+  border-radius: 3px;
+  padding: 0 5px;
+  color: var(--text-2);
+  min-width: 1.4em;
+  text-align: center;
+}
+.jam-km-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.jam-takes {
+  border-top: 1px solid var(--border-soft);
+  margin-top: 4px;
+}
+button.jam-takes-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 5px 2px;
+  background: transparent;
+  color: var(--muted);
+}
+.jam-takes-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 0 6px;
+}
+.jam-take-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+button.jam-take-play {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text-2);
+  background: transparent;
+  flex: none;
+}
+button.jam-take-play svg {
+  width: 11px;
+  height: 11px;
+}
+button.jam-take-play.on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+.jam-take-name {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  color: var(--text);
+  white-space: nowrap;
+}
+.jam-take-who {
+  font-size: 0.66rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jam-rec-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 7px 1px color-mix(in oklab, var(--danger) 55%, transparent);
+  flex: none;
+}
+.jam-rec-dot.armed {
+  background: var(--warn);
+  box-shadow: 0 0 7px 1px color-mix(in oklab, var(--warn) 55%, transparent);
+}
+.jam-rec-lbl {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--danger);
+}
+.jam-rec-lbl.dim {
+  color: var(--warn);
+}
+.jam-rec-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--warn-brd);
+  background: var(--warn-faint);
+  border-radius: var(--r);
+  padding: 5px 10px;
+  margin: 4px 0;
+}
+.jam-rec-banner.live {
+  border-color: var(--danger-brd);
+  background: var(--danger-dim);
+}
+.jam-rec-text {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  color: var(--text-2);
+}
+/* Saved patches: a drawer that grows DOWN, so the tile row keeps its width at any dock size. */
+.jam-custom {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r);
+  padding: 8px 10px;
+  margin: 2px 0 4px;
+}
+.jam-custom-tile {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}

@@ -73,7 +73,7 @@ test("a heartbeat that omits vid does not retract a live screen share", () => {
   // mute states. Folding one of those in used to zero vid, which tore the picture down on every
   // viewer seconds after it started while the sender's own preview kept playing.
   const sharing = mergePeerState(undefined, { t: "s", mic: 0, inst: 0, vid: 2 });
-  assert.deepEqual(sharing, { mic: false, inst: false, vid: 2, rx: 1080 });
+  assert.deepEqual(sharing, { mic: false, inst: false, vid: 2, rx: 1080, rec: 0, rc: false });
 
   const afterPing = mergePeerState(sharing, { mic: 1, inst: 0 });
   assert.equal(afterPing.vid, 2, "an absent vid is not a claim that the video stopped");
@@ -94,6 +94,21 @@ test("stopping the video is believed, and nothing is invented for a peer we neve
   assert.equal(mergePeerState(sharing, { mic: 0, inst: 0, vid: 1 }).vid, 1); // screen -> camera
   assert.equal(mergePeerState(undefined, { mic: 0, inst: 0 }).vid, 0);
   assert.equal(mergePeerState(sharing, { mic: 0, inst: 0, vid: "2" }).vid, 2); // not a number: not a claim
+});
+
+test("recording and consent are fresh claims: silence and old builds read as neither", () => {
+  // The recorder's ready() gate keys off rc; if absence were sticky, a peer whose build stopped
+  // sending it (or an old build that never did) could be treated as still consenting.
+  const asking = mergePeerState(undefined, { mic: 0, inst: 0, rec: 1 });
+  assert.equal(asking.rec, 1);
+  assert.equal(asking.rc, false, "asking to record is not consenting for anyone else");
+  const recording = mergePeerState(asking, { mic: 0, inst: 0, rec: 2, rc: 1 });
+  assert.equal(recording.rec, 2);
+  assert.equal(recording.rc, true);
+  const silentPing = mergePeerState(recording, { mic: 0, inst: 0 });
+  assert.equal(silentPing.rec, 0, "a message without rec is a claim of not recording");
+  assert.equal(silentPing.rc, false, "consent is never remembered past the message that carried it");
+  assert.equal(mergePeerState(undefined, { mic: 0, rec: "2", rc: "1" }).rec, 0, "strings are not claims");
 });
 
 test("parking a video slot drops the send half and leaves the receive half alone", () => {
