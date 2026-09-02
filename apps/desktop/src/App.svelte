@@ -12,8 +12,9 @@
   } from "./textfile";
   import {
     MAX_SPEAKESE_BLIPS, SPEAKESE_STEP_SECONDS, TEXT_EFFECTS, TEXT_EFFECT_GROUPS,
+    rankQuickTextEffects, sanitizeTextEffectUsage, isTextEffectId, canonicalTextEffectId,
     cherryBlossomShouldBurst, dismissTextEffectPalette, insertTextEffect, redTruthNoiseSample,
-    redTruthSoundPlan, speakeseSoundPlan, textEffectHtml,
+    redTruthSoundPlan, speakeseSoundPlan, teletypeSoundPlan, textEffectHtml, ONE_SHOT_EFFECT_IDS, TELETYPE_STEP_SECONDS,
     type TextEffectPointerRegion,
   } from "./message-effects";
   import {
@@ -2852,7 +2853,9 @@
   let textEffectKeybinds = $state<Record<string, string>>(loadTextEffectKeybinds());
   let textEffectTarget = $state<TextEffectTarget | null>(null);
   let textEffectSelection = $state({ start: 0, end: 0 });
-  let textEffectBubble = $state({ x: 0, y: 0 });
+  let textEffectBubble = $state({ x: 0, y: 0, bottom: 0 });
+  // The Aa strip's "+" unfolds the whole sectioned catalog in place instead of opening a modal.
+  let textEffectBarExpanded = $state(false);
   let showTextEffectCatalog = $state(false);
   let textEffectQuery = $state("");
   // Catalog sections the user folded shut; a search query overrides this so matches never hide.
@@ -2860,11 +2863,29 @@
   let recordingTextEffect = $state("");
   let textEffectKeyError = $state("");
   let suppressTextEffectSelection = false;
-  const QUICK_TEXT_EFFECT_IDS = [
-    "shake", "wave", "sparkle", "speakese", "perfect-cherry-blossom", "red-truth",
-    "flame", "gloom", "cyber", "crt", "censor", "pride/rainbow",
-  ];
-  let quickTextEffects = $derived(TEXT_EFFECTS.filter((effect) => QUICK_TEXT_EFFECT_IDS.includes(effect.id)));
+  // Device-local counts of applied effects order the Aa strip by what this person actually uses.
+  const TEXT_EFFECT_USAGE_KEY = "catcoms.textEffects.usage.v1";
+  function loadTextEffectUsage(): Record<string, number> {
+    try {
+      return sanitizeTextEffectUsage(JSON.parse(localStorage.getItem(TEXT_EFFECT_USAGE_KEY) ?? "{}"));
+    } catch {
+      return {};
+    }
+  }
+  let textEffectUsage = $state<Record<string, number>>(loadTextEffectUsage());
+  function bumpTextEffectUsage(id: string) {
+    textEffectUsage = { ...textEffectUsage, [id]: (textEffectUsage[id] ?? 0) + 1 };
+    try { localStorage.setItem(TEXT_EFFECT_USAGE_KEY, JSON.stringify(textEffectUsage)); } catch { /* ignore */ }
+  }
+  let quickTextEffects = $derived.by(() => {
+    const byId = new Map(TEXT_EFFECTS.map((effect) => [effect.id, effect]));
+    return rankQuickTextEffects(textEffectUsage).flatMap((id) => byId.get(id) ?? []);
+  });
+  /** The bar is centred on the selection; a wider unfolded bar needs a tighter clamp to stay on screen. */
+  function textEffectBarLeft(expanded: boolean): number {
+    const half = Math.min(expanded ? 380 : 205, Math.max(0, (innerWidth - 18) / 2));
+    return Math.max(9 + half, Math.min(innerWidth - 9 - half, textEffectBubble.x));
+  }
   let filteredTextEffects = $derived.by(() => {
     const q = textEffectQuery.trim().toLowerCase();
     return q
@@ -2951,11 +2972,13 @@
     const pickedRect = picked.getBoundingClientRect();
     const x = rect.left + pickedRect.left - mirrorRect.left + pickedRect.width / 2 - input.scrollLeft;
     const y = rect.top + pickedRect.top - mirrorRect.top - input.scrollTop - 8;
+    const bottom = rect.top + pickedRect.bottom - mirrorRect.top - input.scrollTop + 8;
     mirror.remove();
     const halfPalette = Math.min(205, Math.max(0, (innerWidth - 18) / 2));
     return {
       x: Math.max(9 + halfPalette, Math.min(innerWidth - 9 - halfPalette, x)),
       y: Math.max(8, Math.min(rect.bottom - 8, y)),
+      bottom: Math.max(rect.top + 8, Math.min(innerHeight - 8, Math.min(rect.bottom + 8, bottom))),
     };
   }
   function onTextEffectSelection(target: TextEffectTarget) {
@@ -2966,15 +2989,26 @@
     }
     const input = textEffectElement(target);
     if (!input) return;
+    const previous = textEffectBubble;
     textEffectBubble = textEffectSelectionAnchor(input, textEffectSelection.start, textEffectSelection.end);
+    // A fresh selection somewhere else folds the big grid back to the strip so it never jumps.
+    if (textEffectTarget !== target || previous.x !== textEffectBubble.x || previous.y !== textEffectBubble.y) {
+      textEffectBarExpanded = false;
+    }
     textEffectTarget = target;
     showTextEffectCatalog = false;
+  }
+  function toggleTextEffectBar() {
+    textEffectBarExpanded = !textEffectBarExpanded;
+    if (textEffectBarExpanded) textEffectQuery = "";
   }
   async function applyTextEffect(id: string, target = textEffectTarget) {
     if (!target) return;
     const wrapped = insertTextEffect(textEffectValue(target), textEffectSelection.start, textEffectSelection.end, id);
     setTextEffectValue(target, wrapped.value);
+    if (isTextEffectId(id)) bumpTextEffectUsage(canonicalTextEffectId(id));
     showTextEffectCatalog = false;
+    textEffectBarExpanded = false;
     textEffectTarget = null;
     suppressTextEffectSelection = true;
     await tick();
@@ -6812,7 +6846,7 @@
     const target = e.target as HTMLElement | null;
     // Spoilers and censored effects use the same local, reader-controlled reveal. First click
     // reveals them and never follows a link that happens to sit inside.
-    const sp = target?.closest("[data-spoiler], [data-text-fx='censor']") as HTMLElement | null;
+    const sp = target?.closest("[data-spoiler], [data-fx-conceal]") as HTMLElement | null;
     if (sp && !sp.classList.contains("revealed")) {
       e.preventDefault();
       sp.classList.add("revealed");
@@ -6889,7 +6923,7 @@
     const k = (e: Event) => {
       const ev = e as KeyboardEvent;
       if (ev.key !== "Enter" && ev.key !== " ") return;
-      const card = (ev.target as HTMLElement | null)?.closest(".ref-card, [data-spoiler], [data-text-fx='censor']") as HTMLElement | null;
+      const card = (ev.target as HTMLElement | null)?.closest(".ref-card, [data-spoiler], [data-fx-conceal]") as HTMLElement | null;
       if (!card) return;
       ev.preventDefault();
       card.click();
@@ -6917,9 +6951,12 @@
     const speakeseRevealTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
     const pendingRedTruth = new Set<HTMLElement>();
     const redTruthRevealTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
+    const pendingTeletype = new Set<HTMLElement>();
+    const teletypeRevealTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
     let pointerFx: HTMLElement | null = null;
     let speakeseAudioUntil = 0;
     let redTruthAudioUntil = 0;
+    let teletypeAudioUntil = 0;
 
     function effectVisible(el: HTMLElement) {
       const rect = el.getBoundingClientRect();
@@ -7008,6 +7045,36 @@
       }
     }
 
+    function scheduleTeletype(el: HTMLElement) {
+      if (document.documentElement.dataset.textEffects !== "full" || !soundOn) return;
+      const count = [...el.querySelectorAll<HTMLElement>(".fx-teletype-unit")]
+        .filter((unit) => (unit.textContent ?? "").trim()).length;
+      if (!count) return;
+      try {
+        const ctx = audioCtx;
+        if (!ctx || ctx.state !== "running") { pendingTeletype.add(el); return; }
+        if (ctx.currentTime < teletypeAudioUntil) return;
+        const start = ctx.currentTime + 0.025;
+        const plan = teletypeSoundPlan(count, start);
+        teletypeAudioUntil = start + plan.length * TELETYPE_STEP_SECONDS;
+        plan.forEach((click) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = click.waveform;
+          osc.frequency.setValueAtTime(click.frequency, click.at);
+          osc.frequency.exponentialRampToValueAtTime(click.endFrequency, click.stop);
+          gain.gain.setValueAtTime(0.0001, click.at);
+          gain.gain.exponentialRampToValueAtTime(click.peak, click.at + 0.002);
+          gain.gain.exponentialRampToValueAtTime(0.0001, click.stop - 0.002);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(click.at);
+          osc.stop(click.stop);
+        });
+      } catch {
+        // The typed reveal never depends on Web Audio.
+      }
+    }
+
     function revealPending(
       pending: Set<HTMLElement>,
       timers: Map<HTMLElement, ReturnType<typeof setTimeout>>,
@@ -7029,6 +7096,7 @@
       if (document.documentElement.dataset.textEffects !== "full" || !soundOn) {
         revealPending(pendingSpeakese, speakeseRevealTimers);
         revealPending(pendingRedTruth, redTruthRevealTimers);
+        revealPending(pendingTeletype, teletypeRevealTimers);
         return;
       }
       try {
@@ -7037,6 +7105,7 @@
           if (!audioCtx || audioCtx.state !== "running") return;
           revealPending(pendingSpeakese, speakeseRevealTimers, scheduleSpeakese);
           revealPending(pendingRedTruth, redTruthRevealTimers, scheduleRedTruth);
+          revealPending(pendingTeletype, teletypeRevealTimers, scheduleTeletype);
         };
         if (audioCtx.state === "running") playPending();
         else void audioCtx.resume().then(playPending).catch(() => { /* retry on the next gesture */ });
@@ -7078,6 +7147,11 @@
           startOneShot(el, pendingSpeakese, speakeseRevealTimers, scheduleSpeakese);
         } else if (el.dataset.textFx === "red-truth") {
           startOneShot(el, pendingRedTruth, redTruthRevealTimers, scheduleRedTruth);
+        } else if (el.dataset.textFx === "teletype") {
+          startOneShot(el, pendingTeletype, teletypeRevealTimers, scheduleTeletype);
+        } else {
+          // Silent entrances (Decrypt) never wait on an audio gesture.
+          el.classList.add("fx-play");
         }
       }
     }, { threshold: 0.18 });
@@ -7089,7 +7163,7 @@
       for (const effect of effects) {
         effect.querySelectorAll<HTMLElement>(".text-fx-unit").forEach((unit, index) =>
           unit.style.setProperty("--fx-i", String(index)));
-        if (["speakese", "red-truth"].includes(effect.dataset.textFx ?? "") && !observed.has(effect)) {
+        if (ONE_SHOT_EFFECT_IDS.includes(effect.dataset.textFx ?? "") && !observed.has(effect)) {
           observed.add(effect);
           // Picker/settings previews demonstrate the entrance, but selecting or browsing effects
           // must never make sound. Authored content is the only observer-driven audio source.
@@ -7112,7 +7186,7 @@
 
     const onPointerMove = (event: PointerEvent) => {
       const next = document.documentElement.dataset.textEffects === "full"
-        ? (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-text-fx]:not([data-text-fx='censor'])") ?? null
+        ? (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-text-fx]:not([data-fx-conceal])") ?? null
         : null;
       const entered = next !== pointerFx;
       if (pointerFx && pointerFx !== next) {
@@ -20100,7 +20174,7 @@
                  written, so it would read as unread until the day it happened. -->
             {#snippet newsRow(n: NewsItem)}
               <li class="inbox-item" class:unseen={isNewsItemUnseen(n, statusCursors, newsTsCeilings)}>
-                <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
+                <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-fx-conceal]:not(.revealed)")) jumpToNews(n); }}>
                   <div class="inbox-meta">
                     {#if n.kind === "event"}
                       <span class="inbox-tag event-tag">⧗ event</span>
@@ -22414,25 +22488,72 @@
 
     {#if textEffectTarget && !showTextEffectCatalog && textEffectSelection.start !== textEffectSelection.end}
       {@const fxTarget = textEffectTarget}
+      {@const flipped = textEffectBarExpanded && textEffectBubble.y < 360}
+      {@const room = flipped ? innerHeight - textEffectBubble.bottom - 16 : textEffectBubble.y - 16}
       <div
         class="text-fx-selection-bar"
-        style={`left:${textEffectBubble.x}px;top:${textEffectBubble.y}px`}
+        class:expanded={textEffectBarExpanded}
+        class:flipped
+        style={`left:${textEffectBarLeft(textEffectBarExpanded)}px;top:${flipped ? textEffectBubble.bottom : textEffectBubble.y}px;--fx-room:${Math.max(120, room)}px`}
         role="toolbar"
         aria-label={`Apply a text effect to selected ${textEffectTargetLabel(fxTarget)}`}
       >
-        {#each quickTextEffects as effect (effect.id)}
+        <div class="text-fx-strip">
+          {#each quickTextEffects as effect (effect.id)}
+            <button
+              type="button"
+              class="text-fx-aa"
+              aria-label={`Apply ${effect.label}`}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => applyTextEffect(effect.id, fxTarget)}
+            >
+              <span class="text-fx-aa-live" aria-hidden="true">{@html textEffectHtml(effect.id, "Aa")}</span>
+              <span class="text-fx-speech" role="tooltip"><strong>{effect.label}</strong>{effect.description}{#if textEffectKeybinds[effect.id]}<kbd>{textEffectKeybinds[effect.id]}</kbd>{/if}</span>
+            </button>
+          {/each}
           <button
             type="button"
-            class="text-fx-aa"
-            aria-label={`Apply ${effect.label}`}
+            class="text-fx-aa more"
+            class:active={textEffectBarExpanded}
+            title={textEffectBarExpanded ? "Back to your most-used effects" : "Every text effect, by section"}
+            aria-expanded={textEffectBarExpanded}
             onmousedown={(e) => e.preventDefault()}
-            onclick={() => applyTextEffect(effect.id, fxTarget)}
-          >
-            <span class="text-fx-aa-live" aria-hidden="true">{@html textEffectHtml(effect.id, "Aa")}</span>
-            <span class="text-fx-speech" role="tooltip"><strong>{effect.label}</strong>{effect.description}{#if textEffectKeybinds[effect.id]}<kbd>{textEffectKeybinds[effect.id]}</kbd>{/if}</span>
-          </button>
-        {/each}
-        <button type="button" class="text-fx-aa more" title="Every text effect and copyable code" onmousedown={(e) => e.preventDefault()} onclick={() => (showTextEffectCatalog = true)}>＋</button>
+            onclick={toggleTextEffectBar}
+          >{textEffectBarExpanded ? "−" : "＋"}</button>
+        </div>
+        {#if textEffectBarExpanded}
+          <div class="text-fx-bar-panel">
+            <input class="text-fx-search" bind:value={textEffectQuery} placeholder="Find shaky, trans pride, cyber, CRT…" aria-label="Search text effects" />
+            <div class="text-fx-bar-scroll">
+              {#each TEXT_EFFECT_GROUPS as group}
+                {@const effects = filteredTextEffects.filter((effect) => effect.group === group)}
+                {#if effects.length}
+                  <section class="text-fx-bar-group">
+                    <h3>{group}<span class="text-fx-group-count">{effects.length}</span></h3>
+                    <div class="text-fx-bar-grid">
+                      {#each effects as effect (effect.id)}
+                        <button
+                          type="button"
+                          class="text-fx-cell"
+                          title={`${effect.label}: ${effect.description}`}
+                          aria-label={`Apply ${effect.label}`}
+                          onmousedown={(e) => e.preventDefault()}
+                          onclick={() => applyTextEffect(effect.id, fxTarget)}
+                        >
+                          <span class="text-fx-cell-preview" aria-hidden="true">{@html textEffectHtml(effect.id, effect.preview)}</span>
+                          <span class="text-fx-cell-name">{effect.label}{#if textEffectKeybinds[effect.id]}<kbd>{textEffectKeybinds[effect.id]}</kbd>{/if}</span>
+                        </button>
+                      {/each}
+                    </div>
+                  </section>
+                {/if}
+              {/each}
+              {#if !filteredTextEffects.length}
+                <p class="muted small text-fx-bar-empty">No effect matches that. Try a mood, a colour, or a flag name.</p>
+              {/if}
+            </div>
+          </div>
+        {/if}
       </div>
     {/if}
 

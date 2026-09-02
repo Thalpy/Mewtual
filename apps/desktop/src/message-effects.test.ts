@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CONCEALING_EFFECT_IDS,
+  DEFAULT_QUICK_TEXT_EFFECT_IDS,
+  MAX_TELETYPE_CLICKS,
+  ONE_SHOT_EFFECT_IDS,
+  QUICK_TEXT_EFFECT_LIMIT,
+  rankQuickTextEffects,
+  sanitizeTextEffectUsage,
+  TELETYPE_STEP_SECONDS,
   TEXT_EFFECTS,
+  TEXT_EFFECT_GROUPS,
   PERFECT_CHERRY_BLOSSOM_PETALS,
   cherryBlossomShouldBurst,
   dismissTextEffectPalette,
@@ -12,9 +21,91 @@ import {
   redTruthSoundPlan,
   speakeseSoundPlan,
   stripTextEffects,
+  teletypeSoundPlan,
   textEffectGradient,
   textEffectHtml,
 } from "./message-effects.ts";
+
+test("the expanded catalog lists every new effect, keeps Utility ahead of Pride, and flags statics", () => {
+  const byId = new Map(TEXT_EFFECTS.map((effect) => [effect.id, effect]));
+  const motion = ["decrypt", "heartbeat", "jelly"];
+  const mood = ["frost", "legendary", "whisper", "void"];
+  const signal = ["hologram", "neon", "corrupted", "teletype"];
+  const utility = ["blur", "highlight", "key", "tag", "fine-print", "shout", "spaced"];
+  for (const [group, ids] of [["Motion", motion], ["Mood", mood], ["Signal", signal], ["Utility", utility]] as const) {
+    for (const id of ids) {
+      const effect = byId.get(id);
+      assert.ok(effect, id);
+      assert.equal(effect.group, group, id);
+      assert.equal(effect.animated, group !== "Utility", `${id} animated flag`);
+      assert.match(textEffectHtml(id, "x"), new RegExp(`data-text-fx="${id}"`));
+    }
+  }
+  assert.ok(TEXT_EFFECT_GROUPS.indexOf("Utility") < TEXT_EFFECT_GROUPS.indexOf("Pride"));
+  assert.equal(new Set(TEXT_EFFECTS.map((effect) => effect.id)).size, TEXT_EFFECTS.length, "ids are unique");
+  assert.deepEqual([...CONCEALING_EFFECT_IDS], ["censor", "blur"]);
+  assert.deepEqual([...ONE_SHOT_EFFECT_IDS], ["speakese", "red-truth", "decrypt", "teletype"]);
+});
+
+test("the Aa strip ranks by usage, fills from the seed list, and rejects junk counts", () => {
+  assert.deepEqual(rankQuickTextEffects({}), [...DEFAULT_QUICK_TEXT_EFFECT_IDS]);
+  const ranked = rankQuickTextEffects({ neon: 5, "pride/trans": 9, wave: 5, decrypt: 1 });
+  assert.deepEqual(ranked.slice(0, 4), ["pride/trans", "wave", "neon", "decrypt"], "count desc, then seed order breaks the tie");
+  assert.equal(ranked.length, QUICK_TEXT_EFFECT_LIMIT);
+  assert.equal(new Set(ranked).size, ranked.length, "no duplicates once seeds fill in");
+  assert.deepEqual(rankQuickTextEffects({ shake: 3 }, 3), ["shake", "wave", "sparkle"]);
+  assert.deepEqual(
+    sanitizeTextEffectUsage({ animalese: 2, wave: 1.9, bogus: 4, shake: -1, crt: Infinity, neon: "7" }),
+    { speakese: 2, wave: 1 },
+    "legacy ids canonicalise, unknown ids and bad numbers drop",
+  );
+  assert.deepEqual(sanitizeTextEffectUsage("nope"), {});
+});
+
+test("Decrypt and Corrupted carry fixed stand-in glyphs per visible letter and never leak markup", () => {
+  const decrypt = textEffectHtml("decrypt", "a <b");
+  assert.match(decrypt, /aria-label="a &lt;b"/);
+  assert.equal((decrypt.match(/data-fx-glyph="/g) ?? []).length, 3, "three visible letters get glyphs, the space does not");
+  assert.equal((decrypt.match(/data-fx-glyph2="/g) ?? []).length, 3);
+  assert.doesNotMatch(decrypt, /<b"/);
+  assert.equal(decrypt, textEffectHtml("decrypt", "a <b"), "the scramble is deterministic");
+  assert.notEqual(
+    [...decrypt.matchAll(/data-fx-glyph="([^"]*)"/g)].map((m) => m[1]).join(""),
+    [...decrypt.matchAll(/data-fx-glyph2="([^"]*)"/g)].map((m) => m[1]).join(""),
+    "the two stand-ins differ so the cycle is visible",
+  );
+  assert.match(textEffectHtml("corrupted", "ok"), /fx-corrupted-unit fx-i-1" data-fx-glyph="/);
+});
+
+test("Teletype types with a cursor and a bounded, alternating click plan", () => {
+  const html = textEffectHtml("teletype", "hi");
+  assert.equal((html.match(/fx-teletype-unit/g) ?? []).length, 2);
+  assert.match(html, /fx-teletype-cursor/);
+  const plan = teletypeSoundPlan(3, 1);
+  assert.equal(plan.length, 3);
+  assert.equal(plan[0].at, 1);
+  assert.ok(Math.abs(plan[1].at - plan[0].at - TELETYPE_STEP_SECONDS) < 1e-9);
+  assert.notEqual(plan[0].frequency, plan[1].frequency);
+  assert.ok(plan.every((click) => click.stop > click.at && click.peak > 0 && click.peak < 0.03));
+  assert.equal(teletypeSoundPlan(500, 0).length, MAX_TELETYPE_CLICKS);
+  assert.equal(teletypeSoundPlan(-4, 0).length, 0);
+});
+
+test("Blur conceals like Censor and Key splits chords into caps", () => {
+  const blur = textEffectHtml("blur", "<twist>");
+  assert.match(blur, /data-fx-conceal=""/);
+  assert.match(blur, /role="button"/);
+  assert.doesNotMatch(blur, /<twist>/);
+  assert.match(textEffectHtml("censor", "x"), /data-fx-conceal=""/);
+  assert.equal(insertTextEffect("", 0, 0, "blur").value, "[fx:blur]spoiler[/fx]");
+
+  const chord = textEffectHtml("key", "Ctrl+Shift+F");
+  assert.equal((chord.match(/class="fx-keycap"/g) ?? []).length, 3);
+  assert.equal((chord.match(/fx-keycap-join/g) ?? []).length, 2);
+  assert.equal((textEffectHtml("key", "+").match(/class="fx-keycap"/g) ?? []).length, 1, "a lone plus is one cap");
+  assert.equal((textEffectHtml("key", "Enter").match(/class="fx-keycap"/g) ?? []).length, 1);
+  assert.doesNotMatch(textEffectHtml("key", "<img>+x"), /<img>/);
+});
 
 test("the catalog includes expressive, terminal, utility and broad pride choices", () => {
   const ids = new Set(TEXT_EFFECTS.map((effect) => effect.id));
@@ -95,7 +186,11 @@ test("Speakese schedules audible, bounded, phoneme-varying blips in letter caden
   assert.equal(plan[0].at, 5);
   assert.ok(Math.abs(plan[1].at - plan[0].at - 0.072) < 1e-9);
   assert.ok(new Set(plan.map((blip) => Math.round(blip.frequency))).size === 3);
-  assert.ok(plan.every((blip) => blip.peak >= 0.03 && blip.stop > blip.at));
+  assert.ok(plan.every((blip) => blip.peak >= 0.04 && blip.stop > blip.at));
+  // Audibility on small speakers: every blip sits in a speech register, and vowels carry the most gain.
+  assert.ok(plan.every((blip) => blip.frequency >= 320 && blip.frequency <= 1_100), "speech register");
+  assert.ok(plan[0].peak > plan[1].peak, "vowels are louder than consonants");
+  assert.notEqual(plan[0].waveform, "sine", "vowels use a harmonic-rich waveform");
   assert.equal(speakeseSoundPlan(Array(100).fill(1), 0).length, 64);
 });
 

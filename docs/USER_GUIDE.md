@@ -248,21 +248,27 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   Clicking a card opens the thing it describes; right-clicking one offers its actions.
 - **Text effects** work in chat (including edits), profile bios, announcements, wiki prose,
   and event titles/details. Highlight some words and the floating **Aa** strip appears above
-  the selection. Its previews show the real effect; hover one for a plain-language explanation,
-  click it to apply, or use **+** for the complete searchable catalog. The **Aa FX** button beside
-  each editor opens that catalog even when nothing is selected.
+  the selection. Its previews show the real effect, ordered by the effects you apply most on this
+  device; hover one for a plain-language explanation and click it to apply. **+** unfolds the
+  whole catalog in place as a sectioned, searchable grid (it opens below the selection when there
+  is no room above). The **Aa FX** button beside each editor opens the full catalog dialog even
+  when nothing is selected.
 - The copyable form is `[fx:cyber]signal online[/fx]`. The catalog includes shaky and wavy
   motion, rainbow sparkles, one-shot Speakese that pops in letter by letter with phoneme-varied
   voice blips, The Red Truth's sharp metal strike and rising/falling noise-wash entrance,
-  entry-shed petals on Perfect Cherry Blossom, angry flame, gloom, cyber and CRT signals,
-  click-to-reveal censorship, and a broad set of named pride flags. The catalog's copy button
-  makes markup easy to move between
+  entry-shed petals on Perfect Cherry Blossom, a glyph-scrambling Decrypt, Heartbeat, and Jelly
+  in Motion; angry flame, gloom, Frost, gold Legendary, Whisper, and Void in Mood; cyber and CRT
+  signals plus Hologram, Neon, Corrupted, and a click-per-letter Teletype in Signal; a Utility set
+  of click-to-reveal Censored and Blur spoilers, Highlighter, keycap Key, pill Tag, Fine print,
+  Shout, and Spaced; and a broad set of named pride flags. Catalog sections fold shut and stay
+  that way until you reopen them; searching opens every matching section. The catalog's copy
+  button makes markup easy to move between
   surfaces without memorising it. Existing `[fx:animalese]...[/fx]` posts still render as Speakese.
 - Under **Settings → Appearance → Message text effects**, choose **Full**, **Low**, or **Plain**.
   Full effects can animate, respond to the pointer, and play quiet effect audio. Low keeps static
   colour/type cues but has no movement, pointer response, petal shedding, or effect audio. Plain shows
-  ordinary text. Your operating-system reduced-motion setting forces Low, and censored text
-  remains concealed in every mode until you reveal it.
+  ordinary text. Your operating-system reduced-motion setting forces Low, and censored or blurred
+  text remains concealed in every mode until you reveal it. Utility effects are static everywhere.
 - The ten original quick effects have defaults from **Alt+Shift+1** through **Alt+Shift+0**;
   **The Red Truth** uses **Alt+Shift+R** and **Perfect Cherry Blossom** uses **Alt+Shift+C**. Open
   **Settings → Keybinds → Text-effect shortcuts** to change, clear, or reset any effect's binding,
