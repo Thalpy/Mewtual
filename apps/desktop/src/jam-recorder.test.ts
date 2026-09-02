@@ -1,0 +1,195 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { JAM_SESSION_NONCE_HEX_CHARS, JAM_TAKE_COMMITMENT_DOMAIN, TAKE_MAX_BYTES, type JamPatch } from "./jam-contract.ts";
+import {
+  jamParticipantCommitment,
+  jamTakeId,
+  JamTakeRecorder,
+  parseJamTakeJson,
+  validateJamTake,
+} from "./jam-recorder.ts";
+
+const alice = "alice-fingerprint";
+const bob = "bob-fingerprint";
+const aliceSn = "a".repeat(JAM_SESSION_NONCE_HEX_CHARS);
+const bobSn = "b".repeat(JAM_SESSION_NONCE_HEX_CHARS);
+const patch: JamPatch = {
+  v: 1,
+  o: [{ w: 3, t: 0, c: 0, l: 100 }],
+  e: { a: 400, d: 800, s: 65, r: 2_000 },
+  f: { m: 0, c: 2_200, q: 25, e: 20 },
+  l: { r: 20, d: 10, t: 1 },
+  x: { c: 12, d: 8, r: 30 },
+};
+
+function recorder() {
+  return new JamTakeRecorder({ groupId: "group-1", callId: "general", bpm: 120, beatsPerBar: 4, participants: [alice, bob] });
+}
+
+function start(rec: JamTakeRecorder) {
+  assert.equal(rec.setConsent(alice, true), true);
+  assert.equal(rec.setConsent(bob, true), true);
+  assert.equal(rec.start(), true);
+}
+
+test("recording starts only with every participant's honest-client consent", () => {
+  const rec = recorder();
+  assert.equal(rec.start(), false);
+  rec.setConsent(alice, true);
+  assert.equal(rec.start(), false);
+  rec.setConsent(bob, true);
+  assert.equal(rec.start(), true);
+  rec.setConsent(bob, false);
+  assert.equal(rec.state(), "arming");
+});
+
+test("authenticated source/session lanes retain patches, fallback waves, drums and gaps", () => {
+  const rec = recorder();
+  start(rec);
+  const on = rec.recordNoteOn({
+    source: alice,
+    sessionNonce: aliceSn,
+    ms: 0,
+    sequence: 10,
+    note: 60,
+    wave: "triangle",
+    patch,
+  });
+  assert.equal(on.ok, true);
+  const off = rec.recordNoteOff({ source: alice, sessionNonce: aliceSn, ms: 500, sequence: 12, note: 60 });
+  assert.deepEqual(off.ok && off.gap, { from: 11, to: 11 });
+  const drum = rec.recordDrum({ source: bob, sessionNonce: bobSn, ms: 250, sequence: 1, pad: 4 });
+  assert.equal(drum.ok, true);
+
+  const take = rec.stop();
+  assert.deepEqual(take.parts, [alice, bob]);
+  assert.deepEqual(take.lanes, [{ src: 0, sn: aliceSn }, { src: 1, sn: bobSn }]);
+  assert.equal(take.patches.length, 1);
+  assert.deepEqual(take.events.map((event) => event.ms), [0, 250, 500], "grid time, not arrival grouping, orders playback");
+  assert.deepEqual(take.events[0], { ms: 0, lane: 0, n: 60, on: 1, w: "triangle", p: 0, q: 10 });
+  assert.deepEqual(take.events[1], { ms: 250, lane: 1, n: 4, d: 1, q: 1 });
+});
+
+test("a sender cannot allocate lanes or patches with rejected events", () => {
+  const rec = recorder();
+  start(rec);
+  assert.equal(rec.recordNoteOn({
+    source: alice,
+    sessionNonce: aliceSn,
+    ms: 10,
+    sequence: 2,
+    note: 60,
+    wave: "sine",
+  }).ok, true);
+  const before = rec.snapshot();
+  const duplicateWithNewPatch = rec.recordNoteOn({
+    source: alice,
+    sessionNonce: aliceSn,
+    ms: 20,
+    sequence: 2,
+    note: 61,
+    wave: "sine",
+    patch,
+  });
+  assert.deepEqual(duplicateWithNewPatch, { ok: false, reason: "duplicate" });
+  assert.equal(rec.snapshot().patches.length, before.patches.length);
+
+  const backwardNewLane = rec.recordDrum({
+    source: bob,
+    sessionNonce: bobSn,
+    ms: -1,
+    sequence: 1,
+    pad: 0,
+  });
+  assert.deepEqual(backwardNewLane, { ok: false, reason: "invalid" });
+  assert.equal(rec.snapshot().lanes.length, before.lanes.length);
+});
+
+test("membership changes pause an active take but do not auto-start an armed one", () => {
+  const armed = recorder();
+  armed.membershipChanged([alice, bob]);
+  assert.equal(armed.state(), "arming");
+
+  armed.membershipChanged([alice, bob, "carol"]);
+  armed.setConsent(alice, true);
+  armed.setConsent(bob, true);
+  assert.equal(armed.state(), "paused-membership");
+  assert.equal(armed.start(), false, "a join before consent must prevent recording the stale set");
+  armed.membershipChanged([alice, bob]);
+  assert.equal(armed.state(), "arming", "restoring an armed set still requires an explicit start");
+
+  const active = recorder();
+  start(active);
+  active.membershipChanged([alice, bob, "newcomer"]);
+  assert.equal(active.state(), "paused-membership");
+  assert.deepEqual(active.recordDrum({ source: alice, sessionNonce: aliceSn, ms: 0, sequence: 1, pad: 0 }), {
+    ok: false,
+    reason: "not-recording",
+  });
+  active.membershipChanged([bob, alice]);
+  assert.equal(active.state(), "recording");
+  active.membershipChanged([alice, alice]);
+  assert.equal(active.state(), "paused-membership", "a duplicate must not impersonate the exact participant set");
+});
+
+test("the recorder owns an immutable copy of its validated header", () => {
+  const participants = [alice, bob];
+  const config = { groupId: "group-1", callId: "general", bpm: 120, beatsPerBar: 4, participants };
+  const rec = new JamTakeRecorder(config);
+  participants.push("mallory");
+  config.callId = "other-call";
+  config.bpm = 240;
+  assert.deepEqual(rec.snapshot().parts, [alice, bob]);
+  assert.equal(rec.snapshot().call, "general");
+  assert.equal(rec.snapshot().group, "group-1");
+  assert.equal(rec.snapshot().met.bpm, 120);
+});
+
+test("take validation rejects parser tricks, unknown fields and dishonest lane order", () => {
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  assert.equal(validateJamTake(circular).ok, false);
+
+  const rec = recorder();
+  start(rec);
+  rec.recordNoteOn({ source: alice, sessionNonce: aliceSn, ms: 10, sequence: 1, note: 60, wave: "sine" });
+  rec.recordNoteOff({ source: alice, sessionNonce: aliceSn, ms: 20, sequence: 2, note: 60 });
+  const take = rec.stop();
+  assert.equal(validateJamTake(take).ok, true);
+  assert.equal(validateJamTake({ ...take, html: "<audio autoplay>" }).ok, false);
+  assert.equal(validateJamTake({ ...take, events: [take.events[1], take.events[0]] }).ok, false);
+  assert.equal(validateJamTake({ ...take, lanes: [...take.lanes, take.lanes[0]] }).ok, false);
+
+  const imported = structuredClone(take);
+  const validated = validateJamTake(imported);
+  assert.equal(validated.ok, true);
+  imported.events[0].n = 127;
+  assert.equal(validated.ok && validated.take.events[0].n, 60, "validated events must not retain caller-owned objects");
+
+  const inherited = Object.create(take) as typeof take;
+  assert.equal(validateJamTake(inherited).ok, false);
+  let getterReads = 0;
+  const accessor = { ...take } as Record<string, unknown>;
+  Object.defineProperty(accessor, "events", { enumerable: true, get: () => { getterReads += 1; return take.events; } });
+  assert.equal(validateJamTake(accessor).ok, false);
+  assert.equal(getterReads, 0);
+  assert.equal(parseJamTakeJson("x".repeat(TAKE_MAX_BYTES + 1)).ok, false);
+  assert.equal(parseJamTakeJson(JSON.stringify(take)).ok, true);
+});
+
+test("participant commitments bind group, take, call, device and every reconnect lane", async () => {
+  const rec = recorder();
+  start(rec);
+  rec.recordDrum({ source: alice, sessionNonce: aliceSn, ms: 0, sequence: 1, pad: 0 });
+  rec.recordDrum({ source: alice, sessionNonce: "c".repeat(JAM_SESSION_NONCE_HEX_CHARS), ms: 5, sequence: 1, pad: 1 });
+  const take = rec.stop();
+  const id = await jamTakeId(take);
+  const commitment = await jamParticipantCommitment(id, take, 0);
+  assert.equal(commitment.domain, JAM_TAKE_COMMITMENT_DOMAIN);
+  assert.equal(commitment.takeId, id);
+  assert.equal(commitment.groupId, "group-1");
+  assert.equal(commitment.callId, "general");
+  assert.equal(commitment.device, alice);
+  assert.match(commitment.laneEventLogHash, /^[0-9a-f]{64}$/);
+  await assert.rejects(() => jamParticipantCommitment("0".repeat(64), take, 0), /take id does not match/);
+});

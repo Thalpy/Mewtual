@@ -190,6 +190,25 @@ table with the commit that closed it.
   grants can be live, and the graph/output track is released when the last grant ends. The call microphone is a separate sender. The
   WebView/OS decides whether window/application audio is available, so this is not an OBS-equivalent
   native process-capture guarantee.
+- **Jam events are untrusted member input rendered inside a receiver-owned, bounded synthesizer.**
+  The jam engine does not authenticate peers itself: the identity used to mint its source-channel
+  capability must come from the already authenticated call connection, never a sender-controlled
+  frame field. Each callback must present the opaque capability minted for that exact generation;
+  reopen/removal invalidates older queued callbacks before they can recreate sender state. Every data-channel
+  delivery is size- and rate-charged before parsing; valid patches pass the same strict, unknown-
+  field-rejecting validator regardless of whether they came from the wire, local storage, import,
+  or take playback. A patch selects values inside one fixed topology and cannot introduce graph
+  edges, code, samples, assets, or feedback. Per-peer held limits, a global tail-inclusive voice
+  limit, release/hold watchdogs, and receiver-owned gates/limiter bound honest-renderer work and
+  output; a malicious member can still make bounded noise and a modified receiver can discard or
+  reinterpret events. Remote events are not queued into a suspended audio context. A content hash
+  promises the same recipe, not identical platform audio. Exact legacy note frames have a separate
+  receive-only compatibility domain; they gain no patch, drum, clock, or recording authority.
+  Deafen and member removal are security-relevant integration points: shipment requires Deafen to
+  gate the instrument master and release remote voices, and roster revocation to close the removed
+  member's call/data-channel connection. Recording consent and performer labels are honest-client
+  coordination until the planned group-bound, domain-separated durable per-participant aggregate
+  lane commitments exist; another endpoint can always record audio or events without announcing it.
 - **A shared file is authenticated bytes, not trusted content.** Explicit save streams into a
   non-overwriting `.part`, checks the declared size and whole-file content address, sanitizes the
   peer-provided name to one leaf, atomically publishes only after verification, and reveals it in
