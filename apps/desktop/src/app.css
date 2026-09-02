@@ -15289,6 +15289,47 @@ button.jam-layer-add:hover {
   color: var(--accent-hi);
   border-color: var(--accent);
 }
+/* Drawer head: the settings cog, the metronome-line toggle, and the MIDI light. */
+button.jam-cog {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--muted);
+  background: transparent;
+}
+button.jam-cog .ico {
+  width: 13px;
+  height: 13px;
+}
+button.jam-cog.on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+button.jam-cog.live {
+  color: var(--accent-hi); /* a grid runs behind the folded line: the glyph says so */
+}
+.jam-midi-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--danger); /* no device routed */
+  box-shadow: 0 0 6px 1px color-mix(in oklab, var(--danger) 45%, transparent);
+}
+.jam-midi-dot.ready {
+  background: var(--ok);
+  box-shadow: 0 0 6px 1px color-mix(in oklab, var(--ok) 45%, transparent);
+}
+.jam-midi-dot.live {
+  background: var(--info);
+  box-shadow: 0 0 7px 1px color-mix(in oklab, var(--info) 55%, transparent);
+}
 /* Opening a fold (EDIT, TAKES, REMAP) can push the surface past its height cap; without a
    reserved gutter the arriving scrollbar steals ~10px of width, the wrapping tile rows re-wrap
    and the centred drawer lurches sideways: the reported "swish". The gutter is reserved up

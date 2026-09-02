@@ -10350,6 +10350,28 @@
   const remoteHeldAt = new Map<string, number>(); // "fp:note" -> when the UI saw the note-on
   let jamAbuseMuted = $state<Record<string, boolean>>({}); // flood auto-mutes; receive-side only
   let jamMode = $state<"keys" | "pads">(loadCallSetting("jammode", "keys") === "pads" ? "pads" : "keys");
+  // The metronome LINE is furniture you can fold away; the grid itself keeps running (it belongs
+  // to the room, not to this row's visibility).
+  let jamMetShow = $state(loadCallSetting("metline", "on") !== "off");
+  function toggleJamMetShow() {
+    jamMetShow = !jamMetShow;
+    try { localStorage.setItem("catcoms.call.metline", jamMetShow ? "on" : "off"); } catch { /* ignore */ }
+  }
+  // The MIDI light: red = nothing routed, green = a device is ready, blue = keys arriving now.
+  // Unlike the old text label (rendered only when a device existed, so "no device" looked like
+  // "no feature"), the light always says which of the three worlds you are in; hover names it.
+  let jamMidiState = $derived(
+    !midiSupported || !midiName ? "none" : midiLastAt && nowTick - midiLastAt < 2500 ? "live" : "ready",
+  );
+  let jamMidiTitle = $derived(
+    !midiSupported
+      ? "MIDI is not available in this webview"
+      : !midiName
+        ? "No MIDI device routed. Plug one in, or pick a port in Settings · Devices."
+        : jamMidiState === "live"
+          ? `MIDI · ${midiName} · playing`
+          : `MIDI · ${midiName} · ready`,
+  );
   let padFlash = $state<Record<number, string>>({}); // pad -> "me" | fp of the latest hit
   const padFlashTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const JAM_PAD_KEYS = ["a", "s", "d", "f", "g", "h", "j", "k", "l", ";"];
@@ -18164,11 +18186,24 @@
         onclick={() => openSettings("voice")}
       >{@render icoGear()}</button>
       <span class="stage-spacer"></span>
-      {#if midiName}<span class="inst-midi">MIDI · {midiName}</span>{/if}
+      <button
+        class="ghost jam-cog"
+        class:on={jamMetShow}
+        class:live={!!jamMetUi && !jamMetShow}
+        aria-pressed={jamMetShow}
+        title={jamMetShow ? "Hide the metronome line (a running grid keeps clicking)" : jamMetUi ? "Show the metronome line: a grid is running" : "Show the metronome line"}
+        aria-label="Show or hide the metronome line"
+        onclick={toggleJamMetShow}
+      >
+        <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 13.5 8 2.5l2.5 11z" /><path d="M8 9l3.5-4.5" /><path d="M4 13.5h8" /></svg>
+      </button>
+      <span class="jam-midi-dot" class:ready={jamMidiState === "ready"} class:live={jamMidiState === "live"} title={jamMidiTitle} role="img" aria-label={jamMidiTitle}></span>
     </div>
 
     <!-- The shared grid. The click each ear hears is local; what is shared is WHERE the beats
-         are. Live playing stays campfire-loose; anything stamped on this grid lands tight. -->
+         are. Live playing stays campfire-loose; anything stamped on this grid lands tight.
+         The row hides behind the head toggle; a hidden grid still runs and still clicks. -->
+    {#if jamMetShow}
     <div class="jam-met">
       {#if jamMetUi}
         {#if jamMetUi.anchor === "me"}
@@ -18215,6 +18250,7 @@
         <span class="jam-met-lbl">the click is local · the grid is shared</span>
       {/if}
     </div>
+    {/if}
 
     {#if jamMode === "keys"}
     <div class="inst-ctl">
