@@ -2,8 +2,9 @@
 //
 // Honest scope, stated where the code can be held to it: this is a REHEARSAL TRANSCRIPT, not a
 // typesetting engine. Starts and lengths quantize to a sixteenth grid on the take's own tempo;
-// durations round DOWN to the plain values (16th/8th/quarter/half/whole, no dots, no ties, no
-// tuplets); simultaneous notes share a column rather than forming engraved chords with shared
+// durations floor to the plain values (16th/8th/quarter/half/whole, no dots, no ties, no tuplets),
+// with a one-sixteenth visible minimum for shorter taps; simultaneous notes share a column rather
+// than forming engraved chords with shared
 // stems. Every player gets their own labelled staff section (clef picked per section by median
 // pitch), and drum lanes render on a single percussion line with x heads. The input is validated
 // by the caller (the one jam-take validator); this module additionally refuses out-of-bound
@@ -63,7 +64,9 @@ export function quantizeTake(take: JamTake): SheetScore {
   const laneSrc = (lane: number): number => take.lanes[lane]?.src ?? 0;
   const closeNote = (lane: number, sounding: Open, offMs: number) => {
     const startSix = Math.max(0, Math.round(sounding.startMs / sixMs));
-    const lenSix = Math.max(1, Math.round((offMs - sounding.startMs) / sixMs));
+    // Starts snap to the nearest grid line. Durations floor after one grid unit, while shorter taps
+    // use one sixteenth as an explicit visibility exception rather than disappearing from the page.
+    const lenSix = Math.max(1, Math.floor((offMs - sounding.startMs) / sixMs));
     if (startSix > MAX_SHEET_SIX) return;
     const list = notesByPart.get(laneSrc(lane)) ?? [];
     list.push({ startSix, lenSix: Math.min(lenSix, barSix * ORPHAN_NOTE_BARS * 2), midi: sounding.midi });
@@ -205,7 +208,9 @@ export function renderSheetSvg(score: SheetScore, names: readonly string[], titl
     section.body();
   }
 
-  const head = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${PAGE_W} ${height}" width="${PAGE_W}" height="${height}">` +
+  // The version marker and fixed element vocabulary are also checked by the native save command.
+  // That second validation keeps compromised renderer/IPC input from becoming active SVG on disk.
+  const head = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${PAGE_W} ${height}" width="${PAGE_W}" height="${height}" data-mewtual-sheet="v1">` +
     `<style>text{font-family:Georgia,serif}.st{stroke:#444;stroke-width:1}.bar{stroke:#444;stroke-width:1}` +
     `.nh{fill:#111}.nh.open{fill:#fff;stroke:#111;stroke-width:1.6}.stem{stroke:#111;stroke-width:1.4}` +
     `.flag{stroke:#111;stroke-width:1.4;fill:none}.acc{font-size:11px;fill:#111}.clef{font-size:34px;fill:#111}` +

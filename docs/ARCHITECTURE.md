@@ -266,6 +266,12 @@ safe to expose. Export creates another permanent offline guessing surface and le
 metadata visible. Changing the live secret atomically rewrites only the DEK wrapper; it cannot revoke
 an older export and never rotates the server/blob encryption keys.
 
+Normal window close is a native-owned lock/snapshot/destroy transaction. Close attempts serialize
+inside `AppState`; once a continuity failure has been returned, another already-queued caller must
+also defer until a later request explicitly acknowledges losing that latest screen snapshot. This
+prevents duplicate WebView calls from replacing the failure with a newer success and destroying the
+only surface capable of warning the user.
+
 ## 5. Roadmap (test-gated, block by block)
 
 0. Workspace + `Clock`/`Transport` seams + canonical wire format + CI/lint gate.

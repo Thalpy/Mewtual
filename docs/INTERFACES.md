@@ -948,7 +948,7 @@ stats as negotiated.
 Everything below rides the existing negotiated per-peer data channel (`"inst"`, id 7, ordered),
 carrying JSON text frames. Notes stay EVENTS, never audio: each receiver synthesizes locally, and
 the receiver is sovereign; it owns the final gain, a master limiter, per-peer mute buses, the
-Deafen gate (hard: gates rendering AND releases every ringing remote voice), an 8 s release-time
+Deafen gate (hard: gates rendering AND releases every ringing voice, including local previews), an 8 s release-time
 ceiling, and forced node teardown. Two prerequisites land before any of this ships: Deafen must
 actually gate instrument rendering, and roster revocation must tear down the removed member's call
 connections (`removePeer`), not merely refresh lists. All constants here are mirrored as named
@@ -962,7 +962,17 @@ sender-controlled field or fingerprint string. Reopen replaces the capability be
 new events, while removal tombstones it before teardown. Work that starts or finishes under an old
 capability cannot recreate source state, consume the replacement's sequence, change its patch
 session, or render. Patch hashing is serialized in ordered-channel receipt order and rechecks the
-capability after WebCrypto completes.
+capability after WebCrypto completes. A per-generation causal queue extends ordered channel
+delivery across asynchronous patch and drum digests, so a dependent note can never overtake its
+announce. Outbound events similarly carry one immutable, fully hashed publication object through
+the wire frame, local renderer and recorder; each edge emits that exact prerequisite announcement
+before its dependent events. Distinct global recipe changes are sender-paced to at least 2 s
+apart (editor churn coalesces onto the latest draft), matching the receiver's patch bucket; a new
+edge may receive the already-published current recipe immediately because its decoder is fresh.
+An unopened edge retains at most 256 events and drops an overflowed
+transient as a unit rather than preserving note-ons without their note-offs. The inbound async
+lane is likewise capped at 256 pending operations; overflow receive-mutes that source rather than
+retaining an unbounded digest backlog.
 
 **Frame admission (before parse).** Any delivered frame over 1024 bytes is rejected before parsing; after parse,
 every type except `t:"p"` must still fit 200 bytes. Each peer has an all-frame token bucket
@@ -970,7 +980,9 @@ every type except `t:"p"` must still fit 200 bytes. Each peer has an all-frame t
 bucket drops the frame. A peer whose bucket stays exhausted for 10 cumulative seconds inside a
 rolling minute is auto-muted receive-side for the rest of the call (their held notes release, the
 UI says so, manual unmute allowed). The musical bucket is unchanged: 30 note-ons/s, burst 60,
-note-offs never charged.
+note-offs never charged. Auto-mute does not freeze consent or media state: exact bounded `t:"s"`
+frames retain a separate pre-parse control lane (refill 2/s, burst 4); no jam frame or unknown
+extension can use that lane.
 
 **Messages.** `t:"s"` is unchanged. Note v2: `{t:"n",on:1,n:0..127,w:<legacy wave>,p?:<id>,q}` and
 `{t:"n",on:0,n,q}`. `q` is a per-sender uint32, monotonically increasing across all note and drum
@@ -1040,14 +1052,19 @@ push.
 max tail 3000 ms; tails occupy voices. Choke groups are SOURCE-SCOPED: pad 4 chokes pad 5 from
 the same sender only. Noise is seeded deterministically per event from the canonical JSON array
 SHA-256(`["catcoms-jam-drum:v1",callId,senderFp,sn,q,pad]`); the seed selects the same
-recipe, not identical audio. Keys vs Pads is local presentation; the wire carries only events.
+recipe, not identical audio. Pending seed digests are bounded independently of voices (4 per
+source, 32 globally), and no allocator slot/node is created until the digest finishes and the
+channel, session, Deafen and audio-state checks pass again. Keys vs Pads is local presentation;
+the wire carries only events.
 
-**Metronome + clock *(phase 4; planned)*.** While inactive, the first valid authenticated
+**Metronome + clock.** While inactive, the first valid authenticated
 `on:1` edge becomes the anchor; while active, other senders cannot supersede it. The anchor leaving
 or sending `on:0` stops the metronome (dumb failover: anyone restarts under their own revision
 domain). `{t:"m",v:1,sn,on:0|1,rev,bpm:40..240,bpb:1..8,org}` where `org` is beat-0 in the anchor's clock
-domain; `rev` is uint32 monotonic only within that authenticated `(sender,sn)` session and revisions
-under 2 s apart are dropped. This prevents a foreign `rev=0xffffffff` from wedging every future
+domain; `rev` is uint32 monotonic only within that authenticated `(sender,sn)` session and tempo
+revisions under 2 s apart are dropped. A newer `on:0` is a lifecycle edge and bypasses that
+throttle, so a quick start/stop cannot strand remote clicks. This prevents a foreign
+`rev=0xffffffff` from wedging every future
 anchor. Simultaneous starts may choose differently until stopped; the metronome is coordination,
 not Byzantine consensus. Offset estimation is
 NTP-style over `{t:"c",q,tx}` / `{t:"c",r,tx,rx}` probes (1/s, burst 4); a correction beyond
@@ -1057,17 +1074,26 @@ replies are accepted only once against one of at most four exact outstanding `(q
 The lowest-RTT estimate is selected only from the latest eight samples so ordinary drift can age
 out an old minimum. The first finite offset is not clamped because separate `performance.now()` clocks
 have arbitrary origins. Clicks are scheduled against `AudioContext.currentTime` with a 150 ms
-lookahead scheduler (webview timers throttle unfocused). This clock feeds ONLY the jam layer:
+lookahead scheduler (webview timers throttle unfocused). A suspended context creates no click
+nodes, cancels any already-scheduled lookahead nodes, and advances past missed beats before resume
+instead of replaying them. This clock feeds ONLY the jam layer:
 never authorization, expiry, freshness,
 or persistence.
 
-**`jam-take:v1` recordings *(phases 5-6; planned)*.** Header
+**`jam-take:v1` recordings *(phase 5; durable commitments remain phase 6)*.** Header
 `{v:1, group, call, met:{bpm,bpb}, parts:[fingerprints], lanes:[{src:<parts index>,sn}],
 patches:[full descriptors]}`. A note-on event carries `{ms,lane,n,on:1,w,p?:<patch index>,q}`;
 note-off carries `{ms,lane,n,on:0,q}`; drum hit carries `{ms,lane,n:<pad>,d:1,q}`. The lane keeps
 the authenticated source and its sequence/seed nonce together across reconnects, while the patch
 index and legacy wave make the take independently playable. Events are stamped in grid time at the source. Caps: 10 minutes,
-20 000 events, 512 KiB serialized, 16 participants. Each lane's `src` derives from the
+20 000 events, 512 KiB serialized, 16 participants, 64 lanes and 64 patches; group/call/performer
+identity strings are each capped at 256 UTF-8 bytes. Playback validates
+and hashes the bounded patch table once per take into an engine-owned archival table; it does not
+multiply work by lanes or force archival recipes through the live peer's four-entry LRU. Source
+teardown waits for the longest receiver-bounded patch/drum tail used by the take (up to 8 s), so a
+legal final release is not truncated. Playback dispatches at most 128 overdue events per
+macrotask pass, so a valid dense/seeked take cannot monopolize the WebView or launch its whole
+event log concurrently. Each lane's `src` derives from the
 authenticated channel at record time, never from a sender-supplied event field; `q` gaps are
 surfaced, and the guarantee is
 "musically aligned given the events received", not bit-identical. Recording state is visible to

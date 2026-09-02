@@ -9,6 +9,7 @@ import {
   TAKE_MAX_BYTES,
   TAKE_MAX_DURATION_MS,
   TAKE_MAX_EVENTS,
+  TAKE_ID_MAX_BYTES,
   TAKE_MAX_LANES,
   TAKE_MAX_PARTICIPANTS,
   TAKE_MAX_PATCHES,
@@ -39,6 +40,10 @@ export type JamRecorderConfig = Readonly<{
 
 type LaneState = { index: number; lastSequence: number | null; lastMs: number };
 const encoder = new TextEncoder();
+
+function boundedTakeIdentity(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && encoder.encode(value).byteLength <= TAKE_ID_MAX_BYTES;
+}
 
 function bytes(value: unknown): number {
   return encoder.encode(JSON.stringify(value)).byteLength;
@@ -96,10 +101,12 @@ export class JamTakeRecorder {
 
   constructor(config: JamRecorderConfig) {
     if (
-      !config.groupId || !config.callId || !Number.isInteger(config.bpm) || config.bpm < JAM_MET_BPM_MIN || config.bpm > JAM_MET_BPM_MAX ||
+      !boundedTakeIdentity(config.groupId) || !boundedTakeIdentity(config.callId) ||
+      !Number.isInteger(config.bpm) || config.bpm < JAM_MET_BPM_MIN || config.bpm > JAM_MET_BPM_MAX ||
       !Number.isInteger(config.beatsPerBar) || config.beatsPerBar < JAM_MET_BPB_MIN || config.beatsPerBar > JAM_MET_BPB_MAX ||
       config.participants.length < 1 || config.participants.length > TAKE_MAX_PARTICIPANTS ||
-      new Set(config.participants).size !== config.participants.length || config.participants.some((part) => !part)
+      new Set(config.participants).size !== config.participants.length ||
+      config.participants.some((part) => !boundedTakeIdentity(part))
     ) throw new TypeError("invalid jam recorder configuration");
     // Keep the validated header independent of its caller. TypeScript's `readonly` is erased at
     // runtime; retaining `config` would let a later array/property mutation bypass byte accounting
@@ -297,6 +304,35 @@ export class JamTakeRecorder {
   }
 }
 
+/** Shared UI seam for local consent changes; local and remote withdrawal hit the same state gate. */
+export function applyJamRecorderConsent(
+  recorder: JamTakeRecorder | null,
+  source: string,
+  consent: boolean,
+): boolean {
+  return !!recorder && !!source && recorder.setConsent(source, consent);
+}
+
+export type JamRecorderLease = Readonly<{ recorder: JamTakeRecorder; ms: number }>;
+
+/** Capture recorder identity and event time before an asynchronous render/digest boundary. */
+export function captureJamRecorderLease(
+  recorder: JamTakeRecorder | null,
+  ms: number,
+): JamRecorderLease | null {
+  return recorder && Number.isFinite(ms) ? { recorder, ms: Math.max(0, Math.round(ms)) } : null;
+}
+
+/** Append only if the recorder active at receipt is still the current take after the await. */
+export function recordLeasedJamDrum(
+  current: JamTakeRecorder | null,
+  lease: JamRecorderLease | null,
+  input: { source: string; sessionNonce: string; sequence: number; pad: number },
+): JamRecordResult | null {
+  if (!lease || current !== lease.recorder) return null;
+  return lease.recorder.recordDrum({ ...input, ms: lease.ms });
+}
+
 export type TakeValidation =
   | Readonly<{ ok: true; take: JamTake }>
   | Readonly<{ ok: false; error: string }>;
@@ -309,13 +345,12 @@ export function validateJamTake(value: unknown): TakeValidation {
   const met = plainRecord(raw.met);
   if (
     Object.keys(root).sort().join(",") !== "call,events,group,lanes,met,parts,patches,v" ||
-    raw.v !== 1 || typeof raw.group !== "string" || !raw.group || raw.group.length > TAKE_MAX_BYTES ||
-    typeof raw.call !== "string" || !raw.call || raw.call.length > TAKE_MAX_BYTES ||
+    raw.v !== 1 || !boundedTakeIdentity(raw.group) || !boundedTakeIdentity(raw.call) ||
     !met || Object.keys(met).sort().join(",") !== "bpb,bpm" ||
     !Number.isInteger(met.bpm) || (met.bpm as number) < JAM_MET_BPM_MIN || (met.bpm as number) > JAM_MET_BPM_MAX ||
     !Number.isInteger(met.bpb) || (met.bpb as number) < JAM_MET_BPB_MIN || (met.bpb as number) > JAM_MET_BPB_MAX ||
     !Array.isArray(raw.parts) || raw.parts.length < 1 || raw.parts.length > TAKE_MAX_PARTICIPANTS ||
-    raw.parts.some((part) => typeof part !== "string" || !part || part.length > TAKE_MAX_BYTES) || new Set(raw.parts).size !== raw.parts.length ||
+    raw.parts.some((part) => !boundedTakeIdentity(part)) || new Set(raw.parts).size !== raw.parts.length ||
     !Array.isArray(raw.lanes) || raw.lanes.length > TAKE_MAX_LANES ||
     !Array.isArray(raw.patches) || raw.patches.length > TAKE_MAX_PATCHES ||
     !Array.isArray(raw.events) || raw.events.length > TAKE_MAX_EVENTS

@@ -302,6 +302,14 @@ struct AppState {
     /// Lets a remounted close report a completed older snapshot failure instead of treating its own
     /// snapshot-less idempotent lock as proof that continuity succeeded.
     last_ui_lock_completion: Mutex<Option<UiLockCompletion>>,
+    /// Serializes native window-close attempts and keeps an unacknowledged continuity failure from
+    /// being overtaken by a duplicate caller. The window may be destroyed only after the first
+    /// failure was returned visibly and a later request explicitly accepts that snapshot loss.
+    vault_window_close: Mutex<()>,
+    /// Sticky close-specific data-loss evidence. Ordinary Ctrl+L locking also publishes
+    /// `last_ui_lock_completion`, so that shared slot may legitimately be replaced later; it must
+    /// never erase the warning a native close still owes before destroying the only UI surface.
+    vault_window_close_debt: Mutex<Option<String>>,
     /// The **new device's** half of an in-flight grant ceremony (multi-device M2): the device
     /// identity + single-use nonce minted by `pairing_begin`, held until the grant bundle is
     /// pasted back. One slot; starting a new ceremony abandons any previous one; and, like
@@ -11423,11 +11431,272 @@ async fn save_space_layout(
     })
 }
 
+// Kept as one literal so jam-sheet.test.ts can pin the cross-language renderer/save contract.
+const JAM_SHEET_STYLE: &str = r#"text{font-family:Georgia,serif}.st{stroke:#444;stroke-width:1}.bar{stroke:#444;stroke-width:1}.nh{fill:#111}.nh.open{fill:#fff;stroke:#111;stroke-width:1.6}.stem{stroke:#111;stroke-width:1.4}.flag{stroke:#111;stroke-width:1.4;fill:none}.acc{font-size:11px;fill:#111}.clef{font-size:34px;fill:#111}.who{font-size:13px;fill:#333;font-style:italic}.ttl{font-size:19px;fill:#111}.sub{font-size:12px;fill:#555}.xh{stroke:#111;stroke-width:1.6}.ped{font-size:9px;fill:#666;font-family:monospace}.led{stroke:#444;stroke-width:1}.bt{stroke:#b9b2a0;stroke-width:0.6;stroke-dasharray:2 4}"#;
+
+#[derive(Debug)]
+struct JamSheetTag<'a> {
+    name: &'a str,
+    attrs: Vec<(&'a str, &'a str)>,
+    self_closing: bool,
+}
+
+/// Parse the renderer's deliberately tiny opening-tag syntax. This is not a permissive XML
+/// parser: accepting browser error recovery here would make it very difficult to prove that an
+/// apparent attribute boundary cannot be reinterpreted as active SVG.
+fn jam_sheet_tag(input: &str) -> Option<(JamSheetTag<'_>, &str)> {
+    let after_open = input.strip_prefix('<')?;
+    let end = after_open.find('>')?;
+    let raw = &after_open[..end];
+    let remaining = &after_open[end + 1..];
+    if raw.is_empty() || raw.starts_with('/') || raw.starts_with('!') || raw.starts_with('?') {
+        return None;
+    }
+    let (body, self_closing) = match raw.strip_suffix('/') {
+        Some(body) => (body, true),
+        None => (raw, false),
+    };
+    let name_end = body.find(' ').unwrap_or(body.len());
+    let name = &body[..name_end];
+    if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_lowercase()) {
+        return None;
+    }
+
+    let mut attrs = Vec::new();
+    let mut rest = &body[name_end..];
+    while !rest.is_empty() {
+        rest = rest.strip_prefix(' ')?;
+        let equals = rest.find('=')?;
+        let key = &rest[..equals];
+        if key.is_empty()
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b':')
+        {
+            return None;
+        }
+        let value_start = rest[equals + 1..].strip_prefix('"')?;
+        let quote = value_start.find('"')?;
+        let value = &value_start[..quote];
+        if value.contains(['<', '>', '\0']) {
+            return None;
+        }
+        attrs.push((key, value));
+        rest = &value_start[quote + 1..];
+    }
+    Some((
+        JamSheetTag {
+            name,
+            attrs,
+            self_closing,
+        },
+        remaining,
+    ))
+}
+
+fn jam_sheet_attrs(tag: &JamSheetTag<'_>, names: &[&str]) -> bool {
+    tag.attrs.len() == names.len()
+        && tag
+            .attrs
+            .iter()
+            .zip(names)
+            .all(|((actual, _), expected)| actual == expected)
+}
+
+fn jam_sheet_number(value: &str) -> bool {
+    if value.is_empty() || value.len() > 24 {
+        return false;
+    }
+    let mut dots = 0;
+    let mut digits = 0;
+    for (index, byte) in value.bytes().enumerate() {
+        match byte {
+            b'0'..=b'9' => digits += 1,
+            b'.' if dots == 0 => dots += 1,
+            b'-' if index == 0 => {}
+            _ => return false,
+        }
+    }
+    digits > 0
+        && value
+            .parse::<f64>()
+            .is_ok_and(|number| number.is_finite() && number.abs() <= 4_000_000.0)
+}
+
+fn jam_sheet_text(text: &str) -> bool {
+    if text.chars().any(char::is_control) || text.contains(['<', '>']) {
+        return false;
+    }
+    let mut remaining = text;
+    while let Some(amp) = remaining.find('&') {
+        remaining = &remaining[amp..];
+        let entity = ["&amp;", "&lt;", "&gt;", "&quot;"]
+            .into_iter()
+            .find(|entity| remaining.starts_with(entity));
+        let Some(entity) = entity else {
+            return false;
+        };
+        remaining = &remaining[entity.len()..];
+    }
+    true
+}
+
+fn jam_sheet_root(tag: &JamSheetTag<'_>) -> bool {
+    if tag.self_closing
+        || tag.name != "svg"
+        || !jam_sheet_attrs(
+            tag,
+            &["xmlns", "viewBox", "width", "height", "data-mewtual-sheet"],
+        )
+        || tag.attrs[0].1 != "http://www.w3.org/2000/svg"
+        || tag.attrs[4].1 != "v1"
+        || !jam_sheet_number(tag.attrs[2].1)
+        || !jam_sheet_number(tag.attrs[3].1)
+    {
+        return false;
+    }
+    let view: Vec<&str> = tag.attrs[1].1.split(' ').collect();
+    view.len() == 4
+        && view[0] == "0"
+        && view[1] == "0"
+        && view[2] == tag.attrs[2].1
+        && view[3] == tag.attrs[3].1
+}
+
+fn jam_sheet_element(tag: &JamSheetTag<'_>) -> bool {
+    match tag.name {
+        "rect" => {
+            tag.self_closing
+                && jam_sheet_attrs(tag, &["x", "y", "width", "height", "fill"])
+                && tag.attrs[..4]
+                    .iter()
+                    .all(|(_, value)| jam_sheet_number(value))
+                && tag.attrs[4].1 == "#fffdf6"
+        }
+        "line" => {
+            tag.self_closing
+                && jam_sheet_attrs(tag, &["x1", "y1", "x2", "y2", "class"])
+                && tag.attrs[..4]
+                    .iter()
+                    .all(|(_, value)| jam_sheet_number(value))
+                && matches!(tag.attrs[4].1, "st" | "bar" | "stem" | "xh" | "led" | "bt")
+        }
+        "ellipse" => {
+            tag.self_closing
+                && jam_sheet_attrs(tag, &["cx", "cy", "rx", "ry", "class"])
+                && tag.attrs[..4]
+                    .iter()
+                    .all(|(_, value)| jam_sheet_number(value))
+                && matches!(tag.attrs[4].1, "nh" | "nh open")
+        }
+        "path" => {
+            tag.self_closing
+                && jam_sheet_attrs(tag, &["d", "class"])
+                && tag.attrs[1].1 == "flag"
+                && tag.attrs[0].1.len() <= 160
+                && tag.attrs[0].1.starts_with('M')
+                && tag.attrs[0].1.contains(" q")
+                && tag.attrs[0].1.bytes().all(|byte| {
+                    byte.is_ascii_digit() || matches!(byte, b'M' | b'q' | b' ' | b'.' | b'-')
+                })
+        }
+        _ => false,
+    }
+}
+
+fn jam_sheet_text_tag(tag: &JamSheetTag<'_>) -> bool {
+    if tag.self_closing || tag.name != "text" {
+        return false;
+    }
+    let ordinary = jam_sheet_attrs(tag, &["x", "y", "class"]);
+    let anchored =
+        jam_sheet_attrs(tag, &["x", "y", "class", "text-anchor"]) && tag.attrs[3].1 == "middle";
+    (ordinary || anchored)
+        && jam_sheet_number(tag.attrs[0].1)
+        && jam_sheet_number(tag.attrs[1].1)
+        && matches!(
+            tag.attrs[2].1,
+            "who" | "ttl" | "sub" | "acc" | "clef" | "ped"
+        )
+}
+
+/// Validate the exact inert SVG subset emitted by jam-sheet.ts.
+///
+/// The webview is not the authority for writing active markup into Downloads. Only flat geometry,
+/// escaped text, a fixed stylesheet and numeric coordinates are accepted; links, event handlers,
+/// external resources, namespaces, animation, foreign content and browser-recovery syntax are
+/// unrepresentable in this grammar.
+fn validate_jam_sheet_svg(svg: &str) -> bool {
+    if svg.is_empty() || svg.len() > 4_000_000 {
+        return false;
+    }
+    let Some((root, after_root)) = jam_sheet_tag(svg) else {
+        return false;
+    };
+    if !jam_sheet_root(&root) {
+        return false;
+    }
+    let Some((style, after_style_open)) = jam_sheet_tag(after_root) else {
+        return false;
+    };
+    if style.name != "style" || style.self_closing || !style.attrs.is_empty() {
+        return false;
+    }
+    let Some(mut remaining) = after_style_open
+        .strip_prefix(JAM_SHEET_STYLE)
+        .and_then(|value| value.strip_prefix("</style>"))
+    else {
+        return false;
+    };
+
+    loop {
+        if remaining == "</svg>" {
+            return true;
+        }
+        let Some((tag, after_tag)) = jam_sheet_tag(remaining) else {
+            return false;
+        };
+        if tag.name == "text" {
+            if !jam_sheet_text_tag(&tag) {
+                return false;
+            }
+            let Some(end) = after_tag.find("</text>") else {
+                return false;
+            };
+            if !jam_sheet_text(&after_tag[..end]) {
+                return false;
+            }
+            remaining = &after_tag[end + "</text>".len()..];
+        } else {
+            if !jam_sheet_element(&tag) {
+                return false;
+            }
+            remaining = after_tag;
+        }
+    }
+}
+
+fn validate_jam_sheet_name(name: &str) -> bool {
+    let Some(stem) = name
+        .strip_prefix("mewtual-take-")
+        .and_then(|value| value.strip_suffix(".svg"))
+    else {
+        return false;
+    };
+    let Some((take, date)) = stem.split_once('-') else {
+        return false;
+    };
+    !take.is_empty()
+        && take.len() <= 10
+        && take.bytes().all(|byte| byte.is_ascii_digit())
+        && date.len() == 8
+        && date.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// Export a jam-take sheet transcript to Downloads and reveal it without executing it.
 ///
-/// The content is frontend-generated SVG (jam-sheet.ts), never peer bytes: the checks below pin
-/// the name to the exporter's own fixed shape and the body to an SVG document within a bounded
-/// size, so this command cannot be repurposed to drop arbitrary peer content into Downloads.
+/// Although jam-sheet.ts generates the content, IPC input is still untrusted. The validator pins
+/// it to that renderer's inert versioned grammar before any bytes are written.
 #[tauri::command]
 async fn save_jam_sheet(
     app: AppHandle,
@@ -11435,21 +11704,46 @@ async fn save_jam_sheet(
     name: String,
     svg: String,
 ) -> Result<SavedFileResult, String> {
-    require_unlocked_session(&state).await?;
-    let valid_name = name.len() <= 64
-        && name.ends_with(".svg")
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
-    if !valid_name {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    save_jam_sheet_to_downloads(
+        &state,
+        generation,
+        &downloads,
+        &name,
+        &svg,
+        std::future::ready(()),
+        reveal_path,
+    )
+    .await
+}
+
+/// Testable sheet-export commit core. Validation may be expensive at the 4 MiB cap, so the exact
+/// UI generation is rechecked after it and the returned commit guard remains held through both
+/// plaintext publication and reveal.
+async fn save_jam_sheet_to_downloads<F, R>(
+    state: &AppState,
+    generation: u64,
+    downloads: &Path,
+    name: &str,
+    svg: &str,
+    before_commit: F,
+    reveal: R,
+) -> Result<SavedFileResult, String>
+where
+    F: Future<Output = ()>,
+    R: FnOnce(&Path) -> Result<(), String>,
+{
+    if !validate_jam_sheet_name(&name) {
         return Err("the sheet export has an unexpected file name".into());
     }
-    if svg.len() > 4_000_000 || !svg.starts_with("<svg") || !svg.trim_end().ends_with("</svg>") {
+    if !validate_jam_sheet_svg(&svg) {
         return Err("the sheet export is not a Mewtual sheet transcript".into());
     }
-    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
-    let path = write_download(&downloads, &name, svg.as_bytes())?;
-    let warning = reveal_path(&path)
+    before_commit.await;
+    let _commit = require_ui_session_generation(state, generation).await?;
+    let path = write_download(downloads, name, svg.as_bytes())?;
+    let warning = reveal(&path)
         .err()
         .map(|error| format!("The sheet was saved, but Downloads could not be opened: {error}"));
     Ok(SavedFileResult {
@@ -11856,6 +12150,10 @@ async fn finalize_unlock_session(
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
     settle_ui_lock_continuity_before_unlock(state, expected_generation).await?;
+    // A successful authenticated transition either retried the exact pending bytes or crossed the
+    // explicit malformed-snapshot acknowledgement flow. The old close warning is now resolved and
+    // must not leak into a later, newly authorized UI session.
+    *state.vault_window_close_debt.lock().await = None;
     let servers = if include_running_servers {
         Some(running_servers(state).await)
     } else {
@@ -12108,14 +12406,58 @@ async fn close_vault_window_plan_inner(
     ui_state_json: Option<String>,
     discard_continuity_error: bool,
 ) -> (LockSessionOutcome, bool) {
+    let _close = state.vault_window_close.lock().await;
+    // Two close/lock requests can cross the bridge before the first response disables the WebView.
+    // The general lock-completion slot may be replaced by a later Ctrl+L success, so close debt has
+    // its own latch. Only a later close carrying the explicit loss acknowledgement may consume it.
+    {
+        let mut debt = state.vault_window_close_debt.lock().await;
+        if let Some(error) = debt.as_ref().cloned() {
+            if discard_continuity_error {
+                *debt = None;
+                return (
+                    LockSessionOutcome {
+                        continuity_error: Some(error),
+                    },
+                    true,
+                );
+            }
+            return (
+                LockSessionOutcome {
+                    continuity_error: Some(error),
+                },
+                false,
+            );
+        }
+    }
     let had_local_snapshot = ui_state_json.is_some();
-    let mut outcome = lock_session_outcome_inner(state, ui_state_json).await;
+    let (requested_generation, result) =
+        lock_session_with_generation_inner(state, ui_state_json).await;
+    let mut outcome = LockSessionOutcome {
+        continuity_error: result.err(),
+    };
+    // The commit mutex is shared by all lock callers, so an older ordinary Ctrl+L may consume and
+    // validate the close's newer pending snapshot. In that interleaving this close itself sees no
+    // pending bytes. Bind its decision to the generation it registered and recover the completion
+    // produced by whichever caller actually consumed that generation (or a newer replacement).
+    if had_local_snapshot && outcome.continuity_error.is_none() {
+        if let Some(completion) = state.last_ui_lock_completion.lock().await.as_ref() {
+            if completion.generation >= requested_generation {
+                outcome.continuity_error.clone_from(&completion.error);
+            }
+        }
+    }
     // After a remount the JS snapshot is gone, but a prior native lock may already have consumed
     // it. Preserve that transaction's result rather than letting this snapshot-less idempotent lock
     // overwrite a failure with `Ok(())`.
     if !had_local_snapshot && outcome.continuity_error.is_none() {
         if let Some(completion) = state.last_ui_lock_completion.lock().await.as_ref() {
             outcome.continuity_error.clone_from(&completion.error);
+        }
+    }
+    if let Some(error) = outcome.continuity_error.as_ref() {
+        if !discard_continuity_error {
+            *state.vault_window_close_debt.lock().await = Some(error.clone());
         }
     }
     let may_destroy = outcome.continuity_error.is_none() || discard_continuity_error;
@@ -12159,6 +12501,18 @@ async fn close_vault_window(
 /// malformed continuity state or a vault write failure is reported, but must never leave the
 /// sensitive webview session open as a side effect of that error.
 async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> Result<(), String> {
+    lock_session_with_generation_inner(state, ui_state_json)
+        .await
+        .1
+}
+
+/// Execute one lock request and return the exact generation it registered. Native window-close
+/// policy needs this provenance because a different caller may consume the request's snapshot
+/// while holding the shared commit mutex.
+async fn lock_session_with_generation_inner(
+    state: &AppState,
+    ui_state_json: Option<String>,
+) -> (u64, Result<(), String>) {
     // Invalidate old work before awaiting anything. The commit mutex is acquired next so, once
     // this function returns, an old join can neither emit its private reply nor register/persist.
     state.session_lock_requested.store(true, Ordering::Release);
@@ -12241,7 +12595,7 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
     for upload in abandoned {
         discard_pending_upload(state, upload).await;
     }
-    save_result
+    (lock_generation, save_result)
 }
 
 // ---------------------------------------------------------------------------
@@ -17238,6 +17592,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_close_cannot_overtake_an_unacknowledged_continuity_failure() {
+        let state = AppState::default();
+        *state.session_resumable.lock().await = true;
+
+        let (first, first_may_destroy) =
+            close_vault_window_plan_inner(&state, Some("not json".into()), false).await;
+        assert!(first.continuity_error.is_some());
+        assert!(!first_may_destroy);
+
+        // This is the duplicate that could already be queued across the bridge before the first
+        // response changes frontend state. Even valid bytes are not an acknowledgement of losing
+        // the failed snapshot, so it must not authorize destruction.
+        let (duplicate, duplicate_may_destroy) = close_vault_window_plan_inner(
+            &state,
+            Some(r#"{"version":1,"drafts":{},"readMarks":{}}"#.into()),
+            false,
+        )
+        .await;
+        assert_eq!(duplicate.continuity_error, first.continuity_error);
+        assert!(!duplicate_may_destroy);
+    }
+
+    #[tokio::test]
+    async fn ordinary_lock_completion_cannot_erase_native_close_debt() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+
+        let (failed_close, may_destroy) =
+            close_vault_window_plan_inner(&state, Some("not json".into()), false).await;
+        assert!(failed_close.continuity_error.is_some());
+        assert!(!may_destroy);
+
+        // Model an already-queued Ctrl+L command completing after the close plan. Its successful
+        // snapshot legitimately replaces the general lock-completion slot, but not close debt.
+        let valid = r#"{"version":1,"drafts":{},"readMarks":{}}"#;
+        let later_lock = lock_session_outcome_inner(&state, Some(valid.into())).await;
+        assert_eq!(later_lock.continuity_error, None);
+        assert_eq!(
+            state
+                .last_ui_lock_completion
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|completion| completion.error.as_ref()),
+            None,
+        );
+
+        let (duplicate, duplicate_may_destroy) =
+            close_vault_window_plan_inner(&state, Some(valid.into()), false).await;
+        assert_eq!(duplicate.continuity_error, failed_close.continuity_error);
+        assert!(!duplicate_may_destroy);
+    }
+
+    #[tokio::test]
+    async fn ordinary_lock_consuming_close_snapshot_cannot_authorize_destruction() {
+        let state = Arc::new(AppState::default());
+        *state.session_resumable.lock().await = true;
+
+        // Queue both requests behind the real production commit mutex. Tokio mutex waiters are
+        // FIFO: A registers first, B replaces its pending snapshot, then A consumes B's bytes.
+        let boundary = state.ui_session_commit.lock().await;
+        let ordinary_state = Arc::clone(&state);
+        let ordinary = tokio::spawn(async move {
+            lock_session_inner(&ordinary_state, Some("ordinary-invalid".into())).await
+        });
+        while state.ui_session_generation.load(Ordering::Acquire) < 1
+            || state
+                .pending_ui_lock_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .map(|s| s.generation)
+                != Some(1)
+        {
+            tokio::task::yield_now().await;
+        }
+
+        let close_state = Arc::clone(&state);
+        let closing = tokio::spawn(async move {
+            close_vault_window_plan_inner(&close_state, Some("close-invalid".into()), false).await
+        });
+        while state.ui_session_generation.load(Ordering::Acquire) < 2
+            || state
+                .pending_ui_lock_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .map(|s| s.generation)
+                != Some(2)
+        {
+            tokio::task::yield_now().await;
+        }
+        drop(boundary);
+
+        assert!(
+            ordinary.await.unwrap().is_err(),
+            "A validates B's invalid snapshot"
+        );
+        let (outcome, may_destroy) = closing.await.unwrap();
+        assert!(outcome.continuity_error.is_some());
+        assert!(
+            !may_destroy,
+            "B must recover its generation-bound failure even though A consumed the bytes"
+        );
+        assert!(state.vault_window_close_debt.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn successful_reunlock_resolves_old_native_close_debt() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let (failed, may_destroy) =
+            close_vault_window_plan_inner(&state, Some("not json".into()), false).await;
+        assert!(failed.continuity_error.is_some());
+        assert!(!may_destroy);
+
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        assert!(finalize_unlock_session(&state, generation, false)
+            .await
+            .is_err());
+        assert!(
+            state.vault_window_close_debt.lock().await.is_some(),
+            "the first unlock merely surfaces malformed-state loss"
+        );
+        assert!(finalize_unlock_session(&state, generation, false)
+            .await
+            .is_ok());
+        assert!(state.vault_window_close_debt.lock().await.is_none());
+    }
+
+    #[tokio::test]
     async fn remounted_close_consumes_the_exact_native_pending_lock_snapshot() {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
@@ -19089,6 +19580,94 @@ mod tests {
             r#"{"kind":"something-else","version":1,"space":{}}"#
         ));
         assert!(!validate_space_layout_json("not json"));
+    }
+
+    #[test]
+    fn jam_sheet_export_accepts_only_the_inert_renderer_grammar() {
+        let safe = format!(
+            concat!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 120" width="960" height="120" data-mewtual-sheet="v1"><style>{}</style>"#,
+                r##"<rect x="0" y="0" width="960" height="120" fill="#fffdf6"/>"##,
+                r#"<line x1="1" y1="2" x2="3.5" y2="4" class="st"/>"#,
+                r#"<ellipse cx="5" cy="6" rx="4.6" ry="3.4" class="nh open"/>"#,
+                r#"<path d="M5 6 q7 -3 8 -12" class="flag"/>"#,
+                r#"<text x="56" y="30" class="ttl">Mika &amp; Rook</text></svg>"#,
+            ),
+            JAM_SHEET_STYLE,
+        );
+        assert!(validate_jam_sheet_svg(&safe));
+
+        for active in [
+            safe.replace("</svg>", "<script>alert(1)</script></svg>"),
+            safe.replace("<svg ", "<svg onload=\"alert(1)\" "),
+            safe.replace("</svg>", "<foreignobject>html</foreignobject></svg>"),
+            safe.replace(
+                "</svg>",
+                "<image href=\"https://example.invalid/x\"/></svg>",
+            ),
+            safe.replace(JAM_SHEET_STYLE, "text{fill:url(https://example.invalid/x)}"),
+        ] {
+            assert!(
+                !validate_jam_sheet_svg(&active),
+                "active SVG syntax was admitted"
+            );
+        }
+        assert!(!validate_jam_sheet_svg(&safe.replace(
+            "data-mewtual-sheet=\"v1\"",
+            "data-mewtual-sheet=\"v2\""
+        )));
+        assert!(validate_jam_sheet_name("mewtual-take-01-20260902.svg"));
+        assert!(validate_jam_sheet_name("mewtual-take-100-20260902.svg"));
+        assert!(!validate_jam_sheet_name("notes.svg"));
+        assert!(!validate_jam_sheet_name("mewtual-take-01-2026-09-02.svg"));
+    }
+
+    #[tokio::test]
+    async fn jam_sheet_export_cannot_publish_or_reveal_after_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let safe = format!(
+            concat!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 120" width="960" height="120" data-mewtual-sheet="v1"><style>{}</style>"#,
+                r##"<rect x="0" y="0" width="960" height="120" fill="#fffdf6"/>"##,
+                "</svg>"
+            ),
+            JAM_SHEET_STYLE,
+        );
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let export_state = Arc::clone(&state);
+        let export_root = root.path().to_path_buf();
+        let export_started = Arc::clone(&started);
+        let export_release = Arc::clone(&release);
+        let exporting = tokio::spawn(async move {
+            save_jam_sheet_to_downloads(
+                &export_state,
+                generation,
+                &export_root,
+                "mewtual-take-01-20260902.svg",
+                &safe,
+                async move {
+                    export_started.notify_one();
+                    export_release.notified().await;
+                },
+                |_| panic!("stale sheet export must never reach reveal"),
+            )
+            .await
+        });
+        started.notified().await;
+
+        lock_session_inner(&state, None).await.unwrap();
+        release.notify_one();
+        assert!(exporting.await.unwrap().is_err());
+        assert!(
+            !root.path().join("mewtual-take-01-20260902.svg").exists(),
+            "no plaintext sheet may appear after the UI generation was locked"
+        );
     }
 
     #[test]

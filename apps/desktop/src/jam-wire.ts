@@ -1,4 +1,4 @@
-import { JamPeerBudget, type JamBudgetDenial } from "./jam-budget.ts";
+import { JamPeerBudget, JamTokenBucket, type JamBudgetDenial } from "./jam-budget.ts";
 import {
   JAM_FRAME_MAX_BYTES,
   JAM_LEGACY_SESSION_NONCE,
@@ -6,6 +6,8 @@ import {
   JAM_MET_BPB_MIN,
   JAM_MET_BPM_MAX,
   JAM_MET_BPM_MIN,
+  JAM_MUTED_STATE_BUCKET_BURST,
+  JAM_MUTED_STATE_BUCKET_RATE,
   JAM_PATCH_ID_HEX_CHARS,
   JAM_SEQUENCE_MAX,
   JAM_SESSION_NONCE_HEX_CHARS,
@@ -35,6 +37,16 @@ export type JamFrameDecode =
   | Readonly<{ ok: false; reason: JamBudgetDenial | "json" | "shape" | "small-frame" }>;
 
 const encoder = new TextEncoder();
+
+/** One row-click acts on the effective mute state; flood mute is forgiven instead of doubled. */
+export function toggleJamPeerMute(manuallyMuted: boolean, abuseMuted: boolean): Readonly<{
+  manuallyMuted: boolean;
+  forgiveAbuse: boolean;
+}> {
+  return abuseMuted
+    ? { manuallyMuted: false, forgiveAbuse: true }
+    : { manuallyMuted: !manuallyMuted, forgiveAbuse: false };
+}
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -82,6 +94,10 @@ function patchId(value: unknown): value is string {
  */
 export class JamFrameDecoder {
   readonly budget: JamPeerBudget;
+  private readonly mutedStates = new JamTokenBucket(
+    JAM_MUTED_STATE_BUCKET_BURST,
+    JAM_MUTED_STATE_BUCKET_RATE,
+  );
   private legacySequence = 0;
 
   constructor(budget = new JamPeerBudget()) {
@@ -90,7 +106,13 @@ export class JamFrameDecoder {
 
   decode(raw: unknown, nowMs: number): JamFrameDecode {
     const admitted = this.budget.admitFrame(raw, nowMs);
-    if (!admitted.ok) return admitted;
+    if (!admitted.ok) {
+      // Auto-mute applies to the expensive musical lane, not to the peer's consent and media
+      // state. Admit only the exact, tiny t:"s" vocabulary through an independent pre-parse
+      // bucket; everything else remains rejected without JSON work.
+      if (admitted.reason === "abuse-muted") return this.mutedState(raw, nowMs);
+      return admitted;
+    }
     let value: unknown;
     try { value = JSON.parse(admitted.raw); } catch { return { ok: false, reason: "json" }; }
     const message = record(value);
@@ -104,6 +126,33 @@ export class JamFrameDecoder {
     if (message.t === "p") return this.patch(message, nowMs);
     if (message.t === "m") return this.metronome(message);
     if (message.t === "c") return this.clock(message, nowMs);
+    return { ok: true, kind: "other", value: message };
+  }
+
+  private mutedState(raw: unknown, nowMs: number): JamFrameDecode {
+    // Every post-mute delivery pays this lane before any content-dependent work. In particular,
+    // wrong-type and oversize frames must not become a free CPU wake-up lane after auto-mute.
+    if (!this.mutedStates.charge(nowMs)) return { ok: false, reason: "abuse-muted" };
+    if (typeof raw !== "string" || raw.length > JAM_SMALL_FRAME_MAX_BYTES) {
+      return { ok: false, reason: "abuse-muted" };
+    }
+    // UTF-16 length provides the allocation-free upper bound needed before UTF-8 encoding.
+    if (encoder.encode(raw).byteLength > JAM_SMALL_FRAME_MAX_BYTES) {
+      return { ok: false, reason: "abuse-muted" };
+    }
+    let value: unknown;
+    try { value = JSON.parse(raw); } catch { return { ok: false, reason: "abuse-muted" }; }
+    const message = record(value);
+    if (!message || !exact(message, ["t"], ["mic", "inst", "vid", "rx", "rec", "rc"]) || message.t !== "s") {
+      return { ok: false, reason: "abuse-muted" };
+    }
+    const bit = (candidate: unknown) => candidate === undefined || candidate === 0 || candidate === 1;
+    if (
+      !bit(message.mic) || !bit(message.inst) || !bit(message.rc) ||
+      (message.vid !== undefined && !boundedInt(message.vid, 0, 2)) ||
+      (message.rec !== undefined && !boundedInt(message.rec, 0, 2)) ||
+      (message.rx !== undefined && message.rx !== 720 && message.rx !== 1080 && message.rx !== 1440 && message.rx !== 2160)
+    ) return { ok: false, reason: "abuse-muted" };
     return { ok: true, kind: "other", value: message };
   }
 

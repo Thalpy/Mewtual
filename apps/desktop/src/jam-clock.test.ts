@@ -92,6 +92,15 @@ test("only the anchor can update or stop, and revision churn is rate-limited", (
   assert.equal(clock.receive(alice, met({ rev: 2, on: 0 }), 5_000), "stopped");
 });
 
+test("a newer stop bypasses the tempo revision throttle", () => {
+  const channels = new JamSourceChannelRegistry();
+  const clock = new JamMetronomeClock(channels);
+  const alice = channels.open("alice");
+  assert.equal(clock.receive(alice, met(), 1_000), "started");
+  assert.equal(clock.receive(alice, met({ rev: 1, on: 0 }), 1_001), "stopped");
+  assert.equal(clock.snapshot(), null);
+});
+
 test("lookahead schedules on the audio clock, stays under 150 ms and never duplicates a beat", () => {
   const channels = new JamSourceChannelRegistry();
   const clock = new JamMetronomeClock(channels);
@@ -115,6 +124,18 @@ test("without a trustworthy offset the click is explicitly local-only", () => {
   assert.equal(clock.receive(channels.open("alice"), met({ org: 9_999_999 }), 5_000), "started");
   const clicks = clock.plan(new JamClockSync(), 5_000, 10);
   assert.equal(clicks[0]?.audioTime, 10);
+});
+
+test("suspended-time catch-up skips missed beats instead of replaying them on resume", () => {
+  const channels = new JamSourceChannelRegistry();
+  const clock = new JamMetronomeClock(channels);
+  const sync = new JamClockSync();
+  assert.equal(clock.receive(channels.open("alice"), met({ org: 0 }), 0), "started");
+  clock.catchUp(sync, 10_000);
+  const resumed = clock.plan(sync, 10_000, 5);
+  assert.equal(resumed[0]?.beat, 20);
+  assert.equal(resumed[0]?.audioTime, 5);
+  assert.ok(resumed.every((click) => click.beat >= 20), "no missed beat may be queued after suspension");
 });
 
 test("a stale channel capability cannot seize metronome state", () => {

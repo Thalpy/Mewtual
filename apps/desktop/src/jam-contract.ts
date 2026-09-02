@@ -18,6 +18,17 @@ export const JAM_FRAME_MAX_BYTES = 1024;
 export const JAM_SMALL_FRAME_MAX_BYTES = 200;
 export const JAM_FRAME_BUCKET_RATE = 80; // tokens per second
 export const JAM_FRAME_BUCKET_BURST = 160;
+// Once musical abuse has muted a peer, a separately bounded control lane keeps only their exact
+// coarse call-state heartbeat alive. Without it, consent withdrawal and video/mute state would
+// freeze for the rest of the call. This lane is still charged before JSON.parse.
+export const JAM_MUTED_STATE_BUCKET_RATE = 2;
+export const JAM_MUTED_STATE_BUCKET_BURST = 4;
+// A not-yet-open outbound edge retains only this many locally generated events. Overflow drops
+// that unopened transient as a unit so note-ons cannot survive without their later note-offs.
+export const JAM_OUTBOUND_PENDING_MAX = 256;
+// Async SHA-256 extends receive processing past data-channel delivery. Bound the causal backlog
+// independently so a peer cannot turn one delayed digest into unbounded retained closures.
+export const JAM_INBOUND_PENDING_MAX = 256;
 // Sustained-abuse auto-mute: bucket exhausted this long (cumulative, rolling window) mutes the
 // peer's instrument channel receive-side for the rest of the call.
 export const JAM_ABUSE_EXHAUSTED_MS = 10_000;
@@ -216,14 +227,25 @@ export const JAM_KIT: readonly JamPad[] = [
 ] as const;
 export const JAM_DRUM_TAIL_MAX_MS = 3_000;
 export const JAM_DRUM_NOISE_PERIOD_SAMPLES = 4_096;
+// WebCrypto work is not cancelled by stealing an allocator slot. Bound pending deterministic
+// noise digests separately, with a per-source share so one performer cannot occupy the room.
+export const JAM_DRUM_DIGESTS_PER_SOURCE = 4;
+export const JAM_DRUM_DIGESTS_GLOBAL = 32;
+/** Short receiver-local call cues may overlap only this many times across the whole room. */
+export const JAM_CALL_CUE_PENDING_MAX = 4;
 
 // --- jam-take:v1 (phases 5-6, planned) -------------------------------------------------------
 export const TAKE_MAX_DURATION_MS = 600_000;
 export const TAKE_MAX_EVENTS = 20_000;
 export const TAKE_MAX_BYTES = 524_288;
+/** Validated jukebox takes retained per call (at most about 4 MiB of source JSON). */
+export const JAM_TAKE_CACHE_MAX = 8;
 export const TAKE_MAX_PARTICIPANTS = 16;
 export const TAKE_MAX_LANES = 64;
 export const TAKE_MAX_PATCHES = 64;
+export const TAKE_ID_MAX_BYTES = 256;
+// Dense/seeked takes are drained over bounded macrotask passes instead of monopolising one tick.
+export const TAKE_PLAYBACK_EVENTS_PER_TICK = 128;
 
 export interface JamTakeLane {
   src: number; // index into parts

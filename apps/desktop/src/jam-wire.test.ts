@@ -2,16 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   JAM_FRAME_BUCKET_BURST,
+  JAM_FRAME_BUCKET_RATE,
   JAM_CLOCK_PROBE_BURST,
   JAM_LEGACY_SESSION_NONCE,
   JAM_FRAME_MAX_BYTES,
+  JAM_MUTED_STATE_BUCKET_BURST,
   JAM_NOTEON_BUCKET_BURST,
   JAM_PATCH_ID_HEX_CHARS,
   JAM_SESSION_NONCE_HEX_CHARS,
   JAM_SMALL_FRAME_MAX_BYTES,
   type JamPatch,
 } from "./jam-contract.ts";
-import { JamFrameDecoder } from "./jam-wire.ts";
+import { JamFrameDecoder, toggleJamPeerMute } from "./jam-wire.ts";
 
 const id = "a".repeat(JAM_PATCH_ID_HEX_CHARS);
 const sn = "b".repeat(JAM_SESSION_NONCE_HEX_CHARS);
@@ -140,4 +142,54 @@ test("incoming clock probes have a dedicated anti-amplification bucket", () => {
 test("unrelated bounded state frames remain available to the existing call handler", () => {
   const state = { t: "s", mic: 1, inst: 0, vid: 2, rx: 1080 };
   assert.deepEqual(new JamFrameDecoder().decode(JSON.stringify(state), 0), { ok: true, kind: "other", value: state });
+});
+
+test("auto-muted music retains a tiny pre-parse lane for exact call state", () => {
+  const decoder = new JamFrameDecoder();
+  for (let index = 0; index < JAM_FRAME_BUCKET_BURST; index += 1) decoder.decode("{}", 0);
+  for (let ms = 1; ms <= 20_000 && !decoder.budget.isAbuseMuted(); ms += 1) {
+    decoder.decode("{}", ms);
+  }
+  assert.equal(decoder.budget.isAbuseMuted(), true);
+
+  const state = { t: "s", mic: 1, inst: 0, vid: 2, rx: 1080, rec: 0, rc: 0 };
+  assert.deepEqual(decoder.decode(JSON.stringify(state), 20_001), {
+    ok: true,
+    kind: "other",
+    value: state,
+  });
+  assert.deepEqual(
+    decoder.decode(JSON.stringify({ t: "n", on: 1, n: 60, w: "sine", q: 1 }), 20_001),
+    { ok: false, reason: "abuse-muted" },
+  );
+  assert.deepEqual(
+    decoder.decode(JSON.stringify({ ...state, href: "https://attacker.invalid" }), 20_001),
+    { ok: false, reason: "abuse-muted" },
+  );
+  // The test intentionally keeps pressure continuous; this import pins that the same production
+  // refill rate is used rather than a test-only time shortcut.
+  assert.ok(JAM_FRAME_BUCKET_RATE > 0);
+});
+
+test("wrong-type frames consume the post-mute state lane before inspection", () => {
+  const decoder = new JamFrameDecoder();
+  for (let index = 0; index < JAM_FRAME_BUCKET_BURST; index += 1) decoder.decode("{}", 0);
+  for (let ms = 1; ms <= 20_000 && !decoder.budget.isAbuseMuted(); ms += 1) {
+    decoder.decode("{}", ms);
+  }
+  assert.equal(decoder.budget.isAbuseMuted(), true);
+
+  for (let index = 0; index < JAM_MUTED_STATE_BUCKET_BURST; index += 1) {
+    assert.deepEqual(decoder.decode(new Uint8Array(), 20_001), { ok: false, reason: "abuse-muted" });
+  }
+  assert.deepEqual(
+    decoder.decode(JSON.stringify({ t: "s", mic: 1 }), 20_001),
+    { ok: false, reason: "abuse-muted" },
+  );
+});
+
+test("one click on an effective flood mute forgives it instead of adding a manual mute", () => {
+  assert.deepEqual(toggleJamPeerMute(false, true), { manuallyMuted: false, forgiveAbuse: true });
+  assert.deepEqual(toggleJamPeerMute(true, true), { manuallyMuted: false, forgiveAbuse: true });
+  assert.deepEqual(toggleJamPeerMute(false, false), { manuallyMuted: true, forgiveAbuse: false });
 });

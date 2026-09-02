@@ -179,11 +179,13 @@ export class JamMetronomeClock {
     }
     if (current.source !== source || current.sessionNonce !== message.sn) return "foreign";
     if (message.rev <= current.revision) return "stale";
-    if (localReceivedMs - current.acceptedAtMs < JAM_MET_REV_MIN_INTERVAL_MS) return "too-fast";
+    // A newer stop is a safety/lifecycle edge, not tempo churn. It must never sit behind the
+    // two-second update throttle or a quick local stop leaves every listener clicking.
     if (message.on === 0) {
       this.active = null;
       return "stopped";
     }
+    if (localReceivedMs - current.acceptedAtMs < JAM_MET_REV_MIN_INTERVAL_MS) return "too-fast";
     this.active = fromMessage(source, message, localReceivedMs);
     return "updated";
   }
@@ -218,6 +220,21 @@ export class JamMetronomeClock {
     }
     active.nextBeat = beat;
     return clicks;
+  }
+
+  /**
+   * Advance past missed beats without translating them into AudioContext work.
+   *
+   * A suspended audio clock is frozen while `performance.now()` continues. Callers use this path
+   * until audio is running so resume begins at the current beat rather than replaying a backlog.
+   */
+  catchUp(sync: JamClockSync, localPerformanceMs: number): void {
+    const active = this.active;
+    if (!active || !finiteTime(localPerformanceMs)) return;
+    const localOrigin = sync.remoteToLocal(active.remoteOriginMs) ?? active.localFallbackOriginMs;
+    const beatMs = 60_000 / active.bpm;
+    const firstFuture = Math.max(0, Math.ceil((localPerformanceMs - localOrigin) / beatMs - 1e-9));
+    active.nextBeat = Math.max(active.nextBeat, firstFuture);
   }
 
   snapshot(): Readonly<Omit<ActiveMetronome, "nextBeat">> | null {

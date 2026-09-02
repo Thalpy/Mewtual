@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JAM_SESSION_NONCE_HEX_CHARS, JAM_TAKE_COMMITMENT_DOMAIN, TAKE_MAX_BYTES, type JamPatch } from "./jam-contract.ts";
+import { JAM_SESSION_NONCE_HEX_CHARS, JAM_TAKE_COMMITMENT_DOMAIN, TAKE_ID_MAX_BYTES, TAKE_MAX_BYTES, type JamPatch } from "./jam-contract.ts";
 import {
+  applyJamRecorderConsent,
+  captureJamRecorderLease,
   jamParticipantCommitment,
   jamTakeId,
   JamTakeRecorder,
   parseJamTakeJson,
+  recordLeasedJamDrum,
   validateJamTake,
 } from "./jam-recorder.ts";
 
@@ -41,6 +44,49 @@ test("recording starts only with every participant's honest-client consent", () 
   assert.equal(rec.start(), true);
   rec.setConsent(bob, false);
   assert.equal(rec.state(), "arming");
+});
+
+test("local consent withdrawal immediately closes the recorder event gate", () => {
+  const rec = recorder();
+  start(rec);
+  assert.equal(applyJamRecorderConsent(rec, alice, false), true);
+  assert.equal(rec.state(), "arming");
+  assert.deepEqual(
+    rec.recordNoteOn({ source: alice, sessionNonce: aliceSn, ms: 1, sequence: 1, note: 60, wave: "sine" }),
+    { ok: false, reason: "not-recording" },
+  );
+  assert.equal(applyJamRecorderConsent(rec, alice, true), true);
+  assert.equal(rec.state(), "arming", "re-allow still requires the normal sync/start transition");
+  assert.equal(rec.start(), true);
+});
+
+test("an async drum keeps receipt time and cannot cross into a replacement take", () => {
+  const old = recorder();
+  start(old);
+  const lease = captureJamRecorderLease(old, 7.4);
+  const replacement = recorder();
+  start(replacement);
+  assert.equal(recordLeasedJamDrum(replacement, lease, {
+    source: alice, sessionNonce: aliceSn, sequence: 1, pad: 0,
+  }), null);
+  assert.equal(replacement.stop().events.length, 0);
+
+  const result = recordLeasedJamDrum(old, lease, {
+    source: alice, sessionNonce: aliceSn, sequence: 1, pad: 0,
+  });
+  assert.equal(result?.ok, true);
+  if (result?.ok) assert.equal(result.event.ms, 7);
+});
+
+test("take identities are independently byte-bounded before per-event drum hashing", () => {
+  const tooLong = "x".repeat(TAKE_ID_MAX_BYTES + 1);
+  assert.throws(
+    () => new JamTakeRecorder({ groupId: "g", callId: tooLong, bpm: 120, beatsPerBar: 4, participants: [alice] }),
+    TypeError,
+  );
+  const take = recorder().stop();
+  assert.equal(validateJamTake({ ...take, call: tooLong }).ok, false);
+  assert.equal(validateJamTake({ ...take, parts: [tooLong, bob] }).ok, false);
 });
 
 test("authenticated source/session lanes retain patches, fallback waves, drums and gaps", () => {
