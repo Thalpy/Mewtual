@@ -26,7 +26,13 @@ import { validateJamPatch } from "./jam-patch.ts";
 export type JamWireMessage = JamNoteOn | JamNoteOff | JamDrumHit | JamPatchAnnounce |
   JamMetronome | JamClockProbe | JamClockReply;
 export type JamFrameDecode =
-  | Readonly<{ ok: true; kind: "jam"; message: JamWireMessage }>
+  | Readonly<{
+    ok: true;
+    kind: "jam";
+    message: JamWireMessage;
+    /** Exact frame already hash-verified in this peer's call-epoch budget on an older edge. */
+    verifiedReannounce?: true;
+  }>
   | Readonly<{
     ok: true;
     kind: "legacy-note";
@@ -99,6 +105,8 @@ export class JamFrameDecoder {
     JAM_MUTED_STATE_BUCKET_RATE,
   );
   private legacySequence = 0;
+  private reconnectPatchAvailable = true;
+  private readonly patchFrames = new WeakMap<JamPatchAnnounce, string>();
 
   constructor(budget = new JamPeerBudget()) {
     this.budget = budget;
@@ -123,7 +131,7 @@ export class JamFrameDecoder {
 
     if (message.t === "n") return this.note(message, nowMs);
     if (message.t === "d") return this.drum(message, nowMs);
-    if (message.t === "p") return this.patch(message, nowMs);
+    if (message.t === "p") return this.patch(message, nowMs, admitted.raw);
     if (message.t === "m") return this.metronome(message);
     if (message.t === "c") return this.clock(message, nowMs);
     return { ok: true, kind: "other", value: message };
@@ -203,20 +211,34 @@ export class JamFrameDecoder {
     return { ok: true, kind: "jam", message: message as unknown as JamDrumHit };
   }
 
-  private patch(message: Record<string, unknown>, nowMs: number): JamFrameDecode {
-    // Charge the rare subtype before descriptor validation and hashing work.
-    if (!this.budget.admitPatch(nowMs)) return { ok: false, reason: "patch-rate" };
+  private patch(message: Record<string, unknown>, nowMs: number, raw: string): JamFrameDecode {
+    // One fresh channel may recover the exact recipe already hash-verified for this peer/call.
+    // Anything else still pays before descriptor validation and later WebCrypto work.
+    const verifiedReannounce = this.reconnectPatchAvailable && this.budget.isVerifiedPatchFrame(raw);
+    if (!verifiedReannounce && !this.budget.admitPatch(nowMs)) return { ok: false, reason: "patch-rate" };
     if (
       !exact(message, ["t", "v", "id", "sn", "d"]) || message.v !== 1 ||
       !patchId(message.id) || !nonce(message.sn)
     ) return { ok: false, reason: "shape" };
     const checked = validateJamPatch(message.d);
     if (!checked.ok) return { ok: false, reason: "shape" };
+    this.reconnectPatchAvailable = false;
+    const normalized: JamPatchAnnounce = { t: "p", v: 1, id: message.id, sn: message.sn, d: checked.patch };
+    this.patchFrames.set(normalized, raw);
     return {
       ok: true,
       kind: "jam",
-      message: { t: "p", v: 1, id: message.id, sn: message.sn, d: checked.patch },
+      message: normalized,
+      ...(verifiedReannounce ? { verifiedReannounce: true as const } : {}),
     };
+  }
+
+  /** Promote only a frame whose descriptor was accepted and hash-verified by the engine. */
+  confirmInstalledPatch(message: JamPatchAnnounce): boolean {
+    const raw = this.patchFrames.get(message);
+    if (!raw) return false;
+    this.budget.confirmVerifiedPatchFrame(raw);
+    return true;
   }
 
   private metronome(message: Record<string, unknown>): JamFrameDecode {

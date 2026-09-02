@@ -3,7 +3,9 @@ import { JamSourceChannelRegistry, type JamSourceChannel } from "./jam-channel.t
 import {
   JAM_DRUM_SEED_DOMAIN,
   JAM_DRUM_DIGESTS_GLOBAL,
-  JAM_DRUM_DIGESTS_PER_SOURCE,
+  JAM_DRUM_DIGESTS_PER_LANE,
+  JAM_DRUM_PENDING_GLOBAL,
+  JAM_DRUM_PENDING_PER_SOURCE,
   JAM_DRUM_NOISE_PERIOD_SAMPLES,
   JAM_DRUM_TAIL_MAX_MS,
   JAM_EFFECT_SEND_MAX_GAIN,
@@ -28,6 +30,8 @@ import {
   JAM_SEQUENCE_MAX,
   JAM_SESSION_NONCE_HEX_CHARS,
   TAKE_MAX_PATCHES,
+  TAKE_ID_MAX_BYTES,
+  TAKE_MAX_PARTICIPANTS,
   JAM_VOICE_PEAK_GAIN,
   PATCH_FILTER_MODES,
   PATCH_LFO_DESTS,
@@ -48,6 +52,28 @@ export type JamPlaybackPatchSet = Readonly<{ [PLAYBACK_PATCH_SET]: true }>;
 type PlaybackPatchData = Readonly<{
   patches: readonly JamPatch[];
   ids: readonly string[];
+  seedCallId?: string;
+  seedSources?: readonly string[];
+  /** Engine-minted fairness/choke domains; never derived from recorder-attested identity text. */
+  owners?: readonly string[];
+}>;
+
+type ChannelProvenance = Readonly<{
+  /** Engine-owned performer domain used for fairness and source-scoped musical behavior. */
+  owner: string;
+  /** Stable performer identity used only as deterministic drum seed material. */
+  seedSource: string;
+  /** Archival call scope. Live events continue to use their current trusted call scope. */
+  seedCallId?: string;
+  /** Prevents a lane bound for one validated take from being reused with another patch table. */
+  playbackPatches?: JamPlaybackPatchSet;
+}>;
+
+export type JamPlaybackSeedProvenance = Readonly<{
+  /** Stable call-channel id shared by the participants; never a device-local server handle. */
+  callId: string;
+  /** Validated take part identities indexed by the lane's `src`. */
+  sources: readonly string[];
 }>;
 
 export type JamNoteInput = Readonly<{
@@ -57,6 +83,8 @@ export type JamNoteInput = Readonly<{
   wave: LegacyWave;
   patchId?: string;
   remote?: boolean;
+  /** Receiver-only admission result; false advances sequencing without constructing audio. */
+  render?: boolean;
 }>;
 
 export type JamNoteOffInput = Readonly<{
@@ -72,9 +100,12 @@ export type JamDrumInput = Readonly<{
   sequence: number;
   pad: number;
   remote?: boolean;
+  /** Receiver-only admission result; false advances sequencing without hashing or audio. */
+  render?: boolean;
 }>;
 
 export type JamDrumSeedInput = Readonly<{
+  /** Stable call-channel id shared across devices; reproducibility only, never authority. */
   callId: string;
   source: string;
   sessionNonce: string;
@@ -90,6 +121,16 @@ export type JamPlayResult = Readonly<{
   stolen?: readonly string[];
 }>;
 
+type PendingDrumJob = Readonly<{
+  owner: string;
+  channel: JamSourceChannel;
+  roomGeneration: number;
+  sourceGeneration: number;
+  sequence: JamSequenceResult;
+  run: () => Promise<JamPlayResult>;
+  resolve: (result: JamPlayResult) => void;
+}>;
+
 /** True when an authenticated event advanced its source lane, even if local audio policy hid it. */
 export function jamSequenceAccepted(result: JamPlayResult): boolean {
   return result.sequence === "first" || result.sequence === "next" || result.sequence === "gap";
@@ -100,6 +141,8 @@ type SourceState = {
   lastSequence: number | null;
   patches: Map<string, JamPatch>;
   muted: boolean;
+  /** Monotonic hard-gate epoch; pre-mute async work may never emerge after unmute. */
+  renderGeneration: number;
   /** Receiver-owned linear gain applied equally to dry and every room send. */
   level: number;
 };
@@ -113,7 +156,10 @@ type SourceBus = {
 
 type VoiceRuntime = {
   id: string;
+  /** Lifecycle/render lane; distinct reconnect lanes remain independently removable. */
   source: string;
+  /** Engine-owned performer domain shared across that performer's archival reconnect lanes. */
+  owner: string;
   remote: boolean;
   customPatch: boolean;
   kind: "note" | "drum";
@@ -139,6 +185,17 @@ type RoomGraph = {
   nodes: AudioNode[];
   sources: AudioScheduledSourceNode[];
 };
+
+const utf8 = new TextEncoder();
+
+function boundedTakeIdentity(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && utf8.encode(value).byteLength <= TAKE_ID_MAX_BYTES;
+}
+
+function liveVoiceOwner(source: string): string {
+  // Domain separation prevents an untrusted take identity from colliding with a live performer.
+  return `live\u0000${source}`;
+}
 
 /** MIDI note to cycles/second; transposition happens before this conversion. */
 function noteHz(note: number): number {
@@ -219,10 +276,19 @@ export class JamEngine {
   private readonly buses = new Map<string, SourceBus>();
   private readonly voices = new Map<string, VoiceRuntime>();
   private readonly playbackPatchSets = new WeakMap<JamPlaybackPatchSet, PlaybackPatchData>();
+  // Provenance is capability-bound and engine-owned. Neither a wire event nor a parsed take can
+  // claim a different owner after the trusted App seam has opened its exact channel generation.
+  private readonly channelProvenance = new WeakMap<JamSourceChannel, ChannelProvenance>();
   private drumDigests = 0;
-  private readonly drumDigestsBySource = new Map<string, number>();
+  private drumPending = 0;
+  private readonly drumActiveJobs = new Set<PendingDrumJob>();
+  private readonly drumPendingBySource = new Map<string, number>();
+  private readonly drumQueue: PendingDrumJob[] = [];
+  private playbackOwnerGeneration = 0;
   private legacyOnly = false;
   private deafened = false;
+  /** Monotonic Deafen epoch closes the Boolean on→off ABA hole for unresolved drum work. */
+  private roomPolicyGeneration = 0;
   private disposed = false;
 
   constructor(
@@ -255,6 +321,44 @@ export class JamEngine {
       if (state) state.lastSequence = null;
     }
     return this.sourceChannels.open(source);
+  }
+
+  /** Open the reserved local lane while retaining the authenticated self identity for seeds. */
+  openLocalSource(authenticatedSelf: string): JamSourceChannel {
+    if (!boundedTakeIdentity(authenticatedSelf)) throw new TypeError("invalid local jam identity");
+    const channel = this.openSource("me");
+    this.channelProvenance.set(channel, {
+      owner: liveVoiceOwner(authenticatedSelf),
+      seedSource: authenticatedSelf,
+    });
+    return channel;
+  }
+
+  /**
+   * Open one independently sequenced archival lane under its original performer's ownership.
+   *
+   * `source` is only a synthetic lifecycle key. Fairness, hat choke and deterministic seed
+   * material come from the engine-validated take table and cannot be supplied on each event.
+   */
+  openPlaybackSource(
+    source: string,
+    patches: JamPlaybackPatchSet,
+    part: number,
+  ): JamSourceChannel | null {
+    const table = this.playbackPatchSets.get(patches);
+    if (
+      this.disposed || !table?.seedCallId || !table.seedSources || !table.owners ||
+      !Number.isInteger(part) || part < 0 || part >= table.seedSources.length
+    ) return null;
+    const channel = this.openSource(source);
+    const seedSource = table.seedSources[part];
+    this.channelProvenance.set(channel, {
+      owner: table.owners[part],
+      seedSource,
+      seedCallId: table.seedCallId,
+      playbackPatches: patches,
+    });
+    return channel;
   }
 
   /** A new sender nonce starts a new replay/sequence and patch-cache domain. */
@@ -319,6 +423,33 @@ export class JamEngine {
     }
     if (!this.beginSourceSession(channel, sessionNonce)) return "invalid-session";
 
+    return this.cachePatch(source, id, checked.patch);
+  }
+
+  /**
+   * Reinstall one exact frame previously hash-verified for this authenticated peer/call epoch.
+   *
+   * Only `JamFrameDecoder.verifiedReannounce` may select this trusted seam. The descriptor is
+   * still structurally reconstructed, but the expensive hash need not be repeated after a normal
+   * reconnect whose source state was removed. New/different frames always use `installPatch`.
+   */
+  installVerifiedReannounce(
+    channel: JamSourceChannel,
+    sessionNonce: string,
+    id: string,
+    candidate: unknown,
+  ): JamPatchInstallResult {
+    if (this.disposed) return "disposed";
+    if (!this.sourceChannels.isCurrent(channel)) return "stale-channel";
+    if (!validWireNonce(sessionNonce)) return "invalid-session";
+    if (!new RegExp(`^[0-9a-f]{${JAM_PATCH_ID_HEX_CHARS}}$`).test(id)) return "hash-mismatch";
+    const checked = validateJamPatch(candidate);
+    if (!checked.ok) return "invalid-patch";
+    if (!this.beginSourceSession(channel, sessionNonce)) return "invalid-session";
+    return this.cachePatch(channel.source, id, checked.patch);
+  }
+
+  private cachePatch(source: string, id: string, patch: JamPatch): "installed" | "cached" {
     const cache = this.state(source).patches;
     if (cache.has(id)) {
       // Map insertion order is the LRU order; touching a valid immutable entry moves it newest.
@@ -327,7 +458,7 @@ export class JamEngine {
       cache.set(id, existing);
       return "cached";
     }
-    cache.set(id, checked.patch);
+    cache.set(id, patch);
     while (cache.size > JAM_PATCH_CACHE_PER_PEER) cache.delete(cache.keys().next().value!);
     return "installed";
   }
@@ -343,8 +474,17 @@ export class JamEngine {
   async preparePlaybackPatches(
     candidates: readonly unknown[],
     isCurrent: () => boolean = () => true,
+    seedProvenance?: JamPlaybackSeedProvenance,
   ): Promise<JamPlaybackPatchSet | null> {
-    if (this.disposed || !isCurrent() || !Array.isArray(candidates) || candidates.length > TAKE_MAX_PATCHES) return null;
+    if (
+      this.disposed || !isCurrent() || !Array.isArray(candidates) || candidates.length > TAKE_MAX_PATCHES ||
+      (seedProvenance && (
+        !boundedTakeIdentity(seedProvenance.callId) ||
+        !Array.isArray(seedProvenance.sources) || seedProvenance.sources.length < 1 ||
+        seedProvenance.sources.length > TAKE_MAX_PARTICIPANTS ||
+        seedProvenance.sources.some((source) => !boundedTakeIdentity(source))
+      ))
+    ) return null;
     const patches: JamPatch[] = [];
     const ids: string[] = [];
     for (const candidate of candidates) {
@@ -358,7 +498,19 @@ export class JamEngine {
       ids.push(id);
     }
     const set = Object.freeze({ [PLAYBACK_PATCH_SET]: true as const });
-    this.playbackPatchSets.set(set, { patches: Object.freeze(patches), ids: Object.freeze(ids) });
+    const playbackOwnerGeneration = ++this.playbackOwnerGeneration;
+    this.playbackPatchSets.set(set, {
+      patches: Object.freeze(patches),
+      ids: Object.freeze(ids),
+      ...(seedProvenance ? {
+        seedCallId: seedProvenance.callId,
+        seedSources: Object.freeze([...seedProvenance.sources]),
+        // These opaque domains aggregate one take performer's reconnect lanes while preventing
+        // recorder-attested text from consuming or choking a same-named live performer's voices.
+        owners: Object.freeze(seedProvenance.sources.map((_, part) =>
+          `playback\u0000${playbackOwnerGeneration}\u0000${part}`)),
+      } : {}),
+    });
     return set;
   }
 
@@ -387,9 +539,14 @@ export class JamEngine {
     ) return { ok: false, reason: "invalid" };
     if (!this.sourceChannels.isCurrent(input.channel)) return { ok: false, reason: "channel" };
     const source = input.channel.source;
+    const provenance = this.channelProvenance.get(input.channel);
+    if (playbackTable?.seedSources && provenance?.playbackPatches !== playback?.patches) {
+      return { ok: false, reason: "invalid" };
+    }
+    const owner = provenance?.owner ?? liveVoiceOwner(source);
     const sequence = this.acceptSequence(source, input.sequence);
     if (sequence === "duplicate" || sequence === "no-session") return { ok: false, reason: "sequence", sequence };
-    if (this.state(source).muted || this.deafened) {
+    if (input.render === false || this.state(source).muted || this.deafened) {
       return { ok: false, reason: "muted", sequence };
     }
     // Remote input is not a user gesture and must never queue a surprise sound in a suspended
@@ -411,6 +568,7 @@ export class JamEngine {
     const allocation = this.allocator.allocate({
       id,
       source,
+      owner,
       phase: "held",
       startedAtMs: this.nowMs(),
       teardown: (reason) => runtime?.teardown(reason),
@@ -418,7 +576,7 @@ export class JamEngine {
     if (!allocation.ok) return { ok: false, reason: allocation.reason, sequence };
 
     try {
-      runtime = this.createPatchVoice(id, input, patch, !!custom);
+      runtime = this.createPatchVoice(id, input, patch, !!custom, owner);
       this.voices.set(id, runtime);
       // A failed duplicate/allocation/graph build never changes LRU recency. This lets recorder
       // integration query the same cache after the result without maintaining a fallible mirror.
@@ -449,80 +607,179 @@ export class JamEngine {
     return { ok: true, sequence };
   }
 
-  async drum(input: JamDrumInput): Promise<JamPlayResult> {
+  async drum(
+    input: JamDrumInput,
+    playback?: Readonly<{ patches: JamPlaybackPatchSet; part: number }>,
+  ): Promise<JamPlayResult> {
+    const playbackTable = playback ? this.playbackPatchSets.get(playback.patches) : undefined;
     if (
       this.disposed || !Number.isInteger(input.pad) || input.pad < 0 || input.pad >= JAM_KIT.length ||
-      !validSequence(input.sequence) || !validWireNonce(input.sessionNonce)
+      !validSequence(input.sequence) || !validWireNonce(input.sessionNonce) || !boundedTakeIdentity(input.callId) ||
+      (playback && (
+        !playbackTable?.seedCallId || !playbackTable.seedSources || !Number.isInteger(playback.part) ||
+        playback.part < 0 || playback.part >= playbackTable.seedSources.length
+      ))
     ) return { ok: false, reason: "invalid" };
     if (!this.sourceChannels.isCurrent(input.channel)) return { ok: false, reason: "channel" };
     const source = input.channel.source;
+    const provenance = this.channelProvenance.get(input.channel);
+    if (
+      playback && playbackTable && (
+        provenance?.playbackPatches !== playback.patches ||
+        provenance.seedSource !== playbackTable.seedSources?.[playback.part]
+      )
+    ) return { ok: false, reason: "invalid" };
+    const owner = provenance?.owner ?? liveVoiceOwner(source);
     if (!this.beginSourceSession(input.channel, input.sessionNonce)) return { ok: false, reason: "invalid" };
     const sequence = this.acceptSequence(source, input.sequence);
     if (sequence === "duplicate" || sequence === "no-session") return { ok: false, reason: "sequence", sequence };
-    if (this.state(source).muted || this.deafened) {
+    if (input.render === false || this.state(source).muted || this.deafened) {
       return { ok: false, reason: "muted", sequence };
     }
     if (input.remote !== false && this.context.state !== "running") {
       return { ok: false, reason: "audio", sequence };
     }
 
-    const sourceDigests = this.drumDigestsBySource.get(source) ?? 0;
-    if (sourceDigests >= JAM_DRUM_DIGESTS_PER_SOURCE) {
-      return { ok: false, reason: "source-held", sequence };
-    }
-    if (this.drumDigests >= JAM_DRUM_DIGESTS_GLOBAL) {
-      return { ok: false, reason: "room-held", sequence };
-    }
-    this.drumDigests += 1;
-    this.drumDigestsBySource.set(source, sourceDigests + 1);
-    let seed: number;
-    try {
-      seed = await this.seedDrum({ ...input, source });
-    } catch {
-      return { ok: false, reason: "audio", sequence };
-    } finally {
-      this.drumDigests -= 1;
-      const remaining = (this.drumDigestsBySource.get(source) ?? 1) - 1;
-      if (remaining > 0) this.drumDigestsBySource.set(source, remaining);
-      else this.drumDigestsBySource.delete(source);
-    }
+    // Capture plain scalars before returning to the caller. The renderer never retains a mutable
+    // sender object, and playback provenance remains the capability-bound value checked above.
+    const queuedInput: JamDrumInput = { ...input };
+    const seedInput: JamDrumSeedInput = {
+      callId: provenance?.seedCallId ?? input.callId,
+      source: provenance?.seedSource ?? source,
+      sessionNonce: input.sessionNonce,
+      sequence: input.sequence,
+      pad: input.pad,
+    };
+    const roomGeneration = this.roomPolicyGeneration;
+    const sourceGeneration = this.state(source).renderGeneration;
+    return this.enqueueDrum(owner, queuedInput.channel, roomGeneration, sourceGeneration, sequence, async () => {
+      // A queued event may have lost its channel/session or receiver permission before hashing.
+      // Check once before spending crypto work and again after the unavoidable await.
+      const currentBeforeHash = this.currentDrumPolicy(queuedInput, source, roomGeneration, sourceGeneration);
+      if (currentBeforeHash) return { ok: false, reason: currentBeforeHash, sequence };
+      let seed: number;
+      try { seed = await this.seedDrum(seedInput); }
+      catch { return { ok: false, reason: "audio", sequence }; }
 
-    // The await gives leave/reconnect, Deafen or suspension a chance to invalidate this event.
-    // No allocator slot or WebAudio node exists until every boundary has been rechecked.
-    if (this.disposed) return { ok: false, reason: "muted", sequence };
-    if (!this.sourceChannels.isCurrent(input.channel)) return { ok: false, reason: "channel", sequence };
-    if (this.state(source).sessionNonce !== input.sessionNonce) {
-      return { ok: false, reason: "sequence", sequence };
-    }
-    if (this.state(source).muted || this.deafened) return { ok: false, reason: "muted", sequence };
-    if (input.remote !== false && this.context.state !== "running") {
-      return { ok: false, reason: "audio", sequence };
-    }
+      const currentAfterHash = this.currentDrumPolicy(queuedInput, source, roomGeneration, sourceGeneration);
+      if (currentAfterHash) return { ok: false, reason: currentAfterHash, sequence };
 
-    const pad = JAM_KIT[input.pad];
-    for (const voice of [...this.voices.values()]) {
-      if (voice.source === source && voice.pad !== null && pad.chokes.includes(voice.pad)) voice.release(0.02);
-    }
-    // The opaque channel generation prevents stale cleanup from sharing an id with a replacement.
-    const id = drumVoiceId(input.channel, input.sessionNonce, input.sequence);
-    let runtime: VoiceRuntime | null = null;
-    const allocation = this.allocator.allocate({
-      id,
-      source,
-      phase: "tail",
-      startedAtMs: this.nowMs(),
-      teardown: (reason) => runtime?.teardown(reason),
+      const pad = JAM_KIT[queuedInput.pad];
+      for (const voice of [...this.voices.values()]) {
+        if (voice.owner === owner && voice.pad !== null && pad.chokes.includes(voice.pad)) voice.release(0.02);
+      }
+      // The opaque channel generation prevents stale cleanup from sharing an id with a replacement.
+      const id = drumVoiceId(queuedInput.channel, queuedInput.sessionNonce, queuedInput.sequence);
+      let runtime: VoiceRuntime | null = null;
+      const allocation = this.allocator.allocate({
+        id,
+        source,
+        owner,
+        phase: "tail",
+        startedAtMs: this.nowMs(),
+        teardown: (reason) => runtime?.teardown(reason),
+      });
+      if (!allocation.ok) return { ok: false, reason: allocation.reason, sequence };
+
+      try {
+        runtime = this.createDrumVoice(id, queuedInput, seed, owner);
+        this.voices.set(id, runtime);
+        return { ok: true, sequence, stolen: allocation.stolen };
+      } catch {
+        this.allocator.finish(id);
+        runtime?.teardown("stolen");
+        return { ok: false, reason: "audio", sequence, stolen: allocation.stolen };
+      }
     });
-    if (!allocation.ok) return { ok: false, reason: allocation.reason, sequence };
+  }
 
-    try {
-      runtime = this.createDrumVoice(id, input, seed);
-      this.voices.set(id, runtime);
-      return { ok: true, sequence, stolen: allocation.stolen };
-    } catch {
-      this.allocator.finish(id);
-      runtime?.teardown("stolen");
-      return { ok: false, reason: "audio", sequence, stolen: allocation.stolen };
+  /** Return the first receiver-owned condition that makes a queued drum event inert. */
+  private currentDrumPolicy(
+    input: JamDrumInput,
+    source: string,
+    roomGeneration: number,
+    sourceGeneration: number,
+  ): "channel" | "sequence" | "muted" | "audio" | null {
+    if (this.disposed) return "muted";
+    if (!this.sourceChannels.isCurrent(input.channel)) return "channel";
+    const state = this.state(source);
+    if (state.sessionNonce !== input.sessionNonce) return "sequence";
+    if (
+      input.render === false || state.muted || this.deafened || state.renderGeneration !== sourceGeneration ||
+      this.roomPolicyGeneration !== roomGeneration
+    ) return "muted";
+    if (input.remote !== false && this.context.state !== "running") return "audio";
+    return null;
+  }
+
+  /**
+   * Admit deterministic drum work into a bounded, channel-generation-ordered scheduler.
+   *
+   * One active digest per opaque channel generation is intentional: resolving SHA-256 promises
+   * out of order must not reverse that lane's musical order, while an obsolete channel must not
+   * wedge its replacement. Stable owner identity is used only for pending-work fairness. App
+   * playback serializes its cross-lane event log; live and remote inputs each have one causal lane.
+   */
+  private enqueueDrum(
+    owner: string,
+    channel: JamSourceChannel,
+    roomGeneration: number,
+    sourceGeneration: number,
+    sequence: JamSequenceResult,
+    run: () => Promise<JamPlayResult>,
+  ): Promise<JamPlayResult> {
+    const sourcePending = this.drumPendingBySource.get(owner) ?? 0;
+    if (sourcePending >= JAM_DRUM_PENDING_PER_SOURCE) {
+      return Promise.resolve({ ok: false, reason: "source-held", sequence });
+    }
+    if (this.drumPending >= JAM_DRUM_PENDING_GLOBAL) {
+      return Promise.resolve({ ok: false, reason: "room-held", sequence });
+    }
+    this.drumPending += 1;
+    this.drumPendingBySource.set(owner, sourcePending + 1);
+    return new Promise((resolve) => {
+      this.drumQueue.push({ owner, channel, roomGeneration, sourceGeneration, sequence, run, resolve });
+      this.pumpDrumQueue();
+    });
+  }
+
+  private pumpDrumQueue(): void {
+    while (this.drumDigests < JAM_DRUM_DIGESTS_GLOBAL) {
+      const index = this.drumQueue.findIndex((job) => [...this.drumActiveJobs].filter((active) =>
+        active.channel === job.channel && active.roomGeneration === job.roomGeneration &&
+        active.sourceGeneration === job.sourceGeneration).length < JAM_DRUM_DIGESTS_PER_LANE);
+      if (index < 0) return;
+      const [job] = this.drumQueue.splice(index, 1);
+      this.drumDigests += 1;
+      this.drumActiveJobs.add(job);
+      void Promise.resolve()
+        .then(job.run)
+        .catch((): JamPlayResult => ({ ok: false, reason: "audio", sequence: job.sequence }))
+        .then((result) => {
+          this.drumDigests -= 1;
+          this.drumActiveJobs.delete(job);
+          this.drumPending -= 1;
+          const remaining = (this.drumPendingBySource.get(job.owner) ?? 1) - 1;
+          if (remaining > 0) this.drumPendingBySource.set(job.owner, remaining);
+          else this.drumPendingBySource.delete(job.owner);
+          job.resolve(result);
+          this.pumpDrumQueue();
+        });
+    }
+  }
+
+  /** Drop work that has not started; active WebCrypto cannot be cancelled but remains bounded. */
+  private cancelQueuedDrums(matches: (job: PendingDrumJob) => boolean = () => true): void {
+    const queued: PendingDrumJob[] = [];
+    for (let index = this.drumQueue.length - 1; index >= 0; index -= 1) {
+      if (matches(this.drumQueue[index])) queued.push(...this.drumQueue.splice(index, 1));
+    }
+    for (const job of queued) {
+      this.drumPending -= 1;
+      const remaining = (this.drumPendingBySource.get(job.owner) ?? 1) - 1;
+      if (remaining > 0) this.drumPendingBySource.set(job.owner, remaining);
+      else this.drumPendingBySource.delete(job.owner);
+      job.resolve({ ok: false, reason: "muted", sequence: job.sequence });
     }
   }
 
@@ -539,6 +796,10 @@ export class JamEngine {
   setSourceMuted(source: string, muted: boolean): void {
     if (this.disposed) return;
     const state = this.state(source);
+    if (muted && !state.muted) {
+      state.renderGeneration += 1;
+      this.cancelQueuedDrums((job) => job.channel.source === source);
+    }
     state.muted = muted;
     const bus = this.buses.get(source);
     if (bus) for (const gate of Object.values(bus)) setGain(gate, muted ? 0 : state.level, this.context.currentTime);
@@ -575,7 +836,9 @@ export class JamEngine {
   setDeafened(enabled: boolean): void {
     if (this.disposed || enabled === this.deafened) return;
     if (enabled) {
+      this.roomPolicyGeneration += 1;
       this.deafened = true;
+      this.cancelQueuedDrums();
       const soundingSources = new Set([...this.voices.values()].map((voice) => voice.source));
       for (const source of soundingSources) this.releaseSource(source);
       for (const bus of this.buses.values()) disconnectSourceBus(bus);
@@ -606,6 +869,25 @@ export class JamEngine {
     for (const voice of [...this.voices.values()]) {
       if (voice.source === source) voice.teardown("source-reset");
     }
+  }
+
+  /**
+   * Move every held note on one exact playback channel into its ordinary release envelope.
+   *
+   * A recorder may stop while a performer still holds a key, so a valid take need not contain a
+   * matching final note-off. Transport completion calls this once, then retains the channel for
+   * the bounded tail instead of sustaining until a hard source teardown.
+   */
+  releaseChannelHeld(channel: JamSourceChannel): readonly string[] {
+    if (this.disposed || !this.sourceChannels.isCurrent(channel)) return [];
+    const released: string[] = [];
+    for (const voice of this.voices.values()) {
+      if (voice.source !== channel.source || voice.kind !== "note" || voice.released) continue;
+      if (!this.allocator.release(voice.id, this.nowMs())) continue;
+      voice.release();
+      released.push(voice.id);
+    }
+    return released;
   }
 
   removeSource(source: string): void {
@@ -656,6 +938,8 @@ export class JamEngine {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    // A stalled digest must not retain every later closure after this call epoch is gone.
+    this.cancelQueuedDrums();
     this.allocator.dispose();
     for (const voice of [...this.voices.values()]) voice.teardown("engine-dispose");
     for (const bus of this.buses.values()) for (const node of Object.values(bus)) disconnect(node);
@@ -670,7 +954,14 @@ export class JamEngine {
   private state(source: string): SourceState {
     let state = this.states.get(source);
     if (!state) {
-      state = { sessionNonce: null, lastSequence: null, patches: new Map(), muted: false, level: 1 };
+      state = {
+        sessionNonce: null,
+        lastSequence: null,
+        patches: new Map(),
+        muted: false,
+        renderGeneration: 0,
+        level: 1,
+      };
       this.states.set(source, state);
     }
     return state;
@@ -739,7 +1030,13 @@ export class JamEngine {
     }
   }
 
-  private createPatchVoice(id: string, input: JamNoteInput, patch: JamPatch, customPatch: boolean): VoiceRuntime {
+  private createPatchVoice(
+    id: string,
+    input: JamNoteInput,
+    patch: JamPatch,
+    customPatch: boolean,
+    owner: string,
+  ): VoiceRuntime {
     const ctx = this.context;
     if (input.remote === false && ctx.state === "suspended") void ctx.resume().catch(() => {});
     const at = ctx.currentTime;
@@ -821,6 +1118,7 @@ export class JamEngine {
     const runtime = this.runtime({
       id,
       source: sourceName,
+      owner,
       remote: input.remote !== false,
       customPatch,
       kind: "note",
@@ -844,7 +1142,7 @@ export class JamEngine {
     }
   }
 
-  private createDrumVoice(id: string, input: JamDrumInput, seed: number): VoiceRuntime {
+  private createDrumVoice(id: string, input: JamDrumInput, seed: number, owner: string): VoiceRuntime {
     const ctx = this.context;
     if (input.remote === false && ctx.state === "suspended") void ctx.resume().catch(() => {});
     const at = ctx.currentTime;
@@ -892,6 +1190,7 @@ export class JamEngine {
     const runtime = this.runtime({
       id,
       source: sourceName,
+      owner,
       remote: input.remote !== false,
       customPatch: false,
       kind: "drum",
@@ -918,6 +1217,7 @@ export class JamEngine {
   private runtime(input: {
     id: string;
     source: string;
+    owner: string;
     remote: boolean;
     customPatch: boolean;
     kind: "note" | "drum";

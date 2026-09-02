@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { JAM_SESSION_NONCE_HEX_CHARS, JAM_TAKE_COMMITMENT_DOMAIN, TAKE_ID_MAX_BYTES, TAKE_MAX_BYTES, type JamPatch } from "./jam-contract.ts";
 import {
   applyJamRecorderConsent,
   captureJamRecorderLease,
+  jamRecorderTimelineMs,
   jamParticipantCommitment,
   jamTakeId,
   JamTakeRecorder,
   parseJamTakeJson,
   recordLeasedJamDrum,
+  recordLeasedJamNoteOff,
+  recordLeasedJamNoteOn,
+  startJamRecorderTimeline,
   validateJamTake,
 } from "./jam-recorder.ts";
 
@@ -76,6 +82,92 @@ test("an async drum keeps receipt time and cannot cross into a replacement take"
   });
   assert.equal(result?.ok, true);
   if (result?.ok) assert.equal(result.event.ms, 7);
+});
+
+test("an event received before consent cannot cross the recorder start boundary", () => {
+  const rec = recorder();
+  const preConsentLease = captureJamRecorderLease(rec, 7.4);
+  assert.equal(preConsentLease, null);
+  start(rec);
+  assert.equal(recordLeasedJamDrum(rec, preConsentLease, {
+    source: alice, sessionNonce: aliceSn, sequence: 1, pad: 0,
+  }), null);
+  assert.equal(rec.snapshot().events.length, 0);
+});
+
+test("receipt leases cannot cross consent withdrawal and restart on the same recorder", () => {
+  const rec = recorder();
+  start(rec);
+  const beforeWithdrawal = captureJamRecorderLease(rec, 10);
+  rec.setConsent(bob, false);
+  const duringWithdrawal = captureJamRecorderLease(rec, 20);
+  rec.setConsent(bob, true);
+  assert.equal(rec.start(), true);
+
+  assert.equal(recordLeasedJamNoteOn(rec, beforeWithdrawal, {
+    source: alice, sessionNonce: aliceSn, sequence: 1, note: 60, wave: "sine",
+  }), null);
+  assert.equal(recordLeasedJamDrum(rec, duringWithdrawal, {
+    source: alice, sessionNonce: aliceSn, sequence: 2, pad: 0,
+  }), null);
+  assert.equal(rec.snapshot().events.length, 0);
+
+  const afterRestart = captureJamRecorderLease(rec, 30);
+  assert.equal(recordLeasedJamNoteOn(rec, afterRestart, {
+    source: alice, sessionNonce: aliceSn, sequence: 3, note: 60, wave: "sine",
+  })?.ok, true);
+  assert.equal(recordLeasedJamNoteOff(rec, afterRestart, {
+    source: alice, sessionNonce: aliceSn, sequence: 4, note: 60,
+  })?.ok, true);
+  assert.deepEqual(rec.snapshot().events.map((event) => event.ms), [30, 30]);
+});
+
+test("remote musical frames capture gate and recorder admission before the outer causal queue", () => {
+  const source = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
+  const start = source.indexOf("function handleJamFrame(");
+  const process = source.indexOf("async function processJamFrame(", start);
+  assert.ok(start >= 0 && process > start);
+  const admission = source.indexOf("const admission: JamQueuedAdmission", start);
+  const enqueue = source.indexOf("queue.enqueue(() => processJamFrame", start);
+  assert.ok(admission >= 0 && admission < enqueue && enqueue < process,
+    "receipt authority must be captured before an async queue can cross a gate change");
+  const body = source.slice(process, source.indexOf("function jamBroadcastFrame", process));
+  assert.match(body, /admission\.roomGeneration === jamRoomRenderGeneration/);
+  assert.match(body, /recordLeasedJamNoteOn\(jamRec, admission\.recorderLease/);
+  assert.match(body, /recordLeasedJamNoteOff\(jamRec, admission\.recorderLease/);
+  assert.match(body, /recordLeasedJamDrum\(jamRec, admission\.recorderLease/);
+});
+
+test("a disconnected participant needs fresh consent before recording resumes", () => {
+  const rec = recorder();
+  start(rec);
+
+  assert.equal(applyJamRecorderConsent(rec, bob, false), true);
+  rec.membershipChanged([alice]);
+  rec.membershipChanged([alice, bob]);
+  assert.equal(rec.state(), "arming");
+  assert.equal(rec.start(), false, "restoring membership cannot revive the disconnected edge's consent");
+
+  assert.equal(applyJamRecorderConsent(rec, bob, true), true);
+  assert.equal(rec.start(), true, "a fresh consent announcement admits the replacement edge");
+});
+
+test("consent pause and resume retain a monotonic recorder timeline", () => {
+  const rec = recorder();
+  start(rec);
+  let timeline = startJamRecorderTimeline({ startMs: null }, 1_000);
+  assert.equal(rec.recordDrum({
+    source: alice, sessionNonce: aliceSn, ms: jamRecorderTimelineMs(timeline, 6_000), sequence: 1, pad: 0,
+  }).ok, true);
+
+  rec.setConsent(bob, false);
+  rec.setConsent(bob, true);
+  assert.equal(rec.start(), true);
+  timeline = startJamRecorderTimeline(timeline, 6_100);
+  assert.equal(timeline.startMs, 1_000, "resume must not reset the original recorder epoch");
+  assert.equal(rec.recordDrum({
+    source: alice, sessionNonce: aliceSn, ms: jamRecorderTimelineMs(timeline, 6_100), sequence: 2, pad: 1,
+  }).ok, true, "the first post-resume event remains monotonic and is admitted");
 });
 
 test("take identities are independently byte-bounded before per-event drum hashing", () => {

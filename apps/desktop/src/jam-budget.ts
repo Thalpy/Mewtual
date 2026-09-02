@@ -41,6 +41,11 @@ export class JamTokenBucket {
     this.tokens -= cost;
     return true;
   }
+
+  reset(): void {
+    this.tokens = this.burst;
+    this.lastMs = null;
+  }
 }
 
 const encoder = new TextEncoder();
@@ -62,6 +67,9 @@ export class JamPeerBudget {
   private currentExhaustion: Exhaustion | null = null;
   private lastDeniedMs: number | null = null;
   private abuseMuted = false;
+  // Exact raw frame last confirmed by the engine after descriptor hash verification. This is
+  // bounded by admitFrame and permits only reconnect recovery, never a fresh descriptor.
+  private verifiedPatchFrame: string | null = null;
 
   admitFrame(raw: unknown, nowMs: number): Readonly<{ ok: true; raw: string }> | Readonly<{ ok: false; reason: JamBudgetDenial }> {
     if (this.abuseMuted) return { ok: false, reason: "abuse-muted" };
@@ -93,6 +101,17 @@ export class JamPeerBudget {
     return !this.abuseMuted && this.patches.charge(nowMs);
   }
 
+  isVerifiedPatchFrame(raw: string): boolean {
+    return !this.abuseMuted && this.verifiedPatchFrame === raw;
+  }
+
+  confirmVerifiedPatchFrame(raw: string): void {
+    // The caller is JamFrameDecoder after JamEngine reported installed/cached. Preserve the raw
+    // canonical sender frame so a fresh decoder can recognize exactly this recipe without hash
+    // work; no sender-controlled key or claimed id is sufficient on its own.
+    if (encoder.encode(raw).byteLength <= JAM_FRAME_MAX_BYTES) this.verifiedPatchFrame = raw;
+  }
+
   admitClockProbe(nowMs: number): boolean {
     return !this.abuseMuted && this.clockProbes.charge(nowMs);
   }
@@ -107,6 +126,10 @@ export class JamPeerBudget {
     this.exhaustions = [];
     this.currentExhaustion = null;
     this.lastDeniedMs = null;
+    this.frames.reset();
+    this.noteOns.reset();
+    this.patches.reset();
+    this.clockProbes.reset();
   }
 
   private recordExhaustion(nowMs: number): void {

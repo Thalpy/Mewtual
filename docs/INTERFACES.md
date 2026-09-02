@@ -948,7 +948,8 @@ stats as negotiated.
 Everything below rides the existing negotiated per-peer data channel (`"inst"`, id 7, ordered),
 carrying JSON text frames. Notes stay EVENTS, never audio: each receiver synthesizes locally, and
 the receiver is sovereign; it owns the final gain, a master limiter, per-peer mute buses, the
-Deafen gate (hard: gates rendering AND releases every ringing voice, including local previews), an 8 s release-time
+Deafen gate (hard: gates rendering, releases every ringing voice including local previews, and
+destroys buffered room-effect state), an 8 s release-time
 ceiling, and forced node teardown. Two prerequisites land before any of this ships: Deafen must
 actually gate instrument rendering, and roster revocation must tear down the removed member's call
 connections (`removePeer`), not merely refresh lists. All constants here are mirrored as named
@@ -962,13 +963,19 @@ sender-controlled field or fingerprint string. Reopen replaces the capability be
 new events, while removal tombstones it before teardown. Work that starts or finishes under an old
 capability cannot recreate source state, consume the replacement's sequence, change its patch
 session, or render. Patch hashing is serialized in ordered-channel receipt order and rechecks the
-capability after WebCrypto completes. A per-generation causal queue extends ordered channel
+capability after WebCrypto completes. Serialization is scoped to that exact channel capability,
+so a stalled digest from a disconnected generation cannot block its replacement. A per-generation causal queue extends ordered channel
 delivery across asynchronous patch and drum digests, so a dependent note can never overtake its
 announce. Outbound events similarly carry one immutable, fully hashed publication object through
 the wire frame, local renderer and recorder; each edge emits that exact prerequisite announcement
 before its dependent events. Distinct global recipe changes are sender-paced to at least 2 s
 apart (editor churn coalesces onto the latest draft), matching the receiver's patch bucket; a new
-edge may receive the already-published current recipe immediately because its decoder is fresh.
+edge may recover exactly one byte-identical current recipe that this peer's call-epoch budget and
+engine previously hash-verified. That reconnect exception spends the persistent all-frame budget
+but neither a patch token nor another digest; any distinct frame still spends the persistent patch
+bucket, so reconnect cannot mint descriptor/hash allowance.
+Only one local publication digest runs while at most the latest draft waits, and that coalescer is
+replaced on leaving so a stalled old call cannot head-of-line block the next call.
 An unopened edge retains at most 256 events and drops an overflowed
 transient as a unit rather than preserving note-ons without their note-offs. The inbound async
 lane is likewise capped at 256 pending operations; overflow receive-mutes that source rather than
@@ -983,6 +990,9 @@ UI says so, manual unmute allowed). The musical bucket is unchanged: 30 note-ons
 note-offs never charged. Auto-mute does not freeze consent or media state: exact bounded `t:"s"`
 frames retain a separate pre-parse control lane (refill 2/s, burst 4); no jam frame or unknown
 extension can use that lane.
+The main peer budget and auto-mute state belong to the authenticated fingerprint for the local
+call epoch, not to one reconnectable channel: reconnecting cannot refill its bursts or clear an
+auto-mute. Only the receiver's explicit unmute resets it; leaving clears the call epoch.
 
 **Messages.** `t:"s"` is unchanged. Note v2: `{t:"n",on:1,n:0..127,w:<legacy wave>,p?:<id>,q}` and
 `{t:"n",on:0,n,q}`. `q` is a per-sender uint32, monotonically increasing across all note and drum
@@ -1033,10 +1043,17 @@ filter Q maps linearly to 0.1..18, filter-envelope amount to +/-6 octaves, cutof
 45% of sample rate), pitch LFO depth to 0..25 cents, and each effect send to 0..0.5 gain. The room master is
 0.72 into a fixed compressor/limiter (-12 dB threshold, 6 dB knee, 12:1 ratio, 3 ms attack,
 250 ms release). The receiver also clamps filter frequency to 45% of its sample rate.
+Deafen disconnects the entire old room graph rather than merely zeroing its master, so buffered
+delay feedback cannot reappear after undeafening. Short call UI cues never create or resume a
+suspended context, are cancelled by Deafen and leave, overlap at most four voices globally, and
+share one receiver-owned limiter instead of connecting oscillators directly to the destination.
 
 **Voice allocation.** A voice is one sounding note; every slot is sized for the worst permitted
 patch (3 oscillators + filter + LFO), so there is no abstract cost model. Per-peer held cap stays
-16; the global ceiling is 64 voices, release and drum tails included. Allocation at the ceiling
+16; all reconnect lanes attributed to one performer inside a take share that cap. Playback uses
+an engine-minted owner domain per validated take/participant, not the recorder-attested label, so
+a take that claims a live fingerprint can neither consume that live peer's allowance nor choke or
+preferentially steal its tails. The global ceiling is 64 voices, release and drum tails included. Allocation at the ceiling
 steals the requesting sender's own oldest RELEASING tail first, then the oldest releasing tail
 globally; if every voice is genuinely held, the new note is rejected; a held voice is never
 stolen (fairness: stealing must not be a griefing mechanism). Stealing and every teardown path
@@ -1051,10 +1068,22 @@ push.
 6 low tom, 7 high tom, 8 ride, 9 crash. Recipes are receiver-owned under the renderer contract;
 max tail 3000 ms; tails occupy voices. Choke groups are SOURCE-SCOPED: pad 4 chokes pad 5 from
 the same sender only. Noise is seeded deterministically per event from the canonical JSON array
-SHA-256(`["catcoms-jam-drum:v1",callId,senderFp,sn,q,pad]`); the seed selects the same
-recipe, not identical audio. Pending seed digests are bounded independently of voices (4 per
-source, 32 globally), and no allocator slot/node is created until the digest finishes and the
-channel, session, Deafen and audio-state checks pass again. Keys vs Pads is local presentation;
+SHA-256(`["catcoms-jam-drum:v1",callChannelId,senderFp,sn,q,pad]`); `callChannelId` is the
+shared channel identifier, never the device-local bridge server number. Take playback retrieves
+that stable call id and original performer from an opaque engine-validated archival capability,
+while its synthetic channel remains only the sequencing, lifecycle, bus and mute authority; an
+engine-minted take/participant owner aggregates allocator fairness, pending-work budgets and choke across
+reconnect lanes without trusting the stored performer label as live authority. The seed selects the same
+recipe, not identical audio. One digest per opaque channel generation commits in event order, with
+32 active globally; stale-channel work cannot head-of-line block its replacement. Pending work is
+independently bounded at 256 per engine-owned performer and 512 globally. Live, remote and take
+integration applies causal backpressure instead of treating those bounds as ordinary event drops;
+disposing an engine resolves all work that has not begun. No allocator slot/node is created until
+the digest finishes and the channel, session, Deafen and audio-state checks pass again. Deafen and
+per-source mute advance App admission generations on both gate edges and engine render generations
+when work is revoked, so neither a frame retained by the outer causal queue nor an older digest can
+exploit an on→off ABA transition to emerge after the receiver reopens audio. Local input captures the
+same admission generation before asynchronous patch publication. Keys vs Pads is local presentation;
 the wire carries only events.
 
 **Metronome + clock.** While inactive, the first valid authenticated
@@ -1085,24 +1114,48 @@ or persistence.
 patches:[full descriptors]}`. A note-on event carries `{ms,lane,n,on:1,w,p?:<patch index>,q}`;
 note-off carries `{ms,lane,n,on:0,q}`; drum hit carries `{ms,lane,n:<pad>,d:1,q}`. The lane keeps
 the authenticated source and its sequence/seed nonce together across reconnects, while the patch
-index and legacy wave make the take independently playable. Events are stamped in grid time at the source. Caps: 10 minutes,
+index and legacy wave make the take independently playable. Events are stamped on the receiver's
+local monotonic take timeline when the authenticated event is admitted. Caps: 10 minutes,
 20 000 events, 512 KiB serialized, 16 participants, 64 lanes and 64 patches; group/call/performer
 identity strings are each capped at 256 UTF-8 bytes. Playback validates
 and hashes the bounded patch table once per take into an engine-owned archival table; it does not
-multiply work by lanes or force archival recipes through the live peer's four-entry LRU. Source
-teardown waits for the longest receiver-bounded patch/drum tail used by the take (up to 8 s), so a
-legal final release is not truncated. Playback dispatches at most 128 overdue events per
-macrotask pass, so a valid dense/seeked take cannot monopolize the WebView or launch its whole
-event log concurrently. Each lane's `src` derives from the
+multiply work by lanes or force archival recipes through the live peer's four-entry LRU. Across
+rapid replacements, one preparation runs and only the latest waits; superseded work checks
+cancellation between hashes, and leaving replaces the coalescer. At end-of-log, the scheduler first
+moves any unmatched held note into its ordinary release envelope. Source teardown then waits for
+the longest receiver-bounded patch/drum tail used by the take (up to 8 s), so a legal final release
+is not truncated and a missing final note-off cannot sustain until hard teardown. Playback dispatches
+at most 128 overdue events per macrotask pass and awaits each asynchronous drum before advancing,
+so a valid dense/seeked take cannot monopolize the WebView, overflow the bounded digest lane, or
+launch its whole event log concurrently. Each lane's `src` derives from the
 authenticated channel at record time, never from a sender-supplied event field; `q` gaps are
 surfaced, and the guarantee is
 "musically aligned given the events received", not bit-identical. Recording state is visible to
 the whole call and is an honest-client consent mechanism, not prevention. Takes are ephemeral
-first. Saved takes go through the existing sealed blob + expiry + sharing machinery as an
+first. Local withdrawal updates the recorder gate synchronously before it is signalled. Every
+decoded musical frame captures its receipt time, recorder identity and monotonic uninterrupted-
+recording generation before entering the App causal queue; note, drum and later digest completion
+can append only under that exact lease. An event received before consent, during withdrawal, or
+before a recording→arming→recording cycle therefore cannot drift into the later interval. Losing a peer edge withdraws that
+edge's consent before membership reconciliation; reconnect requires a fresh `rc`. Consent pauses
+retain the take's original monotonic time origin, preventing resumed events from moving backward.
+Saved takes go through the existing sealed blob + expiry + sharing machinery as an
 application-specific format with its own type: the player re-runs this section's patch validator,
-never hands bytes to a generic media decoder, never autoplays, and byte-caps raw take text before
-JSON parsing. Performer labels in v1 shared takes are honestly presented as recorder-attested;
+never hands bytes to a generic media decoder, never creates or resumes suspended audio from remote
+transport, and byte-caps raw take text before
+JSON parsing. Jukebox ingress also rejects a listing above 512 KiB before whole-file fetch, bounds
+base64 before decode, and retains at most eight validated takes per call.
+Every whole-file take load is serialized/coalesced to one running plus one latest request. Its
+continuation is bound to the exact call lifecycle lease, server, channel and deck CID, and current
+listing/size/trust admission is rerun after download before parsing, caching or starting playback.
+Sheet output floors
+durations after one sixteenth but uses one sixteenth as the explicit visible minimum for shorter
+taps. Native export accepts only the inert versioned renderer grammar and holds the exact UI
+generation guard through plaintext write and reveal. Performer labels in v1 shared takes are
+honestly presented as recorder-attested; the current `group` field is only a recorder-local scope
+marker because the frontend does not yet receive the stable group id. It is not a durable binding;
 durable attribution is phase 6, one signature per participant over the domain
 `catcoms-jam-take-commitment:v1` and `{take id, stable group id, call id, device, aggregate hash of
 all that participant's session lanes}`, which also exposes unrepaired gaps and prevents a
 commitment being replayed into another group.
+Phase 6 remains blocked until the native bridge exposes that stable group id.

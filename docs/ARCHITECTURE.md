@@ -270,7 +270,10 @@ Normal window close is a native-owned lock/snapshot/destroy transaction. Close a
 inside `AppState`; once a continuity failure has been returned, another already-queued caller must
 also defer until a later request explicitly acknowledges losing that latest screen snapshot. This
 prevents duplicate WebView calls from replacing the failure with a newer success and destroying the
-only surface capable of warning the user.
+only surface capable of warning the user. The decision is bound to the close request's own native
+generation because another lock caller may acquire the shared commit mutex first and consume that
+newer snapshot. Plaintext jam-sheet export uses the same exact-generation commit guard and holds it
+through both Downloads publication and OS reveal.
 
 ## 5. Roadmap (test-gated, block by block)
 

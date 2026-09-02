@@ -95,6 +95,8 @@ export class JamTakeRecorder {
   private readonly patchIndex = new Map<string, number>();
   private readonly events: JamTakeEvent[] = [];
   private stateValue: JamRecorderState = "arming";
+  /** Invalidates receipt-time leases whenever consent/membership leaves recording. */
+  private recordingGeneration = 0;
   private membershipMatches = true;
   private resumeAfterMembershipPause = false;
   private byteEstimate: number;
@@ -129,12 +131,25 @@ export class JamTakeRecorder {
     return this.stateValue;
   }
 
+  /** Opaque monotonic value captured with an admitted event before any async queue/digest. */
+  leaseGeneration(): number {
+    return this.recordingGeneration;
+  }
+
+  /** A lease is append-authoritative only inside the uninterrupted recording interval that minted it. */
+  acceptsLease(generation: number): boolean {
+    return this.stateValue === "recording" && generation === this.recordingGeneration;
+  }
+
   setConsent(source: string, consent: boolean): boolean {
     if (!this.partIndex.has(source) || this.stateValue === "stopped") return false;
     if (consent) this.consents.add(source);
     else {
       this.consents.delete(source);
-      if (this.stateValue === "recording") this.stateValue = "arming";
+      if (this.stateValue === "recording") {
+        this.recordingGeneration += 1;
+        this.stateValue = "arming";
+      }
     }
     return true;
   }
@@ -156,7 +171,10 @@ export class JamTakeRecorder {
       current.every((source) => this.partIndex.has(source));
     this.membershipMatches = same;
     if (!same) {
-      if (this.stateValue === "recording") this.resumeAfterMembershipPause = true;
+      if (this.stateValue === "recording") {
+        this.recordingGeneration += 1;
+        this.resumeAfterMembershipPause = true;
+      }
       this.stateValue = "paused-membership";
     } else if (this.stateValue === "paused-membership") {
       this.stateValue = this.resumeAfterMembershipPause && this.ready() ? "recording" : "arming";
@@ -228,6 +246,7 @@ export class JamTakeRecorder {
   }
 
   stop(): JamTake {
+    if (this.stateValue === "recording") this.recordingGeneration += 1;
     this.stateValue = "stopped";
     return this.snapshot();
   }
@@ -313,23 +332,71 @@ export function applyJamRecorderConsent(
   return !!recorder && !!source && recorder.setConsent(source, consent);
 }
 
-export type JamRecorderLease = Readonly<{ recorder: JamTakeRecorder; ms: number }>;
+export type JamRecorderLease = Readonly<{ recorder: JamTakeRecorder; generation: number; ms: number }>;
 
-/** Capture recorder identity and event time before an asynchronous render/digest boundary. */
+export type JamRecorderTimeline = Readonly<{ startMs: number | null }>;
+
+/** Set a recorder's monotonic origin exactly once; consent pause/resume preserves it. */
+export function startJamRecorderTimeline(
+  timeline: JamRecorderTimeline,
+  nowMs: number,
+): JamRecorderTimeline {
+  if (timeline.startMs !== null || !Number.isFinite(nowMs)) return timeline;
+  return { startMs: Math.max(0, nowMs) };
+}
+
+/** Timestamp against the retained origin; callers may use the same value for UI duration. */
+export function jamRecorderTimelineMs(timeline: JamRecorderTimeline, nowMs: number): number {
+  if (timeline.startMs === null || !Number.isFinite(nowMs)) return 0;
+  return Math.max(0, Math.round(nowMs - timeline.startMs));
+}
+
+/**
+ * Capture recorder identity and event time before an asynchronous render/digest boundary.
+ *
+ * Admission is decided at receipt, not after the await. An event received while consent is still
+ * arming must never become recordable merely because the same recorder starts before hashing ends.
+ */
 export function captureJamRecorderLease(
   recorder: JamTakeRecorder | null,
   ms: number,
 ): JamRecorderLease | null {
-  return recorder && Number.isFinite(ms) ? { recorder, ms: Math.max(0, Math.round(ms)) } : null;
+  return recorder?.state() === "recording" && Number.isFinite(ms)
+    ? { recorder, generation: recorder.leaseGeneration(), ms: Math.max(0, Math.round(ms)) }
+    : null;
 }
 
-/** Append only if the recorder active at receipt is still the current take after the await. */
+function jamRecorderLeaseCurrent(current: JamTakeRecorder | null, lease: JamRecorderLease | null): lease is JamRecorderLease {
+  return !!lease && current === lease.recorder && lease.recorder.acceptsLease(lease.generation);
+}
+
+/** Append a note-on only inside the uninterrupted recording interval that admitted it. */
+export function recordLeasedJamNoteOn(
+  current: JamTakeRecorder | null,
+  lease: JamRecorderLease | null,
+  input: Omit<Parameters<JamTakeRecorder["recordNoteOn"]>[0], "ms">,
+): JamRecordResult | null {
+  if (!jamRecorderLeaseCurrent(current, lease)) return null;
+  return lease.recorder.recordNoteOn({ ...input, ms: lease.ms });
+}
+
+/** Append a note-off only inside the uninterrupted recording interval that admitted it. */
+export function recordLeasedJamNoteOff(
+  current: JamTakeRecorder | null,
+  lease: JamRecorderLease | null,
+  input: Omit<Parameters<JamTakeRecorder["recordNoteOff"]>[0], "ms">,
+): JamRecordResult | null {
+  if (!jamRecorderLeaseCurrent(current, lease)) return null;
+  return lease.recorder.recordNoteOff({ ...input, ms: lease.ms });
+}
+
+/** Append a drum only inside the uninterrupted recording interval that admitted it. */
 export function recordLeasedJamDrum(
   current: JamTakeRecorder | null,
   lease: JamRecorderLease | null,
   input: { source: string; sessionNonce: string; sequence: number; pad: number },
 ): JamRecordResult | null {
-  if (!lease || current !== lease.recorder) return null;
+  if (!jamRecorderLeaseCurrent(current, lease)) return null;
   return lease.recorder.recordDrum({ ...input, ms: lease.ms });
 }
 

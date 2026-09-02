@@ -227,14 +227,18 @@ export const JAM_KIT: readonly JamPad[] = [
 ] as const;
 export const JAM_DRUM_TAIL_MAX_MS = 3_000;
 export const JAM_DRUM_NOISE_PERIOD_SAMPLES = 4_096;
-// WebCrypto work is not cancelled by stealing an allocator slot. Bound pending deterministic
-// noise digests separately, with a per-source share so one performer cannot occupy the room.
-export const JAM_DRUM_DIGESTS_PER_SOURCE = 4;
+// Deterministic drum hashes commit in channel-generation order: one active digest per opaque lane
+// prevents asynchronously resolved hits from reversing their event order, while a stale channel
+// cannot head-of-line block its replacement. App playback serializes its validated cross-lane log.
+// The pending owner bounds retain a finite fairness/backpressure lane.
+export const JAM_DRUM_DIGESTS_PER_LANE = 1;
 export const JAM_DRUM_DIGESTS_GLOBAL = 32;
+export const JAM_DRUM_PENDING_PER_SOURCE = 256;
+export const JAM_DRUM_PENDING_GLOBAL = 512;
 /** Short receiver-local call cues may overlap only this many times across the whole room. */
 export const JAM_CALL_CUE_PENDING_MAX = 4;
 
-// --- jam-take:v1 (phases 5-6, planned) -------------------------------------------------------
+// --- jam-take:v1 (phase 5 live; durable signed attribution remains phase 6) ------------------
 export const TAKE_MAX_DURATION_MS = 600_000;
 export const TAKE_MAX_EVENTS = 20_000;
 export const TAKE_MAX_BYTES = 524_288;

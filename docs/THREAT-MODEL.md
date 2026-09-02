@@ -200,21 +200,50 @@ table with the commit that closed it.
   or take playback. A patch selects values inside one fixed topology and cannot introduce graph
   edges, code, samples, assets, or feedback. Per-peer held limits, a global tail-inclusive voice
   limit, release/hold watchdogs, and receiver-owned gates/limiter bound honest-renderer work and
-  output; a malicious member can still make bounded noise and a modified receiver can discard or
+  output. Take playback also releases unmatched held notes when the event log ends before its
+  bounded tail teardown, rather than sustaining them for that whole grace period. A malicious
+  member can still make bounded noise and a modified receiver can discard or
   reinterpret events. Remote events are not queued into a suspended audio context. A content hash
   promises the same recipe, not identical platform audio. Exact legacy note frames have a separate
   receive-only compatibility domain; they gain no patch, drum, clock, or recording authority.
   Ordered data-channel delivery is extended across asynchronous digests, and outbound wire,
   renderer and recorder events share one immutable published recipe; unopened-edge work is bounded
-  and dropped as a whole on overflow. Sender publication pacing matches the receiver patch budget,
-  while take scheduler work and pending drum digests have separate per-pass/per-source/global caps;
+  and dropped as a whole on overflow. Reconnects cannot reset the call-epoch peer budget or leave
+  an old channel's digest blocking its replacement. A fresh channel gets one exact raw recipe
+  reannouncement only when that peer/call budget previously observed the engine hash-verify it;
+  this avoids another digest/token while distinct recipes still spend the persistent patch bucket.
+  Sender publication pacing matches the receiver
+  patch budget, while publication/playback preparation coalesce to one running plus one latest task,
+  and take scheduler work and pending drum digests have separate per-pass/per-source/global caps.
+  Drum work is channel-generation ordered with bounded backpressure: dense takes await it, local
+  echoes share one causal event lane, and stale generation work cannot block its replacement.
+  Monotonic room/source admission generations advance on both gate edges, and engine render
+  generations advance on revocation, making Deafen and mute sticky for work already queued or
+  hashing even if the user reopens audio before that work settles. Local input captures its room
+  generation before asynchronous patch publication;
   the audible voice count is not treated as a bound on unresolved crypto work. Auto-muted music retains only a tiny separately rate-limited
   `t:"s"` lane so an instrument flood cannot freeze consent withdrawal or call state.
   Deafen and member removal are security-relevant integration points: shipment requires Deafen to
-  gate the instrument master and release all voices including local previews, and roster revocation to close the removed
+  destroy the instrument room graph (including buffered wet state) and release all voices including
+  local previews. Remote-controlled call cues cannot create/resume suspended audio, have a global
+  overlap cap and receiver limiter, and are cancelled at Deafen/leave. Roster revocation must close the removed
   member's call/data-channel connection. Recording consent and performer labels are honest-client
   coordination until the planned group-bound, domain-separated durable per-participant aggregate
   lane commitments exist; another endpoint can always record audio or events without announcing it.
+  Within an honest renderer, take reconnect lanes attributed to one participant share allocator,
+  choke and digest budgets. That owner is an engine-minted playback domain, not the unsigned stored
+  label, so a forged label cannot consume or choke a same-named live member's voices. Local live
+  seed material is bound to the authenticated self fingerprint rather than the reserved `me` lane.
+  A recorder lease exists only for events received while its consent gate is already recording and
+  binds the recorder's monotonic uninterrupted-recording generation before the App causal queue;
+  withdrawal/restart invalidates pre-withdrawal work, and events received while paused have no
+  lease. Disconnect retracts that edge's consent and reconnect must announce fresh consent.
+  Shared-take ingress rejects oversize listings before whole-file download, bounds encoded bytes
+  before decode, keeps a bounded per-call LRU, and serializes/coalesces downloads. A completion must
+  still match the exact call lease/server/channel/deck and pass the current listing and trust policy;
+  a fetch started in an old call cannot populate a later call even when both adopt the same CID.
+  The current take `group` value is device-local
+  scope metadata, not the stable group binding needed by phase 6.
 - **A shared file is authenticated bytes, not trusted content.** Explicit save streams into a
   non-overwriting `.part`, checks the declared size and whole-file content address, sanitizes the
   peer-provided name to one leaf, atomically publishes only after verification, and reveals it in

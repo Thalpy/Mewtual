@@ -10,15 +10,30 @@ function add(
   phase: "held" | "tail",
   at: number,
   ended: [string, JamVoiceEndReason][],
+  owner?: string,
 ) {
   return allocator.allocate({
     id,
     source,
+    owner,
     phase,
     startedAtMs: at,
     teardown: (reason) => ended.push([id, reason]),
   });
 }
+
+test("archival reconnect lanes share one performer's held-note limit", () => {
+  const allocator = new JamVoiceAllocator();
+  const ended: [string, JamVoiceEndReason][] = [];
+  for (let index = 0; index < JAM_HELD_PER_PEER; index += 1) {
+    assert.equal(add(allocator, `alice:${index}`, `take-lane-${index}`, "held", index, ended, "alice").ok, true);
+  }
+  assert.deepEqual(
+    add(allocator, "alice:overflow", "take-lane-overflow", "held", 99, ended, "alice"),
+    { ok: false, reason: "source-held" },
+  );
+  assert.equal(add(allocator, "bob:one", "take-lane-bob", "held", 100, ended, "bob").ok, true);
+});
 
 test("a source cannot hold more than the musical polyphony limit", () => {
   const allocator = new JamVoiceAllocator();

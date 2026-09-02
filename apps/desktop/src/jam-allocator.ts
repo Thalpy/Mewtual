@@ -5,7 +5,10 @@ export type JamVoiceEndReason = "stolen" | "source-reset" | "engine-dispose";
 
 export type JamVoiceRequest = Readonly<{
   id: string;
+  /** Lifecycle/render lane. Reconnect lanes for one performer remain independently removable. */
   source: string;
+  /** Fairness identity. Archival reconnect lanes for one performer must share this owner. */
+  owner?: string;
   phase: JamVoicePhase;
   startedAtMs: number;
   /** Must synchronously disconnect every node owned by the voice. */
@@ -15,6 +18,7 @@ export type JamVoiceRequest = Readonly<{
 type AllocatedVoice = {
   id: string;
   source: string;
+  owner: string;
   phase: JamVoicePhase;
   startedAtMs: number;
   releasedAtMs: number | null;
@@ -38,11 +42,12 @@ export class JamVoiceAllocator {
 
   allocate(request: JamVoiceRequest): JamAllocation {
     if (this.voices.has(request.id)) return { ok: false, reason: "duplicate" };
-    if (!request.id || !request.source || !Number.isFinite(request.startedAtMs)) {
-      throw new TypeError("voice allocation needs a stable id, source and monotonic start time");
+    const owner = request.owner ?? request.source;
+    if (!request.id || !request.source || !owner || !Number.isFinite(request.startedAtMs)) {
+      throw new TypeError("voice allocation needs a stable id, source, owner and monotonic start time");
     }
     if (request.phase !== "held" && request.phase !== "tail") throw new TypeError("invalid voice phase");
-    if (request.phase === "held" && this.count(request.source, "held") >= JAM_HELD_PER_PEER) {
+    if (request.phase === "held" && this.countOwner(owner, "held") >= JAM_HELD_PER_PEER) {
       return { ok: false, reason: "source-held" };
     }
 
@@ -50,13 +55,14 @@ export class JamVoiceAllocator {
     if (this.voices.size >= JAM_VOICES_GLOBAL) {
       // Prefer the requester's own remaining tail. Rapid releases cannot make another performer
       // pay while the offender still owns something safe to reclaim.
-      const roomTail = this.oldestTail(request.source) ?? this.oldestTail();
+      const roomTail = this.oldestTail(owner) ?? this.oldestTail();
       if (!roomTail) return { ok: false, reason: "room-held" };
       stolen.push(this.steal(roomTail));
     }
 
     this.voices.set(request.id, {
       ...request,
+      owner,
       releasedAtMs: request.phase === "tail" ? request.startedAtMs : null,
     });
     return { ok: true, stolen };
@@ -97,21 +103,21 @@ export class JamVoiceAllocator {
     return this.voices.has(id);
   }
 
-  snapshot(): readonly Readonly<Pick<AllocatedVoice, "id" | "source" | "phase" | "startedAtMs" | "releasedAtMs">>[] {
+  snapshot(): readonly Readonly<Pick<AllocatedVoice, "id" | "source" | "owner" | "phase" | "startedAtMs" | "releasedAtMs">>[] {
     return [...this.voices.values()].map(({ teardown: _teardown, ...voice }) => ({ ...voice }));
   }
 
-  private count(source: string, phase?: JamVoicePhase): number {
+  private countOwner(owner: string, phase?: JamVoicePhase): number {
     let count = 0;
     for (const voice of this.voices.values()) {
-      if (voice.source === source && (!phase || voice.phase === phase)) count += 1;
+      if (voice.owner === owner && (!phase || voice.phase === phase)) count += 1;
     }
     return count;
   }
 
-  private oldestTail(source?: string): AllocatedVoice | null {
+  private oldestTail(owner?: string): AllocatedVoice | null {
     return [...this.voices.values()]
-      .filter((voice) => voice.phase === "tail" && (!source || voice.source === source))
+      .filter((voice) => voice.phase === "tail" && (!owner || voice.owner === owner))
       .sort(compareAge)[0] ?? null;
   }
 

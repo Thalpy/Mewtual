@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JAM_DRUM_DIGESTS_GLOBAL, JAM_DRUM_DIGESTS_PER_SOURCE, JAM_LEGACY_SESSION_NONCE, JAM_REMOTE_HOLD_MAX_MS, JAM_SESSION_NONCE_HEX_CHARS, type JamPatch } from "./jam-contract.ts";
-import { drumSeed, JamEngine } from "./jam-engine.ts";
+import { JAM_DRUM_DIGESTS_GLOBAL, JAM_DRUM_DIGESTS_PER_LANE, JAM_DRUM_PENDING_GLOBAL, JAM_DRUM_PENDING_PER_SOURCE, JAM_HELD_PER_PEER, JAM_LEGACY_SESSION_NONCE, JAM_REMOTE_HOLD_MAX_MS, JAM_SESSION_NONCE_HEX_CHARS, type JamPatch } from "./jam-contract.ts";
+import { drumSeed, JamEngine, type JamDrumSeedInput, type JamPlaybackPatchSet } from "./jam-engine.ts";
 import { jamPatchId } from "./jam-patch.ts";
 import { JamLatestTaskQueue } from "./jam-publication.ts";
+import { JamPeerBudget } from "./jam-budget.ts";
+import { JamFrameDecoder } from "./jam-wire.ts";
 
 class FakeParam {
   value = 0;
@@ -140,6 +142,50 @@ test("validated immutable patches render through one receiver-owned room effect 
   for (const source of voiceSources) source.end();
   assert.equal(engine.snapshot().voices.length, 0);
   assert.ok(voiceSources.every((source) => source.disconnects > 0));
+});
+
+test("four reconnect generations establish the same verified patch under one persistent budget", async () => {
+  const fake = new FakeContext();
+  const verifiedId = "c".repeat(64);
+  let hashes = 0;
+  const engine = new JamEngine(
+    fake as unknown as AudioContext,
+    () => 0,
+    fake.destination as unknown as AudioNode,
+    undefined,
+    undefined,
+    async () => { hashes += 1; return verifiedId; },
+  );
+  const budget = new JamPeerBudget();
+  const rawPatch = JSON.stringify({ t: "p", v: 1, id: verifiedId, sn, d: patch });
+
+  for (let generation = 0; generation < 4; generation += 1) {
+    const channel = engine.openSource("alice");
+    const decoder = new JamFrameDecoder(budget);
+    const decoded = decoder.decode(rawPatch, 0);
+    assert.equal(decoded.ok, true);
+    if (!decoded.ok || decoded.kind !== "jam" || decoded.message.t !== "p") return;
+    const installed = decoded.verifiedReannounce
+      ? engine.installVerifiedReannounce(channel, decoded.message.sn, decoded.message.id, decoded.message.d)
+      : await engine.installPatch(channel, decoded.message.sn, decoded.message.id, decoded.message.d);
+    assert.ok(installed === "installed" || installed === "cached");
+    assert.equal(decoder.confirmInstalledPatch(decoded.message), true);
+
+    const note = decoder.decode(JSON.stringify({
+      t: "n", on: 1, n: 60 + generation, w: "triangle", p: verifiedId, q: 1,
+    }), 0);
+    assert.equal(note.ok, true);
+    if (!note.ok || note.kind !== "jam" || note.message.t !== "n" || note.message.on !== 1) return;
+    assert.equal(engine.noteOn({
+      channel,
+      sequence: note.message.q,
+      note: note.message.n,
+      wave: note.message.w,
+      patchId: note.message.p,
+    }).ok, true);
+    engine.removeSource("alice"); // the real disconnect path forgets the per-source patch cache
+  }
+  assert.equal(hashes, 1, "exact reconnect recovery reuses prior verification, not fresh hash work");
 });
 
 test("recorder recipe lookup is the renderer's exact touched live LRU", async () => {
@@ -511,6 +557,32 @@ test("remote notes never queue while audio is suspended", () => {
   assert.equal(fake.sources.length, before);
 });
 
+test("App gate suppression advances sequencing without hashing or constructing audio", async () => {
+  const fake = new FakeContext();
+  let seedCalls = 0;
+  const engine = new JamEngine(
+    fake as unknown as AudioContext,
+    () => 0,
+    fake.destination as unknown as AudioNode,
+    undefined,
+    async () => { seedCalls += 1; return 1; },
+  );
+  const alice = engine.openSource("alice");
+  engine.beginSourceSession(alice, sn);
+  const before = fake.sources.length;
+  assert.deepEqual(engine.noteOn({
+    channel: alice, sequence: 1, note: 60, wave: "triangle", remote: true, render: false,
+  }), { ok: false, reason: "muted", sequence: "first" });
+  assert.deepEqual(await engine.drum({
+    callId: "general", channel: alice, sessionNonce: sn, sequence: 2, pad: 0, remote: true, render: false,
+  }), { ok: false, reason: "muted", sequence: "next" });
+  assert.equal(seedCalls, 0);
+  assert.equal(fake.sources.length, before);
+  assert.equal(engine.noteOn({
+    channel: alice, sequence: 3, note: 61, wave: "triangle", remote: true,
+  }).ok, true, "the next post-gate event continues the accepted q lane");
+});
+
 test("drum seeds are reproducible and source-scoped hat choke never touches another player", async () => {
   const base = { callId: "general", source: "alice", sessionNonce: sn, sequence: 1, pad: 5 };
   assert.equal(await drumSeed(base), await drumSeed(base));
@@ -525,6 +597,134 @@ test("drum seeds are reproducible and source-scoped hat choke never touches anot
   const voices = engine.snapshot().voices;
   assert.equal(voices.filter((voice) => voice.source === "bob").length, 1);
   assert.equal(voices.filter((voice) => voice.source === "alice").length, 2);
+});
+
+test("live and take playback use identical stable drum seed provenance", async () => {
+  const fake = new FakeContext();
+  const seeds: JamDrumSeedInput[] = [];
+  const engine = new JamEngine(
+    fake as unknown as AudioContext,
+    () => 0,
+    fake.destination as unknown as AudioNode,
+    undefined,
+    async (input) => { seeds.push(input); return 123; },
+  );
+  // The App deliberately keeps the local sequencing alias as "me"; the engine must bind seed
+  // provenance to the authenticated fingerprint rather than leaking that alias into recordings.
+  const live = engine.openLocalSource("alice");
+  assert.equal((await engine.drum({
+    callId: "stable-channel", channel: live, sessionNonce: sn, sequence: 7, pad: 4,
+  })).ok, true);
+
+  const patches = await engine.preparePlaybackPatches([], () => true, {
+    callId: "stable-channel",
+    sources: ["alice"],
+  });
+  assert.ok(patches);
+  const playback = engine.openPlaybackSource("take\u00000", patches!, 0);
+  assert.ok(playback);
+  assert.equal((await engine.drum(
+    { callId: "ignored-live-field", channel: playback!, sessionNonce: sn, sequence: 7, pad: 4 },
+    { patches: patches!, part: 0 },
+  )).ok, true);
+  assert.deepEqual(seeds, [seeds[0], seeds[0]], "synthetic allocator ids never enter seed material");
+});
+
+test("take reconnect lanes share performer fairness and source-scoped hat choke", async () => {
+  const { fake, engine } = contextAndEngine();
+  const patches = await engine.preparePlaybackPatches([], () => true, {
+    callId: "stable-channel",
+    sources: ["alice", "bob"],
+  });
+  assert.ok(patches);
+
+  for (let index = 0; index < JAM_HELD_PER_PEER; index += 1) {
+    const lane = engine.openPlaybackSource(`alice-${index}`, patches!, 0);
+    assert.ok(lane);
+    engine.beginSourceSession(lane!, sn);
+    assert.equal(engine.noteOn({
+      channel: lane!, sequence: 1, note: 40 + index, wave: "triangle", remote: false,
+    }).ok, true);
+  }
+  const overflowLane = engine.openPlaybackSource("alice-overflow", patches!, 0);
+  assert.ok(overflowLane);
+  engine.beginSourceSession(overflowLane!, sn);
+  assert.deepEqual(engine.noteOn({
+    channel: overflowLane!, sequence: 1, note: 90, wave: "triangle", remote: false,
+  }), { ok: false, reason: "source-held", sequence: "first" });
+
+  // Take identities are recorder-attested until phase 6. Claiming a live fingerprint must not
+  // turn playback into a deputy that consumes that live performer's fairness/choke domain.
+  const liveAlice = engine.openSource("alice");
+  engine.beginSourceSession(liveAlice, otherSn);
+  assert.equal(engine.noteOn({
+    channel: liveAlice, sequence: 1, note: 91, wave: "triangle", remote: false,
+  }).ok, true, "a forged take participant label cannot consume the live source's allowance");
+
+  const bobLane = engine.openPlaybackSource("bob-one", patches!, 1);
+  assert.ok(bobLane);
+  engine.beginSourceSession(bobLane!, otherSn);
+  assert.equal(engine.noteOn({
+    channel: bobLane!, sequence: 1, note: 90, wave: "triangle", remote: false,
+  }).ok, true, "another participant keeps an independent held-note allowance");
+
+  const aliceOpenHat = engine.openPlaybackSource("alice-hat-open", patches!, 0);
+  const aliceClosedHat = engine.openPlaybackSource("alice-hat-closed", patches!, 0);
+  const bobOpenHat = engine.openPlaybackSource("bob-hat-open", patches!, 1);
+  assert.ok(aliceOpenHat && aliceClosedHat && bobOpenHat);
+  const beforeHats = fake.sources.length;
+  assert.equal((await engine.drum(
+    { callId: "ignored", channel: aliceOpenHat!, sessionNonce: sn, sequence: 1, pad: 5, remote: false },
+    { patches: patches!, part: 0 },
+  )).ok, true);
+  const aliceHatSources = fake.sources.slice(beforeHats);
+  assert.equal((await engine.drum(
+    { callId: "ignored", channel: bobOpenHat!, sessionNonce: otherSn, sequence: 1, pad: 5, remote: false },
+    { patches: patches!, part: 1 },
+  )).ok, true);
+  const bobHatSources = fake.sources.slice(beforeHats + aliceHatSources.length);
+  assert.equal((await engine.drum(
+    { callId: "ignored", channel: aliceClosedHat!, sessionNonce: otherSn, sequence: 1, pad: 4, remote: false },
+    { patches: patches!, part: 0 },
+  )).ok, true);
+  assert.ok(aliceHatSources.every((source) => source.stops.length > 1), "Alice's reconnect lane chokes Alice's open hat");
+  assert.ok(bobHatSources.every((source) => source.stops.length === 1), "Alice never chokes Bob's open hat");
+});
+
+test("take completion releases an unmatched held note before bounded channel teardown", async () => {
+  const { fake, engine } = contextAndEngine();
+  const patches = await engine.preparePlaybackPatches([patch], () => true, {
+    callId: "stable-channel",
+    sources: ["alice"],
+  });
+  assert.ok(patches);
+  const channel = engine.openPlaybackSource("take-unmatched", patches!, 0);
+  assert.ok(channel);
+  engine.beginSourceSession(channel!, sn);
+  const before = fake.sources.length;
+  assert.equal(engine.noteOn(
+    { channel: channel!, sequence: 1, note: 60, wave: "triangle", remote: false },
+    { patches: patches!, index: 0 },
+  ).ok, true);
+  assert.equal(engine.snapshot().voices.at(-1)?.phase, "held");
+
+  assert.equal(engine.releaseChannelHeld(channel!).length, 1);
+  assert.equal(engine.snapshot().voices.at(-1)?.phase, "tail");
+  assert.equal(engine.releaseChannelHeld(channel!).length, 0, "completion release is idempotent");
+  const voiceSources = fake.sources.slice(before);
+  assert.ok(voiceSources.every((source) => Math.min(...source.stops) <= 6.01),
+    "the release envelope ends before the take's six-second retention horizon");
+
+  const stale = channel!;
+  const replacement = engine.openPlaybackSource("take-unmatched", patches!, 0);
+  assert.ok(replacement);
+  engine.beginSourceSession(replacement!, sn);
+  assert.equal(engine.noteOn(
+    { channel: replacement!, sequence: 1, note: 62, wave: "triangle", remote: false },
+    { patches: patches!, index: 0 },
+  ).ok, true);
+  assert.deepEqual(engine.releaseChannelHeld(stale), [], "stale completion cannot release a replacement lane");
+  assert.equal(engine.snapshot().voices.at(-1)?.phase, "held");
 });
 
 test("an async drum from a replaced channel cannot adopt the replacement's reused slot", async () => {
@@ -550,6 +750,32 @@ test("an async drum from a replaced channel cannot adopt the replacement's reuse
   assert.equal(engine.snapshot().voices.length, 0, "the surviving graph must still own and release its slot");
 });
 
+test("a stalled old-channel drum cannot head-of-line block its replacement", async () => {
+  const fake = new FakeContext();
+  const resolvers: ((seed: number) => void)[] = [];
+  const engine = new JamEngine(
+    fake as unknown as AudioContext,
+    () => 0,
+    fake.destination as unknown as AudioNode,
+    undefined,
+    () => new Promise<number>((resolve) => { resolvers.push(resolve); }),
+  );
+  const oldChannel = engine.openSource("alice");
+  const old = engine.drum({ callId: "general", channel: oldChannel, sessionNonce: sn, sequence: 1, pad: 5 });
+  await Promise.resolve();
+  assert.equal(resolvers.length, 1, "the old generation owns one genuinely active digest");
+
+  const replacement = engine.openSource("alice");
+  const current = engine.drum({ callId: "general", channel: replacement, sessionNonce: sn, sequence: 1, pad: 4 });
+  await Promise.resolve();
+  assert.equal(resolvers.length, 2, "opaque generation ordering lets replacement work start");
+  resolvers[1](2);
+  assert.equal((await current).ok, true);
+  resolvers[0](1);
+  assert.deepEqual(await old, { ok: false, reason: "channel", sequence: "first" });
+  assert.equal(engine.snapshot().voices.length, 1);
+});
+
 test("a pending remote drum rechecks Deafen after its digest await", async () => {
   const fake = new FakeContext();
   let resolveSeed!: (seed: number) => void;
@@ -567,6 +793,47 @@ test("a pending remote drum rechecks Deafen after its digest await", async () =>
   resolveSeed(123);
   assert.deepEqual(await pending, { ok: false, reason: "muted", sequence: "first" });
   assert.equal(engine.snapshot().voices.length, 0);
+});
+
+test("Deafen and source mute generations prevent pre-gate drums emerging after reopen", async () => {
+  const fake = new FakeContext();
+  const resolvers: ((seed: number) => void)[] = [];
+  const engine = new JamEngine(
+    fake as unknown as AudioContext,
+    () => 0,
+    fake.destination as unknown as AudioNode,
+    undefined,
+    () => new Promise<number>((resolve) => { resolvers.push(resolve); }),
+  );
+  const alice = engine.openSource("alice");
+
+  const beforeDeafen = engine.drum({ callId: "general", channel: alice, sessionNonce: sn, sequence: 1, pad: 0 });
+  await Promise.resolve();
+  const queuedBeforeDeafen = engine.drum({ callId: "general", channel: alice, sessionNonce: sn, sequence: 2, pad: 1 });
+  engine.setDeafened(true);
+  assert.deepEqual(await queuedBeforeDeafen, { ok: false, reason: "muted", sequence: "next" });
+  engine.setDeafened(false);
+  const afterDeafen = engine.drum({ callId: "general", channel: alice, sessionNonce: sn, sequence: 3, pad: 2 });
+  await Promise.resolve();
+  assert.equal(resolvers.length, 2, "fresh room-generation work does not wait behind obsolete work");
+  resolvers[1](2);
+  assert.equal((await afterDeafen).ok, true);
+  resolvers[0](1);
+  assert.deepEqual(await beforeDeafen, { ok: false, reason: "muted", sequence: "first" });
+
+  const beforeMute = engine.drum({ callId: "general", channel: alice, sessionNonce: sn, sequence: 4, pad: 3 });
+  await Promise.resolve();
+  const queuedBeforeMute = engine.drum({ callId: "general", channel: alice, sessionNonce: sn, sequence: 5, pad: 4 });
+  engine.setSourceMuted("alice", true);
+  assert.deepEqual(await queuedBeforeMute, { ok: false, reason: "muted", sequence: "next" });
+  engine.setSourceMuted("alice", false);
+  const afterMute = engine.drum({ callId: "general", channel: alice, sessionNonce: sn, sequence: 6, pad: 5 });
+  await Promise.resolve();
+  assert.equal(resolvers.length, 4, "fresh source-generation work does not wait behind obsolete work");
+  resolvers[3](4);
+  assert.equal((await afterMute).ok, true);
+  resolvers[2](3);
+  assert.deepEqual(await beforeMute, { ok: false, reason: "muted", sequence: "next" });
 });
 
 test("a pending remote drum rechecks audio suspension after its digest await", async () => {
@@ -588,45 +855,118 @@ test("a pending remote drum rechecks audio suspension after its digest await", a
   assert.equal(engine.snapshot().voices.length, 0);
 });
 
-test("pending drum digests have independent per-source and global bounds", async () => {
+test("same-owner drum hashes are backpressured and commit in event order", async () => {
   const fake = new FakeContext();
-  let resolveSeed!: (seed: number) => void;
-  const seed = new Promise<number>((resolve) => { resolveSeed = resolve; });
-  let seedCalls = 0;
+  const seeds: { input: JamDrumSeedInput; resolve: (seed: number) => void }[] = [];
   const engine = new JamEngine(
     fake as unknown as AudioContext,
     () => 0,
     fake.destination as unknown as AudioNode,
     undefined,
-    () => { seedCalls += 1; return seed; },
+    (input) => new Promise<number>((resolve) => { seeds.push({ input, resolve }); }),
   );
   const alice = engine.openSource("alice");
-  const alicePending = Array.from({ length: JAM_DRUM_DIGESTS_PER_SOURCE }, (_, index) =>
-    engine.drum({ callId: "general", channel: alice, sessionNonce: sn, sequence: index + 1, pad: 0 }));
-  assert.deepEqual(
-    await engine.drum({ callId: "general", channel: alice, sessionNonce: sn, sequence: 99, pad: 0 }),
-    { ok: false, reason: "source-held", sequence: "gap" },
-  );
-  assert.equal(seedCalls, JAM_DRUM_DIGESTS_PER_SOURCE);
+  const pads = [5, 4, 0, 1, 2];
+  const pending = pads.map((pad, index) => engine.drum({
+    callId: "general", channel: alice, sessionNonce: sn, sequence: index + 1, pad,
+  }));
+  await Promise.resolve();
+  assert.equal(JAM_DRUM_DIGESTS_PER_LANE, 1);
+  assert.equal(seeds.length, 1, "later owner work waits instead of being rejected or racing");
 
-  const roomPending = [...alicePending];
-  for (let index = JAM_DRUM_DIGESTS_PER_SOURCE; index < JAM_DRUM_DIGESTS_GLOBAL; index += 1) {
-    const channel = engine.openSource(`lane-${index}`);
-    roomPending.push(engine.drum({ callId: "general", channel, sessionNonce: sn, sequence: 1, pad: 0 }));
+  const beforeOpenHat = fake.sources.length;
+  seeds[0].resolve(101);
+  assert.equal((await pending[0]).ok, true);
+  const openHatSources = fake.sources.slice(beforeOpenHat);
+  await Promise.resolve();
+  assert.equal(seeds.length, 2);
+  seeds[1].resolve(102);
+  assert.equal((await pending[1]).ok, true);
+  assert.ok(openHatSources.every((source) => source.stops.length > 1),
+    "the later closed hat commits after and chokes the earlier open hat");
+
+  for (let index = 2; index < pending.length; index += 1) {
+    await Promise.resolve();
+    assert.equal(seeds.length, index + 1);
+    seeds[index].resolve(100 + index);
+    assert.equal((await pending[index]).ok, true);
   }
-  const overflow = engine.openSource("overflow");
-  assert.deepEqual(
-    await engine.drum({ callId: "general", channel: overflow, sessionNonce: sn, sequence: 1, pad: 0 }),
-    { ok: false, reason: "room-held", sequence: "first" },
-  );
-  assert.equal(seedCalls, JAM_DRUM_DIGESTS_GLOBAL);
-  assert.equal(engine.snapshot().voices.length, 0, "digests do not reserve audible voice slots");
+  assert.deepEqual(seeds.map(({ input }) => input.sequence), [1, 2, 3, 4, 5]);
+});
 
+test("the 33rd owner waits behind the global digest ceiling instead of losing its hit", async () => {
+  const fake = new FakeContext();
+  const resolvers: ((seed: number) => void)[] = [];
+  const engine = new JamEngine(
+    fake as unknown as AudioContext,
+    () => 0,
+    fake.destination as unknown as AudioNode,
+    undefined,
+    () => new Promise<number>((resolve) => { resolvers.push(resolve); }),
+  );
+  const pending = Array.from({ length: JAM_DRUM_DIGESTS_GLOBAL + 1 }, (_, index) => {
+    const channel = engine.openSource(`owner-${index}`);
+    return engine.drum({ callId: "general", channel, sessionNonce: sn, sequence: 1, pad: 0 });
+  });
+  await Promise.resolve();
+  assert.equal(resolvers.length, JAM_DRUM_DIGESTS_GLOBAL);
+  assert.equal(engine.snapshot().voices.length, 0, "queued hashes do not reserve audible voices");
+
+  resolvers[0](1);
+  assert.equal((await pending[0]).ok, true);
+  await Promise.resolve();
+  assert.equal(resolvers.length, JAM_DRUM_DIGESTS_GLOBAL + 1, "the queued owner eventually receives a slot");
+  for (const resolve of resolvers.slice(1)) resolve(2);
+  const settled = await Promise.all(pending);
+  assert.ok(settled.every((result) => result.ok));
+});
+
+test("drum pending bounds reject excess work and dispose releases queued closures", async () => {
+  const fake = new FakeContext();
+  const resolvers: ((seed: number) => void)[] = [];
+  const engine = new JamEngine(
+    fake as unknown as AudioContext,
+    () => 0,
+    fake.destination as unknown as AudioNode,
+    undefined,
+    () => new Promise<number>((resolve) => { resolvers.push(resolve); }),
+  );
+  const alice = engine.openSource("alice");
+  const pending = Array.from({ length: JAM_DRUM_PENDING_PER_SOURCE }, (_, index) =>
+    engine.drum({ callId: "general", channel: alice, sessionNonce: sn, sequence: index + 1, pad: 0 }));
+  assert.deepEqual(await engine.drum({
+    callId: "general", channel: alice, sessionNonce: sn,
+    sequence: JAM_DRUM_PENDING_PER_SOURCE + 1, pad: 0,
+  }), { ok: false, reason: "source-held", sequence: "next" });
+  await Promise.resolve();
+  assert.equal(resolvers.length, 1);
   engine.dispose();
-  resolveSeed(123);
-  const settled = await Promise.all(roomPending);
-  assert.ok(settled.every((result) => !result.ok));
-  assert.equal(engine.snapshot().voices.length, 0);
+  const queued = await Promise.all(pending.slice(1));
+  assert.ok(queued.every((result) => !result.ok), "dispose resolves every not-yet-started job inert");
+  resolvers[0](1);
+  assert.equal((await pending[0]).ok, false);
+
+  const roomResolvers: ((seed: number) => void)[] = [];
+  const roomEngine = new JamEngine(
+    fake as unknown as AudioContext,
+    () => 0,
+    fake.destination as unknown as AudioNode,
+    undefined,
+    () => new Promise<number>((resolve) => { roomResolvers.push(resolve); }),
+  );
+  const roomPending = Array.from({ length: JAM_DRUM_PENDING_GLOBAL }, (_, index) => {
+    const channel = roomEngine.openSource(`bounded-owner-${index}`);
+    return roomEngine.drum({ callId: "general", channel, sessionNonce: sn, sequence: 1, pad: 0 });
+  });
+  const overflowChannel = roomEngine.openSource("bounded-overflow");
+  assert.deepEqual(await roomEngine.drum({
+    callId: "general", channel: overflowChannel, sessionNonce: sn, sequence: 1, pad: 0,
+  }), { ok: false, reason: "room-held", sequence: "first" });
+  await Promise.resolve();
+  assert.equal(roomResolvers.length, JAM_DRUM_DIGESTS_GLOBAL);
+  roomEngine.dispose();
+  for (const resolve of roomResolvers) resolve(2);
+  assert.ok((await Promise.all(roomPending)).every((result) => !result.ok));
 });
 
 test("a Web Audio construction failure disconnects the partial voice graph", () => {

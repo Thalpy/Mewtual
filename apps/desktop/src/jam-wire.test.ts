@@ -14,6 +14,7 @@ import {
   type JamPatch,
 } from "./jam-contract.ts";
 import { JamFrameDecoder, toggleJamPeerMute } from "./jam-wire.ts";
+import { JamPeerBudget } from "./jam-budget.ts";
 
 const id = "a".repeat(JAM_PATCH_ID_HEX_CHARS);
 const sn = "b".repeat(JAM_SESSION_NONCE_HEX_CHARS);
@@ -44,6 +45,33 @@ test("the decoder admits the v2 note, patch and old-client-safe drum shapes", ()
     decoder.decode(JSON.stringify({ t: "p", v: 1, id, sn, d: TEST_PATCH }), 0),
     { ok: true, kind: "jam", message: { t: "p", v: 1, id, sn, d: TEST_PATCH } },
   );
+});
+
+test("fresh channels recover one exact verified recipe without refreshing distinct patch allowance", () => {
+  const budget = new JamPeerBudget();
+  const raw = JSON.stringify({ t: "p", v: 1, id, sn, d: TEST_PATCH });
+  const first = new JamFrameDecoder(budget);
+  const installed = first.decode(raw, 0);
+  assert.equal(installed.ok, true);
+  if (!installed.ok || installed.kind !== "jam" || installed.message.t !== "p") return;
+  assert.equal(first.confirmInstalledPatch(installed.message), true);
+
+  for (let generation = 0; generation < 4; generation += 1) {
+    const recovered = new JamFrameDecoder(budget).decode(raw, 0);
+    assert.equal(recovered.ok, true);
+    if (recovered.ok && recovered.kind === "jam") assert.equal(recovered.verifiedReannounce, true);
+  }
+
+  // The original descriptor spent one of the burst's three tokens. Exact reconnect recovery spent
+  // none; two new descriptors remain available and the third is still rejected at the same time.
+  for (let distinct = 0; distinct < 3; distinct += 1) {
+    const changed = { ...TEST_PATCH, e: { ...TEST_PATCH.e, a: TEST_PATCH.e.a + distinct + 1 } };
+    const candidate = new JamFrameDecoder(budget).decode(JSON.stringify({
+      t: "p", v: 1, id: String(distinct).repeat(JAM_PATCH_ID_HEX_CHARS), sn, d: changed,
+    }), 0);
+    if (distinct < 2) assert.equal(candidate.ok, true);
+    else assert.deepEqual(candidate, { ok: false, reason: "patch-rate" });
+  }
 });
 
 test("the rejected t:n drum shape cannot strand notes on an old build", () => {
@@ -192,4 +220,23 @@ test("one click on an effective flood mute forgives it instead of adding a manua
   assert.deepEqual(toggleJamPeerMute(false, true), { manuallyMuted: false, forgiveAbuse: true });
   assert.deepEqual(toggleJamPeerMute(true, true), { manuallyMuted: false, forgiveAbuse: true });
   assert.deepEqual(toggleJamPeerMute(false, false), { manuallyMuted: true, forgiveAbuse: false });
+});
+
+test("reconnect keeps the call-epoch abuse mute until explicit receiver forgiveness", () => {
+  const budget = new JamPeerBudget();
+  const firstChannel = new JamFrameDecoder(budget);
+  for (let index = 0; index < JAM_FRAME_BUCKET_BURST; index += 1) firstChannel.decode("{}", 0);
+  for (let ms = 1; ms <= 20_000 && !budget.isAbuseMuted(); ms += 1) firstChannel.decode("{}", ms);
+  assert.equal(budget.isAbuseMuted(), true);
+
+  const replacementChannel = new JamFrameDecoder(budget);
+  assert.deepEqual(
+    replacementChannel.decode(JSON.stringify({ t: "n", on: 1, n: 60, w: "sine", q: 1 }), 20_001),
+    { ok: false, reason: "abuse-muted" },
+  );
+  assert.equal(replacementChannel.decode(JSON.stringify({ t: "s", mic: 1 }), 20_001).ok, true);
+
+  budget.clearAbuseMute();
+  const forgivenChannel = new JamFrameDecoder(budget);
+  assert.equal(forgivenChannel.decode(JSON.stringify({ t: "n", on: 1, n: 60, w: "sine", q: 1 }), 20_002).ok, true);
 });

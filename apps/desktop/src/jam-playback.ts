@@ -3,6 +3,86 @@ import { legacyJamPatch } from "./jam-patch.ts";
 
 const TAKE_BASE64_MAX_CHARS = Math.ceil(TAKE_MAX_BYTES / 3) * 4;
 
+type JamTakeLoadTask<T> = {
+  epoch: number;
+  key: string;
+  promise: Promise<T | null>;
+  run: (isCurrent: () => boolean) => T | Promise<T>;
+  resolve: (value: T | null) => void;
+  reject: (reason: unknown) => void;
+};
+
+/**
+ * Run at most one whole-file take load and retain at most one newer replacement.
+ *
+ * Equal keys resolve to `null` immediately: the one existing consumer reads current global deck
+ * state, so duplicate heartbeats retain no waiter. `invalidate()` makes a running continuation
+ * stale without pretending it can cancel the native fetch, and drops pending old-call work.
+ */
+export class JamTakeLoadCoordinator<T> {
+  private epoch = 0;
+  private active: JamTakeLoadTask<T> | null = null;
+  private pending: JamTakeLoadTask<T> | null = null;
+
+  submit(key: string, run: (isCurrent: () => boolean) => T | Promise<T>): Promise<T | null> {
+    if (!key) throw new TypeError("take load needs a stable key");
+    if (this.active?.epoch === this.epoch && this.active.key === key) return Promise.resolve(null);
+    if (this.pending?.epoch === this.epoch && this.pending.key === key) return Promise.resolve(null);
+
+    let resolve!: (value: T | null) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T | null>((yes, no) => { resolve = yes; reject = no; });
+    const item = { epoch: this.epoch, key, promise, run, resolve, reject };
+    if (!this.active) this.execute(item);
+    else {
+      this.pending?.resolve(null);
+      this.pending = item;
+    }
+    return promise;
+  }
+
+  invalidate(): void {
+    this.epoch += 1;
+    this.pending?.resolve(null);
+    this.pending = null;
+  }
+
+  private execute(item: JamTakeLoadTask<T>): void {
+    this.active = item;
+    void Promise.resolve()
+      .then(() => item.run(() => item.epoch === this.epoch))
+      .then(item.resolve, item.reject)
+      .finally(() => {
+        if (this.active === item) this.active = null;
+        const next = this.pending;
+        this.pending = null;
+        if (next) this.execute(next);
+      });
+  }
+}
+
+export type JamTakePlaybackLease = Readonly<{
+  callLease: number;
+  server: number;
+  channel: string;
+  cid: string;
+}>;
+
+/** Exact scalar call/deck binding used again after every whole-file fetch await. */
+export function jamTakePlaybackLeaseCurrent(
+  lease: JamTakePlaybackLease,
+  current: Readonly<{
+    inCall: boolean;
+    callLease: number;
+    server: number | null;
+    channel: string;
+    cid: string | null;
+  }>,
+): boolean {
+  return current.inCall && current.callLease === lease.callLease && current.server === lease.server &&
+    current.channel === lease.channel && current.cid === lease.cid;
+}
+
 /** Refuse an oversized listing before invoking the generic whole-file download command. */
 export function mayFetchJamTake(size: number): boolean {
   return Number.isSafeInteger(size) && size >= 0 && size <= TAKE_MAX_BYTES;
