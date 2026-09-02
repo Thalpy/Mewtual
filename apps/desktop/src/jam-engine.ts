@@ -84,6 +84,8 @@ type SourceState = {
   lastSequence: number | null;
   patches: Map<string, JamPatch>;
   muted: boolean;
+  /** Receiver-owned linear gain applied equally to dry and every room send. */
+  level: number;
 };
 
 type SourceBus = {
@@ -435,8 +437,28 @@ export class JamEngine {
     const state = this.state(source);
     state.muted = muted;
     const bus = this.buses.get(source);
-    if (bus) for (const gate of Object.values(bus)) setGain(gate, muted ? 0 : 1, this.context.currentTime);
+    if (bus) for (const gate of Object.values(bus)) setGain(gate, muted ? 0 : state.level, this.context.currentTime);
     if (muted) this.releaseSource(source);
+  }
+
+  /**
+   * Set a receiver-owned source level without changing sender state or the shared master.
+   *
+   * The jukebox uses this for synthetic take lanes: ordinary media and event-log playback then
+   * obey the same local volume control without allowing a take to raise the global limiter input
+   * above its validated 0..1 range. Invalid non-finite values fail closed and preserve the prior
+   * level; muting remains authoritative over the stored level.
+   */
+  setSourceLevel(source: string, level: number): boolean {
+    if (this.disposed || !Number.isFinite(level)) return false;
+    const state = this.state(source);
+    state.level = Math.min(1, Math.max(0, level));
+    const bus = this.buses.get(source);
+    if (bus) {
+      const audibleLevel = state.muted ? 0 : state.level;
+      for (const gate of Object.values(bus)) setGain(gate, audibleLevel, this.context.currentTime);
+    }
+    return true;
   }
 
   /** Deafen is a hard safety gate and also forgets every remote held state. */
@@ -464,6 +486,19 @@ export class JamEngine {
     const bus = this.buses.get(source);
     if (bus) for (const node of Object.values(bus)) disconnect(node);
     this.buses.delete(source);
+  }
+
+  /**
+   * Remove a source only when the caller still owns its exact channel generation.
+   *
+   * Async take setup can finish after a replacement playback has opened the same synthetic
+   * source name. Cleaning up by name in that case would tear down the replacement. The opaque
+   * channel is therefore the authority for lifecycle cleanup, just as it is for note events.
+   */
+  removeChannel(channel: JamSourceChannel): boolean {
+    if (this.disposed || !this.sourceChannels.isCurrent(channel)) return false;
+    this.removeSource(channel.source);
+    return true;
   }
 
   /** Timer-driven bookkeeping backup; audio-time watchdog automation remains authoritative. */
@@ -507,7 +542,7 @@ export class JamEngine {
   private state(source: string): SourceState {
     let state = this.states.get(source);
     if (!state) {
-      state = { sessionNonce: null, lastSequence: null, patches: new Map(), muted: false };
+      state = { sessionNonce: null, lastSequence: null, patches: new Map(), muted: false, level: 1 };
       this.states.set(source, state);
     }
     return state;
@@ -559,10 +594,10 @@ export class JamEngine {
     const nodes: AudioNode[] = [];
     try {
       bus = {
-        dry: trackedGain(this.context, nodes, state.muted ? 0 : 1),
-        chorus: trackedGain(this.context, nodes, state.muted ? 0 : 1),
-        delay: trackedGain(this.context, nodes, state.muted ? 0 : 1),
-        reverb: trackedGain(this.context, nodes, state.muted ? 0 : 1),
+        dry: trackedGain(this.context, nodes, state.muted ? 0 : state.level),
+        chorus: trackedGain(this.context, nodes, state.muted ? 0 : state.level),
+        delay: trackedGain(this.context, nodes, state.muted ? 0 : state.level),
+        reverb: trackedGain(this.context, nodes, state.muted ? 0 : state.level),
       };
       bus.dry.connect(this.room.dry);
       bus.chorus.connect(this.room.chorus);

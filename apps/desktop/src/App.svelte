@@ -178,7 +178,7 @@
   } from "./melody";
   import {
     MIDI_FIXES, MIDI_SETUP_STEPS, describeMidiMessage, deviceRows, isMonitorWorthy, isPortRouted,
-    midiPortLabel, midiStatus, newMidiRouter, parseMidiMessage, pushMonitorLine, releaseAllNotes,
+    midiInstrumentAction, midiPortLabel, midiStatus, newMidiRouter, parseMidiMessage, pushMonitorLine, releaseAllNotes,
     routeMidi, routedDevices,
     type MidiDeviceRow, type MidiMonitorLine, type MidiPermission,
   } from "./midi";
@@ -200,6 +200,7 @@
   import { JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_CACHE_PER_PEER, JAM_REMOTE_HOLD_MAX_MS, PATCH_OSC_WAVES, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
   import { JamClockProbeTracker, JamClockSync, JamMetronomeClock, type JamClick } from "./jam-clock";
   import { JamTakeRecorder, parseJamTakeJson } from "./jam-recorder";
+  import { shouldDispatchTakeEvent } from "./jam-playback";
   import { jamTakeSheetSvg } from "./jam-sheet";
   // Types only. The console's own logic and markup live in DebugConsole.svelte, which is loaded
   // on demand; this file needs just enough to describe what it hands over.
@@ -1668,13 +1669,18 @@
     // a surface change. Sustain is enabled ONLY for the call instrument: see routeMidi, where the
     // melody lock's secret would otherwise change under a held pedal.
     const target = midiTarget();
-    for (const { note, on } of routeMidi(midiRouter, msg, target === "instrument")) {
+    // Pads are one-shots, so neither note-off nor sustain has a sound to prolong. General MIDI
+    // note numbers select the fixed kit regardless of which MIDI channel a controller transmits.
+    const sustainEnabled = target === "instrument" && jamMode === "keys";
+    for (const { note, on } of routeMidi(midiRouter, msg, sustainEnabled)) {
       if (target === "melody") {
         if (on) noteOn(note);
         else noteOff(note);
       } else if (target === "instrument") {
-        if (on) instNoteOn(note);
-        else instNoteOff(note);
+        const action = midiInstrumentAction(note, on, jamMode);
+        if (action?.kind === "pad") jamPadHit(action.pad);
+        else if (action?.kind === "note" && action.on) instNoteOn(action.note);
+        else if (action?.kind === "note") instNoteOff(action.note);
       }
     }
   }
@@ -1683,7 +1689,10 @@
     const target = midiTarget();
     for (const { note } of releaseAllNotes(midiRouter)) {
       if (target === "melody") noteOff(note);
-      else if (target === "instrument") instNoteOff(note);
+      else if (target === "instrument") {
+        const action = midiInstrumentAction(note, false, jamMode);
+        if (action?.kind === "note") instNoteOff(action.note);
+      }
     }
   }
   /** Wire every input we can see and rebuild the device list. Safe to call as often as we like. */
@@ -2846,6 +2855,8 @@
   let textEffectBubble = $state({ x: 0, y: 0 });
   let showTextEffectCatalog = $state(false);
   let textEffectQuery = $state("");
+  // Catalog sections the user folded shut; a search query overrides this so matches never hide.
+  let collapsedTextEffectGroups: Record<string, boolean> = $state({});
   let recordingTextEffect = $state("");
   let textEffectKeyError = $state("");
   let suppressTextEffectSelection = false;
@@ -10908,12 +10919,17 @@
   } | null = null;
   let jamPlayingId = $state<number | null>(null);
   let jamPlayGen = 0; // the installs below await; only the newest press may seat itself
+  let jamPendingPlay: { gen: number; id: number | null; deckCid: string | null } | null = null;
+  function jamDeckPlaybackCid(): string | null {
+    return jamPlay?.deckCid ?? jamPendingPlay?.deckCid ?? null;
+  }
   function takeEndMs(take: JamTake): number {
     return take.events[take.events.length - 1]?.ms ?? 0;
   }
   async function jamStartTakePlayback(take: JamTake, offsetMs: number, localId: number | null, deckCid: string | null) {
-    const gen = ++jamPlayGen;
     jamStopPlayback();
+    const gen = jamPlayGen;
+    jamPendingPlay = { gen, id: localId, deckCid };
     const engine = ensureJamEngine();
     if (engine.context.state === "suspended") void engine.context.resume().catch(() => { /* gesture */ });
     const chans = take.lanes.map((lane, index) => {
@@ -10923,9 +10939,16 @@
         : engine.beginSourceSession(chan, lane.sn);
       return opened ? chan : null;
     });
+    // Cleanup is capability-scoped. A later playback reuses these source names, so stale async
+    // work must be unable to remove the newer generation when it finally resumes.
+    const abandon = () => {
+      for (const chan of chans) if (chan) engine.removeChannel(chan);
+      if (jamPendingPlay?.gen === gen) jamPendingPlay = null;
+    };
     const patchIds: (string | null)[] = [];
     for (const patch of take.patches) {
       try { patchIds.push(await jamPatchId(patch)); } catch { patchIds.push(null); }
+      if (gen !== jamPlayGen) { abandon(); return; }
     }
     // Pre-install every patch on every non-legacy lane; the per-source LRU keeps the last few,
     // which mirrors exactly what a live listener would have retained.
@@ -10934,9 +10957,24 @@
       for (const [patchIndex, patch] of take.patches.entries()) {
         const id = patchIds[patchIndex];
         if (id) await engine.installPatch(chan, take.lanes[laneIndex].sn, id, patch);
+        if (gen !== jamPlayGen) { abandon(); return; }
       }
     }
-    if (gen !== jamPlayGen) return; // a newer press owns the deck; its openSource replaced ours
+    if (gen !== jamPlayGen) { abandon(); return; }
+    // Patch installation yields to WebCrypto. Read jukeVol only after those awaits so a slider
+    // move during loading cannot leave this take at the stale level captured when loading began.
+    // No take graph is constructed until jamPlayTick below, so every lane is gated first.
+    if (deckCid) {
+      const live = jukeNow;
+      if (!live || live.cid !== deckCid || live.paused || jukeStale) {
+        // Retire this still-current lease before releasing its channels. A late continuation must
+        // not be able to seat itself after pause, track replacement, DJ expiry, or call teardown.
+        if (gen === jamPlayGen) jamPlayGen += 1;
+        abandon();
+        return;
+      }
+      for (const chan of chans) if (chan) engine.setSourceLevel(chan.source, jukeVol);
+    }
     const baseMs = Math.max(0, offsetMs);
     const firstDue = take.events.findIndex((event) => event.ms >= baseMs);
     jamPlay = {
@@ -10952,6 +10990,7 @@
       endTimer: undefined,
       done: false,
     };
+    jamPendingPlay = null;
     jamPlayingId = localId;
     jamPlayTick();
   }
@@ -10969,8 +11008,9 @@
     while (pl.next < pl.take.events.length && pl.take.events[pl.next].ms <= elapsed) {
       const event = pl.take.events[pl.next];
       pl.next += 1;
-      // A deafened listener's deck keeps counting with the room but dispatches nothing.
-      if (callDeafened && pl.deckCid) continue;
+      // Deafen drops new attacks but note-offs still close voices that began before its master
+      // gate shut; otherwise those obsolete notes would resurrect when the gate reopened.
+      if (!shouldDispatchTakeEvent(event, pl.deckCid !== null, callDeafened)) continue;
       const chan = pl.chans[event.lane];
       if (!chan) continue;
       const lane = pl.take.lanes[event.lane];
@@ -10986,19 +11026,28 @@
     if (pl.next >= pl.take.events.length && !pl.done && elapsed >= takeEndMs(pl.take)) {
       pl.done = true;
       clearInterval(pl.timer);
+      // Arm the release-tail cleanup before advancing. A cached next take can start synchronously
+      // inside jukeAdvance; that replacement clears this timer, and the identity guard also makes
+      // an already-queued callback harmless instead of stopping the new deck 3.5 seconds later.
+      pl.endTimer = setTimeout(() => {
+        if (jamPlay === pl) jamStopPlayback();
+      }, 3500);
       // Only the DJ moves the room on; every listener's deck simply ran out together.
       if (pl.deckCid && jukeIsDj() && jukeNow?.cid === pl.deckCid) jukeAdvance(true);
-      pl.endTimer = setTimeout(jamStopPlayback, 3500); // releases and drum tails ring out
     }
   }
   function jamStopPlayback() {
+    // Invalidate pending setup even when no playback has seated yet. Patch hashing/installing is
+    // async, and a stop, replacement, or leave must win that race deterministically.
+    jamPlayGen += 1;
+    jamPendingPlay = null;
     const pl = jamPlay;
+    jamPlay = null;
+    jamPlayingId = null;
     if (!pl) return;
     clearInterval(pl.timer);
     clearTimeout(pl.endTimer);
-    for (const chan of pl.chans) if (chan) jamEngine?.removeSource(chan.source);
-    jamPlay = null;
-    jamPlayingId = null;
+    for (const chan of pl.chans) if (chan) jamEngine?.removeChannel(chan);
   }
   function pad2(value: number): string {
     return String(value).padStart(2, "0");
@@ -11040,7 +11089,7 @@
     }
   }
   function jamDiscardTake(id: number) {
-    if (jamPlayingId === id) jamStopPlayback();
+    if (jamPlayingId === id || jamPendingPlay?.id === id) jamStopPlayback();
     jamTakes = jamTakes.filter((t) => t.id !== id);
   }
   function takePlayers(take: JamTake): string {
@@ -11277,6 +11326,10 @@
     jamPatchDirty();
   }
   function setJamMode(mode: "keys" | "pads") {
+    if (mode === jamMode) return;
+    // Release under the OLD routing rule. Switching while a MIDI key or pedal is down must not
+    // leave a piano voice held merely because its eventual note-off is now routed to a one-shot.
+    releaseMidiNotes();
     jamMode = mode;
     try { localStorage.setItem("catcoms.call.jammode", mode); } catch { /* ignore */ }
   }
@@ -12570,8 +12623,14 @@
     return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.6;
   }
   function setJukeVol(v: number) {
+    if (!Number.isFinite(v)) return;
     jukeVol = Math.min(1, Math.max(0, v));
     if (jukeAudio) jukeAudio.volume = jukeVol;
+    // A .jamtake has no media element: it plays as synthetic per-lane engine sources. Apply the
+    // same slider to those bounded receiver-owned buses without changing live performers' gains.
+    if (jamPlay?.deckCid) {
+      for (const chan of jamPlay.chans) if (chan) jamEngine?.setSourceLevel(chan.source, jukeVol);
+    }
     try { localStorage.setItem("catcoms.call.jukevol", String(jukeVol)); } catch { /* ignore */ }
   }
   // The one deck element, made on first play and appended like the per-peer call audio.
@@ -12818,7 +12877,7 @@
     if (!file || (!isTake && !(mime.startsWith("audio/") || mime.startsWith("video/")))) {
       jukeTrustBlocked = "unavailable";
       parkJukeboxMedia();
-      if (jamPlay?.deckCid) jamStopPlayback();
+      if (jamDeckPlaybackCid()) jamStopPlayback();
       return;
     }
     const approvalKey = scopedMediaKey(server, cid);
@@ -12828,11 +12887,12 @@
     )) {
       jukeTrustBlocked = "consent";
       parkJukeboxMedia();
-      if (jamPlay?.deckCid) jamStopPlayback();
+      if (jamDeckPlaybackCid()) jamStopPlayback();
       return;
     }
     jukeTrustBlocked = "";
-    if (jamPlay?.deckCid && jamPlay.deckCid !== cid) jamStopPlayback(); // the room moved on
+    const activeTakeCid = jamDeckPlaybackCid();
+    if (activeTakeCid && activeTakeCid !== cid) jamStopPlayback(); // the room moved on
     if (isTake) {
       void jukeApplyTake(cid);
       return;
@@ -12924,7 +12984,7 @@
     const live = jukeNow;
     if (!live || live.cid !== cid) return;
     if (live.paused || jukeStale) {
-      if (jamPlay?.deckCid === cid) jamStopPlayback(); // position lives in the transport, not here
+      if (jamDeckPlaybackCid() === cid) jamStopPlayback(); // position lives in the transport, not here
       return;
     }
     const targetMs = Math.max(0, jukeTarget() * 1000);
@@ -13082,7 +13142,7 @@
   function jukeStop() {
     jukeBlocked = false; // nothing is loaded: there is no playback being held back
     jukeLocalFail = "";
-    if (jamPlay?.deckCid) jamStopPlayback(); // the take deck stops with the transport
+    if (jamDeckPlaybackCid()) jamStopPlayback(); // the take deck stops with the transport
     const el = jukeAudio;
     if (!el) return;
     el.pause();
@@ -13178,7 +13238,7 @@
     jukeStale = true; // anyone's next press claims the deck
     jukeBlocked = false; // a frozen deck is not one the webview is refusing to start
     jukeAudio?.pause();
-    if (jamPlay?.deckCid) jamStopPlayback(); // a dead DJ's take freezes exactly like their track
+    if (jamDeckPlaybackCid()) jamStopPlayback(); // a dead DJ's take freezes exactly like their track
   }
   // Leaving the room takes the deck with it. There are no blobs to release any more: the element
   // streamed from the vault rather than holding a decrypted copy of the track.
@@ -18588,7 +18648,7 @@
       {/each}
     </div>
 
-    <div class="inst-hint">{jamMode === "pads" ? `${padKeys.join(" ")} hit pads · your hat chokes your open hat, never theirs` : `${pianoKeys.slice(0, 12).join(" ")} play · z/x shift · click keys or midi`}</div>
+    <div class="inst-hint">{jamMode === "pads" ? `${padKeys.join(" ")} hit pads · MIDI uses GM drum notes · your hat chokes your open hat, never theirs` : `${pianoKeys.slice(0, 12).join(" ")} play · z/x shift · click keys or midi`}</div>
   </div>
 {/snippet}
 
@@ -22394,8 +22454,12 @@
             {#each TEXT_EFFECT_GROUPS as group}
               {@const effects = filteredTextEffects.filter((effect) => effect.group === group)}
               {#if effects.length}
-                <section class="text-fx-group">
-                  <h3>{group}</h3>
+                <details
+                  class="text-fx-group"
+                  open={!!textEffectQuery.trim() || !collapsedTextEffectGroups[group]}
+                  ontoggle={(e) => { if (!textEffectQuery.trim()) collapsedTextEffectGroups[group] = !e.currentTarget.open; }}
+                >
+                  <summary><h3>{group}<span class="text-fx-group-count">{effects.length}</span></h3></summary>
                   <div class="text-fx-grid">
                     {#each effects as effect (effect.id)}
                       <div class="text-fx-choice">
@@ -22408,7 +22472,7 @@
                       </div>
                     {/each}
                   </div>
-                </section>
+                </details>
               {/if}
             {/each}
           </div>

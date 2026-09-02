@@ -1,4 +1,4 @@
-export type TextEffectGroup = "Motion" | "Mood" | "Signal" | "Pride" | "Utility";
+export type TextEffectGroup = "Motion" | "Mood" | "Signal" | "Utility" | "Pride";
 
 export type TextEffectDefinition = {
   id: string;
@@ -68,7 +68,7 @@ export const TEXT_EFFECTS: readonly TextEffectDefinition[] = [
   })),
 ];
 
-export const TEXT_EFFECT_GROUPS: readonly TextEffectGroup[] = ["Motion", "Mood", "Signal", "Pride", "Utility"];
+export const TEXT_EFFECT_GROUPS: readonly TextEffectGroup[] = ["Motion", "Mood", "Signal", "Utility", "Pride"];
 export const TEXT_EFFECT_RE = /^\[fx:([a-z0-9/-]{1,40})\]([^\n]{1,320}?)\[\/fx\]/i;
 export const SPEAKESE_STEP_SECONDS = 0.072;
 export const MAX_SPEAKESE_BLIPS = 64;

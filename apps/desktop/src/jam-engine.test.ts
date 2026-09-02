@@ -241,6 +241,60 @@ test("Deafen is a hard remote gate but does not tear down the local player's ins
   });
 });
 
+test("receiver-owned source level scales every send and survives mute without exceeding unity", () => {
+  const { fake, engine } = contextAndEngine();
+  const live = engine.openSource("live-performer");
+  engine.beginSourceSession(live, otherSn);
+  const liveBefore = fake.nodes.length;
+  assert.equal(engine.noteOn({ channel: live, sequence: 1, note: 64, wave: "triangle" }).ok, true);
+  const liveGates = fake.nodes.slice(liveBefore, liveBefore + 4) as FakeGain[];
+  assert.ok(liveGates.every((gate) => gate instanceof FakeGain && gate.gain.value === 1));
+
+  const takeLane = engine.openSource("take-lane");
+  engine.beginSourceSession(takeLane, sn);
+  assert.equal(engine.setSourceLevel("take-lane", 0.25), true);
+  const before = fake.nodes.length;
+  assert.equal(engine.noteOn({ channel: takeLane, sequence: 1, note: 60, wave: "triangle", remote: false }).ok, true);
+
+  // A source bus is always dry/chorus/delay/reverb, created before its first voice nodes.
+  const gates = fake.nodes.slice(before, before + 4) as FakeGain[];
+  assert.equal(gates.length, 4);
+  assert.ok(gates.every((gate) => gate instanceof FakeGain && gate.gain.value === 0.25));
+
+  engine.setSourceMuted("take-lane", true);
+  assert.ok(gates.every((gate) => gate.gain.value === 0));
+  engine.setSourceMuted("take-lane", false);
+  assert.ok(gates.every((gate) => gate.gain.value === 0.25), "unmute restores the receiver's level");
+
+  assert.equal(engine.setSourceLevel("take-lane", 9), true);
+  assert.ok(gates.every((gate) => gate.gain.value === 1), "gain clamps at unity");
+  assert.ok(liveGates.every((gate) => gate.gain.value === 1), "take volume never changes a live source");
+  assert.equal(engine.setSourceLevel("take-lane", Number.NaN), false);
+  assert.ok(gates.every((gate) => gate.gain.value === 1), "invalid input preserves the safe prior level");
+
+  assert.equal(engine.removeChannel(takeLane), true);
+  const reopened = engine.openSource("take-lane");
+  engine.beginSourceSession(reopened, sn);
+  const reopenedBefore = fake.nodes.length;
+  assert.equal(engine.noteOn({ channel: reopened, sequence: 1, note: 67, wave: "triangle", remote: false }).ok, true);
+  const reopenedGates = fake.nodes.slice(reopenedBefore, reopenedBefore + 4) as FakeGain[];
+  assert.ok(reopenedGates.every((gate) => gate.gain.value === 1), "removing a source forgets its local level");
+});
+
+test("capability-scoped cleanup cannot remove a replacement playback source", () => {
+  const { engine } = contextAndEngine();
+  const stale = engine.openSource("take-lane");
+  engine.beginSourceSession(stale, sn);
+  const current = engine.openSource("take-lane");
+  engine.beginSourceSession(current, otherSn);
+  assert.equal(engine.noteOn({ channel: current, sequence: 1, note: 60, wave: "triangle", remote: false }).ok, true);
+
+  assert.equal(engine.removeChannel(stale), false);
+  assert.deepEqual(engine.snapshot().voices.map((voice) => voice.source), ["take-lane"]);
+  assert.equal(engine.removeChannel(current), true);
+  assert.equal(engine.snapshot().voices.length, 0);
+});
+
 test("legacy-only is receive-side and immediately removes sounding custom remote voices", async () => {
   const { engine } = contextAndEngine();
   const alice = engine.openSource("alice");

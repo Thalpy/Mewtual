@@ -479,9 +479,12 @@ type a `code`, choose its display size and upload an image. Then anyone types `:
 - Choose **Join voice** in a chat channel's header. Voice rooms belong to channels and remain
   active while you move around the app. The call stage provides mute/deafen, per-person volume,
   input/output device selection, camera and screen sharing.
-- **Instruments** opens an on-screen keyboard that also accepts computer-keyboard or Web MIDI
-  input; notes are shared live with the room. The **Jukebox** queues audio already circulating in
-  the server's Files area, so it does not upload a second copy. Whoever pressed last is the DJ and
+- **Instruments** opens Keys and Pads surfaces that also accept computer-keyboard or Web MIDI
+  input; notes and drum hits are shared live with the room. In Pads mode, MIDI uses the General
+  MIDI drum notes for kick, snare, rim, clap, hats, toms, ride and crash. The **Jukebox** queues
+  audio or saved jam takes already circulating in the server's Files area, so it does not upload a
+  second copy. Its local volume slider applies equally to ordinary media and synthesized jam-take
+  playback. Whoever pressed last is the DJ and
   everyone hears the same position; the deck's own play button starts the queue from the top, and
   a track comes off the queue once the room has heard it through. **Add from share** can be
   narrowed to audio or video. A video plays on the deck's own screen in the voice stage, or full

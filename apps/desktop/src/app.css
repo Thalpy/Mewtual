@@ -13699,6 +13699,28 @@ button.fx-order {
   letter-spacing: 0.16em;
   text-transform: uppercase;
 }
+.text-fx-group summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.text-fx-group summary::-webkit-details-marker { display: none; }
+.text-fx-group summary::before {
+  content: "▸";
+  flex: 0 0 auto;
+  margin-top: 7px;
+  color: var(--text-2);
+  font-size: 0.62rem;
+  transition: transform 0.14s ease;
+}
+.text-fx-group[open] summary::before { transform: rotate(90deg); }
+.text-fx-group summary:hover h3,
+.text-fx-group summary:focus-visible h3 { color: var(--text); }
+.text-fx-group summary:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.text-fx-group-count { margin-left: 8px; color: var(--text-3, var(--text-2)); letter-spacing: 0; opacity: 0.8; }
 .text-fx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 7px; }
 .text-fx-choice { position: relative; display: flex; min-width: 0; border: 1px solid var(--border); background: rgb(255 255 255 / 0.018); }
 .text-fx-choice:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }

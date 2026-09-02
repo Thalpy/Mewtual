@@ -22,7 +22,8 @@ import assert from "node:assert/strict";
 import {
   CC_ALL_NOTES_OFF, CC_ALL_SOUND_OFF, CC_SUSTAIN, MIDI_FIXES, MIDI_MONITOR_LINES,
   MIDI_SETUP_STEPS, deviceRows, describeMidiMessage, isMonitorWorthy, isPortRouted,
-  midiChannelLabel, midiPortLabel, midiStatus, newMidiRouter, parseMidiMessage, pushMonitorLine,
+  midiChannelLabel, midiInstrumentAction, midiJamPad, midiPortLabel, midiStatus, newMidiRouter,
+  parseMidiMessage, pushMonitorLine,
   releaseAllNotes, routeMidi, routedDevices,
   type MidiDeviceRow, type MidiEnvironment, type MidiPortLike,
 } from "./midi.ts";
@@ -127,6 +128,24 @@ test("a filtered-out port still earns a monitor line", () => {
 });
 
 // --- Routing --------------------------------------------------------------------------------
+
+test("General MIDI drum notes map exactly onto the fixed jam kit", () => {
+  assert.deepEqual(
+    [36, 38, 37, 39, 42, 46, 45, 50, 51, 49].map((note) => midiJamPad(note)),
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  );
+  assert.equal(midiJamPad(35), null);
+  assert.equal(midiJamPad(52), null);
+  assert.equal(midiJamPad(36.5), null);
+});
+
+test("instrument MIDI dispatch follows Keys or one-shot Pads mode", () => {
+  assert.deepEqual(midiInstrumentAction(60, true, "keys"), { kind: "note", note: 60, on: true });
+  assert.deepEqual(midiInstrumentAction(60, false, "keys"), { kind: "note", note: 60, on: false });
+  assert.deepEqual(midiInstrumentAction(42, true, "pads"), { kind: "pad", pad: 4 });
+  assert.equal(midiInstrumentAction(42, false, "pads"), null, "a one-shot has no sound to release");
+  assert.equal(midiInstrumentAction(60, true, "pads"), null, "unmapped MIDI keys stay silent in Pads mode");
+});
 
 const on = (note: number, velocity = 90) => ({ kind: "noteon" as const, channel: 0, note, velocity });
 const off = (note: number) => ({ kind: "noteoff" as const, channel: 0, note });
