@@ -31,7 +31,7 @@ remains honest: 709 kB is still large, so `chunkSizeWarningLimit` has not been r
 | Cross-server inbox scans | Each channel event can scan every server/channel | Debounce, run during browser idle time with a deadline, cancel on lock/unmount | Done; incremental native index remains |
 | Large startup component | One very large Svelte component and eager optional libraries increase parse/initialization work | Real dynamic imports; move component markup, behavior and feature CSS together | Feedback + Wiki Help + QR done; more views queued |
 | Server-wide search | Builds an all-channel corpus and runs filters/sorts on the UI thread | Load on explicit search only; next move indexing/filtering to a worker and page results | Queued |
-| Full native history materialization | `read_messages` walks every Automerge list item and IPC serializes the full vector | Walk with one sequential list/map cursor instead of an indexed lookup per row and field; cache the materialized list per channel under its document version (`Server::with_messages`) so one walk serves every read between two changes. Paged/window query with total/anchors still to come; preserve exact search/unread semantics | Cursor walk + version cache done (2026-09-03); paging queued, compatibility/security design required |
+| Full native history materialization | `read_messages` walks every Automerge list item and IPC serializes the full vector | Walk with one sequential list/map cursor instead of an indexed lookup per row and field; cache the materialized list per channel under its document version (`Server::with_messages`) so one walk serves every read between two changes. Then an actor-owned page query around durable id anchors with per-row reply context and a whole-channel unread summary, so the webview holds one slice (`docs/design-native-paging.md`) | Cursor walk + version cache done (2026-09-03); native paging done on `perf-native-paging` (2026-09-03): `get_message_page` / `get_pinned_messages`, webview converted, `get_messages` kept only for search corpus and moderation timeline |
 | Per-event native projection sweep | Every network event (gossip frame, presence blip, receipt) re-materialized every open channel plus status, wiki, roles and Ed25519-verified moderation records to detect changes | Gate every projection on `Server::doc_version` (ops applied per document, O(1)) plus epoch/member-count for membership-derived ones. Delivery dirtying is left ungated on purpose: its one-second timer is also the wake that cancels a sync tick blocked in an outbound request (see INTERFACES § 10); gating it made `process_recovery_e2e` deadlock for the full request timeout | Done (2026-09-03) |
 | Actor blocks on outbound requests | A sync tick that awaits a catch-up/PEX response cannot serve the peer's inbound request; two members requesting each other at once wait for each other until a timeout. Today only the `select!` cancellation from the delivery timer or a command breaks it | Move outbound request/response off the serve path (or serve inbound requests while awaiting), then the delivery gating can land. Protocol-adjacent: adversarial review first | Found 2026-09-03; queued |
 | Background-channel arrival fetch | The ticker fetched a whole channel's history for every arrival in a channel not on screen, to read its last row and scan for mentions | `get_message_tail(limit)` with a native `targets_me` per row (reply parents resolved against the whole channel) | Done (2026-09-03) |
@@ -60,7 +60,7 @@ webview, which is what native paging is for.
 
 ## Security review and command tracking
 
-The desktop exposes **101** custom Tauri commands. `src/tauri-command-security.ts` classifies every
+The desktop exposes **103** custom Tauri commands. `src/tauri-command-security.ts` classifies every
 one by boundary, and `tauri-command-security.test.ts` compares that ledger with both the Rust
 `generate_handler!` list and literal frontend invocations. A new, removed, duplicated, dynamically
 named or unclassified command fails the frontend suite.
@@ -98,8 +98,9 @@ implementation.
    behind the same dynamic boundary. Add typed props and explicit loading/error fallbacks.
 2. Extract Settings and Server Settings by page, preserving drafts across chunk loads and keeping
    every mutation in a typed native service wrapper.
-3. Design actor-owned paged history: stable message-id anchors, bounded limits, edits/deletes,
-   unread/search behavior, and legacy id-less rows. Review before changing the bridge contract.
+3. ~~Design actor-owned paged history: stable message-id anchors, bounded limits, edits/deletes,
+   unread/search behavior, and legacy id-less rows. Review before changing the bridge contract.~~
+   Done (`perf-native-paging`, `docs/design-native-paging.md`).
 4. Move server-wide search/filter/sort to an on-demand worker over paged data.
 5. Make remote media consent-aware and fixed-size before fetch; then profile voice/video and pause
    nonessential timers while hidden or locked.

@@ -30,10 +30,12 @@
     type MessageFrameMotion, type MessageFrameShape,
   } from "./message-frame";
   import {
-    CHAT_INITIAL_ROWS, CHAT_WINDOW_STEP, CoalescedAsyncRefresh, SanitizedMessageCache, initialChatWindow,
-    nearScrollBottom, reconcileChatWindow, revealNewer, revealOlder, windowAround,
-    type ChatWindow,
+    CHAT_INITIAL_ROWS, CHAT_WINDOW_STEP, CoalescedAsyncRefresh, SanitizedMessageCache, nearScrollBottom,
   } from "./chat-performance";
+  import {
+    planJump, planRefresh, planRevealNewer, planRevealOlder, reanchorByIndex,
+    type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
+  } from "./message-paging";
   import { chatScopeKey, reconcileActiveChannel, scopeHoldsConversation } from "./chatscope";
   import {
     WIKI_REVIEW_UNKNOWN,
@@ -229,6 +231,9 @@
   // profile name, or a reply to my own message) against the WHOLE channel document, so a reply
   // whose parent is older than the tail is still recognised without shipping the history.
   type TailMsg = Msg & { targets_me: boolean };
+  // One row of `get_message_page`: the message plus what it needs from the rest of the channel
+  // (addressing, reply count, reply parent), resolved natively so the webview holds only a slice.
+  type PagedMsg = Msg & PagedRowContext;
   type InboxEntry = {
     server: number; server_name: string; is_dm: boolean;
     channel: string; message_id: string; author: string; author_name: string;
@@ -2133,16 +2138,57 @@
   // Raw, not deep, state: the history is only ever replaced wholesale by a fresh actor snapshot,
   // never mutated in place, so proxying every row (and every field of every row) bought nothing
   // and cost a proxy plus per-field signals for the entire log on every refresh.
-  let messages = $state.raw<Msg[]>([]);
-  // The actor remains the source of truth for the complete channel history. Only a bounded slice
-  // enters the DOM, which caps Svelte work, rich-media resolution, observers and layout cost in a
-  // long-running room. Sanitized HTML is cached in memory only and wiped at the lock boundary.
+  // The loaded slice of the active channel: one contiguous run of rows the actor handed back
+  // (see `docs/design-native-paging.md`). The actor remains the source of truth for the complete
+  // history; the webview never holds more than what is on screen plus a bounded margin, so a
+  // room's age no longer sets the cost of opening it or of every arrival in it.
+  let messages = $state.raw<PagedMsg[]>([]);
+  // Position of `messages[0]` in the whole channel, the channel's size, and the document version
+  // the slice was read at. Row indexes in the DOM (`data-mi`) stay absolute: `pageStart + i`.
+  let pageStart = $state(0);
+  let pageTotal = $state(0);
+  let pageVersion = $state(0);
+  // Whole-channel unread state measured natively against the frozen divider (see `dividerTs`).
+  let pageUnread = $state<UnreadSummary | null>(null);
+  let pageEnd = $derived(pageStart + messages.length);
+  let tailLoaded = $derived(pageEnd >= pageTotal);
+  // Sanitized HTML is cached in memory only and wiped at the lock boundary.
   const messageRenderCache = new SanitizedMessageCache();
-  let messageWindow = $state<ChatWindow>({ start: 0, end: 0 });
   let messageWindowScope = $state("");
   let chatStickToBottom = $state(true);
   let expandingMessageWindow = false;
-  let renderedMessages = $derived(messages.slice(messageWindow.start, messageWindow.end));
+  function currentSlice() {
+    return { start: pageStart, ids: messages.map((m) => m.id), tailLoaded };
+  }
+  function unreadProbe() {
+    return { divider_ts: Number.isFinite(dividerTs) ? dividerTs : null, now_ms: Date.now() };
+  }
+  async function fetchPage(server: number, channel: string, request: PageRequest): Promise<MessagePage<PagedMsg>> {
+    return invoke<MessagePage<PagedMsg>>("get_message_page", {
+      server, channel, anchor: request.anchor, before: request.before, after: request.after, unread: unreadProbe(),
+    });
+  }
+  // A page whose id anchor vanished (deleted between reads) is re-read by index so the reader
+  // holds position; a page that still finds nothing is an empty channel.
+  async function fetchPageOrReanchor(server: number, channel: string, request: PageRequest, index: number) {
+    const page = await fetchPage(server, channel, request);
+    if (page.anchor_index !== null || page.total === 0 || request.anchor.kind === "index") return page;
+    return fetchPage(server, channel, reanchorByIndex(request, index));
+  }
+  function applyPage(page: MessagePage<PagedMsg>) {
+    messages = page.rows;
+    pageStart = page.rows.length ? page.start : 0;
+    pageTotal = page.total;
+    pageVersion = page.version;
+    pageUnread = page.unread;
+  }
+  function clearPage() {
+    messages = [];
+    pageStart = 0;
+    pageTotal = 0;
+    pageVersion = 0;
+    pageUnread = null;
+  }
   // Only rows inserted by a live update receive an arrival animation. A short-lived id set keeps
   // history loads and ordinary re-renders still, and also lets each sender choose their motion.
   let arrivalMessageIds = $state<Set<string>>(new Set());
@@ -2254,8 +2300,9 @@
   }
 
   // ---- corpus: which channels the search covers -------------------------------------------
-  // The open channel always reads the live `messages`; any other in-scope channel is fetched once
-  // into `chanMsgs` (a snapshot, dropped when the search closes) so search can span the server.
+  // Every in-scope channel, the open one included, is fetched once into `chanMsgs` (a whole-history
+  // snapshot, dropped when the search closes) so search can span the server. The open channel's
+  // live `messages` is only a slice now, so it cannot stand in for its history.
   let chanMsgs = $state<Record<string, Msg[]>>({});
   let scopeLoading = $state(false);
   let searchChannels = $derived.by(() => cur?.channels ?? []);
@@ -2266,8 +2313,8 @@
     const id = activeServerId;
     const s = cur;
     if (id === null || !s) return;
-    const want = filters.channel === "*" ? s.channels.map((c) => c.id) : filters.channel ? [filters.channel] : [];
-    const need = want.filter((c) => c !== s.active && !chanMsgs[c]);
+    const want = filters.channel === "*" ? s.channels.map((c) => c.id) : [filters.channel || s.active];
+    const need = want.filter((c) => c && !chanMsgs[c]);
     if (!need.length) return;
     scopeLoading = true;
     try {
@@ -2289,7 +2336,7 @@
     const ids = filters.channel === "*" ? searchChannels.map((c) => c.id) : [filters.channel || active];
     const out: SearchHit[] = [];
     for (const ch of ids) {
-      const list = ch === active ? messages : chanMsgs[ch];
+      const list = chanMsgs[ch];
       if (list) list.forEach((m, idx) => out.push({ ch, idx, m }));
     }
     return out;
@@ -2442,21 +2489,27 @@
       renderMessage,
     );
   }
+  // Make an absolute row index renderable: fetch a page around it when it is not loaded. The
+  // same shape `windowAround` used to slice out of the whole array, read from the actor instead.
   async function ensureMessageRendered(msgIdx: number) {
-    if (msgIdx >= messageWindow.start && msgIdx < messageWindow.end) return;
-    messageWindow = windowAround(msgIdx, messages.length, CHAT_INITIAL_ROWS);
+    if (msgIdx >= pageStart && msgIdx < pageEnd) return;
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (server === null || !channel) return;
+    const page = await fetchPage(server, channel, planJump({ kind: "index", index: msgIdx }, CHAT_INITIAL_ROWS));
+    if (activeServerId !== server || cur?.active !== channel) return;
+    applyPage(page);
     await tick();
   }
   async function scrollToMatch(msgIdx: number) {
     await ensureMessageRendered(msgIdx);
     messagesEl?.querySelector(`[data-mi="${msgIdx}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
-  // Go to a hit, following it into another channel if that's where it lives. The channel we leave
-  // is snapshotted first so its hits don't blink out of the result list mid-switch.
+  // Go to a hit, following it into another channel if that's where it lives. Every channel in the
+  // corpus is already a snapshot, so the one we leave keeps its hits across the switch.
   async function goToHit(h: SearchHit, pos: number) {
     searchPos = pos;
     if (cur && h.ch !== cur.active) {
-      chanMsgs[cur.active] = messages;
       await switchTo(h.ch, true);
       if (h.m.id) jumpToMessageId(h.m.id);
       else void scrollToMatch(h.idx); // a legacy message has no id: its index still holds
@@ -2490,6 +2543,8 @@
   function openSearch(advanced = false) {
     showSearch = true;
     if (advanced) showSearchAdv = true;
+    // The corpus is read on demand: the open channel's live rows are only a slice of it.
+    void loadScope();
     queueMicrotask(() => searchInput?.focus());
   }
   function closeSearch() {
@@ -2692,11 +2747,13 @@
     const k = chanKey();
     dividerTs = k && readMarks[k] ? readMarks[k].ts : Number.POSITIVE_INFINITY;
   }
-  // The newest timestamp in the loaded conversation this machine is willing to believe. A message
+  // The newest timestamp in the conversation this machine is willing to believe. A message
   // timestamp is the SENDER's clock, so used raw as a cursor one broken clock (or one member
   // choosing the value) parks the read mark years ahead and every later message silently counts as
-  // already read. Recomputed only when the rows change, so it is stable while a channel is open.
-  let readTsCeiling = $derived(readCeiling(messages.map((m) => m.ts), Date.now()));
+  // already read. Measured natively over the WHOLE channel with every page (the same rule as
+  // `readCeiling`, against this machine's clock); the loaded slice is the fallback only when no
+  // page has answered yet.
+  let readTsCeiling = $derived(pageUnread ? pageUnread.ceiling_ts : readCeiling(messages.map((m) => m.ts), Date.now()));
   // A row's timestamp as read state may use it. Display still shows what the sender wrote.
   function readTs(m: Msg): number {
     return effectiveTs(m.ts, readTsCeiling);
@@ -2741,11 +2798,13 @@
     if (at >= 0) return messages.slice(at + 1).some((m) => m.author !== myFp);
     return messages.some((m) => m.author !== myFp && readTs(m) > mark.ts);
   }
-  // Index of the first message newer than the read boundary (-1 if all read).
+  // Absolute index of the first message newer than the read boundary (-1 if all read), and how
+  // many sit past it; the divider and the header jump both name it. Both come from the page's
+  // native summary, measured over the whole channel against the frozen `dividerTs`, so a reader
+  // holding one slice still sees the true count and can jump to a divider that is not loaded.
   // Own messages never count as unread: sending shouldn't raise a "New messages" divider.
-  let firstUnreadIdx = $derived(messages.findIndex((m) => effectiveTs(m.ts, readTsCeiling) > dividerTs && m.author !== myFp));
-  // How many messages sit past that boundary; the divider and the header jump both name it.
-  let unreadCount = $derived(firstUnreadIdx < 0 ? 0 : messages.slice(firstUnreadIdx).filter((m) => m.author !== myFp).length);
+  let firstUnreadIdx = $derived(pageUnread?.first_index ?? -1);
+  let unreadCount = $derived(pageUnread?.count ?? 0);
   // Is this row one of the unread ones? Own messages never count (you just sent them).
   const isUnread = (m: Msg) => firstUnreadIdx >= 0 && readTs(m) > dividerTs && m.author !== myFp;
 
@@ -2764,7 +2823,7 @@
   let messageFrameBreaks = $derived.by(() => {
     const breaks = new Set<number>();
     if (!CHAT_MESSAGE_FRAMES_ENABLED) return breaks;
-    if (firstUnreadIdx >= 0) breaks.add(firstUnreadIdx);
+    if (firstUnreadIdx >= pageStart) breaks.add(firstUnreadIdx - pageStart);
     for (let i = 1; i < messages.length; i++) {
       if (!sameDay(messages[i - 1].ts, messages[i].ts)) breaks.add(i);
     }
@@ -4549,18 +4608,35 @@
 
   async function revealOlderMessages() {
     const node = messagesEl;
-    if (!node || messageWindow.start <= 0 || expandingMessageWindow) return;
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (!node || pageStart <= 0 || expandingMessageWindow || server === null || !channel) return;
     expandingMessageWindow = true;
-    const previousHeight = node.scrollHeight;
-    const previousTop = node.scrollTop;
-    messageWindow = revealOlder(messageWindow, messages.length, CHAT_WINDOW_STEP);
-    await tick();
-    // Retain the reader's visual anchor after inserting rows above the viewport.
-    if (messagesEl === node) node.scrollTop = previousTop + node.scrollHeight - previousHeight;
-    expandingMessageWindow = false;
+    try {
+      const page = await fetchPageOrReanchor(server, channel, planRevealOlder(currentSlice(), CHAT_WINDOW_STEP), pageStart);
+      if (activeServerId !== server || cur?.active !== channel || !page.rows.length) return;
+      const previousHeight = node.scrollHeight;
+      const previousTop = node.scrollTop;
+      applyPage(page);
+      await tick();
+      // Retain the reader's visual anchor after inserting rows above the viewport.
+      if (messagesEl === node) node.scrollTop = previousTop + node.scrollHeight - previousHeight;
+    } finally {
+      expandingMessageWindow = false;
+    }
   }
-  function revealNewerMessages() {
-    messageWindow = revealNewer(messageWindow, messages.length, CHAT_WINDOW_STEP);
+  async function revealNewerMessages() {
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (tailLoaded || expandingMessageWindow || server === null || !channel) return;
+    expandingMessageWindow = true;
+    try {
+      const page = await fetchPageOrReanchor(server, channel, planRevealNewer(currentSlice(), CHAT_WINDOW_STEP), pageEnd - 1);
+      if (activeServerId !== server || cur?.active !== channel || !page.rows.length) return;
+      applyPage(page);
+    } finally {
+      expandingMessageWindow = false;
+    }
   }
   function onChatScroll() {
     const node = messagesEl;
@@ -4570,26 +4646,26 @@
     if (
       node.scrollTop < 80 &&
       node.scrollHeight > node.clientHeight + 40 &&
-      messageWindow.start > 0
+      pageStart > 0
     ) {
       void revealOlderMessages();
     }
-    if (nearScrollBottom(node.scrollTop, node.clientHeight, node.scrollHeight) && messageWindow.end < messages.length) {
-      revealNewerMessages();
+    if (nearScrollBottom(node.scrollTop, node.clientHeight, node.scrollHeight) && !tailLoaded) {
+      void revealNewerMessages();
       chatStickToBottom = false;
       return;
     }
     chatStickToBottom =
-      messageWindow.end >= messages.length &&
+      tailLoaded &&
       nearScrollBottom(node.scrollTop, node.clientHeight, node.scrollHeight);
   }
 
   $effect(() => {
     void messages;
-    void messageWindow;
+    void pageStart;
     if (!chatStickToBottom) return;
     tick().then(() => {
-      if (messagesEl && chatStickToBottom && messageWindow.end >= messages.length) {
+      if (messagesEl && chatStickToBottom && tailLoaded) {
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
     });
@@ -5403,9 +5479,9 @@
     storageChecking = false;
     storageRepairing = false;
     storageRepairNote = "";
-    messages = [];
+    clearPage();
+    pinnedMsgs = [];
     messageRenderCache.clear();
-    messageWindow = { start: 0, end: 0 };
     messageWindowScope = "";
     chatStickToBottom = true;
     channelTopic = "";
@@ -5676,11 +5752,11 @@
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
     // Channel-scoped content, dropped before the move rather than when the read returns: the
     // group's own state (roster, files, branding) is unchanged by a channel hop and stays put.
-    messages = [];
+    clearPage();
+    pinnedMsgs = [];
     // The render cache is keyed by (server, channel, id) and bounded, so it is deliberately kept
     // across a channel hop: switching A -> B -> A re-mounts A's rows from cache instead of
     // re-parsing and re-sanitizing every one of them. It is still wiped at the lock boundary.
-    messageWindow = { start: 0, end: 0 };
     messageWindowScope = "";
     chatStickToBottom = true;
     channelTopic = "";
@@ -5744,24 +5820,21 @@
     try {
       const previousMessages = messages;
       const previous = new Set(previousMessages.map((message) => message.id));
-      const next = await invoke<Msg[]>("get_messages", { server, channel });
+      const nextScope = chatScopeKey(server, channel);
+      // A fresh conversation starts at the tail. An open one re-reads what the reader holds: the
+      // newest rows when pinned to the bottom, otherwise the slice anchored at its first row so
+      // the top never moves under someone reading history.
+      const held = messageWindowScope === nextScope && previousMessages.length ? currentSlice() : null;
+      const page = await fetchPageOrReanchor(server, channel, planRefresh(held, chatStickToBottom, CHAT_INITIAL_ROWS, CHAT_WINDOW_STEP), pageStart);
       // A slow response from the conversation we just left must never populate the new one.
       if (revision !== refreshRevision || activeServerId !== server || cur?.active !== channel) return;
-      const nextScope = chatScopeKey(server, channel);
-      const nextWindow = reconcileChatWindow(
-        previousMessages,
-        next,
-        messageWindow,
-        chatStickToBottom,
-        messageWindowScope !== nextScope,
-      );
-      messages = next;
-      messageWindow = nextWindow;
+      applyPage(page);
       messageWindowScope = nextScope;
+      void refreshPinned(server, channel);
       if (animateArrivals) {
         // Own posts already animate at optimistic insertion; excluding them prevents the
         // acknowledged, server-assigned id from replaying the entrance a second time.
-        markMessageArrivals(next.filter((message) => message.author !== myFp && !previous.has(message.id)).map((message) => message.id));
+        markMessageArrivals(page.rows.filter((message) => message.author !== myFp && !previous.has(message.id)).map((message) => message.id));
       }
       // Loading rows is not reading them. `settleReadState` decides which this was.
       settleReadState();
@@ -6014,7 +6087,7 @@
   }
   // Index of your most recent message in the log (-1 if none): the one message whose state is
   // still plausibly in flight, and the receipt line's anchor.
-  let lastOwnIdx = $derived(messages.reduce((acc, m, i) => (m.author === myFp ? i : acc), -1));
+  let lastOwnIdx = $derived(messages.reduce((acc, m, i) => (m.author === myFp ? pageStart + i : acc), -1));
   // What is actually known about one of your messages. `delivered`/`reachable` are null when the
   // actor has reported nothing for it, which is deliberately distinct from reporting zero: the
   // absence of a measurement is not evidence that nobody is out there.
@@ -7654,7 +7727,7 @@
   // menu carries the row's own actions (reply, edit, delete) below its target-specific ones.
   function rowActions(el: HTMLElement): MenuItem[] {
     const row = el.closest("li[data-mi]") as HTMLElement | null;
-    const m = row ? messages[Number(row.getAttribute("data-mi"))] : undefined;
+    const m = row ? messages[Number(row.getAttribute("data-mi")) - pageStart] : undefined;
     return m ? [{ divider: true }, ...messageMenu(m)] : [];
   }
 
@@ -9554,39 +9627,61 @@
   // Index the loaded messages by id once per change, so reply-parent lookups (the quote on every
   // reply + the composer banner) are O(1) instead of a linear scan per render.
   let msgById = $derived(new Map(messages.map((m) => [m.id, m] as const)));
-  // Reply target: the id of the message the composer is replying to ("" = a plain message).
+  // The quote on a reply: the loaded parent when it is on screen, else the preview the page
+  // carried for it (resolved natively against the whole channel), else nothing.
+  function replyParent(m: PagedMsg): { author: string; text: string } | undefined {
+    return msgById.get(m.reply_to) ?? m.reply_to_preview ?? undefined;
+  }
+  // Reply target: the id of the message the composer is replying to ("" = a plain message). The
+  // row is kept beside the id so the banner survives the row paging off screen.
   let replyingTo = $state("");
-  let replyTarget = $derived(replyingTo ? msgById.get(replyingTo) : undefined);
+  let replyingToRow = $state<Msg | undefined>(undefined);
+  let replyTarget = $derived(replyingTo ? (msgById.get(replyingTo) ?? replyingToRow) : undefined);
   // Briefly flash a message you jumped to (e.g. from a reply quote), keyed by id so it survives
   // index shifts; cleared after the pulse.
   let flashId = $state("");
-  function jumpToMessageId(id: string) {
-    const idx = messages.findIndex((m) => m.id === id);
-    if (idx < 0) return; // parent not in the loaded list (deleted / scrolled out of history)
-    void scrollToMatch(idx);
+  // Land on a message by id: scroll when it is loaded, otherwise page around it first. A page
+  // that finds nothing means the message is gone (deleted, or never existed here).
+  async function jumpToMessageId(id: string) {
+    if (!id) return;
+    let idx = messages.findIndex((m) => m.id === id);
+    if (idx < 0) {
+      const server = activeServerId;
+      const channel = cur?.active;
+      if (server === null || !channel) return;
+      const page = await fetchPage(server, channel, planJump({ kind: "id", id }, CHAT_INITIAL_ROWS));
+      if (activeServerId !== server || cur?.active !== channel || page.anchor_index === null) return;
+      applyPage(page);
+      await tick();
+      idx = messages.findIndex((m) => m.id === id);
+      if (idx < 0) return;
+    }
+    void scrollToMatch(pageStart + idx);
     flashId = id;
     setTimeout(() => {
       if (flashId === id) flashId = "";
     }, 1300);
   }
-  // Reply counts per parent message id (for the "N replies" thread affordance).
-  let replyCounts = $derived.by(() => {
-    const m = new Map<string, number>();
-    for (const msg of messages) {
-      if (msg.reply_to) m.set(msg.reply_to, (m.get(msg.reply_to) ?? 0) + 1);
-    }
-    return m;
-  });
-  function jumpToFirstReply(parentId: string) {
+  async function jumpToFirstReply(parentId: string) {
     const first = messages.find((m) => m.reply_to === parentId);
-    if (first) jumpToMessageId(first.id);
+    if (first) return jumpToMessageId(first.id);
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (server === null || !channel) return;
+    const page = await fetchPage(server, channel, planJump({ kind: "first_reply_to", id: parentId }, CHAT_INITIAL_ROWS));
+    if (activeServerId !== server || cur?.active !== channel || page.anchor_index === null) return;
+    applyPage(page);
+    const target = messages[page.anchor_index - page.start];
+    if (target?.id) await jumpToMessageId(target.id);
   }
   function startReply(m: Msg) {
     replyingTo = m.id;
+    replyingToRow = m;
     composerEl?.focus();
   }
   function cancelReply() {
     replyingTo = "";
+    replyingToRow = undefined;
   }
   function msgSnippet(text: string, n = 70): string {
     return plainSummary(text, n);
@@ -15379,29 +15474,29 @@
     scheduleUiStateSave();
     sending = true;
     const pendingId = `pending:${Date.now()}:${pendingSendNonce++}`;
-    const previousMessages = messages;
-    const nextMessages = [...previousMessages, {
-      id: pendingId,
-      author: myFp,
-      text,
-      ts: Date.now(),
-      edited: 0,
-      reactions: [],
-      reply_to,
-      pinned: false,
-    }];
     const nextScope = chatScopeKey(server, channel);
     chatStickToBottom = true;
-    messages = nextMessages;
-    messageWindow = reconcileChatWindow(
-      previousMessages,
-      nextMessages,
-      messageWindow,
-      true,
-      messageWindowScope !== nextScope,
-    );
-    messageWindowScope = nextScope;
-    markMessageArrivals([pendingId]);
+    // The optimistic row belongs at the end of the log, which is only where the slice ends when
+    // the tail is loaded. Away from the tail the acknowledgement refresh lands there instead.
+    if (tailLoaded && messageWindowScope === nextScope) {
+      const parent = replyTarget;
+      messages = [...messages, {
+        id: pendingId,
+        author: myFp,
+        text,
+        ts: Date.now(),
+        edited: 0,
+        reactions: [],
+        reply_to,
+        pinned: false,
+        targets_me: false,
+        reply_count: 0,
+        reply_to_preview: parent ? { id: reply_to, author: parent.author, text: parent.text } : null,
+      }];
+      pageTotal += 1;
+      markMessageArrivals([pendingId]);
+    }
+    replyingToRow = undefined;
     await tick();
     try {
       // The one path instrumented end to end, and the pattern the rest adopt. The trace is
@@ -15416,8 +15511,9 @@
       if (activeServerId === server && cur?.active === channel) await refresh();
     } catch (e) {
       error = String(e);
-      if (activeServerId === server && cur?.active === channel) {
+      if (activeServerId === server && cur?.active === channel && messages.some((m) => m.id === pendingId)) {
         messages = messages.filter((m) => m.id !== pendingId);
+        pageTotal = Math.max(0, pageTotal - 1);
       }
       // Put the message back only if the user has not already started another one while the send
       // was in flight. A failed send should never silently eat their text.
@@ -15492,7 +15588,18 @@
 
   // Pinned messages (owner/admin pin/unpin; a panel surfaces them).
   let showPinned = $state(false);
-  let pinnedMsgs = $derived(messages.filter((m) => m.pinned));
+  // Pins are read by name (they are few and curated) rather than scanned out of a history the
+  // webview no longer holds. Refreshed with every page read of the channel.
+  let pinnedMsgs = $state.raw<Msg[]>([]);
+  async function refreshPinned(server: number, channel: string) {
+    try {
+      const pins = await invoke<Msg[]>("get_pinned_messages", { server, channel });
+      if (activeServerId !== server || cur?.active !== channel) return;
+      pinnedMsgs = pins;
+    } catch {
+      // A failed pin read leaves the previous list; the next channel refresh retries it.
+    }
+  }
   async function togglePin(m: Msg) {
     const ch = cur?.active;
     if (activeServerId === null || !ch || !m.id) return;
@@ -16757,15 +16864,13 @@
             // headline THIS channel with ANOTHER one's text, and the ticker click would try to
             // land a foreign message id here and silently do nothing. Fetch our own rows in that
             // case, exactly as the non-active-channel branch below always does.
-            if (!scopeHoldsConversation(messageWindowScope, server, channel)) {
+            // Likewise when the reader is up in history: the slice does not end at the newest row.
+            if (!scopeHoldsConversation(messageWindowScope, server, channel) || !tailLoaded) {
               void notifyLatestChannelMessage(server, channel, "detect");
               return;
             }
             const last = messages[messages.length - 1];
-            const forMe =
-              last &&
-              last.author !== myFp &&
-              (mentionsMe(last.text) || (!!last.reply_to && msgById.get(last.reply_to)?.author === myFp));
+            const forMe = last && last.author !== myFp && last.targets_me;
             notifyMessage(server, channel, last, forMe ? "mention" : "message");
           });
           return;
@@ -21230,16 +21335,17 @@
             ondragleave={() => (dragOver = false)}
             ondrop={(e) => onComposerDrop("chat", e)}
           >
-            {#if messageWindow.start > 0}
+            {#if pageStart > 0}
               <li class="message-window-edge">
                 <button class="ghost small" type="button" onclick={revealOlderMessages}>
-                  Load {Math.min(CHAT_WINDOW_STEP, messageWindow.start)} older messages
+                  Load {Math.min(CHAT_WINDOW_STEP, pageStart)} older messages
                 </button>
               </li>
             {/if}
-            {#each renderedMessages as m, visibleIndex (messageDomKey(m, messageWindow.start + visibleIndex))}
-              {@const mi = messageWindow.start + visibleIndex}
-              {@const newDay = visibleIndex === 0 || mi === 0 || !sameDay(messages[mi - 1].ts, m.ts)}
+            {#each messages as m, visibleIndex (messageDomKey(m, pageStart + visibleIndex))}
+              {@const mi = pageStart + visibleIndex}
+              {@const prev = visibleIndex > 0 ? messages[visibleIndex - 1] : undefined}
+              {@const newDay = !prev || !sameDay(prev.ts, m.ts)}
               {#if newDay}
                 <li class="day-divider" aria-hidden="true"><span>{dayLabel(m.ts)}</span></li>
               {/if}
@@ -21247,14 +21353,14 @@
                 <li class="unread-divider" aria-hidden="true"><span>new · {unreadCount} unread</span></li>
               {/if}
               {@const grouped =
-                mi > 0 &&
+                !!prev &&
                 mi !== firstUnreadIdx &&
                 !newDay &&
                 !m.reply_to &&
-                messages[mi - 1].author === m.author &&
-                m.ts - messages[mi - 1].ts < 300000}
+                prev.author === m.author &&
+                m.ts - prev.ts < 300000}
               {@const framePosition = CHAT_MESSAGE_FRAMES_ENABLED
-                ? messageFramePosition(messages, mi, messageFrameBreaks)
+                ? messageFramePosition(messages, visibleIndex, messageFrameBreaks)
                 : "single"}
               {@const bubble = bubbleStyle(m.author)}
               {@const messageFrame = CHAT_MESSAGE_FRAMES_ENABLED
@@ -21309,7 +21415,7 @@
                 <div class="m-body">
                 {@render frameLayers(messageFrame, !!bubble)}
                 {#if m.reply_to}
-                  {@const parent = msgById.get(m.reply_to)}
+                  {@const parent = replyParent(m)}
                   <button
                     class="reply-quote"
                     type="button"
@@ -21381,8 +21487,8 @@
                   {/if}
                   <span class="text">{@html renderedMessage(m)}{#if m.edited}<span class="edited-tag muted" title={"edited " + new Date(m.edited).toLocaleString()}> (edited)</span>{/if}</span>
                 {/if}
-                {#if m.id && replyCounts.get(m.id)}
-                  {@const n = replyCounts.get(m.id)}
+                {#if m.id && m.reply_count}
+                  {@const n = m.reply_count}
                   <button class="reply-count" type="button" title="Jump to the first reply" onclick={() => jumpToFirstReply(m.id)}>
                     💬 {n} {n === 1 ? "reply" : "replies"}
                   </button>
@@ -21435,10 +21541,10 @@
             {:else}
               <li class="muted">{groupLoading ? "Loading messages…" : "No messages yet: say hello."}</li>
             {/each}
-            {#if messageWindow.end < messages.length}
+            {#if !tailLoaded}
               <li class="message-window-edge">
                 <button class="ghost small" type="button" onclick={revealNewerMessages}>
-                  Load {Math.min(CHAT_WINDOW_STEP, messages.length - messageWindow.end)} newer messages
+                  Load {Math.min(CHAT_WINDOW_STEP, pageTotal - pageEnd)} newer messages
                 </button>
               </li>
             {/if}

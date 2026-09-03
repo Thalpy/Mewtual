@@ -10743,6 +10743,140 @@ async fn get_message_tail(
         .collect())
 }
 
+/// Where a paged read is centred, as the webview names it: `{kind:"tail"}`, `{kind:"id", id}` or
+/// `{kind:"index", index}`.
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum UiPageAnchor {
+    Tail,
+    Id { id: String },
+    Index { index: u64 },
+    FirstReplyTo { id: String },
+}
+
+/// The client's read boundary and clock, for a natively measured unread summary.
+#[derive(serde::Deserialize)]
+struct UiUnreadProbe {
+    /// `null` (or absent) means "everything is read".
+    divider_ts: Option<u64>,
+    now_ms: u64,
+}
+
+#[derive(Serialize)]
+struct UiUnreadSummary {
+    ceiling_ts: u64,
+    first_index: Option<u64>,
+    count: u64,
+}
+
+/// One row of [`get_message_page`].
+#[derive(Serialize, Clone)]
+struct UiPagedMessage {
+    #[serde(flatten)]
+    message: UiMessage,
+    targets_me: bool,
+    reply_count: u32,
+    /// `{id, author, text}` of the parent when this row is a reply whose parent exists.
+    reply_to_preview: Option<UiReplyPreview>,
+}
+
+#[derive(Serialize, Clone)]
+struct UiReplyPreview {
+    id: String,
+    author: String,
+    text: String,
+}
+
+/// A contiguous slice of a channel: see `MessagePage` in `catcoms-app`.
+#[derive(Serialize)]
+struct UiMessagePage {
+    version: u64,
+    total: u64,
+    start: u64,
+    anchor_index: Option<u64>,
+    rows: Vec<UiPagedMessage>,
+    unread: Option<UiUnreadSummary>,
+}
+
+/// Upper bound on the rows one side of a page may ask for. A view holds a few hundred rows and
+/// reveals a couple of hundred more per step; nothing on screen needs more than this at once.
+const MAX_PAGE_SIDE: usize = 2_048;
+
+/// Read a bounded slice of a channel around an anchor. This is how the webview reads history:
+/// the newest rows on open, a page above on scroll-up, a window around a target on a jump, and a
+/// refresh of the rows it holds (by id anchor) when the channel changes; never the whole log.
+#[tauri::command]
+async fn get_message_page(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    anchor: UiPageAnchor,
+    before: usize,
+    after: usize,
+    unread: Option<UiUnreadProbe>,
+) -> Result<UiMessagePage, String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let query = catcoms_app::MessagePageQuery {
+        anchor: match anchor {
+            UiPageAnchor::Tail => catcoms_app::PageAnchor::Tail,
+            UiPageAnchor::Id { id } => catcoms_app::PageAnchor::Id(id),
+            UiPageAnchor::Index { index } => catcoms_app::PageAnchor::Index(index),
+            UiPageAnchor::FirstReplyTo { id } => catcoms_app::PageAnchor::FirstReplyTo(id),
+        },
+        before: before.min(MAX_PAGE_SIDE),
+        after: after.min(MAX_PAGE_SIDE),
+        unread: unread.map(|probe| catcoms_app::UnreadProbe {
+            divider_ts: probe.divider_ts.unwrap_or(u64::MAX),
+            now_ms: probe.now_ms,
+        }),
+    };
+    let actor = actor_of(&state, server).await?;
+    let page = actor.message_page(id, query).await;
+    Ok(UiMessagePage {
+        version: page.version,
+        total: page.total,
+        start: page.start,
+        anchor_index: page.anchor_index,
+        unread: page.unread.map(|u| UiUnreadSummary {
+            ceiling_ts: u.ceiling_ts,
+            first_index: u.first_index,
+            count: u.count,
+        }),
+        rows: page
+            .rows
+            .into_iter()
+            .map(|row| UiPagedMessage {
+                message: ui_message(row.message),
+                targets_me: row.targets_me,
+                reply_count: row.reply_count,
+                reply_to_preview: row.reply_to_preview.map(|p| UiReplyPreview {
+                    id: p.id,
+                    author: p.author,
+                    text: p.text,
+                }),
+            })
+            .collect(),
+    })
+}
+
+/// Every pinned message of a channel, in log order. Pins are few and curated, so a paged client
+/// asks for them by name instead of scanning the history for the flag.
+#[tauri::command]
+async fn get_pinned_messages(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+) -> Result<Vec<UiMessage>, String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .pinned_messages(id)
+        .await
+        .into_iter()
+        .map(ui_message)
+        .collect())
+}
+
 /// One channel's newest activity, with no message text: what unread state is rebuilt from.
 #[derive(Serialize)]
 struct UiChannelHead {
@@ -15210,6 +15344,8 @@ pub fn run() {
             get_inbox,
             get_messages,
             get_message_tail,
+            get_message_page,
+            get_pinned_messages,
             get_channel_heads,
             pairing_begin,
             pairing_read,

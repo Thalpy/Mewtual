@@ -130,6 +130,142 @@ pub struct ChatMessage {
     pub pinned: bool,
 }
 
+/// One channel's message list materialized at one document version, plus the lookups every
+/// paged read needs and that would otherwise be rebuilt per read: position by id (page anchors,
+/// reply parents) and the number of replies each message has received. Built in one pass by
+/// [`MaterializedChannel::build`]; see `Server::messages_cache`.
+#[derive(Debug, Default)]
+struct MaterializedChannel {
+    /// The [`Server::doc_version`] these rows were read at; `u64::MAX` until the first read.
+    version: u64,
+    messages: Vec<ChatMessage>,
+    /// Position of each message with a non-empty id. Legacy id-less rows are not addressable.
+    by_id: HashMap<String, usize>,
+    /// How many messages name each id as their `reply_to`.
+    reply_counts: HashMap<String, u32>,
+}
+
+impl MaterializedChannel {
+    fn build(version: u64, messages: Vec<ChatMessage>) -> Self {
+        let mut by_id = HashMap::with_capacity(messages.len());
+        let mut reply_counts: HashMap<String, u32> = HashMap::new();
+        for (index, m) in messages.iter().enumerate() {
+            if !m.id.is_empty() {
+                // First occurrence wins: an id can only repeat through a malformed or replayed
+                // write, and the earlier row is the one every other member also saw first.
+                by_id.entry(m.id.clone()).or_insert(index);
+            }
+            if !m.reply_to.is_empty() {
+                *reply_counts.entry(m.reply_to.clone()).or_default() += 1;
+            }
+        }
+        Self {
+            version,
+            messages,
+            by_id,
+            reply_counts,
+        }
+    }
+}
+
+/// Where a paged read of a channel is centred. Ids are the durable anchor (they survive
+/// concurrent inserts, edits and deletes around them); an index is the fallback for a row that
+/// has no id or was deleted; the tail is where a fresh open starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageAnchor {
+    /// The newest row.
+    Tail,
+    /// The row with this message id.
+    Id(String),
+    /// The row at this position in the current order (clamped to the last row).
+    Index(u64),
+    /// The first row that replies to this message id (the "N replies" jump).
+    FirstReplyTo(String),
+}
+
+/// A bounded read: the anchor row, up to `before` rows above it and `after` rows below it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessagePageQuery {
+    pub anchor: PageAnchor,
+    pub before: usize,
+    pub after: usize,
+    /// When set, the page also carries an [`UnreadSummary`] measured against this boundary.
+    pub unread: Option<UnreadProbe>,
+}
+
+/// The read boundary a client wants unread state measured against, plus its own clock so the
+/// plausibility ceiling is computed the way the client's read marks are (see `readCeiling` in
+/// the desktop's `unread.ts`, whose rule this mirrors exactly).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadProbe {
+    /// Effective timestamp of the newest row the client had read when it opened the channel;
+    /// `u64::MAX` for "everything is read".
+    pub divider_ts: u64,
+    /// The client's wall clock (epoch-millis).
+    pub now_ms: u64,
+}
+
+/// How far ahead of the client's clock a sender's timestamp may be and still be believed;
+/// the same five minutes as the desktop's `CLOCK_SKEW_GRACE_MS`.
+pub const CLOCK_SKEW_GRACE_MS: u64 = 5 * 60_000;
+
+/// Unread state for a whole channel, measured natively so a client holding one page of it can
+/// still place the divider and count what sits past it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UnreadSummary {
+    /// The newest timestamp in the channel within the clock grace: every row's timestamp is
+    /// pulled down to this before it is compared, so one broken or hostile clock cannot park the
+    /// boundary in the future.
+    pub ceiling_ts: u64,
+    /// Position of the first row from somebody else past the boundary, if any.
+    pub first_index: Option<u64>,
+    /// Rows from somebody else past the boundary.
+    pub count: u64,
+}
+
+/// One row of a paged read, with what the row needs from the rest of the channel resolved
+/// natively so the webview never has to hold the history to render it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PagedMessage {
+    pub message: ChatMessage,
+    /// An `@[my name]` mention or a reply to one of my messages (see [`Server::message_tail`]).
+    pub targets_me: bool,
+    /// How many messages reply to this one, across the whole channel.
+    pub reply_count: u32,
+    /// The parent this row replies to, when it can be found.
+    pub reply_to_preview: Option<ReplyPreview>,
+}
+
+/// Enough of a reply's parent to render the quote line: who wrote it and the start of its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyPreview {
+    pub id: String,
+    pub author: String,
+    /// The parent's text, cut to [`REPLY_PREVIEW_CHARS`] characters.
+    pub text: String,
+}
+
+/// Characters of a reply parent's text carried in a [`ReplyPreview`].
+pub const REPLY_PREVIEW_CHARS: usize = 200;
+
+/// The result of a paged read: a contiguous slice of the channel in its current order.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MessagePage {
+    /// The document version the rows were read at ([`Server::doc_version`]). Two pages at the
+    /// same version are slices of the same list and can be stitched by index.
+    pub version: u64,
+    /// Rows in the whole channel.
+    pub total: u64,
+    /// Position of `rows[0]` in the whole channel (meaningless when `rows` is empty).
+    pub start: u64,
+    /// Position the anchor resolved to; `None` when an id anchor names no current row, in which
+    /// case `rows` is empty and the caller chooses another anchor.
+    pub anchor_index: Option<u64>,
+    pub rows: Vec<PagedMessage>,
+    /// Present when the query carried an [`UnreadProbe`].
+    pub unread: Option<UnreadSummary>,
+}
+
 /// One emoji reaction on a message: the emoji plus the fingerprints of the members who reacted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reaction {
@@ -357,6 +493,30 @@ pub fn append_message(
         doc.put(&msg, REPLY_TO, reply_to)?;
     }
     Ok(())
+}
+
+/// Unread state over a whole message list, by the desktop's rule: the ceiling is the newest
+/// timestamp no further ahead of `now` than the clock grace, every timestamp is clamped to it,
+/// and a row counts when its clamped timestamp is past the divider and somebody else wrote it.
+fn unread_summary(messages: &[ChatMessage], me: &str, probe: &UnreadProbe) -> UnreadSummary {
+    let limit = probe.now_ms.saturating_add(CLOCK_SKEW_GRACE_MS);
+    let ceiling_ts = messages
+        .iter()
+        .map(|m| m.ts)
+        .filter(|ts| *ts <= limit)
+        .max()
+        .unwrap_or(0);
+    let mut summary = UnreadSummary {
+        ceiling_ts,
+        ..UnreadSummary::default()
+    };
+    for (index, m) in messages.iter().enumerate() {
+        if m.author != me && m.ts.min(ceiling_ts) > probe.divider_ts {
+            summary.count += 1;
+            summary.first_index.get_or_insert(index as u64);
+        }
+    }
+    summary
 }
 
 /// Materialize a channel document into the UI's ordered message list.
@@ -2910,7 +3070,7 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// ask. Interior mutability because every reader is `&self`; the cell is never borrowed
     /// across a call that could re-enter it. Derived state; never persisted; a `RefCell` (not a
     /// lock) because a `Server` is owned by exactly one actor task.
-    messages_cache: std::cell::RefCell<HashMap<u128, (u64, Vec<ChatMessage>)>>,
+    messages_cache: std::cell::RefCell<HashMap<u128, MaterializedChannel>>,
     /// Total order of delivery snapshots issued by this actor session. Queries and emitted events
     /// share it, so a delayed IPC query can never overwrite a newer event in the webview.
     delivery_snapshot_revision: u64,
@@ -6733,20 +6893,94 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// `f` must not call back into a message read of this server (the cache is borrowed while it
     /// runs); the projections that use this only read the slice they are handed.
     pub fn with_messages<U>(&self, channel: u128, f: impl FnOnce(&[ChatMessage]) -> U) -> U {
+        self.with_channel(channel, |c| f(&c.messages))
+    }
+
+    /// As [`Self::with_messages`], with the by-id and reply-count lookups alongside the rows.
+    fn with_channel<U>(&self, channel: u128, f: impl FnOnce(&MaterializedChannel) -> U) -> U {
         let Some(doc) = self.sync.doc(DocType::Channel, channel) else {
             // Not open: nothing to cache, and a stale entry from before a re-open is unreachable
             // since a document is never removed from the sync layer within a session.
-            return f(&[]);
+            return f(&MaterializedChannel {
+                version: 0,
+                ..MaterializedChannel::default()
+            });
         };
         let version = doc.op_count() as u64;
         let mut cache = self.messages_cache.borrow_mut();
-        let entry = cache
-            .entry(channel)
-            .or_insert_with(|| (u64::MAX, Vec::new()));
-        if entry.0 != version {
-            *entry = (version, read_messages(doc.doc()));
+        let entry = cache.entry(channel).or_insert_with(|| MaterializedChannel {
+            version: u64::MAX,
+            ..MaterializedChannel::default()
+        });
+        if entry.version != version {
+            *entry = MaterializedChannel::build(version, read_messages(doc.doc()));
         }
-        f(&entry.1)
+        f(entry)
+    }
+
+    /// A bounded, contiguous slice of a channel around an anchor (see [`MessagePageQuery`]), with
+    /// each row's cross-channel needs (mention/reply addressing, reply count, reply parent)
+    /// resolved here against the whole materialized list. This is what lets the webview hold only
+    /// the rows it shows: an id anchor survives concurrent inserts, edits and deletes around it,
+    /// and `version` tells a caller whether two pages describe the same list.
+    pub fn message_page(&self, channel: u128, query: &MessagePageQuery) -> MessagePage {
+        let me = self.my_fingerprint();
+        let marker = self.mention_marker();
+        self.with_channel(channel, |c| {
+            let total = c.messages.len();
+            let mut page = MessagePage {
+                version: c.version,
+                total: total as u64,
+                ..MessagePage::default()
+            };
+            if let Some(probe) = &query.unread {
+                page.unread = Some(unread_summary(&c.messages, &me, probe));
+            }
+            let anchor = match &query.anchor {
+                _ if total == 0 => None,
+                PageAnchor::Tail => Some(total - 1),
+                PageAnchor::Id(id) => c.by_id.get(id).copied(),
+                PageAnchor::Index(index) => Some((*index as usize).min(total - 1)),
+                PageAnchor::FirstReplyTo(id) => c.messages.iter().position(|m| &m.reply_to == id),
+            };
+            let Some(anchor) = anchor else {
+                return page;
+            };
+            let start = anchor.saturating_sub(query.before);
+            let end = anchor.saturating_add(query.after).min(total - 1);
+            page.anchor_index = Some(anchor as u64);
+            page.start = start as u64;
+            page.rows = c.messages[start..=end]
+                .iter()
+                .map(|m| {
+                    let parent = (!m.reply_to.is_empty())
+                        .then(|| c.by_id.get(&m.reply_to).map(|&i| &c.messages[i]))
+                        .flatten();
+                    let targets_me = m.author != me
+                        && (marker.as_deref().is_some_and(|mk| m.text.contains(mk))
+                            || parent.is_some_and(|p| p.author == me));
+                    PagedMessage {
+                        message: m.clone(),
+                        targets_me,
+                        reply_count: c.reply_counts.get(&m.id).copied().unwrap_or(0),
+                        reply_to_preview: parent.map(|p| ReplyPreview {
+                            id: p.id.clone(),
+                            author: p.author.clone(),
+                            text: p.text.chars().take(REPLY_PREVIEW_CHARS).collect(),
+                        }),
+                    }
+                })
+                .collect();
+            page
+        })
+    }
+
+    /// Every pinned message in a channel, in log order. Pins are few and owner/admin-curated, so
+    /// this is the one whole-channel projection a paged client still asks for by name.
+    pub fn pinned_messages(&self, channel: u128) -> Vec<ChatMessage> {
+        self.with_messages(channel, |msgs| {
+            msgs.iter().filter(|m| m.pinned).cloned().collect()
+        })
     }
 
     /// One activity head per known channel: what the newest message is, and what the newest
@@ -6791,33 +7025,17 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// This is what an arrival notification needs, and all it needs: the previous shape of that
     /// path fetched the entire history of a channel nobody was looking at to read its last row.
     pub fn message_tail(&self, channel: u128, limit: usize) -> Vec<(ChatMessage, bool)> {
-        let me = self.my_fingerprint();
-        let marker = self.mention_marker();
-        self.with_messages(channel, |msgs| {
-            let start = msgs.len().saturating_sub(limit);
-            let tail = &msgs[start..];
-            // Only replies in the tail need their parent looked up, and only parents outside the
-            // tail need the full index; build it lazily so a quiet channel pays nothing.
-            let mut author_of: Option<HashMap<&str, &str>> = None;
-            tail.iter()
-                .map(|m| {
-                    if m.author == me {
-                        return (m.clone(), false);
-                    }
-                    let mention = marker.as_deref().is_some_and(|mk| m.text.contains(mk));
-                    let reply = !m.reply_to.is_empty() && {
-                        let index = author_of.get_or_insert_with(|| {
-                            msgs.iter()
-                                .filter(|m| !m.id.is_empty())
-                                .map(|m| (m.id.as_str(), m.author.as_str()))
-                                .collect()
-                        });
-                        index.get(m.reply_to.as_str()) == Some(&me.as_str())
-                    };
-                    (m.clone(), mention || reply)
-                })
-                .collect()
-        })
+        let query = MessagePageQuery {
+            anchor: PageAnchor::Tail,
+            before: limit.saturating_sub(1),
+            after: 0,
+            unread: None,
+        };
+        self.message_page(channel, &query)
+            .rows
+            .into_iter()
+            .map(|row| (row.message, row.targets_me))
+            .collect()
     }
 
     /// The `@[Name]` marker the composer inserts for me, or `None` when I have no usable name.

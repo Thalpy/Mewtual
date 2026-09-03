@@ -91,6 +91,11 @@ export const TAURI_COMMAND_GROUPS = {
       // The newest few rows of one channel plus an "addressed to me" bit per row, for the
       // arrival ticker: the same text `get_messages` serves, bounded instead of the whole log.
       "get_message_tail",
+      // A bounded, contiguous slice of one channel around an anchor (tail / message id / index),
+      // with per-row reply context: the paged replacement for reading the whole log.
+      "get_message_page",
+      // The pinned rows of one channel by name, so a paged client need not scan for the flag.
+      "get_pinned_messages",
       // Counts and timestamps only, no message text: the projection unread badges are rebuilt
       // from after a lock or a restart, neither of which the live event stream survives.
       "get_channel_heads",

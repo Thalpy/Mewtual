@@ -216,6 +216,12 @@ const SEND_SCENARIO = `(async () => {
       const rows = await base(cmd, payload, opts);
       return rows.concat(sent);
     }
+    // The log reads pages now; the appended rows ride the tail page the fixture serves.
+    if (cmd === "get_message_page" && payload.server === 1 && payload.channel === "general") {
+      const page = await base(cmd, payload, opts);
+      const extra = sent.map((m) => ({ ...m, targets_me: false, reply_count: 0, reply_to_preview: null }));
+      return { ...page, rows: page.rows.concat(extra), total: page.total + sent.length };
+    }
     return base(cmd, payload, opts);
   };
 

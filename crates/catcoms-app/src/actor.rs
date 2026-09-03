@@ -315,6 +315,17 @@ pub enum AppCommand {
         limit: usize,
         reply: oneshot::Sender<Vec<(ChatMessage, bool)>>,
     },
+    /// Query a bounded slice of a channel around an anchor (see [`crate::MessagePageQuery`]).
+    MessagePage {
+        channel: u128,
+        query: crate::MessagePageQuery,
+        reply: oneshot::Sender<crate::MessagePage>,
+    },
+    /// Query every pinned message of a channel.
+    PinnedMessages {
+        channel: u128,
+        reply: oneshot::Sender<Vec<ChatMessage>>,
+    },
     /// Query a channel's lightweight activity stats (count + timestamps; no text).
     MessageStats {
         channel: u128,
@@ -1267,6 +1278,43 @@ impl ServerActor {
                 limit,
                 reply,
             })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// A bounded slice of a channel around an anchor (see [`Server::message_page`]). An empty
+    /// default page if the actor has stopped.
+    pub async fn message_page(
+        &self,
+        channel: u128,
+        query: crate::MessagePageQuery,
+    ) -> crate::MessagePage {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::MessagePage {
+                channel,
+                query,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return crate::MessagePage::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Every pinned message of a channel (see [`Server::pinned_messages`]).
+    pub async fn pinned_messages(&self, channel: u128) -> Vec<ChatMessage> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::PinnedMessages { channel, reply })
             .await
             .is_err()
         {
@@ -3330,6 +3378,16 @@ where
                     }) => {
                         let _ = reply.send(server.message_tail(channel, limit));
                     }
+                    Some(AppCommand::MessagePage {
+                        channel,
+                        query,
+                        reply,
+                    }) => {
+                        let _ = reply.send(server.message_page(channel, &query));
+                    }
+                    Some(AppCommand::PinnedMessages { channel, reply }) => {
+                        let _ = reply.send(server.pinned_messages(channel));
+                    }
                     Some(AppCommand::MessageStats { channel, reply }) => {
                         let _ = reply.send(server.message_stats(channel));
                     }
@@ -5067,6 +5125,211 @@ mod tests {
         assert_eq!(whole.len(), 9, "a wide limit is clamped to the history");
         assert_eq!(whole[0].0.id, mine);
         assert!(!whole[0].1, "my own row is never addressed to me");
+    }
+
+    /// A page is a contiguous slice around an anchor in the channel's current order, and every
+    /// row carries what it needs from the rest of the channel (reply parent, reply count,
+    /// addressing) so a caller can hold only the slice.
+    #[tokio::test]
+    async fn message_page_slices_around_an_anchor_and_resolves_row_context() {
+        use crate::{MessagePageQuery, PageAnchor};
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_channel(GENERAL).await.unwrap();
+
+        let empty = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Tail,
+                before: 5,
+                after: 5,
+                unread: None,
+            },
+        );
+        assert_eq!(empty.total, 0);
+        assert!(empty.anchor_index.is_none() && empty.rows.is_empty());
+
+        server.send_message(GENERAL, "my own opener").await.unwrap();
+        let mine = server.messages(GENERAL)[0].id.clone();
+        async fn post_as(
+            server: &mut Server<MemNetwork, ChaCha20Rng>,
+            id: &str,
+            text: &str,
+            reply_to: &str,
+        ) {
+            let (id, text, reply_to) = (id.to_string(), text.to_string(), reply_to.to_string());
+            server
+                .sync
+                .post(crate::DocType::Channel, GENERAL, move |d| {
+                    crate::append_message(d, &id, "bob", &text, 7, &reply_to)
+                })
+                .await
+                .unwrap();
+        }
+        for i in 0..5 {
+            post_as(&mut server, &format!("filler-{i}"), &"x".repeat(300), "").await;
+        }
+        post_as(&mut server, "reply", "re: opener", &mine).await;
+        post_as(&mut server, "reply-2", "re: filler", "filler-0").await;
+        post_as(&mut server, "plain", "nothing for alice", "").await;
+        // 9 rows: mine, filler-0..4, reply, reply-2, plain.
+
+        let ids = |page: &crate::MessagePage| {
+            page.rows
+                .iter()
+                .map(|r| r.message.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let tail = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Tail,
+                before: 2,
+                after: 0,
+                unread: None,
+            },
+        );
+        assert_eq!(tail.total, 9);
+        assert_eq!(
+            tail.version,
+            server.doc_version(crate::DocType::Channel, GENERAL)
+        );
+        assert_eq!((tail.start, tail.anchor_index), (6, Some(8)));
+        assert_eq!(ids(&tail), vec!["reply", "reply-2", "plain"]);
+
+        let around = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Id("filler-2".into()),
+                before: 1,
+                after: 1,
+                unread: None,
+            },
+        );
+        assert_eq!((around.start, around.anchor_index), (2, Some(3)));
+        assert_eq!(ids(&around), vec!["filler-1", "filler-2", "filler-3"]);
+
+        let missing = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Id("nope".into()),
+                before: 3,
+                after: 3,
+                unread: None,
+            },
+        );
+        assert_eq!(missing.total, 9);
+        assert!(missing.anchor_index.is_none() && missing.rows.is_empty());
+
+        let clamped = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Index(999),
+                before: 0,
+                after: 50,
+                unread: None,
+            },
+        );
+        assert_eq!((clamped.start, clamped.anchor_index), (8, Some(8)));
+        assert_eq!(ids(&clamped), vec!["plain"]);
+
+        let whole = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Index(0),
+                before: 0,
+                after: 100,
+                unread: None,
+            },
+        );
+        assert_eq!(whole.rows.len(), 9);
+        let row = |id: &str| whole.rows.iter().find(|r| r.message.id == id).unwrap();
+        assert_eq!(row(&mine).reply_count, 1, "one reply names my opener");
+        assert_eq!(row("filler-0").reply_count, 1);
+        assert_eq!(row("plain").reply_count, 0);
+        let reply = row("reply");
+        assert!(reply.targets_me, "a reply to my message addresses me");
+        let preview = reply.reply_to_preview.as_ref().expect("parent resolved");
+        assert_eq!(
+            (preview.id.as_str(), preview.author.as_str()),
+            (mine.as_str(), server.my_fingerprint().as_str())
+        );
+        let reply_2 = row("reply-2");
+        assert!(
+            !reply_2.targets_me,
+            "a reply to somebody else's message is not for me"
+        );
+        assert_eq!(
+            reply_2
+                .reply_to_preview
+                .as_ref()
+                .unwrap()
+                .text
+                .chars()
+                .count(),
+            crate::REPLY_PREVIEW_CHARS,
+            "a long parent is cut to the preview length"
+        );
+        assert!(row(&mine).reply_to_preview.is_none());
+
+        let first_reply = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::FirstReplyTo("filler-0".into()),
+                before: 0,
+                after: 0,
+                unread: None,
+            },
+        );
+        assert_eq!(ids(&first_reply), vec!["reply-2"]);
+
+        // Unread: the divider sits at ts 7 (everything Bob wrote is at 7, so nothing is past it);
+        // at ts 6 all eight of Bob's rows are past it and the first is filler-0 at index 1. My own
+        // row never counts. A far-future row is clamped to the ceiling, so it cannot count either.
+        let probe = |divider_ts: u64| MessagePageQuery {
+            anchor: PageAnchor::Tail,
+            before: 0,
+            after: 0,
+            unread: Some(crate::UnreadProbe {
+                divider_ts,
+                now_ms: 1_000,
+            }),
+        };
+        // My own opener carries the (manual) clock's 1_000, which is the newest plausible stamp.
+        let none = server.message_page(GENERAL, &probe(7)).unread.unwrap();
+        assert_eq!(
+            (none.count, none.first_index, none.ceiling_ts),
+            (0, None, 1_000)
+        );
+        let all = server.message_page(GENERAL, &probe(6)).unread.unwrap();
+        assert_eq!((all.count, all.first_index), (8, Some(1)));
+        post_as_at(&mut server, "future", "from a broken clock", u64::MAX / 2).await;
+        let clamped = server.message_page(GENERAL, &probe(7)).unread.unwrap();
+        assert_eq!(
+            (clamped.count, clamped.ceiling_ts),
+            (1, 1_000),
+            "an implausible timestamp is pulled down to the ceiling: it counts once, like any \
+             other new row, and can never move the boundary into the future"
+        );
+        assert_eq!(server.pinned_messages(GENERAL).len(), 0);
+        server.set_pin(GENERAL, &mine, true).await.unwrap();
+        assert_eq!(server.pinned_messages(GENERAL)[0].id, mine);
+
+        async fn post_as_at(
+            server: &mut Server<MemNetwork, ChaCha20Rng>,
+            id: &str,
+            text: &str,
+            ts: u64,
+        ) {
+            let (id, text) = (id.to_string(), text.to_string());
+            server
+                .sync
+                .post(crate::DocType::Channel, GENERAL, move |d| {
+                    crate::append_message(d, &id, "bob", &text, ts, "")
+                })
+                .await
+                .unwrap();
+        }
     }
 
     /// Timing probe for the per-tick costs that scale with history. Not a correctness test; run

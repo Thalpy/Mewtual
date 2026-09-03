@@ -1,5 +1,6 @@
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import type { InvokeArgs } from "@tauri-apps/api/core";
+import { pageOfList, type PageRequest, type UnreadProbe } from "./message-paging.ts";
 
 export const VISUAL_FIXTURE_NOW = Date.UTC(2026, 7, 20, 12, 0, 0);
 
@@ -218,6 +219,18 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
       ]);
     case "get_messages":
       return clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []);
+    case "get_message_page": {
+      const rows = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Message[];
+      const request: PageRequest = {
+        anchor: (args.anchor as PageRequest["anchor"]) ?? { kind: "tail" },
+        before: typeof args.before === "number" ? args.before : 0,
+        after: typeof args.after === "number" ? args.after : 0,
+      };
+      const probe = (args.unread as UnreadProbe | undefined) ?? null;
+      return pageOfList(rows, request, ME, "@[Rowan]", 1, probe);
+    }
+    case "get_pinned_messages":
+      return clone((CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []).filter((m) => m.pinned));
     case "get_message_tail": {
       const rows = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Array<{ text: string }>;
       const limit = typeof args.limit === "number" && args.limit > 0 ? Math.trunc(args.limit) : rows.length;

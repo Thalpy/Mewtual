@@ -932,6 +932,21 @@ timeout, and `process_recovery_e2e` fails. `Server::messages` is served from a p
 cached under the same version (`with_messages` borrows it without copying), so the actor's change
 check, `get_messages`, the unread heads and the inbox share one walk per change.
 
+**Paged history** (`docs/design-native-paging.md`). The webview no longer reads a channel whole:
+`get_message_page(server, channel, anchor, before, after, unread?)` (`Server::message_page`) returns
+one contiguous slice `{version, total, start, anchor_index, rows, unread}` around an anchor
+(`{kind:"tail"}`, `{kind:"id", id}`, `{kind:"index", index}`, `{kind:"first_reply_to", id}`), with
+`before`/`after` rows either side (each clamped to 2048 at the bridge). Ids are the durable anchor
+(they survive concurrent inserts, edits and deletes around them); an id that names no current row
+yields `anchor_index: null` and no rows, and the client re-anchors by index. Every row carries
+`targets_me`, `reply_count` and `reply_to_preview` (`{id, author, text[..200]}` of the parent),
+resolved natively against the whole channel. With an `unread` probe (`{divider_ts | null, now_ms}`,
+the client's frozen divider and its own clock) the page also carries `{ceiling_ts, first_index,
+count}` by exactly the rule in `unread.ts` (`readCeiling`/`effectiveTs`, five-minute grace, own rows
+never count), so a client holding one slice still places the divider and counts past it over the
+whole channel. `get_pinned_messages(server, channel)` returns the pinned rows by name. `get_messages`
+remains for the explicit whole-history readers (server-wide search corpus, moderation timeline).
+
 `get_message_tail(server, channel, limit)` (`Server::message_tail`) returns the newest `limit` rows
 (oldest first, `limit` clamped to 1..=256 at the bridge) each with a `targets_me` flag: an `@[my name]`
 mention under the composer's normalization, or a reply to one of my messages, with the parent resolved
