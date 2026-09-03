@@ -453,7 +453,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   async open_channel(DocType, doc_id) -> Result<()>;       // create doc + subscribe its ns_secret_L-keyed topic
   async post(DocType, doc_id, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<()>;  // edit + gossip
   async run_once() -> Result<bool>;                        // drain outbox + recovery + sub-resync; then handle ONE event
-  async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;        // document history catch-up
+  async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;        // incremental where possible; see KIND_CATCHUP_SINCE
   async request_commit_catchup(peer:PeerId, from_epoch:u64) -> Result<usize>;  // missed-commit recovery (ordered replay, SIGNED response)
   // 6e-3d-6 pre-dial member tag (keyed by ns_secret_L): a discoverer rejects a Sybil/forged record before dialing.
   membership_tag(rz_peer:&[u8], slot:u64, peer_id:&[u8], seq:u64) -> Option<[u8;16]>;
@@ -592,6 +592,18 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
 - **`CommitRecord`** (control payload): `bytes group_id ‖ u64 commit_epoch ‖ bytes committer_device(32) ‖ bytes mls_commit ‖ bytes base_auth(32) ‖ bytes committer_sig(64)`.
 - **Request/response** (`ProtocolId("/catcoms/rr/1")`): first payload byte = **kind**:
   - `0` KIND_CATCHUP; **authed** body wrapping `u16 doc_type ‖ u128 doc_id`; response = op bundle.
+  - `19` KIND_CATCHUP_SINCE; **authed** body wrapping `u16 doc_type ‖ u128 doc_id ‖ u32 count(≤64) ‖
+    32-byte change hashes`; response = `[1] ‖ op bundle`, carrying only the ops behind the server's
+    frontier and not behind the hashes named. The hashes are the requester's automerge heads **plus
+    their immediate ancestors** (`EncryptedDoc::sync_frontier`): a member that wrote while it could
+    not reach anyone has a head nobody else has seen, and a peer that cannot see a hash can subtract
+    nothing behind it, so naming the parents keeps the exchange incremental. Sound because holding a
+    change means holding its dependencies, so anything causally behind a named hash is already held.
+    A hash the server does not know selects nothing. The leading marker byte separates "nothing for
+    you" (`[1]` with an empty bundle) from "I do not know this kind" (an empty response), which is
+    how a requester detects an older peer and re-asks with `KIND_CATCHUP`. Members-only on exactly
+    the same terms as `KIND_CATCHUP`, and truncation is still progress: the requester applies the
+    prefix, its frontier moves, and the next request asks for less.
   - `1` KIND_JOIN; body `bytes invite.encode() ‖ bytes key_package`; response =
     `[JOIN_READY] ‖ bytes welcome ‖ bytes signature(64) ‖ bytes sealed_routing` (the admitter signs
     `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome ‖ sealed_routing`). Not member-authed.
