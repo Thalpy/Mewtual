@@ -162,6 +162,11 @@ const MAX_CATCHUP_SINCE_HEADS: usize = 64;
 /// already up to date" (a bundle of zero ops) is distinguishable from "I did not understand you"
 /// (an empty response). Everything after it is an ordinary catch-up bundle.
 const CATCHUP_SINCE_UNDERSTOOD: u8 = 1;
+/// As [`CATCHUP_SINCE_UNDERSTOOD`], and the serving peer withheld more than it sent: ask again.
+/// Continuation is the server's answer because only it knows what it left out. A requester that
+/// inferred it from "did I apply anything" stopped on a chunk of ops it already had, and on a
+/// chunk that could carry nothing because the next op was larger than the budget.
+const CATCHUP_SINCE_MORE: u8 = 2;
 const MAX_DELIVERY_RECEIPT_OUTBOX: usize = 128;
 const MAX_DELIVERY_RECEIPT_TARGETS: usize = 64;
 const RECIPROCAL_ATTEST_DOMAIN: &str = "catcoms/reciprocal/helper-attestation/v1";
@@ -3300,18 +3305,44 @@ fn encode_bundle(ops: &[SealedOp]) -> Vec<u8> {
 /// Encode a contiguous prefix of `ops` whose total size fits `budget`, returning
 /// the encoded bundle and how many ops it covers. The prefix is dependency-safe
 /// because `ops` are in log order (earlier ops first).
-fn size_capped_ops(ops: &[SealedOp], budget: usize) -> (Vec<u8>, usize) {
+/// The longest prefix of `ops` whose encoded bundle fits `budget`.
+///
+/// With one exception that the protocol depends on: **a non-empty input always yields at least one
+/// op**, even one larger than `budget`, up to `hard_ceiling`. A response carrying nothing is
+/// indistinguishable from "you already have everything", so a serving peer that returned an empty
+/// bundle because the next op was too large would tell the requester it was up to date while
+/// holding something it needed, and the requester would stop asking. That is a permanent stall,
+/// not a slow sync. A single op can exceed a 256 KiB chunk in ordinary use: a signed op is capped
+/// at 256 KiB before sealing, and sealing pads to the next power of two up to a 1 MiB ceiling.
+///
+/// An op too large even for `hard_ceiling` cannot be served at all; it is reported so the caller
+/// can fail loudly rather than answer "up to date".
+fn size_capped_ops(
+    ops: &[SealedOp],
+    budget: usize,
+    hard_ceiling: usize,
+) -> Result<(Vec<u8>, usize), SyncError> {
     let mut taken: Vec<SealedOp> = Vec::new();
     let mut size = 4; // bundle count header
     for op in ops {
         let entry = op.encode().len() + 4;
-        if size + entry > budget {
+        let first = taken.is_empty();
+        if size + entry > budget && !first {
             break;
+        }
+        if first && size + entry > hard_ceiling {
+            tracing::error!(
+                bytes = entry,
+                hard_ceiling,
+                "a single sealed op exceeds the response ceiling and cannot be served"
+            );
+            return Err(SyncError::Malformed);
         }
         size += entry;
         taken.push(op.clone());
     }
-    (encode_bundle(&taken), taken.len())
+    let served = taken.len();
+    Ok((encode_bundle(&taken), served))
 }
 
 fn decode_bundle(bytes: &[u8]) -> Result<Vec<SealedOp>, SyncError> {
@@ -9732,6 +9763,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some((&CATCHUP_SINCE_UNDERSTOOD, bundle)) => self
                 .apply_catchup_response(doc_type, doc_id, bundle)
                 .map(Some),
+            Some((&CATCHUP_SINCE_MORE, bundle)) => {
+                let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
+                // The peer said it withheld some, so ask again whatever this round applied. A
+                // chunk can legitimately apply nothing (ops already held, or one op too large to
+                // share the budget) and the gap still be real.
+                self.enqueue_doc_catchup(doc_type, doc_id);
+                Ok(Some(applied))
+            }
             Some(_) => Err(SyncError::Malformed),
         }
     }
@@ -9794,10 +9833,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // returning a later frame's error; retrying would see the prefix as duplicate and could
         // never reconstruct its author/change attribution.
         terminal?;
-        // A response is a chunk, not necessarily the whole gap (see `MAX_CATCHUP_CHUNK`). Anything
-        // applied means the frontier moved, so ask again: the next request asks for less, and the
-        // exchange ends on the first round that applies nothing. Queued rather than looped here,
-        // so one catch-up never occupies the tick for longer than a single bounded round trip.
+        // Whether to ask again belongs to the serving peer and is carried by the response marker
+        // (see `CATCHUP_SINCE_MORE`), not decided here from how much was applied. The one shape
+        // that cannot say it is the old whole-history serve, which has no marker: there, having
+        // applied something means the frontier moved, so a follow-up can ask for the rest, and
+        // that follow-up goes through the incremental path which does say.
         if applied_count > 0 {
             self.enqueue_doc_catchup(doc_type, doc_id);
         }
@@ -10709,21 +10749,37 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Serve only what a member is missing in one document, given the frontier it names.
     ///
     /// Members-only on exactly the same terms as [`Self::serve_catchup`], and answering with the
-    /// same sealed-bundle shape behind a one-byte marker so a requester can tell "nothing for
-    /// you" from "this peer is too old to ask". A truncated response is still progress here: the
-    /// requester applies the prefix, its frontier moves, and the next request asks for less.
+    /// same sealed-bundle shape behind a one-byte marker.
+    ///
+    /// The marker is what makes a bounded response safe. It separates three answers a requester
+    /// must not confuse: "here is everything you were missing", "here is part of it, ask again",
+    /// and "I do not know this request". Only the serving peer knows whether it withheld anything,
+    /// so **whether to continue is its answer to give**, not something the requester can infer
+    /// from how many ops it happened to apply. Inferring it was wrong in two ways: a chunk of ops
+    /// the requester already had applied nothing and looked complete, and so did a chunk that had
+    /// to be empty because the next op was larger than the budget.
     fn serve_catchup_since(&mut self, data: &[u8]) -> Option<Vec<u8>> {
         let (inner, _pubkey, _auth) = self.authenticate_request(KIND_CATCHUP_SINCE, data)?;
         let (doc_type, doc_id, heads) = decode_catchup_since_req(&inner).ok()?;
         let doc = self.docs.get_mut(&(doc_type, doc_id))?;
         match doc.export_catchup_since(&heads, &self.group, &self.device, &mut self.rng) {
             Ok(bundle) => {
-                let (prefix, served) = size_capped_ops(&bundle, MAX_CATCHUP_CHUNK);
-                if served < bundle.len() {
+                let (prefix, served) =
+                    match size_capped_ops(&bundle, MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE) {
+                        Ok(capped) => capped,
+                        Err(e) => {
+                            // Refusing is the honest answer: claiming to be done here would
+                            // strand the requester on this document forever.
+                            tracing::error!(error = %e, ?doc_type, doc_id, "cannot serve catch-up");
+                            return None;
+                        }
+                    };
+                let more = served < bundle.len();
+                if more {
                     tracing::debug!(
                         served,
                         total = bundle.len(),
-                        "incremental doc catch-up truncated to response budget"
+                        "incremental doc catch-up truncated; the requester is told to ask again"
                     );
                 }
                 tracing::debug!(
@@ -10731,10 +10787,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     doc_id,
                     ops = served,
                     heads = heads.len(),
+                    more,
                     "serving incremental doc catch-up"
                 );
                 let mut response = Vec::with_capacity(prefix.len() + 1);
-                response.push(CATCHUP_SINCE_UNDERSTOOD);
+                response.push(if more {
+                    CATCHUP_SINCE_MORE
+                } else {
+                    CATCHUP_SINCE_UNDERSTOOD
+                });
                 response.extend_from_slice(&prefix);
                 Some(response)
             }
@@ -10751,10 +10812,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let doc = self.docs.get(&(doc_type, doc_id))?;
         match doc.export_catchup(&self.group, &self.device, &mut self.rng) {
             Ok(bundle) => {
-                // Bound the response we generate (mirror the inbound cap): serve a
-                // contiguous prefix that fits the byte budget; the requester pages
-                // the rest with a follow-up catch-up.
-                let (prefix, served) = size_capped_ops(&bundle, MAX_CATCHUP_CHUNK);
+                // Bound the response we generate (mirror the inbound cap): serve a contiguous
+                // prefix that fits the chunk budget, so one answer stays inside the request
+                // deadline. This shape carries no "ask again" marker, but it does not need one:
+                // only a peer holding nothing asks this way, so every op served is new to it, and
+                // applying anything queues the follow-up, which goes down the paging path. The
+                // response ceiling is the wire limit, letting a single op too large for the
+                // budget still travel alone rather than be silently withheld.
+                let (prefix, served) =
+                    match size_capped_ops(&bundle, MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE) {
+                        Ok(capped) => capped,
+                        Err(e) => {
+                            tracing::error!(error = %e, ?doc_type, doc_id, "cannot serve catch-up");
+                            return None;
+                        }
+                    };
                 if served < bundle.len() {
                     tracing::debug!(
                         served,
@@ -15218,6 +15290,274 @@ mod tests {
                 "every post arrived"
             );
         }
+    }
+
+    /// One operation can be larger than a whole catch-up chunk, and it must still be delivered.
+    ///
+    /// A signed op is capped at 256 KiB before sealing, and sealing pads to the next power of two
+    /// up to a 1 MiB ceiling, so an ordinary large post does not fit a 256 KiB response. A serving
+    /// peer that answered "here is what fits" would answer with nothing, which is the same shape
+    /// as "you are up to date": the requester would apply nothing, stop asking, and never see that
+    /// message or anything causally after it.
+    #[tokio::test]
+    async fn an_operation_larger_than_one_chunk_is_still_served_and_converges() {
+        use automerge::transaction::Transactable;
+        use automerge::{ReadDoc as _, ROOT};
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        alice.open_channel(DocType::Channel, 82).await.unwrap();
+        bob.open_channel(DocType::Channel, 82).await.unwrap();
+
+        // Comfortably over the chunk budget once padded, then some ordinary posts behind it.
+        // Incompressible on purpose: automerge compresses a change, so a repeated character would
+        // shrink to nothing and prove the opposite of what this test is about.
+        let huge: String = {
+            let mut state = 0x2545_f491_4f6c_dd1du64;
+            (0..900_000)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    char::from(b'a' + (state % 26) as u8)
+                })
+                .collect()
+        };
+        // Bob first catches up on one ordinary post, so he has a frontier and everything below is
+        // the incremental exchange rather than the whole-history one. That is where a bounded
+        // chunk meets an op too large to fit inside it.
+        alice
+            .post(DocType::Channel, 82, |doc| doc.put(ROOT, "seen", "live"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            bob.transport.next_event().await,
+            Some(TransportEvent::Gossip { .. })
+        ));
+        let (seeded, _) = tokio::join!(
+            bob.request_catchup(alice_peer, DocType::Channel, 82),
+            alice.run_once(),
+        );
+        assert_eq!(seeded.unwrap(), 1);
+
+        alice
+            .post(DocType::Channel, 82, |doc| {
+                doc.put(ROOT, "huge", huge.as_str())
+            })
+            .await
+            .unwrap();
+        for i in 0..3 {
+            alice
+                .post(DocType::Channel, 82, |doc| {
+                    doc.put(ROOT, format!("small{i}"), "s")
+                })
+                .await
+                .unwrap();
+        }
+        for _ in 0..4 {
+            assert!(matches!(
+                bob.transport.next_event().await,
+                Some(TransportEvent::Gossip { .. })
+            ));
+        }
+
+        // The premise of this test: the first op Bob is missing does not fit one chunk on its own.
+        let frontier = bob
+            .docs
+            .get_mut(&(DocType::Channel, 82))
+            .unwrap()
+            .sync_frontier(MAX_CATCHUP_SINCE_HEADS);
+        let missing = alice
+            .docs
+            .get_mut(&(DocType::Channel, 82))
+            .unwrap()
+            .export_catchup_since(&frontier, &alice.group, &alice.device, &mut alice.rng)
+            .unwrap();
+        assert!(
+            missing[0].encode().len() + 8 > MAX_CATCHUP_CHUNK,
+            "the first missing op must exceed a chunk, or this test proves nothing (got {})",
+            missing[0].encode().len()
+        );
+        // The invariant the whole exchange rests on, asserted where it lives. A prefix of zero ops
+        // is the wire's way of saying "you are up to date", so a peer that still holds something
+        // must never produce one: the requester would believe it and stop asking. Checked here
+        // rather than only through the loop below, because the failure it guards against is a
+        // stall, and a stalled test hangs instead of reporting.
+        let (_, served) =
+            size_capped_ops(&missing, MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE).unwrap();
+        assert_eq!(
+            served, 1,
+            "an op too large for the budget is still served alone, never dropped for a bundle \
+             that would read as 'nothing for you'"
+        );
+
+        let mut rounds = 0;
+        loop {
+            rounds += 1;
+            assert!(rounds < 20, "catch-up must converge, not stall or spin");
+            let (applied, _) = tokio::join!(
+                bob.request_catchup(alice_peer, DocType::Channel, 82),
+                alice.run_once(),
+            );
+            applied.expect("a round succeeds");
+            if bob
+                .doc(DocType::Channel, 82)
+                .map(|doc| doc.op_count())
+                .unwrap_or(0)
+                == 5
+            {
+                break;
+            }
+            assert!(
+                bob.catchup_queue.iter().any(|task| matches!(
+                    task,
+                    CatchupTask::Doc {
+                        doc_type: DocType::Channel,
+                        doc_id: 82
+                    }
+                )),
+                "an unfinished catch-up is queued by the peer saying so, not by what was applied"
+            );
+        }
+        let doc = bob.doc(DocType::Channel, 82).unwrap().doc();
+        let stored = doc.get(ROOT, "huge").unwrap().unwrap().0;
+        assert_eq!(
+            stored.into_string().unwrap().len(),
+            900_000,
+            "the large op arrived whole"
+        );
+        for i in 0..3 {
+            assert!(
+                doc.get(ROOT, format!("small{i}")).unwrap().is_some(),
+                "and so did what was behind it"
+            );
+        }
+
+        // Caught up, so the exchange stops: the serving peer reports nothing more, and a round
+        // that applies nothing no longer decides anything either way.
+        bob.catchup_queue.clear();
+        let (applied, _) = tokio::join!(
+            bob.request_catchup(alice_peer, DocType::Channel, 82),
+            alice.run_once(),
+        );
+        assert_eq!(applied.unwrap(), 0);
+        assert!(
+            bob.catchup_queue.is_empty(),
+            "a complete answer ends the exchange rather than queueing forever"
+        );
+    }
+
+    /// A round can carry a chunk the asker already has and still be a round that made progress.
+    /// The frontier on the wire is capped, so it can understate what the asker holds, and then
+    /// the serving peer replays from further back than it needed to. Deciding whether to ask
+    /// again from how much was applied strands the asker exactly there: nothing landed, so it
+    /// concludes it is current, while the ops it actually wanted sit one chunk further on.
+    #[tokio::test]
+    async fn a_round_that_applies_only_duplicates_still_asks_for_the_rest() {
+        use automerge::transaction::Transactable;
+        use automerge::{ReadDoc as _, ROOT};
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        alice.open_channel(DocType::Channel, 84).await.unwrap();
+        bob.open_channel(DocType::Channel, 84).await.unwrap();
+
+        // A history that needs more than one chunk to replay, so a replay from the beginning
+        // spends its first chunk on ops Bob already holds.
+        let body = "y".repeat(16_384);
+        let posts = 40;
+        for i in 0..posts {
+            alice
+                .post(DocType::Channel, 84, |doc| {
+                    doc.put(ROOT, format!("m{i}"), body.as_str())
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                bob.transport.next_event().await,
+                Some(TransportEvent::Gossip { .. })
+            ));
+        }
+        let mut rounds = 0;
+        while bob
+            .doc(DocType::Channel, 84)
+            .map(|doc| doc.op_count())
+            .unwrap_or(0)
+            < posts
+        {
+            rounds += 1;
+            assert!(rounds < 50, "setting the scene must itself converge");
+            let (applied, _) = tokio::join!(
+                bob.request_catchup(alice_peer, DocType::Channel, 84),
+                alice.run_once(),
+            );
+            applied.expect("a round succeeds");
+        }
+
+        // One more post that Bob has not seen, and never will over gossip.
+        alice
+            .post(DocType::Channel, 84, |doc| doc.put(ROOT, "last", "arrived"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            bob.transport.next_event().await,
+            Some(TransportEvent::Gossip { .. })
+        ));
+
+        // Ask with an empty frontier: what a truncated one looks like on the wire, and the only
+        // shape that makes the serving peer replay from a point the asker is already past.
+        bob.catchup_queue.clear();
+        let (applied, _) = tokio::join!(
+            bob.request_catchup_since(alice_peer, DocType::Channel, 84, &[]),
+            alice.run_once(),
+        );
+        assert_eq!(
+            applied.expect("the round succeeds").expect("understood"),
+            0,
+            "the first chunk of a full replay is all ops Bob already had"
+        );
+        assert!(
+            bob.catchup_queue.iter().any(|task| matches!(
+                task,
+                CatchupTask::Doc {
+                    doc_type: DocType::Channel,
+                    doc_id: 84
+                }
+            )),
+            "a round that applied nothing still asks again, because the peer said it withheld some"
+        );
+
+        // And the exchange gets there, rather than sitting on a gap it was told about.
+        let mut rounds = 0;
+        while bob
+            .doc(DocType::Channel, 84)
+            .map(|doc| doc.op_count())
+            .unwrap_or(0)
+            <= posts
+        {
+            rounds += 1;
+            assert!(rounds < 50, "catch-up must converge, not stall or spin");
+            let (applied, _) = tokio::join!(
+                bob.request_catchup(alice_peer, DocType::Channel, 84),
+                alice.run_once(),
+            );
+            applied.expect("a round succeeds");
+        }
+        let doc = bob.doc(DocType::Channel, 84).unwrap().doc();
+        assert!(
+            doc.get(ROOT, "last").unwrap().is_some(),
+            "the op behind the duplicate chunk arrived"
+        );
     }
 
     #[tokio::test]
