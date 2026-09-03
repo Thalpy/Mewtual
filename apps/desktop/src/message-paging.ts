@@ -36,7 +36,13 @@ export type MessagePage<Row> = {
   unread: UnreadSummary | null;
 };
 
-export type UnreadProbe = { divider_ts: number | null; now_ms: number };
+/**
+ * Where the reader had got to. `divider_id` is the cursor whenever it names a row that is still
+ * here; `divider_ts` is the fallback for a row that has gone, and for the older marks recorded
+ * before ids were kept. A timestamp alone cannot separate two messages sent in the same
+ * millisecond, so on a busy channel it hid one of them.
+ */
+export type UnreadProbe = { divider_id: string | null; divider_ts: number | null; now_ms: number };
 
 /** Characters of a reply parent carried in a preview (mirrors `REPLY_PREVIEW_CHARS`). */
 export const REPLY_PREVIEW_CHARS = 200;
@@ -174,10 +180,24 @@ export function unreadSummaryOf(messages: readonly PageableMessage[], me: string
   let ceiling = 0;
   for (const m of messages) if (Number.isFinite(m.ts) && m.ts <= limit && m.ts > ceiling) ceiling = m.ts;
   const divider = probe.divider_ts === null ? Number.POSITIVE_INFINITY : probe.divider_ts;
+  // Position of the row the mark names, when it is still here. First occurrence wins, as in the
+  // native by-id index: an id repeats only through a replayed or malformed write, and the earlier
+  // row is the one every other member saw first.
+  let cursor: number | null = null;
+  if (probe.divider_id) {
+    for (let index = 0; index < messages.length; index += 1) {
+      if (messages[index].id === probe.divider_id) {
+        cursor = index;
+        break;
+      }
+    }
+  }
   let count = 0;
   let first: number | null = null;
   messages.forEach((m, index) => {
-    if (m.author !== me && Math.min(m.ts, ceiling) > divider) {
+    if (m.author === me) return; // own messages never make a channel unread
+    const unread = cursor === null ? Math.min(m.ts, ceiling) > divider : index > cursor;
+    if (unread) {
       count += 1;
       if (first === null) first = index;
     }

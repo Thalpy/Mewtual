@@ -109,15 +109,44 @@ test("the unread summary agrees with the client's ceiling rule and ignores my ow
     row("c", "bob", now - 1),
     row("future", "bob", now + 60 * 60_000),
   ];
-  const summary = unreadSummaryOf(list, ME, { divider_ts: now - 8, now_ms: now });
+  const summary = unreadSummaryOf(list, ME, { divider_id: null, divider_ts: now - 8, now_ms: now });
   const ceiling = readCeiling(list.map((m) => m.ts), now);
   assert.equal(summary.ceiling_ts, ceiling);
   // Rows past the divider from somebody else: c, and the far-future row only after it is clamped.
   const expected = list.filter((m) => m.author !== ME && effectiveTs(m.ts, ceiling) > now - 8);
   assert.equal(summary.count, expected.length);
   assert.equal(summary.first_index, 2);
-  const nothing = unreadSummaryOf(list, ME, { divider_ts: null, now_ms: now });
+  const nothing = unreadSummaryOf(list, ME, { divider_id: null, divider_ts: null, now_ms: now });
   assert.deepEqual([nothing.count, nothing.first_index], [0, null]);
-  const page = pageOfList(list, { anchor: { kind: "tail" }, before: 0, after: 0 }, ME, null, 1, { divider_ts: now - 8, now_ms: now });
+  const page = pageOfList(list, { anchor: { kind: "tail" }, before: 0, after: 0 }, ME, null, 1, { divider_id: null, divider_ts: now - 8, now_ms: now });
   assert.deepEqual(page.unread, summary);
+});
+
+test("the unread mark counts from the row it names, not from the moment it happened", () => {
+  const now = 1_000_000;
+  // Three messages in the same millisecond: a burst, a paste, a catch-up landing at once. A
+  // timestamp cannot order them, so counting by time either hides the ones after the mark or
+  // shows the mark's own row as unread. Their position can.
+  const list = [
+    row("a", "bob", now - 100),
+    row("b", "bob", now - 50),
+    row("c", "carol", now - 50),
+    row("d", "bob", now - 50),
+  ];
+  const at = (id: string) => unreadSummaryOf(list, ME, { divider_id: id, divider_ts: now - 50, now_ms: now });
+  assert.deepEqual([at("b").count, at("b").first_index], [2, 2], "the two rows after b, and no others");
+  assert.deepEqual([at("c").count, at("c").first_index], [1, 3]);
+  assert.deepEqual([at("d").count, at("d").first_index], [0, null], "the newest row read leaves nothing");
+  // The timestamp rule on the same list cannot tell those three apart at all.
+  const byTime = unreadSummaryOf(list, ME, { divider_id: null, divider_ts: now - 50, now_ms: now });
+  assert.equal(byTime.count, 0, "which is what the id is for");
+
+  // A mark whose row has gone falls back to the time it was at, rather than counting everything.
+  const gone = unreadSummaryOf(list, ME, { divider_id: "deleted", divider_ts: now - 100, now_ms: now });
+  assert.deepEqual([gone.count, gone.first_index], [3, 1]);
+
+  // My own rows are still not unread, whichever rule is deciding.
+  const mine = [row("x", "bob", now - 10), row("y", ME, now - 5), row("z", "bob", now - 1)];
+  const after = unreadSummaryOf(mine, ME, { divider_id: "x", divider_ts: now - 10, now_ms: now });
+  assert.deepEqual([after.count, after.first_index], [1, 2]);
 });
