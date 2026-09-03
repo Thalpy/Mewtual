@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JamCausalQueue, JamCausalQueueOverflow, JamLatestTaskQueue, JamOutboundEdge, JamPublicationGeneration, JamPublicationPacer } from "./jam-publication.ts";
+import { JamCausalQueue, JamCausalQueueOverflow, JamInitialPublicationGate, JamLatestTaskQueue, JamOutboundEdge, JamPublicationGeneration, JamPublicationPacer, JamResettableCausalQueue, type JamPublishedFrame } from "./jam-publication.ts";
 import { JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, type JamPatch } from "./jam-contract.ts";
 import { JamFrameDecoder } from "./jam-wire.ts";
 import { jamPatchId } from "./jam-patch.ts";
@@ -78,37 +78,138 @@ test("a new call epoch is not blocked by an old call's stalled digest", async ()
   assert.equal(await old, "old-stale");
 });
 
-test("an unopened edge receives each prerequisite announce before dependent events", () => {
-  const edge = new JamOutboundEdge(8);
-  const oldPatch = { key: "sn:old", announce: "patch-old" };
-  const newPatch = { key: "sn:new", announce: "patch-new" };
+test("an unopened edge drops paced history and establishes only the current patch", async () => {
+  const edge = new JamOutboundEdge();
+  const decoder = new JamFrameDecoder();
   const sent: string[] = [];
   const send = (frame: string) => { sent.push(frame); return true; };
-  edge.event(oldPatch, "note-old", send);
-  edge.event(newPatch, "note-new", send);
-  edge.open(newPatch, send);
-  assert.deepEqual(sent, ["patch-old", "note-old", "patch-new", "note-new"]);
+  const publications: JamPublishedFrame[] = [];
+  for (let index = 0; index < 4; index += 1) {
+    const patch: JamPatch = {
+      v: 1,
+      o: [{ w: 0, t: 0, c: 0, l: 100 }],
+      e: { a: 0, d: 10, s: 80, r: 100 },
+      f: { m: 0, c: 1_000 + index, q: 10, e: 0 },
+      l: { r: 100, d: 0, t: 0 },
+      x: { c: 0, d: 0, r: 0 },
+    };
+    const id = await jamPatchId(patch);
+    publications.push({
+      key: `1111111111111111:${id}`,
+      announce: JSON.stringify({ t: "p", v: 1, id, sn: "1111111111111111", d: patch }),
+    });
+    assert.equal(edge.event(
+      publications[index],
+      JSON.stringify({ t: "n", on: 1, n: 60, w: "sine", p: id, q: index }),
+      send,
+    ), false);
+  }
+  // Exercise both receiver attack and all-frame burst ceilings. None of this stale performance
+  // is emitted, so elapsed sender history cannot become a receiver-budget burst on open.
+  for (let q = 4; q < 205; q += 1) {
+    assert.equal(edge.event(
+      publications[3],
+      JSON.stringify({ t: "d", n: q % 10, q }),
+      send,
+    ), false);
+  }
+  assert.deepEqual(sent, []);
+
+  edge.open(publications[3], send);
+  assert.equal(sent.length, 1);
+  assert.equal(decoder.decode(sent[0], 10_000).ok, true, "the sole current prerequisite fits a fresh decoder budget");
+
+  // Fresh held-state edges remain paired even though their sequence follows explicitly lost
+  // history. This is the live path, not a replay of the old note-on/note-off stream.
+  assert.equal(edge.event(
+    publications[3],
+    JSON.stringify({ t: "n", on: 1, n: 64, w: "sine", q: 205 }),
+    send,
+  ), true);
+  assert.equal(edge.event(
+    publications[3],
+    JSON.stringify({ t: "n", on: 0, n: 64, q: 206 }),
+    send,
+  ), true);
+  assert.equal(sent.length, 3);
+  assert.equal(decoder.decode(sent[1], 10_001).ok, true);
+  assert.equal(decoder.decode(sent[2], 10_002).ok, true);
 });
 
-test("unopened-edge overflow drops the transient as a unit and stays bounded", () => {
-  const edge = new JamOutboundEdge(2);
-  const patch = { key: "sn:id", announce: "patch" };
+test("an edge opened during the initial digest cannot receive the App prepublication backlog", async () => {
+  const patch: JamPatch = {
+    v: 1,
+    o: [{ w: 0, t: 0, c: 0, l: 100 }],
+    e: { a: 0, d: 10, s: 80, r: 100 },
+    f: { m: 0, c: 1_000, q: 10, e: 0 },
+    l: { r: 100, d: 0, t: 0 },
+    x: { c: 0, d: 0, r: 0 },
+  };
+  const id = await jamPatchId(patch);
+  const publication: JamPublishedFrame = {
+    key: `1111111111111111:${id}`,
+    announce: JSON.stringify({ t: "p", v: 1, id, sn: "1111111111111111", d: patch }),
+  };
+  const gate = new JamInitialPublicationGate<JamPublishedFrame>(256);
+  const edge = new JamOutboundEdge();
   const sent: string[] = [];
   const send = (frame: string) => { sent.push(frame); return true; };
-  assert.equal(edge.event(patch, "on", send), true);
-  assert.equal(edge.event(patch, "off", send), true);
-  assert.equal(edge.event(patch, "overflow", send), false);
-  edge.open(patch, send);
-  assert.deepEqual(sent, ["patch"]);
+  let localEvents = 0;
+
+  // More than both the receiver attack and frame burst budgets waits while the digest is absent.
+  for (let q = 0; q < 201; q += 1) {
+    assert.equal(gate.submit(null, (ready, outbound) => {
+      localEvents += 1;
+      if (outbound) edge.event(ready, JSON.stringify({ t: "d", n: q % 10, q }), send);
+    }), "queued");
+  }
+  edge.open(publication, send);
+  gate.flush(publication);
+  assert.equal(localEvents, 201, "the bounded backlog remains available to local render/recording");
+  assert.deepEqual(sent, [publication.announce], "digest completion emits no historical wire burst");
+
+  assert.equal(gate.submit(publication, (ready, outbound) => {
+    assert.equal(outbound, true);
+    edge.event(ready, JSON.stringify({ t: "n", on: 1, n: 64, w: "sine", q: 201 }), send);
+  }), "live");
+  assert.equal(sent.length, 2, "a fresh post-publication gesture reaches the ready edge");
+  const decoder = new JamFrameDecoder();
+  assert.equal(decoder.decode(sent[0], 10_000).ok, true);
+  assert.equal(decoder.decode(sent[1], 10_001).ok, true);
 });
 
 test("an announcement send failure suppresses its dependent event", () => {
-  const edge = new JamOutboundEdge(2);
+  const edge = new JamOutboundEdge();
   const publication = { key: "sn:id", announce: "patch" };
   const attempted: string[] = [];
   edge.open(publication, (frame) => { attempted.push(frame); return false; });
   assert.equal(edge.event(publication, "note", (frame) => { attempted.push(frame); return false; }), false);
   assert.deepEqual(attempted, ["patch", "patch"]);
+});
+
+test("local queue overflow retires retained attacks and admits a fresh generation", async () => {
+  const queue = new JamResettableCausalQueue(2);
+  const first = deferred<void>();
+  const ran: string[] = [];
+  let invalidations = 0;
+  const active = queue.enqueue(async () => { await first.promise; ran.push("active-finished"); }, () => {
+    invalidations += 1;
+  });
+  await Promise.resolve();
+  const retained = queue.enqueue(() => { ran.push("retained-attack"); }, () => {
+    invalidations += 1;
+  });
+  const overflow = queue.enqueue(() => { ran.push("overflowing-attack"); }, () => {
+    invalidations += 1;
+  });
+  assert.equal(invalidations, 1, "overflow invalidates the engine synchronously");
+  const fresh = queue.enqueue(() => { ran.push("fresh-attack"); }, () => {
+    invalidations += 1;
+  });
+  await fresh;
+  first.resolve();
+  await Promise.all([active, retained, overflow]);
+  assert.deepEqual(ran, ["fresh-attack", "active-finished"]);
 });
 
 test("publication generations reject an older digest completion", () => {

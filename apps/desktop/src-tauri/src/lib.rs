@@ -40,7 +40,10 @@ use catcoms_net::{
     JoinReply, MeshHandle, MeshObservationSnapshot, MeshService, PortMappingMechanism,
     PortMappingSnapshot, PortMappingTransport, RelayAddressSnapshot, RendezvousTarget,
 };
-use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
+use catcoms_rt::{
+    Clock, MeshTransport, OsCryptoRng, PeerId, RequestCancellation, RngCore,
+    SharedRequestKeepalive, SystemClock, TransportEvent,
+};
 use catcoms_sync::{fingerprint, join_namespace, PreOwnerConnectionHandoff, JOIN_REPLY_PROOF_KIND};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
@@ -238,6 +241,51 @@ struct UiLockCompletion {
     error: Option<String>,
 }
 
+/// Maximum cancellable whole-file reads registered by the webview at once.
+///
+/// The common media path streams and does not use these slots. Four permits legitimate overlap
+/// between a take and text previews while bounding abandoned native work under rapid call churn.
+const MAX_CANCELLABLE_INLINE_DOWNLOADS: usize = 4;
+const INLINE_DOWNLOAD_CANCELLATION_ID_MAX_BYTES: usize = 96;
+
+#[derive(Debug)]
+struct InlineDownloadCancellation {
+    generation: u64,
+    started: bool,
+    signal: watch::Sender<bool>,
+}
+
+/// Exact registration shared with any transport request that can outlive `download_file`.
+#[derive(Clone, Debug)]
+struct InlineDownloadLease {
+    inner: Arc<InlineDownloadLeaseInner>,
+}
+
+#[derive(Debug)]
+struct InlineDownloadLeaseInner {
+    table: Arc<StdMutex<HashMap<String, InlineDownloadCancellation>>>,
+    id: String,
+    generation: u64,
+}
+
+impl InlineDownloadLease {
+    fn request_keepalive(&self) -> SharedRequestKeepalive {
+        self.inner.clone()
+    }
+}
+
+impl Drop for InlineDownloadLeaseInner {
+    fn drop(&mut self) {
+        let mut table = self.table.lock().unwrap_or_else(|e| e.into_inner());
+        if table
+            .get(&self.id)
+            .is_some_and(|entry| entry.generation == self.generation)
+        {
+            table.remove(&self.id);
+        }
+    }
+}
+
 /// App state managed by Tauri: every running server keyed by a bridge-assigned id, plus the
 /// on-disk store once the user has unlocked it with a passphrase (`None` = in-memory only).
 #[derive(Default)]
@@ -247,6 +295,10 @@ struct AppState {
     /// actor installations than the process can perform in its lifetime; zero has no special
     /// meaning and is permitted after that theoretical wrap.
     next_server_instance: AtomicU64,
+    /// Bounded cancellation registry for inline reads such as `.jamtake` playback. The signal is
+    /// threaded into the actor's chunk future; dropping only a Tauri invoke would not cancel it.
+    inline_downloads: Arc<StdMutex<HashMap<String, InlineDownloadCancellation>>>,
+    next_inline_download_generation: AtomicU64,
     /// One endpoint budget shared by every server swarm and pre-join discovery attempt in this
     /// desktop process. Per-server ranking remains inside each actor; this is the final bound on
     /// actual socket fan-out across groups.
@@ -1507,6 +1559,9 @@ struct CallSignalEvt {
 struct DownloadProgressEvt {
     server: u64,
     cid: String,
+    /// Exact caller token for cancellable inline reads. `None` preserves the existing media/file
+    /// progress shape while allowing take playback to reject queued events from an older call.
+    cancellation: Option<String>,
     done: usize,
     total: usize,
     bytes_done: u64,
@@ -8126,6 +8181,250 @@ async fn get_wiki_pinned_cids(
     Ok(actor.wiki_pinned_cids().await)
 }
 
+fn valid_inline_download_cancellation_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= INLINE_DOWNLOAD_CANCELLATION_ID_MAX_BYTES
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'-' | b'_'))
+}
+
+/// Reclaim one begin-only permit at the bound. Such an entry owns no actor work and has no native
+/// completion path after its webview disappears; active entries are never displaced.
+fn reclaim_abandoned_inline_download_at_capacity(
+    table: &mut HashMap<String, InlineDownloadCancellation>,
+) {
+    if table.len() < MAX_CANCELLABLE_INLINE_DOWNLOADS {
+        return;
+    }
+    let abandoned = table
+        .iter()
+        .filter(|(_, entry)| !entry.started)
+        .min_by_key(|(_, entry)| entry.generation)
+        .map(|(id, _)| id.clone());
+    if let Some(abandoned) = abandoned {
+        if let Some(entry) = table.remove(&abandoned) {
+            let _ = entry.signal.send(true);
+        }
+    }
+}
+
+fn require_inline_download_capacity(
+    table: &mut HashMap<String, InlineDownloadCancellation>,
+) -> Result<(), String> {
+    reclaim_abandoned_inline_download_at_capacity(table);
+    if table.len() >= MAX_CANCELLABLE_INLINE_DOWNLOADS {
+        Err("too many inline downloads are already active".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn register_inline_download(state: &AppState, id: &str) -> Result<(), String> {
+    if !valid_inline_download_cancellation_id(id) {
+        return Err("invalid inline-download cancellation id".to_string());
+    }
+    let mut table = state
+        .inline_downloads
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Lock publishes this flag before acquiring the same table to cancel its contents. Testing it
+    // while holding the table closes the otherwise possible sweep-before-insert race.
+    if state.session_lock_requested.load(Ordering::Acquire) {
+        return Err("the vault is locked".to_string());
+    }
+    if let Some(existing) = table.get(id) {
+        if existing.started {
+            return Err("inline-download cancellation id is already registered".to_string());
+        }
+        // A reloaded webview can restart its local sequence and reuse the exact id left by its
+        // predecessor. Begin-only authority owns no actor work, so replace it atomically; rejecting
+        // it would let the abandoned registration deny the fresh view's first take load.
+        if let Some(abandoned) = table.remove(id) {
+            let _ = abandoned.signal.send(true);
+        }
+    }
+    require_inline_download_capacity(&mut table)?;
+    let generation = state
+        .next_inline_download_generation
+        .fetch_add(1, Ordering::Relaxed);
+    let (signal, _receiver) = watch::channel(false);
+    table.insert(
+        id.to_string(),
+        InlineDownloadCancellation {
+            generation,
+            started: false,
+            signal,
+        },
+    );
+    Ok(())
+}
+
+/// Claim a process-owned slot for callers of the compatibility form that omit a cancellation id.
+/// The reserved `#native:` prefix is outside the webview token grammar, so injected IPC cannot
+/// collide with or cancel these entries; explicit lock remains their cancellation authority.
+fn claim_internal_inline_download(
+    state: &AppState,
+) -> Result<(InlineDownloadLease, watch::Receiver<bool>), String> {
+    let (id, generation, receiver) = {
+        let mut table = state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if state.session_lock_requested.load(Ordering::Acquire) {
+            return Err("the vault is locked".to_string());
+        }
+        require_inline_download_capacity(&mut table)?;
+
+        // At most four ids can be live. Even after the theoretical u64 wrap, five attempts find
+        // an unused id without allowing a stale RAII lease to alias the new registration.
+        let mut identity = None;
+        for _ in 0..=MAX_CANCELLABLE_INLINE_DOWNLOADS {
+            let generation = state
+                .next_inline_download_generation
+                .fetch_add(1, Ordering::Relaxed);
+            let id = format!("#native:{generation}");
+            if !table.contains_key(&id) {
+                identity = Some((id, generation));
+                break;
+            }
+        }
+        let (id, generation) = identity
+            .ok_or_else(|| "could not allocate an inline-download generation".to_string())?;
+        let (signal, receiver) = watch::channel(false);
+        table.insert(
+            id.clone(),
+            InlineDownloadCancellation {
+                generation,
+                started: true,
+                signal,
+            },
+        );
+        (id, generation, receiver)
+    };
+    Ok((
+        InlineDownloadLease {
+            inner: Arc::new(InlineDownloadLeaseInner {
+                table: Arc::clone(&state.inline_downloads),
+                id,
+                generation,
+            }),
+        },
+        receiver,
+    ))
+}
+
+fn claim_inline_download(
+    state: &AppState,
+    id: &str,
+) -> Result<(InlineDownloadLease, watch::Receiver<bool>), String> {
+    if !valid_inline_download_cancellation_id(id) {
+        return Err("invalid inline-download cancellation id".to_string());
+    }
+    let (generation, receiver) = {
+        let mut table = state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = table
+            .get_mut(id)
+            .ok_or_else(|| "inline-download cancellation id is not registered".to_string())?;
+        if entry.started {
+            return Err("inline-download cancellation id was already claimed".to_string());
+        }
+        entry.started = true;
+        (entry.generation, entry.signal.subscribe())
+    };
+    Ok((
+        InlineDownloadLease {
+            inner: Arc::new(InlineDownloadLeaseInner {
+                table: Arc::clone(&state.inline_downloads),
+                id: id.to_string(),
+                generation,
+            }),
+        },
+        receiver,
+    ))
+}
+
+fn cancel_inline_download_registration(state: &AppState, id: &str) -> Result<bool, String> {
+    if !valid_inline_download_cancellation_id(id) {
+        return Err("invalid inline-download cancellation id".to_string());
+    }
+    let signal = {
+        let mut table = state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match table.get(id) {
+            Some(entry) if entry.started => Some(entry.signal.clone()),
+            Some(_) => table.remove(id).map(|entry| entry.signal),
+            None => None,
+        }
+    };
+    if let Some(signal) = signal {
+        // Active registrations remain counted until their exact RAII lease observes cancellation
+        // and returns. Otherwise repeated cancel/start churn could exceed the process-wide cap.
+        let _ = signal.send(true);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+fn cancel_all_inline_downloads(state: &AppState) {
+    let signals = {
+        let mut table = state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let signals = table
+            .values()
+            .filter(|entry| entry.started)
+            .map(|entry| entry.signal.clone())
+            .collect::<Vec<_>>();
+        // Begin-only registrations have no command that can own their cleanup. Active entries
+        // stay counted until their RAII leases return, preserving the global cap across unlock.
+        table.retain(|_, entry| entry.started);
+        signals
+    };
+    for signal in signals {
+        let _ = signal.send(true);
+    }
+}
+
+fn ensure_inline_download_not_cancelled(
+    cancellation: Option<&watch::Receiver<bool>>,
+) -> Result<(), String> {
+    if cancellation.is_some_and(|receiver| *receiver.borrow()) {
+        Err("download cancelled".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// Reserve one bounded native cancellation signal before starting a whole-file take read.
+#[tauri::command]
+async fn begin_inline_download(
+    state: State<'_, AppState>,
+    cancellation: String,
+) -> Result<(), String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    // Hold the same commit boundary as lock-sensitive publication. Either this registration is
+    // visible for a subsequent lock to drain, or the newer lock generation rejects it first.
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    register_inline_download(&state, &cancellation)
+}
+
+/// Cancel and retire an inline read. Safe while locking because it can only destroy authority.
+#[tauri::command]
+fn cancel_inline_download(state: State<'_, AppState>, cancellation: String) -> Result<(), String> {
+    // Do not reveal whether a token existed while the vault gate is closed. Cancellation remains
+    // idempotent and available because it can only remove authority and bounded background work.
+    let _ = cancel_inline_download_registration(&state, &cancellation)?;
+    Ok(())
+}
+
 /// Download a small shared file by content-address hex; returns base64-encoded bytes. Fetches the
 /// file ONE chunk per actor command (emitting `download-progress` after each), so the actor returns
 /// to its loop between chunks and interleaves other commands + network sync. The whole reassembled
@@ -8144,6 +8443,7 @@ async fn download_file(
     server: u64,
     cid: String,
     trace: Option<String>,
+    cancellation: Option<String>,
 ) -> Result<String, AppError> {
     let op = Operation::start(
         trace,
@@ -8154,11 +8454,29 @@ async fn download_file(
     );
     let raw = hex::decode(cid.trim())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, format!("bad cid: {e}")))?;
+    let progress_cancellation = cancellation.clone();
+    // The shared RAII lease removes this exact generation only after both the command and any
+    // lower transport request have returned. Ordinary callers receive an internal native token;
+    // take playback registers its caller token first so a stale call can preempt its waiter.
+    let (cancellation_lease, cancellation) = match cancellation.as_deref() {
+        Some(id) => {
+            let (lease, receiver) = claim_inline_download(&state, id)
+                .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+            (Some(lease), Some(receiver))
+        }
+        None => {
+            let (lease, receiver) = claim_internal_inline_download(&state)
+                .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+            (Some(lease), Some(receiver))
+        }
+    };
     let target: [u8; 32] = raw
         .clone()
         .try_into()
         .map_err(|_| op.fail(codes::FILE_DOWNLOAD_FAILED, "bad cid length"))?;
     let actor = op.actor(&state, server).await?;
+    ensure_inline_download_not_cancelled(cancellation.as_ref())
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
         op.fail(
             codes::FILE_DOWNLOAD_FAILED,
@@ -8166,6 +8484,8 @@ async fn download_file(
         )
     })?;
     inline_download_allowed(size).map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+    ensure_inline_download_not_cancelled(cancellation.as_ref())
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     require_unlocked_session(&state)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
@@ -8178,6 +8498,7 @@ async fn download_file(
         DownloadProgressEvt {
             server,
             cid: cid.clone(),
+            cancellation: progress_cancellation.clone(),
             done: 0,
             total,
             bytes_done: 0,
@@ -8190,14 +8511,26 @@ async fn download_file(
     let mut out = Vec::with_capacity(size as usize);
     let mut network_bytes_done = 0u64;
     for i in 0..total {
+        ensure_inline_download_not_cancelled(cancellation.as_ref())
+            .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
         // A transfer can outlive the click that started it. Do not return plaintext or continue
         // emitting file metadata after an explicit lock closes the webview session.
         require_unlocked_session(&state)
             .await
             .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+        let request_cancellation = cancellation.as_ref().map(|signal| {
+            RequestCancellation::new(
+                signal.clone(),
+                cancellation_lease
+                    .as_ref()
+                    .map(InlineDownloadLease::request_keepalive),
+            )
+        });
         let (chunk, provider) = actor
-            .fetch_file_chunk(raw.clone(), i)
+            .fetch_file_chunk_cancellable(raw.clone(), i, request_cancellation)
             .await
+            .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+        ensure_inline_download_not_cancelled(cancellation.as_ref())
             .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
         if provider.is_some() {
             network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
@@ -8218,6 +8551,7 @@ async fn download_file(
             DownloadProgressEvt {
                 server,
                 cid: cid.clone(),
+                cancellation: progress_cancellation.clone(),
                 done: i + 1,
                 total,
                 bytes_done: out.len() as u64,
@@ -8234,6 +8568,8 @@ async fn download_file(
             "this file's chunks hold less data than it declares",
         ));
     }
+    ensure_inline_download_not_cancelled(cancellation.as_ref())
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     if Cid::of(&out).as_bytes() != &target {
         // Every chunk verified and the whole did not. Recorded as its own outcome because it means
         // something specific: a manifest whose parts are individually honest and collectively not.
@@ -8245,8 +8581,16 @@ async fn download_file(
     require_unlocked_session(&state)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    ensure_inline_download_not_cancelled(cancellation.as_ref())
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+    let encoded = B64.encode(&out);
+    ensure_inline_download_not_cancelled(cancellation.as_ref())
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+    require_unlocked_session(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     op.succeeded("FILE.DOWNLOAD.COMPLETED");
-    Ok(B64.encode(&out))
+    Ok(encoded)
 }
 
 /// Post to the server status feed. **Owner/admin only** unless the feed has been opened to
@@ -11931,6 +12275,7 @@ impl SaveSource for ActorSaveSource<'_> {
             DownloadProgressEvt {
                 server: self.server,
                 cid: self.cid.clone(),
+                cancellation: None,
                 done,
                 total: self.total,
                 bytes_done,
@@ -12516,6 +12861,9 @@ async fn lock_session_with_generation_inner(
     // Invalidate old work before awaiting anything. The commit mutex is acquired next so, once
     // this function returns, an old join can neither emit its private reply nor register/persist.
     state.session_lock_requested.store(true, Ordering::Release);
+    // Cancellation destroys authority and must not wait behind the persistence transaction. This
+    // also retires unclaimed registrations left by a reloaded/crashed webview.
+    cancel_all_inline_downloads(state);
     let lock_generation = state
         .ui_session_generation
         .fetch_add(1, Ordering::AcqRel)
@@ -12537,6 +12885,10 @@ async fn lock_session_with_generation_inner(
     }
     *state.session_resumable.lock().await = false;
     let _session_commit = state.ui_session_commit.lock().await;
+    // Close the registration/early-sweep race as a second line of defence. Registration itself
+    // checks `session_lock_requested` while holding the cancellation table, but this post-commit
+    // drain also retires any future registration path that was already inside the UI commit seam.
+    cancel_all_inline_downloads(state);
     // Save the final draft/read snapshot and close IPC as one ordered native operation. Two
     // separate fire-and-forget commands could race, causing the save to arrive after the lock and
     // be correctly rejected by the new session gate.
@@ -14736,6 +15088,8 @@ pub fn run() {
             send_call_signal,
             call_media_key,
             dismiss_dm_request,
+            begin_inline_download,
+            cancel_inline_download,
             download_file,
             file_available,
             delete_file,
@@ -15831,6 +16185,215 @@ mod tests {
         // a ~341 MB JS string built on the webview's main thread, reachable by scrolling past an
         // embedded file rather than by any deliberate action.
         assert!(inline_download_allowed(MAX_FILE_BYTES as u64).is_err());
+    }
+
+    #[test]
+    fn cancellable_inline_downloads_are_globally_bounded_and_reusable() {
+        let state = AppState::default();
+        let mut leases = Vec::new();
+        for index in 0..MAX_CANCELLABLE_INLINE_DOWNLOADS {
+            let id = format!("jam:1:{index}");
+            register_inline_download(&state, &id).unwrap();
+            leases.push(claim_inline_download(&state, &id).unwrap());
+        }
+        assert!(register_inline_download(&state, "jam:1:overflow")
+            .unwrap_err()
+            .contains("too many"));
+        assert!(cancel_inline_download_registration(&state, "jam:1:0").unwrap());
+        let cancelled = leases.remove(0);
+        drop(cancelled);
+        register_inline_download(&state, "jam:1:replacement").unwrap();
+        assert_eq!(
+            state
+                .inline_downloads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            MAX_CANCELLABLE_INLINE_DOWNLOADS
+        );
+        drop(leases);
+    }
+
+    #[test]
+    fn abandoned_unclaimed_inline_registration_cannot_starve_a_reload() {
+        let state = AppState::default();
+        for index in 0..MAX_CANCELLABLE_INLINE_DOWNLOADS {
+            register_inline_download(&state, &format!("jam:1:{index}")).unwrap();
+        }
+        register_inline_download(&state, "jam:2:fresh").unwrap();
+        let fresh = claim_inline_download(&state, "jam:2:fresh").unwrap();
+        assert_eq!(
+            state
+                .inline_downloads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            MAX_CANCELLABLE_INLINE_DOWNLOADS
+        );
+        drop(fresh);
+    }
+
+    #[test]
+    fn abandoned_unclaimed_inline_registration_can_be_replaced_by_the_same_id() {
+        let state = AppState::default();
+        register_inline_download(&state, "jam:1:1").unwrap();
+        let old_receiver = state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("jam:1:1")
+            .unwrap()
+            .signal
+            .subscribe();
+
+        register_inline_download(&state, "jam:1:1").unwrap();
+        assert!(
+            *old_receiver.borrow(),
+            "the abandoned generation is explicitly retired"
+        );
+        let (_lease, fresh_receiver) = claim_inline_download(&state, "jam:1:1").unwrap();
+        assert!(
+            !*fresh_receiver.borrow(),
+            "the replacement owns an independent cancellation generation"
+        );
+    }
+
+    #[test]
+    fn active_inline_registration_does_not_collide_with_a_fresh_webview_nonce() {
+        let state = AppState::default();
+        register_inline_download(&state, "jam:aaaaaaaaaaaaaaaa:1:1").unwrap();
+        let (_old_lease, _old_receiver) =
+            claim_inline_download(&state, "jam:aaaaaaaaaaaaaaaa:1:1").unwrap();
+
+        register_inline_download(&state, "jam:bbbbbbbbbbbbbbbb:1:1").unwrap();
+        let (_new_lease, new_receiver) =
+            claim_inline_download(&state, "jam:bbbbbbbbbbbbbbbb:1:1").unwrap();
+        assert!(
+            !*new_receiver.borrow(),
+            "reset call/sequence counters remain independent across WebView nonces"
+        );
+    }
+
+    #[test]
+    fn cancellation_wakes_a_claimed_download_and_keeps_it_counted_until_return() {
+        let state = AppState::default();
+        register_inline_download(&state, "jam:9:1").unwrap();
+        let (old_lease, old_receiver) = claim_inline_download(&state, "jam:9:1").unwrap();
+        assert!(cancel_inline_download_registration(&state, "jam:9:1").unwrap());
+        assert!(
+            *old_receiver.borrow(),
+            "the actor receives the cancellation edge"
+        );
+
+        assert!(register_inline_download(&state, "jam:9:1").is_err());
+        drop(old_lease);
+        register_inline_download(&state, "jam:9:1").unwrap();
+        let (_new_lease, new_receiver) = claim_inline_download(&state, "jam:9:1").unwrap();
+        assert!(
+            !*new_receiver.borrow(),
+            "an old RAII guard cannot retire a reused id generation"
+        );
+    }
+
+    #[test]
+    fn session_lock_retires_every_inline_download_registration() {
+        let state = AppState::default();
+        register_inline_download(&state, "jam:4:1").unwrap();
+        let (lease, receiver) = claim_inline_download(&state, "jam:4:1").unwrap();
+        register_inline_download(&state, "jam:4:2").unwrap();
+
+        cancel_all_inline_downloads(&state);
+        assert!(
+            *receiver.borrow(),
+            "claimed actor work receives cancellation"
+        );
+        {
+            let table = state
+                .inline_downloads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            assert_eq!(
+                table.len(),
+                1,
+                "active work remains counted until its return"
+            );
+            assert!(table.contains_key("jam:4:1"));
+            assert!(
+                !table.contains_key("jam:4:2"),
+                "unclaimed work retires at lock"
+            );
+        }
+        drop(lease);
+        assert!(state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty());
+    }
+
+    #[test]
+    fn inline_download_cancellation_ids_have_a_small_inert_grammar() {
+        let state = AppState::default();
+        assert!(register_inline_download(&state, "jam:2:17").is_ok());
+        assert!(register_inline_download(&state, "../escape").is_err());
+        assert!(register_inline_download(
+            &state,
+            &"x".repeat(INLINE_DOWNLOAD_CANCELLATION_ID_MAX_BYTES + 1)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn omitted_token_inline_downloads_share_the_global_cap_and_lock_cancellation() {
+        let state = AppState::default();
+        let mut active = (0..MAX_CANCELLABLE_INLINE_DOWNLOADS)
+            .map(|_| claim_internal_inline_download(&state).unwrap())
+            .collect::<Vec<_>>();
+        let overflow = match claim_internal_inline_download(&state) {
+            Err(error) => error,
+            Ok(_) => panic!("a fifth compatibility-path download exceeded the global cap"),
+        };
+        assert!(overflow.contains("too many"));
+
+        cancel_all_inline_downloads(&state);
+        assert!(
+            active.iter().all(|(_, receiver)| *receiver.borrow()),
+            "lock cancellation reaches every compatibility-path operation"
+        );
+        drop(active.pop());
+        let (_replacement, receiver) = claim_internal_inline_download(&state).unwrap();
+        assert!(
+            !*receiver.borrow(),
+            "a returned native lease restores exactly one slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_registration_cannot_overtake_explicit_lock_after_commit_admission() {
+        let state = Arc::new(AppState::default());
+        // Model begin_inline_download after it acquired the exact-generation commit guard but
+        // immediately before its synchronous table insertion.
+        let admitted_begin = state.ui_session_commit.lock().await;
+        let locking_state = Arc::clone(&state);
+        let locking =
+            tokio::spawn(
+                async move { lock_session_with_generation_inner(&locking_state, None).await },
+            );
+        while !state.session_lock_requested.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(register_inline_download(&state, "jam:1:lock-race")
+            .unwrap_err()
+            .contains("locked"));
+        drop(admitted_begin);
+        let (_generation, result) = locking.await.unwrap();
+        result.unwrap();
+        assert!(state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty());
     }
 
     #[test]

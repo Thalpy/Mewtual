@@ -836,6 +836,38 @@ test("Deafen and source mute generations prevent pre-gate drums emerging after r
   assert.deepEqual(await beforeMute, { ok: false, reason: "muted", sequence: "next" });
 });
 
+test("local queue invalidation retires active and queued drum work without muting fresh input", async () => {
+  const fake = new FakeContext();
+  const resolvers: ((seed: number) => void)[] = [];
+  const engine = new JamEngine(
+    fake as unknown as AudioContext,
+    () => 0,
+    fake.destination as unknown as AudioNode,
+    undefined,
+    () => new Promise<number>((resolve) => { resolvers.push(resolve); }),
+  );
+  const local = engine.openLocalSource("alice");
+  const active = engine.drum({
+    callId: "general", channel: local, sessionNonce: sn, sequence: 1, pad: 0, remote: false,
+  });
+  await Promise.resolve();
+  const queued = engine.drum({
+    callId: "general", channel: local, sessionNonce: sn, sequence: 2, pad: 1, remote: false,
+  });
+  assert.equal(engine.invalidateChannelRender(local), true);
+  assert.deepEqual(await queued, { ok: false, reason: "muted", sequence: "next" });
+
+  const fresh = engine.drum({
+    callId: "general", channel: local, sessionNonce: sn, sequence: 3, pad: 2, remote: false,
+  });
+  await Promise.resolve();
+  assert.equal(resolvers.length, 2, "fresh local work starts outside the retired digest lane");
+  resolvers[1](2);
+  assert.equal((await fresh).ok, true);
+  resolvers[0](1);
+  assert.deepEqual(await active, { ok: false, reason: "muted", sequence: "first" });
+});
+
 test("a pending remote drum rechecks audio suspension after its digest await", async () => {
   const fake = new FakeContext();
   let resolveSeed!: (seed: number) => void;

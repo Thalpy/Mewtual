@@ -23,9 +23,9 @@ export const JAM_FRAME_BUCKET_BURST = 160;
 // freeze for the rest of the call. This lane is still charged before JSON.parse.
 export const JAM_MUTED_STATE_BUCKET_RATE = 2;
 export const JAM_MUTED_STATE_BUCKET_BURST = 4;
-// A not-yet-open outbound edge retains only this many locally generated events. Overflow drops
-// that unopened transient as a unit so note-ons cannot survive without their later note-offs.
-export const JAM_OUTBOUND_PENDING_MAX = 256;
+// Local input waiting for the first immutable patch publication is bounded independently. Network
+// edges retain no pre-open musical history because replay would collapse pacing at the receiver.
+export const JAM_LOCAL_PUBLICATION_PENDING_MAX = 256;
 // Async SHA-256 extends receive processing past data-channel delivery. Bound the causal backlog
 // independently so a peer cannot turn one delayed digest into unbounded retained closures.
 export const JAM_INBOUND_PENDING_MAX = 256;

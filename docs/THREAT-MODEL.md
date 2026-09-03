@@ -173,6 +173,13 @@ table with the commit that closed it.
   current member can claim receipt without displaying content, so the UI says delivered/held and
   never read. Receipt traffic adds message-timing metadata to peers already participating in the
   encrypted group; it is not broadcast outside the group.
+- **Epoch-managed document operations above 1 MiB disclose their coarse size.** P1 bounds the
+  domain envelope to 64 KiB and a whole signed operation to 256 KiB, so conforming creative and
+  registry operations stay inside the existing sealed-op padding ladder. The generic legacy
+  replication codec still permits larger Automerge operations: above the one-MiB padding ceiling
+  they receive only the authenticated length footer, not another power-of-two bucket. A forwarding
+  group member can therefore estimate such a legacy bulk edit's ciphertext size. Content remains
+  encrypted, the network frame cap still bounds work, and P1 admission rejects the operation.
 - **Adaptive stream resolution reveals only a coarse call preference.** A call participant sends
   one of four height buckets, not its exact window, monitor dimensions, or pixel ratio. The sender
   treats it as an advisory upper bound and independently caps each WebRTC encoding. Screen tracks
@@ -207,8 +214,10 @@ table with the commit that closed it.
   promises the same recipe, not identical platform audio. Exact legacy note frames have a separate
   receive-only compatibility domain; they gain no patch, drum, clock, or recording authority.
   Ordered data-channel delivery is extended across asynchronous digests, and outbound wire,
-  renderer and recorder events share one immutable published recipe; unopened-edge work is bounded
-  and dropped as a whole on overflow. Reconnects cannot reset the call-epoch peer budget or leave
+  renderer and recorder events share one immutable published recipe. Unopened edges retain no
+  musical history: open establishes only the current patch, then fresh live events begin. This
+  chooses an explicit sequence gap over collapsing paced history into a receiver-budget burst or
+  losing a release behind an accepted attack. Reconnects cannot reset the call-epoch peer budget or leave
   an old channel's digest blocking its replacement. A fresh channel gets one exact raw recipe
   reannouncement only when that peer/call budget previously observed the engine hash-verify it;
   this avoids another digest/token while distinct recipes still spend the persistent patch bucket.
@@ -217,6 +226,9 @@ table with the commit that closed it.
   and take scheduler work and pending drum digests have separate per-pass/per-source/global caps.
   Drum work is channel-generation ordered with bounded backpressure: dense takes await it, local
   echoes share one causal event lane, and stale generation work cannot block its replacement.
+  Local causal overflow advances a resettable queue generation, cancels queued/active engine work,
+  and releases current local voices before a fresh queue admits more input; retained attacks cannot
+  emerge later as a local burst.
   Monotonic room/source admission generations advance on both gate edges, and engine render
   generations advance on revocation, making Deafen and mute sticky for work already queued or
   hashing even if the user reopens audio before that work settles. Local input captures its room
@@ -239,9 +251,25 @@ table with the commit that closed it.
   withdrawal/restart invalidates pre-withdrawal work, and events received while paused have no
   lease. Disconnect retracts that edge's consent and reconnect must announce fresh consent.
   Shared-take ingress rejects oversize listings before whole-file download, bounds encoded bytes
-  before decode, keeps a bounded per-call LRU, and serializes/coalesces downloads. A completion must
+  before decode, keeps a bounded per-call LRU, and serializes/coalesces downloads. Each take read
+  has a native cancellation signal observed inside the actor-owned chunk fetch; cancellation
+  acknowledgement preempts the stale JavaScript slot, while a transport-owned keepalive retains
+  its native charge until the exact submitted request responds, fails or times out. A four-request
+  process cap and exact UI-generation cleanup therefore bound rapid call churn even against a
+  withholding peer. Explicit lock cancels every slot, and unclaimed
+  begin-only registrations are replaceable at the cap so reload cannot starve playback. Inline
+  reads that omit a caller token receive an unforgeable native token under the same cap and lock
+  cancellation, while caller tokens include a per-WebView random nonce so reset counters cannot
+  collide with a still-active predecessor. The transport trait has no cancellable-request default:
+  every implementation must declare the ownership rule. Both libp2p and in-memory queues retain
+  accounting at their underlying owner; wrappers delegate, while test fakes that do not transfer
+  it own no detached work. Compatibility or alternate transports therefore cannot silently inherit
+  an unbounded path. A completion must
   still match the exact call lease/server/channel/deck and pass the current listing and trust policy;
   a fetch started in an old call cannot populate a later call even when both adopt the same CID.
+  Tokenized progress is accepted only for that exact call/server/CID/token, and tokenless progress
+  is excluded while a take is on deck, preventing queued old-group provider telemetry from
+  repainting the replacement deck.
   The current take `group` value is device-local
   scope metadata, not the stable group binding needed by phase 6.
 - **A shared file is authenticated bytes, not trusted content.** Explicit save streams into a

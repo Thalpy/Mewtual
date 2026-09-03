@@ -890,6 +890,22 @@ export class JamEngine {
     return released;
   }
 
+  /**
+   * Retire asynchronous render work for one exact current channel without muting future input.
+   *
+   * Local causal-queue overflow uses this as its engine-side cancellation seam. WebCrypto already
+   * executing cannot be stopped, but its captured source generation fails after the await; queued
+   * jobs resolve inertly and currently sounding notes enter their ordinary bounded release.
+   */
+  invalidateChannelRender(channel: JamSourceChannel): boolean {
+    if (this.disposed || !this.sourceChannels.isCurrent(channel)) return false;
+    const state = this.state(channel.source);
+    state.renderGeneration += 1;
+    this.cancelQueuedDrums((job) => job.channel === channel);
+    this.releaseSource(channel.source);
+    return true;
+  }
+
   removeSource(source: string): void {
     this.sourceChannels.close(source);
     this.releaseSource(source);

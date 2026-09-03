@@ -385,8 +385,9 @@ than accepted from text.
 ## 4. Encrypted CRDT replication  *(catcoms-replication)*
 
 ```rust
-pub struct SignedOp { doc_type:DocType, doc_id:u128, author_device:DeviceId, author_pubkey:Vec<u8>, delta:Vec<u8>, signature:[u8;64] }
-  sign(&MlsDevice, DocType, doc_id, delta:Vec<u8>) -> Result<Self>;  verify()->bool;  encode()/decode();  hash()->[u8;32];
+pub struct SignedOp { doc_type:DocType, doc_id:u128, author_device:DeviceId, author_pubkey:Vec<u8>, delta:Vec<u8>, domain_op:Option<Vec<u8>>, signature:[u8;64] }
+  sign(&MlsDevice, DocType, doc_id, delta:Vec<u8>) -> Result<Self>;  sign_domain(..., &DomainOp)->Result<Self>;
+  verify()->bool;  encode()/decode();  hash()->[u8;32];
 pub struct SealedOp { doc_type:DocType, doc_id:u128, epoch:u64, blob:SealedBlob }
   seal(&SignedOp, &ServerGroup, &MlsDevice, rng) -> Result<Self>;  open(channel_key:&[u8;32]) -> Result<SignedOp>;
   encode()->Vec<u8>; decode(&[u8])->Result<Self>;
@@ -398,6 +399,21 @@ pub struct EncryptedDoc;   // automerge doc + signed-op log
   ingest_with_key(&mut, &SealedOp, key:&[u8;32]) -> Result<bool>;      // open with a caller-supplied (past-epoch) key; inner sig still verified
   export_catchup(&ServerGroup, &MlsDevice, rng) -> Result<Vec<SealedOp>>;   // re-sealed under current epoch
   import_catchup(&mut, &[SealedOp], &ServerGroup, &MlsDevice) -> Result<usize>;
+  restore_for_actor(snapshot, &DeviceId) -> Result<EncryptedDoc>; // required before post-restart P1 edits
+  edit_domain_gated(&mut, &LogicalDocument, &EpochGate, ..., &DomainOp, edit) -> Result<(SealedOp,ChangeHash)>;
+  ingest_domain_gated(&mut, &LogicalDocument, &EpochGate, &SealedOp, ...) -> Result<Admission>;
+
+pub struct LogicalDocument { server_id:Vec<u8>, doc_type:DocType, logical_key:Vec<u8> }
+pub struct CloseRecord;      // authority and the real dependency-closed signed log validate together
+pub struct Receipt;          // owner-signed close + seed + first-tenure inherited checkpoint
+pub struct VerifiedReceipt;  // opaque capability returned only by owner/tenure verification
+pub struct ReceiptRepair;    // owner-signed selection after visible receipt equivocation
+pub struct ReceiptHeadProof; // nonce/requester-bound owner selection; verifies to VerifiedReceipt
+pub struct OwnerReceiptJournal; // persist-before-publish high-water + one in-flight decision
+pub struct ReceiptBook;      // ingest_and_seal atomically updates receipt state and its epoch gate
+pub struct EpochGate;        // server/document/id-bound Open -> Closing/Settled/Fault boundary
+pub struct IntentLedger;     // bounded vault-sealed local operations retained until receipted
+pub struct RecoverySlots;    // two retained typed snapshots + one crash-resumable staged slot
 ```
 
 ---
@@ -616,7 +632,8 @@ be in the receiver's current MLS roster. This is not an invite or a membership o
 
 ## 8. `DocType` tags (stable; only append)
 `Channel=1, Wiki=2, Status=3, Calendar=4, InviteLedger=5, MemberRoles=6, FileIndex=7, Routing=8,
-Profile=9, Livery=10, Badges=11, Devices=12, ChannelIndex=13, Moderation=14`.
+Profile=9, Livery=10, Badges=11, Devices=12, ChannelIndex=13, Moderation=14,
+StudioIndex=15, StudioObject=16, PostReplies=17, DocRegistry=18`.
 Exporter context = `u16 tag ‖ u128 doc_id` (18 bytes, fixed-width → injective). `Routing` has no content
 doc; it feeds the **metadata** exporter label to derive the per-removal `ns_secret_L`.
 
@@ -976,10 +993,14 @@ but neither a patch token nor another digest; any distinct frame still spends th
 bucket, so reconnect cannot mint descriptor/hash allowance.
 Only one local publication digest runs while at most the latest draft waits, and that coalescer is
 replaced on leaving so a stalled old call cannot head-of-line block the next call.
-An unopened edge retains at most 256 events and drops an overflowed
-transient as a unit rather than preserving note-ons without their note-offs. The inbound async
-lane is likewise capped at 256 pending operations; overflow receive-mutes that source rather than
-retaining an unbounded digest backlog.
+An unopened edge retains **no musical events**: when it opens, it sends only the current patch
+announcement and begins with fresh live traffic. This intentionally records one transient-loss
+gap instead of collapsing seconds of history into an instantaneous receiver-budget burst or
+separating a held note from its release. A future sustain-across-connect feature requires a newly
+sequenced bounded held-state snapshot, not historical edge replay. Local input waiting for its
+first immutable publication is capped at 256 events and drops an overflowed transient as a unit.
+The inbound async lane is likewise capped at 256 pending operations; overflow receive-mutes that
+source rather than retaining an unbounded digest backlog.
 
 **Frame admission (before parse).** Any delivered frame over 1024 bytes is rejected before parsing; after parse,
 every type except `t:"p"` must still fit 200 bytes. Each peer has an all-frame token bucket
@@ -1148,6 +1169,23 @@ base64 before decode, and retains at most eight validated takes per call.
 Every whole-file take load is serialized/coalesced to one running plus one latest request. Its
 continuation is bound to the exact call lifecycle lease, server, channel and deck CID, and current
 listing/size/trust admission is rerun after download before parsing, caching or starting playback.
+Before `download_file`, the take path reserves one `begin_inline_download(cancellation)` token;
+`cancel_inline_download(cancellation)` is observed inside the actor-owned chunk await, not merely
+at the JavaScript continuation. Cancellation acknowledgement promptly retires the old JavaScript
+coordinator slot. If libp2p already submitted a request, a shared native keepalive leaves that
+registration charged until the exact request responds, fails, or times out; at most four such
+lower requests exist process-wide, so four withholding debts deliberately pause new inline reads
+instead of growing work without bound. Registrations use a small inert id grammar and exact
+generation/RAII identity; caller ids include a cryptographic per-WebView nonce before resettable
+call/sequence counters, so a reloaded view cannot collide with an active predecessor. Registration
+holds the exact UI-session commit guard; explicit lock
+signals every active slot and drops every unclaimed one. An unclaimed begin-only slot may be
+displaced at the cap so a webview reload cannot starve it, including replacement by the same id.
+Ordinary callers may omit `download_file.cancellation` for command compatibility, but native code
+still assigns those reads a reserved, lock-cancellable slot under the same process-wide cap.
+Tokenized `download-progress` carries that exact cancellation id; take UI accepts it only for the
+current call lease, server and CID. Tokenless compatibility/media progress cannot impersonate a
+take, so a queued old-group provider fingerprint cannot enter a replacement deck.
 Sheet output floors
 durations after one sixteenth but uses one sixteenth as the explicit visible minimum for shorter
 taps. Native export accepts only the inert versioned renderer grammar and holds the exact UI

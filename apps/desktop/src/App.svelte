@@ -199,7 +199,7 @@
   import { JamFrameDecoder, toggleJamPeerMute, type JamFrameDecode } from "./jam-wire";
   import { jamPatchId, legacyJamPatch, validateJamPatch } from "./jam-patch";
   import type { JamSourceChannel } from "./jam-channel";
-  import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_OUTBOUND_PENDING_MAX, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_REMOTE_HOLD_MAX_MS, PATCH_OSC_WAVES, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
+  import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_REMOTE_HOLD_MAX_MS, PATCH_OSC_WAVES, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
   import { JamClockProbeTracker, JamClockSync, JamMetronomeClock } from "./jam-clock";
   import { JamCallCuePlayer, JamClickPlayer } from "./jam-clicks";
   import {
@@ -209,10 +209,10 @@
   } from "./jam-recorder";
   import {
     decodeJamTakeBase64, jamTakePlaybackLeaseCurrent, JamTakeCache, JamTakeLoadCoordinator,
-    mayFetchJamTake, shouldDispatchTakeEvent, takeDueBatchEnd, takePlaybackIsRemote,
-    takeReleaseTailMs, type JamTakePlaybackLease,
+    mayFetchJamTake, shouldApplyJamTakeProgress, shouldDispatchTakeEvent, takeDueBatchEnd,
+    takePlaybackIsRemote, takeReleaseTailMs, type JamTakePlaybackLease, type JamTakeProgressLease,
   } from "./jam-playback";
-  import { JamCausalQueue, JamCausalQueueOverflow, JamLatestTaskQueue, JamOutboundEdge, JamPublicationGeneration, JamPublicationPacer, type JamPublishedFrame } from "./jam-publication";
+  import { JamCausalQueue, JamCausalQueueOverflow, JamInitialPublicationGate, JamLatestTaskQueue, JamOutboundEdge, JamPublicationGeneration, JamPublicationPacer, JamResettableCausalQueue, type JamPublishedFrame } from "./jam-publication";
   import { jamTakeSheetSvg } from "./jam-sheet";
   // Types only. The console's own logic and markup live in DebugConsole.svelte, which is loaded
   // on demand; this file needs just enough to describe what it hands over.
@@ -10446,7 +10446,7 @@
   const jamPeerInbound: Record<string, JamCausalQueue> = {}; // extends channel ordering across awaits
   // Local echo shares the sender's q lane too: a note after a drum must not overtake its async
   // deterministic seed. Human input stays far below the same bounded backlog used for peers.
-  let jamLocalRender = new JamCausalQueue(JAM_INBOUND_PENDING_MAX);
+  const jamLocalRender = new JamResettableCausalQueue(JAM_INBOUND_PENDING_MAX);
   // App queues exist above the engine's own async boundary. Bind each retained closure to these
   // epochs so mute/Deafen revocation remains sticky even if audio is reopened before it executes.
   let jamRoomRenderGeneration = 0;
@@ -10524,7 +10524,7 @@
   let jamPublicationQueue = new JamLatestTaskQueue<PublishedJamPatch | null>();
   const jamPublicationPacer = new JamPublicationPacer(JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS);
   let jamEnsurePublication: Promise<PublishedJamPatch | null> | null = null;
-  const jamPendingLocalEvents: Array<(publication: PublishedJamPatch) => void> = [];
+  const jamPendingLocalEvents = new JamInitialPublicationGate<PublishedJamPatch>(JAM_LOCAL_PUBLICATION_PENDING_MAX);
   let jamEditOpen = $state(false);
   let jamAnnTimer: ReturnType<typeof setTimeout> | undefined;
   // The saved sound goes through the same validator as wire and playback input: a corrupted or
@@ -11753,7 +11753,7 @@
   function jamEdge(dc: RTCDataChannel): JamOutboundEdge {
     let edge = jamOutboundEdges.get(dc);
     if (!edge) {
-      edge = new JamOutboundEdge(JAM_OUTBOUND_PENDING_MAX);
+      edge = new JamOutboundEdge();
       jamOutboundEdges.set(dc, edge);
     }
     return edge;
@@ -11777,22 +11777,17 @@
     }
   }
   function flushPendingJamEvents(publication: PublishedJamPatch) {
-    const waiting = jamPendingLocalEvents.splice(0);
-    for (const event of waiting) event(publication);
+    jamPendingLocalEvents.flush(publication);
   }
-  function withPublishedJamPatch(event: (publication: PublishedJamPatch) => void) {
-    if (jamPublishedPatch) {
-      event(jamPublishedPatch);
-      return;
-    }
-    if (jamPendingLocalEvents.length >= JAM_OUTBOUND_PENDING_MAX) {
+  function withPublishedJamPatch(event: (publication: PublishedJamPatch, outbound: boolean) => void) {
+    const admission = jamPendingLocalEvents.submit(jamPublishedPatch, event);
+    if (admission === "live") return;
+    if (admission === "overflow") {
       // No event has reached an unopened edge or the local engine yet. Drop the whole transient
       // rather than keeping an unbounded queue or retaining note-ons without their note-offs.
-      jamPendingLocalEvents.splice(0);
       callHeld = [];
       return;
     }
-    jamPendingLocalEvents.push(event);
     void ensurePublishedJamPatch();
   }
   function capturedJamDraft(): {
@@ -11900,14 +11895,19 @@
     jamEdge(dc).open(publication, (frame) => sendJamEdgeFrame(dc, frame));
   }
 
-  function instSend(publication: PublishedJamPatch, note: number, on: boolean): number {
+  function instSend(
+    publication: PublishedJamPatch,
+    note: number,
+    on: boolean,
+    outbound: boolean,
+  ): number {
     const q = jamMyQ;
     jamMyQ += 1;
     const frame: Record<string, unknown> = on
       ? { t: "n", on: 1, n: note, w: publication.wave, q }
       : { t: "n", on: 0, n: note, q };
     if (on && publication.custom) frame.p = publication.id;
-    jamBroadcastEvent(publication, JSON.stringify(frame));
+    if (outbound) jamBroadcastEvent(publication, JSON.stringify(frame));
     return q;
   }
   function renderLocalJamEvent(
@@ -11916,23 +11916,25 @@
     roomGeneration: number,
     task: (render: boolean) => unknown | Promise<unknown>,
   ) {
-    void jamLocalRender.enqueue(() => task(roomGeneration === jamRoomRenderGeneration)).catch((cause) => {
-      if (!(cause instanceof JamCausalQueueOverflow)) return;
-      // This is an internal last-resort bound, not expected human input. Prefer silencing held
-      // local notes over allowing a lost queued note-off to drone until the watchdog.
-      if (jamEngine === engine && jamSelfChan === channel) engine.releaseChannelHeld(channel);
-    });
+    void jamLocalRender.enqueue(
+      () => task(roomGeneration === jamRoomRenderGeneration),
+      () => {
+        // Retire both closures waiting outside the engine and any active local drum digest. The
+        // next human event starts on a fresh queue; old work cannot arrive as a delayed burst.
+        if (jamEngine === engine && jamSelfChan === channel) engine.invalidateChannelRender(channel);
+      },
+    ).catch(() => { /* a render failure is local and the queue remains usable */ });
   }
   function instNoteOn(note: number) {
     if (!inCall || callHeld.includes(note) || callHeld.length >= 16) return;
     callHeld = [...callHeld, note];
     const recorderLease = captureJamRecorderLease(jamRec, jamRec ? jamRecMs() : 0);
     const roomGeneration = jamRoomRenderGeneration;
-    withPublishedJamPatch((publication) => {
+    withPublishedJamPatch((publication, outbound) => {
       const engine = jamEngine;
       const channel = jamSelfChan;
       if (!inCall || !engine || !channel || publication.sessionNonce !== jamMySn) return;
-      const q = instSend(publication, note, true);
+      const q = instSend(publication, note, true, outbound);
       if (callSelfFp) {
         const recorded = recordLeasedJamNoteOn(jamRec, recorderLease, {
           source: callSelfFp,
@@ -11960,11 +11962,11 @@
     callHeld = callHeld.filter((n) => n !== note);
     const recorderLease = captureJamRecorderLease(jamRec, jamRec ? jamRecMs() : 0);
     const roomGeneration = jamRoomRenderGeneration;
-    withPublishedJamPatch((publication) => {
+    withPublishedJamPatch((publication, outbound) => {
       const engine = jamEngine;
       const channel = jamSelfChan;
       if (!inCall || !engine || !channel || publication.sessionNonce !== jamMySn) return;
-      const q = instSend(publication, note, false);
+      const q = instSend(publication, note, false, outbound);
       if (callSelfFp) {
         const recorded = recordLeasedJamNoteOff(jamRec, recorderLease, {
           source: callSelfFp, sessionNonce: publication.sessionNonce, sequence: q, note,
@@ -11982,14 +11984,14 @@
     flashPad(pad, "me");
     const recorderLease = captureJamRecorderLease(jamRec, jamRec ? jamRecMs() : 0);
     const roomGeneration = jamRoomRenderGeneration;
-    withPublishedJamPatch((publication) => {
+    withPublishedJamPatch((publication, outbound) => {
       const engine = jamEngine;
       const channel = jamSelfChan;
       if (!inCall || !engine || !channel || publication.sessionNonce !== jamMySn) return;
       const q = jamMyQ;
       jamMyQ += 1;
       const callId = jamCallId();
-      jamBroadcastEvent(publication, JSON.stringify({ t: "d", n: pad, q }));
+      if (outbound) jamBroadcastEvent(publication, JSON.stringify({ t: "d", n: pad, q }));
       if (callSelfFp) {
         const recorded = recordLeasedJamDrum(jamRec, recorderLease, {
           source: callSelfFp, sessionNonce: publication.sessionNonce, sequence: q, pad,
@@ -13299,8 +13301,8 @@
   function jukeAdopt(seq: number, fromFp: string, entry: string, cid: string, name: string, off: number, paused: boolean) {
     const same = jukeNow?.entry === entry && jukeNow?.cid === cid;
     const sameDeckLease = same && jukeAdopted?.seq === seq && jukeAdopted.fromFp === fromFp;
-    // A pause/resume, replacement DJ or different track owns a new continuation epoch. Native
-    // whole-file fetches cannot be cancelled, but their old epoch can never populate this deck.
+    // A pause/resume, replacement DJ or different track owns a new continuation epoch. The load
+    // coordinator cancels the old native chunk operation before releasing its active slot.
     if (!sameDeckLease) jukeTakeLoads.invalidate();
     jukeAdopted = { seq, fromFp, off, at: performance.now() };
     jukeHeard = jukeAdopted.at;
@@ -13411,6 +13413,9 @@
   // then drive the jam playback scheduler from the room's transport. No element, no decoder.
   const jukeTakeCache = new JamTakeCache();
   const jukeTakeLoads = new JamTakeLoadCoordinator<void>();
+  const jukeTakeCancellationNonce = jamNonce();
+  let jukeTakeProgressLease: JamTakeProgressLease | null = null;
+  let jukeTakeCancellationSeq = 0;
 
   function jukeTakeAdmission(server: number, cid: string): "ok" | "consent" | "unavailable" {
     const now = jukeNow;
@@ -13443,30 +13448,79 @@
     if (!inCall || server === null || !channel || !callLifecycleSession.isCurrent(callLease)) return;
     parkJukeboxMedia(); // the media element never holds a take
     const lease = { callLease, server, channel, cid };
-    void jukeTakeLoads.submit(cid, (coordinatorCurrent) =>
-      jukeApplyTakeNow(lease, coordinatorCurrent));
+    jukeTakeCancellationSeq = (jukeTakeCancellationSeq % 1_000_000_000) + 1;
+    const cancellation = `jam:${jukeTakeCancellationNonce}:${callLease}:${jukeTakeCancellationSeq}`;
+    let cancellationReadyResolve!: () => void;
+    let cancellationReadySettled = false;
+    const cancellationReady = new Promise<void>((resolve) => { cancellationReadyResolve = resolve; });
+    const markCancellationReady = () => {
+      if (cancellationReadySettled) return;
+      cancellationReadySettled = true;
+      cancellationReadyResolve();
+    };
+    void jukeTakeLoads.submit(
+      cid,
+      (coordinatorCurrent) =>
+        jukeApplyTakeNow(lease, coordinatorCurrent, cancellation, markCancellationReady),
+      async () => {
+        // Do not acknowledge preemption until the short native registration attempt has settled.
+        // This removes the cancel-before-register race without serializing newer downloads behind
+        // the potentially slow whole-file command.
+        await cancellationReady;
+        await invoke("cancel_inline_download", { cancellation });
+      },
+    );
   }
 
-  async function jukeApplyTakeNow(lease: JamTakePlaybackLease, coordinatorCurrent: () => boolean) {
+  async function jukeApplyTakeNow(
+    lease: JamTakePlaybackLease,
+    coordinatorCurrent: () => boolean,
+    cancellation: string,
+    markCancellationReady: () => void,
+  ) {
     const { server, cid } = lease;
-    if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent)) return;
+    if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent)) {
+      markCancellationReady();
+      return;
+    }
     const initialAdmission = jukeTakeAdmission(server, cid);
     if (initialAdmission !== "ok") {
+      markCancellationReady();
       jukeTrustBlocked = initialAdmission;
       return;
     }
     let take = jukeTakeCache.get(cid);
     if (!take) {
+      const progressLease = { callLease: lease.callLease, server, cid, cancellation };
+      jukeTakeProgressLease = progressLease;
       jukeFetch = { source: "local", percent: 0, provider: "" };
       let base64 = "";
+      let cancellationRegistered = false;
       try {
-        ({ value: base64 } = await invokeDebugged<string>("download_file", { server, cid }));
+        try {
+          await invoke("begin_inline_download", { cancellation });
+          cancellationRegistered = true;
+        } finally {
+          markCancellationReady();
+        }
+        // Registration is a separate short command so cancellation cannot race ahead of a native
+        // operation that does not exist yet. If the deck changed during registration, `finally`
+        // retires the permit without beginning a read.
+        if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent)) return;
+        ({ value: base64 } = await invokeDebugged<string>("download_file", { server, cid, cancellation }));
       } catch (e) {
         if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent)) return;
         diagRecord({ section: "channels", code: "JUKEBOX.TAKE.FETCH_FAILED", level: "warn", fields: { failure: classifyInvokeFailure(e) } });
         jukeFetch = null;
         jukeFail(cid);
         return;
+      } finally {
+        if (jukeTakeProgressLease === progressLease) jukeTakeProgressLease = null;
+        if (cancellationRegistered) {
+          // Normally `download_file` has already removed its RAII registration. This also closes
+          // the begin→invoke gap and every frontend exception path; unknown ids are harmless.
+          await invoke("cancel_inline_download", { cancellation }).catch(() => {});
+        }
       }
       // Re-run both lifecycle and current listing/trust admission. A call reset clears the cache,
       // but it cannot cancel an already executing native command, and the next call may adopt the
@@ -13494,6 +13548,9 @@
       }
       take = parsed.take;
       jukeTakeCache.set(cid, take);
+    } else {
+      // A cache hit owns no native operation, so invalidation can retire the coordinator slot now.
+      markCancellationReady();
     }
     if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent) || jukeTakeAdmission(server, cid) !== "ok") return;
     jukeFetch = null;
@@ -15065,8 +15122,8 @@
     // A digest from the departed call may never settle. Its generation checks make completion
     // inert; replacing the O(1) coalescer prevents it from blocking the next call's first patch.
     jamPublicationQueue = new JamLatestTaskQueue<PublishedJamPatch | null>();
-    jamPendingLocalEvents.splice(0);
-    jamLocalRender = new JamCausalQueue(JAM_INBOUND_PENDING_MAX);
+    jamPendingLocalEvents.clear();
+    jamLocalRender.reset();
     remoteHeldAt.clear();
     for (const t of padFlashTimers.values()) clearTimeout(t);
     padFlashTimers.clear();
@@ -15108,6 +15165,7 @@
     callDeafened = false;
     voiceMutedPeers = {};
     jukeReset();
+    jukeTakeProgressLease = null;
     stopMeters();
     navigator.mediaDevices?.removeEventListener?.("devicechange", onDeviceChange);
     if (localStream) {
@@ -16757,11 +16815,22 @@
         bytes_total: number;
         network_bytes_done: number;
         provider: string | null;
+        cancellation: string | null;
       }>("download-progress", (e) => {
         // The deck reads the same events the Downloads surface does. It has no download of its
         // own to key off: the media element pulls ranges, and the backend emits progress for the
         // chunks it needs, so this is the only view the deck gets of how a track is coming in.
-        if (jukeNow?.cid === e.payload.cid) jukeFetch = fetchPhase(e.payload);
+        const tokenizedTake = typeof e.payload.cancellation === "string"
+          && shouldApplyJamTakeProgress(jukeTakeProgressLease, {
+            server: e.payload.server,
+            cid: e.payload.cid,
+            cancellation: e.payload.cancellation,
+          }, activeCallLease);
+        const currentMediaRead = e.payload.cancellation == null
+          && inCall && e.payload.server === callServer && jukeKind !== "take";
+        if (jukeNow?.cid === e.payload.cid && (tokenizedTake || currentMediaRead)) {
+          jukeFetch = fetchPhase(e.payload);
+        }
         const d = downloads[dlKey(e.payload.server, e.payload.cid)];
         if (!d) return; // only track explicitly-initiated downloads
         const now = Date.now();

@@ -15,8 +15,8 @@ use tokio::sync::oneshot;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::transport::{
-    DialSubmission, MeshTransport, PeerId, ProtocolId, Responder, Topic, TransportError,
-    TransportEvent, MAX_PEER_DIAL_BATCH,
+    DialSubmission, MeshTransport, PeerId, ProtocolId, RequestCancellation, Responder, Topic,
+    TransportError, TransportEvent, MAX_PEER_DIAL_BATCH,
 };
 
 #[derive(Debug, Default)]
@@ -133,10 +133,43 @@ impl MeshTransport for MemNetwork {
             from: self.local,
             proto,
             data,
-            responder: Responder(tx),
+            responder: Responder {
+                reply: tx,
+                _keepalive: None,
+            },
         };
         self.hub.deliver(peer, event)?;
         rx.await.map_err(|_| TransportError::NoResponse)
+    }
+
+    async fn request_cancellable(
+        &self,
+        peer: PeerId,
+        proto: ProtocolId,
+        data: Bytes,
+        mut cancellation: RequestCancellation,
+    ) -> Result<Bytes, TransportError> {
+        if cancellation.is_cancelled() {
+            return Err(TransportError::Cancelled);
+        }
+        let (reply, response) = oneshot::channel();
+        let event = TransportEvent::Request {
+            from: self.local,
+            proto,
+            data,
+            // The unbounded test inbox can outlive this waiting future just like libp2p's
+            // outbound table. Keep accounting with the event/responder until it is handled.
+            responder: Responder {
+                reply,
+                _keepalive: cancellation.keepalive(),
+            },
+        };
+        self.hub.deliver(peer, event)?;
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(TransportError::Cancelled),
+            result = response => result.map_err(|_| TransportError::NoResponse),
+        }
     }
 
     async fn request_connected(
@@ -198,6 +231,7 @@ impl MeshTransport for MemNetwork {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn bytes(s: &'static str) -> Bytes {
         Bytes::from_static(s.as_bytes())
@@ -269,6 +303,49 @@ mod tests {
         assert_eq!(from, PeerId::from_u64(1));
         assert_eq!(p, proto);
         assert_eq!(data, bytes("ping"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_retains_accounting_with_the_queued_in_memory_responder() {
+        #[derive(Debug)]
+        struct DropObserved(Arc<AtomicUsize>);
+        impl Drop for DropObserved {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let hub = Hub::new();
+        let a = hub.join(PeerId::from_u64(1));
+        let b = hub.join(PeerId::from_u64(2));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        let cancellation =
+            RequestCancellation::new(receiver, Some(Arc::new(DropObserved(Arc::clone(&drops)))));
+        let requester = a.clone();
+        let peer = b.local_peer();
+        let request = tokio::spawn(async move {
+            requester
+                .request_cancellable(peer, ProtocolId("bounded"), bytes("request"), cancellation)
+                .await
+        });
+        let responder = match b.next_event().await {
+            Some(TransportEvent::Request { responder, .. }) => responder,
+            other => panic!("expected request, got {other:?}"),
+        };
+
+        cancel.send(true).unwrap();
+        assert!(matches!(
+            request.await.unwrap(),
+            Err(TransportError::Cancelled)
+        ));
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "the queued request, not its cancelled waiter, owns the accounting lifetime"
+        );
+        responder.respond(bytes("late"));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

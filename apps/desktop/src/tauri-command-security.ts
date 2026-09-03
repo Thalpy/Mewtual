@@ -14,6 +14,9 @@ export const TAURI_COMMAND_GROUPS = {
       // bypass the session boundary: native code unconditionally closes that boundary under the
       // commit mutex before it may destroy the sole main webview. A first continuity error defers
       // destruction, and only a repeated close acknowledges loss of that latest UI snapshot.
+      // Inline-download cancellation is also deliberately available while locked. It returns no
+      // existence bit and can only destroy a bounded operation registration / actor future.
+      "cancel_inline_download",
       "create_backup", "change_vault_secret", "get_debug_logging", "set_debug_logging",
       // Emits a marked record and re-reads the sink's health, so Settings can report what the
       // writer is doing rather than what the preference asked for. Gated like the pair above.
@@ -99,7 +102,10 @@ export const TAURI_COMMAND_GROUPS = {
       // releases the reservation and collects whatever was sealed. Same authority as add_file
       // had, split so neither the webview nor the server actor is occupied for a whole file.
       "begin_file_upload", "push_file_chunk", "finish_file_upload", "cancel_file_upload",
-      "send_call_signal", "dismiss_dm_request", "download_file", "create_event",
+      // A cancellable inline read registers under the unlocked-session gate; cancellation remains
+      // callable while locking because it only destroys bounded operation authority and work.
+      "begin_inline_download", "download_file",
+      "send_call_signal", "dismiss_dm_request", "create_event",
       "save_wiki_page", "send_message", "edit_message", "delete_message", "toggle_reaction",
       "set_channel_topic", "jukebox_add", "jukebox_remove",
       // The announcement feed's counterparts to the three above, and gated the same way. An edit

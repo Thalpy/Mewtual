@@ -47,8 +47,9 @@ use catcoms_mls::{
 use catcoms_replication::{AppliedOp, EncryptedDoc, SealedOp};
 use catcoms_rt::{
     Clock, ConnectionFamily, ConnectionPath, ConnectionTransport, CryptoRngCore, DiscoveredPeer,
-    MeshTransport, PeerId, ProtocolId, RendezvousRegistration, Topic, TransportError,
-    TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT, MAX_PEER_DIAL_BATCH,
+    MeshTransport, PeerId, ProtocolId, RendezvousRegistration, RequestCancellation, Topic,
+    TransportError, TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT,
+    MAX_PEER_DIAL_BATCH,
 };
 use catcoms_storage::{
     open_file as open_file_fn, seal_file as seal_file_fn, BlobStore, Cid, FileRef, MemoryBlobStore,
@@ -4077,7 +4078,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         this.file_wrap_key = Zeroizing::new(file_wrap_key);
         this.ledger = InviteLedger::restore(&ledger_bytes).map_err(|_| SyncError::Malformed)?;
         for snap in &doc_snaps {
-            let doc = EncryptedDoc::restore(snap)?;
+            // Rebind Automerge's local actor after loading. P1 validates that actor against the
+            // signed outer device, and legacy documents also gain deterministic post-restart
+            // attribution instead of inheriting an implementation-selected actor.
+            let doc = EncryptedDoc::restore_for_actor(snap, &this.device.device_id())?;
             this.docs.insert((doc.doc_type(), doc.doc_id()), doc);
         }
         this.commit_log = commit_log;
@@ -9637,10 +9641,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// else `None`. The response is members-only and signed; the served bytes are re-hashed
     /// against the requested address before storing, so a member cannot substitute different
     /// bytes under it.
-    async fn request_blob_tracked(
+    async fn request_blob_tracked_cancellable(
         &mut self,
         peer: catcoms_rt::PeerId,
         cid: &Cid,
+        cancellation: Option<RequestCancellation>,
     ) -> Result<(bool, Option<DeviceId>), SyncError> {
         // A filename alone is not availability: a corrupt record must fall through to the
         // authenticated fetch path, whose CID check plus BlobStore::put repairs it in place.
@@ -9649,10 +9654,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let (req, auth) =
             self.build_authed_request(KIND_BLOB_FETCH, &encode_blob_fetch_req(cid))?;
-        let resp = self
-            .transport
-            .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
-            .await?;
+        let resp = match cancellation {
+            Some(cancellation) => {
+                self.transport
+                    .request_cancellable(
+                        peer,
+                        ProtocolId(RR_PROTOCOL),
+                        Bytes::from(req),
+                        cancellation,
+                    )
+                    .await?
+            }
+            None => {
+                self.transport
+                    .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+                    .await?
+            }
+        };
         if resp.is_empty() {
             return Ok((false, None)); // the peer did not have this blob
         }
@@ -9686,6 +9704,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.blobs.put(&blob)?;
         Ok((true, Some(responder)))
+    }
+
+    async fn request_blob_tracked(
+        &mut self,
+        peer: catcoms_rt::PeerId,
+        cid: &Cid,
+    ) -> Result<(bool, Option<DeviceId>), SyncError> {
+        self.request_blob_tracked_cancellable(peer, cid, None).await
     }
 
     /// Fetch a blob by content address from `peer`; `Ok(true)` if now held (already-held or
@@ -9728,6 +9754,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .await?
                 .1
                 .map(|d| roles::fingerprint(&d))),
+            None => Ok(None),
+        }
+    }
+
+    /// Cancellable counterpart used by bounded inline downloads. The accounting keepalive is
+    /// retained by a production transport until the actual outbound request responds or fails.
+    pub async fn request_blob_best_provider_cancellable(
+        &mut self,
+        cid: &Cid,
+        cancellation: RequestCancellation,
+    ) -> Result<Option<String>, SyncError> {
+        if matches!(self.blobs.get(cid), Ok(Some(_))) {
+            return Ok(None);
+        }
+        match self.pick_catchup_peer() {
+            Some(peer) => Ok(self
+                .request_blob_tracked_cancellable(peer, cid, Some(cancellation))
+                .await?
+                .1
+                .map(|device| roles::fingerprint(&device))),
             None => Ok(None),
         }
     }
@@ -12741,6 +12787,20 @@ mod tests {
             }
             self.inner.request(peer, proto, data).await
         }
+        async fn request_cancellable(
+            &self,
+            peer: PeerId,
+            proto: ProtocolId,
+            data: Bytes,
+            cancellation: RequestCancellation,
+        ) -> Result<Bytes, TransportError> {
+            if self.is_denied(&peer) {
+                return Err(TransportError::Unreachable(peer));
+            }
+            self.inner
+                .request_cancellable(peer, proto, data, cancellation)
+                .await
+        }
         async fn next_event(&self) -> Option<TransportEvent> {
             loop {
                 let event = self.inner.next_event().await?;
@@ -14280,6 +14340,19 @@ mod tests {
             Ok(self.response.clone())
         }
 
+        async fn request_cancellable(
+            &self,
+            peer: PeerId,
+            proto: ProtocolId,
+            data: Bytes,
+            cancellation: RequestCancellation,
+        ) -> Result<Bytes, TransportError> {
+            if cancellation.is_cancelled() {
+                return Err(TransportError::Cancelled);
+            }
+            self.request(peer, proto, data).await
+        }
+
         async fn next_event(&self) -> Option<TransportEvent> {
             self.events.lock().expect("event mutex").pop_front()
         }
@@ -14336,6 +14409,19 @@ mod tests {
             Ok(Bytes::from(response))
         }
 
+        async fn request_cancellable(
+            &self,
+            peer: PeerId,
+            proto: ProtocolId,
+            data: Bytes,
+            cancellation: RequestCancellation,
+        ) -> Result<Bytes, TransportError> {
+            if cancellation.is_cancelled() {
+                return Err(TransportError::Cancelled);
+            }
+            self.request(peer, proto, data).await
+        }
+
         async fn next_event(&self) -> Option<TransportEvent> {
             None
         }
@@ -14366,6 +14452,18 @@ mod tests {
             data: Bytes,
         ) -> Result<Bytes, TransportError> {
             self.inner.request(peer, proto, data).await
+        }
+
+        async fn request_cancellable(
+            &self,
+            peer: PeerId,
+            proto: ProtocolId,
+            data: Bytes,
+            cancellation: RequestCancellation,
+        ) -> Result<Bytes, TransportError> {
+            self.inner
+                .request_cancellable(peer, proto, data, cancellation)
+                .await
         }
 
         async fn next_event(&self) -> Option<TransportEvent> {
@@ -15212,6 +15310,18 @@ mod tests {
             _data: Bytes,
         ) -> Result<Bytes, TransportError> {
             Err(TransportError::Unreachable(peer))
+        }
+        async fn request_cancellable(
+            &self,
+            peer: PeerId,
+            proto: ProtocolId,
+            data: Bytes,
+            cancellation: RequestCancellation,
+        ) -> Result<Bytes, TransportError> {
+            if cancellation.is_cancelled() {
+                return Err(TransportError::Cancelled);
+            }
+            self.request(peer, proto, data).await
         }
         async fn next_event(&self) -> Option<TransportEvent> {
             None
@@ -18340,6 +18450,19 @@ mod tests {
             _data: Bytes,
         ) -> Result<Bytes, TransportError> {
             std::future::pending().await
+        }
+        async fn request_cancellable(
+            &self,
+            peer: PeerId,
+            proto: ProtocolId,
+            data: Bytes,
+            cancellation: RequestCancellation,
+        ) -> Result<Bytes, TransportError> {
+            if cancellation.is_cancelled() {
+                return Err(TransportError::Cancelled);
+            }
+            // This fake transfers no work out of the returned future, so dropping it is terminal.
+            self.request(peer, proto, data).await
         }
         async fn notify(
             &self,
