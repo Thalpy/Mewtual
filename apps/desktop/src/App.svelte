@@ -2330,13 +2330,20 @@
   function beginPageRequest(): number {
     return pageAdmission.begin();
   }
-  function applyPage(page: MessagePage<PagedMsg>, token: number) {
-    if (!pageAdmission.accepts(token)) return; // superseded while it was in flight
+  /**
+   * Returns whether the page was admitted. Callers that do anything after this: scroll, flash a
+   * row, animate an arrival, refresh pins, settle the read mark, must stop when it says no.
+   * Those follow-ups all describe the rows this answer carried, so running them on rows that
+   * were refused points them at whatever the winning request put on screen instead.
+   */
+  function applyPage(page: MessagePage<PagedMsg>, token: number): boolean {
+    if (!pageAdmission.accepts(token)) return false; // superseded while it was in flight
     messages = page.rows;
     pageStart = page.rows.length ? page.start : 0;
     pageTotal = page.total;
     pageVersion = page.version;
     pageUnread = page.unread;
+    return true;
   }
   function clearPage() {
     // Leaving the conversation invalidates everything already asked for.
@@ -2686,19 +2693,22 @@
   }
   // Make an absolute row index renderable: fetch a page around it when it is not loaded. The
   // same shape `windowAround` used to slice out of the whole array, read from the actor instead.
-  async function ensureMessageRendered(msgIdx: number) {
-    if (msgIdx >= pageStart && msgIdx < pageEnd) return;
+  // Reports whether the row is on screen now, so callers do not scroll to an index that a
+  // superseding request has already replaced with a different stretch of the conversation.
+  async function ensureMessageRendered(msgIdx: number): Promise<boolean> {
+    if (msgIdx >= pageStart && msgIdx < pageEnd) return true;
     const server = activeServerId;
     const channel = cur?.active;
-    if (server === null || !channel) return;
+    if (server === null || !channel) return false;
     const token = beginPageRequest();
     const page = await fetchPage(server, channel, planJump({ kind: "index", index: msgIdx }, CHAT_INITIAL_ROWS));
-    if (activeServerId !== server || cur?.active !== channel) return;
-    applyPage(page, token);
+    if (activeServerId !== server || cur?.active !== channel) return false;
+    if (!applyPage(page, token)) return false;
     await tick();
+    return true;
   }
   async function scrollToMatch(msgIdx: number) {
-    await ensureMessageRendered(msgIdx);
+    if (!(await ensureMessageRendered(msgIdx))) return;
     messagesEl?.querySelector(`[data-mi="${msgIdx}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
   // Go to a hit, following it into another channel if that's where it lives. Every channel in the
@@ -4842,7 +4852,9 @@
       if (activeServerId !== server || cur?.active !== channel || !page.rows.length) return;
       const previousHeight = node.scrollHeight;
       const previousTop = node.scrollTop;
-      applyPage(page, token);
+      // A refused page left the list alone, so the height correction below would be measured
+      // against rows this call never inserted and would jump the reader somewhere arbitrary.
+      if (!applyPage(page, token)) return;
       await tick();
       // Retain the reader's visual anchor after inserting rows above the viewport.
       if (messagesEl === node) node.scrollTop = previousTop + node.scrollHeight - previousHeight;
@@ -6101,7 +6113,10 @@
       // A slow response from the conversation we just left must never populate the new one, and
       // `applyPage` refuses one that a later request has already superseded.
       if (revision !== refreshRevision || activeServerId !== server || cur?.active !== channel) return;
-      applyPage(page, token);
+      // Everything below describes the rows this answer carried: which are new enough to animate,
+      // which pins belong beside them, what counts as read. A refused page put none of them on
+      // screen, so all of it would be said about somebody else's rows.
+      if (!applyPage(page, token)) return;
       messageWindowScope = nextScope;
       void refreshPinned(server, channel);
       if (animateArrivals) {
@@ -9951,7 +9966,7 @@
       const token = beginPageRequest();
       const page = await fetchPage(server, channel, planJump({ kind: "id", id }, CHAT_INITIAL_ROWS));
       if (activeServerId !== server || cur?.active !== channel || page.anchor_index === null) return;
-      applyPage(page, token);
+      if (!applyPage(page, token)) return;
       await tick();
       idx = messages.findIndex((m) => m.id === id);
       if (idx < 0) return;
@@ -9971,8 +9986,7 @@
     const token = beginPageRequest();
     const page = await fetchPage(server, channel, planJump({ kind: "first_reply_to", id: parentId }, CHAT_INITIAL_ROWS));
     if (activeServerId !== server || cur?.active !== channel || page.anchor_index === null) return;
-    applyPage(page, token);
-    if (!pageAdmission.accepts(token)) return; // a newer request already replaced the slice
+    if (!applyPage(page, token)) return; // a newer request already replaced the slice
     const target = messages[page.anchor_index - page.start];
     if (target?.id) await jumpToMessageId(target.id);
   }
