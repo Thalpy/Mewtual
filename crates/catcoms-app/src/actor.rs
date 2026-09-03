@@ -5341,6 +5341,101 @@ mod tests {
         }
     }
 
+    /// Where the time between launching and being able to read a message actually goes.
+    ///
+    /// The desktop's startup budget has never been broken down, so the hardening plan has been
+    /// trading in chunk sizes. This times the native half on one machine: the vault unlock
+    /// (Argon2id, deliberately slow), reading and unsealing a server, and rebuilding it from its
+    /// snapshot. Not a correctness test; run with
+    /// `cargo test -p catcoms-app --release --lib startup_probe -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn startup_probe() {
+        use crate::store::{ServerRecord, ServerStore};
+        use catcoms_rt::OsCryptoRng;
+        let clock = catcoms_rt::SystemClock;
+        let timed = |f: &mut dyn FnMut()| {
+            let start = clock.monotonic_ms();
+            f();
+            clock.monotonic_ms().saturating_sub(start)
+        };
+
+        for messages in [200usize, 5_000, 20_000] {
+            let hub = Hub::new();
+            let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+            server.open_channel(GENERAL).await.unwrap();
+            for i in 0..messages {
+                server
+                    .send_message(
+                        GENERAL,
+                        &format!("message {i} with a plausible amount of text"),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let snapshot = server.snapshot().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let mut rng = OsCryptoRng;
+
+            let mut first = None;
+            let create = timed(&mut || {
+                first = Some(
+                    ServerStore::open(dir.path(), b"a long enough passphrase", &mut rng).unwrap(),
+                )
+            });
+            let store = first.unwrap();
+            store.save_server(7, &snapshot, &mut rng).unwrap();
+            store
+                .save_registry(
+                    &[ServerRecord {
+                        id: 7,
+                        display_name: "alice".into(),
+                        invite: String::new(),
+                        is_dm: false,
+                    }],
+                    &mut rng,
+                )
+                .unwrap();
+            drop(store);
+
+            // The launch path: unlock the vault, read the registry, unseal and rebuild a server.
+            let mut reopened = None;
+            let unlock = timed(&mut || {
+                reopened = Some(
+                    ServerStore::open(dir.path(), b"a long enough passphrase", &mut rng).unwrap(),
+                )
+            });
+            let store = reopened.unwrap();
+            let mut registry = Vec::new();
+            let read_registry = timed(&mut || registry = store.load_registry().unwrap());
+            let mut sealed = None;
+            let read_server =
+                timed(&mut || sealed = Some(store.load_server(registry[0].id).unwrap()));
+            let sealed = sealed.unwrap();
+            let hub2 = Hub::new();
+            let mut restored = None;
+            let restore = timed(&mut || {
+                restored = Server::restore(
+                    &sealed,
+                    hub2.join(PeerId::from_u64(2)),
+                    ChaCha20Rng::seed_from_u64(1),
+                    Box::new(ManualClock::new(2_000)),
+                    "alice",
+                )
+                .ok()
+            });
+            let restored = restored.expect("the snapshot restores");
+            let open = timed(&mut || {
+                let _ = restored.messages(GENERAL);
+            });
+            println!(
+                "messages={messages} snapshot={} KiB | vault_create={create}ms vault_unlock={unlock}ms \
+                 registry={read_registry}ms read_server={read_server}ms restore={restore}ms first_read={open}ms",
+                snapshot.len() / 1024,
+            );
+        }
+    }
+
     /// Timing probe for the per-tick costs that scale with history. Not a correctness test; run
     /// with `cargo test -p catcoms-app --release --lib scale_probe -- --ignored --nocapture`.
     #[tokio::test]
