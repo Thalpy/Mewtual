@@ -314,6 +314,7 @@ pub enum AppCommand {
         channel: u128,
         limit: usize,
         after_id: String,
+        after_ts: u64,
         reply: oneshot::Sender<crate::MessageTail>,
     },
     /// Query a bounded slice of a channel around an anchor (see [`crate::MessagePageQuery`]).
@@ -1280,6 +1281,7 @@ impl ServerActor {
         channel: u128,
         limit: usize,
         after_id: String,
+        after_ts: u64,
     ) -> crate::MessageTail {
         let (reply, rx) = oneshot::channel();
         if self
@@ -1288,6 +1290,7 @@ impl ServerActor {
                 channel,
                 limit,
                 after_id,
+                after_ts,
                 reply,
             })
             .await
@@ -3403,9 +3406,10 @@ where
                         channel,
                         limit,
                         after_id,
+                        after_ts,
                         reply,
                     }) => {
-                        let _ = reply.send(server.message_tail(channel, limit, &after_id));
+                        let _ = reply.send(server.message_tail(channel, limit, &after_id, after_ts));
                     }
                     Some(AppCommand::MessagePage {
                         channel,
@@ -5137,24 +5141,25 @@ mod tests {
             id: &str,
             text: &str,
             reply_to: &str,
+            ts: u64,
         ) {
             let (id, text, reply_to) = (id.to_string(), text.to_string(), reply_to.to_string());
             server
                 .sync
                 .post(crate::DocType::Channel, GENERAL, move |d| {
-                    crate::append_message(d, &id, "bob", &text, 7, &reply_to)
+                    crate::append_message(d, &id, "bob", &text, ts, &reply_to)
                 })
                 .await
                 .unwrap();
         }
         for i in 0..5 {
-            post_as(&mut server, &format!("filler-{i}"), "filler", "").await;
+            post_as(&mut server, &format!("filler-{i}"), "filler", "", 100 + i).await;
         }
-        post_as(&mut server, "reply", "re: opener", &mine).await;
-        post_as(&mut server, "mention", "@[Alice Cat] ping", "").await;
-        post_as(&mut server, "plain", "nothing for alice", "").await;
+        post_as(&mut server, "reply", "re: opener", &mine, 200).await;
+        post_as(&mut server, "mention", "@[Alice Cat] ping", "", 300).await;
+        post_as(&mut server, "plain", "nothing for alice", "", 400).await;
 
-        let tail = server.message_tail(GENERAL, 3, "");
+        let tail = server.message_tail(GENERAL, 3, "", 0);
         assert_eq!(
             tail.rows
                 .iter()
@@ -5171,7 +5176,7 @@ mod tests {
             vec![true, true, false],
             "the reply's parent is outside the tail and is still resolved"
         );
-        let whole = server.message_tail(GENERAL, 100, "");
+        let whole = server.message_tail(GENERAL, 100, "", 0);
         assert_eq!(
             whole.rows.len(),
             9,
@@ -5184,9 +5189,16 @@ mod tests {
         // would carry, and it still has to ring: the answer is computed over the whole channel
         // past this device's cursor, not over the window.
         for i in 0..10 {
-            post_as(&mut server, &format!("burst-{i}"), "ordinary chatter", "").await;
+            post_as(
+                &mut server,
+                &format!("burst-{i}"),
+                "ordinary chatter",
+                "",
+                500 + i,
+            )
+            .await;
         }
-        let after_burst = server.message_tail(GENERAL, 3, "filler-0");
+        let after_burst = server.message_tail(GENERAL, 3, "filler-0", 100);
         assert!(
             after_burst.rows.iter().all(|(_, to_me)| !*to_me),
             "nothing in the carried window is addressed to me"
@@ -5197,15 +5209,32 @@ mod tests {
         );
         assert!(
             !server
-                .message_tail(GENERAL, 3, "plain")
+                .message_tail(GENERAL, 3, "plain", 400)
                 .addressed_after_cursor,
             "a cursor past the mention leaves only ordinary chatter"
         );
+
+        // A read mark whose message has been deleted. The id no longer names anything, but the
+        // timestamp still says how far this device had read, and it has to be believed: treating
+        // the channel as unread from its first row makes an old mention ring again, and go on
+        // ringing on every arrival, for a conversation the member finished with long ago.
+        assert!(
+            !server
+                .message_tail(GENERAL, 3, "deleted-row", 400)
+                .addressed_after_cursor,
+            "a lost cursor still knows the time it was at, and the mention is behind it"
+        );
         assert!(
             server
-                .message_tail(GENERAL, 3, "no-such-id")
+                .message_tail(GENERAL, 3, "deleted-row", 200)
                 .addressed_after_cursor,
-            "a cursor naming no row cannot be trusted to have covered anything"
+            "and it does not swallow a mention that came after that time"
+        );
+        assert!(
+            server
+                .message_tail(GENERAL, 3, "no-such-id", 0)
+                .addressed_after_cursor,
+            "no cursor at all is the one case where the whole channel is unaccounted for"
         );
     }
 

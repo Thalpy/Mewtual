@@ -7138,11 +7138,22 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// This is what an arrival notification needs, and all it needs: the previous shape of that
     /// path fetched the entire history of a channel nobody was looking at to read its last row.
     ///
-    /// `after_id` is the caller's cursor, normally the read mark for that channel.
-    /// [`MessageTail::addressed_after_cursor`] answers over **every** row past it, not only the
-    /// rows carried: a catch-up or a burst can append more messages than one tail holds, and a
-    /// mention followed by `limit` ordinary messages must still ring.
-    pub fn message_tail(&self, channel: u128, limit: usize, after_id: &str) -> MessageTail {
+    /// `after_id` and `after_ts` are the caller's cursor, normally the read mark for that
+    /// channel. [`MessageTail::addressed_after_cursor`] answers over **every** row past it, not
+    /// only the rows carried: a catch-up or a burst can append more messages than one tail holds,
+    /// and a mention followed by `limit` ordinary messages must still ring.
+    ///
+    /// The id is the cursor; `after_ts` is what is left of it once the message it named is gone.
+    /// Without it a deleted read mark reads as "nothing here has been read", so a channel read
+    /// years ago rings again for its oldest mention, and keeps ringing. Pass `0` only to mean
+    /// this member has genuinely read nothing here.
+    pub fn message_tail(
+        &self,
+        channel: u128,
+        limit: usize,
+        after_id: &str,
+        after_ts: u64,
+    ) -> MessageTail {
         let me = self.my_fingerprint();
         let marker = self.mention_marker();
         let rows = self
@@ -7160,13 +7171,24 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .map(|row| (row.message, row.targets_me))
             .collect();
         let addressed_after_cursor = self.with_channel(channel, |c| {
-            let from = match c.by_id.get(after_id) {
-                Some(cursor) => cursor + 1,
-                // No cursor, or one whose message is gone: everything here is still unaccounted
-                // for, which is the answer that cannot silently drop a mention.
-                None => 0,
+            // Where the cursor lands, in the three ways it can be known. The id is exact and is
+            // preferred whenever the message it names is still here. Rows are in document order,
+            // which is not sorted by time, so the timestamp fallback is a test applied per row
+            // rather than a place to start from.
+            let from = c.by_id.get(after_id).map(|cursor| cursor + 1);
+            let seen_before = |index: usize, m: &ChatMessage| match from {
+                Some(start) => index < start,
+                // The cursor's message is gone, deleted or never recorded. Its timestamp still
+                // says where the reader had got to, and a message at or before that was read.
+                None if after_ts > 0 => m.ts <= after_ts,
+                // Nothing read here at all, so nothing is accounted for. This is the only case
+                // where the whole channel counts, and it is the one where that is the answer.
+                None => false,
             };
-            c.messages[from.min(c.messages.len())..].iter().any(|m| {
+            c.messages.iter().enumerate().any(|(index, m)| {
+                if seen_before(index, m) {
+                    return false;
+                }
                 let parent = (!m.reply_to.is_empty())
                     .then(|| c.by_id.get(&m.reply_to).map(|&i| &c.messages[i]))
                     .flatten();

@@ -16851,10 +16851,13 @@
       // channel, past this device's read mark. A tail alone could not answer it: one catch-up or
       // one busy minute can append more messages than the tail holds, and a mention followed by
       // that many ordinary messages would drop out of the window and never ring.
-      const cursor = readMarkOf(chatScopeKey(server, channel)).id;
+      // The id is the cursor; its timestamp is what remains of it when the message it names has
+      // been deleted. Without that, a channel read long ago looks unread from its first row, and
+      // an ancient mention rings on every arrival from then on.
+      const cursor = readMarkOf(chatScopeKey(server, channel));
       const tail = await invoke<{ rows: TailMsg[]; addressed_after_cursor: boolean }>(
         "get_message_tail",
-        { server, channel, limit: NOTIFY_TAIL_ROWS, afterId: cursor || null },
+        { server, channel, limit: NOTIFY_TAIL_ROWS, afterId: cursor.id || null, afterTs: cursor.ts || null },
       );
       const latest = tail.rows[tail.rows.length - 1];
       let kind: "message" | "mention" = mode === "mention" ? "mention" : "message";

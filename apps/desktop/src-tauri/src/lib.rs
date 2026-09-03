@@ -10976,12 +10976,18 @@ async fn get_message_tail(
     channel: String,
     limit: usize,
     after_id: Option<String>,
+    after_ts: Option<u64>,
 ) -> Result<UiMessageTail, String> {
     let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
     let limit = limit.clamp(1, MAX_MESSAGE_TAIL);
     let actor = actor_of(&state, server).await?;
     let tail = actor
-        .message_tail(id, limit, after_id.unwrap_or_default())
+        .message_tail(
+            id,
+            limit,
+            after_id.unwrap_or_default(),
+            after_ts.unwrap_or_default(),
+        )
         .await;
     Ok(UiMessageTail {
         rows: tail
