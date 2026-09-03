@@ -206,7 +206,10 @@
     assistedJoinAction, joinReplyCandidateLabel, joinReplyIsExpired, joinReplyNeedsReplacement,
     withOrderedSwitchboardStatus,
   } from "./joinreply";
-  import { callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, type MappedPort } from "./callroutes";
+  import {
+    callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate,
+    shouldSignalHostCandidate, type MappedPort,
+  } from "./callroutes";
   import { JamEngine, jamSequenceAccepted, type JamPlaybackPatchSet } from "./jam-engine";
   import { JamPeerBudget } from "./jam-budget";
   import { JamFrameDecoder, toggleJamPeerMute, type JamFrameDecode } from "./jam-wire";
@@ -550,7 +553,11 @@
     // target. It also empties `livery` on the way past and refills it a round-trip later, which is
     // why the editor draft is seeded from liveryLoaded rather than from `livery` directly.
     if (id !== null && id !== activeServerId) void switchServer(id);
-    serverNameDraft = cur?.name ?? "";
+    serverNameDraft = cur ? serverLabel(cur) : "";
+    // Seeded from the published name only; an unread livery seeds nothing, for the same reason
+    // the colour draft does not. Publishing an empty name would clear the group's name for
+    // everyone, so it must never be presented as though that were the current value.
+    sharedNameDraft = liveryLoaded ? livery.name : "";
     serverSettingsPage = page;
     setSearch = "";
     showServerSettings = true;
@@ -569,16 +576,70 @@
       void precheckInviteRoutes(targetServer);
     }
   }
+  /**
+   * Rename this server for myself alone: a local label that outranks whatever the owner
+   * publishes. The rail entry and the native record both take it, so the cross-server inbox
+   * agrees with what is on screen.
+   */
   async function renameServer() {
     const name = serverNameDraft.trim();
-    if (activeServerId === null || !cur || !name || name === cur.name) return;
+    const id = activeServerId;
+    if (id === null || !cur || !name || name === serverLabel(cur)) return;
     try {
-      await invoke("rename_server", { server: activeServerId, name });
+      await invoke("rename_server", { server: id, name });
       cur.name = name;
+      try { localStorage.setItem(localNameKey(id), name); } catch { /* the rail entry still has it */ }
+      railNameTick += 1;
+      applyServerLabels();
     } catch (e) {
       error = String(e);
     }
   }
+  /**
+   * Publish the group's name to every member (owner/admin). Distinct from renaming it for
+   * yourself: this is what the group is called for anyone who has not overridden it.
+   *
+   * Publishing also drops MY own override, because otherwise the person who just named the
+   * group would be the one member who could not see the name they chose.
+   */
+  async function publishServerName() {
+    const name = sharedNameDraft.trim();
+    const id = activeServerId;
+    if (id === null) return;
+    busy = true;
+    try {
+      await invoke("set_shared_server_name", { server: id, name });
+      try { localStorage.removeItem(localNameKey(id)); } catch { /* an override we cannot clear */ }
+      await refreshLivery();
+      await refreshServerIconFor(id);
+      railNameTick += 1;
+      applyServerLabels();
+      toast(name ? `This server is now called "${name}" for everyone` : "Published name cleared", "ok", 3000);
+    } catch (e) {
+      error = errorText(e);
+    } finally {
+      busy = false;
+    }
+  }
+  /** Drop my local override and go back to whatever the group publishes. */
+  function clearLocalServerName() {
+    const id = activeServerId;
+    if (id === null) return;
+    try { localStorage.removeItem(localNameKey(id)); } catch { /* ignore */ }
+    // `applyServerLabels` cannot undo this on its own: the entry's own name IS the override it
+    // settled on last time, so dropping the override has to name what replaces it explicitly.
+    const published = serverPublishedNames[id];
+    if (published && cur) {
+      cur.name = published;
+      void invoke("rename_server", { server: id, name: published }).catch(() => {});
+      servers = [...servers];
+    }
+    railNameTick += 1;
+    serverNameDraft = cur ? serverLabel(cur) : "";
+  }
+  // `serverLabel` reads localStorage, which no rune tracks; this makes a rename repaint the rail.
+  let railNameTick = $state(0);
+  let sharedNameDraft = $state("");
   let showFeedback = $state(false); // the Send-feedback overlay
   type FeedbackOverlayComponent = (typeof import("./FeedbackOverlay.svelte"))["default"];
   let FeedbackOverlay = $state<FeedbackOverlayComponent | null>(null);
@@ -691,12 +752,53 @@
   // UNTRUSTED (any member's client may have written the doc): sanitized on read, and only
   // ever able to recolor: preset id, accent, and an allow-list of colour tokens. Semantic
   // tokens (--ok/--warn/--danger) and layout are never livery-controllable.
-  type Livery = { preset: string; accent: string; tokens: Record<string, string>; icon: string; cursor: string };
-  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {}, icon: "", cursor: "" });
+  type Livery = { preset: string; accent: string; tokens: Record<string, string>; icon: string; cursor: string; name: string };
+  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {}, icon: "", cursor: "", name: "" });
   let livery = $state<Livery>(emptyLivery());
   // Rail icons for every (non-DM) server, fetched from each server's livery doc and kept
   // fresh by livery-changed events. Values are sanitized base64 (rendered as data: URLs).
   let serverIcons = $state<Record<number, string>>({});
+  // Each (non-DM) server's PUBLISHED name, read from the same livery doc as the icon. The group's
+  // own name, as opposed to the rail label, which is local and may be overridden per member.
+  let serverPublishedNames = $state<Record<number, string>>({});
+  // Local overrides, by server id: a member who has renamed a server for themselves keeps that
+  // name even when the owner publishes one. Renaming is what sets this; there is no other way in.
+  const localNameKey = (id: number) => `catcoms.server.localname.${id}`;
+  function loadLocalName(id: number): string {
+    try { return localStorage.getItem(localNameKey(id)) ?? ""; } catch { return ""; }
+  }
+  /**
+   * What to call a server in the rail, in order of authority: this member's own override, then
+   * the owner's published name, then whatever label the entry was created with.
+   *
+   * The last of those used to be the only one, and it defaulted to the display name of whoever
+   * was looking, so every group was named after its reader.
+   */
+  function serverLabel(entry: { id: number; name: string; isDm: boolean }): string {
+    void railNameTick; // a rename is a localStorage write, which no rune would otherwise see
+    if (entry.isDm) return entry.name; // a DM's label is the friend, and is never published
+    return loadLocalName(entry.id) || serverPublishedNames[entry.id] || entry.name;
+  }
+  /**
+   * Settle each rail entry's own `name` on the label that should be showing.
+   *
+   * Done here, once, rather than at the thirty-odd places that render a server's name: the rail,
+   * the crumbs, the cross-server inbox, the orbit view and the command palette all read
+   * `s.name`, and they should all agree. A local override wins, then the group's published name;
+   * an entry nobody has named either way keeps the label it was created with.
+   */
+  function applyServerLabels() {
+    let changed = false;
+    for (const s of servers) {
+      if (s.isDm) continue;
+      const label = serverLabel(s);
+      if (label && label !== s.name) {
+        s.name = label;
+        changed = true;
+      }
+    }
+    if (changed) servers = [...servers];
+  }
   let liveryDraft = $state<Livery>(emptyLivery()); // Server-settings editor draft
   // Whether `livery` holds an answer we actually read for the active server, as opposed to the
   // empty value a switch leaves behind. An empty livery is byte-for-byte the payload that REMOVES
@@ -710,7 +812,11 @@
   // the editor has this server's values in it, the buffer belongs to the user.
   function seedLiveryDraft(server: number) {
     if (!showServerSettings || liveryDraftFor === server) return;
-    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "" };
+    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "", name: "" };
+    // The published name is seeded on the same read, and only from one: opening the wrench
+    // mid-switch would otherwise leave the box empty and one Publish away from clearing the
+    // group's name for every member.
+    sharedNameDraft = livery.name;
     liveryDraftFor = server;
   }
   const LIVERY_TOKENS = [
@@ -746,6 +852,13 @@
     }
     if (typeof l.icon === "string" && ICON_B64.test(l.icon)) out.icon = l.icon;
     if (typeof l.cursor === "string" && ICON_B64.test(l.cursor) && l.cursor.length <= 24000) out.cursor = l.cursor;
+    // A published name is drawn as text in the rail, the crumbs and the cross-server inbox.
+    // The backend already bounds it and refuses control characters; this is the read-side half
+    // of the same rule, because any member's client may have written the document.
+    if (typeof l.name === "string") {
+      const name = l.name.replace(/\p{Cc}|\p{Cf}/gu, "").trim();
+      if (name && name.length <= 64) out.name = name;
+    }
     return out;
   }
 
@@ -860,6 +973,10 @@
       const l = sanitizeLivery(await invoke<Livery>("get_livery", { server: id }));
       if (l.icon) serverIcons[id] = l.icon;
       else delete serverIcons[id];
+      // The name rides the same read: one round trip already fetches the whole livery doc.
+      if (l.name) serverPublishedNames[id] = l.name;
+      else delete serverPublishedNames[id];
+      applyServerLabels();
     } catch {
       /* unreachable server actor: keep whatever we had */
     }
@@ -5252,6 +5369,12 @@
       const { value: r } = await invokeDebugged<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false, serverName });
       if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       addServer(r, serverName, displayName);
+      // Publish it as the group's own name, so everyone who joins sees what it is called instead
+      // of naming it themselves. Best-effort: a founded server with an unpublished name is still
+      // a working server, and the owner can publish it from Server settings.
+      void invoke("set_shared_server_name", { server: r.server, name: serverName })
+        .then(() => refreshServerIconFor(r.server))
+        .catch(() => {});
       newServerName = "";
     } catch (e) {
       if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = errorText(e);
@@ -15137,6 +15260,20 @@
   // Reactive shadow of how many router-mapped routes this call holds, for the status line: a
   // plain Map mutation is invisible to $derived.
   let callMappedRoutes = $state(0);
+  // This machine's real LAN address, used only to recognise host candidates gathered on virtual
+  // adapters. Read once per call: it is the address every host candidate already carries, so
+  // holding it here publishes nothing, and a null simply disables the filter.
+  let defaultRouteIpv4 = $state<string | null>(null);
+  // How many candidates were held back this call. Surfaced in Connectivity rather than dropped
+  // silently, because a filter nobody can see is indistinguishable from a bug when a call fails.
+  let suppressedIceCandidates = $state(0);
+  async function refreshDefaultRoute() {
+    try {
+      defaultRouteIpv4 = await invoke<string | null>("default_route_address");
+    } catch {
+      defaultRouteIpv4 = null; // unknown route: signal everything, as before
+    }
+  }
 
   async function signalMappedCandidate(peer: CallPeer, c: RTCIceCandidate) {
     if (!mappableIcePort(c)) return;
@@ -15242,6 +15379,12 @@
     pc.onnegotiationneeded = () => void negotiatePeer(peer);
     pc.onicecandidate = (e) => {
       if (e.candidate) {
+        // A candidate on one of this machine's virtual adapters can never be reached from
+        // outside, and sending it costs the far end a connectivity check before ICE settles.
+        if (!shouldSignalHostCandidate(e.candidate, defaultRouteIpv4)) {
+          suppressedIceCandidates += 1;
+          return;
+        }
         void sendSignal(peer.server, fp, { callId: peer.channel, type: "ice", candidate: e.candidate.toJSON() });
         void signalMappedCandidate(peer, e.candidate);
       }
@@ -15522,6 +15665,9 @@
     void refreshCallProfiles();
     void refreshCallFiles();
     callMuted = false;
+    // Read before the first candidate is gathered; a route learned late simply filters nothing.
+    suppressedIceCandidates = 0;
+    void refreshDefaultRoute();
     focusOpen = false;
     focusDismissed = false; // a new call earns a fresh chance to take the window
     voiceAlert = null;
@@ -23205,6 +23351,13 @@
             Media is end to end encrypted on every path; no relay or server can hear or decrypt it.
             A relayed leg passes through a TURN relay, which can see who is talking to whom, when,
             and from which IP address. A direct leg has nobody in the path at all.
+            {#if suppressedIceCandidates}
+              <br />
+              Held back {suppressedIceCandidates} local network address{suppressedIceCandidates === 1 ? "" : "es"}
+              on virtual adapters (VirtualBox, WSL or Hyper-V). Nobody outside this machine can
+              reach those, so sending them would only have made the other side wait while it tried
+              them. Your real network is unaffected, and nothing needs changing on your system.
+            {/if}
           </p>
         {/if}
 
@@ -25275,12 +25428,35 @@
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // OVERVIEW</div>
               <h1>Overview</h1>
               <section class="set-section">
-              <p>{cur?.name ?? ":"} <span class="role-badge {myRole}">{myRole}</span></p>
+              <p>{cur ? serverLabel(cur) : ":"} <span class="role-badge {myRole}">{myRole}</span></p>
+              {#if canModerate && !cur?.isDm}
+                <h3>Name this server</h3>
+                <p class="muted small">Everyone sees this name unless they have renamed the server for themselves.</p>
+                <form class="rename-row" onsubmit={(e) => { e.preventDefault(); publishServerName(); }}>
+                  <input bind:value={sharedNameDraft} maxlength="64" placeholder="What this group is called" />
+                  <button class="ghost small" disabled={busy || !liveryLoaded || sharedNameDraft.trim() === livery.name}>Publish</button>
+                </form>
+                {#if !liveryLoaded}
+                  <p class="muted small">Still reading this server's published values; publishing is held until it lands so an empty box cannot clear the name for everyone.</p>
+                {:else if livery.name}
+                  <p class="muted small">Published as <b>{livery.name}</b>.</p>
+                {:else}
+                  <p class="muted small">No name published yet, so each member sees whatever they called it when they joined.</p>
+                {/if}
+              {/if}
+              <h3>Rename it for yourself</h3>
               <form class="rename-row" onsubmit={(e) => { e.preventDefault(); renameServer(); }}>
-                <input bind:value={serverNameDraft} placeholder="Server name" />
-                <button class="ghost small" disabled={!serverNameDraft.trim() || serverNameDraft.trim() === cur?.name}>Rename</button>
+                <input bind:value={serverNameDraft} maxlength="64" placeholder="Your own label" />
+                <button class="ghost small" disabled={!serverNameDraft.trim() || serverNameDraft.trim() === (cur ? serverLabel(cur) : "")}>Rename</button>
               </form>
-              <p class="muted small">The name is your own label for this server (not shared with other members).</p>
+              {#if activeServerId !== null && loadLocalName(activeServerId)}
+                <p class="muted small">
+                  You call this server <b>{loadLocalName(activeServerId)}</b>, which overrides the published name.
+                  <button type="button" class="ghost small" onclick={clearLocalServerName}>Use the published name</button>
+                </p>
+              {:else}
+                <p class="muted small">A private label, visible only to you. Nobody else is told.</p>
+              {/if}
               </section>
               <!-- The icon IS shared, and it was only reachable under Livery, which reads as a
                    theming page: the one thing everybody looks for when setting a server up was

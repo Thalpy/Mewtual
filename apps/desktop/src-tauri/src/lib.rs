@@ -1177,6 +1177,10 @@ struct UiLivery {
     /// The shared server cursor as base64 image bytes (empty = none). Untrusted exactly like
     /// the icon: render it as an image only (a `cursor: url(data:…)`), never interpret it.
     cursor: String,
+    /// The shared server name (empty = the group publishes none, so each member keeps its own
+    /// local label). Untrusted like everything else here: the backend bounds its length and
+    /// refuses control characters, and the frontend renders it as text only.
+    name: String,
 }
 
 /// One member's custom badge as serialized to the frontend, keyed by fingerprint in
@@ -1975,10 +1979,11 @@ fn forward_events(
             // Keeping that rule uniform means an arbitrary runtime `trace` field can never bypass
             // Safe capture, while both actor outputs still join the command's canonical trace.
             let actor_trace = catcoms_diagnostics::TraceId(ev.trace.0);
-            let trace = actor_trace
-                .is_set()
-                .then(|| catcoms_log::hub().external_trace(actor_trace))
-                .unwrap_or_default();
+            let trace = if actor_trace.is_set() {
+                catcoms_log::hub().external_trace(actor_trace)
+            } else {
+                Default::default()
+            };
             // Route/authentication changes are the narrow window in which a pasted recovery route
             // is provable. Seal it before the ordinary UI-event lock gate: actors intentionally
             // keep networking behind the lock, and waiting for the minute timer could lose a
@@ -7085,8 +7090,11 @@ async fn set_livery(
             preset,
             accent,
             tokens,
+            // Ignored by `set_livery`, which reads all three back out of the document and
+            // writes them again unchanged. Publishing colours never touches them.
             icon: String::new(),
             cursor: String::new(),
+            name: String::new(),
         })
         .await?;
     persist_server(&state, server).await;
@@ -7154,7 +7162,25 @@ async fn get_livery(state: State<'_, AppState>, server: u64) -> Result<UiLivery,
         tokens: l.tokens,
         icon: l.icon,
         cursor: l.cursor,
+        name: l.name,
     })
+}
+
+/// Publish (or clear, with `""`) the shared **server name**; owner/admin only, re-seals the
+/// server. Independent of the colours and both images: setting it disturbs none of them.
+///
+/// Clearing does not rename anybody's rail. It means the group publishes no name, and every
+/// member falls back to the local label it already had.
+#[tauri::command]
+async fn set_shared_server_name(
+    state: State<'_, AppState>,
+    server: u64,
+    name: String,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.set_server_name(name).await?;
+    persist_server(&state, server).await;
+    Ok(())
 }
 
 /// Assign a custom badge to a member (owner/admin only); re-seals the server. An empty `label`
@@ -7741,9 +7767,9 @@ async fn storage_health_cache_publish(
     // Hold the registry row through cache insertion. `leave_server` removes this row before
     // clearing the cache, which makes its ordering with this publication atomic.
     let servers = state.servers.lock().await;
-    if !servers
+    if servers
         .get(&server)
-        .is_some_and(|entry| entry.instance == server_instance)
+        .is_none_or(|entry| entry.instance != server_instance)
     {
         return Err("the server changed while storage inspection was in progress".into());
     }
@@ -9397,6 +9423,23 @@ struct MappedCallPort {
     confirmed: bool,
 }
 
+/// The IPv4 source address the kernel would route toward the public internet, or `None` when it
+/// cannot be resolved.
+///
+/// The webview uses this to decide which gathered ICE host candidates are worth signalling. A
+/// desktop with virtualisation installed gathers candidates on adapters no remote peer can reach
+/// (VirtualBox host-only, WSL/Hyper-V vEthernet), and each one it sends costs the far end a
+/// connectivity check before ICE can settle. Naming the real interface is what lets the webview
+/// tell those apart; see `shouldSignalHostCandidate`.
+///
+/// This is the machine's own LAN address, which it already puts in every host candidate it
+/// signals, so returning it to the page reveals nothing the call plane did not already publish.
+#[tauri::command]
+async fn default_route_address(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    require_unlocked_session(&state).await?;
+    Ok(catcoms_net::default_route_ipv4().map(|ip| ip.to_string()))
+}
+
 /// Ask the router to forward one of the active call's media UDP ports to this machine, over the
 /// bound-interface IGD path the invite reachability fix proved out, with PCP/NAT-PMP as the
 /// fallback rung for routers that don't speak UPnP. The webview signals the returned public
@@ -9865,6 +9908,11 @@ async fn media_head_put_for_generation(
 /// The cache exists because the actor is single-threaded: every miss is time the server spends
 /// not answering anything else, so a player walking a track must not make us re-read a chunk it
 /// has already been served.
+///
+/// Every argument names something the read is bound to (which server, which manifest version,
+/// which UI generation). Bundling them into a struct would move the same fields behind a name
+/// without removing one, and each is checked separately at a different point in the read.
+#[allow(clippy::too_many_arguments)]
 async fn media_chunk(
     state: &AppState,
     actor: &ServerActor,
@@ -11195,6 +11243,9 @@ struct RestoredActor {
     device_id: DeviceId,
 }
 
+/// The injected seams (transport, RNG, clock) are what make this testable with an in-memory
+/// transport, so they are arguments by design rather than by accident.
+#[allow(clippy::too_many_arguments)]
 async fn restore_server_actor<T, R>(
     state: &AppState,
     snapshot: &[u8],
@@ -12468,10 +12519,10 @@ where
     F: Future<Output = ()>,
     R: FnOnce(&Path) -> Result<(), String>,
 {
-    if !validate_jam_sheet_name(&name) {
+    if !validate_jam_sheet_name(name) {
         return Err("the sheet export has an unexpected file name".into());
     }
-    if !validate_jam_sheet_svg(&svg) {
+    if !validate_jam_sheet_svg(svg) {
         return Err("the sheet export is not a Mewtual sheet transcript".into());
     }
     before_commit.await;
@@ -15456,6 +15507,7 @@ pub fn run() {
             set_server_icon,
             set_server_cursor,
             get_livery,
+            set_shared_server_name,
             set_member_badge,
             get_badges,
             get_devices,
@@ -15522,6 +15574,7 @@ pub fn run() {
             get_connectivity,
             get_call_transport,
             map_call_port,
+            default_route_address,
             unmap_call_port,
             get_switchboard_status,
             set_switchboard_offered,
@@ -18898,7 +18951,7 @@ mod tests {
             actor,
             instance,
             group_id: replacement_group.clone(),
-            device_id: replacement_device.clone(),
+            device_id: replacement_device,
             invite: None,
             name: "test".into(),
             bootstrap: Vec::new(),
@@ -19009,7 +19062,7 @@ mod tests {
             actor: actor.clone(),
             instance,
             group_id: group_id.clone(),
-            device_id: device_id.clone(),
+            device_id,
             invite: None,
             name: "test".into(),
             bootstrap: Vec::new(),

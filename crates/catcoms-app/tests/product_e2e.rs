@@ -37,8 +37,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catcoms_app::{
-    channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Profile, ReconnectPolicy, Server,
-    ServerActor, ServerNet, ServerStore, TracedEvent,
+    channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Livery, Profile, ReconnectPolicy,
+    Server, ServerActor, ServerNet, ServerStore, TracedEvent,
 };
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_rt::{Hub, ManualClock, PeerId};
@@ -1139,6 +1139,103 @@ async fn a_profile_change_on_one_node_reaches_the_other_members_roster() {
         .iter()
         .any(|m| m.fingerprint == alice.fp && !m.is_self));
     assert!(roster.iter().any(|m| m.fingerprint == bob.fp && m.is_self));
+
+    alice.shutdown().await;
+    bob.shutdown().await;
+}
+
+/// A server has a name of its own, and the member who joins it sees that name.
+///
+/// Before this, the rail label was purely local and defaulted to the display name of whoever was
+/// looking, so a joined server appeared to be named after the person reading it and two members
+/// of one group never saw the same name for it. The name now rides the livery document beside
+/// the icon, which is why the later halves matter as much as the first: publishing colours must
+/// not silently clear it, and naming the server must not clear the colours.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_published_server_name_reaches_a_joiner_and_survives_a_colour_publish() {
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_700_000_000_000);
+    let alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
+    let invite = mint(&alice.actor, 7).await;
+    let mut bob = join_node(
+        &hub,
+        &clock,
+        test_transport_peer(2),
+        "bob",
+        2,
+        alice.peer,
+        &invite,
+    )
+    .await;
+
+    alice
+        .actor
+        .set_server_name("The Cat Cafe".into())
+        .await
+        .expect("the owner may name the server");
+
+    let seen = until(
+        "the joiner learns what the group is actually called",
+        &mut bob.events,
+        || async {
+            let name = bob.actor.livery().await.name;
+            (name == "The Cat Cafe").then_some(name)
+        },
+    )
+    .await;
+    assert_eq!(seen, "The Cat Cafe");
+
+    // Publishing colours is a read-modify-write that must carry the name through untouched.
+    alice
+        .actor
+        .set_livery(Livery {
+            preset: "aurum".into(),
+            accent: "#e2a83d".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("the owner may publish colours");
+    let after = until(
+        "the colour publish reaches the joiner",
+        &mut bob.events,
+        || async {
+            let l = bob.actor.livery().await;
+            (l.preset == "aurum").then_some(l)
+        },
+    )
+    .await;
+    assert_eq!(
+        after.name, "The Cat Cafe",
+        "publishing colours must not clear the group's name"
+    );
+
+    // And the reverse: naming the server must not wipe the colours somebody just published.
+    alice
+        .actor
+        .set_server_name("Cat Cafe II".into())
+        .await
+        .expect("renaming is allowed");
+    let renamed = until("the rename reaches the joiner", &mut bob.events, || async {
+        let l = bob.actor.livery().await;
+        (l.name == "Cat Cafe II").then_some(l)
+    })
+    .await;
+    assert_eq!(
+        renamed.accent, "#e2a83d",
+        "naming the server must not clear its colours"
+    );
+
+    // A member is not an owner, and the UI hiding the control is not what enforces that.
+    let refused = bob.actor.set_server_name("Bob's Cafe".into()).await;
+    assert!(
+        refused.is_err(),
+        "an ordinary member cannot rename the group for everyone"
+    );
+    assert_eq!(
+        alice.actor.livery().await.name,
+        "Cat Cafe II",
+        "and the refusal changed nothing"
+    );
 
     alice.shutdown().await;
     bob.shutdown().await;

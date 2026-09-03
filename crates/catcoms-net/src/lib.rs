@@ -2228,11 +2228,64 @@ const UPNP_BOUND_LEASE_SECS: u32 = 2 * 60 * 60;
 /// sane LAN; three seconds keeps the retry loop responsive without spamming discovery.
 const UPNP_BOUND_SEARCH_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long a global-IPv6 reachability answer is reused before the kernel is asked again.
+///
+/// Short enough that plugging in a cable, joining a VPN or an interface coming up after launch is
+/// picked up within a minute; long enough that a dial burst asks the kernel once, not per address.
+const IPV6_ROUTE_CACHE_MS: u64 = 60_000;
+
+/// Cached `(has a global IPv6 route, when that was learned)`.
+static IPV6_ROUTE_CACHE: std::sync::Mutex<Option<(bool, u64)>> = std::sync::Mutex::new(None);
+
+/// Whether this host currently has a route to the global IPv6 internet.
+///
+/// Learned the same way as [`default_route_ipv4`]: an unbound UDP socket is "connected" to a
+/// documentation address (RFC 3849; nothing is sent) and the kernel either resolves a route with a
+/// globally routable source address or refuses. On a host with no IPv6 route the refusal is the
+/// same `NetworkUnreachable` that the QUIC transport otherwise reports once per dial attempt.
+fn host_has_global_ipv6_uncached() -> bool {
+    let Ok(socket) = std::net::UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)) else {
+        return false;
+    };
+    let documentation = Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1);
+    if socket.connect((documentation, 9)).is_err() {
+        return false;
+    }
+    matches!(
+        socket.local_addr().map(|addr| addr.ip()),
+        Ok(IpAddr::V6(ip)) if addr::ipv6_is_globally_routable(&ip)
+    )
+}
+
+/// [`host_has_global_ipv6_uncached`], answered at most once per [`IPV6_ROUTE_CACHE_MS`].
+fn host_has_global_ipv6() -> bool {
+    let now = SystemClock.now_ms();
+    let mut cache = IPV6_ROUTE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((answer, at)) = *cache {
+        if now.saturating_sub(at) < IPV6_ROUTE_CACHE_MS {
+            return answer;
+        }
+    }
+    let answer = host_has_global_ipv6_uncached();
+    *cache = Some((answer, now));
+    answer
+}
+
+/// Whether an address names a global IPv6 destination, which a host with no IPv6 route cannot
+/// reach. Link-local and unique-local IPv6 are excluded deliberately: those are LAN business and
+/// do not depend on having a route to the internet.
+fn dials_global_ipv6(addr: &Multiaddr) -> bool {
+    addr.iter().any(|part| match part {
+        Protocol::Ip6(ip) => addr::ipv6_is_globally_routable(&ip),
+        _ => false,
+    })
+}
+
 /// The IPv4 source address the kernel would route toward the public internet, learned by
 /// "connecting" an unbound UDP socket to a documentation address (RFC 5737; nothing is sent, the
 /// kernel just resolves the route). This names the interface whose LAN hosts the default
 /// gateway, i.e. the only interface where an IGD search can possibly be answered.
-fn default_route_ipv4() -> Option<Ipv4Addr> {
+pub fn default_route_ipv4() -> Option<Ipv4Addr> {
     let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
     socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
     match socket.local_addr().ok()?.ip() {
@@ -4111,6 +4164,15 @@ impl Actor {
             .is_some_and(|permit| permit.address() != addr.to_string())
         {
             tracing::warn!("dial refused: scheduler permit/address mismatch");
+            return catcoms_rt::DialSubmission::Suppressed;
+        }
+        // A global IPv6 target on a host with no IPv6 route cannot succeed, and trying costs a
+        // full dial timeout each time. Peers advertise both families, so this is not rare: one
+        // field session spent 20 dials on `NetworkUnreachable` alone, and every one of those is
+        // time the peer's IPv4 address was not being tried. Suppressed rather than failed, so
+        // the caller's budget is refunded and the IPv4 candidate is attempted immediately.
+        if dials_global_ipv6(&addr) && !host_has_global_ipv6() {
+            tracing::debug!("dial suppressed: no global IPv6 route on this host");
             return catcoms_rt::DialSubmission::Suppressed;
         }
         // Routing *through* a relay makes it this node's infrastructure just as surely as
@@ -6764,6 +6826,57 @@ mod tests {
         assert!(
             message.contains("not on the default-route interface"),
             "refusal must say why: {message}"
+        );
+    }
+
+    #[test]
+    fn only_a_global_ipv6_target_depends_on_having_an_ipv6_route() {
+        let global: Multiaddr = "/ip6/2a00:1450:4009:81f::200e/udp/443/quic-v1/p2p/12D3KooWEWwrkX6mqCzzBDjVy1EfnzN1oJSroTjLUsTrKqAh1BHL".parse().unwrap();
+        assert!(
+            dials_global_ipv6(&global),
+            "this is the dial that cannot work"
+        );
+
+        // IPv4 is never suppressed by an IPv6 route question.
+        let v4: Multiaddr =
+            "/ip4/192.168.0.231/tcp/7220/p2p/12D3KooWEWwrkX6mqCzzBDjVy1EfnzN1oJSroTjLUsTrKqAh1BHL"
+                .parse()
+                .unwrap();
+        assert!(!dials_global_ipv6(&v4));
+
+        // Link-local and unique-local IPv6 are LAN business: they do not need a route to the
+        // internet, so suppressing them on a host without one would break same-network calls.
+        let link_local: Multiaddr =
+            "/ip6/fe80::1/tcp/7220/p2p/12D3KooWEWwrkX6mqCzzBDjVy1EfnzN1oJSroTjLUsTrKqAh1BHL"
+                .parse()
+                .unwrap();
+        assert!(!dials_global_ipv6(&link_local));
+        let unique_local: Multiaddr =
+            "/ip6/fd00::1/tcp/7220/p2p/12D3KooWEWwrkX6mqCzzBDjVy1EfnzN1oJSroTjLUsTrKqAh1BHL"
+                .parse()
+                .unwrap();
+        assert!(!dials_global_ipv6(&unique_local));
+        let loopback: Multiaddr =
+            "/ip6/::1/tcp/7220/p2p/12D3KooWEWwrkX6mqCzzBDjVy1EfnzN1oJSroTjLUsTrKqAh1BHL"
+                .parse()
+                .unwrap();
+        assert!(!dials_global_ipv6(&loopback));
+
+        // A relayed circuit whose RELAY is reached over global IPv6 is still an IPv6 dial.
+        let circuit: Multiaddr = "/ip6/2a00:1450::1/tcp/4000/p2p/12D3KooWHnKkkXzewsGnxQhCFcNF4RkoFncmJruLisZiTT4USCJp/p2p-circuit/p2p/12D3KooWEWwrkX6mqCzzBDjVy1EfnzN1oJSroTjLUsTrKqAh1BHL".parse().unwrap();
+        assert!(dials_global_ipv6(&circuit));
+    }
+
+    #[test]
+    fn the_ipv6_route_answer_is_cached_but_still_reflects_this_machine() {
+        // Whatever this machine's answer is, it must be stable across calls inside the window
+        // (a dial burst asks the kernel once) and must agree with the uncached probe.
+        let first = host_has_global_ipv6();
+        assert_eq!(first, host_has_global_ipv6(), "the cache must be consulted");
+        assert_eq!(
+            first,
+            host_has_global_ipv6_uncached(),
+            "and must not disagree with the kernel it was learned from"
         );
     }
 

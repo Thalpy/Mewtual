@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate } from "./callroutes.ts";
+import {
+  callBarStatus,
+  mappableIcePort,
+  mappingAddressPolicy,
+  routerMappedCandidate,
+  shouldSignalHostCandidate,
+} from "./callroutes.ts";
 
 const host = {
   type: "host",
@@ -22,6 +28,45 @@ test("only a host UDP candidate with a port is worth a router mapping", () => {
   assert.ok(!mappableIcePort({ ...host, protocol: "tcp" }), "the mapped socket is UDP");
   assert.ok(!mappableIcePort({ ...host, port: null }));
   assert.ok(!mappableIcePort({ ...host, port: 0 }), "port zero names nothing");
+});
+
+test("host candidates on virtual adapters are not inflicted on the far end", () => {
+  const route = "192.168.0.231";
+  // The two seen in the field on 2026-09-02: VirtualBox host-only and WSL/Hyper-V vEthernet.
+  // Neither is reachable by any remote peer, and each costs them a connectivity check.
+  assert.equal(shouldSignalHostCandidate({ type: "host", address: "192.168.56.1" }, route), false);
+  assert.equal(shouldSignalHostCandidate({ type: "host", address: "172.18.128.1" }, route), false);
+  assert.equal(shouldSignalHostCandidate({ type: "host", address: "10.42.0.7" }, route), false);
+  // The real LAN interface is exactly the one that must survive: a peer on this LAN reaches it,
+  // and it is the path a call most wants.
+  assert.equal(shouldSignalHostCandidate({ type: "host", address: route }, route), true);
+});
+
+test("the candidate filter suppresses only what it can prove is useless", () => {
+  const route = "192.168.0.231";
+  // Not host candidates: these already traversed something and say nothing about interfaces.
+  assert.equal(shouldSignalHostCandidate({ type: "srflx", address: "192.168.56.1" }, route), true);
+  assert.equal(shouldSignalHostCandidate({ type: "relay", address: "192.168.56.1" }, route), true);
+  // Unjudgeable: an mDNS name, IPv6, a hostname, a missing address. Keeping a dead candidate is
+  // cheap; dropping one that would have connected is not.
+  assert.equal(shouldSignalHostCandidate({ type: "host", address: "d9f2e-4a.local" }, route), true);
+  assert.equal(shouldSignalHostCandidate({ type: "host", address: "fe80::1" }, route), true);
+  assert.equal(shouldSignalHostCandidate({ type: "host", address: null }, route), true);
+  // A public address on another interface is unusual but real: never guess it away.
+  assert.equal(shouldSignalHostCandidate({ type: "host", address: "203.0.113.9" }, route), true);
+  // And with no route known, nothing is suppressed at all.
+  for (const unknown of [null, undefined, "", "   "]) {
+    assert.equal(
+      shouldSignalHostCandidate({ type: "host", address: "192.168.56.1" }, unknown),
+      true,
+      "a suppression must never rest on a guess about the route",
+    );
+  }
+  // 172.16.0.0/12 boundaries: .15 and .32 are public space and stay.
+  assert.equal(shouldSignalHostCandidate({ type: "host", address: "172.15.0.1" }, route), true);
+  assert.equal(shouldSignalHostCandidate({ type: "host", address: "172.32.0.1" }, route), true);
+  assert.equal(shouldSignalHostCandidate({ type: "host", address: "172.16.0.1" }, route), false);
+  assert.equal(shouldSignalHostCandidate({ type: "host", address: "172.31.255.254" }, route), false);
 });
 
 test("the mapped candidate is a well-formed srflx that shadows its host candidate", () => {

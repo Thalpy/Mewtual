@@ -175,6 +175,67 @@ test("a rejected capture downscale still plans from the actual 4K source", () =>
   assert.equal(plan.scaleResolutionDownBy, 3);
 });
 
+test("a budget refused because negotiation moved under it is retried, not treated as a refusal", async () => {
+  // The field failure this exists for (2026-09-02): the first cap for a screen share is applied
+  // to a transceiver added moments earlier, negotiation completes during the write, and Chromium
+  // rejects the stale snapshot. Because a screen cap PARKS its sender before applying, treating
+  // that as "the encoder refused the budget" left the share attached to nothing and sending no
+  // video at all, silently, for the rest of the call.
+  const controller = new PeerVideoBudgetController();
+  const reads: number[] = [];
+  let cname = "";
+  let attempts = 0;
+  const track = { kind: "video" } as MediaStreamTrack;
+  const sender = {
+    getParameters: () => {
+      reads.push(reads.length);
+      // Negotiation completes after the first read: the RTCP identity appears.
+      cname = "post-negotiation";
+      return { encodings: [{}], rtcp: { cname } } as unknown as RTCRtpSendParameters;
+    },
+    setParameters: (parameters: RTCRtpSendParameters) => {
+      attempts += 1;
+      if (attempts === 1) {
+        return Promise.reject(new Error(
+          "Failed to execute 'setParameters' on 'RTCRtpSender': Attempted to set RtpParameters with modified RTCP parameters",
+        ));
+      }
+      assert.equal((parameters as unknown as { rtcp: { cname: string } }).rtcp.cname, cname);
+      return Promise.resolve();
+    },
+    replaceTrack: () => Promise.resolve(),
+  };
+  const result = await controller.apply(sender, DEFAULT_STREAM_SETTINGS, 1080, 1080, true, track);
+  assert.equal(result.state, "applied", "the retry succeeds and the share keeps its video");
+  assert.equal(attempts, 2, "exactly one retry, not a loop");
+  assert.equal(reads.length, 2, "the retry must read parameters again, not resend the stale ones");
+});
+
+test("a budget the encoder genuinely refuses twice still parks the sender", async () => {
+  // The retry must not swallow a real refusal: an uncapped screen encode is the thing the pause
+  // exists to prevent, so two failures still park the edge rather than leaving it sending.
+  const controller = new PeerVideoBudgetController();
+  let attempts = 0;
+  const track = { kind: "video" } as MediaStreamTrack;
+  let parked = 0;
+  const sender = {
+    getParameters: () => ({ encodings: [{}] }) as RTCRtpSendParameters,
+    setParameters: () => {
+      attempts += 1;
+      return Promise.reject(new Error("encoder says no"));
+    },
+    replaceTrack: (t: MediaStreamTrack | null) => {
+      if (t === null) parked += 1;
+      return Promise.resolve();
+    },
+  };
+  const result = await controller.apply(sender, DEFAULT_STREAM_SETTINGS, 1080, 1080, true, track);
+  assert.equal(attempts, 2, "it tried twice");
+  assert.equal(result.state, "paused");
+  assert.match(String(result.error), /encoder says no/);
+  assert.ok(parked >= 1, "the edge is parked rather than left sending an uncapped encode");
+});
+
 test("sender budgets coalesce a resize burst to one pending newest request", async () => {
   const controller = new PeerVideoBudgetController();
   const calls: RTCRtpSendParameters[] = [];

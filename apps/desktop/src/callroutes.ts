@@ -47,6 +47,47 @@ export function mappingAddressPolicy(address: string | null | undefined): {
   return { map: false, claim: null };
 }
 
+/** Private IPv4 space (RFC 1918) plus the link-local block, as a candidate address. */
+function isPrivateIpv4(a: string): boolean {
+  const parts = a.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [x, y] = parts;
+  return x === 10
+    || (x === 172 && y >= 16 && y <= 31)
+    || (x === 192 && y === 168)
+    || (x === 169 && y === 254);
+}
+
+/**
+ * Whether a gathered host candidate is worth sending to the far end.
+ *
+ * A desktop with virtualisation installed gathers host candidates on adapters that no remote peer
+ * can ever reach: VirtualBox host-only (`192.168.56.x`) and WSL/Hyper-V vEthernet (`172.x`) both
+ * showed up in the field on 2026-09-02. Signalling them costs the PEER a connectivity check per
+ * dead address before ICE can settle, which is pure added latency on every call, and it also
+ * tells them which virtualisation software is installed.
+ *
+ * The rule is deliberately narrow, because dropping a candidate that WOULD have worked is worse
+ * than keeping a dead one: only a PRIVATE IPv4 host candidate on an interface that is not the
+ * default route is suppressed. Such an address is reachable only from this machine's own virtual
+ * networks. Anything we cannot judge is kept: reflexive and relay candidates (not host), an
+ * mDNS `.local` name, IPv6, a public address, and every candidate at all when the native side
+ * could not name a default route.
+ */
+export function shouldSignalHostCandidate(
+  candidate: Pick<IceCandidateView, "type" | "address">,
+  defaultRouteIpv4: string | null | undefined,
+): boolean {
+  if (candidate.type !== "host") return true;
+  const route = defaultRouteIpv4?.trim();
+  if (!route) return true; // no route known: never suppress on a guess
+  const a = candidate.address?.trim();
+  if (!a || a.endsWith(".local")) return true;
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(a)) return true; // IPv6 or a hostname: not ours to judge
+  if (a === route) return true;
+  return !isPrivateIpv4(a);
+}
+
 /**
  * The hand-built server-reflexive candidate carrying a router-granted public socket. The
  * receiving side treats it like any other remote candidate, so old builds interoperate; its

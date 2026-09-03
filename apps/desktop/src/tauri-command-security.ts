@@ -130,7 +130,11 @@ export const TAURI_COMMAND_GROUPS = {
   policy_controlled_writes: {
     boundary: "Role/author/policy-sensitive mutations; UI visibility is never authorization.",
     commands: [
-      "rename_server", "set_livery", "set_server_icon", "set_server_cursor", "set_member_badge",
+      // `rename_server` is the LOCAL rail label and needs no role. `set_shared_server_name`
+      // publishes the group's own name to every member and is owner/admin, enforced natively in
+      // the same place the livery and icon are: the settings page only hides the control.
+      "rename_server", "set_shared_server_name",
+      "set_livery", "set_server_icon", "set_server_cursor", "set_member_badge",
       "delete_file", "set_file_expiry", "delete_event", "set_wiki_format", "delete_wiki_page",
       "rename_wiki_page", "set_wiki_review_days", "approve_wiki_edit", "reject_wiki_edit",
       "restore_wiki_page", "warn_message", "create_kick_case", "cast_kick_vote",
@@ -153,7 +157,15 @@ export const TAURI_COMMAND_GROUPS = {
   },
   router_boundary: {
     boundary: "Best-effort router port mappings for the active call's media sockets; exact caller-named ports, bounded leases, no other router state.",
-    commands: ["map_call_port", "unmap_call_port"],
+    commands: [
+      "map_call_port", "unmap_call_port",
+      // Reads this machine's own LAN address, so the webview can recognise the ICE host
+      // candidates it gathered on virtual adapters (VirtualBox, WSL, Hyper-V) and stop sending
+      // peers addresses none of them can reach. Discloses nothing new: the same address is
+      // already inside every host candidate the call plane signals, and the page is the one
+      // that gathered it. Takes no argument and touches no other network state.
+      "default_route_address",
+    ],
   },
   mesh_repair_boundary: {
     boundary: "User-triggered member-route retry and out-of-band recovery; current-roster signatures, canonical routes and shared endpoint/process budgets remain authoritative.",

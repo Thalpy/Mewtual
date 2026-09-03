@@ -1291,6 +1291,10 @@ const L_ICON: &str = "icon";
 /// The shared server cursor (base64 image bytes). Additive to the v1 schema in the same way
 /// as the icon: an older doc simply lacks the key, which reads as "no cursor".
 const L_CURSOR: &str = "cursor";
+/// The shared server **name**. Additive in the same way as the icon and cursor: an older doc
+/// lacks the key, which reads as "the owner has published no name" and leaves every member on
+/// whatever local label it already had.
+const L_NAME: &str = "name";
 
 /// Maximum length of a livery preset id (a short key like `nightshade`).
 pub const MAX_LIVERY_PRESET_BYTES: usize = 32;
@@ -1312,6 +1316,9 @@ pub const MAX_SERVER_ICON_BYTES: usize = 64 * 1024;
 /// tighter budget than the icon; and, like the icon, it rides *inline* (base64) in the livery
 /// document, so this also bounds what gossips.
 pub const MAX_SERVER_CURSOR_BYTES: usize = 16 * 1024;
+/// Maximum length of a published server name. Long enough for a real group name, short enough
+/// that it cannot be used to push prose through the rail or the cross-server inbox.
+pub const MAX_SERVER_NAME_BYTES: usize = 64;
 
 /// A server's published UI livery. Empty fields mean "no livery" / "no override"; every
 /// value is opaque to the backend and validated by the client on read.
@@ -1332,6 +1339,15 @@ pub struct Livery {
     /// this field and preserves whatever is stored. The two images are independent; setting
     /// one never disturbs the other.
     pub cursor: String,
+    /// The shared server name; empty = the owner has published none, and each member keeps
+    /// whatever local label it already had. Set/cleared only by [`Server::set_server_name`],
+    /// exactly like the two images: [`Server::set_livery`] preserves whatever is stored.
+    ///
+    /// This exists because a server had no name of its own at all. The rail label was purely
+    /// local and defaulted to the display name of whoever was looking, so every group appeared
+    /// to be named after its reader. A member may still relabel a server for themselves; this is
+    /// what the group is called when nobody has.
+    pub name: String,
 }
 
 /// Write the livery document (last-writer-wins on each field; the token map is replaced
@@ -1344,6 +1360,7 @@ fn write_livery(doc: &mut AutoCommit, l: &Livery) -> Result<(), AutomergeError> 
     doc.put(ROOT, L_ACCENT, l.accent.as_str())?;
     doc.put(ROOT, L_ICON, l.icon.as_str())?;
     doc.put(ROOT, L_CURSOR, l.cursor.as_str())?;
+    doc.put(ROOT, L_NAME, l.name.as_str())?;
     let tokens = doc.put_object(ROOT, L_TOKENS, ObjType::Map)?;
     for (k, v) in &l.tokens {
         doc.put(&tokens, k.as_str(), v.as_str())?;
@@ -1369,6 +1386,14 @@ fn write_server_cursor(doc: &mut AutoCommit, cursor: &str) -> Result<(), Automer
     Ok(())
 }
 
+/// Write **only** the shared server name (`""` clears it), leaving the colours and both images
+/// untouched; the same independence the two images already have from each other.
+fn write_server_name(doc: &mut AutoCommit, name: &str) -> Result<(), AutomergeError> {
+    doc.put(ROOT, L_V, LIVERY_VERSION)?;
+    doc.put(ROOT, L_NAME, name)?;
+    Ok(())
+}
+
 /// Materialize the livery document (a missing/foreign-shaped field reads as empty; so a
 /// doc written before the icon/cursor keys existed reads back with neither).
 fn read_livery(doc: &AutoCommit) -> Livery {
@@ -1385,6 +1410,7 @@ fn read_livery(doc: &AutoCommit) -> Livery {
         tokens,
         icon: str_field(doc, &ROOT, L_ICON),
         cursor: str_field(doc, &ROOT, L_CURSOR),
+        name: str_field(doc, &ROOT, L_NAME),
     }
 }
 
@@ -6105,16 +6131,50 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         self.sync
             .post(DocType::Livery, LIVERY_DOC, |d| {
-                // Read-modify-write inside the edit itself: take the images that are already in
+                // Read-modify-write inside the edit itself: take the values that are already in
                 // the document and write them back verbatim, so a colour publish is a no-op for
-                // the (comparatively huge) icon and the cursor alike.
+                // the (comparatively huge) icon, the cursor and the server's name alike.
                 let kept = Livery {
                     icon: str_field(d, &ROOT, L_ICON),
                     cursor: str_field(d, &ROOT, L_CURSOR),
+                    name: str_field(d, &ROOT, L_NAME),
                     ..livery
                 };
                 write_livery(d, &kept)
             })
+            .await?;
+        Ok(())
+    }
+
+    /// Set (or clear, with `""`) the shared **server name**, stored in the livery document
+    /// beside the icon and independent of it. **Owner or admin only**, like every other
+    /// published livery value.
+    ///
+    /// Clearing it does not rename anybody's rail: it means "the group publishes no name", and
+    /// each member falls back to the local label it already had.
+    pub async fn set_server_name(&mut self, name: String) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can set the server name".into(),
+            ));
+        }
+        let name = name.trim().to_string();
+        if name.len() > MAX_SERVER_NAME_BYTES {
+            return Err(AppError::Invalid(format!(
+                "server name too long: {} bytes (max {MAX_SERVER_NAME_BYTES})",
+                name.len()
+            )));
+        }
+        // A name is drawn in the rail, in crumbs and in the cross-server inbox. Control
+        // characters there are a rendering problem at best and a spoofing tool at worst, and the
+        // one thing no legitimate group name contains is a newline.
+        if name.chars().any(char::is_control) {
+            return Err(AppError::Invalid(
+                "a server name cannot contain control characters".into(),
+            ));
+        }
+        self.sync
+            .post(DocType::Livery, LIVERY_DOC, |d| write_server_name(d, &name))
             .await?;
         Ok(())
     }
@@ -9743,6 +9803,7 @@ mod tests {
             tokens: HashMap::from([("--accent-hi".to_string(), "#ffe680".to_string())]),
             icon: String::new(),
             cursor: String::new(),
+            name: String::new(),
         };
         alice.set_livery(l.clone()).await.unwrap();
         assert_eq!(alice.livery(), l);

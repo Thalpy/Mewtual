@@ -5014,6 +5014,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 }
                 continue;
             };
+            // Do not sign a request for a peer we are not connected to.
+            //
+            // A catch-up request carries a signed timestamp and is refused past
+            // `MAX_REQUEST_AGE_MS`. The signature is applied here, but the transport may hold the
+            // bytes for as long as it takes to dial, and libp2p flushes everything it buffered
+            // for a peer the moment the connection finally opens. On a link that takes more than
+            // a minute to come up, a whole queue's worth of requests therefore arrives at once,
+            // every one of them already stale, and the serving peer refuses all of them: observed
+            // in the field as 22 refusals inside 47ms after several minutes of failed dials.
+            // Catch-up then never completes, and the worse the link the more certain that is.
+            //
+            // Deferring costs nothing: the task is re-queued, connections are established by the
+            // dial plan and PEX, and the next tick signs a request that can actually leave.
+            if !self.peer_is_connected(peer) {
+                self.catchup_queue.push(retry);
+                continue;
+            }
             attempted = true;
             match task {
                 CatchupTask::Commits {
@@ -5208,6 +5225,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             gap_at,
             avoid,
         });
+    }
+
+    /// Whether the transport reports a live connection to `peer` right now.
+    ///
+    /// Used to keep a signed, freshness-bound request out of a transport's dial buffer; see the
+    /// gate in [`drain_catchup_queue`](Self::drain_catchup_queue). Present-time state only: it
+    /// carries no membership meaning and is never used to decide trust.
+    fn peer_is_connected(&self, peer: PeerId) -> bool {
+        self.transport
+            .connection_snapshot()
+            .iter()
+            .any(|row| row.peer == peer)
     }
 
     /// Queue a document catch-up (deduped per document; bounded by `max_catchup_queue`).
@@ -14364,6 +14393,65 @@ mod tests {
         // That somebody else closes it.
         let (_, _) = tokio::join!(bob.drain_catchup_queue(), alice.run_once());
         assert_eq!(bob.epoch(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_catchup_is_not_signed_for_a_peer_the_transport_is_not_connected_to() {
+        // A catch-up request carries a signed timestamp and is refused past MAX_REQUEST_AGE_MS.
+        // Signing one for a peer we cannot reach hands freshness-bound bytes to a transport that
+        // will hold them until it manages to dial, and libp2p flushes everything it buffered the
+        // moment the connection opens: a whole queue arrives at once, minutes stale, and the
+        // serving peer refuses all of it. Observed in the field as 22 refusals inside 47ms.
+        let (_hub, _alice, mut bob, _carol, _ids) = group_with_a_missed_commit().await;
+
+        // A peer that is genuinely a catch-up candidate but is not connected: it never joined the
+        // hub, so the transport does not report it, exactly as a peer mid-dial would not be.
+        let unreachable = PeerId::from_u64(0xDEAD_BEEF);
+        bob.remember_peer(unreachable);
+        assert_eq!(
+            bob.pick_catchup_peer(),
+            Some(unreachable),
+            "it would be asked"
+        );
+        assert!(!bob.peer_is_connected(unreachable));
+
+        bob.enqueue_doc_catchup(DocType::Channel, 1);
+        let attempted = bob.drain_catchup_queue().await;
+
+        assert!(
+            !attempted,
+            "nothing may be signed and sent for an unreachable peer"
+        );
+        assert!(
+            bob.catchup_queue.contains(&CatchupTask::Doc {
+                doc_type: DocType::Channel,
+                doc_id: 1,
+            }),
+            "the task is deferred, never dropped: a later tick asks once the dial has landed"
+        );
+        // And deferring must not have marked an innocent peer as a failed source.
+        assert!(bob.failed_catchup_peers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_connected_peer_is_still_asked_so_the_gate_cannot_stall_recovery() {
+        // The other half: the gate must be transparent whenever the peer IS reachable, or it
+        // would trade a stale-request bug for a never-asks-anyone bug.
+        let (_hub, mut alice, mut bob, _carol, _ids) = group_with_a_missed_commit().await;
+        let alice_peer = alice.local_peer();
+        bob.remember_peer(alice_peer);
+        assert!(
+            bob.peer_is_connected(alice_peer),
+            "a peer on the same hub is reachable with no dial to perform"
+        );
+
+        bob.enqueue_commit_catchup_for(1, Some(2), None);
+        let (_, _) = tokio::join!(bob.drain_catchup_queue(), alice.run_once());
+        assert_eq!(
+            bob.epoch(),
+            2,
+            "the gap still closes against a connected peer"
+        );
     }
 
     #[tokio::test]

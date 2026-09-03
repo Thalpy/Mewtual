@@ -401,6 +401,11 @@ pub enum AppCommand {
         cursor: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Set (or clear, with `""`) the shared server name (owner/admin only).
+    SetServerName {
+        name: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Query the server's published livery.
     Livery { reply: oneshot::Sender<Livery> },
     /// Pull the livery document from `peer` (e.g. right after joining).
@@ -1664,6 +1669,21 @@ impl ServerActor {
         if self
             .cmd_tx
             .send(AppCommand::SetServerIcon { icon, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Set (or clear, with `""`) the shared server name (owner/admin only; a `LiveryUpdated`
+    /// event follows). Publishing colours or either image never disturbs it.
+    pub async fn set_server_name(&self, name: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetServerName { name, reply })
             .await
             .is_err()
         {
@@ -3468,6 +3488,13 @@ where
                     }
                     Some(AppCommand::SetServerIcon { icon, reply }) => {
                         let res = server.set_server_icon(icon).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if livery_changed(&server, &mut last_livery) {
+                            let _ = event_tx.send(AppEvent::LiveryUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::SetServerName { name, reply }) => {
+                        let res = server.set_server_name(name).await.map_err(|e| e.to_string());
                         let _ = reply.send(res);
                         if livery_changed(&server, &mut last_livery) {
                             let _ = event_tx.send(AppEvent::LiveryUpdated).await;
