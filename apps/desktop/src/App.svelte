@@ -36,6 +36,7 @@
     planJump, planRefresh, planRevealNewer, planRevealOlder, reanchorByIndex,
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
+  import { ImageSrcCache } from "./image-src";
   import { chatScopeKey, reconcileActiveChannel, scopeHoldsConversation } from "./chatscope";
   import {
     WIKI_REVIEW_UNKNOWN,
@@ -2872,6 +2873,15 @@
   }
   let profiles = $state<Record<string, Prof>>({});
   let files = $state<UiFile[]>([]);
+  // The file index by content address. Embeds, posters, cards and chips all resolve a cid to its
+  // listing, and a linear scan per lookup made rendering a message with several embeds cost
+  // O(embeds x files) in a group whose index only ever grows. First listing wins, exactly as
+  // `find` did.
+  let filesByCid = $derived.by(() => {
+    const index = new Map<string, UiFile>();
+    for (const file of files) if (!index.has(file.cid)) index.set(file.cid, file);
+    return index;
+  });
   // Whether ≥1 live peer previously proved it could serve authenticated catch-up (a conservative
   // availability hint refreshed with the file list). This is stricter than `onlineMembers`.
   let hasPeers = $state(false);
@@ -4852,7 +4862,7 @@
   // 200 MB file cannot be turned into a JS string by the act of rendering a message.
   function loadEmoji(code: string, cid: string) {
     if (activeServerId === null) return;
-    const file = files.find((candidate) => candidate.cid === cid);
+    const file = filesByCid.get(cid);
     if (!file || !mayAutoLoadSharedFile(file)) return;
     emojiUrls = { ...emojiUrls, [code]: sharedMediaUrl(cid, activeServerId) };
   }
@@ -5028,6 +5038,7 @@
     mediaUrls = {};
     emojiUrls = {};
     storageHealthCache.clear();
+    imageSrcCache.clear(); // avatars and icons are member content; do not retain them behind lock
     if (locked) return;
     // Lock wins over an in-progress secret change and drops every transient secret first.
     vaultChangeCurrent = "";
@@ -6266,10 +6277,10 @@
   }
 
   async function exportStoredFile(cid: string) {
-    let listed = files.find((file) => file.cid === cid);
+    let listed = filesByCid.get(cid);
     if (!listed) {
       await refreshFiles();
-      listed = files.find((file) => file.cid === cid);
+      listed = filesByCid.get(cid);
     }
     if (!listed) {
       toast("That file is no longer listed in this server.", "warn", 5000);
@@ -7784,7 +7795,7 @@
         items.push({ label: "View image", icon: "⛶", onSelect: () => openLightbox(el) });
       }
       items.push({ label: "Properties", icon: "📄", onSelect: () => openFileRef(cid) });
-      const embedded = files.find((f) => f.cid === cid);
+      const embedded = filesByCid.get(cid);
       if (embedded) items.push({ label: "Download", icon: "↓", onSelect: () => downloadFile(embedded) });
       items.push({ label: "Copy address (CID)", icon: "#", onSelect: () => copyText(cid) });
       // An image can cover its whole message row, so keep the message actions reachable here:
@@ -8322,18 +8333,13 @@
     }
   }
 
-  // Sniff a stored image's format from its base64 prefix (the first magic bytes survive
-  // base64 alignment). Profiles store opaque bytes, so an animated GIF or WebP a member
-  // uploaded plays back as itself instead of being branded a JPEG.
+  // A stored image's data URL, memoized by its bytes (`image-src.ts`): the same avatars and icons
+  // are rendered by many rows, and rebuilding the URL per render made a profile update cost
+  // megabytes of transient strings. The format is sniffed from the base64 prefix, so an animated
+  // GIF or WebP a member uploaded plays back as itself instead of being branded a JPEG.
+  const imageSrcCache = new ImageSrcCache();
   function imgSrc(b64: string): string {
-    const mime = b64.startsWith("R0lGOD")
-      ? "image/gif"
-      : b64.startsWith("iVBOR")
-        ? "image/png"
-        : b64.startsWith("UklGR")
-          ? "image/webp"
-          : "image/jpeg";
-    return `data:${mime};base64,${b64}`;
+    return imageSrcCache.src(b64);
   }
   // A file's raw bytes as base64, no re-encode: keeps animation and alpha.
   async function fileToRawB64(file: File): Promise<string> {
@@ -8748,7 +8754,7 @@
     const server = activeServerId;
     for (const element of Array.from(document.querySelectorAll<HTMLElement>("[data-embed-cid][data-resolved]"))) {
       const cid = element.dataset.embedCid ?? "";
-      const file = files.find((candidate) => candidate.cid === cid);
+      const file = filesByCid.get(cid);
       if (!file || mayAutoLoadSharedFile(file, server)) continue;
       if (element instanceof HTMLMediaElement) {
         element.pause();
@@ -8770,7 +8776,7 @@
     }
     for (const image of Array.from(document.querySelectorAll<HTMLImageElement>("img.ref-card-thumb[data-thumb-cid]"))) {
       const cid = image.dataset.thumbCid ?? "";
-      const file = files.find((candidate) => candidate.cid === cid);
+      const file = filesByCid.get(cid);
       if (file && mayAutoLoadSharedFile(file, server)) continue;
       const card = image.closest<HTMLElement>(".ref-card");
       image.removeAttribute("src");
@@ -8779,7 +8785,7 @@
     }
     for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>("button.media-load-chip[data-load-cid]"))) {
       const cid = button.dataset.loadCid ?? "";
-      const file = files.find((candidate) => candidate.cid === cid);
+      const file = filesByCid.get(cid);
       if (!file || !mayAutoLoadSharedFile(file, server)) continue;
       const mime = safeMime(button.dataset.loadMime ?? file.mime);
       if (mime) button.replaceWith(buildMediaEl(mime, mediaUrl(server, cid), button.dataset.loadAlt ?? file.name, cid));
@@ -8876,14 +8882,14 @@
   let mediaUrls = $state<Record<string, string>>({});
   function preparedMedia(cid: string): string {
     if (activeServerId === null) return "";
-    const file = files.find((candidate) => candidate.cid === cid);
+    const file = filesByCid.get(cid);
     if (!file || !safeMime(file.mime) || !mayAutoLoadSharedFile(file, activeServerId)) return "";
     return mediaUrls[scopedMediaKey(activeServerId, cid)] ?? "";
   }
   function ensureMedia(cid: string) {
     if (!cid || activeServerId === null) return;
     const server = activeServerId;
-    const file = files.find((f) => f.cid === cid);
+    const file = filesByCid.get(cid);
     if (!file || !safeMime(file.mime) || !mayAutoLoadSharedFile(file)) return; // retried on index/policy update
     const key = scopedMediaKey(server, cid);
     if (mediaUrls[key]) return;
@@ -8912,7 +8918,7 @@
         span.setAttribute("data-resolved", "1");
         continue;
       }
-      const file = files.find((f) => f.cid === cid);
+      const file = filesByCid.get(cid);
       if (!file) continue; // not in the index yet: retry when `files` updates
       span.setAttribute("data-resolved", "1");
       const mime = safeMime(file.mime);
@@ -8988,7 +8994,7 @@
   let lightboxZoom = $state(false); // false = fit the window, true = 1:1 and scrollable
   const lightboxFile = $derived.by(() => {
     const lb = lightbox;
-    return lb ? (files.find((f) => f.cid === lb.cid) ?? null) : null;
+    return lb ? (filesByCid.get(lb.cid) ?? null) : null;
   });
 
   function openLightbox(el: HTMLImageElement) {
@@ -9054,7 +9060,7 @@
   }
 
   function fileCardSpec(cid: string): CardSpec | null {
-    const f = files.find((x) => x.cid === cid);
+    const f = filesByCid.get(cid);
     if (!f) return null; // not in the index on this device: leave the chip, retry next pass
     const where = f.path ? ` in ${f.path}` : "";
     return {
@@ -9120,7 +9126,7 @@
 
   /** Hang an image on a card; a card whose picture cannot be fetched just reads as text. */
   function attachCardThumb(card: HTMLElement, cid: string, server: number) {
-    const file = files.find((f) => f.cid === cid);
+    const file = filesByCid.get(cid);
     const mime = safeMime(file?.mime ?? "");
     if (!file || !mime.startsWith("image/") || !mayAutoLoadSharedFile(file, server)) return;
     const img = document.createElement("img");
@@ -14005,7 +14011,7 @@
   // Files surface hands to relDay.
   function jukeExpiryDays(cid: string): number {
     if (!jukeShareInView) return -1;
-    const f = files.find((x) => x.cid === cid);
+    const f = filesByCid.get(cid);
     if (!f || !f.expires_known || f.expires === null || isPinned(cid)) return -1;
     const days = Math.ceil((f.expires - nowTick) / 86_400_000);
     return days <= 7 ? Math.max(0, days) : -1;
