@@ -55,7 +55,23 @@ pub struct EncryptedDoc {
     change_authors: HashMap<ChangeHash, DeviceId>,
     /// How many entries of `log` are already reflected in `change_authors`.
     authors_indexed: usize,
+    /// The last [`EncryptedDoc::snapshot`] and the exact document state it describes: the
+    /// automerge heads plus the op-log length, which together are everything the serialization
+    /// reads. Persistence re-serializes every open document of a server on every write, so an
+    /// unchanged document was re-encoded once per sent message; this makes it pay once per
+    /// change instead. Not a correctness shortcut: a key that has not moved means the bytes
+    /// cannot have. Held only while under [`MAX_CACHED_SNAPSHOT_BYTES`], so the largest
+    /// documents (whose bytes are the ones worth not duplicating) are simply re-encoded.
+    /// Derived state; never persisted.
+    snapshot_cache: Option<(SnapshotKey, Vec<u8>)>,
 }
+
+/// What a serialization of a document depends on: its automerge heads and its op-log length.
+type SnapshotKey = (Vec<ChangeHash>, usize);
+
+/// Largest snapshot retained by [`EncryptedDoc::snapshot`]'s cache. Above this the saving is not
+/// worth a second copy of the document in memory; a busy channel re-encodes as it always did.
+pub const MAX_CACHED_SNAPSHOT_BYTES: usize = 1 << 20;
 
 impl EncryptedDoc {
     /// Create an empty document. `actor` (this device) becomes the automerge
@@ -71,6 +87,7 @@ impl EncryptedDoc {
             applied: HashSet::new(),
             change_authors: HashMap::new(),
             authors_indexed: 0,
+            snapshot_cache: None,
         }
     }
 
@@ -117,6 +134,37 @@ impl EncryptedDoc {
             .collect();
         heads.sort_unstable();
         heads
+    }
+
+    /// What this node tells a serving peer it already holds, for an incremental catch-up: its
+    /// automerge frontier plus the immediate ancestors of that frontier, deduplicated and capped
+    /// at `max` (newest first, so a truncated list still describes the most useful part).
+    ///
+    /// The ancestors matter because a frontier alone is fragile in the one case that matters: a
+    /// member that wrote while it could not reach anyone has a head nobody else has seen, and a
+    /// peer that cannot see a hash cannot subtract anything behind it, so the whole history would
+    /// come back. Naming the parents of that local change gives the peer a hash it does know.
+    ///
+    /// Sound by the same argument for every hash listed: holding a change means holding its
+    /// dependencies, so a peer may treat anything causally behind a named hash as already held.
+    pub fn sync_frontier(&mut self, max: usize) -> Vec<[u8; 32]> {
+        let heads = self.doc.get_heads();
+        let mut out: Vec<[u8; 32]> = Vec::new();
+        let mut seen: HashSet<ChangeHash> = HashSet::new();
+        let ancestors: Vec<ChangeHash> = heads
+            .iter()
+            .filter_map(|hash| self.doc.get_change_by_hash(hash))
+            .flat_map(|change| change.deps().to_vec())
+            .collect();
+        for hash in heads.into_iter().chain(ancestors) {
+            if out.len() >= max {
+                break;
+            }
+            if seen.insert(hash) {
+                out.push(hash.0);
+            }
+        }
+        out
     }
 
     /// Return the signed operations in the dependency-closed history selected by `heads`.
@@ -305,6 +353,20 @@ impl EncryptedDoc {
     /// rebuilt from the log on restore. **Secret**; holds plaintext document content; the
     /// persistence layer seals it under `db_key` before it touches disk.
     pub fn snapshot(&mut self) -> Result<Vec<u8>, ReplError> {
+        let key: SnapshotKey = (self.doc.get_heads(), self.log.len());
+        if let Some((cached_key, bytes)) = &self.snapshot_cache {
+            if *cached_key == key {
+                return Ok(bytes.clone());
+            }
+        }
+        let bytes = self.encode_snapshot()?;
+        self.snapshot_cache =
+            (bytes.len() <= MAX_CACHED_SNAPSHOT_BYTES).then(|| (key, bytes.clone()));
+        Ok(bytes)
+    }
+
+    /// The serialization itself, always recomputed. See [`EncryptedDoc::snapshot`].
+    fn encode_snapshot(&mut self) -> Result<Vec<u8>, ReplError> {
         let doc_bytes = self.doc.save();
         let count = u32::try_from(self.log.len()).map_err(|_| ReplError::Malformed)?;
         let mut e = Encoder::new();
@@ -344,6 +406,7 @@ impl EncryptedDoc {
             applied,
             change_authors: HashMap::new(),
             authors_indexed: 0,
+            snapshot_cache: None,
         })
     }
 
@@ -675,6 +738,49 @@ impl EncryptedDoc {
         Ok(out)
     }
 
+    /// Export only the signed ops a requester holding `have_heads` is missing, re-sealed under
+    /// the current epoch exactly as [`EncryptedDoc::export_catchup`] does.
+    ///
+    /// The requester names its automerge frontier; everything causally behind it is what it
+    /// already has, so what remains is the difference. A reconnecting member therefore pays for
+    /// the gap rather than for the whole history, which is what made rejoining a long-lived
+    /// channel cost more every week it stayed alive.
+    ///
+    /// A head this node has never seen selects nothing: it is a change the *requester* has and
+    /// this node does not, so it can exclude nothing here and the requester keeps it. An op whose
+    /// delta will not parse is sent rather than withheld, because withholding could strand the
+    /// requester and a duplicate is dropped on arrival.
+    pub fn export_catchup_since(
+        &mut self,
+        have_heads: &[[u8; 32]],
+        group: &ServerGroup,
+        device: &MlsDevice,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Vec<SealedOp>, ReplError> {
+        let mut have: HashSet<ChangeHash> = HashSet::new();
+        let mut stack: Vec<ChangeHash> = have_heads.iter().copied().map(ChangeHash).collect();
+        while let Some(hash) = stack.pop() {
+            if self.doc.get_change_by_hash(&hash).is_none() || !have.insert(hash) {
+                continue;
+            }
+            let deps = self
+                .doc
+                .get_change_by_hash(&hash)
+                .map(|change| change.deps().to_vec())
+                .unwrap_or_default();
+            stack.extend(deps);
+        }
+        let mut out = Vec::new();
+        for op in &self.log {
+            let carried = Change::from_bytes(op.delta.clone()).ok().map(|c| c.hash());
+            if carried.is_some_and(|hash| have.contains(&hash)) {
+                continue;
+            }
+            out.push(SealedOp::seal(op, group, device, rng)?);
+        }
+        Ok(out)
+    }
+
     /// Apply a catch-up bundle produced by [`EncryptedDoc::export_catchup`].
     /// Returns the number of newly applied ops.
     pub fn import_catchup(
@@ -837,6 +943,155 @@ mod tests {
         // Re-snapshotting the restored doc is stable, and garbage is rejected.
         assert!(EncryptedDoc::restore(&restored.snapshot().unwrap()).is_ok());
         assert!(EncryptedDoc::restore(b"garbage").is_err());
+    }
+
+    /// A catch-up should cost the gap, not the history. What it must not do is mistake "I cannot
+    /// see that change" for "you already have everything after it": a requester whose frontier
+    /// contains a change the server has never seen must still receive the server's own history.
+    #[test]
+    fn an_incremental_catchup_carries_the_difference_and_nothing_else() {
+        let server = MlsDevice::generate().unwrap();
+        let member = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&server).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(9);
+
+        let mut held = EncryptedDoc::new(DocType::Channel, 3, &server.device_id());
+        for i in 0..6 {
+            held.edit(&server, &group, &mut rng, |d| {
+                d.put(ROOT, format!("k{i}"), i as u64)
+            })
+            .unwrap();
+        }
+
+        // A member that caught up at op 4 and then went away.
+        let mut behind = EncryptedDoc::new(DocType::Channel, 3, &member.device_id());
+        let full = held.export_catchup(&group, &server, &mut rng).unwrap();
+        assert_eq!(full.len(), 6);
+        behind.import_catchup(&full[..4], &group, &member).unwrap();
+        assert_eq!(behind.op_count(), 4);
+
+        // It comes back and names what it has: only the two it missed come down the wire.
+        let gap = held
+            .export_catchup_since(&behind.sync_frontier(64), &group, &server, &mut rng)
+            .unwrap();
+        assert_eq!(
+            gap.len(),
+            2,
+            "only the ops behind the server's frontier and not the member's"
+        );
+        assert_eq!(behind.import_catchup(&gap, &group, &member).unwrap(), 2);
+        assert_eq!(behind.op_count(), 6);
+        for i in 0..6u64 {
+            let stored = behind.doc().get(ROOT, format!("k{i}")).unwrap().unwrap().0;
+            assert_eq!(stored.to_scalar().unwrap().to_u64().unwrap(), i);
+        }
+
+        // Fully caught up: the difference is empty, and asking again stays empty.
+        assert!(held
+            .export_catchup_since(&behind.sync_frontier(64), &group, &server, &mut rng)
+            .unwrap()
+            .is_empty());
+
+        // The member writes something of its own, so its frontier now names a change the server
+        // has never seen. That head can exclude nothing, and the server's own history still
+        // comes back rather than being silently treated as already held.
+        behind
+            .edit(&member, &group, &mut rng, |d| d.put(ROOT, "mine", "yes"))
+            .unwrap();
+        let mut fresh = EncryptedDoc::new(DocType::Channel, 3, &server.device_id());
+        fresh
+            .import_catchup(
+                &held.export_catchup(&group, &server, &mut rng).unwrap(),
+                &group,
+                &server,
+            )
+            .unwrap();
+        let after = fresh
+            .export_catchup_since(&behind.sync_frontier(64), &group, &server, &mut rng)
+            .unwrap();
+        assert!(
+            after.is_empty(),
+            "a head the server cannot see excludes nothing, and everything else is genuinely held"
+        );
+        let mut stranger = EncryptedDoc::new(DocType::Channel, 3, &member.device_id());
+        assert_eq!(
+            held.export_catchup_since(&stranger.sync_frontier(64), &group, &server, &mut rng)
+                .unwrap()
+                .len(),
+            6,
+            "a member holding nothing is told everything"
+        );
+    }
+
+    /// The snapshot cache exists so an unchanged document is not re-encoded once per sent
+    /// message. What it must never do is hand back bytes that predate a change: this is the
+    /// durability path, and a stale snapshot is a message that was reported saved and was not.
+    #[test]
+    fn a_cached_snapshot_is_reused_only_while_the_document_stands_still() {
+        let device = MlsDevice::generate().unwrap();
+        let other = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(4);
+        let mut doc = EncryptedDoc::new(DocType::Channel, 9, &device.device_id());
+        doc.edit(&device, &group, &mut rng, |d| d.put(ROOT, "k", "v1"))
+            .unwrap();
+
+        let first = doc.snapshot().unwrap();
+        assert_eq!(
+            doc.snapshot().unwrap(),
+            first,
+            "an idle document re-encodes to itself"
+        );
+        assert!(
+            doc.snapshot_cache.is_some(),
+            "a small document is worth remembering"
+        );
+
+        // A local edit.
+        doc.edit(&device, &group, &mut rng, |d| d.put(ROOT, "k", "v2"))
+            .unwrap();
+        let second = doc.snapshot().unwrap();
+        assert_ne!(second, first, "a local edit invalidates the cache");
+        let edited = EncryptedDoc::restore(&second).unwrap();
+        let v = edited.doc().get(ROOT, "k").unwrap().unwrap().0;
+        assert_eq!(v.into_string().unwrap(), "v2");
+
+        // A peer's op arriving through the ordinary replication path.
+        let mut peer = EncryptedDoc::new(DocType::Channel, 9, &other.device_id());
+        peer.import_catchup(
+            &doc.export_catchup(&group, &device, &mut rng).unwrap(),
+            &group,
+            &other,
+        )
+        .unwrap();
+        let sealed = peer
+            .edit(&other, &group, &mut rng, |d| d.put(ROOT, "peer", "here"))
+            .unwrap();
+        let before_ingest = doc.snapshot().unwrap();
+        assert!(doc.ingest(&sealed, &group, &device).unwrap());
+        let after_ingest = doc.snapshot().unwrap();
+        assert_ne!(
+            after_ingest, before_ingest,
+            "an ingested op invalidates the cache"
+        );
+        let restored = EncryptedDoc::restore(&after_ingest).unwrap();
+        assert!(restored.doc().get(ROOT, "peer").unwrap().is_some());
+        assert_eq!(restored.op_count(), doc.op_count());
+
+        // A document past the retention bound answers correctly and simply is not remembered.
+        let mut big = EncryptedDoc::new(DocType::Channel, 10, &device.device_id());
+        let payload = "x".repeat(MAX_CACHED_SNAPSHOT_BYTES + 1);
+        big.edit(&device, &group, &mut rng, |d| {
+            d.put(ROOT, "big", payload.as_str())
+        })
+        .unwrap();
+        let large = big.snapshot().unwrap();
+        assert!(large.len() > MAX_CACHED_SNAPSHOT_BYTES);
+        assert!(
+            big.snapshot_cache.is_none(),
+            "the biggest documents are not duplicated"
+        );
+        assert_eq!(big.snapshot().unwrap(), large);
     }
 
     #[test]

@@ -119,6 +119,47 @@ struct ServerEntry {
     /// without ever reaching the number the next launch will start from. A record is only kept
     /// by a peer when its `seq` beats the one already held, so reuse is permanent invisibility.
     record_seq: u64,
+    /// Persistence coalescing for this server: how many mutations have asked to reach disk, and
+    /// how many the newest completed write covered. See [`persist_server`].
+    persist: PersistCounters,
+    /// Serializes this server's snapshot+seal+write. An `Arc` so a writer can hold it without
+    /// holding the registry lock, which the snapshot command and the file write both outlive.
+    persist_lock: Arc<Mutex<()>>,
+}
+
+/// Where one server is between "a change happened" and "a write that contains it finished".
+///
+/// Persistence runs after every message, and a snapshot serializes the whole server, so a burst
+/// of sends used to perform one full write each: the cost of the Nth message in a session grew
+/// with N. These two counters collapse a burst into the writes actually needed without weakening
+/// the contract the callers rely on, which is that a command reports success only after a write
+/// that includes its own change reached the disk.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+struct PersistCounters {
+    /// Incremented by every request, before anything is written.
+    requested: u64,
+    /// The `requested` value observed by the newest completed write, at the moment it took its
+    /// snapshot. Every request at or below it is on disk.
+    completed: u64,
+}
+
+impl PersistCounters {
+    /// Take a ticket for a change that has already been applied. Any snapshot taken after this
+    /// contains that change, which is what makes [`Self::needs_write`] safe to answer `false`.
+    fn request(&mut self) -> u64 {
+        self.requested = self.requested.saturating_add(1);
+        self.requested
+    }
+
+    /// Whether `ticket` still needs a write of its own, or has been carried by another one.
+    fn needs_write(&self, ticket: u64) -> bool {
+        self.completed < ticket
+    }
+
+    /// Record that a write whose snapshot was taken with `requested == covering` is on disk.
+    fn completed_through(&mut self, covering: u64) {
+        self.completed = self.completed.max(covering);
+    }
 }
 
 /// One decrypted chunk, kept so a player reading a track sequentially does not re-fetch and
@@ -3036,6 +3077,8 @@ async fn register_server(
             is_dm,
             switchboard,
             record_seq,
+            persist: PersistCounters::default(),
+            persist_lock: Arc::new(Mutex::new(())),
         },
     );
     install_reconnect_capture_worker(app, id, timer_actor.clone());
@@ -3057,10 +3100,39 @@ async fn next_record_seq(state: &AppState, server: u64) -> Option<u64> {
 
 /// Snapshot a running server through its actor and seal it to disk (best-effort: a missing
 /// store, a stopped actor, or an I/O error is logged, not fatal; the app keeps running).
+///
+/// Concurrent requests are coalesced, and the contract every caller depends on is unchanged: this
+/// returns only after a write whose snapshot was taken **after** the caller's own change. A burst
+/// of sends therefore costs the writes it needs rather than one whole-server write each; what it
+/// must never become is a debounce, which would let a command report success before its message
+/// was durable.
 async fn persist_server(state: &AppState, server: u64) {
-    let actor = match actor_of_unchecked(state, server).await {
-        Ok(a) => a,
-        Err(_) => return,
+    // The ticket is taken before anything is written, and the caller's change is already applied,
+    // so any snapshot taken after this point contains it.
+    let Some((ticket, lock, actor)) = ({
+        let mut servers = state.servers.lock().await;
+        servers.get_mut(&server).map(|entry| {
+            (
+                entry.persist.request(),
+                entry.persist_lock.clone(),
+                entry.actor.clone(),
+            )
+        })
+    }) else {
+        return;
+    };
+    let _writing = lock.lock().await;
+    // Someone else's write may have started after this ticket was issued, in which case its
+    // snapshot already contains this change and there is nothing left to do.
+    let covering = {
+        let servers = state.servers.lock().await;
+        let Some(entry) = servers.get(&server) else {
+            return;
+        };
+        if !entry.persist.needs_write(ticket) {
+            return;
+        }
+        entry.persist.requested
     };
     let bytes = match actor.snapshot().await {
         Ok(b) => b,
@@ -3070,11 +3142,18 @@ async fn persist_server(state: &AppState, server: u64) {
         }
     };
     let guard = state.store.lock().await;
-    if let Some(store) = guard.as_ref() {
-        let mut rng = OsCryptoRng;
-        if let Err(e) = store.save_server(server, &bytes, &mut rng) {
-            tracing::error!(target: "catcoms_app", server, error = %e, "VAULT.SEAL_SERVER.FAILED");
-        }
+    let Some(store) = guard.as_ref() else {
+        return; // no store mounted: nothing was written, so nothing may be retired
+    };
+    let mut rng = OsCryptoRng;
+    if let Err(e) = store.save_server(server, &bytes, &mut rng) {
+        tracing::error!(target: "catcoms_app", server, error = %e, "VAULT.SEAL_SERVER.FAILED");
+        return;
+    }
+    drop(guard);
+    // Only a write that actually reached the disk may retire the requests it covered.
+    if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+        entry.persist.completed_through(covering);
     }
 }
 
@@ -11239,6 +11318,8 @@ async fn reload_one(
             is_dm: record.is_dm,
             switchboard: net.switchboard,
             record_seq: net.record_seq,
+            persist: PersistCounters::default(),
+            persist_lock: Arc::new(Mutex::new(())),
         },
     );
     install_reconnect_capture_worker(app, record.id, timer_actor.clone());
@@ -15369,6 +15450,36 @@ mod tests {
     use super::*;
     use catcoms_rt::ManualClock;
 
+    /// A burst of sends must cost the writes it needs, and no send may be told it is durable by a
+    /// write that predates it. The interleaving that matters: three changes land, the first writer
+    /// through the door covers all three, and the two behind it then have nothing to do.
+    #[test]
+    fn a_burst_is_covered_by_the_write_that_saw_it() {
+        let mut counters = PersistCounters::default();
+        let first = counters.request();
+        let second = counters.request();
+        let third = counters.request();
+        assert_eq!((first, second, third), (1, 2, 3));
+        assert!(counters.needs_write(first));
+
+        // The first writer takes its snapshot now, so it contains every change requested so far.
+        let covering = counters.requested;
+        counters.completed_through(covering);
+        assert!(
+            !counters.needs_write(second) && !counters.needs_write(third),
+            "a write that saw a change is the write that made it durable"
+        );
+
+        // A change that lands after that snapshot is not covered by it, whatever its number.
+        let fourth = counters.request();
+        assert!(counters.needs_write(fourth));
+        // An older write finishing late may never retire a newer request.
+        counters.completed_through(covering);
+        assert!(counters.needs_write(fourth), "completion never goes backwards");
+        counters.completed_through(counters.requested);
+        assert!(!counters.needs_write(fourth));
+    }
+
     #[tokio::test]
     async fn recovery_capture_wakes_are_bounded_replaced_and_coalesced() {
         let signals = StdMutex::new(HashMap::new());
@@ -18585,6 +18696,8 @@ mod tests {
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            persist: PersistCounters::default(),
+            persist_lock: Arc::new(Mutex::new(())),
         };
         const SERVER: u64 = 12;
         const OLD: u64 = 40;
@@ -19056,6 +19169,8 @@ mod tests {
                     is_dm: records[0].is_dm,
                     switchboard: network.switchboard,
                     record_seq: network.record_seq,
+                    persist: PersistCounters::default(),
+                    persist_lock: Arc::new(Mutex::new(())),
                 },
             );
             (state, actor, restored.events, restored.task)

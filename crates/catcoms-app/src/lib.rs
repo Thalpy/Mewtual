@@ -4923,6 +4923,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.member_route_revision()
     }
 
+    /// Session-local revision of the explicit delivery-receipt evidence. A delivery snapshot can
+    /// change without any document changing (a peer's receipt arrives), so [`Self::doc_version`]
+    /// alone cannot decide when to re-derive one; this is the other half.
+    pub fn delivery_evidence_revision(&self) -> u64 {
+        self.sync.delivery_receipt_revision()
+    }
+
     /// Session-monotonic version of one replicated document: the number of signed ops applied to
     /// it so far (`0` for a document that is not open). Every path that changes a document's
     /// content, local edit, live gossip, past-epoch replay and catch-up alike, appends exactly

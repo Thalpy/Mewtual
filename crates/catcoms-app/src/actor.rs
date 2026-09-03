@@ -3045,6 +3045,7 @@ where
         // every gossip frame, presence blip and receipt cost a full walk of the history; the
         // version comparison is what lets an unchanged document cost nothing.
         let mut versions = DocVersions::default();
+        let mut last_delivery_evidence = server.delivery_evidence_revision();
         let mut members = server.member_count();
         // The directory itself is shared. Seed `general` for legacy/new servers, then open every
         // known message document so later gossip and reconnect catch-up have somewhere to land.
@@ -4296,10 +4297,12 @@ where
                         .await;
                         // Only a channel whose document moved can have changed; the version
                         // check is O(1), the delta it guards walks the channel's history.
+                        let mut moved_channels = Vec::new();
                         for channel in counts.keys().copied().collect::<Vec<_>>() {
                             if !versions.moved(&server, crate::DocType::Channel, channel) {
                                 continue;
                             }
+                            moved_channels.push(channel);
                             // The version was consumed just above; a second check here would
                             // read "unchanged" and swallow the very change it is meant to report.
                             if let Some(change) = channel_delta(&server, channel, &mut counts) {
@@ -4390,7 +4393,8 @@ where
                         // (a peer connected or dropped). `online_members` is sorted, so the Vec
                         // compare is order-stable.
                         let online = server.online_members();
-                        if online != last_online {
+                        let presence_changed = online != last_online;
+                        if presence_changed {
                             last_online = online.clone();
                             let _ = event_tx
                                 .send(AppEvent::ConnectivityChanged { online })
@@ -4416,15 +4420,20 @@ where
                         // rate-limited per channel; throttled channels remain dirty and receive a
                         // deterministic timer wake if no later network event arrives.
                         //
-                        // Deliberately NOT gated on document versions like the projections above.
-                        // The recompute short-circuits when this device has no recent own messages,
-                        // so it is cheap; and the timer it arms is load-bearing: `select!` drops
-                        // the in-flight `sync_once` when the timer fires, which is what frees a
-                        // tick blocked in an outbound request while the peer's inbound request
-                        // waits behind it (two members requesting each other at once). Gating
-                        // this removed that wake and `process_recovery_e2e` deadlocked until the
-                        // request timeout.
-                        delivery_dirty.extend(counts.keys().copied());
+                        // Only a channel whose document moved can carry new causal evidence. An
+                        // explicit receipt lives outside the documents and a delivery row also
+                        // names how many members are reachable, so either of those dirties
+                        // everything. This gating was reverted once, because the timer it arms was
+                        // the only thing cancelling a tick stuck in an outbound request; that is
+                        // now the request's own deadline (`CATCHUP_REQUEST_MS`), so the wake is a
+                        // wake again rather than a load-bearing accident.
+                        let delivery_evidence = server.delivery_evidence_revision();
+                        if delivery_evidence != last_delivery_evidence || presence_changed {
+                            last_delivery_evidence = delivery_evidence;
+                            delivery_dirty.extend(counts.keys().copied());
+                        } else {
+                            delivery_dirty.extend(moved_channels.iter().copied());
+                        }
                         for (channel, snapshot) in recompute_due_delivery(
                             &mut server,
                             &mut delivery,

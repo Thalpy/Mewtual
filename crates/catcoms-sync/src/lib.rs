@@ -150,6 +150,18 @@ const KIND_INDIRECT_RESULT: u8 = 17;
 /// existing causal-descendant proof: a quiet recipient can now confirm receipt without authoring
 /// another message, while an older peer simply ignores this unknown request kind.
 const KIND_DELIVERY_RECEIPT: u8 = 18;
+/// Catch-up for a document the requester already partly holds: it names its automerge frontier
+/// and receives only what is missing. A peer that does not know this kind answers empty, which is
+/// how the requester detects it and falls back to [`KIND_CATCHUP`].
+const KIND_CATCHUP_SINCE: u8 = 19;
+/// Frontier entries one incremental catch-up may name. A document's frontier is one hash per
+/// concurrent writer and normally one or two; this is a bound on the walk a requester can ask a
+/// serving peer to perform, not a limit anyone reaches.
+const MAX_CATCHUP_SINCE_HEADS: usize = 64;
+/// Marks a response as coming from a peer that understands [`KIND_CATCHUP_SINCE`], so "you are
+/// already up to date" (a bundle of zero ops) is distinguishable from "I did not understand you"
+/// (an empty response). Everything after it is an ordinary catch-up bundle.
+const CATCHUP_SINCE_UNDERSTOOD: u8 = 1;
 const MAX_DELIVERY_RECEIPT_OUTBOX: usize = 128;
 const MAX_DELIVERY_RECEIPT_TARGETS: usize = 64;
 const RECIPROCAL_ATTEST_DOMAIN: &str = "catcoms/reciprocal/helper-attestation/v1";
@@ -512,6 +524,21 @@ const MAX_CONTROL_REQUEST: usize = 64 * 1024;
 /// large; 16 MiB is a generous v1 ceiling (resumable chunked anti-entropy for
 /// larger-than-this histories is deferred; see ARCHITECTURE §2.8).
 const MAX_CATCHUP_RESPONSE: usize = 16 * 1024 * 1024;
+/// Ceiling on how long one outbound catch-up may hold this node's tick (ms).
+///
+/// A tick that is awaiting a response cannot serve the request arriving the other way, so two
+/// members that ask each other at the same moment each wait behind the other. Until the request
+/// path is moved off the serve path entirely (see `docs/design-native-paging.md`'s neighbours in
+/// the hardening plan), the deadline is what makes that self-heal: the tick returns, the inbound
+/// request is served, and the catch-up is re-queued by the ordinary recovery trigger. It is
+/// deliberately generous next to a LAN round trip and short next to a person noticing.
+///
+/// It is also *more* permissive than what it replaces. The actor's `select!` already dropped an
+/// in-flight tick whenever the one-second delivery timer fired, so a catch-up has effectively had
+/// about a second to complete; this budget is explicit, twice as long, and no longer a side
+/// effect of an unrelated feature. Bundles are what make the budget comfortable: a catch-up now
+/// carries only what the requester is missing (`request_catchup_since`).
+const CATCHUP_REQUEST_MS: u64 = 2_000;
 /// Defensive cap on the element count claimed by a bundle header, so a malformed
 /// length prefix cannot drive a long allocation loop even within the size cap.
 const MAX_BUNDLE_ELEMENTS: u32 = 1 << 20;
@@ -3164,6 +3191,42 @@ fn encode_catchup_req(doc_type: DocType, doc_id: u128) -> Vec<u8> {
     e.finish()
 }
 
+fn encode_catchup_since_req(doc_type: DocType, doc_id: u128, heads: &[[u8; 32]]) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_u16(doc_type.tag());
+    e.put_u128(doc_id);
+    e.put_u32(heads.len() as u32);
+    for head in heads {
+        e.put_bytes(head).expect("a 32-byte head always encodes");
+    }
+    e.finish()
+}
+
+#[allow(clippy::type_complexity)]
+fn decode_catchup_since_req(bytes: &[u8]) -> Result<(DocType, u128, Vec<[u8; 32]>), SyncError> {
+    let mut d = Decoder::new(bytes);
+    let tag = d.get_u16().map_err(|_| SyncError::Malformed)?;
+    let doc_type = DocType::from_tag(tag).ok_or(SyncError::Malformed)?;
+    let doc_id = d.get_u128().map_err(|_| SyncError::Malformed)?;
+    let count = d.get_u32().map_err(|_| SyncError::Malformed)? as usize;
+    // Bound the claimed count before allocating for it, exactly as every other decoded bundle
+    // header is bounded: the number is chosen by the peer.
+    if count > MAX_CATCHUP_SINCE_HEADS {
+        return Err(SyncError::Malformed);
+    }
+    let mut heads = Vec::with_capacity(count);
+    for _ in 0..count {
+        let head: [u8; 32] = d
+            .get_bytes()
+            .map_err(|_| SyncError::Malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
+        heads.push(head);
+    }
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((doc_type, doc_id, heads))
+}
+
 fn decode_catchup_req(bytes: &[u8]) -> Result<(DocType, u128), SyncError> {
     let mut d = Decoder::new(bytes);
     let tag = d.get_u16().map_err(|_| SyncError::Malformed)?;
@@ -3534,6 +3597,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Verified receipt senders for each tracked change. Session-only and monotonic; causal proof
     /// remains available as an interoperable fallback for older peers.
     delivery_receipts: HashMap<(DocType, u128, ChangeHash), BTreeSet<DeviceId>>,
+    /// Bumped whenever a receipt adds evidence. Receipts live outside the documents, so a
+    /// consumer that decides what to recompute from document versions needs this second signal
+    /// to notice them.
+    delivery_receipt_revision: u64,
     /// Peers that recently answered a commit catch-up without filling the gap;
     /// skipped when choosing the next catch-up source so one bad/stale peer can't
     /// dead-end recovery. Cleared once a catch-up makes progress.
@@ -3825,6 +3892,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             delivery_receipt_outbox: VecDeque::new(),
             delivery_receipt_targets: VecDeque::new(),
             delivery_receipts: HashMap::new(),
+            delivery_receipt_revision: 0,
             failed_catchup_peers: VecDeque::new(),
             pending: None,
             welcome_outbox: Vec::new(),
@@ -6930,10 +6998,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if requester == self.device.device_id() {
             return;
         }
-        self.delivery_receipts
+        if self
+            .delivery_receipts
             .entry(target)
             .or_default()
-            .insert(requester);
+            .insert(requester)
+        {
+            self.delivery_receipt_revision = self.delivery_receipt_revision.wrapping_add(1);
+        }
+    }
+
+    /// Session-local revision of the explicit-receipt evidence: changes exactly when a receipt
+    /// that could alter a delivery snapshot is accepted. Documents carry their own versions;
+    /// this covers the evidence that lives beside them.
+    pub fn delivery_receipt_revision(&self) -> u64 {
+        self.delivery_receipt_revision
     }
 
     /// Send queued receipts only over an already-live member route. A receipt must never create a
@@ -9514,9 +9593,107 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    /// One outbound request, bounded by [`CATCHUP_REQUEST_MS`].
+    ///
+    /// A timeout is reported as [`SyncError::Transport`]'s unreachable case, which every caller
+    /// already treats as "this peer did not answer": the catch-up stays queued and is retried,
+    /// against a different peer if this one keeps failing.
+    ///
+    /// Takes the transport and clock rather than `&self`: a future holding `&ChannelSync` would
+    /// have to be `Sync` to stay `Send`, and this owner deliberately is not.
+    async fn request_within_deadline(
+        transport: &T,
+        clock: &(dyn Clock + Send),
+        peer: PeerId,
+        req: Vec<u8>,
+        what: &'static str,
+    ) -> Result<Bytes, SyncError> {
+        // The deadline runs on the injected clock like every other wait in this crate, so a
+        // deterministic test advances into it rather than sleeping through it.
+        let deadline = clock.sleep(std::time::Duration::from_millis(CATCHUP_REQUEST_MS));
+        let answer = transport.request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req));
+        futures::pin_mut!(deadline, answer);
+        match futures::future::select(answer, deadline).await {
+            futures::future::Either::Left((result, _)) => Ok(result?),
+            futures::future::Either::Right(((), _)) => {
+                tracing::debug!(?peer, what, "outbound request passed its deadline");
+                Err(SyncError::Transport(TransportError::Unreachable(peer)))
+            }
+        }
+    }
+
     /// Request a catch-up bundle for a document from `peer` and apply it.
     /// Returns the number of newly-applied ops.
+    ///
+    /// A document this node already partly holds is caught up **incrementally**: it names its
+    /// automerge frontier and receives only what is behind the peer's and not behind its own.
+    /// Rejoining a long-lived channel therefore costs the gap rather than the whole history,
+    /// which is what made every reconnect more expensive than the last. A peer too old to
+    /// understand that answers nothing, and the full history is requested instead.
     pub async fn request_catchup(
+        &mut self,
+        peer: catcoms_rt::PeerId,
+        doc_type: DocType,
+        doc_id: u128,
+    ) -> Result<usize, SyncError> {
+        let heads = self
+            .docs
+            .get_mut(&(doc_type, doc_id))
+            .map(|doc| doc.sync_frontier(MAX_CATCHUP_SINCE_HEADS))
+            .unwrap_or_default();
+        // Nothing held means nothing to subtract; that is the full history's business.
+        if !heads.is_empty() {
+            if let Some(applied) = self
+                .request_catchup_since(peer, doc_type, doc_id, &heads)
+                .await?
+            {
+                return Ok(applied);
+            }
+        }
+        self.request_full_catchup(peer, doc_type, doc_id).await
+    }
+
+    /// Ask `peer` for only what this node is missing. `Ok(None)` means the peer did not
+    /// understand the request, which is the one case the caller answers by asking for everything.
+    async fn request_catchup_since(
+        &mut self,
+        peer: catcoms_rt::PeerId,
+        doc_type: DocType,
+        doc_id: u128,
+        heads: &[[u8; 32]],
+    ) -> Result<Option<usize>, SyncError> {
+        let (req, _auth) = self.build_authed_request(
+            KIND_CATCHUP_SINCE,
+            &encode_catchup_since_req(doc_type, doc_id, heads),
+        )?;
+        tracing::debug!(
+            ?doc_type,
+            doc_id,
+            ?peer,
+            heads = heads.len(),
+            "request incremental doc catch-up"
+        );
+        self.stats.doc_catchups_requested += 1;
+        let resp = Self::request_within_deadline(
+            &self.transport,
+            &*self.clock,
+            peer,
+            req,
+            "incremental doc catch-up",
+        )
+        .await?;
+        match resp.split_first() {
+            // An older peer, or one that refused: ask the way it understands.
+            None => Ok(None),
+            Some((&CATCHUP_SINCE_UNDERSTOOD, bundle)) => self
+                .apply_catchup_response(doc_type, doc_id, bundle)
+                .map(Some),
+            Some(_) => Err(SyncError::Malformed),
+        }
+    }
+
+    /// Ask `peer` for a document's whole history.
+    async fn request_full_catchup(
         &mut self,
         peer: catcoms_rt::PeerId,
         doc_type: DocType,
@@ -9526,13 +9703,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.build_authed_request(KIND_CATCHUP, &encode_catchup_req(doc_type, doc_id))?;
         tracing::debug!(?doc_type, doc_id, ?peer, "request doc catch-up");
         self.stats.doc_catchups_requested += 1;
-        let resp = self
-            .transport
-            .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
-            .await?;
+        let resp =
+            Self::request_within_deadline(&self.transport, &*self.clock, peer, req, "doc catch-up")
+                .await?;
         if resp.is_empty() {
             return Ok(0); // peer had nothing for this document
         }
+        self.apply_catchup_response(doc_type, doc_id, &resp)
+    }
+
+    /// Verify, apply and acknowledge a served bundle. Shared by both catch-up shapes, which
+    /// differ only in what the serving peer chose to put in it.
+    fn apply_catchup_response(
+        &mut self,
+        doc_type: DocType,
+        doc_id: u128,
+        resp: &[u8],
+    ) -> Result<usize, SyncError> {
         if resp.len() > MAX_CATCHUP_RESPONSE {
             tracing::warn!(
                 bytes = resp.len(),
@@ -9540,7 +9727,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             );
             return Err(SyncError::Malformed);
         }
-        let bundle = decode_bundle(&resp)?;
+        let bundle = decode_bundle(resp)?;
 
         let key = (doc_type, doc_id);
         let actor = self.device.device_id();
@@ -9798,10 +9985,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.build_authed_request(KIND_COMMIT_CATCHUP, &encode_commit_catchup_req(from_epoch))?;
         tracing::debug!(from_epoch, ?peer, "request commit catch-up");
         self.stats.commit_catchups_requested += 1;
-        let resp = self
-            .transport
-            .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
-            .await?;
+        let resp = Self::request_within_deadline(
+            &self.transport,
+            &*self.clock,
+            peer,
+            req,
+            "commit catch-up",
+        )
+        .await?;
         if resp.is_empty() {
             return Ok(0);
         }
@@ -10341,6 +10532,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         match data.split_first() {
             Some((&KIND_CATCHUP, rest)) => self.serve_catchup(rest).unwrap_or_default(),
+            Some((&KIND_CATCHUP_SINCE, rest)) => self.serve_catchup_since(rest).unwrap_or_default(),
             Some((&KIND_JOIN, rest)) => self.serve_join(from, rest).unwrap_or_default(),
             Some((&KIND_COMMIT_CATCHUP, rest)) => {
                 self.serve_commit_catchup(rest).unwrap_or_default()
@@ -10463,6 +10655,45 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Serve a document's history; but only to a requester that proved current
     /// group membership (the bundle, though sealed, still carries member-only
     /// framing/metadata, so it is members-only).
+    /// Serve only what a member is missing in one document, given the frontier it names.
+    ///
+    /// Members-only on exactly the same terms as [`Self::serve_catchup`], and answering with the
+    /// same sealed-bundle shape behind a one-byte marker so a requester can tell "nothing for
+    /// you" from "this peer is too old to ask". A truncated response is still progress here: the
+    /// requester applies the prefix, its frontier moves, and the next request asks for less.
+    fn serve_catchup_since(&mut self, data: &[u8]) -> Option<Vec<u8>> {
+        let (inner, _pubkey, _auth) = self.authenticate_request(KIND_CATCHUP_SINCE, data)?;
+        let (doc_type, doc_id, heads) = decode_catchup_since_req(&inner).ok()?;
+        let doc = self.docs.get_mut(&(doc_type, doc_id))?;
+        match doc.export_catchup_since(&heads, &self.group, &self.device, &mut self.rng) {
+            Ok(bundle) => {
+                let (prefix, served) = size_capped_ops(&bundle, MAX_CONTROL_RESPONSE);
+                if served < bundle.len() {
+                    tracing::debug!(
+                        served,
+                        total = bundle.len(),
+                        "incremental doc catch-up truncated to response budget"
+                    );
+                }
+                tracing::debug!(
+                    ?doc_type,
+                    doc_id,
+                    ops = served,
+                    heads = heads.len(),
+                    "serving incremental doc catch-up"
+                );
+                let mut response = Vec::with_capacity(prefix.len() + 1);
+                response.push(CATCHUP_SINCE_UNDERSTOOD);
+                response.extend_from_slice(&prefix);
+                Some(response)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to build incremental catch-up bundle");
+                None
+            }
+        }
+    }
+
     fn serve_catchup(&mut self, data: &[u8]) -> Option<Vec<u8>> {
         let (inner, _pubkey, _auth) = self.authenticate_request(KIND_CATCHUP, data)?;
         let (doc_type, doc_id) = decode_catchup_req(&inner).ok()?;
