@@ -54,7 +54,13 @@ startup payload. Raising `chunkSizeWarningLimit` would only suppress the signal.
 times the native costs that grow with it. Before the cursor walk, one materialization of the channel
 (`Server::messages`, which the actor's change check also ran for every open channel on every network
 event) cost 34 ms at 1k messages, 194 ms at 5k and 823 ms at 20k: the reason a busy old room got slower
-to open and to keep up with. After the change the walk (plus the clone `messages()` hands out) is
+to open and to keep up with. After the whole sequence (cursor walk, version cache, version-gated
+actor, snapshot cache) the same probe reads 3 / 18 / 75 ms for the walk, 0 ms for a cached read,
+and 0 / 1 / 2 ms for the actor's per-event change check, with the snapshot at 3 / 12 / 54 ms and
+now taken only when a document moved. The numbers below are from the first of those steps, kept
+because they are what the cursor walk alone bought.
+
+After that first change the walk (plus the clone `messages()` hands out) is
 2.8 ms / 17 ms / 72 ms, and the actor's change check between two changes, which now only hashes the
 cached list, is 0.08 ms / 0.38 ms / 1.6 ms instead of repeating the walk. The remaining per-arrival
 cost of a 20k-row channel is therefore one ~70 ms materialization plus the full-vector IPC to the
