@@ -215,3 +215,34 @@ export type SearchRequest =
 
 /** What it answers. `id` names the query, so a late answer to an old one can be discarded. */
 export type SearchResponse = { type: "result"; id: number; hits: SearchHitRef[] };
+
+/**
+ * Which read of a channel is still wanted.
+ *
+ * The corpus is a snapshot of a live conversation, so a channel can change while it is being
+ * read. Dropping the stored snapshot is not enough on its own: the read that is already in
+ * flight knows nothing about the change, and when it lands it looks exactly like a fresh one.
+ * Stamping each read with the channel's revision at the moment it was issued is what tells the
+ * two apart, so the answer that was overtaken is discarded rather than stored as current.
+ *
+ * A channel with nothing stored still counts. That is precisely the window where a first read is
+ * outstanding and the conversation moves under it.
+ */
+export class CorpusRevisions {
+  #wanted = new Map<string, number>();
+
+  /** The revision to stamp a read with. Pass it back to {@link accepts} when the read lands. */
+  issue(channel: string): number {
+    return this.#wanted.get(channel) ?? 0;
+  }
+
+  /** Note that `channel` has changed, so any read already in flight for it is out of date. */
+  invalidate(channel: string): void {
+    this.#wanted.set(channel, this.issue(channel) + 1);
+  }
+
+  /** Whether a read stamped `issued` still describes the channel. */
+  accepts(channel: string, issued: number): boolean {
+    return this.issue(channel) === issued;
+  }
+}

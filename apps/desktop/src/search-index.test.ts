@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  CorpusRevisions,
   dayBound,
   findMatches,
   messageKinds,
@@ -108,4 +109,32 @@ test("embeds are classified by the file index, and anything unknown is an attach
   assert.deepEqual(kinds, { image: true, video: true, audio: false, file: true, link: false });
   assert.equal(messageKinds("![x](cid:99)", {}).file, true, "an address not in the index yet");
   assert.equal(reactionCount(message({ id: "r", reactions: [{ emoji: "x", by: ["a", "b"] }] })), 2);
+});
+
+test("a channel that changes while it is being read discards that read", () => {
+  const wanted = new CorpusRevisions();
+
+  // The ordinary case: nothing happened while the read was out, so it is stored.
+  const quiet = wanted.issue("general");
+  assert.equal(wanted.accepts("general", quiet), true);
+
+  // The case the snapshot alone could not catch. Nothing is stored for this channel yet, so
+  // there is no stale copy to drop, but a first read is already out and a message has just
+  // arrived. Accepting it would seat a corpus that is missing that message and looks current,
+  // and nothing would invalidate it again.
+  const first = wanted.issue("busy");
+  wanted.invalidate("busy");
+  assert.equal(wanted.accepts("busy", first), false, "the overtaken read is not the channel");
+  assert.equal(wanted.accepts("busy", wanted.issue("busy")), true, "the read that replaces it is");
+
+  // Channels are counted apart: a burst in one says nothing about another.
+  assert.equal(wanted.accepts("general", quiet), true);
+
+  // Two changes during one read are still one discard, and a second read issued between them
+  // is discarded in its turn.
+  const second = wanted.issue("busy");
+  wanted.invalidate("busy");
+  wanted.invalidate("busy");
+  assert.equal(wanted.accepts("busy", second), false);
+  assert.equal(wanted.accepts("busy", wanted.issue("busy")), true);
 });

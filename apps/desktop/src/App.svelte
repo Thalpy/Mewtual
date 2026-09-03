@@ -43,7 +43,7 @@
     peerGain, type PeerAudioKind,
   } from "./call-audio";
   import {
-    findMatches, noSearchFilters, reactionCount, searchFilterCount, searchIsEmpty,
+    CorpusRevisions, findMatches, noSearchFilters, reactionCount, searchFilterCount, searchIsEmpty,
     type SearchCorpusChannel, type SearchHitRef, type SearchMessage, type SearchResponse,
     type SearchSpec,
   } from "./search-index";
@@ -2412,9 +2412,18 @@
    * what tells the worker its copy is obsolete.
    */
   let chanMsgsRevision = $state<Record<string, number>>({});
+  // Which read of each channel is still wanted, so one overtaken mid-flight is discarded instead
+  // of stored as current. Deliberately outside `$state`: nothing renders from it.
+  const searchCorpusWanted = new CorpusRevisions();
+  // Channel to the revision of the read currently out for it, so an unchanged channel is not
+  // read twice at once while a changed one is read again promptly.
+  const searchReadsInFlight = new Map<string, number>();
   /** Forget a channel's snapshot so the next `loadScope` reads it again. */
   function invalidateSearchChannel(channel: string) {
-    if (!showSearch || !chanMsgs[channel]) return;
+    if (!showSearch) return;
+    // Marked before the snapshot check, because a channel with no snapshot yet is the one case
+    // that matters most: its first read is outstanding and has just been overtaken.
+    searchCorpusWanted.invalidate(channel);
     delete chanMsgs[channel];
     void loadScope();
   }
@@ -2423,25 +2432,37 @@
     const s = cur;
     if (id === null || !s) return;
     const want = filters.channel === "*" ? s.channels.map((c) => c.id) : [filters.channel || s.active];
-    const need = want.filter((c) => c && !chanMsgs[c]);
+    // Skip a channel already being read at the revision we would ask for; re-read one whose read
+    // in flight is for an older revision, because that answer is going to be thrown away.
+    const need = want.filter(
+      (c) => c && !chanMsgs[c] && searchReadsInFlight.get(c) !== searchCorpusWanted.issue(c)
+    );
     if (!need.length) return;
+    const issued = need.map((c) => [c, searchCorpusWanted.issue(c)] as const);
+    for (const [c, at] of issued) searchReadsInFlight.set(c, at);
     scopeLoading = true;
     try {
       const loaded = await Promise.all(
-        need.map((c) =>
-          invoke<Msg[]>("get_messages", { server: id, channel: c }).then((msgs) => [c, msgs] as const)
+        issued.map(([c, at]) =>
+          invoke<Msg[]>("get_messages", { server: id, channel: c }).then((msgs) => [c, msgs, at] as const)
         )
       );
       // A server switch, or search closing, drops the answer: neither may repopulate a cache that
       // was deliberately cleared.
       if (activeServerId !== id || !showSearch) return;
-      for (const [c, msgs] of loaded) {
+      for (const [c, msgs, at] of loaded) {
+        // The channel changed while this was being read, so these rows are already history. A
+        // reload for the newer revision is either running or queued by the same invalidation.
+        if (!searchCorpusWanted.accepts(c, at)) continue;
         chanMsgs[c] = msgs;
         chanMsgsRevision[c] = (chanMsgsRevision[c] ?? 0) + 1;
       }
     } catch (e) {
       error = String(e);
     } finally {
+      for (const [c, at] of issued) {
+        if (searchReadsInFlight.get(c) === at) searchReadsInFlight.delete(c);
+      }
       scopeLoading = false;
     }
   }
