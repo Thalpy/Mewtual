@@ -31,20 +31,36 @@ remains honest: 709 kB is still large, so `chunkSizeWarningLimit` has not been r
 | Cross-server inbox scans | Each channel event can scan every server/channel | Debounce, run during browser idle time with a deadline, cancel on lock/unmount | Done; incremental native index remains |
 | Large startup component | One very large Svelte component and eager optional libraries increase parse/initialization work | Real dynamic imports; move component markup, behavior and feature CSS together | Feedback + Wiki Help + QR done; more views queued |
 | Server-wide search | Builds an all-channel corpus and runs filters/sorts on the UI thread | Load on explicit search only; next move indexing/filtering to a worker and page results | Queued |
-| Full native history materialization | `read_messages` walks every Automerge list item and IPC serializes the full vector | Add an actor-owned paged/window query with total/anchors; preserve exact search/unread semantics | Queued; compatibility/security design required |
+| Full native history materialization | `read_messages` walks every Automerge list item and IPC serializes the full vector | Walk with one sequential list/map cursor instead of an indexed lookup per row and field; cache the materialized list per channel under its document version (`Server::with_messages`) so one walk serves every read between two changes. Paged/window query with total/anchors still to come; preserve exact search/unread semantics | Cursor walk + version cache done (2026-09-03); paging queued, compatibility/security design required |
+| Per-event native projection sweep | Every network event (gossip frame, presence blip, receipt) re-materialized every open channel plus status, wiki, roles and Ed25519-verified moderation records to detect changes | Gate every projection on `Server::doc_version` (ops applied per document, O(1)) plus epoch/member-count for membership-derived ones. Delivery dirtying is left ungated on purpose: its one-second timer is also the wake that cancels a sync tick blocked in an outbound request (see INTERFACES § 10); gating it made `process_recovery_e2e` deadlock for the full request timeout | Done (2026-09-03) |
+| Actor blocks on outbound requests | A sync tick that awaits a catch-up/PEX response cannot serve the peer's inbound request; two members requesting each other at once wait for each other until a timeout. Today only the `select!` cancellation from the delivery timer or a command breaks it | Move outbound request/response off the serve path (or serve inbound requests while awaiting), then the delivery gating can land. Protocol-adjacent: adversarial review first | Found 2026-09-03; queued |
+| Background-channel arrival fetch | The ticker fetched a whole channel's history for every arrival in a channel not on screen, to read its last row and scan for mentions | `get_message_tail(limit)` with a native `targets_me` per row (reply parents resolved against the whole channel) | Done (2026-09-03) |
+| Frontend full-array reactivity | `messages` was deep `$state`, proxying every row and field on every refresh while eight deriveds walk the whole array | `$state.raw` (the array is only ever replaced wholesale); keep the sanitized-HTML cache across channel hops; in-place ticker receipt set (bounded) and media-url record instead of copy-per-add | Done (2026-09-03) |
 | Remote image embeds | Network, decode, memory and layout work; also discloses the viewer IP to the image host | Keep URL/referrer validation; add click-to-load or per-server trust and fixed intrinsic placeholders | Queued |
 | Voice/video/instruments | WebRTC peers, meters, rAF/timers and media decode are inherently expensive | Keep inactive code lazy, stop every track/timer on leave/lock, profile peer-count scaling | Queued |
 | Global timers/animated chrome | Presence, transfers, mascot, ticker and visual effects keep waking the webview | Pause hidden/locked work, consolidate clocks, respect motion-off | Queued |
 | Large settings/operations markup | Infrequent views still compile and initialize with chat | Extract Settings, Server Settings, Server Space, moderation/storage/connectivity, wiki help and recovery as typed lazy components | Queued in that order of coupling/risk |
 | CSS size/style invalidation | One 200+ kB global stylesheet is parsed up front and broad selectors can invalidate widely | Move feature CSS with extracted components; audit selectors before changing shared theme tokens | Queued |
-| Persistence/crypto work on mutations | Snapshots and integrity work can overlap UI-visible activity | Measure actor latency first; batch only where durability contracts permit; never weaken seals/hashes | Measurement queued |
+| Persistence/crypto work on mutations | Snapshots and integrity work can overlap UI-visible activity | Measure actor latency first; batch only where durability contracts permit; never weaken seals/hashes | Measured 2026-09-03 (release, one channel): full `Server::snapshot` is 2.7 ms / 393 KiB at 1k messages, 12 ms / 1.9 MiB at 5k, 47 ms / 7.6 MiB at 20k, and `persist_server` runs it (plus seal, full-file rewrite and fsync, inside the actor mailbox) after every send/edit/reaction. Not the dominant cost, but linear in history; a debounce would change the "persisted before reported" contract and needs its own decision |
 
 `manualChunks` is deliberately not the plan: without dynamic imports it mostly renames the same
 startup payload. Raising `chunkSizeWarningLimit` would only suppress the signal.
 
+### Measured history scaling (2026-09-03)
+
+`cargo test -p catcoms-app --release --lib scale_probe -- --ignored --nocapture` fills one channel and
+times the native costs that grow with it. Before the cursor walk, one materialization of the channel
+(`Server::messages`, which the actor's change check also ran for every open channel on every network
+event) cost 34 ms at 1k messages, 194 ms at 5k and 823 ms at 20k: the reason a busy old room got slower
+to open and to keep up with. After the change the walk (plus the clone `messages()` hands out) is
+2.8 ms / 17 ms / 72 ms, and the actor's change check between two changes, which now only hashes the
+cached list, is 0.08 ms / 0.38 ms / 1.6 ms instead of repeating the walk. The remaining per-arrival
+cost of a 20k-row channel is therefore one ~70 ms materialization plus the full-vector IPC to the
+webview, which is what native paging is for.
+
 ## Security review and command tracking
 
-The desktop exposes **100** custom Tauri commands. `src/tauri-command-security.ts` classifies every
+The desktop exposes **101** custom Tauri commands. `src/tauri-command-security.ts` classifies every
 one by boundary, and `tauri-command-security.test.ts` compares that ledger with both the Rust
 `generate_handler!` list and literal frontend invocations. A new, removed, duplicated, dynamically
 named or unclassified command fails the frontend suite.

@@ -10705,6 +10705,44 @@ async fn get_messages(
         .collect())
 }
 
+/// One row of [`get_message_tail`]: a message plus whether it is addressed to this member.
+#[derive(Serialize, Clone)]
+struct UiTailMessage {
+    #[serde(flatten)]
+    message: UiMessage,
+    /// An `@[my name]` mention or a reply to one of my messages, resolved natively against the
+    /// whole channel so the webview does not need the history to answer it.
+    targets_me: bool,
+}
+
+/// Upper bound on one tail read. A notification needs the newest row and the handful behind it;
+/// a caller asking for more than this is asking for `get_messages`.
+const MAX_MESSAGE_TAIL: usize = 256;
+
+/// Read the newest `limit` messages of a channel (oldest first) with an "addressed to me" bit per
+/// row. This is the arrival-notification read: it runs for every arrival in every channel that is
+/// not on screen, so it is bounded by `limit`, never by how long the channel has existed.
+#[tauri::command]
+async fn get_message_tail(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    limit: usize,
+) -> Result<Vec<UiTailMessage>, String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let limit = limit.clamp(1, MAX_MESSAGE_TAIL);
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .message_tail(id, limit)
+        .await
+        .into_iter()
+        .map(|(m, targets_me)| UiTailMessage {
+            message: ui_message(m),
+            targets_me,
+        })
+        .collect())
+}
+
 /// One channel's newest activity, with no message text: what unread state is rebuilt from.
 #[derive(Serialize)]
 struct UiChannelHead {
@@ -15171,6 +15209,7 @@ pub fn run() {
             get_jukebox,
             get_inbox,
             get_messages,
+            get_message_tail,
             get_channel_heads,
             pairing_begin,
             pairing_read,

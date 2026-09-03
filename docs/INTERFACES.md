@@ -913,6 +913,31 @@ merge can leave the count untouched. First sight of a channel reports nothing, b
 fetches messages when it opens one. The bridge forwards the flags on the `channel-updated` payload
 (`messages_appended`, `messages_changed`, `topic`, `jukebox`).
 
+The signature is recomputed only for a channel whose document **moved**. `Server::doc_version(doc_type,
+doc_id)` is the number of signed ops applied to a document this session (O(1); every content change,
+local or remote, live or caught up, is exactly one op, and duplicates never count), and the actor keeps
+the last version it projected for every document it watches. A network event that touched nothing a
+projection reads costs no document walk; before this, every gossip frame, presence blip and receipt
+re-materialized every open channel plus the status feed, wiki, roles and (Ed25519-verified)
+moderation records. Membership-derived projections (roles, moderation) also re-read on an epoch or
+member-count change, and the wiki keeps its full compare while a review is pending, because a pending
+edit auto-accepts at its deadline with no op written. Delivery snapshots are deliberately **not**
+gated: every tick still dirties every open channel (the recompute is throttled to one second per
+channel and short-circuits when this device has no recent own messages), because the one-second
+delivery timer that this arms is also what cancels a sync tick blocked in an outbound request.
+The actor's `select!` drops the in-flight `sync_once` future whenever the timer or a command
+fires; without that wake, two members that simultaneously issue a request to each other (a doc
+catch-up one way, PEX the other) each sit on the other's inbound request until the request
+timeout, and `process_recovery_e2e` fails. `Server::messages` is served from a per-channel materialization
+cached under the same version (`with_messages` borrows it without copying), so the actor's change
+check, `get_messages`, the unread heads and the inbox share one walk per change.
+
+`get_message_tail(server, channel, limit)` (`Server::message_tail`) returns the newest `limit` rows
+(oldest first, `limit` clamped to 1..=256 at the bridge) each with a `targets_me` flag: an `@[my name]`
+mention under the composer's normalization, or a reply to one of my messages, with the parent resolved
+against the **whole** channel. It exists for the arrival ticker, which runs for every arrival in every
+channel not on screen and used to fetch that channel's entire history to read its last row.
+
 `get_channel_heads(server)` is how unread badges survive what the event stream cannot. Actor
 notifications are deliberately dropped at the native boundary while the vault is locked, and a
 restart begins with no event history at all, so anything that arrived in the meantime has no event

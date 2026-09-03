@@ -225,6 +225,10 @@
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
+  // One row of `get_message_tail`: the backend resolves "addressed to me" (an @-mention of my
+  // profile name, or a reply to my own message) against the WHOLE channel document, so a reply
+  // whose parent is older than the tail is still recognised without shipping the history.
+  type TailMsg = Msg & { targets_me: boolean };
   type InboxEntry = {
     server: number; server_name: string; is_dm: boolean;
     channel: string; message_id: string; author: string; author_name: string;
@@ -2126,7 +2130,10 @@
   let copied = $state(false);
   let newChannel = $state("");
 
-  let messages = $state<Msg[]>([]);
+  // Raw, not deep, state: the history is only ever replaced wholesale by a fresh actor snapshot,
+  // never mutated in place, so proxying every row (and every field of every row) bought nothing
+  // and cost a proxy plus per-field signals for the entire log on every refresh.
+  let messages = $state.raw<Msg[]>([]);
   // The actor remains the source of truth for the complete channel history. Only a bounded slice
   // enters the DOM, which caps Svelte work, rich-media resolution, observers and layout cost in a
   // long-running room. Sanitized HTML is cached in memory only and wiped at the lock boundary.
@@ -5670,7 +5677,9 @@
     // Channel-scoped content, dropped before the move rather than when the read returns: the
     // group's own state (roster, files, branding) is unchanged by a channel hop and stays put.
     messages = [];
-    messageRenderCache.clear();
+    // The render cache is keyed by (server, channel, id) and bounded, so it is deliberately kept
+    // across a channel hop: switching A -> B -> A re-mounts A's rows from cache instead of
+    // re-parsing and re-sanitizing every one of them. It is still wiped at the lock boundary.
     messageWindow = { start: 0, end: 0 };
     messageWindowScope = "";
     chatStickToBottom = true;
@@ -8805,7 +8814,9 @@
     if (!file || !safeMime(file.mime) || !mayAutoLoadSharedFile(file)) return; // retried on index/policy update
     const key = scopedMediaKey(server, cid);
     if (mediaUrls[key]) return;
-    mediaUrls = { ...mediaUrls, [key]: sharedMediaUrl(cid, server) };
+    // In-place: the record is deep state, so a property write is reactive on its own, and the
+    // previous spread copied every resolved url again for each new embed.
+    mediaUrls[key] = sharedMediaUrl(cid, server);
   }
   $effect(() => {
     const wanted = [...events.map((e) => e.image), evImage].filter(Boolean);
@@ -9848,7 +9859,7 @@
   }
   // Does `msgs` contain a message newer than the channel's read mark that targets me (and isn't
   // mine)? Used to flag a channel and to decide whether an arrival deserves a mention chime.
-  function targetsMe(channel: string, msgs: Msg[]): boolean {
+  function targetsMe(channel: string, msgs: TailMsg[]): boolean {
     // No active server means no read mark to measure against. The sole caller already requires
     // server === activeServerId, and its documented fallback is an ordinary-message notification,
     // which is what false gives it. The old key built `null:channel`, which said the same thing
@@ -9858,13 +9869,10 @@
     // Same clock ceiling the read marks use: a sender-chosen timestamp far in the future must not
     // decide, either way, whether something addressed to me still counts as unseen.
     const ceiling = readCeiling(msgs.map((m) => m.ts), Date.now());
-    const byId = new Map(msgs.map((m) => [m.id, m] as const));
-    return msgs.some(
-      (m) =>
-        effectiveTs(m.ts, ceiling) > seen &&
-        m.author !== myFp &&
-        (mentionsMe(m.text) || (!!m.reply_to && byId.get(m.reply_to)?.author === myFp)),
-    );
+    // Whether a row addresses me is resolved by the backend against the full document (see
+    // `TailMsg`); only "still unseen" is a client-side question, because only the client holds
+    // the read mark.
+    return msgs.some((m) => effectiveTs(m.ts, ceiling) > seen && m.author !== myFp && m.targets_me);
   }
 
   // Cross-server inbox: the backend scans every server's channels for messages addressed to me.
@@ -16067,16 +16075,17 @@
   // Receipts live for the unlocked UI session. Unlike the old feed-coupled set they are never
   // pruned just because a five-minute item aged out, so a replayed backend event cannot crawl or
   // ring a second time. lockScreen clears them because wiki/page ids can contain content names.
-  let tickerReceipts = $state<Set<string>>(new Set());
+  // Not reactive state: nothing renders from the receipt set, it is only consulted on the way in.
+  // It is mutated in place and bounded (see `acceptTickerReceipt`); the old copy-on-accept made
+  // every notification cost as much as every notification before it.
+  let tickerReceipts = new Set<string>();
   function pushTicker(kind: TickerKind, server: number, id: string, text: string, go: () => void): boolean {
     if (locked) return false; // nothing that names app content may reach a locked screen
     if (!text.trim()) return false;
-    const nextReceipts = acceptTickerReceipt(tickerReceipts, id);
-    if (!nextReceipts) return false;
+    if (!acceptTickerReceipt(tickerReceipts, id)) return false;
     const at = Date.now();
     const kept = tickerItems.filter((t) => at - t.at < TICKER_TTL);
     tickerItems = [...kept, { id, server, kind, text, at, go }].slice(-TICKER_MAX);
-    tickerReceipts = nextReceipts;
     return true;
   }
   function pruneTicker() {
@@ -16157,13 +16166,18 @@
     else playNotify(server);
   }
 
+  const NOTIFY_TAIL_ROWS = 64;
   async function notifyLatestChannelMessage(
     server: number,
     channel: string,
     mode: "message" | "mention" | "detect",
   ) {
     try {
-      const channelMessages = await invoke<Msg[]>("get_messages", { server, channel });
+      // A bounded tail, not the history: this runs for every arrival in every channel that is not
+      // on screen, so it must not scale with how long the room has existed. The tail is wide
+      // enough to cover what can plausibly have arrived unseen since the last look; anything older
+      // that addressed me is still surfaced by the inbox.
+      const channelMessages = await invoke<TailMsg[]>("get_message_tail", { server, channel, limit: NOTIFY_TAIL_ROWS });
       const latest = channelMessages[channelMessages.length - 1];
       let kind: "message" | "mention" = mode === "mention" ? "mention" : "message";
       // Mention detection depends on the active server's identity/profile and read marks. If the

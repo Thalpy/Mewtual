@@ -360,12 +360,18 @@ pub fn append_message(
 }
 
 /// Materialize a channel document into the UI's ordered message list.
+///
+/// One sequential cursor over the list rather than an indexed `get` per element: an indexed
+/// lookup re-descends the op tree every time, which made this walk cost tens of microseconds per
+/// message and put a long channel's every read (and the actor's every change check) near a
+/// second. The cursor visits each element once.
 pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
+    use automerge::{ReadDoc as _, ValueRef};
     let mut out = Vec::new();
     if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, MESSAGES) {
-        for i in 0..doc.length(&list) {
-            if let Ok(Some((Value::Object(ObjType::Map), msg))) = doc.get(&list, i) {
-                out.push(read_message(doc, &msg));
+        for item in doc.list_range(&list, ..) {
+            if matches!(item.value, ValueRef::Object(ObjType::Map)) {
+                out.push(read_message(doc, &item.id()));
             }
         }
     }
@@ -375,17 +381,66 @@ pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
 /// Decode one message map. Both the legacy channel/status list and the conflict-free status
 /// layout below use exactly this inner schema; keeping one decoder prevents compatibility fixes
 /// from making the two representations render differently.
+///
+/// One pass over the map's keys serves every field and the flat reaction keys alike (the same
+/// cursor-not-lookup reasoning as [`read_messages`]). Field semantics are exactly those of
+/// [`str_field`] / [`int_field`]: a string field that is not a string reads as empty, an integer
+/// field that is not an `Int`/`Uint` reads as `0`, and `pinned` is "the key is present".
 fn read_message(doc: &AutoCommit, msg: &ObjId) -> ChatMessage {
-    ChatMessage {
-        id: str_field(doc, msg, MSG_ID),
-        author: str_field(doc, msg, AUTHOR),
-        text: str_field(doc, msg, TEXT),
-        ts: int_field(doc, msg, TS),
-        edited: int_field(doc, msg, EDITED),
-        reactions: read_reactions(doc, msg),
-        reply_to: str_field(doc, msg, REPLY_TO),
-        pinned: doc.get(msg, PINNED).ok().flatten().is_some(),
+    use automerge::{ReadDoc as _, ScalarValueRef, ValueRef};
+    fn str_of(value: &ValueRef<'_>) -> String {
+        match value {
+            ValueRef::Scalar(ScalarValueRef::Str(s)) => s.to_string(),
+            _ => String::new(),
+        }
     }
+    fn int_of(value: &ValueRef<'_>) -> u64 {
+        match value {
+            ValueRef::Scalar(ScalarValueRef::Int(i)) => *i as u64,
+            ValueRef::Scalar(ScalarValueRef::Uint(u)) => *u,
+            _ => 0,
+        }
+    }
+    let mut m = ChatMessage {
+        id: String::new(),
+        author: String::new(),
+        text: String::new(),
+        ts: 0,
+        edited: 0,
+        reactions: Vec::new(),
+        reply_to: String::new(),
+        pinned: false,
+    };
+    // Reactions are flat scalar keys *directly on the message map*, `"<emoji>\x1f<fingerprint>" =
+    // true` (see `toggle_reaction_in_doc`), beside the regular field keys (none of which contain
+    // the separator). A `BTreeMap` gives a stable emoji order, so the UI and the change-detector
+    // signature are deterministic. No reaction keys, no reactions.
+    let mut grouped: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for item in doc.map_range(msg, ..) {
+        match item.key.as_ref() {
+            MSG_ID => m.id = str_of(&item.value),
+            AUTHOR => m.author = str_of(&item.value),
+            TEXT => m.text = str_of(&item.value),
+            REPLY_TO => m.reply_to = str_of(&item.value),
+            TS => m.ts = int_of(&item.value),
+            EDITED => m.edited = int_of(&item.value),
+            PINNED => m.pinned = true,
+            key => {
+                if let Some((emoji, fp)) = key.split_once(REACTION_SEP) {
+                    grouped
+                        .entry(emoji.to_string())
+                        .or_default()
+                        .push(fp.to_string());
+                }
+            }
+        }
+    }
+    m.reactions = grouped
+        .into_iter()
+        .map(|(emoji, by)| Reaction { emoji, by })
+        .collect();
+    m
 }
 
 /// The separator between the emoji and the reactor fingerprint in a flat reaction key. ASCII Unit
@@ -398,28 +453,6 @@ const REACTION_SEP: char = '\u{1f}';
 /// feed. The length bound is a gossip budget: honest clients send a small fixed set.
 fn valid_reaction_emoji(emoji: &str) -> bool {
     !emoji.is_empty() && !emoji.contains(REACTION_SEP) && emoji.len() <= 64
-}
-
-/// Read a message map's reactions and group them by emoji. Reactions are stored as flat scalar keys
-/// *directly on the message map*; `"<emoji>\x1f<fingerprint>" = true` (see `toggle_reaction_in_doc`)
-///; alongside the regular field keys (`id`/`author`/…, none of which contain the separator, so they
-/// are skipped here). A `BTreeMap` gives a stable emoji order (so the UI and the change-detector
-/// signature are deterministic). No reaction keys → no reactions.
-fn read_reactions(doc: &AutoCommit, msg: &ObjId) -> Vec<Reaction> {
-    let mut grouped: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
-    for key in doc.keys(msg) {
-        if let Some((emoji, fp)) = key.split_once(REACTION_SEP) {
-            grouped
-                .entry(emoji.to_string())
-                .or_default()
-                .push(fp.to_string());
-        }
-    }
-    grouped
-        .into_iter()
-        .map(|(emoji, by)| Reaction { emoji, by })
-        .collect()
 }
 
 /// Toggle `fp`'s reaction `emoji` on the message with `id`: adds it if absent, removes it if
@@ -2870,6 +2903,14 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// mapping is gone, so older messages report no delivery state at all rather than a wrong
     /// one. Only own messages are tracked; a peer's delivery is not ours to display.
     own_message_changes: HashMap<u128, VecDeque<(String, ChangeHash)>>,
+    /// Per channel, the last materialized message list together with the document version
+    /// ([`Server::doc_version`]) it was read at. Materializing a channel walks its whole automerge
+    /// document, and the actor, the unread projection, the inbox and every UI read all ask for the
+    /// same list between two changes; so the walk happens once per change rather than once per
+    /// ask. Interior mutability because every reader is `&self`; the cell is never borrowed
+    /// across a call that could re-enter it. Derived state; never persisted; a `RefCell` (not a
+    /// lock) because a `Server` is owned by exactly one actor task.
+    messages_cache: std::cell::RefCell<HashMap<u128, (u64, Vec<ChatMessage>)>>,
     /// Total order of delivery snapshots issued by this actor session. Queries and emitted events
     /// share it, so a delayed IPC query can never overwrite a newer event in the webview.
     delivery_snapshot_revision: u64,
@@ -2938,6 +2979,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
         })
@@ -2984,6 +3026,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
         })
@@ -3030,6 +3073,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
         })
@@ -3109,6 +3153,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 display_name: display_name.into(),
                 device_id,
                 own_message_changes: HashMap::new(),
+                messages_cache: std::cell::RefCell::new(HashMap::new()),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
             },
@@ -3159,6 +3204,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 display_name: display_name.into(),
                 device_id,
                 own_message_changes: HashMap::new(),
+                messages_cache: std::cell::RefCell::new(HashMap::new()),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
             },
@@ -3251,6 +3297,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
         })
@@ -3280,6 +3327,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
         })
@@ -4713,6 +4761,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Cheap session-local invalidation epoch for [`Self::member_routes`].
     pub fn member_route_revision(&self) -> u64 {
         self.sync.member_route_revision()
+    }
+
+    /// Session-monotonic version of one replicated document: the number of signed ops applied to
+    /// it so far (`0` for a document that is not open). Every path that changes a document's
+    /// content, local edit, live gossip, past-epoch replay and catch-up alike, appends exactly
+    /// one op to its log, and duplicates are dropped before they count; so an unchanged version
+    /// means an unchanged projection, and a consumer can skip re-materializing it. O(1).
+    pub fn doc_version(&self, doc_type: DocType, doc_id: u128) -> u64 {
+        self.sync
+            .doc(doc_type, doc_id)
+            .map(|d| d.op_count() as u64)
+            .unwrap_or(0)
     }
 
     /// Every inbound join attempt this node served this session, newest first, with why each was
@@ -6660,11 +6720,33 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// The current materialized messages in a channel (empty if it is not open).
+    ///
+    /// A clone of the cached list (see `messages_cache`); callers that only need to look use
+    /// [`Self::with_messages`] and pay nothing per row.
     pub fn messages(&self, channel: u128) -> Vec<ChatMessage> {
-        self.sync
-            .doc(DocType::Channel, channel)
-            .map(|d| read_messages(d.doc()))
-            .unwrap_or_default()
+        self.with_messages(channel, |msgs| msgs.to_vec())
+    }
+
+    /// Run `f` over the channel's current messages without copying them. The list is materialized
+    /// at most once per document version; every later call at the same version borrows it.
+    ///
+    /// `f` must not call back into a message read of this server (the cache is borrowed while it
+    /// runs); the projections that use this only read the slice they are handed.
+    pub fn with_messages<U>(&self, channel: u128, f: impl FnOnce(&[ChatMessage]) -> U) -> U {
+        let Some(doc) = self.sync.doc(DocType::Channel, channel) else {
+            // Not open: nothing to cache, and a stale entry from before a re-open is unreachable
+            // since a document is never removed from the sync layer within a session.
+            return f(&[]);
+        };
+        let version = doc.op_count() as u64;
+        let mut cache = self.messages_cache.borrow_mut();
+        let entry = cache
+            .entry(channel)
+            .or_insert_with(|| (u64::MAX, Vec::new()));
+        if entry.0 != version {
+            *entry = (version, read_messages(doc.doc()));
+        }
+        f(&entry.1)
     }
 
     /// One activity head per known channel: what the newest message is, and what the newest
@@ -6679,24 +6761,78 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.channels()
             .into_iter()
             .map(|c| {
-                let msgs = self.messages(c.id);
-                let mut head = ChannelHead {
-                    channel: c.id,
-                    count: msgs.len() as u64,
-                    ..ChannelHead::default()
-                };
-                for m in &msgs {
-                    head.latest_ts = head.latest_ts.max(m.ts);
-                    // `>=` so that among equal timestamps the last one materialized wins, which is
-                    // the same row the UI shows at the bottom of the log.
-                    if m.author != me && m.ts >= head.latest_incoming_ts {
-                        head.latest_incoming_ts = m.ts;
-                        head.latest_incoming_id = m.id.clone();
+                self.with_messages(c.id, |msgs| {
+                    let mut head = ChannelHead {
+                        channel: c.id,
+                        count: msgs.len() as u64,
+                        ..ChannelHead::default()
+                    };
+                    for m in msgs {
+                        head.latest_ts = head.latest_ts.max(m.ts);
+                        // `>=` so that among equal timestamps the last one materialized wins,
+                        // which is the same row the UI shows at the bottom of the log.
+                        if m.author != me && m.ts >= head.latest_incoming_ts {
+                            head.latest_incoming_ts = m.ts;
+                            head.latest_incoming_id = m.id.clone();
+                        }
                     }
-                }
-                head
+                    head
+                })
             })
             .collect()
+    }
+
+    /// The newest `limit` messages of a channel, oldest first, each paired with whether it is
+    /// addressed to me: an `@[my name]` mention (the composer's marker, under the same
+    /// normalization [`Self::inbox`] uses) or a reply to one of my own messages. The reply parent
+    /// is resolved against the whole channel, so a reply to something far older than the tail is
+    /// still recognised; only the rows shipped are bounded. My own messages are never "to me".
+    ///
+    /// This is what an arrival notification needs, and all it needs: the previous shape of that
+    /// path fetched the entire history of a channel nobody was looking at to read its last row.
+    pub fn message_tail(&self, channel: u128, limit: usize) -> Vec<(ChatMessage, bool)> {
+        let me = self.my_fingerprint();
+        let marker = self.mention_marker();
+        self.with_messages(channel, |msgs| {
+            let start = msgs.len().saturating_sub(limit);
+            let tail = &msgs[start..];
+            // Only replies in the tail need their parent looked up, and only parents outside the
+            // tail need the full index; build it lazily so a quiet channel pays nothing.
+            let mut author_of: Option<HashMap<&str, &str>> = None;
+            tail.iter()
+                .map(|m| {
+                    if m.author == me {
+                        return (m.clone(), false);
+                    }
+                    let mention = marker.as_deref().is_some_and(|mk| m.text.contains(mk));
+                    let reply = !m.reply_to.is_empty() && {
+                        let index = author_of.get_or_insert_with(|| {
+                            msgs.iter()
+                                .filter(|m| !m.id.is_empty())
+                                .map(|m| (m.id.as_str(), m.author.as_str()))
+                                .collect()
+                        });
+                        index.get(m.reply_to.as_str()) == Some(&me.as_str())
+                    };
+                    (m.clone(), mention || reply)
+                })
+                .collect()
+        })
+    }
+
+    /// The `@[Name]` marker the composer inserts for me, or `None` when I have no usable name.
+    /// Built from the SAME normalization the composer applies (desktop `mentionName`), so a name
+    /// with brackets/newlines/extra spaces or over the length cap is detected here exactly as it
+    /// was written; not silently missed.
+    fn mention_marker(&self) -> Option<String> {
+        let me = self.my_fingerprint();
+        let name = self
+            .profiles()
+            .get(&me)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let my_name = normalize_mention_name(&name);
+        (!my_name.is_empty()).then(|| format!("@[{my_name}]"))
     }
 
     /// Lightweight activity stats over a channel's messages; total count, first/last wall-clock
@@ -6733,41 +6869,38 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .into_iter()
             .map(|(fp, p)| (fp, p.name))
             .collect();
-        // Build the mention marker from the SAME normalization the composer applies when it inserts
-        // `@[Name]` (desktop `mentionName`), so a name with brackets/newlines/extra spaces or over
-        // the length cap is detected here exactly as it was written; not silently missed.
-        let my_name = normalize_mention_name(&names.get(&me).cloned().unwrap_or_default());
-        let marker = (!my_name.is_empty()).then(|| format!("@[{my_name}]"));
+        let marker = self.mention_marker();
 
         let mut out = Vec::new();
         for channel in self.sync.channel_ids() {
-            let msgs = self.messages(channel);
-            // message id -> author, to resolve a reply's parent within this channel.
-            let author_of: std::collections::HashMap<&str, &str> = msgs
-                .iter()
-                .filter(|m| !m.id.is_empty())
-                .map(|m| (m.id.as_str(), m.author.as_str()))
-                .collect();
-            for m in &msgs {
-                if m.author == me {
-                    continue; // never inbox my own messages
+            self.with_messages(channel, |msgs| {
+                // message id -> author, to resolve a reply's parent within this channel.
+                let author_of: std::collections::HashMap<&str, &str> = msgs
+                    .iter()
+                    .filter(|m| !m.id.is_empty())
+                    .map(|m| (m.id.as_str(), m.author.as_str()))
+                    .collect();
+                for m in msgs {
+                    if m.author == me {
+                        continue; // never inbox my own messages
+                    }
+                    let mention = marker.as_deref().is_some_and(|mk| m.text.contains(mk));
+                    let reply = !m.reply_to.is_empty()
+                        && author_of.get(m.reply_to.as_str()) == Some(&me.as_str());
+                    if mention || reply {
+                        out.push(InboxItem {
+                            channel,
+                            message_id: m.id.clone(),
+                            author: m.author.clone(),
+                            author_name: names.get(&m.author).cloned().unwrap_or_default(),
+                            text: m.text.clone(),
+                            ts: m.ts,
+                            mention,
+                            reply,
+                        });
+                    }
                 }
-                let mention = marker.as_deref().is_some_and(|mk| m.text.contains(mk));
-                let reply = !m.reply_to.is_empty()
-                    && author_of.get(m.reply_to.as_str()) == Some(&me.as_str());
-                if mention || reply {
-                    out.push(InboxItem {
-                        channel,
-                        message_id: m.id.clone(),
-                        author: m.author.clone(),
-                        author_name: names.get(&m.author).cloned().unwrap_or_default(),
-                        text: m.text.clone(),
-                        ts: m.ts,
-                        mention,
-                        reply,
-                    });
-                }
-            }
+            });
         }
         out.sort_by(|a, b| b.ts.cmp(&a.ts));
         out.truncate(limit);
@@ -7142,6 +7275,68 @@ mod tests {
     use rand_core::SeedableRng;
 
     const GENERAL: u128 = 1;
+
+    /// The cursor walk must see exactly what the indexed walk saw, for rows written locally AND
+    /// rows that arrived as another actor's change (the replication path is `load_incremental`,
+    /// which is where a cursor over the op set could diverge from an indexed lookup).
+    #[test]
+    fn cursor_materialization_matches_indexed_lookup_for_remote_changes() {
+        let mut alice = AutoCommit::new();
+        alice.set_actor(automerge::ActorId::from(vec![1u8; 32]));
+        append_message(&mut alice, "m1", "alice", "first", 10, "").unwrap();
+        alice.commit();
+        let first = alice.get_last_local_change().unwrap().raw_bytes().to_vec();
+
+        let mut bob = AutoCommit::new();
+        bob.set_actor(automerge::ActorId::from(vec![2u8; 32]));
+        bob.load_incremental(&first).unwrap();
+        append_message(&mut bob, "m2", "bob", "second", 11, "m1").unwrap();
+        toggle_reaction_in_doc(&mut bob, "m1", "👍", "bob").unwrap();
+        bob.commit();
+        let second = bob.get_last_local_change().unwrap().raw_bytes().to_vec();
+        alice.load_incremental(&second).unwrap();
+
+        // The reference: the indexed walk this crate used before the cursor.
+        fn indexed(doc: &AutoCommit) -> Vec<ChatMessage> {
+            let mut out = Vec::new();
+            if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, MESSAGES) {
+                for i in 0..doc.length(&list) {
+                    if let Ok(Some((Value::Object(ObjType::Map), msg))) = doc.get(&list, i) {
+                        let mut by = Vec::new();
+                        for key in doc.keys(&msg) {
+                            if let Some((emoji, fp)) = key.split_once(REACTION_SEP) {
+                                by.push((emoji.to_string(), fp.to_string()));
+                            }
+                        }
+                        out.push(ChatMessage {
+                            id: str_field(doc, &msg, MSG_ID),
+                            author: str_field(doc, &msg, AUTHOR),
+                            text: str_field(doc, &msg, TEXT),
+                            ts: int_field(doc, &msg, TS),
+                            edited: int_field(doc, &msg, EDITED),
+                            reactions: by
+                                .into_iter()
+                                .map(|(emoji, fp)| Reaction {
+                                    emoji,
+                                    by: vec![fp],
+                                })
+                                .collect(),
+                            reply_to: str_field(doc, &msg, REPLY_TO),
+                            pinned: doc.get(&msg, PINNED).ok().flatten().is_some(),
+                        });
+                    }
+                }
+            }
+            out
+        }
+        for doc in [&alice, &bob] {
+            let rows = read_messages(doc);
+            assert_eq!(rows, indexed(doc));
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].reactions.len(), 1, "the remote reaction is visible");
+            assert_eq!(rows[1].reply_to, "m1");
+        }
+    }
 
     /// Deterministic transport identities keep product-layer fixtures honest about the
     /// canonical `/p2p/<PeerId>` route binding enforced by steady-state discovery.

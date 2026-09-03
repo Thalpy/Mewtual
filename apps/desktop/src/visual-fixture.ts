@@ -218,6 +218,11 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
       ]);
     case "get_messages":
       return clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []);
+    case "get_message_tail": {
+      const rows = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Array<{ text: string }>;
+      const limit = typeof args.limit === "number" && args.limit > 0 ? Math.trunc(args.limit) : rows.length;
+      return rows.slice(-limit).map((row) => ({ ...row, targets_me: row.text.includes("@[Rowan]") }));
+    }
     case "get_members":
       return clone(
         server === 2
