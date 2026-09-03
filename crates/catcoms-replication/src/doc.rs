@@ -9,15 +9,19 @@
 //! latecomer converges without ever needing old epoch keys (forward secrecy is
 //! preserved) while still verifying each op's original authorship.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
-use automerge::{ActorId, AutoCommit, Change, ChangeHash};
+use automerge::transaction::Transactable;
+use automerge::{ActorId, AutoCommit, Change, ChangeHash, ReadDoc, ScalarValue, Value, ROOT};
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_rt::CryptoRngCore;
 use catcoms_wire::{Decoder, DocType, Encoder};
 
+use crate::epoch::{
+    Admission, AdmittedOperation, DomainOp, EpochGate, LogicalDocument, MAX_SIGNED_EPOCH_OP_BYTES,
+};
 use crate::op::{SealedOp, SignedOp};
 use crate::ReplError;
 
@@ -88,6 +92,132 @@ impl EncryptedDoc {
     /// Number of ops in this document's log.
     pub fn op_count(&self) -> usize {
         self.log.len()
+    }
+
+    /// Whether this epoch already contains the author-bound marker for a domain operation.
+    /// Replay callers use this before rebuilding an intent; materializers ignore marker keys.
+    pub fn has_domain_marker(&self, op_id: &[u8; 32]) -> Result<bool, ReplError> {
+        self.doc
+            .get(ROOT, domain_marker_key(op_id))
+            .map_err(|e| ReplError::Automerge(e.to_string()))
+            .map(|value| {
+                value.is_some_and(|(value, _)| {
+                    matches!(value, Value::Scalar(value) if value.as_ref() == &ScalarValue::Uint(1))
+                })
+            })
+    }
+
+    /// Current Automerge heads as raw protocol hashes, sorted for a canonical P1 close record.
+    pub fn heads(&mut self) -> Vec<[u8; 32]> {
+        let mut heads: Vec<[u8; 32]> = self
+            .doc
+            .get_heads()
+            .into_iter()
+            .map(|hash| hash.0)
+            .collect();
+        heads.sort_unstable();
+        heads
+    }
+
+    /// Return the signed operations in the dependency-closed history selected by `heads`.
+    ///
+    /// P1 close validation uses this instead of trusting a close author's operation count. A
+    /// checkpoint seed is the sole permitted unsigned Automerge change; callers name its exact
+    /// hash in `unsigned_seed`. Every other change in the selected closure must map to exactly one
+    /// signed P1 operation.
+    pub(crate) fn signed_ops_for_heads(
+        &mut self,
+        heads: &[[u8; 32]],
+        unsigned_seed: Option<[u8; 32]>,
+    ) -> Result<Vec<SignedOp>, ReplError> {
+        // Walk the named closure explicitly. `AutoCommit::fork_at` would select the same graph but
+        // deliberately creates a random actor id, which is both unnecessary for a read-only walk
+        // and outside Mewtual's injected RNG seam.
+        let mut wanted = BTreeSet::new();
+        let mut stack: Vec<ChangeHash> = heads.iter().copied().map(ChangeHash).collect();
+        while let Some(hash) = stack.pop() {
+            if !wanted.insert(hash.0) {
+                continue;
+            }
+            let change = self
+                .doc
+                .get_change_by_hash(&hash)
+                .ok_or(ReplError::Malformed)?;
+            stack.extend(change.deps().iter().copied());
+        }
+        if let Some(seed) = unsigned_seed {
+            if !wanted.remove(&seed) {
+                return Err(ReplError::Malformed);
+            }
+        }
+
+        let selected_hashes = wanted.clone();
+        let mut operation_by_change = std::collections::BTreeMap::new();
+        for op in &self.log {
+            let change = Change::from_bytes(op.delta.clone())
+                .map_err(|e| ReplError::Automerge(e.to_string()))?
+                .hash()
+                .0;
+            if selected_hashes.contains(&change) {
+                if op.domain_op.is_none() {
+                    return Err(ReplError::Malformed);
+                }
+                if operation_by_change.insert(change, op.clone()).is_some() {
+                    // Two signed envelopes claiming one Automerge change make authorship and
+                    // per-device accounting ambiguous. P1's author-bound marker prevents this for a
+                    // valid operation, so a duplicate claim is malformed rather than tie-broken.
+                    return Err(ReplError::Malformed);
+                }
+            }
+        }
+        if operation_by_change.len() != selected_hashes.len() {
+            return Err(ReplError::Malformed);
+        }
+
+        // Produce a canonical dependency order. The append log reflects arrival order, which can
+        // differ across peers, and therefore cannot be used as checkpoint input directly.
+        let mut dependency_count = std::collections::BTreeMap::new();
+        let mut dependents: std::collections::BTreeMap<[u8; 32], Vec<[u8; 32]>> =
+            std::collections::BTreeMap::new();
+        for hash in &selected_hashes {
+            let change = self
+                .doc
+                .get_change_by_hash(&ChangeHash(*hash))
+                .ok_or(ReplError::Malformed)?;
+            let mut count = 0usize;
+            for dependency in change.deps() {
+                if selected_hashes.contains(&dependency.0) {
+                    count += 1;
+                    dependents.entry(dependency.0).or_default().push(*hash);
+                }
+            }
+            dependency_count.insert(*hash, count);
+        }
+        let mut ready: BTreeSet<[u8; 32]> = dependency_count
+            .iter()
+            .filter_map(|(hash, count)| (*count == 0).then_some(*hash))
+            .collect();
+        let mut out = Vec::with_capacity(selected_hashes.len());
+        while let Some(hash) = ready.pop_first() {
+            out.push(
+                operation_by_change
+                    .remove(&hash)
+                    .ok_or(ReplError::Malformed)?,
+            );
+            for dependent in dependents.get(&hash).into_iter().flatten() {
+                let count = dependency_count
+                    .get_mut(dependent)
+                    .ok_or(ReplError::Malformed)?;
+                *count = count.checked_sub(1).ok_or(ReplError::Malformed)?;
+                if *count == 0 {
+                    ready.insert(*dependent);
+                }
+            }
+        }
+        if !operation_by_change.is_empty() {
+            return Err(ReplError::Malformed);
+        }
+        Ok(out)
     }
 
     /// Which devices **provably hold** each of `targets` (automerge change hashes), from the
@@ -217,6 +347,19 @@ impl EncryptedDoc {
         })
     }
 
+    /// Restore and bind all subsequently authored changes to this device's verified identity.
+    ///
+    /// P1 requires the Automerge actor on every change to equal the signed envelope author. A
+    /// loaded `AutoCommit` otherwise owns an implementation-selected local actor, so callers that
+    /// may edit after restart must use this entry point rather than read-only [`Self::restore`].
+    pub fn restore_for_actor(bytes: &[u8], actor: &DeviceId) -> Result<Self, ReplError> {
+        let mut restored = Self::restore(bytes)?;
+        restored
+            .doc
+            .set_actor(ActorId::from(actor.as_bytes().to_vec()));
+        Ok(restored)
+    }
+
     /// Apply a local edit, returning a [`SealedOp`] to broadcast. The closure
     /// mutates the automerge document; the resulting change is signed and sealed.
     pub fn edit<F>(
@@ -246,6 +389,11 @@ impl EncryptedDoc {
     where
         F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
     {
+        if is_epoch_managed(self.doc_type) {
+            // New P1 types have no legacy writers. A v1 operation here would bypass durable
+            // intents, semantic validation and the shared epoch lifecycle gate.
+            return Err(ReplError::EpochScope);
+        }
         edit(&mut self.doc).map_err(|e| ReplError::Automerge(e.to_string()))?;
         self.doc.commit();
         let change = self
@@ -259,6 +407,188 @@ impl EncryptedDoc {
         let sealed = SealedOp::seal(&op, group, device, rng)?;
         self.record(op);
         Ok((sealed, hash))
+    }
+
+    /// Author a P1 operation through the epoch lifecycle gate.
+    ///
+    /// The caller must durably persist the corresponding local intent before entering this
+    /// method. The change is built, signed and sealed on a rollback-safe clone, then admitted by
+    /// the same gate
+    /// used by receipt settlement. Losing a seal race therefore leaves the live document and log
+    /// untouched so the durable intent can render as an overlay and replay in the successor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_domain_gated<F, V>(
+        &mut self,
+        logical_document: &LogicalDocument,
+        gate: &EpochGate,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        rng: &mut impl CryptoRngCore,
+        domain_op: &DomainOp,
+        edit: F,
+        validate_change: V,
+    ) -> Result<(SealedOp, ChangeHash), ReplError>
+    where
+        F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
+        V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
+    {
+        if logical_document.doc_type != self.doc_type
+            || logical_document.server_id != group.group_id()
+            || domain_op.doc_type != self.doc_type
+            || domain_op.logical_key != logical_document.logical_key
+        {
+            return Err(ReplError::EpochScope);
+        }
+        gate.verify_scope(logical_document, self.doc_id)?;
+        if self.has_domain_marker(&domain_op.id(&device.device_id()))? {
+            return Err(ReplError::NoChange);
+        }
+        // `fork()` randomizes the actor; a clone gives us a rollback-safe staging graph while
+        // preserving the authenticated device actor for the new change.
+        let mut staged = self.doc.clone();
+        edit(&mut staged).map_err(|e| ReplError::Automerge(e.to_string()))?;
+        let marker = domain_marker_key(&domain_op.id(&device.device_id()));
+        staged
+            .put(ROOT, marker, 1u64)
+            .map_err(|e| ReplError::Automerge(e.to_string()))?;
+        staged.commit();
+        let change = staged.get_last_local_change().ok_or(ReplError::NoChange)?;
+        validate_change(domain_op, &change)?;
+        let change_hash = change.hash();
+        let op = SignedOp::sign_domain(
+            device,
+            self.doc_type,
+            self.doc_id,
+            change.raw_bytes().to_vec(),
+            domain_op,
+        )?;
+        let sealed = SealedOp::seal(&op, group, device, rng)?;
+        let admitted = AdmittedOperation {
+            op_hash: op.hash(),
+            domain_op_id: domain_op.id(&op.author_device),
+            author: op.author_device,
+            encoded_len: op.encode().len(),
+        };
+        let admission = gate.admit_local_and_commit(admitted, || {
+            self.doc = staged;
+            self.record(op);
+        })?;
+        if admission != Admission::Accepted {
+            // A locally constructed change is based on the current graph and uses a fresh nonce;
+            // finding its exact envelope in the gate but not this log is an atomicity violation.
+            return Err(ReplError::Malformed);
+        }
+        Ok((sealed, change_hash))
+    }
+
+    /// Decrypt, authenticate and conditionally apply one P1 operation through an epoch gate.
+    ///
+    /// An operation that loses the receipt-seal race is authenticated and charged only to the
+    /// bounded quarantine; its Automerge bytes never enter live or durable document state.
+    pub fn ingest_domain_gated<V>(
+        &mut self,
+        logical_document: &LogicalDocument,
+        gate: &EpochGate,
+        sealed: &SealedOp,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        validate_change: V,
+    ) -> Result<Admission, ReplError>
+    where
+        V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
+    {
+        self.check_doc(sealed.doc_type, sealed.doc_id)?;
+        if logical_document.server_id != group.group_id() {
+            return Err(ReplError::EpochScope);
+        }
+        gate.verify_scope(logical_document, self.doc_id)?;
+        if sealed.epoch != group.epoch() {
+            return Err(ReplError::EpochUnavailable(sealed.epoch));
+        }
+        let key = group.channel_secret(device, self.doc_type, self.doc_id)?;
+        let op = sealed.open(&key)?;
+        self.apply_domain_gated(logical_document, gate, op, validate_change)
+    }
+
+    fn apply_domain_gated<V>(
+        &mut self,
+        logical_document: &LogicalDocument,
+        gate: &EpochGate,
+        op: SignedOp,
+        validate_change: V,
+    ) -> Result<Admission, ReplError>
+    where
+        V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
+    {
+        self.check_doc(op.doc_type, op.doc_id)?;
+        gate.verify_scope(logical_document, self.doc_id)?;
+        let op_hash = op.hash();
+        if self.applied.contains(&op_hash) {
+            return Ok(Admission::Duplicate);
+        }
+        if !op.verify() {
+            return Err(ReplError::BadSignature);
+        }
+        let encoded_len = op.encode().len();
+        if encoded_len > MAX_SIGNED_EPOCH_OP_BYTES {
+            return Err(ReplError::EpochBound);
+        }
+        let domain_op = op.parsed_domain_op()?.ok_or(ReplError::Malformed)?;
+        if logical_document.doc_type != self.doc_type
+            || domain_op.doc_type != self.doc_type
+            || domain_op.logical_key != logical_document.logical_key
+        {
+            return Err(ReplError::EpochScope);
+        }
+        let change = Change::from_bytes(op.delta.clone())
+            .map_err(|e| ReplError::Automerge(e.to_string()))?;
+        if change.actor_id().to_bytes() != op.author_device.as_bytes() {
+            return Err(ReplError::EpochAuthority);
+        }
+        validate_change(&domain_op, &change)?;
+        // Loading an inbound change authors nothing locally, so preserve the existing actor and
+        // avoid `fork()`'s ambient random actor generation.
+        let mut staged = self.doc.clone();
+        staged
+            .load_incremental(&op.delta)
+            .map_err(|e| ReplError::Automerge(e.to_string()))?;
+        let domain_op_id = domain_op.id(&op.author_device);
+        let marker = domain_marker_key(&domain_op_id);
+        let marker_is_one = staged
+            .get(ROOT, marker)
+            .map_err(|e| ReplError::Automerge(e.to_string()))?
+            .is_some_and(|(value, _)| {
+                matches!(value, Value::Scalar(value) if value.as_ref() == &ScalarValue::Uint(1))
+            });
+        if !marker_is_one {
+            return Err(ReplError::Malformed);
+        }
+        let admission = gate.admit_inbound_and_commit(
+            AdmittedOperation {
+                op_hash,
+                domain_op_id,
+                author: op.author_device,
+                encoded_len,
+            },
+            || {
+                self.doc = staged;
+                self.applied.insert(op_hash);
+                self.log.push(op);
+            },
+        )?;
+        match admission {
+            Admission::Accepted => Ok(Admission::Accepted),
+            Admission::Duplicate => {
+                if self.has_domain_marker(&domain_op_id)? {
+                    Ok(Admission::Duplicate)
+                } else {
+                    // Gate and document state are persisted atomically. A gate-only duplicate
+                    // means the caller restored an inconsistent pair and must not silently skip.
+                    Err(ReplError::Malformed)
+                }
+            }
+            Admission::Quarantined | Admission::RejectedQuarantineFull => Ok(admission),
+        }
     }
 
     /// Decrypt, verify and apply an inbound sealed op. Returns `true` if it was
@@ -393,6 +723,14 @@ impl EncryptedDoc {
 
     fn apply_signed_tracked(&mut self, op: SignedOp) -> Result<Option<AppliedOp>, ReplError> {
         self.check_doc(op.doc_type, op.doc_id)?;
+        if is_epoch_managed(self.doc_type) {
+            // Epoch-managed types must bind logical scope, semantic validation and lifecycle
+            // admission through `ingest_domain_gated`.
+            return Err(ReplError::EpochScope);
+        }
+        if op.domain_op.is_some() {
+            return Err(ReplError::Malformed);
+        }
         let hash = op.hash();
         if self.applied.contains(&hash) {
             return Ok(None);
@@ -430,6 +768,24 @@ impl EncryptedDoc {
         }
         Ok(())
     }
+}
+
+fn is_epoch_managed(doc_type: DocType) -> bool {
+    matches!(
+        doc_type,
+        DocType::StudioIndex | DocType::StudioObject | DocType::PostReplies | DocType::DocRegistry
+    )
+}
+
+fn domain_marker_key(op_id: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut key = String::with_capacity(7 + 64);
+    key.push_str("_p1/op/");
+    for byte in op_id {
+        key.push(char::from(HEX[usize::from(byte >> 4)]));
+        key.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    key
 }
 
 impl fmt::Debug for EncryptedDoc {
@@ -481,5 +837,72 @@ mod tests {
         // Re-snapshotting the restored doc is stable, and garbage is rejected.
         assert!(EncryptedDoc::restore(&restored.snapshot().unwrap()).is_ok());
         assert!(EncryptedDoc::restore(b"garbage").is_err());
+    }
+
+    #[test]
+    fn close_operations_are_topologically_canonical_not_arrival_ordered() {
+        let alice = MlsDevice::generate().unwrap();
+        let bob = MlsDevice::generate().unwrap();
+        let logical =
+            LogicalDocument::new(b"server".to_vec(), DocType::StudioObject, b"score".to_vec())
+                .unwrap();
+        let doc_id = crate::epoch::epoch_zero_id(logical.doc_type, &logical.logical_key);
+
+        let make_operation = |device: &MlsDevice, nonce: [u8; 16], field: &str| {
+            let domain = DomainOp {
+                nonce,
+                doc_type: logical.doc_type,
+                logical_key: logical.logical_key.clone(),
+                body: field.as_bytes().to_vec(),
+            };
+            let mut change_doc = AutoCommit::new();
+            change_doc.set_actor(ActorId::from(device.device_id().as_bytes().to_vec()));
+            change_doc.put(ROOT, field, true).unwrap();
+            change_doc
+                .put(
+                    ROOT,
+                    domain_marker_key(&domain.id(&device.device_id())),
+                    1u64,
+                )
+                .unwrap();
+            change_doc.commit();
+            let change = change_doc.get_last_local_change().unwrap();
+            SignedOp::sign_domain(
+                device,
+                logical.doc_type,
+                doc_id,
+                change.raw_bytes().to_vec(),
+                &domain,
+            )
+            .unwrap()
+        };
+        let a = make_operation(&alice, [1; 16], "a");
+        let b = make_operation(&bob, [2; 16], "b");
+
+        let build = |arrival: [&SignedOp; 2]| {
+            let mut doc = EncryptedDoc::new(logical.doc_type, doc_id, &alice.device_id());
+            for operation in arrival {
+                doc.doc.load_incremental(&operation.delta).unwrap();
+                doc.log.push(operation.clone());
+            }
+            doc
+        };
+        let mut left = build([&a, &b]);
+        let mut right = build([&b, &a]);
+        let left_heads = left.heads();
+        let right_heads = right.heads();
+        let left_order: Vec<_> = left
+            .signed_ops_for_heads(&left_heads, None)
+            .unwrap()
+            .into_iter()
+            .map(|operation| operation.hash())
+            .collect();
+        let right_order: Vec<_> = right
+            .signed_ops_for_heads(&right_heads, None)
+            .unwrap()
+            .into_iter()
+            .map(|operation| operation.hash())
+            .collect();
+        assert_eq!(left_order, right_order);
     }
 }

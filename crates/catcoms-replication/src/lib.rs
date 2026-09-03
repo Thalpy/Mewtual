@@ -20,11 +20,19 @@
 //! sync protocol over the network.
 
 pub mod doc;
+pub mod epoch;
 pub mod op;
 
 use thiserror::Error;
 
 pub use doc::{AppliedOp, EncryptedDoc, MAX_DELIVERY_TARGETS};
+pub use epoch::{
+    epoch_id, epoch_zero_id, tenure_id, Admission, AdmittedOperation, CloseRecord, ClosureStats,
+    DomainOp, EpochGate, EpochPhase, InheritedCheckpoint, IntentLedger, LocalIntent,
+    LogicalDocument, OwnerReceiptJournal, Receipt, ReceiptBook, ReceiptHeadProof, ReceiptIngest,
+    ReceiptRepair, RecoveryConflict, RecoveryConflictValue, RecoveryElement, RecoveryReason,
+    RecoverySlots, RecoverySnapshot, RecoveryTombstone, RecoveryTransition, VerifiedReceipt,
+};
 pub use op::{SealedOp, SignedOp};
 
 /// Errors from the replication engine.
@@ -54,4 +62,25 @@ pub enum ReplError {
     /// An op or sealed op was malformed.
     #[error("malformed op")]
     Malformed,
+    /// An epoch-close record exceeded a hard pre-parse or semantic bound.
+    #[error("epoch-close record exceeds its bound")]
+    EpochBound,
+    /// An epoch-close record was for another server or logical document.
+    #[error("epoch-close record has the wrong scope")]
+    EpochScope,
+    /// An epoch-close signature or signer authority check failed.
+    #[error("epoch-close signature or authority is invalid")]
+    EpochAuthority,
+    /// An operation targeted an epoch that is already closing or settled.
+    #[error("epoch does not accept operations")]
+    EpochClosed,
+    /// A receipt conflicts with already-persisted owner or peer state.
+    #[error("conflicting epoch-close receipt")]
+    ReceiptConflict,
+    /// A recovery transition is already waiting in the one staged slot.
+    #[error("recovery staging slot is occupied")]
+    RecoveryPending,
+    /// A device reused one domain-operation nonce with different canonical bytes.
+    #[error("domain-operation nonce was reused with conflicting bytes")]
+    IntentConflict,
 }

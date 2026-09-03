@@ -16,11 +16,10 @@
 //! timestamp and, without this, a size that is the message's length plus a constant. The ladder
 //! and its costs are documented on [`catcoms_storage::pad::OP_PAD_FLOOR`].
 //!
-//! The padding is a **transport** concern only. [`SignedOp::encode`] is unchanged, so the op
-//! hash, the inner signature preimage and the persisted `EncryptedDoc` snapshot log are all
-//! byte-identical to before; re-sealing on catch-up re-pads from the same unpadded op, and the
-//! locked "deterministic byte-identical compaction" property (which is about that log) is
-//! untouched. The frame is deterministic, so it draws nothing from the injected RNG seam.
+//! The padding is a **transport** concern only. Legacy [`SignedOp::encode`] bytes are unchanged;
+//! P1 operations use an explicit trailing v2 domain envelope. In either case re-sealing on
+//! catch-up re-pads the same unpadded op, and checkpoint determinism operates on those unpadded
+//! bytes. The frame is deterministic, so it draws nothing from the injected RNG seam.
 
 use catcoms_crypto::{seal, unseal, verify_with_public_bytes, DeviceId, SealedBlob};
 use catcoms_mls::{MlsDevice, ServerGroup};
@@ -28,9 +27,11 @@ use catcoms_rt::CryptoRngCore;
 use catcoms_storage::pad::{self, OP_PAD_CEILING, OP_PAD_FLOOR};
 use catcoms_wire::{Decoder, DocType, Encoder};
 
+use crate::epoch::DomainOp;
 use crate::ReplError;
 
 const OP_DOMAIN: &str = "catcoms/op/v1";
+const DOMAIN_OP_DOMAIN: &str = "catcoms/op/v2";
 
 /// A CRDT delta authored and inner-signed by one device.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,17 +47,34 @@ pub struct SignedOp {
     pub author_pubkey: Vec<u8>,
     /// The opaque automerge change bytes.
     pub delta: Vec<u8>,
+    /// Canonical P1 domain-operation envelope. Absent for the original v1 document types; present
+    /// for epoch-managed Studio and registry documents and covered by the v2 signature.
+    pub domain_op: Option<Vec<u8>>,
     /// The author's signature over the canonical payload.
     pub signature: [u8; 64],
 }
 
-fn signing_payload(doc_type: DocType, doc_id: u128, author_pubkey: &[u8], delta: &[u8]) -> Vec<u8> {
+fn signing_payload(
+    doc_type: DocType,
+    doc_id: u128,
+    author_pubkey: &[u8],
+    delta: &[u8],
+    domain_op: Option<&[u8]>,
+) -> Vec<u8> {
     let mut e = Encoder::new();
-    e.put_str(OP_DOMAIN).expect("label fits");
+    e.put_str(if domain_op.is_some() {
+        DOMAIN_OP_DOMAIN
+    } else {
+        OP_DOMAIN
+    })
+    .expect("label fits");
     e.put_u16(doc_type.tag());
     e.put_u128(doc_id);
     e.put_bytes(author_pubkey).expect("pubkey fits");
     e.put_bytes(delta).expect("delta fits");
+    if let Some(domain_op) = domain_op {
+        e.put_bytes(domain_op).expect("domain operation fits");
+    }
     e.finish()
 }
 
@@ -69,7 +87,7 @@ impl SignedOp {
         delta: Vec<u8>,
     ) -> Result<Self, ReplError> {
         let author_pubkey = device.public_key_bytes();
-        let payload = signing_payload(doc_type, doc_id, &author_pubkey, &delta);
+        let payload = signing_payload(doc_type, doc_id, &author_pubkey, &delta, None);
         let signature = device.sign(&payload)?;
         Ok(Self {
             doc_type,
@@ -77,6 +95,41 @@ impl SignedOp {
             author_device: device.device_id(),
             author_pubkey,
             delta,
+            domain_op: None,
+            signature,
+        })
+    }
+
+    /// Author and sign an epoch-managed operation. The canonical domain envelope is bound to the
+    /// exact Automerge change, so an intermediary cannot substitute replay semantics while keeping
+    /// a valid change signature.
+    pub fn sign_domain(
+        device: &MlsDevice,
+        doc_type: DocType,
+        doc_id: u128,
+        delta: Vec<u8>,
+        domain_op: &DomainOp,
+    ) -> Result<Self, ReplError> {
+        if domain_op.doc_type != doc_type {
+            return Err(ReplError::EpochScope);
+        }
+        let encoded_domain = domain_op.encode()?;
+        let author_pubkey = device.public_key_bytes();
+        let payload = signing_payload(
+            doc_type,
+            doc_id,
+            &author_pubkey,
+            &delta,
+            Some(&encoded_domain),
+        );
+        let signature = device.sign(&payload)?;
+        Ok(Self {
+            doc_type,
+            doc_id,
+            author_device: device.device_id(),
+            author_pubkey,
+            delta,
+            domain_op: Some(encoded_domain),
             signature,
         })
     }
@@ -87,7 +140,21 @@ impl SignedOp {
         if DeviceId::from_public_key_bytes(&self.author_pubkey) != self.author_device {
             return false;
         }
-        let payload = signing_payload(self.doc_type, self.doc_id, &self.author_pubkey, &self.delta);
+        if let Some(domain_op) = &self.domain_op {
+            let Ok(domain_op) = DomainOp::decode(domain_op) else {
+                return false;
+            };
+            if domain_op.doc_type != self.doc_type {
+                return false;
+            }
+        }
+        let payload = signing_payload(
+            self.doc_type,
+            self.doc_id,
+            &self.author_pubkey,
+            &self.delta,
+            self.domain_op.as_deref(),
+        );
         verify_with_public_bytes(&self.author_pubkey, &payload, &self.signature)
     }
 
@@ -100,6 +167,12 @@ impl SignedOp {
         e.put_bytes(&self.author_pubkey).expect("pubkey fits");
         e.put_bytes(&self.delta).expect("delta fits");
         e.put_bytes(&self.signature).expect("64 fits");
+        if let Some(domain_op) = &self.domain_op {
+            // The legacy frame ends after the signature. A trailing version byte therefore makes
+            // v2 unambiguous while preserving byte-for-byte v1 snapshots and hashes.
+            e.put_u8(2);
+            e.put_bytes(domain_op).expect("domain operation fits");
+        }
         e.finish()
     }
 
@@ -116,6 +189,19 @@ impl SignedOp {
             .map_err(|_| ReplError::Malformed)?
             .try_into()
             .map_err(|_| ReplError::Malformed)?;
+        let domain_op = if d.is_empty() {
+            None
+        } else {
+            if d.get_u8().map_err(|_| ReplError::Malformed)? != 2 {
+                return Err(ReplError::Malformed);
+            }
+            let encoded = d.get_bytes().map_err(|_| ReplError::Malformed)?.to_vec();
+            let parsed = DomainOp::decode(&encoded)?;
+            if parsed.doc_type != doc_type {
+                return Err(ReplError::EpochScope);
+            }
+            Some(encoded)
+        };
         d.finish().map_err(|_| ReplError::Malformed)?;
         Ok(Self {
             doc_type,
@@ -123,8 +209,14 @@ impl SignedOp {
             author_device: DeviceId::from_public_key_bytes(&author_pubkey),
             author_pubkey,
             delta,
+            domain_op,
             signature,
         })
+    }
+
+    /// Parse the authenticated P1 domain operation, if this is a v2 envelope.
+    pub fn parsed_domain_op(&self) -> Result<Option<DomainOp>, ReplError> {
+        self.domain_op.as_deref().map(DomainOp::decode).transpose()
     }
 
     /// A stable content hash of the op, used for de-duplication.
