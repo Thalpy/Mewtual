@@ -232,9 +232,15 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
     case "get_pinned_messages":
       return clone((CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []).filter((m) => m.pinned));
     case "get_message_tail": {
-      const rows = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Array<{ text: string }>;
-      const limit = typeof args.limit === "number" && args.limit > 0 ? Math.trunc(args.limit) : rows.length;
-      return rows.slice(-limit).map((row) => ({ ...row, targets_me: row.text.includes("@[Rowan]") }));
+      const all = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Array<{ id: string; text: string }>;
+      const limit = typeof args.limit === "number" && args.limit > 0 ? Math.trunc(args.limit) : all.length;
+      const cursor = typeof args.afterId === "string" ? args.afterId : "";
+      const at = cursor ? all.findIndex((row) => row.id === cursor) : -1;
+      const addresses = (row: { text: string }) => row.text.includes("@[Rowan]");
+      return {
+        rows: all.slice(-limit).map((row) => ({ ...row, targets_me: addresses(row) })),
+        addressed_after_cursor: all.slice(at + 1).some(addresses),
+      };
     }
     case "get_members":
       return clone(

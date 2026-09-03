@@ -198,8 +198,16 @@ pub struct MessagePageQuery {
 /// the desktop's `unread.ts`, whose rule this mirrors exactly).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnreadProbe {
-    /// Effective timestamp of the newest row the client had read when it opened the channel;
-    /// `u64::MAX` for "everything is read".
+    /// Id of the newest message from somebody else that the client had read when it opened the
+    /// channel: **the cursor**. Empty for a read mark written before ids existed, or none at all.
+    ///
+    /// A timestamp cannot order two messages sent in the same millisecond, and it orders two
+    /// senders' clocks not at all, so a stamp alone can hide a real arrival: exactly the reasoning
+    /// the durable badge already follows (`unread.ts`). When this id names a row, everything after
+    /// that row is what has not been read.
+    pub divider_id: String,
+    /// Effective timestamp of that row; `u64::MAX` for "everything is read". Used to place the
+    /// divider, and as the whole rule only when `divider_id` names no current row.
     pub divider_ts: u64,
     /// The client's wall clock (epoch-millis).
     pub now_ms: u64,
@@ -247,6 +255,16 @@ pub struct ReplyPreview {
 
 /// Characters of a reply parent's text carried in a [`ReplyPreview`].
 pub const REPLY_PREVIEW_CHARS: usize = 200;
+
+/// The newest rows of a channel, plus what the rows outside them would have said about whether
+/// anything here is addressed to this member. See [`Server::message_tail`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MessageTail {
+    /// The newest rows, oldest first, each with whether it addresses me.
+    pub rows: Vec<(ChatMessage, bool)>,
+    /// Whether **any** message after the caller's cursor addresses me, carried or not.
+    pub addressed_after_cursor: bool,
+}
 
 /// The result of a paged read: a contiguous slice of the channel in its current order.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -495,10 +513,30 @@ pub fn append_message(
     Ok(())
 }
 
-/// Unread state over a whole message list, by the desktop's rule: the ceiling is the newest
-/// timestamp no further ahead of `now` than the clock grace, every timestamp is clamped to it,
-/// and a row counts when its clamped timestamp is past the divider and somebody else wrote it.
-fn unread_summary(messages: &[ChatMessage], me: &str, probe: &UnreadProbe) -> UnreadSummary {
+/// Whether one message is addressed to `me`: an `@[my name]` mention under the composer's own
+/// normalization, or a reply to something I wrote. My own messages never address me.
+fn addresses_me(
+    m: &ChatMessage,
+    me: &str,
+    marker: Option<&str>,
+    parent: Option<&ChatMessage>,
+) -> bool {
+    m.author != me
+        && (marker.is_some_and(|mk| m.text.contains(mk)) || parent.is_some_and(|p| p.author == me))
+}
+
+/// Unread state over a whole channel.
+///
+/// By position when the client's cursor names a row: everything after it that somebody else wrote
+/// has not been read, which needs no clock and cannot be fooled by two messages sharing a
+/// millisecond or by a sender whose clock ran backwards.
+///
+/// By timestamp only when there is no usable cursor, which is a read mark written before ids
+/// existed or one whose message has since been deleted. That path is the desktop's original rule:
+/// the ceiling is the newest timestamp no further ahead of `now` than the clock grace, every
+/// timestamp is clamped to it, and a row counts when its clamped stamp is past the divider.
+fn unread_summary(channel: &MaterializedChannel, me: &str, probe: &UnreadProbe) -> UnreadSummary {
+    let messages = &channel.messages;
     let limit = probe.now_ms.saturating_add(CLOCK_SKEW_GRACE_MS);
     let ceiling_ts = messages
         .iter()
@@ -510,8 +548,18 @@ fn unread_summary(messages: &[ChatMessage], me: &str, probe: &UnreadProbe) -> Un
         ceiling_ts,
         ..UnreadSummary::default()
     };
+    let after = (!probe.divider_id.is_empty())
+        .then(|| channel.by_id.get(&probe.divider_id).copied())
+        .flatten();
     for (index, m) in messages.iter().enumerate() {
-        if m.author != me && m.ts.min(ceiling_ts) > probe.divider_ts {
+        if m.author == me {
+            continue; // own messages never make a channel unread
+        }
+        let unread = match after {
+            Some(cursor) => index > cursor,
+            None => m.ts.min(ceiling_ts) > probe.divider_ts,
+        };
+        if unread {
             summary.count += 1;
             summary.first_index.get_or_insert(index as u64);
         }
@@ -6941,7 +6989,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 ..MessagePage::default()
             };
             if let Some(probe) = &query.unread {
-                page.unread = Some(unread_summary(&c.messages, &me, probe));
+                page.unread = Some(unread_summary(c, &me, probe));
             }
             let anchor = match &query.anchor {
                 _ if total == 0 => None,
@@ -6963,9 +7011,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     let parent = (!m.reply_to.is_empty())
                         .then(|| c.by_id.get(&m.reply_to).map(|&i| &c.messages[i]))
                         .flatten();
-                    let targets_me = m.author != me
-                        && (marker.as_deref().is_some_and(|mk| m.text.contains(mk))
-                            || parent.is_some_and(|p| p.author == me));
+                    let targets_me = addresses_me(m, &me, marker.as_deref(), parent);
                     PagedMessage {
                         message: m.clone(),
                         targets_me,
@@ -7031,18 +7077,46 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ///
     /// This is what an arrival notification needs, and all it needs: the previous shape of that
     /// path fetched the entire history of a channel nobody was looking at to read its last row.
-    pub fn message_tail(&self, channel: u128, limit: usize) -> Vec<(ChatMessage, bool)> {
-        let query = MessagePageQuery {
-            anchor: PageAnchor::Tail,
-            before: limit.saturating_sub(1),
-            after: 0,
-            unread: None,
-        };
-        self.message_page(channel, &query)
+    ///
+    /// `after_id` is the caller's cursor, normally the read mark for that channel.
+    /// [`MessageTail::addressed_after_cursor`] answers over **every** row past it, not only the
+    /// rows carried: a catch-up or a burst can append more messages than one tail holds, and a
+    /// mention followed by `limit` ordinary messages must still ring.
+    pub fn message_tail(&self, channel: u128, limit: usize, after_id: &str) -> MessageTail {
+        let me = self.my_fingerprint();
+        let marker = self.mention_marker();
+        let rows = self
+            .message_page(
+                channel,
+                &MessagePageQuery {
+                    anchor: PageAnchor::Tail,
+                    before: limit.saturating_sub(1),
+                    after: 0,
+                    unread: None,
+                },
+            )
             .rows
             .into_iter()
             .map(|row| (row.message, row.targets_me))
-            .collect()
+            .collect();
+        let addressed_after_cursor = self.with_channel(channel, |c| {
+            let from = match c.by_id.get(after_id) {
+                Some(cursor) => cursor + 1,
+                // No cursor, or one whose message is gone: everything here is still unaccounted
+                // for, which is the answer that cannot silently drop a mention.
+                None => 0,
+            };
+            c.messages[from.min(c.messages.len())..].iter().any(|m| {
+                let parent = (!m.reply_to.is_empty())
+                    .then(|| c.by_id.get(&m.reply_to).map(|&i| &c.messages[i]))
+                    .flatten();
+                addresses_me(m, &me, marker.as_deref(), parent)
+            })
+        });
+        MessageTail {
+            rows,
+            addressed_after_cursor,
+        }
     }
 
     /// The `@[Name]` marker the composer inserts for me, or `None` when I have no usable name.

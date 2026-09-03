@@ -313,7 +313,8 @@ pub enum AppCommand {
     MessageTail {
         channel: u128,
         limit: usize,
-        reply: oneshot::Sender<Vec<(ChatMessage, bool)>>,
+        after_id: String,
+        reply: oneshot::Sender<crate::MessageTail>,
     },
     /// Query a bounded slice of a channel around an anchor (see [`crate::MessagePageQuery`]).
     MessagePage {
@@ -1269,19 +1270,25 @@ impl ServerActor {
 
     /// The newest `limit` messages of a channel, oldest first, each paired with whether it is
     /// addressed to me (see [`Server::message_tail`]). Empty if the actor has stopped.
-    pub async fn message_tail(&self, channel: u128, limit: usize) -> Vec<(ChatMessage, bool)> {
+    pub async fn message_tail(
+        &self,
+        channel: u128,
+        limit: usize,
+        after_id: String,
+    ) -> crate::MessageTail {
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
             .send(AppCommand::MessageTail {
                 channel,
                 limit,
+                after_id,
                 reply,
             })
             .await
             .is_err()
         {
-            return Vec::new();
+            return crate::MessageTail::default();
         }
         rx.await.unwrap_or_default()
     }
@@ -3375,9 +3382,10 @@ where
                     Some(AppCommand::MessageTail {
                         channel,
                         limit,
+                        after_id,
                         reply,
                     }) => {
-                        let _ = reply.send(server.message_tail(channel, limit));
+                        let _ = reply.send(server.message_tail(channel, limit, &after_id));
                     }
                     Some(AppCommand::MessagePage {
                         channel,
@@ -5119,21 +5127,59 @@ mod tests {
         post_as(&mut server, "mention", "@[Alice Cat] ping", "").await;
         post_as(&mut server, "plain", "nothing for alice", "").await;
 
-        let tail = server.message_tail(GENERAL, 3);
+        let tail = server.message_tail(GENERAL, 3, "");
         assert_eq!(
-            tail.iter().map(|(m, _)| m.id.as_str()).collect::<Vec<_>>(),
+            tail.rows
+                .iter()
+                .map(|(m, _)| m.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["reply", "mention", "plain"],
             "the newest rows, oldest first"
         );
         assert_eq!(
-            tail.iter().map(|(_, to_me)| *to_me).collect::<Vec<_>>(),
+            tail.rows
+                .iter()
+                .map(|(_, to_me)| *to_me)
+                .collect::<Vec<_>>(),
             vec![true, true, false],
             "the reply's parent is outside the tail and is still resolved"
         );
-        let whole = server.message_tail(GENERAL, 100);
-        assert_eq!(whole.len(), 9, "a wide limit is clamped to the history");
-        assert_eq!(whole[0].0.id, mine);
-        assert!(!whole[0].1, "my own row is never addressed to me");
+        let whole = server.message_tail(GENERAL, 100, "");
+        assert_eq!(
+            whole.rows.len(),
+            9,
+            "a wide limit is clamped to the history"
+        );
+        assert_eq!(whole.rows[0].0.id, mine);
+        assert!(!whole.rows[0].1, "my own row is never addressed to me");
+
+        // A burst longer than the tail. The mention is now far outside the rows a notification
+        // would carry, and it still has to ring: the answer is computed over the whole channel
+        // past this device's cursor, not over the window.
+        for i in 0..10 {
+            post_as(&mut server, &format!("burst-{i}"), "ordinary chatter", "").await;
+        }
+        let after_burst = server.message_tail(GENERAL, 3, "filler-0");
+        assert!(
+            after_burst.rows.iter().all(|(_, to_me)| !*to_me),
+            "nothing in the carried window is addressed to me"
+        );
+        assert!(
+            after_burst.addressed_after_cursor,
+            "the mention behind the burst is still reported"
+        );
+        assert!(
+            !server
+                .message_tail(GENERAL, 3, "plain")
+                .addressed_after_cursor,
+            "a cursor past the mention leaves only ordinary chatter"
+        );
+        assert!(
+            server
+                .message_tail(GENERAL, 3, "no-such-id")
+                .addressed_after_cursor,
+            "a cursor naming no row cannot be trusted to have covered anything"
+        );
     }
 
     /// A page is a contiguous slice around an anchor in the channel's current order, and every
@@ -5300,6 +5346,7 @@ mod tests {
             before: 0,
             after: 0,
             unread: Some(crate::UnreadProbe {
+                divider_id: String::new(),
                 divider_ts,
                 now_ms: 1_000,
             }),
@@ -5320,6 +5367,58 @@ mod tests {
             "an implausible timestamp is pulled down to the ceiling: it counts once, like any \
              other new row, and can never move the boundary into the future"
         );
+        // The cursor is the message id, because a timestamp cannot separate two messages sent in
+        // the same millisecond and cannot order two senders' clocks at all. Both of those hid a
+        // real arrival while the divider was a timestamp comparison.
+        post_as_at(&mut server, "same-ms-a", "first of two", 500).await;
+        post_as_at(&mut server, "same-ms-b", "second of two", 500).await;
+        post_as_at(
+            &mut server,
+            "backwards",
+            "an older clock, later in the log",
+            400,
+        )
+        .await;
+        let by_id = |id: &str| MessagePageQuery {
+            anchor: PageAnchor::Tail,
+            before: 0,
+            after: 0,
+            unread: Some(crate::UnreadProbe {
+                divider_id: id.to_string(),
+                divider_ts: 500,
+                now_ms: 1_000,
+            }),
+        };
+        let after_first = server
+            .message_page(GENERAL, &by_id("same-ms-a"))
+            .unread
+            .unwrap();
+        assert_eq!(
+            after_first.count, 2,
+            "the second message of the millisecond, and the one with the older stamp, are unread"
+        );
+        let after_second = server
+            .message_page(GENERAL, &by_id("same-ms-b"))
+            .unread
+            .unwrap();
+        assert_eq!(
+            after_second.count, 1,
+            "only the backwards-stamped row is left"
+        );
+        let deleted_cursor = server
+            .message_page(GENERAL, &by_id("no-such-row"))
+            .unread
+            .unwrap();
+        assert_eq!(
+            deleted_cursor.count,
+            server
+                .message_page(GENERAL, &probe(500))
+                .unread
+                .unwrap()
+                .count,
+            "a cursor that names no row falls back to the timestamp rule it replaced"
+        );
+
         assert_eq!(server.pinned_messages(GENERAL).len(), 0);
         server.set_pin(GENERAL, &mine, true).await.unwrap();
         assert_eq!(server.pinned_messages(GENERAL)[0].id, mine);

@@ -7659,9 +7659,14 @@ button.stage-chev:hover {
   font-family: var(--mono);
   font-size: 0.6rem;
   color: var(--muted);
-  width: 30px;
+  width: 34px;
   text-align: right;
   flex: none;
+}
+/* Above unity this is amplifying an already-compressed stream, not just turning a dial: the
+   reading says so, so a level left high is visible rather than mysterious. */
+.stage-pct.boosted {
+  color: var(--warn);
 }
 button.stage-tog {
   display: inline-flex;
@@ -8424,6 +8429,43 @@ button.focus-chip:hover {
   letter-spacing: 0.08em;
   color: var(--info);
   flex: none;
+}
+
+/* Watch one person only. Out of the way until the tile is under the pointer, because the whole
+   point of the view is the picture; once soloed it stays visible, since it is also the way back. */
+.focus-solo {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 3px 8px;
+  font-family: var(--mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  background: color-mix(in oklab, var(--bg-0) 72%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.focus-tile:hover .focus-solo,
+.focus-tile:focus-within .focus-solo,
+.focus-solo.on,
+.focus-solo:focus-visible {
+  opacity: 1;
+}
+.focus-solo:hover {
+  border-color: var(--accent);
+}
+/* A soloed tile owns the window, so a screen share is shown whole rather than cropped to fill. */
+.focus-tile.soloed .focus-vid {
+  object-fit: contain;
+}
+@media (prefers-reduced-motion: reduce) {
+  .focus-solo {
+    transition: none;
+  }
 }
 .focus-name .ico {
   width: 0.8rem;

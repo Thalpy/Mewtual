@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  PageAdmission,
   firstDurableId,
   pageOfList,
   planJump,
@@ -33,6 +34,26 @@ test("a refresh at the tail keeps at least what was loaded; away from it, it re-
   const legacy = planRefresh({ start: 5, ids: ["", ""], tailLoaded: false }, false, 320, 200);
   assert.deepEqual(legacy, { anchor: { kind: "index", index: 5 }, before: 0, after: 201 });
   assert.deepEqual(reanchorByIndex(away, 100).anchor, { kind: "index", index: 100 });
+});
+
+test("only the newest page request may replace what is on screen", () => {
+  const admission = new PageAdmission();
+  const reveal = admission.begin();
+  const refresh = admission.begin();
+  assert.equal(admission.accepts(reveal), false, "a slow reveal cannot land after a newer refresh");
+  assert.equal(admission.accepts(refresh), true);
+
+  // Two requests that would carry the same document version still need an order: the reader's
+  // last action is the one that must win.
+  const firstJump = admission.begin();
+  const secondJump = admission.begin();
+  assert.equal(admission.accepts(firstJump), false);
+  assert.equal(admission.accepts(secondJump), true);
+
+  // Leaving the conversation refuses everything outstanding without claiming anything.
+  admission.invalidate();
+  assert.equal(admission.accepts(secondJump), false);
+  assert.equal(admission.accepts(admission.begin()), true);
 });
 
 test("reveal plans keep the loaded rows and extend one side by one step", () => {

@@ -44,6 +44,40 @@ export const REPLY_PREVIEW_CHARS = 200;
 /** A request the client is about to make. */
 export type PageRequest = { anchor: PageAnchor; before: number; after: number };
 
+/**
+ * Which page response is still allowed to replace what is on screen.
+ *
+ * Every path that can replace the loaded slice (open, refresh, reveal, jump, re-anchor) awaits a
+ * promise, and those settle in whatever order the actor and the bridge produce them. Checking only
+ * that the server and channel are unchanged lets a slow older response overwrite a newer one,
+ * which silently puts the reader back on stale rows: an arrival, an edit or a moved unread summary
+ * disappears until something else happens to refresh. Only the newest request issued for the
+ * conversation may land, and leaving the conversation invalidates every request already made.
+ *
+ * Deliberately not a comparison of document versions. Two requests can carry the same version and
+ * still need an order (two jumps to different places), and a version cannot say which one the
+ * reader asked for last.
+ */
+export class PageAdmission {
+  #current = 0;
+
+  /** Claim the right to replace the slice. The newest claim wins. */
+  begin(): number {
+    this.#current += 1;
+    return this.#current;
+  }
+
+  /** Whether a response for `token` may still be applied. */
+  accepts(token: number): boolean {
+    return token === this.#current;
+  }
+
+  /** Refuse every outstanding response, without claiming anything. */
+  invalidate(): void {
+    this.#current += 1;
+  }
+}
+
 /** The loaded slice as the planner sees it. */
 export type LoadedSlice = {
   /** Position of the first loaded row in the channel. */

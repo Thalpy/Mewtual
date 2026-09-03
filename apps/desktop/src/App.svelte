@@ -33,10 +33,15 @@
     CHAT_INITIAL_ROWS, CHAT_WINDOW_STEP, CoalescedAsyncRefresh, SanitizedMessageCache, nearScrollBottom,
   } from "./chat-performance";
   import {
-    planJump, planRefresh, planRevealNewer, planRevealOlder, reanchorByIndex,
+    PageAdmission, planJump, planRefresh, planRevealNewer, planRevealOlder, reanchorByIndex,
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { ImageSrcCache } from "./image-src";
+  import { pastedMedia, pastedName } from "./clipboard-media";
+  import {
+    DEFAULT_PEER_LEVEL, MAX_PEER_LEVEL, RemoteAudioRouter, effectivePeerGain, normalizePeerLevel,
+    peerGain, type PeerAudioKind,
+  } from "./call-audio";
   import {
     findMatches, noSearchFilters, reactionCount, searchFilterCount, searchIsEmpty,
     type SearchCorpusChannel, type SearchHitRef, type SearchMessage, type SearchResponse,
@@ -211,7 +216,7 @@
   import { JamClockProbeTracker, JamClockSync, JamMetronomeClock } from "./jam-clock";
   import { JamCallCuePlayer, JamClickPlayer } from "./jam-clicks";
   import {
-    applyJamRecorderConsent, captureJamRecorderLease, jamRecorderTimelineMs, JamTakeRecorder,
+    captureJamRecorderLease, jamRecorderTimelineMs, JamTakeRecorder,
     parseJamTakeJson, recordLeasedJamDrum, recordLeasedJamNoteOff, recordLeasedJamNoteOn,
     startJamRecorderTimeline, type JamRecorderLease, type JamRecorderTimeline,
   } from "./jam-recorder";
@@ -284,6 +289,11 @@
   // whose empty state makes a CLAIM ("No messages yet", "No matching members") must consult this:
   // an empty collection mid-switch means "not read yet", not "there is nothing".
   let groupLoading = $state(false);
+  // The same claim, narrowed to the chat pane: true only until this group's MESSAGES have been
+  // read. The panes are served by one actor a command at a time, so the message rows arrive long
+  // before the wiki, file and device reads that share the switch; holding the chat pane's empty
+  // state on all of them left "Loading messages..." on screen well after the messages were in hand.
+  let messagesLoading = $state(false);
   function beginViewSwitch(): number {
     return ++viewGeneration;
   }
@@ -359,6 +369,10 @@
   let showSettings = $state(false); // the personal/app Settings takeover
   let showServerSettings = $state(false); // the per-server Settings takeover
   let serverNameDraft = $state("");
+  // Names for a group being founded or joined, kept apart from `displayName` (who YOU are).
+  // One box for both was the whole bug: a server ended up named after whoever opened it.
+  let newServerName = $state("");
+  let joinServerName = $state("");
   // The settings takeovers are Discord-shaped: a sidebar of pages, one page shown at a
   // time. Page ids are stable route names; the catalogs below are the sidebars' contents.
   // `setSearch` filters BOTH sidebars by label (cleared on open, "/" focuses it).
@@ -2167,7 +2181,11 @@
     return { start: pageStart, ids: messages.map((m) => m.id), tailLoaded };
   }
   function unreadProbe() {
-    return { divider_ts: Number.isFinite(dividerTs) ? dividerTs : null, now_ms: Date.now() };
+    return {
+      divider_id: dividerId || null,
+      divider_ts: Number.isFinite(dividerTs) ? dividerTs : null,
+      now_ms: Date.now(),
+    };
   }
   async function fetchPage(server: number, channel: string, request: PageRequest): Promise<MessagePage<PagedMsg>> {
     return invoke<MessagePage<PagedMsg>>("get_message_page", {
@@ -2181,7 +2199,22 @@
     if (page.anchor_index !== null || page.total === 0 || request.anchor.kind === "index") return page;
     return fetchPage(server, channel, reanchorByIndex(request, index));
   }
-  function applyPage(page: MessagePage<PagedMsg>) {
+  /**
+   * Admission for page responses.
+   *
+   * Every path that can replace the loaded slice (open, refresh, reveal, jump, re-anchor) awaits
+   * a promise, and those promises settle in whatever order the actor and the bridge produce them.
+   * Checking only that the server and channel are unchanged lets a slow older response overwrite
+   * a newer one, which puts the reader back on stale rows: an arrival, an edit or a moved unread
+   * summary silently disappears until something else happens to refresh. The last request issued
+   * for the conversation is the only one whose answer may land.
+   */
+  const pageAdmission = new PageAdmission();
+  function beginPageRequest(): number {
+    return pageAdmission.begin();
+  }
+  function applyPage(page: MessagePage<PagedMsg>, token: number) {
+    if (!pageAdmission.accepts(token)) return; // superseded while it was in flight
     messages = page.rows;
     pageStart = page.rows.length ? page.start : 0;
     pageTotal = page.total;
@@ -2189,6 +2222,8 @@
     pageUnread = page.unread;
   }
   function clearPage() {
+    // Leaving the conversation invalidates everything already asked for.
+    pageAdmission.invalidate();
     messages = [];
     pageStart = 0;
     pageTotal = 0;
@@ -2243,6 +2278,22 @@
   function channelName(id: string): string {
     return searchChannels.find((c) => c.id === id)?.name ?? id;
   }
+  /**
+   * How many times each in-scope channel has been read into the corpus.
+   *
+   * The corpus is a snapshot, and a snapshot of a live conversation goes stale: a message edited
+   * to remove the word being searched for kept matching, and a message that arrived after the
+   * channel was first read never appeared. Counting the reads gives every reload a new identity
+   * even when the number of rows is unchanged, which a row count cannot do, and that identity is
+   * what tells the worker its copy is obsolete.
+   */
+  let chanMsgsRevision = $state<Record<string, number>>({});
+  /** Forget a channel's snapshot so the next `loadScope` reads it again. */
+  function invalidateSearchChannel(channel: string) {
+    if (!showSearch || !chanMsgs[channel]) return;
+    delete chanMsgs[channel];
+    void loadScope();
+  }
   async function loadScope() {
     const id = activeServerId;
     const s = cur;
@@ -2257,8 +2308,13 @@
           invoke<Msg[]>("get_messages", { server: id, channel: c }).then((msgs) => [c, msgs] as const)
         )
       );
-      if (activeServerId !== id) return; // server switched mid-fetch: drop the stale snapshot
-      for (const [c, msgs] of loaded) chanMsgs[c] = msgs;
+      // A server switch, or search closing, drops the answer: neither may repopulate a cache that
+      // was deliberately cleared.
+      if (activeServerId !== id || !showSearch) return;
+      for (const [c, msgs] of loaded) {
+        chanMsgs[c] = msgs;
+        chanMsgsRevision[c] = (chanMsgsRevision[c] ?? 0) + 1;
+      }
     } catch (e) {
       error = String(e);
     } finally {
@@ -2293,11 +2349,14 @@
   let searchWorker: Worker | null = null;
   let searchWorkerCorpus = ""; // the corpus the worker holds, by `searchCorpusKey`
   let searchQueryId = 0;
-  // What the worker's copy of the corpus must match. Names the channels and their sizes rather
-  // than a count, so swapping one channel for another of equal length still re-sends it.
+  /** The corpus the in-flight query was issued against; its hits index into that one only. */
+  let searchQueryCorpus = "";
+  // What the worker's copy of the corpus must match. Named by which channels are in scope and
+  // which reading of each one they are, so an edit or a deletion that leaves the number of rows
+  // unchanged still re-sends the corpus. A row count could not tell those apart.
   let searchCorpusKey = $derived(
     searchCorpusChannels()
-      .map((c) => `${c.ch}:${c.rows.length}`)
+      .map((c) => `${c.ch}:${chanMsgsRevision[c.ch] ?? 0}`)
       .join("|"),
   );
   function searchSpec(): SearchSpec {
@@ -2343,8 +2402,10 @@
     try {
       const worker = new Worker(new URL("./search-worker.ts", import.meta.url), { type: "module" });
       worker.onmessage = (event: MessageEvent<SearchResponse>) => {
-        // A late answer to a superseded query would overwrite a newer result with an older one.
-        if (event.data.id !== searchQueryId) return;
+        // A late answer to a superseded query would overwrite a newer result with an older one,
+        // and an answer whose corpus has since been re-read indexes rows that may no longer be
+        // the ones it matched. The effect re-runs on both, so dropping the answer loses nothing.
+        if (event.data.id !== searchQueryId || searchQueryCorpus !== searchCorpusKey) return;
         searchMatches = hitsFromRefs(event.data.hits);
         settleSearchScroll();
       };
@@ -2396,6 +2457,9 @@
         searchWorkerCorpus = corpusKey;
       }
       searchQueryId += 1;
+      // Remembered with the query: a hit is a (channel, index) into the corpus that was scanned,
+      // so it may only be mapped back through the same one.
+      searchQueryCorpus = corpusKey;
       worker.postMessage({ type: "query", id: searchQueryId, spec });
     });
   });
@@ -2510,9 +2574,10 @@
     const server = activeServerId;
     const channel = cur?.active;
     if (server === null || !channel) return;
+    const token = beginPageRequest();
     const page = await fetchPage(server, channel, planJump({ kind: "index", index: msgIdx }, CHAT_INITIAL_ROWS));
     if (activeServerId !== server || cur?.active !== channel) return;
-    applyPage(page);
+    applyPage(page, token);
     await tick();
   }
   async function scrollToMatch(msgIdx: number) {
@@ -2574,6 +2639,9 @@
     showSearchAdv = false;
     searchQuery = "";
     chanMsgs = {};
+    // Not reset: a channel read again in a later search must not reuse an identity the worker
+    // could still associate with the copy it is being handed now.
+    void chanMsgsRevision;
     // The worker holds a copy of the corpus, so closing search drops it there too.
     stopSearchWorker();
     clearFilters();
@@ -2665,6 +2733,8 @@
     return readMarks[key] ?? NO_READ_MARK;
   }
   let dividerTs = $state(Number.POSITIVE_INFINITY);
+  /** Id of the last message read here, frozen with `dividerTs`. See `captureDivider`. */
+  let dividerId = $state("");
   let uiStateSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let uiStateSaveChain: Promise<void> = Promise.resolve();
   // Server actions remain hidden until the sealed continuity snapshot (including
@@ -2770,6 +2840,10 @@
   function captureDivider() {
     const k = chanKey();
     dividerTs = k && readMarks[k] ? readMarks[k].ts : Number.POSITIVE_INFINITY;
+    // The id is the cursor and the timestamp only places the line: two messages can share a
+    // millisecond, and two senders' clocks agree about nothing. Frozen with the timestamp so the
+    // divider stays put while the channel is read.
+    dividerId = k && readMarks[k] ? readMarks[k].id : "";
   }
   // The newest timestamp in the conversation this machine is willing to believe. A message
   // timestamp is the SENDER's clock, so used raw as a cursor one broken clock (or one member
@@ -4646,11 +4720,12 @@
     if (!node || pageStart <= 0 || expandingMessageWindow || server === null || !channel) return;
     expandingMessageWindow = true;
     try {
+      const token = beginPageRequest();
       const page = await fetchPageOrReanchor(server, channel, planRevealOlder(currentSlice(), CHAT_WINDOW_STEP), pageStart);
       if (activeServerId !== server || cur?.active !== channel || !page.rows.length) return;
       const previousHeight = node.scrollHeight;
       const previousTop = node.scrollTop;
-      applyPage(page);
+      applyPage(page, token);
       await tick();
       // Retain the reader's visual anchor after inserting rows above the viewport.
       if (messagesEl === node) node.scrollTop = previousTop + node.scrollHeight - previousHeight;
@@ -4664,9 +4739,10 @@
     if (tailLoaded || expandingMessageWindow || server === null || !channel) return;
     expandingMessageWindow = true;
     try {
+      const token = beginPageRequest();
       const page = await fetchPageOrReanchor(server, channel, planRevealNewer(currentSlice(), CHAT_WINDOW_STEP), pageEnd - 1);
       if (activeServerId !== server || cur?.active !== channel || !page.rows.length) return;
-      applyPage(page);
+      applyPage(page, token);
     } finally {
       expandingMessageWindow = false;
     }
@@ -5169,9 +5245,14 @@
     error = "";
     const operationGeneration = viewGeneration;
     try {
-      const { value: r } = await invokeDebugged<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false });
+      // The group's name and your name in it are two different things. Naming the group is
+      // optional; left blank it is labelled after the person who founded it, which is at least
+      // a description of what it is rather than a second copy of your own name.
+      const serverName = newServerName.trim() || `${displayName}'s server`;
+      const { value: r } = await invokeDebugged<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false, serverName });
       if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
-      addServer(r, displayName);
+      addServer(r, serverName, displayName);
+      newServerName = "";
     } catch (e) {
       if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = errorText(e);
     } finally {
@@ -5201,15 +5282,24 @@
       // Do not let the click that first reveals the extra-member privacy boundary also cross it.
       if (assistedAction === "preview") return;
       joinAttemptPending = true;
+      // The native record carries the same label the rail shows, so the cross-server inbox names
+      // the group rather than naming the reader.
+      const label = joinServerName.trim() || "New server";
       const { value: r } = await invokeDebugged<Found>("join_server", {
         inviteHex: hex,
         displayName,
         isDm: false,
         allowSwitchboards: assistedAction === "switchboard",
+        serverName: label,
       });
       if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       if (turn) storeServerTurn(r.server, turn); // inherit the operator's shared TURN
-      addServer(r, displayName);
+      // An invite carries no group name yet, so this is the joiner's own label for it until the
+      // owner's published name arrives. What it must NOT be is the joiner's display name, which
+      // is what made every joined server appear in the rail under the name of the person
+      // reading it. Renaming lives in Server settings, Overview.
+      addServer(r, label, displayName);
+      joinServerName = "";
       joinInvite = "";
       joinPreview = null;
       joinPreviewCode = "";
@@ -5347,7 +5437,16 @@
     }
   }
 
-  function addServer(r: Found, name: string) {
+  /**
+   * Put a newly founded or joined group in the rail.
+   *
+   * `name` labels the RAIL and `profileName`, when given, is who you are inside it. They used to
+   * be the same string, because founding and joining had one text box between them: the group was
+   * therefore named after whoever was looking at it, and every server in the rail carried its
+   * owner's own display name. They are separate now, and a caller with nothing to say about the
+   * profile leaves it alone.
+   */
+  function addServer(r: Found, name: string, profileName: string = "") {
     const channels = r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }];
     servers = [
       ...servers,
@@ -5364,9 +5463,9 @@
     }
     showAdd = false;
     onboardingFileTrust = "on-demand";
-    // A server adopts the name as your profile (existing behaviour); a DM's label is the friend's
-    // name, so leave your profile alone.
-    if (!r.is_dm) pName = name;
+    // Your profile takes the name you gave for YOURSELF, never the group's. A DM has no profile
+    // name of its own to carry, so its caller passes none and this leaves the profile untouched.
+    if (profileName) pName = profileName;
     switchServer(r.server);
   }
 
@@ -5571,6 +5670,7 @@
     moderationMessages = [];
     moderationLoading = false;
     groupLoading = false; // a clear with no load behind it (no active group) is not "loading"
+    messagesLoading = false;
     // Livery is server branding: leaving it up paints the group you left over the one you opened.
     // followLiveryNow already drops to the default theme for DM-home and the inbox, so the brief
     // default between servers is that same transition rather than a new kind of flicker.
@@ -5632,6 +5732,7 @@
     // the panes render, synchronously, before the scope of trust changes.
     clearServerView();
     groupLoading = true;
+    messagesLoading = true;
     const s = servers.find((x) => x.id === id);
     // Nothing is cleared here. Arriving at a server is not reading its channels, and the rail's
     // badge is derived from the unread channel list rather than kept beside it, so opening one
@@ -5668,8 +5769,19 @@
     // `view = "chat"` and `roles = {}` above: withCorpus is false here, so the corpus is
     // structurally unreachable during a switch. Anything that later keeps the moderation surface
     // open ACROSS a switch must restore the explicit ordering rather than rely on that.
+    // The chat pane is released by its OWN read, not by the slowest one in this batch.
+    //
+    // These fifteen reads are issued together but answered by a single per-server actor, one
+    // command at a time, so the batch takes as long as all of them put together. Gating the chat
+    // pane on the whole batch meant "Loading messages..." stayed up while the wiki page list, the
+    // file index, the event list and the device list were fetched: the messages had been on hand
+    // for most of that wait, and the pane was lying about it. The other panes still make their
+    // claims ("No members to show") only once everything has landed.
+    const messages = refresh().then(() => {
+      if (viewCurrent(gen, id)) messagesLoading = false;
+    });
     await Promise.all([
-      refresh(),
+      messages,
       refreshMembers(),
       refreshProfiles(),
       refreshFiles(),
@@ -5687,6 +5799,7 @@
     ]);
     if (!viewCurrent(gen, id)) return; // moved on while this group was loading
     groupLoading = false;
+    messagesLoading = false; // already false unless the messages read itself failed
     syncProfileEditor();
     // The channel list is only certain now. Rebuilding here as well as at unlock is what makes the
     // badges right for a server whose directory was still a stub when the session started, and for
@@ -5860,10 +5973,12 @@
       // newest rows when pinned to the bottom, otherwise the slice anchored at its first row so
       // the top never moves under someone reading history.
       const held = messageWindowScope === nextScope && previousMessages.length ? currentSlice() : null;
+      const token = beginPageRequest();
       const page = await fetchPageOrReanchor(server, channel, planRefresh(held, chatStickToBottom, CHAT_INITIAL_ROWS, CHAT_WINDOW_STEP), pageStart);
-      // A slow response from the conversation we just left must never populate the new one.
+      // A slow response from the conversation we just left must never populate the new one, and
+      // `applyPage` refuses one that a later request has already superseded.
       if (revision !== refreshRevision || activeServerId !== server || cur?.active !== channel) return;
-      applyPage(page);
+      applyPage(page, token);
       messageWindowScope = nextScope;
       void refreshPinned(server, channel);
       if (animateArrivals) {
@@ -6120,9 +6235,19 @@
       ); // closed actor: ticks simply don't render
     }
   }
-  // Index of your most recent message in the log (-1 if none): the one message whose state is
-  // still plausibly in flight, and the receipt line's anchor.
+  // Index of your most recent message *in the loaded slice* (-1 if none).
   let lastOwnIdx = $derived(messages.reduce((acc, m, i) => (m.author === myFp ? pageStart + i : acc), -1));
+  /**
+   * Is this row the one message of yours whose state is still plausibly in flight, and so the
+   * receipt line's anchor?
+   *
+   * Only answerable when the slice reaches the newest row. Reading history, the last message of
+   * yours on screen need not be the last you sent, and calling it the latest would present an old
+   * message with no receipt evidence as though it were still waiting to be delivered.
+   */
+  function isLatestOwn(mi: number): boolean {
+    return tailLoaded && mi === lastOwnIdx;
+  }
   // What is actually known about one of your messages. `delivered`/`reachable` are null when the
   // actor has reported nothing for it, which is deliberately distinct from reporting zero: the
   // absence of a measurement is not evidence that nobody is out there.
@@ -6134,7 +6259,7 @@
       reachable: d ? d.reachable : null,
       anyPeer: d ? d.any_peer : null,
       pending: m.id.startsWith("pending:"),
-      latest: mi === lastOwnIdx,
+      latest: isLatestOwn(mi),
     };
   }
   // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ held by
@@ -6151,7 +6276,7 @@
   }
   // The spelled-out receipt under your latest message. Same evidence as the gutter tick, in words.
   function deliveryReceipt(m: Msg, mi: number): { g: string; label: string; cls: string; tip: string } | null {
-    if (mi !== lastOwnIdx || !m.id || m.author !== myFp) return null;
+    if (!isLatestOwn(mi) || !m.id || m.author !== myFp) return null;
     const e = deliveryEvidence(m, mi);
     const verdict = deliveryVerdict(e);
     if (!verdict) return null;
@@ -8700,21 +8825,28 @@
   // member's embed folder, then insert a `![name](cid:HEX)` marker into the draft for the
   // shared renderer to resolve inline. Non-media files are shared as plain attachments.
   async function embedFiles(target: "chat" | "status", fileList: FileList | null) {
-    if (!fileList || fileList.length === 0 || activeServerId === null) return;
+    if (!fileList) return;
+    await embedMedia(target, Array.from(fileList).map((file) => ({ file, name: file.name })));
+  }
+
+  // Embed media that already knows what it wants to be called. A picked or dropped file brings its
+  // own name; a pasted screenshot has no name of its own and is given one (see clipboard-media.ts).
+  async function embedMedia(target: "chat" | "status", items: { file: File; name: string }[]) {
+    if (items.length === 0 || activeServerId === null) return;
     uploading = true;
     try {
-      for (const file of Array.from(fileList)) {
-        const tid = toast(`Uploading ${file.name}…`, "info", 0);
+      for (const { file, name } of items) {
+        const tid = toast(`Uploading ${name}…`, "info", 0);
         try {
-          const cid = await addSharedFile(file, myEmbedFolder);
+          const cid = await addSharedFile(file, myEmbedFolder, name);
           // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
-          const alt = file.name.replace(/[[\]]/g, " ");
+          const alt = name.replace(/[[\]]/g, " ");
           const marker = `![${alt}](cid:${cid})`;
           if (target === "chat") draft = draft ? `${draft} ${marker}` : marker;
           else statusDraft = statusDraft ? `${statusDraft} ${marker}` : marker;
-          updateToast(tid, `Attached ${file.name}`, "ok");
+          updateToast(tid, `Attached ${name}`, "ok");
         } catch (e) {
-          updateToast(tid, `Upload of ${file.name} failed: ${e}`, "err", 9000);
+          updateToast(tid, `Upload of ${name} failed: ${e}`, "err", 9000);
         }
       }
       await refreshFiles();
@@ -8727,6 +8859,20 @@
     e.preventDefault();
     dragOver = false;
     embedFiles(target, e.dataTransfer?.files ?? null);
+  }
+
+  // Paste a screenshot or a media file straight into the composer, the same way dropping one in
+  // already worked. A paste carrying no media of ours is left entirely alone: preventing the
+  // default on those would swallow ordinary text pastes, and copying a region of a web page puts
+  // an HTML flavour on the clipboard beside the picture.
+  function onComposerPaste(target: "chat" | "status", e: ClipboardEvent) {
+    const media = pastedMedia(e.clipboardData?.files);
+    if (!media.length) return;
+    e.preventDefault();
+    // One instant for the whole paste, so a multi-image paste keeps its clipboard order in the
+    // folder listing instead of depending on how long each upload took to start.
+    const at = Date.now();
+    void embedMedia(target, media.map((file) => ({ file, name: pastedName(file, at) })));
   }
 
   // Only embeddable media types render inline; anything else is shown as a download chip.
@@ -9679,9 +9825,10 @@
       const server = activeServerId;
       const channel = cur?.active;
       if (server === null || !channel) return;
+      const token = beginPageRequest();
       const page = await fetchPage(server, channel, planJump({ kind: "id", id }, CHAT_INITIAL_ROWS));
       if (activeServerId !== server || cur?.active !== channel || page.anchor_index === null) return;
-      applyPage(page);
+      applyPage(page, token);
       await tick();
       idx = messages.findIndex((m) => m.id === id);
       if (idx < 0) return;
@@ -9698,9 +9845,11 @@
     const server = activeServerId;
     const channel = cur?.active;
     if (server === null || !channel) return;
+    const token = beginPageRequest();
     const page = await fetchPage(server, channel, planJump({ kind: "first_reply_to", id: parentId }, CHAT_INITIAL_ROWS));
     if (activeServerId !== server || cur?.active !== channel || page.anchor_index === null) return;
-    applyPage(page);
+    applyPage(page, token);
+    if (!pageAdmission.accepts(token)) return; // a newer request already replaced the slice
     const target = messages[page.anchor_index - page.start];
     if (target?.id) await jumpToMessageId(target.id);
   }
@@ -9982,24 +10131,6 @@
   function mentionsMe(text: string): boolean {
     return !!myMentionName && text.includes(`@[${myMentionName}]`);
   }
-  // Does `msgs` contain a message newer than the channel's read mark that targets me (and isn't
-  // mine)? Used to flag a channel and to decide whether an arrival deserves a mention chime.
-  function targetsMe(channel: string, msgs: TailMsg[]): boolean {
-    // No active server means no read mark to measure against. The sole caller already requires
-    // server === activeServerId, and its documented fallback is an ordinary-message notification,
-    // which is what false gives it. The old key built `null:channel`, which said the same thing
-    // by accident rather than on purpose.
-    if (!myFp || activeServerId === null) return false;
-    const seen = readMarkOf(chatScopeKey(activeServerId, channel)).ts;
-    // Same clock ceiling the read marks use: a sender-chosen timestamp far in the future must not
-    // decide, either way, whether something addressed to me still counts as unseen.
-    const ceiling = readCeiling(msgs.map((m) => m.ts), Date.now());
-    // Whether a row addresses me is resolved by the backend against the full document (see
-    // `TailMsg`); only "still unseen" is a client-side question, because only the client holds
-    // the read mark.
-    return msgs.some((m) => effectiveTs(m.ts, ceiling) > seen && m.author !== myFp && m.targets_me);
-  }
-
   // Cross-server inbox: the backend scans every server's channels for messages addressed to me.
   async function loadInbox() {
     if (locked) return;
@@ -10407,8 +10538,12 @@
   const onDeviceChange = () => void refreshAudioDevices();
   async function applySink(fp: string) {
     if (!sinkSupported || !spkDev) return;
-    const el = document.getElementById(`call-audio-${fp}`) as SinkAudio | null;
-    try { await el?.setSinkId?.(spkDev); } catch { /* device vanished: stays on the default */ }
+    // One peer plays through an element per source (voice, share), and all of them follow the
+    // chosen output device.
+    for (const [key] of peerChains(fp)) {
+      const el = document.getElementById(`call-audio-${key}`) as SinkAudio | null;
+      try { await el?.setSinkId?.(spkDev); } catch { /* device vanished: stays on the default */ }
+    }
   }
   async function setSpkDevice(id: string) {
     spkDev = id;
@@ -10527,34 +10662,181 @@
     micOn = true;
     pushInstState();
   }
-  function attachRemote(fp: string, stream: MediaStream) {
-    let el = document.getElementById(`call-audio-${fp}`) as HTMLAudioElement | null;
+  /**
+   * Play one of a peer's audio sources, through a gain of its own.
+   *
+   * A peer sends up to two things: their microphone, and the mixed audio of whatever they are
+   * sharing. They used to be merged into a single element, which made them a single slider, and
+   * that slider was the element's own `volume`: capped by the browser at unity, so a quiet friend
+   * could be turned down but never up. Each source now gets its own chain
+   * (`source -> gain -> destination -> element`), which separates the two AND lifts the ceiling,
+   * because gain is a plain multiplier. The element survives at the end of the chain because it
+   * is what `setSinkId` speaks to: routing a call to a chosen output device still works.
+   */
+  function attachRemote(fp: string, stream: MediaStream, kind: PeerAudioKind) {
+    const key = peerChainKey(fp, stream.id);
+    // One chain per SOURCE STREAM, not one per kind. A MediaStreamAudioSourceNode binds to the
+    // track its stream held when the node was made and does not follow later track changes, so a
+    // per-kind chain fed by an aggregate would go silent the moment a source was replaced. It also
+    // makes reclassification free: when a stream turns out to be a share after all, only the level
+    // the chain follows changes, and no part of the graph is rebuilt.
+    peerChainKinds.set(key, kind);
+    let el = document.getElementById(`call-audio-${key}`) as HTMLAudioElement | null;
     if (!el) {
       el = document.createElement("audio");
-      el.id = `call-audio-${fp}`;
+      el.id = `call-audio-${key}`;
       el.autoplay = true;
       document.body.appendChild(el);
     }
-    // A peer can send its microphone and one separately mixed screen-audio track. Feeding the
-    // latest arriving stream straight to the element would replace (and silence) the earlier one,
-    // so aggregate all of that peer's live audio tracks into one local playback stream.
-    let aggregate = remoteAudioStreams[fp];
-    if (!aggregate) {
-      aggregate = new MediaStream();
-      remoteAudioStreams[fp] = aggregate;
+    remoteAudioStreams[key] = stream;
+    const gain = ensurePeerGainNode(key, stream, el);
+    if (!gain) {
+      // No Web Audio in this runtime. Play the stream directly and accept the browser's ceiling:
+      // a call with a capped slider is worth far more than a silent one.
+      el.srcObject = stream;
+    } else {
+      el.muted = false; // silence is applied at the gain, so a lift restores the level that was set
     }
-    for (const track of stream.getAudioTracks()) {
-      if (aggregate.getTracks().some((candidate) => candidate.id === track.id)) continue;
-      aggregate.addTrack(track);
-      track.addEventListener("ended", () => aggregate?.removeTrack(track), { once: true });
+    applyPeerGain(fp, kind);
+    // Seed the sliders from what is stored, so the UI shows the trim already in force.
+    for (const seeded of ["voice", "share"] as PeerAudioKind[]) {
+      const level = peerLevelFor(fp, seeded);
+      if (seeded === "voice") {
+        if (peerVolumes[fp] !== level) peerVolumes = { ...peerVolumes, [fp]: level };
+      } else if (peerShareVolumes[fp] !== level) {
+        peerShareVolumes = { ...peerShareVolumes, [fp]: level };
+      }
     }
-    el.srcObject = aggregate;
-    el.muted = callDeafened || !!voiceMutedPeers[fp];
-    const v = loadPeerVol(fp);
-    el.volume = v;
-    if (peerVolumes[fp] !== v) peerVolumes = { ...peerVolumes, [fp]: v };
     void applySink(fp);
-    addAnalyser(fp, stream); // speaking detection taps the stream, never the element
+    // Speaking detection taps the VOICE stream only: a shared video with dialogue in it must not
+    // light somebody up as though they were talking.
+    if (kind === "voice") addAnalyser(fp, stream);
+  }
+  /** The identity of one playback chain: a peer and the stream it carries. */
+  function peerChainKey(fp: string, streamId: string): string {
+    return `${fp}--${streamId}`;
+  }
+  /** Every chain currently playing for one peer, as [key, kind]. */
+  function peerChains(fp: string): [string, PeerAudioKind][] {
+    const prefix = `${fp}--`;
+    return [...peerChainKinds.entries()].filter(([key]) => key.startsWith(prefix));
+  }
+  /**
+   * A stream turned out to be a share after the audio for it had already been placed. Only the
+   * level it follows changes, so this is a re-apply rather than a rebuild.
+   */
+  function regroupRemoteAudio(fp: string, streamId: string) {
+    const key = peerChainKey(fp, streamId);
+    if (!peerChainKinds.has(key)) return;
+    peerChainKinds.set(key, "share");
+    // The talking dot is driven by ONE analyser per peer, and this stream may have supplied it
+    // while it was believed to be their voice. Rebuild it from a stream that really is.
+    dropAnalyser(fp);
+    for (const [voiceKey, chainKind] of peerChains(fp)) {
+      const voiceStream = chainKind === "voice" ? remoteAudioStreams[voiceKey] : undefined;
+      if (voiceStream) {
+        addAnalyser(fp, voiceStream);
+        break;
+      }
+    }
+    applyPeerGain(fp, "voice");
+    applyPeerGain(fp, "share");
+    shareAudioTick += 1; // the share controls appear now that there is something to control
+  }
+  /**
+   * Build (or find) the gain chain for one source, returning null when this runtime has no Web
+   * Audio at all. The graph is `MediaStreamAudioSourceNode -> GainNode ->
+   * MediaStreamAudioDestinationNode`, and the element plays the destination.
+   */
+  function ensurePeerGainNode(key: string, stream: MediaStream, el: HTMLAudioElement): GainNode | null {
+    const existing = peerGainNodes.get(key);
+    if (existing) return existing.gain;
+    let context = callAudioContext;
+    try {
+      context ??= new AudioContext();
+      // A context created under autoplay policy can arrive suspended, and a suspended context
+      // produces silence rather than an error. Joining voice is itself a gesture, so this
+      // normally resolves immediately; the check is what makes it not matter when it does not.
+      if (context.state === "suspended") void context.resume();
+    } catch {
+      return null;
+    }
+    try {
+      const source = context.createMediaStreamSource(stream);
+      const gain = context.createGain();
+      const destination = context.createMediaStreamDestination();
+      source.connect(gain).connect(destination);
+      el.srcObject = destination.stream;
+      callAudioContext = context;
+      peerGainNodes.set(key, { source, gain, destination });
+      // Some WebView builds stop pumping a remote stream that is only consumed by a graph. A
+      // muted element holding the raw stream keeps the receiver alive and is never heard.
+      let keepalive = document.getElementById(`call-keepalive-${key}`) as HTMLAudioElement | null;
+      if (!keepalive) {
+        keepalive = document.createElement("audio");
+        keepalive.id = `call-keepalive-${key}`;
+        keepalive.autoplay = true;
+        document.body.appendChild(keepalive);
+      }
+      keepalive.muted = true;
+      keepalive.srcObject = stream;
+      return gain;
+    } catch (e) {
+      console.warn("voice: could not build a gain chain for this peer", { key, error: String(e) });
+      return null;
+    }
+  }
+  /** Push the current level, per-peer mute and deafen state into every chain of one kind. */
+  function applyPeerGain(fp: string, kind: PeerAudioKind) {
+    const value = effectivePeerGain(peerLevelFor(fp, kind), peerSilenced(fp, kind), callDeafened);
+    for (const [key, chainKind] of peerChains(fp)) {
+      if (chainKind !== kind) continue;
+      const node = peerGainNodes.get(key);
+      if (!node || !callAudioContext) {
+        const el = document.getElementById(`call-audio-${key}`) as HTMLAudioElement | null;
+        // The no-Web-Audio fallback keeps the browser's ceiling; nothing else can be done there.
+        if (el) {
+          el.volume = Math.min(1, value);
+          el.muted = value === 0;
+        }
+        continue;
+      }
+      try {
+        // A short ramp rather than a step: an abrupt gain change on a live stream clicks.
+        node.gain.gain.setTargetAtTime(value, callAudioContext.currentTime, 0.015);
+      } catch {
+        node.gain.gain.value = value;
+      }
+    }
+  }
+  /** Re-apply every chain: used by deafen, which is a statement about all of them at once. */
+  function applyAllPeerGains() {
+    for (const fp of Object.keys(callPeers)) {
+      applyPeerGain(fp, "voice");
+      applyPeerGain(fp, "share");
+    }
+  }
+  /** Whether this specific source is silenced for me alone. */
+  function peerSilenced(fp: string, kind: PeerAudioKind): boolean {
+    return kind === "voice" ? !!voiceMutedPeers[fp] : !!shareMutedPeers[fp];
+  }
+  /** Drop one peer's chains and the elements that played them. */
+  function releasePeerAudio(fp: string) {
+    for (const [key] of peerChains(fp)) {
+      const node = peerGainNodes.get(key);
+      if (node) {
+        try { node.source.disconnect(); } catch { /* already gone */ }
+        try { node.gain.disconnect(); } catch { /* already gone */ }
+        for (const track of node.destination.stream.getTracks()) track.stop();
+        peerGainNodes.delete(key);
+      }
+      document.getElementById(`call-audio-${key}`)?.remove();
+      document.getElementById(`call-keepalive-${key}`)?.remove();
+      delete remoteAudioStreams[key];
+      peerChainKinds.delete(key);
+    }
+    remoteAudioRouter.forget(fp);
+    shareAudioTick += 1;
   }
   // --- In-call instruments (the jam layer, jam:v2) --------------------------------------------
   // Notes are EVENTS, not audio: tiny JSON frames on a per-peer data channel, synthesized locally
@@ -11032,15 +11314,17 @@
     try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
     if (myPatchName === name) myPatchName = "CUSTOM"; // the sound keeps playing; only the label detaches
   }
-  // --- Takes: bounded ephemeral event-log recording (jam-recorder.ts owns every rule). Consent
-  // is honest-client coordination riding the state heartbeat (`rec` what I do, `rc` what I allow);
-  // the recorder starts only when EVERY participant's rc says yes, and an old build that cannot
-  // even display the banner never consents, so it can never be recorded by this client.
+  // --- Takes: bounded ephemeral event-log recording (jam-recorder.ts owns every rule).
+  //
+  // A take captures NOTE EVENTS, never audio: no microphone is involved, nothing anyone said is
+  // in it, and playing one back runs the same local synthesizer the room was already hearing. It
+  // used to need every participant to agree before it would start, which treated it as a recording
+  // of the room and made keeping the riff that just happened a negotiation. The `rec` heartbeat
+  // still says what this client is doing, so the room can always see that a take is rolling.
   let jamRec = $state<JamTakeRecorder | null>(null);
-  // Consent pauses retain this original time origin so resumed events cannot move backward.
+  // Membership pauses retain this original time origin so resumed events cannot move backward.
   let jamRecTimeline: JamRecorderTimeline = { startMs: null };
   let jamRecUi = $state<"off" | "arming" | "recording" | "paused">("off");
-  let jamRecConsent = $state(false); // my rc: sticky for this call until I toggle it
   let jamRecGaps = $state(0);
   let jamRecClock = $state(0); // seconds, for the banner; a 1s ticker while the recorder lives
   let jamRecTimer: ReturnType<typeof setInterval> | undefined;
@@ -11069,9 +11353,6 @@
     jamRecGaps = 0;
     jamRecClock = 0;
     jamRecTimeline = { startMs: null };
-    jamRecConsent = true; // arming a take is consenting to be on it
-    jamRec.setConsent(callSelfFp, true);
-    for (const fp of callParticipants) if (peerMeta[fp]?.rc) jamRec.setConsent(fp, true);
     clearInterval(jamRecTimer);
     jamRecTimer = setInterval(() => {
       if (jamRecUi === "recording") {
@@ -11089,7 +11370,7 @@
       if (jamRecUi !== "off") { jamRecUi = "off"; pushInstState(); }
       return;
     }
-    if (rec.state() === "arming" && rec.ready() && rec.start()) {
+    if (rec.state() === "arming" && rec.start()) {
       jamRecTimeline = startJamRecorderTimeline(jamRecTimeline, performance.now());
     }
     const s = rec.state();
@@ -11120,13 +11401,6 @@
       jamTakes = [...jamTakes, { id: jamTakeSeq, take: trimmed, gaps: jamRecGaps }];
     }
     jamRecUi = "off";
-    pushInstState();
-  }
-  function toggleJamConsent() {
-    jamRecConsent = !jamRecConsent;
-    // Our own consent is part of the recorder's gate, not merely a wire/UI flag. Withdrawal must
-    // stop append admission synchronously before any later local or remote event reaches it.
-    if (applyJamRecorderConsent(jamRec, callSelfFp, jamRecConsent)) syncJamRec();
     pushInstState();
   }
   function jamRecMembership() {
@@ -11501,7 +11775,7 @@
     try { localStorage.setItem("catcoms.call.receive-resolution", String(receiveResolutionMode)); } catch { /* optional */ }
     pushInstState();
     if (inCall && callServer !== null && callChannel) {
-      broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: jamRecConsent ? 1 : 0 });
+      broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: 1 });
     }
   }
 
@@ -11520,7 +11794,7 @@
         receiveHeight = next;
         pushInstState();
         if (inCall && callServer !== null && callChannel) {
-          broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: next, rec: myRecWire(), rc: jamRecConsent ? 1 : 0 });
+          broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: next, rec: myRecWire(), rc: 1 });
         }
       }, 180);
     };
@@ -11632,30 +11906,62 @@
     jamMode = mode;
     try { localStorage.setItem("catcoms.call.jammode", mode); } catch { /* ignore */ }
   }
-  // Per-peer voice volume (0..1), remembered per fingerprint.
+  // Per-peer levels as PERCENTAGES (0..250, unity at 100), remembered per fingerprint and kept
+  // separately for a peer's voice and for the audio of whatever they are sharing.
   let peerVolumes = $state<Record<string, number>>({});
-  function loadPeerVol(fp: string): number {
+  let peerShareVolumes = $state<Record<string, number>>({});
+  const peerLevelKey = (fp: string, kind: PeerAudioKind) =>
+    kind === "voice" ? `catcoms.call.level.${fp}` : `catcoms.call.sharelevel.${fp}`;
+  function loadPeerLevel(fp: string, kind: PeerAudioKind): number {
     try {
-      const raw = localStorage.getItem(`catcoms.call.vol.${fp}`);
-      if (raw === null) return 1;
-      const v = Number(raw);
-      return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1;
-    } catch { return 1; }
+      const raw = localStorage.getItem(peerLevelKey(fp, kind));
+      if (raw !== null) return normalizePeerLevel(raw);
+      if (kind === "share") return DEFAULT_PEER_LEVEL;
+      // One-time carry-over of the trims set before levels were percentages. The old key held a
+      // 0..1 element volume, so a stored 0.4 is 40%, not 0.4%. Read only; nothing writes it again.
+      const legacy = localStorage.getItem(`catcoms.call.vol.${fp}`);
+      if (legacy === null) return DEFAULT_PEER_LEVEL;
+      const fraction = Number(legacy);
+      return Number.isFinite(fraction) ? normalizePeerLevel(fraction * 100) : DEFAULT_PEER_LEVEL;
+    } catch {
+      return DEFAULT_PEER_LEVEL;
+    }
   }
-  function setPeerVolume(fp: string, v: number) {
-    peerVolumes = { ...peerVolumes, [fp]: v };
-    const el = document.getElementById(`call-audio-${fp}`) as HTMLAudioElement | null;
-    if (el) el.volume = v;
-    try { localStorage.setItem(`catcoms.call.vol.${fp}`, String(v)); } catch { /* ignore */ }
+  /** This peer's current level for one source: what the UI shows, falling back to what is stored. */
+  function peerLevelFor(fp: string, kind: PeerAudioKind): number {
+    const held = kind === "voice" ? peerVolumes[fp] : peerShareVolumes[fp];
+    return held ?? loadPeerLevel(fp, kind);
+  }
+  function setPeerVolume(fp: string, level: number) {
+    const value = normalizePeerLevel(level);
+    peerVolumes = { ...peerVolumes, [fp]: value };
+    applyPeerGain(fp, "voice");
+    try { localStorage.setItem(peerLevelKey(fp, "voice"), String(value)); } catch { /* ignore */ }
+  }
+  function setPeerShareVolume(fp: string, level: number) {
+    const value = normalizePeerLevel(level);
+    peerShareVolumes = { ...peerShareVolumes, [fp]: value };
+    applyPeerGain(fp, "share");
+    try { localStorage.setItem(peerLevelKey(fp, "share"), String(value)); } catch { /* ignore */ }
+  }
+  /** Silence one peer's shared audio without touching their voice, and the reverse. */
+  let shareMutedPeers = $state<Record<string, boolean>>({});
+  function toggleSharePeer(fp: string) {
+    shareMutedPeers = { ...shareMutedPeers, [fp]: !shareMutedPeers[fp] };
+    applyPeerGain(fp, "share");
+  }
+  /** Whether this peer is currently sending any shared audio for those controls to act on. */
+  function peerHasShareAudio(fp: string): boolean {
+    void shareAudioTick; // re-derives when a share starts or stops
+    return peerChains(fp).some(([key, kind]) =>
+      kind === "share" && !!remoteAudioStreams[key]?.getAudioTracks().length);
   }
   // Local per-peer voice mute: purely receive side (their <audio> element), so it needs no signal
   // and they are never told. Deafen still wins over it, hence the OR at every assignment.
   let voiceMutedPeers = $state<Record<string, boolean>>({});
   function toggleVoicePeer(fp: string) {
-    const muted = !voiceMutedPeers[fp];
-    voiceMutedPeers = { ...voiceMutedPeers, [fp]: muted };
-    const el = document.getElementById(`call-audio-${fp}`) as HTMLAudioElement | null;
-    if (el) el.muted = muted || callDeafened;
+    voiceMutedPeers = { ...voiceMutedPeers, [fp]: !voiceMutedPeers[fp] };
+    applyPeerGain(fp, "voice");
   }
   function toggleDeafen() {
     callDeafened = !callDeafened;
@@ -11665,10 +11971,9 @@
     // A digest may keep the take drain busy across a fast on→off cycle. Mark the whole interval
     // on both edges so attacks due inside it remain suppressed after reopen; note-offs still run.
     if (jamPlay) jamPlay.dropAttacksThroughMs = Math.max(jamPlay.dropAttacksThroughMs, jamPlayElapsed());
-    for (const fp of Object.keys(callPeers)) {
-      const el = document.getElementById(`call-audio-${fp}`) as HTMLAudioElement | null;
-      if (el) el.muted = callDeafened || !!voiceMutedPeers[fp];
-    }
+    // Deafen reaches the gains, not the elements: silence has to be applied where the level lives
+    // or lifting it would come back at whatever the level was, at the wrong moment or not at all.
+    applyAllPeerGains();
     if (jukeAudio) jukeAudio.muted = callDeafened; // the deck is part of "everyone", not an exception
     // Deafen is one hard room gate: it cancels lookahead clicks and releases every engine voice,
     // including local previews, so no retained tail can emerge when the master reopens.
@@ -11697,7 +12002,10 @@
       vid: myVid(),
       rx: receiveHeight,
       rec: myRecWire(),
-      rc: jamRecConsent ? 1 : 0,
+      // Still sent, always set. A take holds note events and no audio, so this client no longer
+      // gates on it; a peer running an older build does, and would refuse to keep its own take
+      // without it. Saying yes is what that build has to hear to behave the way this one does.
+      rc: 1,
     });
   }
   function pushInstState() {
@@ -11714,7 +12022,6 @@
       const sender = callPeers[fp]?.vidSender;
       if (sender) void capVideo(sender, "screen", fp);
     }
-    if (jamRec) { jamRec.setConsent(fp, after.rc); syncJamRec(); }
   }
   // One authenticated peer's frame. The decoder charges budgets BEFORE parsing; the engine then
   // re-checks the closed-over channel capability, so authority is never reconstructed from a
@@ -14064,7 +14371,21 @@
   let myVideo = $state<"" | "cam" | "screen">("");
   let localVideoStream = $state<MediaStream | null>(null); // the self-preview tile reads this
   let remoteStreams = $state<Record<string, MediaStream>>({}); // fp -> their video stream
+  // Keyed by `peerChainKey`: one peer has up to two of these, their voice and their share.
   const remoteAudioStreams: Record<string, MediaStream> = {};
+  // The receive-side mixer. One AudioContext for the whole call, one chain per playing source.
+  let callAudioContext: AudioContext | null = null;
+  const peerGainNodes = new Map<string, {
+    source: MediaStreamAudioSourceNode;
+    gain: GainNode;
+    destination: MediaStreamAudioDestinationNode;
+  }>();
+  /** Which level each chain follows. Keyed like `peerGainNodes`, by peer and source stream. */
+  const peerChainKinds = new Map<string, PeerAudioKind>();
+  const remoteAudioRouter = new RemoteAudioRouter();
+  // The chain map is a plain Map, so the share controls need a nudge to re-derive when a peer
+  // starts or stops sending shared audio.
+  let shareAudioTick = $state(0);
   type ScreenAudioCapture = {
     id: string;
     label: string;
@@ -14109,7 +14430,13 @@
     }
     if (!track || !screenAudioDestination) return;
     try {
-      peer.screenAudioSender = peer.pc.addTrack(track, screenAudioDestination.stream);
+      // Announced under the SCREEN's stream, not the mixer's own. The second argument to addTrack
+      // is only an identity (the msid), and using the one the screen video already rides makes
+      // this track knowable at the far end as "the share's sound" rather than as a second voice.
+      // Without it a receiver sees two anonymous audio tracks from one peer and has to lump them
+      // into a single element, which is why one slider used to move a friend's voice and their
+      // game at the same time. See `classifyRemoteAudio`.
+      peer.screenAudioSender = peer.pc.addTrack(track, camStream ?? screenAudioDestination.stream);
       void capScreenAudio(peer.screenAudioSender);
     } catch (e) {
       console.warn("voice: could not add mixed screen audio", { peer: peer.fp, error: String(e) });
@@ -14662,8 +14989,27 @@
   // queued must not seize the window from whoever is reading chat, so the dock shows it in place
   // and the expand button is the way up.
   let jukeScreen = $derived(deckSurface(jukeKind, !!jukeNow, focusOpen, jukeOpen));
+  // Watching ONE person, usually the one sharing a screen. A grid divides the window between
+  // everybody, which is the wrong answer when the thing worth seeing is somebody's screen and
+  // everything else is a face: soloing gives the whole window to one tile. Held as a fingerprint
+  // rather than a flag so it survives other people joining and leaving around it.
+  let focusSolo = $state("");
+  // A soloed peer who has left, or stopped being interesting, releases the view on their own.
+  let focusSoloActive = $derived(
+    focusSolo !== "" && (focusSolo === callSelfFp || callParticipants.includes(focusSolo)),
+  );
+  function toggleFocusSolo(fp: string) {
+    focusSolo = focusSolo === fp ? "" : fp;
+  }
+  /** Whoever is sharing a screen right now, self last: the natural thing to solo from a keystroke. */
+  let focusShareCandidates = $derived([
+    ...callParticipants.filter((fp) => (peerMeta[fp]?.vid ?? 0) === 2 && !!remoteStreams[fp]),
+    ...(myVideo === "screen" ? [callSelfFp] : []),
+  ]);
   // Self first, then peers: one tile per person, and nothing else on the grid.
-  let focusTiles = $derived([callSelfFp, ...callParticipants]);
+  let focusTiles = $derived(
+    focusSoloActive ? [focusSolo] : [callSelfFp, ...callParticipants],
+  );
   let focusCols = $derived(focusTiles.length <= 1 ? 1 : focusTiles.length <= 4 ? 2 : 3);
 
   async function negotiatePeer(peer: CallPeer) {
@@ -14910,10 +15256,15 @@
       const stream = e.streams[0];
       if (!stream) return;
       if (e.track.kind === "audio") {
-        attachRemote(fp, stream);
+        // A sender announces its shared audio under the same stream as its shared video, so the
+        // stream this arrived on says which of the two it is.
+        attachRemote(fp, stream, remoteAudioRouter.classify(fp, stream.id));
         return;
       }
       // Video: hand the stream to the tiles; clear it when the sender stops or removes the track.
+      // Learning that this stream carries video can also revise an answer already given for audio
+      // that arrived first, in which case that audio moves to the share chain.
+      if (remoteAudioRouter.noteVideo(fp, stream.id)) regroupRemoteAudio(fp, stream.id);
       remoteStreams = { ...remoteStreams, [fp]: stream };
       e.track.onended = () => dropRemoteVideo(fp, stream);
       stream.onremovetrack = () => {
@@ -14938,8 +15289,7 @@
       delete callPeers[fp];
     }
     delete waitingIce[fp];
-    document.getElementById(`call-audio-${fp}`)?.remove();
-    delete remoteAudioStreams[fp];
+    releasePeerAudio(fp);
     callParticipants = Object.keys(callPeers);
     const { [fp]: _drop, ...rest } = callPeerStates;
     callPeerStates = rest;
@@ -14960,9 +15310,6 @@
     delete jamSourceGateMuted[fp];
     delete jamClockSyncs[fp];
     delete jamProbes[fp];
-    // Consent is channel-fresh. A reconnecting peer must announce `rc` again before an existing
-    // take can resume; retaining a prior edge's consent would record before the new edge opted in.
-    applyJamRecorderConsent(jamRec, fp, false);
     if (jamMet?.anchorLeft(fp)) {
       // Dumb failover by design: the grid stops with its anchor; anyone can start a new one.
       jamMetUi = null;
@@ -15184,13 +15531,13 @@
     alertedRooms.delete(roomKey(server, channel));
     recordPresence(server, channel, callSelfFp);
     void refreshJukebox(); // the room's queue, whatever the DJ is currently on
-    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: jamRecConsent ? 1 : 0 }); // announce + trigger existing members to offer
+    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: 1 }); // announce + trigger existing members to offer
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
       if (callChannel && callServer !== null) {
         // vid rides the heartbeat for the same reason mic does: it is the only thing that repairs
         // a data-channel state message that never arrived, and the video tile is gated on it.
-        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: jamRecConsent ? 1 : 0 });
+        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: 1 });
         recordPresence(callServer, callChannel, callSelfFp); // keep my own presence fresh
         jukeTick(); // the DJ's re-announce (and the listener's DJ-left check) ride this tick
         sweepJamUi(); // engine hold watchdogs + the drawer's own 30s held-note honesty sweep
@@ -15235,7 +15582,16 @@
     localVideoStream = null;
     myVideo = "";
     remoteStreams = {};
+    focusSolo = ""; // whoever was being watched is not in a call any more
     for (const fp of Object.keys(callPeers)) removePeer(fp);
+    // Every chain went with its peer; the context they shared goes with the call.
+    remoteAudioRouter.clear();
+    peerChainKinds.clear();
+    if (callAudioContext) {
+      const context = callAudioContext;
+      callAudioContext = null;
+      void context.close().catch(() => { /* already closing */ });
+    }
     callHeld = [];
     remoteHeld = {};
     peerMeta = {};
@@ -15284,7 +15640,6 @@
     clearInterval(jamRecTimer);
     jamRecTimer = undefined;
     jamRecUi = "off";
-    jamRecConsent = false;
     jamRecGaps = 0;
     jamRecClock = 0;
     jamRecTimeline = { startMs: null };
@@ -15372,7 +15727,6 @@
           const sender = callPeers[fromFp]?.vidSender;
           if (sender) capVideo(sender, "screen", fromFp);
         }
-        if (jamRec) { jamRec.setConsent(fromFp, after.rc); syncJamRec(); }
       }
       if (type === "voice-ping") {
         const peer = callPeers[fromFp];
@@ -16311,15 +16665,21 @@
   ) {
     try {
       // A bounded tail, not the history: this runs for every arrival in every channel that is not
-      // on screen, so it must not scale with how long the room has existed. The tail is wide
-      // enough to cover what can plausibly have arrived unseen since the last look; anything older
-      // that addressed me is still surfaced by the inbox.
-      const channelMessages = await invoke<TailMsg[]>("get_message_tail", { server, channel, limit: NOTIFY_TAIL_ROWS });
-      const latest = channelMessages[channelMessages.length - 1];
+      // on screen, so it must not scale with how long the room has existed. The rows are only for
+      // the headline; whether anything here is addressed to me is answered natively over the whole
+      // channel, past this device's read mark. A tail alone could not answer it: one catch-up or
+      // one busy minute can append more messages than the tail holds, and a mention followed by
+      // that many ordinary messages would drop out of the window and never ring.
+      const cursor = readMarkOf(chatScopeKey(server, channel)).id;
+      const tail = await invoke<{ rows: TailMsg[]; addressed_after_cursor: boolean }>(
+        "get_message_tail",
+        { server, channel, limit: NOTIFY_TAIL_ROWS, afterId: cursor || null },
+      );
+      const latest = tail.rows[tail.rows.length - 1];
       let kind: "message" | "mention" = mode === "mention" ? "mention" : "message";
-      // Mention detection depends on the active server's identity/profile and read marks. If the
-      // user switches servers during this fetch, degrade to an ordinary message notification.
-      if (mode === "detect" && server === activeServerId && targetsMe(channel, channelMessages)) {
+      // Mention detection depends on the active server's identity and profile, so if the user
+      // switches servers during this fetch, degrade to an ordinary message notification.
+      if (mode === "detect" && server === activeServerId && tail.addressed_after_cursor) {
         if (!mentionChannels.has(channel)) mentionChannels = new Set(mentionChannels).add(channel);
         kind = "mention";
       }
@@ -16854,6 +17214,12 @@
         // A new or edited message may be addressed to me → the cross-server inbox may have a new
         // entry (debounced). A queue or topic edit can never add one.
         if (change.messagesAppended || change.messagesChanged) scheduleInboxReload();
+        // An open search holds a snapshot of this channel. Anything that moves its rows makes that
+        // snapshot wrong in both directions: a new message would never be found, and a message
+        // edited to remove the word would go on matching.
+        if (server === activeServerId && (change.messagesAppended || change.messagesChanged)) {
+          invalidateSearchChannel(channel);
+        }
         // A DM got a message → its activity stats changed; keep the friends sorting fresh.
         if (change.messagesAppended && dmHome && servers.find((x) => x.id === server)?.isDm) refreshDmStats();
         // The room I'm listening in need not be the one I'm looking at.
@@ -18980,16 +19346,13 @@
     {@const live = jamRecActive.some((r) => r.rec === 2)}
     <div class="jam-rec-banner" class:live>
       <span class="jam-rec-dot" class:armed={!live}></span>
+      <!-- The banner stays: a take is note events rather than audio, but the room still gets to
+           see that one is rolling and who is keeping it. -->
       <span class="jam-rec-text">
-        {live ? "REC" : "RECORD?"} · {jamRecActive.map((r) => (r.fp === "me" ? "you" : nameOf(r.fp))).join(", ")}
-        {live ? "" : "· starts when everyone allows it"}
+        {live ? "REC" : "READY"} · {jamRecActive.map((r) => (r.fp === "me" ? "you" : nameOf(r.fp))).join(", ")}
+        · notes, not audio
       </span>
       <span class="stage-spacer"></span>
-      {#if jamRecActive.some((r) => r.fp !== "me")}
-        <button class="ghost jam-save-btn" class:on={jamRecConsent} onclick={toggleJamConsent}
-          title={jamRecConsent ? "Withdraw consent; recorders including you pause" : "Allow recorders in this call to include your playing"}
-        >{jamRecConsent ? "ALLOWED" : "ALLOW"}</button>
-      {/if}
     </div>
   {/if}
 {/snippet}
@@ -19342,11 +19705,10 @@
                 <span class="jam-met-chip warn">{jamRecGaps} lost</span>
               {/if}
             {:else}
-              <button class="ghost jam-save-btn rec" onclick={jamRecArm} title="Ask the room to record; the take starts when everyone allows it">REC</button>
+              <button class="ghost jam-save-btn rec" onclick={jamRecArm} title="Keep this take: the note events everyone is already hearing, no audio">REC</button>
               <span class="jam-edit-note">a take is the note events, not audio · the whole room sees it</span>
             {/if}
             <span class="stage-spacer"></span>
-            <button class="ghost jam-legacy" class:on={jamRecConsent} onclick={toggleJamConsent} title="Whether recorders in this call may include your playing">{jamRecConsent ? "YOU ALLOW REC" : "ALLOW REC"}</button>
           </div>
           {#each jamTakes as t (t.id)}
             <div class="jam-take-row">
@@ -20479,6 +20841,7 @@
       <label class="field">
         <span class="muted">Display name</span>
         <input bind:value={displayName} placeholder="display name" />
+        <small class="muted">Who you are to the people in the group, not what the group is called.</small>
       </label>
       <fieldset class="file-trust-onboarding">
         <legend>Before this server can fetch shared media automatically</legend>
@@ -20529,6 +20892,11 @@
           <p class="muted">
             Paste the invite you were sent: it carries everything your app needs to find the group.
           </p>
+          <label class="field">
+            <span class="muted">Name this group (optional)</span>
+            <input bind:value={joinServerName} placeholder="what you want to call it" />
+            <small class="muted">Your own label for the rail. An invite does not carry the group's name; you can change this later in Server settings.</small>
+          </label>
           <textarea
             class="invite-code"
             bind:value={joinInvite}
@@ -20605,6 +20973,11 @@
         </div>
       {:else}
         <div class="start-pane" role="tabpanel" id="start-panel-found" aria-labelledby="start-tab-found">
+          <label class="field">
+            <span class="muted">Server name</span>
+            <input bind:value={newServerName} placeholder="what this group is called" />
+            <small class="muted">The group's own name, separate from your display name above.</small>
+          </label>
           <div class="field">
             <span class="muted">Who is this server for?</span>
             <div class="mode-cards">
@@ -21570,7 +21943,7 @@
                 </div>
               </li>
             {:else}
-              <li class="muted">{groupLoading ? "Loading messages…" : "No messages yet: say hello."}</li>
+              <li class="muted">{messagesLoading ? "Loading messages…" : "No messages yet: say hello."}</li>
             {/each}
             {#if !tailLoaded}
               <li class="message-window-edge">
@@ -21666,6 +22039,7 @@
                   rows="1"
                   class="composer-input"
                   placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
+                  onpaste={(e) => onComposerPaste("chat", e)}
                   oninput={onComposerInput}
                   onselect={() => onTextEffectSelection("chat")}
                   onkeydown={onComposerKeydown}
@@ -22222,7 +22596,7 @@
                 />
               </label>
               {@render textEffectButton("announcement", "Announcement text effects")}
-              <textarea bind:this={announcementInputEl} bind:value={statusDraft} rows="1" onselect={() => onTextEffectSelection("announcement")} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Write an announcement…"}></textarea>
+              <textarea bind:this={announcementInputEl} bind:value={statusDraft} rows="1" onselect={() => onTextEffectSelection("announcement")} onpaste={(e) => onComposerPaste("status", e)} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Write an announcement…"}></textarea>
               <button type="submit" disabled={uploading}>Post</button>
             </form>
           {:else}
@@ -22843,7 +23217,9 @@
           <ul class="stage-peers">
             {#each callParticipants as fp (fp)}
               {@const link = linkState(callPeerStates[fp] ?? "new")}
-              {@const vol = peerVolumes[fp] ?? 1}
+              {@const vol = peerVolumes[fp] ?? DEFAULT_PEER_LEVEL}
+              {@const shareVol = peerShareVolumes[fp] ?? DEFAULT_PEER_LEVEL}
+              {@const hasShare = peerHasShareAudio(fp)}
               <li class="stage-peer">
                 <div class="stage-row">
                   <span class="stage-av" class:talking={speaking[fp]}>{@render catEars(fp)}{@render callAvatarTag(fp)}</span>
@@ -22875,13 +23251,14 @@
                     class="stage-vol"
                     type="range"
                     min="0"
-                    max="1"
-                    step="0.05"
+                    max={MAX_PEER_LEVEL}
+                    step="5"
                     value={vol}
-                    aria-label={`Volume for ${nameOf(fp)}`}
+                    aria-label={`Voice volume for ${nameOf(fp)}`}
+                    title={`Their voice, for you only. Past 100% this amplifies what they sent.`}
                     oninput={(e) => setPeerVolume(fp, Number(e.currentTarget.value))}
                   />
-                  <span class="stage-pct">{Math.round(vol * 100)}%</span>
+                  <span class="stage-pct" class:boosted={vol > DEFAULT_PEER_LEVEL}>{vol}%</span>
                   <button
                     class="ghost stage-tog"
                     class:on={voiceMutedPeers[fp]}
@@ -22897,6 +23274,33 @@
                     onclick={() => toggleInstPeer(fp)}
                   >{@render icoNote()}</button>
                 </div>
+                <!-- A second trim, present only while they are actually sending shared audio.
+                     Their voice and their share are separate chains, so this balances one against
+                     the other: turn a game down without turning the person down. -->
+                {#if hasShare}
+                  <div class="stage-trim">
+                    <span class="stage-trim-ico" title="What they are sharing">{@render icoCam()}</span>
+                    <input
+                      class="stage-vol"
+                      type="range"
+                      min="0"
+                      max={MAX_PEER_LEVEL}
+                      step="5"
+                      value={shareVol}
+                      aria-label={`Shared audio volume for ${nameOf(fp)}`}
+                      title="The sound of what they are sharing, independent of their voice"
+                      oninput={(e) => setPeerShareVolume(fp, Number(e.currentTarget.value))}
+                    />
+                    <span class="stage-pct" class:boosted={shareVol > DEFAULT_PEER_LEVEL}>{shareVol}%</span>
+                    <button
+                      class="ghost stage-tog"
+                      class:on={shareMutedPeers[fp]}
+                      aria-pressed={!!shareMutedPeers[fp]}
+                      title={shareMutedPeers[fp] ? "Hear what they are sharing again" : "Mute their shared audio, keep their voice"}
+                      onclick={() => toggleSharePeer(fp)}
+                    >{@render icoSpeaker()}</button>
+                  </div>
+                {/if}
               </li>
             {/each}
           </ul>
@@ -23007,6 +23411,22 @@
               {linksUp}/{callParticipants.length} links up
             </span>
           {/if}
+          <!-- One click to the thing worth looking at, without hunting for the right tile. With
+               several shares running it cycles through them, so "the stream" is reachable even
+               when it is not the first one. -->
+          {#if focusSoloActive}
+            <button class="ghost focus-chip" title="Back to everyone" onclick={() => (focusSolo = "")}>
+              <span class="stage-label">SHOW ALL</span>
+            </button>
+          {:else if focusShareCandidates.length}
+            <button
+              class="ghost focus-chip"
+              title={focusShareCandidates.length > 1
+                ? `Watch one share only (${focusShareCandidates.length} are running)`
+                : "Watch the share only"}
+              onclick={() => (focusSolo = focusShareCandidates[0])}
+            >{@render icoScreen()}<span class="stage-label">WATCH SHARE</span></button>
+          {/if}
           <!-- Says what is actually true. The media key is derived but the frame layer that would
                use it is not implemented, so today's guarantee is DTLS-SRTP plus signalling that
                cannot be MITM'd, which is E2E but is not MLS-keyed media. -->
@@ -23048,7 +23468,7 @@
             {@const stream = me ? localVideoStream : remoteStreams[fp] ?? null}
             {@const held = me ? callHeld : remoteHeld[fp] ?? []}
             {@const micOff = me ? callMuted : !!peerMeta[fp]?.mic}
-            <div class="focus-tile" class:talking={speaking[me ? "me" : fp]}>
+            <div class="focus-tile" class:talking={speaking[me ? "me" : fp]} class:soloed={focusSoloActive}>
               {#if vid > 0 && stream}
                 <!-- Always muted: voice arrives on the per-peer <audio> elements, and a second
                      unmuted path here would double every voice in the room. -->
@@ -23063,6 +23483,17 @@
                 {#if held.length}<span class="focus-nm-note" title="Playing right now">{@render icoNote()}</span>{/if}
                 {#if vid === 2}<span class="focus-nm-share">SHARING</span>{/if}
               </span>
+              <!-- Watch one person only. Sits on the tile because the tile is what it is about,
+                   and the tile is the thing you are already looking at when you want this. -->
+              <button
+                class="focus-solo"
+                class:on={focusSoloActive}
+                aria-pressed={focusSoloActive}
+                title={focusSoloActive
+                  ? "Back to everyone"
+                  : `Watch only ${me ? "your own share" : nameOf(fp)}`}
+                onclick={() => toggleFocusSolo(fp)}
+              >{focusSoloActive ? "SHOW ALL" : "WATCH ONLY"}</button>
             </div>
           {/each}
         </div>
@@ -24851,6 +25282,31 @@
               </form>
               <p class="muted small">The name is your own label for this server (not shared with other members).</p>
               </section>
+              <!-- The icon IS shared, and it was only reachable under Livery, which reads as a
+                   theming page: the one thing everybody looks for when setting a server up was
+                   the one thing filed under decoration. It lives beside the name now. -->
+              {#if canModerate && !cur?.isDm}
+                <section class="set-section">
+                  <h3>Server icon</h3>
+                  <p class="muted small">Shared with every member and shown on their rail. Unlike the name, this one everybody sees.</p>
+                  <div class="avatar-row">
+                    {#if livery.icon}
+                      <img class="avatar lg" src={imgSrc(livery.icon)} alt="" />
+                    {:else}
+                      <span class="avatar lg fallback">{monogram(cur?.name ?? "")}</span>
+                    {/if}
+                    <label class="upload-btn">
+                      {livery.icon ? "Replace icon" : "Upload icon"}
+                      <input type="file" accept="image/png,image/jpeg,image/webp" onchange={(e) => loadServerIcon(e.currentTarget.files)} />
+                    </label>
+                    {#if livery.icon}
+                      <button type="button" class="ghost small" disabled={busy} onclick={() => setServerIcon("")}>Remove icon</button>
+                    {/if}
+                  </div>
+                  <p class="muted small">Colours, corners and the rest of the shared look live under Livery.</p>
+                  <button type="button" class="ghost small" onclick={() => (serverSettingsPage = "livery")}>Open Livery</button>
+                </section>
+              {/if}
             {:else if serverSettingsPage === "notifications"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // NOTIFICATIONS</div>
               <h1>Notifications</h1>

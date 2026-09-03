@@ -120,11 +120,9 @@ struct ServerEntry {
     /// by a peer when its `seq` beats the one already held, so reuse is permanent invisibility.
     record_seq: u64,
     /// Persistence coalescing for this server: how many mutations have asked to reach disk, and
-    /// how many the newest completed write covered. See [`persist_server`].
+    /// how many the newest completed write covered. See [`persist_server`]. Per incarnation, so a
+    /// reinstalled id starts from zero and cannot inherit a departed entry's completions.
     persist: PersistCounters,
-    /// Serializes this server's snapshot+seal+write. An `Arc` so a writer can hold it without
-    /// holding the registry lock, which the snapshot command and the file write both outlive.
-    persist_lock: Arc<Mutex<()>>,
 }
 
 /// Where one server is between "a change happened" and "a write that contains it finished".
@@ -374,6 +372,14 @@ struct AppState {
     /// never race two reloads, while an explicitly UI-locked session must authenticate against
     /// the existing mount rather than deadlocking itself on the lifetime vault lock.
     vault_mount: Mutex<()>,
+    /// One persistence lock per **numeric** server id, outliving the registry entry it belongs to.
+    ///
+    /// A persisted id is deliberately reused when a server is removed and reinstalled, and a write
+    /// begun by the departing incarnation can still be in flight when the replacement is
+    /// installed. Keeping the lock in the entry gave the two incarnations separate locks, so those
+    /// writes did not even serialize against each other. Here they do, and the incarnation check
+    /// inside the lock then decides which of them is still entitled to write.
+    persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
     store: Mutex<Option<ServerStore>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
@@ -3078,7 +3084,6 @@ async fn register_server(
             switchboard,
             record_seq,
             persist: PersistCounters::default(),
-            persist_lock: Arc::new(Mutex::new(())),
         },
     );
     install_reconnect_capture_worker(app, id, timer_actor.clone());
@@ -3108,27 +3113,45 @@ async fn next_record_seq(state: &AppState, server: u64) -> Option<u64> {
 /// was durable.
 async fn persist_server(state: &AppState, server: u64) {
     // The ticket is taken before anything is written, and the caller's change is already applied,
-    // so any snapshot taken after this point contains it.
-    let Some((ticket, lock, actor)) = ({
+    // so any snapshot taken after this point contains it. The incarnation is captured with it:
+    // everything below belongs to *this* installation of the id, and a persisted id is reused
+    // when a server is removed and reinstalled.
+    let Some((ticket, instance, actor)) = ({
         let mut servers = state.servers.lock().await;
         servers.get_mut(&server).map(|entry| {
-            (
-                entry.persist.request(),
-                entry.persist_lock.clone(),
-                entry.actor.clone(),
-            )
+            (entry.persist.request(), entry.instance, entry.actor.clone())
         })
     }) else {
         return;
     };
+    persist_captured(state, server, instance, ticket, actor).await;
+}
+
+/// [`persist_server`] once its request has been recorded: everything from waiting for the id's
+/// lock to retiring the requests the write covered. Separate so the incarnation rule can be
+/// tested against a writer that was captured before a replacement was installed, which is the
+/// schedule that cannot be produced by calling `persist_server` twice.
+async fn persist_captured(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    ticket: u64,
+    actor: ServerActor,
+) {
+    let lock = persist_lock_for(state, server);
     let _writing = lock.lock().await;
-    // Someone else's write may have started after this ticket was issued, in which case its
-    // snapshot already contains this change and there is nothing left to do.
+    // Two questions, now that this writer holds the id's lock. Is the entry still the one this
+    // request belongs to; and did a write that started after this ticket already carry it?
     let covering = {
         let servers = state.servers.lock().await;
         let Some(entry) = servers.get(&server) else {
             return;
         };
+        if entry.instance != instance {
+            // The server was replaced while this write waited. Its bytes describe a group that no
+            // longer holds this slot, and its ticket says nothing about the new one's mutations.
+            return;
+        }
         if !entry.persist.needs_write(ticket) {
             return;
         }
@@ -3145,16 +3168,39 @@ async fn persist_server(state: &AppState, server: u64) {
     let Some(store) = guard.as_ref() else {
         return; // no store mounted: nothing was written, so nothing may be retired
     };
+    // Re-checked immediately before the write, because the snapshot above is an await: a
+    // replacement installed during it must not have this incarnation's bytes written over it.
+    // Safe against a replacement racing this exact moment because installing one takes the
+    // registry lock, and removal cannot complete between this check and the write while the
+    // registry guard below is held.
+    let servers = state.servers.lock().await;
+    if servers.get(&server).map(|entry| entry.instance) != Some(instance) {
+        return;
+    }
     let mut rng = OsCryptoRng;
     if let Err(e) = store.save_server(server, &bytes, &mut rng) {
         tracing::error!(target: "catcoms_app", server, error = %e, "VAULT.SEAL_SERVER.FAILED");
         return;
     }
+    drop(servers);
     drop(guard);
-    // Only a write that actually reached the disk may retire the requests it covered.
+    // Only a write that actually reached the disk may retire the requests it covered, and only
+    // for the incarnation that made them.
     if let Some(entry) = state.servers.lock().await.get_mut(&server) {
-        entry.persist.completed_through(covering);
+        if entry.instance == instance {
+            entry.persist.completed_through(covering);
+        }
     }
+}
+
+/// The persistence lock for a numeric server id, created on first use. See
+/// [`AppState::persist_locks`]: it is deliberately not per registry entry.
+fn persist_lock_for(state: &AppState, server: u64) -> Arc<Mutex<()>> {
+    let mut locks = state
+        .persist_locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.entry(server).or_default().clone()
 }
 
 /// Seal this server's cross-session address cache (the previously-proven members it can dial
@@ -9410,6 +9456,33 @@ const MEDIA_WINDOW_BYTES: usize = 2 * 1024 * 1024;
 /// above the chunk size is exactly the regression that made one response need two decrypts.
 const _: () = assert!(MEDIA_WINDOW_BYTES <= CHUNK_BYTES);
 
+/// The largest image served entire in one rangeless response. See [`serves_whole_image`].
+///
+/// Comfortably above a 4K screenshot or a phone photo, and far below the 256 MiB a listing may
+/// declare: the body is assembled in memory before it crosses the scheme boundary, so this is the
+/// most an ordinary `<img>` may cost at once.
+const MAX_WHOLE_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Whether a request must be answered with the whole file rather than one window.
+///
+/// `<img>` issues a plain GET with no `Range` header, takes the response body as the entire
+/// image, and never follows up on a partial response. A windowed answer therefore hands the
+/// decoder a truncated file: every image above [`MEDIA_WINDOW_BYTES`] rendered as a broken icon,
+/// which is most screenshots and nearly every 4K one. `<video>`/`<audio>` are the opposite case:
+/// they range-request, so they keep the windowed path that holds one response to one chunk.
+///
+/// A rangeless request for something larger than [`MAX_WHOLE_IMAGE_BYTES`] still gets a window.
+/// It cannot render either way, and refusing it here would only trade a broken image for a
+/// different broken image while giving up the bound this exists to keep.
+fn serves_whole_image(mime: &str, ranged: bool, total: u64) -> bool {
+    !ranged && total <= MAX_WHOLE_IMAGE_BYTES && mime.starts_with("image/")
+}
+
+/// How many [`CHUNK_BYTES`] chunks cover a file of `total` bytes. An empty file is still one.
+fn media_chunk_span(total: u64) -> usize {
+    total.div_ceil(CHUNK_BYTES as u64).max(1) as usize
+}
+
 /// The custom scheme the webview plays shared media through: `catcoms-media://a/<server>/<cid>`.
 /// Windows rewrites this to `http://catcoms-media.localhost/...`, so the host is never parsed;
 /// only the path is.
@@ -9572,6 +9645,53 @@ async fn serve_media(
     };
     let total = head.total_size;
     let mime = safe_media_mime(&head.mime);
+
+    // An image asked for without a Range is asked for whole. Served chunk by chunk like every
+    // other read, so the actor still returns to its loop between decrypts.
+    if serves_whole_image(&mime, range.is_some(), total) {
+        // Every chunk read below carries the generation guard of its own, and the response is
+        // built under the same commit the windowed path holds, so there is nothing extra to take
+        // here: the size this is about to allocate is already bounded by `serves_whole_image`.
+        let mut body = Vec::with_capacity(total as usize);
+        for index in 0..media_chunk_span(total) {
+            let bytes = match media_chunk(
+                state,
+                &actor,
+                server,
+                &cid,
+                &raw,
+                head.manifest_version,
+                index,
+                generation,
+            )
+            .await
+            {
+                Some(bytes) => bytes,
+                None => return deny(http::StatusCode::SERVICE_UNAVAILABLE),
+            };
+            let want = (total as usize).saturating_sub(body.len());
+            body.extend_from_slice(&bytes[..want.min(bytes.len())]);
+            if body.len() as u64 >= total {
+                break;
+            }
+        }
+        // The same last authorization point the windowed path holds, for the same reason: no
+        // plaintext crosses the scheme boundary if an explicit lock completed during the reads.
+        let _response_commit = match require_ui_session_generation(state, generation).await {
+            Ok(commit) => commit,
+            Err(_) => return deny(http::StatusCode::FORBIDDEN),
+        };
+        return http::Response::builder()
+            .status(http::StatusCode::OK)
+            .header("Content-Type", mime)
+            .header("Accept-Ranges", "bytes")
+            .header("Content-Length", body.len().to_string())
+            .header("Cache-Control", "no-store")
+            .header("Access-Control-Allow-Origin", "null")
+            .header("X-Content-Type-Options", "nosniff")
+            .body(body)
+            .expect("response builds");
+    }
 
     let (start, len) = match authorized_media_range(state, generation, total, range).await {
         Ok(plan) => plan,
@@ -10807,19 +10927,33 @@ async fn get_message_tail(
     server: u64,
     channel: String,
     limit: usize,
-) -> Result<Vec<UiTailMessage>, String> {
+    after_id: Option<String>,
+) -> Result<UiMessageTail, String> {
     let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
     let limit = limit.clamp(1, MAX_MESSAGE_TAIL);
     let actor = actor_of(&state, server).await?;
-    Ok(actor
-        .message_tail(id, limit)
-        .await
-        .into_iter()
-        .map(|(m, targets_me)| UiTailMessage {
-            message: ui_message(m),
-            targets_me,
-        })
-        .collect())
+    let tail = actor
+        .message_tail(id, limit, after_id.unwrap_or_default())
+        .await;
+    Ok(UiMessageTail {
+        rows: tail
+            .rows
+            .into_iter()
+            .map(|(m, targets_me)| UiTailMessage {
+                message: ui_message(m),
+                targets_me,
+            })
+            .collect(),
+        addressed_after_cursor: tail.addressed_after_cursor,
+    })
+}
+
+/// What [`get_message_tail`] answers: the newest rows, and whether anything at all after the
+/// caller's cursor addresses this member, including rows the tail was too short to carry.
+#[derive(Serialize)]
+struct UiMessageTail {
+    rows: Vec<UiTailMessage>,
+    addressed_after_cursor: bool,
 }
 
 /// Where a paged read is centred, as the webview names it: `{kind:"tail"}`, `{kind:"id", id}` or
@@ -10836,6 +10970,9 @@ enum UiPageAnchor {
 /// The client's read boundary and clock, for a natively measured unread summary.
 #[derive(serde::Deserialize)]
 struct UiUnreadProbe {
+    /// Id of the newest message from somebody else that this device had read. The cursor; `null`
+    /// for a read mark written before ids existed, or one whose message is gone.
+    divider_id: Option<String>,
     /// `null` (or absent) means "everything is read".
     divider_ts: Option<u64>,
     now_ms: u64,
@@ -10905,6 +11042,7 @@ async fn get_message_page(
         before: before.min(MAX_PAGE_SIDE),
         after: after.min(MAX_PAGE_SIDE),
         unread: unread.map(|probe| catcoms_app::UnreadProbe {
+            divider_id: probe.divider_id.unwrap_or_default(),
             divider_ts: probe.divider_ts.unwrap_or(u64::MAX),
             now_ms: probe.now_ms,
         }),
@@ -11319,7 +11457,6 @@ async fn reload_one(
             switchboard: net.switchboard,
             record_seq: net.record_seq,
             persist: PersistCounters::default(),
-            persist_lock: Arc::new(Mutex::new(())),
         },
     );
     install_reconnect_capture_worker(app, record.id, timer_actor.clone());
@@ -17245,6 +17382,65 @@ mod tests {
     }
 
     #[test]
+    fn an_unranged_image_is_served_whole_and_a_player_still_gets_a_window() {
+        // The bug this exists to hold shut: an <img> issues a plain GET, takes the body as the
+        // whole image, and never asks again. A 4K screenshot is several megabytes, so answering
+        // that with one MEDIA_WINDOW_BYTES window handed the decoder a truncated PNG and every
+        // such image rendered as a broken icon.
+        let screenshot = 6 * 1024 * 1024;
+        assert!(
+            screenshot > MEDIA_WINDOW_BYTES as u64,
+            "the case only exists above the window"
+        );
+        assert!(serves_whole_image("image/png", false, screenshot));
+
+        // A ranged request is a reader that will come back: it keeps the bounded window, and so
+        // does everything that is not an image, because players range-request by construction.
+        assert!(
+            !serves_whole_image("image/png", true, screenshot),
+            "a Range means the caller pages for itself"
+        );
+        assert!(
+            !serves_whole_image("video/mp4", false, screenshot),
+            "a player must not pull a whole track into one response"
+        );
+        assert!(
+            !serves_whole_image("audio/mpeg", false, screenshot),
+            "nor a whole audio track"
+        );
+
+        // And the allocation stays bounded: past the cap it is a window again, which is no worse
+        // than the behaviour it replaces.
+        assert!(serves_whole_image("image/jpeg", false, MAX_WHOLE_IMAGE_BYTES));
+        assert!(!serves_whole_image(
+            "image/jpeg",
+            false,
+            MAX_WHOLE_IMAGE_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn a_whole_image_read_covers_every_byte_of_the_file() {
+        // The assembly loop reads chunk by chunk and stops at the declared size, so the span has
+        // to cover the last partial chunk. Undercounting here would silently truncate again.
+        assert_eq!(media_chunk_span(0), 1, "an empty file is still one read");
+        assert_eq!(media_chunk_span(1), 1);
+        assert_eq!(media_chunk_span(CHUNK_BYTES as u64), 1);
+        assert_eq!(
+            media_chunk_span(CHUNK_BYTES as u64 + 1),
+            2,
+            "one byte past a chunk needs the next one"
+        );
+        for total in [1u64, 4242, CHUNK_BYTES as u64 * 3 + 7, MAX_WHOLE_IMAGE_BYTES] {
+            let covered = media_chunk_span(total) as u64 * CHUNK_BYTES as u64;
+            assert!(
+                covered >= total,
+                "{total} bytes needs at least {total} bytes of chunks, got {covered}"
+            );
+        }
+    }
+
+    #[test]
     fn sequential_playback_walks_chunks_forward_and_never_returns_to_one() {
         // A player asking for the default window makes several requests per chunk, and that is
         // fine: the chunk cache means only the first of them decrypts anything. What must hold is
@@ -18657,6 +18853,134 @@ mod tests {
         assert!(state.storage_health.lock().await.is_empty());
     }
 
+    /// A persisted id is reused when a server is removed and reinstalled, and a write begun by the
+    /// departing incarnation can still be in flight when the replacement arrives. It must not put
+    /// its bytes in the replacement's slot, and it must not report the replacement's mutations as
+    /// durable: the first loses the newer group's state, the second reports a message saved that
+    /// was not.
+    #[tokio::test]
+    async fn a_departed_incarnation_cannot_write_into_or_retire_a_reused_id() {
+        use catcoms_rt::Hub;
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+
+        const SERVER: u64 = 12;
+        const OLD: u64 = 40;
+        const NEW: u64 = 41;
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+
+        // Two genuinely different groups, so what reached the disk is legible from its content.
+        let build = |peer: u64, seed: u64| {
+            Server::found(
+                Hub::new().join(PeerId::from_u64(peer)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(seed),
+                Box::new(ManualClock::new(1_000)),
+                "alice",
+            )
+            .unwrap()
+        };
+        let mut departing = build(91, 91);
+        departing.open_channel(1).await.unwrap();
+        departing.send_message(1, "from the departed incarnation").await.unwrap();
+        let (old_actor, old_events, old_task) = spawn(departing);
+        let mut replacement = build(92, 92);
+        replacement.open_channel(1).await.unwrap();
+        replacement.send_message(1, "from the replacement").await.unwrap();
+        let replacement_group = replacement.group_id();
+        let replacement_device = replacement.device_id();
+        let (new_actor, new_events, new_task) = spawn(replacement);
+
+        let entry = |instance, actor: ServerActor| ServerEntry {
+            actor,
+            instance,
+            group_id: replacement_group.clone(),
+            device_id: replacement_device.clone(),
+            invite: None,
+            name: "test".into(),
+            bootstrap: Vec::new(),
+            bootstrap_owners: HashMap::new(),
+            interface_routes: None,
+            rendezvous: Vec::new(),
+            mesh: None,
+            is_dm: false,
+            switchboard: false,
+            record_seq: 0,
+            persist: PersistCounters::default(),
+        };
+
+        // The departing incarnation records a request, then is replaced before it can write.
+        state
+            .servers
+            .lock()
+            .await
+            .insert(SERVER, entry(OLD, old_actor.clone()));
+        // Several requests, so the stale ticket is a number the replacement's own counters will
+        // not have reached. A departing writer holding ticket 1 is accidentally stopped by the
+        // coalescing check; the hazard is the one whose ticket is still ahead.
+        let stale_ticket = {
+            let mut servers = state.servers.lock().await;
+            let entry = servers.get_mut(&SERVER).unwrap();
+            entry.persist.request();
+            entry.persist.request();
+            entry.persist.request()
+        };
+        assert_eq!(stale_ticket, 3);
+        state.servers.lock().await.remove(&SERVER);
+        state
+            .servers
+            .lock()
+            .await
+            .insert(SERVER, entry(NEW, new_actor.clone()));
+
+        // The replacement persists a change of its own, and that is what belongs on disk.
+        persist_server(&state, SERVER).await;
+        let after_replacement = {
+            let guard = state.store.lock().await;
+            guard.as_ref().unwrap().load_server(SERVER).unwrap()
+        };
+
+        // Now the departed writer resumes.
+        persist_captured(&state, SERVER, OLD, stale_ticket, old_actor.clone()).await;
+
+        let on_disk = {
+            let guard = state.store.lock().await;
+            guard.as_ref().unwrap().load_server(SERVER).unwrap()
+        };
+        assert_eq!(
+            on_disk.to_vec(),
+            after_replacement.to_vec(),
+            "a departed incarnation must not write into the slot its id now names"
+        );
+        let restored = Server::restore(
+            &on_disk,
+            Hub::new().join(PeerId::from_u64(93)),
+            ChaCha20Rng::seed_from_u64(93),
+            Box::new(ManualClock::new(2_000)),
+            "alice",
+        )
+        .unwrap();
+        assert_eq!(
+            restored.messages(1).first().map(|m| m.text.clone()),
+            Some("from the replacement".to_string()),
+        );
+        assert_eq!(
+            state.servers.lock().await.get(&SERVER).unwrap().persist.completed,
+            1,
+            "the stale writer retires nothing: only the replacement's own write counts"
+        );
+
+        old_actor.shutdown().await;
+        new_actor.shutdown().await;
+        let _ = old_task.await;
+        let _ = new_task.await;
+        drop(old_events);
+        drop(new_events);
+    }
+
     #[tokio::test]
     async fn a_removed_server_incarnation_cannot_publish_into_a_reused_id() {
         use catcoms_rt::Hub;
@@ -18697,7 +19021,6 @@ mod tests {
             switchboard: false,
             record_seq: 0,
             persist: PersistCounters::default(),
-            persist_lock: Arc::new(Mutex::new(())),
         };
         const SERVER: u64 = 12;
         const OLD: u64 = 40;
@@ -19170,7 +19493,6 @@ mod tests {
                     switchboard: network.switchboard,
                     record_seq: network.record_seq,
                     persist: PersistCounters::default(),
-                    persist_lock: Arc::new(Mutex::new(())),
                 },
             );
             (state, actor, restored.events, restored.task)

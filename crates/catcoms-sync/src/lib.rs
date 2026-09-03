@@ -536,9 +536,24 @@ const MAX_CATCHUP_RESPONSE: usize = 16 * 1024 * 1024;
 /// It is also *more* permissive than what it replaces. The actor's `select!` already dropped an
 /// in-flight tick whenever the one-second delivery timer fired, so a catch-up has effectively had
 /// about a second to complete; this budget is explicit, twice as long, and no longer a side
-/// effect of an unrelated feature. Bundles are what make the budget comfortable: a catch-up now
-/// carries only what the requester is missing (`request_catchup_since`).
+/// effect of an unrelated feature.
+///
+/// A deadline is only safe if a legal response can always fit inside it, which is why a served
+/// bundle is capped at [`MAX_CATCHUP_CHUNK`] rather than at the 16 MiB a response may legally
+/// reach. Without that cap this deadline would be a throughput requirement: a valid, steadily
+/// progressing connection that could not move 16 MiB in two seconds would time out, retry, and
+/// time out again, so a large history could never converge at all. What remains is a floor of
+/// roughly 1 Mb/s per chunk. A progress-based deadline that resets as bytes arrive would remove
+/// even that, and needs transport-level progress the `MeshTransport` seam does not expose yet.
 const CATCHUP_REQUEST_MS: u64 = 2_000;
+/// Bytes of ops one catch-up response may carry.
+///
+/// Small on purpose: it is what makes [`CATCHUP_REQUEST_MS`] a deadlock bound rather than a
+/// bandwidth demand. A history larger than this arrives over several exchanges, and every one of
+/// them is progress: the requester applies what it received, its frontier moves, and it asks for
+/// what is still missing. See `apply_catchup_response`, which queues the next round while a round
+/// is still applying anything.
+const MAX_CATCHUP_CHUNK: usize = 256 * 1024;
 /// Defensive cap on the element count claimed by a bundle header, so a malformed
 /// length prefix cannot drive a long allocation loop even within the size cap.
 const MAX_BUNDLE_ELEMENTS: u32 = 1 << 20;
@@ -9750,6 +9765,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // returning a later frame's error; retrying would see the prefix as duplicate and could
         // never reconstruct its author/change attribution.
         terminal?;
+        // A response is a chunk, not necessarily the whole gap (see `MAX_CATCHUP_CHUNK`). Anything
+        // applied means the frontier moved, so ask again: the next request asks for less, and the
+        // exchange ends on the first round that applies nothing. Queued rather than looped here,
+        // so one catch-up never occupies the tick for longer than a single bounded round trip.
+        if applied_count > 0 {
+            self.enqueue_doc_catchup(doc_type, doc_id);
+        }
         tracing::debug!(applied = applied_count, "applied doc catch-up");
         Ok(applied_count)
     }
@@ -10667,7 +10689,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let doc = self.docs.get_mut(&(doc_type, doc_id))?;
         match doc.export_catchup_since(&heads, &self.group, &self.device, &mut self.rng) {
             Ok(bundle) => {
-                let (prefix, served) = size_capped_ops(&bundle, MAX_CONTROL_RESPONSE);
+                let (prefix, served) = size_capped_ops(&bundle, MAX_CATCHUP_CHUNK);
                 if served < bundle.len() {
                     tracing::debug!(
                         served,
@@ -10703,7 +10725,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // Bound the response we generate (mirror the inbound cap): serve a
                 // contiguous prefix that fits the byte budget; the requester pages
                 // the rest with a follow-up catch-up.
-                let (prefix, served) = size_capped_ops(&bundle, MAX_CONTROL_RESPONSE);
+                let (prefix, served) = size_capped_ops(&bundle, MAX_CATCHUP_CHUNK);
                 if served < bundle.len() {
                     tracing::debug!(
                         served,
@@ -15017,6 +15039,97 @@ mod tests {
             vec![roles::fingerprint(&ids[1])],
             "a silent receiver now confirms delivery without a causal descendant"
         );
+    }
+
+    /// A history larger than one response must converge over several exchanges.
+    ///
+    /// The deadline around an outbound catch-up is a deadlock bound, and it is only that if a
+    /// legal response always fits inside it. If a serving peer could answer with everything it
+    /// has, the deadline would silently become a throughput requirement, and a member rejoining a
+    /// long-lived channel over a slow link would time out, retry, and time out again forever. So
+    /// each response is bounded, and each one has to be progress: the requester applies it, its
+    /// frontier moves, and the next request asks for what is still missing.
+    #[tokio::test]
+    async fn a_history_larger_than_one_response_converges_over_several_bounded_rounds() {
+        use automerge::transaction::Transactable;
+        use automerge::{ReadDoc as _, ROOT};
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        alice.open_channel(DocType::Channel, 81).await.unwrap();
+        bob.open_channel(DocType::Channel, 81).await.unwrap();
+
+        // Comfortably more than one chunk's worth, written while Bob was away.
+        let body = "x".repeat(16_384);
+        let posts = 40;
+        for i in 0..posts {
+            alice
+                .post(DocType::Channel, 81, |doc| {
+                    doc.put(ROOT, format!("m{i}"), body.as_str())
+                })
+                .await
+                .unwrap();
+            // Drop the live broadcast, so catch-up is the only path that can deliver it.
+            assert!(matches!(
+                bob.transport.next_event().await,
+                Some(TransportEvent::Gossip { .. })
+            ));
+        }
+
+        let mut rounds = 0;
+        let mut applied_total = 0;
+        while bob
+            .doc(DocType::Channel, 81)
+            .map(|doc| doc.op_count())
+            .unwrap_or(0)
+            < posts
+        {
+            rounds += 1;
+            assert!(rounds < 50, "catch-up must make progress, not spin");
+            let (applied, _) = tokio::join!(
+                bob.request_catchup(alice_peer, DocType::Channel, 81),
+                alice.run_once(),
+            );
+            let applied = applied.expect("a bounded catch-up round succeeds");
+            assert!(
+                applied > 0,
+                "every round carries something, or it is a spin"
+            );
+            assert!(
+                applied < posts,
+                "a round must be bounded rather than the whole history at once"
+            );
+            applied_total += applied;
+        }
+        assert!(
+            rounds > 1,
+            "this history was supposed to need several rounds"
+        );
+        assert_eq!(applied_total, posts);
+        // The requester keeps asking while rounds still apply anything, so the queue is what
+        // carries an unfinished catch-up to the next tick rather than a loop inside one.
+        assert!(
+            bob.catchup_queue.iter().any(|task| matches!(
+                task,
+                CatchupTask::Doc {
+                    doc_type: DocType::Channel,
+                    doc_id: 81
+                }
+            )),
+            "an applying round queues the next one"
+        );
+        for i in 0..posts {
+            let doc = bob.doc(DocType::Channel, 81).unwrap().doc();
+            assert!(
+                doc.get(ROOT, format!("m{i}")).unwrap().is_some(),
+                "every post arrived"
+            );
+        }
     }
 
     #[tokio::test]

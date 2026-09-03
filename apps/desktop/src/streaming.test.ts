@@ -53,6 +53,23 @@ test("stream presets have visible safe defaults and sanitize persisted values", 
   }
 });
 
+test("a share carries the surface's audio unless it has been explicitly silenced", () => {
+  // Sharing a screen with no sound reads as a broken stream rather than as a choice, and the
+  // recovery costs the moment being shared. Audio is what an unconfigured share asks for.
+  assert.equal(DEFAULT_STREAM_SETTINGS.audioMode, "surface");
+  assert.equal(parseStreamSettings(null).audioMode, "surface");
+  assert.equal(parseStreamSettings({}).audioMode, "surface");
+  assert.equal(
+    parseStreamSettings({ audioMode: "system" }).audioMode,
+    "surface",
+    "a value from no version of this app is not a choice either",
+  );
+  // The half that makes the default acceptable: silence chosen once stays chosen. Folding an
+  // absent value and a stored "none" together is what would make it unreachable.
+  assert.equal(parseStreamSettings({ audioMode: "none" }).audioMode, "none");
+  assert.equal(parseStreamSettings({ audioMode: "separate" }).audioMode, "separate");
+});
+
 test("streamer mixer levels are finite, bounded and map to linear Web Audio gain", () => {
   assert.equal(normalizeStreamAudioLevel(-1), 0);
   assert.equal(normalizeStreamAudioLevel(99.6), 100);

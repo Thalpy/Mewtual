@@ -29,7 +29,13 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   frameRate: 30,
   quality: "balanced",
   mbpsPerPeer: 6,
-  audioMode: "none",
+  // Sharing a screen silently is almost never what was meant: a video with no sound reads as
+  // broken rather than as a choice, and the fix (stop, change a setting, share again) costs the
+  // moment being shared. The selected surface's own audio is therefore the default, and turning it
+  // off is one explicit choice that then sticks (see `parseStreamSettings`). The Screen Capture
+  // API still requires a fresh, visible grant for every capture, so this defaults what is
+  // REQUESTED, never what is silently captured.
+  audioMode: "surface",
   audioLevel: DEFAULT_STREAM_AUDIO_LEVEL,
 };
 
@@ -71,9 +77,14 @@ export function parseStreamSettings(value: unknown): StreamSettings {
   const mbpsPerPeer = typeof rawMbps === "number" && Number.isFinite(rawMbps)
     ? Math.min(50, Math.max(0.5, rawMbps))
     : DEFAULT_STREAM_SETTINGS.mbpsPerPeer;
-  const audioMode = parsed.audioMode === "surface" || parsed.audioMode === "separate"
+  // "none" is a stored CHOICE and survives; an absent or unrecognised value is no choice at all
+  // and takes the default. Collapsing both onto "none" is what would make the new default
+  // unreachable for anyone who has ever opened the stream settings.
+  const audioMode = parsed.audioMode === "surface"
+    || parsed.audioMode === "separate"
+    || parsed.audioMode === "none"
     ? parsed.audioMode
-    : "none";
+    : DEFAULT_STREAM_SETTINGS.audioMode;
   const audioLevel = normalizeStreamAudioLevel(parsed.audioLevel);
   return { resolution, frameRate, quality, mbpsPerPeer, audioMode, audioLevel };
 }
