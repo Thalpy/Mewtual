@@ -604,6 +604,14 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     how a requester detects an older peer and re-asks with `KIND_CATCHUP`. Members-only on exactly
     the same terms as `KIND_CATCHUP`, and truncation is still progress: the requester applies the
     prefix, its frontier moves, and the next request asks for less.
+  - **Both catch-up serves are capped at `MAX_CATCHUP_CHUNK` (256 KiB), not at the 16 MiB a
+    response may legally reach.** The cap is what makes `CATCHUP_REQUEST_MS` a deadlock bound
+    rather than a throughput requirement: without it, a valid connection that could not move a
+    whole history inside the deadline would time out, retry, and time out again, so a large gap
+    could never converge at all. A round that applied anything queues the next one
+    (`apply_catchup_response`), so a history arrives over several bounded exchanges and the
+    exchange ends on the first round that applies nothing. Each round occupies the tick for one
+    bounded request rather than for a whole history.
   - `1` KIND_JOIN; body `bytes invite.encode() ‖ bytes key_package`; response =
     `[JOIN_READY] ‖ bytes welcome ‖ bytes signature(64) ‖ bytes sealed_routing` (the admitter signs
     `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome ‖ sealed_routing`). Not member-authed.
@@ -952,18 +960,37 @@ one contiguous slice `{version, total, start, anchor_index, rows, unread}` aroun
 (they survive concurrent inserts, edits and deletes around them); an id that names no current row
 yields `anchor_index: null` and no rows, and the client re-anchors by index. Every row carries
 `targets_me`, `reply_count` and `reply_to_preview` (`{id, author, text[..200]}` of the parent),
-resolved natively against the whole channel. With an `unread` probe (`{divider_ts | null, now_ms}`,
-the client's frozen divider and its own clock) the page also carries `{ceiling_ts, first_index,
-count}` by exactly the rule in `unread.ts` (`readCeiling`/`effectiveTs`, five-minute grace, own rows
-never count), so a client holding one slice still places the divider and counts past it over the
-whole channel. `get_pinned_messages(server, channel)` returns the pinned rows by name. `get_messages`
-remains for the explicit whole-history readers (server-wide search corpus, moderation timeline).
+resolved natively against the whole channel. `get_pinned_messages(server, channel)` returns the
+pinned rows by name. `get_messages` remains for the explicit whole-history readers (server-wide
+search corpus, moderation timeline).
 
-`get_message_tail(server, channel, limit)` (`Server::message_tail`) returns the newest `limit` rows
-(oldest first, `limit` clamped to 1..=256 at the bridge) each with a `targets_me` flag: an `@[my name]`
-mention under the composer's normalization, or a reply to one of my messages, with the parent resolved
-against the **whole** channel. It exists for the arrival ticker, which runs for every arrival in every
-channel not on screen and used to fetch that channel's entire history to read its last row.
+**Only the newest page response may be applied.** Every path that can replace the loaded slice
+(open, refresh, reveal, jump, re-anchor) awaits a promise, and those settle in whatever order the
+actor and the bridge produce them; checking only that the server and channel are unchanged let a
+slow older response overwrite a newer one and put the reader back on stale rows. `PageAdmission`
+(`message-paging.ts`) issues one token per request, `applyPage` refuses any other, and leaving the
+conversation invalidates every outstanding request. Deliberately not a comparison of `version`: two
+requests can carry the same version and still need an order.
+
+With an `unread` probe (`{divider_id | null, divider_ts | null, now_ms}`: the client's frozen read
+cursor, its timestamp, and its own clock) the page also carries `{ceiling_ts, first_index, count}`
+over the whole channel, so a client holding one slice still places the divider and counts past it.
+**`divider_id` is the cursor**, matching the durable badge in `unread.ts`: when it names a row,
+everything after that row that somebody else wrote is unread, which needs no clock and so cannot be
+fooled by two messages sharing a millisecond or by a sender whose clock ran backwards. The
+timestamp rule (`readCeiling`/`effectiveTs`, five-minute grace, own rows never count) applies only
+when there is no usable cursor: a read mark written before ids existed, or one whose message has
+since been deleted.
+
+`get_message_tail(server, channel, limit, afterId)` (`Server::message_tail`) returns the newest
+`limit` rows (oldest first, `limit` clamped to 1..=256 at the bridge) each with a `targets_me` flag,
+plus `addressed_after_cursor`. The flag on a row is an `@[my name]` mention under the composer's
+normalization, or a reply to one of my messages, with the parent resolved against the **whole**
+channel. `addressed_after_cursor` answers the same question over **every** row after `afterId`
+(normally the channel's read mark), carried or not: one catch-up or one busy minute can append more
+messages than a tail holds, and a mention followed by that many ordinary messages must still ring.
+It exists for the arrival ticker, which runs for every arrival in every channel not on screen and
+used to fetch that channel's entire history to read its last row.
 
 `get_channel_heads(server)` is how unread badges survive what the event stream cannot. Actor
 notifications are deliberately dropped at the native boundary while the vault is locked, and a

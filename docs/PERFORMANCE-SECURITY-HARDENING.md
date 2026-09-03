@@ -48,6 +48,25 @@ remains honest: 709 kB is still large, so `chunkSizeWarningLimit` has not been r
 `manualChunks` is deliberately not the plan: without dynamic imports it mostly renames the same
 startup payload. Raising `chunkSizeWarningLimit` would only suppress the signal.
 
+### Adversarial review of the paging/search/persistence work (2026-09-03)
+
+An external review of the whole PR raised nine defects. Seven are fixed, each with a test that was
+first shown to fail against the old behaviour.
+
+| Finding | Verdict | Fix |
+|---|---|---|
+| Fixed catch-up deadline vs a 16 MiB legal response | Real | Serves capped at `MAX_CATCHUP_CHUNK`; an applying round queues the next, so a large gap converges over bounded exchanges |
+| Persistence not bound to the server incarnation | Real, introduced here | Lock moved to the numeric id so both incarnations serialize; write and completion counter both require the captured `instance` |
+| Out-of-order page responses roll the UI back | Real, introduced here | One `PageAdmission` token per request; leaving a conversation invalidates all |
+| Unread summary drops the message-id cursor | Real defect, **not** a regression: the divider and count were timestamp-based before this work too | `divider_id` added; position rule when the cursor names a row, timestamps only as the legacy fallback |
+| Delivery tick can call an old message the latest | Real, introduced here | `isLatestOwn` requires the tail to be loaded |
+| Search corpus goes stale while open | Partly introduced here (the open channel used to be live) | A channel is re-read when it changes; corpus keyed by read revision, not row count, so same-length edits invalidate |
+| 64-row notification tail is lossy in bursts | Real, introduced here | The actor answers `addressed_after_cursor` over the whole channel past the read mark |
+| Search still loads whole histories, unbounded result list | Real, **predates this work** | Not fixed here. A bounded native search is the right answer and is feature-sized; the one thing this work changed is that the open channel is now fetched rather than reused from memory |
+| Native work per update is still O(n) | Real, known | Not fixed here. Caching removed repeated walks per event, not the walk itself; incremental per-channel indexes are the fix |
+
+The review's scope criticism is accepted: this work should have been several changes.
+
 ### Where startup time actually goes (2026-09-03)
 
 The plan had been trading in chunk sizes without ever measuring the budget they belong to. Two
