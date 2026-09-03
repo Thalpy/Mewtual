@@ -12,8 +12,9 @@
   } from "./textfile";
   import {
     MAX_SPEAKESE_BLIPS, SPEAKESE_STEP_SECONDS, TEXT_EFFECTS, TEXT_EFFECT_GROUPS,
+    rankQuickTextEffects, sanitizeTextEffectUsage, isTextEffectId, canonicalTextEffectId,
     cherryBlossomShouldBurst, dismissTextEffectPalette, insertTextEffect, redTruthNoiseSample,
-    redTruthSoundPlan, speakeseSoundPlan, textEffectHtml,
+    redTruthSoundPlan, speakeseSoundPlan, teletypeSoundPlan, textEffectHtml, ONE_SHOT_EFFECT_IDS, TELETYPE_STEP_SECONDS,
     type TextEffectPointerRegion,
   } from "./message-effects";
   import {
@@ -78,7 +79,7 @@
   import {
     deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, jukeClaimWins, mediaChoices,
     mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, queueChanged, queueDigest, resolveCallName,
-    stallChip, validJukeSeq, STALL_ANNOUNCE_MS,
+    stallChip, validJukeSeq, JAM_TAKE_EXT, JAM_TAKE_MIME, STALL_ANNOUNCE_MS,
     type FetchPhase, type JukeEntry, type MediaFilter, type MediaKind,
   } from "./jukebox";
   import {
@@ -112,6 +113,7 @@
     makeSeqTracker,
     makeTraceSource,
     needsResync,
+    vaultUnlockErrorText,
     type EventCursor,
     type EventCorrelation,
     type EventEnvelope,
@@ -140,6 +142,9 @@
     type ModerationEvent, type ModerationState, type TimelineMessage,
   } from "./moderation";
   import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
+  import {
+    NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
+  } from "./window-close";
   import {
     DEFAULT_FILE_TRUST_POLICY, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
     mayLoadJukeboxFile, scopedMediaKey, toggleTrustedAuthor,
@@ -174,7 +179,7 @@
   } from "./melody";
   import {
     MIDI_FIXES, MIDI_SETUP_STEPS, describeMidiMessage, deviceRows, isMonitorWorthy, isPortRouted,
-    midiPortLabel, midiStatus, newMidiRouter, parseMidiMessage, pushMonitorLine, releaseAllNotes,
+    midiInstrumentAction, midiPortLabel, midiStatus, newMidiRouter, parseMidiMessage, pushMonitorLine, releaseAllNotes,
     routeMidi, routedDevices,
     type MidiDeviceRow, type MidiMonitorLine, type MidiPermission,
   } from "./midi";
@@ -189,13 +194,33 @@
     withOrderedSwitchboardStatus,
   } from "./joinreply";
   import { callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, type MappedPort } from "./callroutes";
+  import { JamEngine, jamSequenceAccepted, type JamPlaybackPatchSet } from "./jam-engine";
+  import { JamPeerBudget } from "./jam-budget";
+  import { JamFrameDecoder, toggleJamPeerMute, type JamFrameDecode } from "./jam-wire";
+  import { jamPatchId, legacyJamPatch, validateJamPatch } from "./jam-patch";
+  import type { JamSourceChannel } from "./jam-channel";
+  import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_REMOTE_HOLD_MAX_MS, PATCH_OSC_WAVES, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
+  import { JamClockProbeTracker, JamClockSync, JamMetronomeClock } from "./jam-clock";
+  import { JamCallCuePlayer, JamClickPlayer } from "./jam-clicks";
+  import {
+    applyJamRecorderConsent, captureJamRecorderLease, jamRecorderTimelineMs, JamTakeRecorder,
+    parseJamTakeJson, recordLeasedJamDrum, recordLeasedJamNoteOff, recordLeasedJamNoteOn,
+    startJamRecorderTimeline, type JamRecorderLease, type JamRecorderTimeline,
+  } from "./jam-recorder";
+  import {
+    decodeJamTakeBase64, jamTakePlaybackLeaseCurrent, JamTakeCache, JamTakeLoadCoordinator,
+    mayFetchJamTake, shouldApplyJamTakeProgress, shouldDispatchTakeEvent, takeDueBatchEnd,
+    takePlaybackIsRemote, takeReleaseTailMs, type JamTakePlaybackLease, type JamTakeProgressLease,
+  } from "./jam-playback";
+  import { JamCausalQueue, JamCausalQueueOverflow, JamInitialPublicationGate, JamLatestTaskQueue, JamOutboundEdge, JamPublicationGeneration, JamPublicationPacer, JamResettableCausalQueue, type JamPublishedFrame } from "./jam-publication";
+  import { jamTakeSheetSvg } from "./jam-sheet";
   // Types only. The console's own logic and markup live in DebugConsole.svelte, which is loaded
   // on demand; this file needs just enough to describe what it hands over.
   import {
-    memberRoutesVisible, mergeMemberRouteRead, routeActionLabel, routeActionScopeLabel, routeChip,
+    debugLogSettingsStatus, memberRoutesVisible, mergeMemberRouteRead, routeActionLabel, routeActionScopeLabel, routeChip,
     routeExplanation, routeHistoricalAge, routeIndirectEvidence, routeIsConnected, routePathLabel, routeState,
     shouldRefreshMemberRoutes,
-    type DbgSection, type DebugVoicePeer, type MemberRoute,
+    type DbgSection, type DebugLogSink, type DebugVoicePeer, type MemberRoute,
   } from "./debug-console";
 
   type Reaction = { emoji: string; by: string[] };
@@ -1656,13 +1681,18 @@
     // a surface change. Sustain is enabled ONLY for the call instrument: see routeMidi, where the
     // melody lock's secret would otherwise change under a held pedal.
     const target = midiTarget();
-    for (const { note, on } of routeMidi(midiRouter, msg, target === "instrument")) {
+    // Pads are one-shots, so neither note-off nor sustain has a sound to prolong. General MIDI
+    // note numbers select the fixed kit regardless of which MIDI channel a controller transmits.
+    const sustainEnabled = target === "instrument" && jamMode === "keys";
+    for (const { note, on } of routeMidi(midiRouter, msg, sustainEnabled)) {
       if (target === "melody") {
         if (on) noteOn(note);
         else noteOff(note);
       } else if (target === "instrument") {
-        if (on) instNoteOn(note);
-        else instNoteOff(note);
+        const action = midiInstrumentAction(note, on, jamMode);
+        if (action?.kind === "pad") jamPadHit(action.pad);
+        else if (action?.kind === "note" && action.on) instNoteOn(action.note);
+        else if (action?.kind === "note") instNoteOff(action.note);
       }
     }
   }
@@ -1671,7 +1701,10 @@
     const target = midiTarget();
     for (const { note } of releaseAllNotes(midiRouter)) {
       if (target === "melody") noteOff(note);
-      else if (target === "instrument") instNoteOff(note);
+      else if (target === "instrument") {
+        const action = midiInstrumentAction(note, false, jamMode);
+        if (action?.kind === "note") instNoteOff(action.note);
+      }
     }
   }
   /** Wire every input we can see and rebuild the device list. Safe to call as often as we like. */
@@ -2831,17 +2864,39 @@
   let textEffectKeybinds = $state<Record<string, string>>(loadTextEffectKeybinds());
   let textEffectTarget = $state<TextEffectTarget | null>(null);
   let textEffectSelection = $state({ start: 0, end: 0 });
-  let textEffectBubble = $state({ x: 0, y: 0 });
+  let textEffectBubble = $state({ x: 0, y: 0, bottom: 0 });
+  // The Aa strip's "+" unfolds the whole sectioned catalog in place instead of opening a modal.
+  let textEffectBarExpanded = $state(false);
   let showTextEffectCatalog = $state(false);
   let textEffectQuery = $state("");
+  // Catalog sections the user folded shut; a search query overrides this so matches never hide.
+  let collapsedTextEffectGroups: Record<string, boolean> = $state({});
   let recordingTextEffect = $state("");
   let textEffectKeyError = $state("");
   let suppressTextEffectSelection = false;
-  const QUICK_TEXT_EFFECT_IDS = [
-    "shake", "wave", "sparkle", "speakese", "perfect-cherry-blossom", "red-truth",
-    "flame", "gloom", "cyber", "crt", "censor", "pride/rainbow",
-  ];
-  let quickTextEffects = $derived(TEXT_EFFECTS.filter((effect) => QUICK_TEXT_EFFECT_IDS.includes(effect.id)));
+  // Device-local counts of applied effects order the Aa strip by what this person actually uses.
+  const TEXT_EFFECT_USAGE_KEY = "catcoms.textEffects.usage.v1";
+  function loadTextEffectUsage(): Record<string, number> {
+    try {
+      return sanitizeTextEffectUsage(JSON.parse(localStorage.getItem(TEXT_EFFECT_USAGE_KEY) ?? "{}"));
+    } catch {
+      return {};
+    }
+  }
+  let textEffectUsage = $state<Record<string, number>>(loadTextEffectUsage());
+  function bumpTextEffectUsage(id: string) {
+    textEffectUsage = { ...textEffectUsage, [id]: (textEffectUsage[id] ?? 0) + 1 };
+    try { localStorage.setItem(TEXT_EFFECT_USAGE_KEY, JSON.stringify(textEffectUsage)); } catch { /* ignore */ }
+  }
+  let quickTextEffects = $derived.by(() => {
+    const byId = new Map(TEXT_EFFECTS.map((effect) => [effect.id, effect]));
+    return rankQuickTextEffects(textEffectUsage).flatMap((id) => byId.get(id) ?? []);
+  });
+  /** The bar is centred on the selection; a wider unfolded bar needs a tighter clamp to stay on screen. */
+  function textEffectBarLeft(expanded: boolean): number {
+    const half = Math.min(expanded ? 380 : 205, Math.max(0, (innerWidth - 18) / 2));
+    return Math.max(9 + half, Math.min(innerWidth - 9 - half, textEffectBubble.x));
+  }
   let filteredTextEffects = $derived.by(() => {
     const q = textEffectQuery.trim().toLowerCase();
     return q
@@ -2928,11 +2983,13 @@
     const pickedRect = picked.getBoundingClientRect();
     const x = rect.left + pickedRect.left - mirrorRect.left + pickedRect.width / 2 - input.scrollLeft;
     const y = rect.top + pickedRect.top - mirrorRect.top - input.scrollTop - 8;
+    const bottom = rect.top + pickedRect.bottom - mirrorRect.top - input.scrollTop + 8;
     mirror.remove();
     const halfPalette = Math.min(205, Math.max(0, (innerWidth - 18) / 2));
     return {
       x: Math.max(9 + halfPalette, Math.min(innerWidth - 9 - halfPalette, x)),
       y: Math.max(8, Math.min(rect.bottom - 8, y)),
+      bottom: Math.max(rect.top + 8, Math.min(innerHeight - 8, Math.min(rect.bottom + 8, bottom))),
     };
   }
   function onTextEffectSelection(target: TextEffectTarget) {
@@ -2943,15 +3000,26 @@
     }
     const input = textEffectElement(target);
     if (!input) return;
+    const previous = textEffectBubble;
     textEffectBubble = textEffectSelectionAnchor(input, textEffectSelection.start, textEffectSelection.end);
+    // A fresh selection somewhere else folds the big grid back to the strip so it never jumps.
+    if (textEffectTarget !== target || previous.x !== textEffectBubble.x || previous.y !== textEffectBubble.y) {
+      textEffectBarExpanded = false;
+    }
     textEffectTarget = target;
     showTextEffectCatalog = false;
+  }
+  function toggleTextEffectBar() {
+    textEffectBarExpanded = !textEffectBarExpanded;
+    if (textEffectBarExpanded) textEffectQuery = "";
   }
   async function applyTextEffect(id: string, target = textEffectTarget) {
     if (!target) return;
     const wrapped = insertTextEffect(textEffectValue(target), textEffectSelection.start, textEffectSelection.end, id);
     setTextEffectValue(target, wrapped.value);
+    if (isTextEffectId(id)) bumpTextEffectUsage(canonicalTextEffectId(id));
     showTextEffectCatalog = false;
+    textEffectBarExpanded = false;
     textEffectTarget = null;
     suppressTextEffectSelection = true;
     await tick();
@@ -4824,15 +4892,26 @@
 
   async function unlock(secret = unlockSecret()) {
     if (!secret) return;
+    // Close and unlock are competing generation changes. The close handler sets this before its
+    // first await, so an unlock can never reopen native IPC underneath an older close operation.
+    if (windowCloseInFlight) return;
     unlocking = true;
     error = "";
     // The summon starts alongside the KDF call and never gates it: the animation fills
     // latency that exists anyway, and a failed unlock aborts it below.
     if (unlockMethod === "sigil") startSummon();
     try {
+      // Ctrl+L clears the webview immediately but native persistence can still be finishing. Join
+      // that exact request before authenticating a new generation; otherwise a late old lock could
+      // invalidate the session immediately after this unlock appears to succeed.
+      await nativeVaultLock.settle();
       // The passphrase is an argument and never a recorded field: invokeDebugged records the
       // command name and its outcome, not what it was called with.
       const { value: reloaded } = await invokeDebugged<Reloaded[]>("unlock", { passphrase: secret });
+      // The prior session's native lock promise (settled or otherwise) must never be reused after
+      // an authenticated unlock establishes a new command generation.
+      nativeVaultLock.reset();
+      closeAfterContinuityError = false;
       passphrase = "";
       sigilStrokes = [];
       sigilDrawing = [];
@@ -4844,7 +4923,9 @@
       restoreReloaded(reloaded);
     } catch (e) {
       abortSummon(); // wrong secret ⇒ no cat: the failure must read as a failure
-      error = String(e);
+      // `unlock` returns a typed AppError. Stringifying that object produces only
+      // "[object Object]"; the shared reader preserves its useful message, code and trace.
+      error = vaultUnlockErrorText(e);
     } finally {
       unlocking = false;
     }
@@ -4902,7 +4983,16 @@
     memberRecoveryInput = "";
     memberRecoveryBusy = false;
     if (!nativeAlreadyLocked) {
-      void invoke("lock_session", { uiStateJson: finalContinuityJson }).catch((e) => console.warn("Session locked; final UI continuity save failed", e));
+      // Retain this exact promise. An OS close racing Ctrl+L must wait for the snapshot captured
+      // above instead of destroying the window or submitting a second, already-cleared snapshot.
+      void nativeVaultLock.begin(finalContinuityJson).then(
+        (outcome) => {
+          if (outcome.continuity_error) {
+            console.warn("Session locked; final UI continuity save failed", outcome.continuity_error);
+          }
+        },
+        (e) => console.warn("Could not confirm the native session lock", e),
+      );
     }
     spaceOpen = false; // and no server names floating behind it either
     showSettings = false;
@@ -6291,21 +6381,10 @@
    * reported itself active. Someone could then reproduce a hard bug on the strength of that word
    * and find nothing to send, which spends the reproduction and returns nothing.
    */
-  type DebugLogState = {
-    enabled: boolean;
-    active: boolean;
-    state: "stopped" | "active" | "degraded" | "failed";
-    error: string;
+  type DebugLogState = DebugLogSink & {
     session: string;
     dir: string;
-    file: string;
-    events_written: number;
-    bytes_written: number;
-    events_dropped: number;
-    events_truncated: number;
     queue_depth: number;
-    queue_high_water: number;
-    session_quota_bytes: number;
   };
   let debugLog = $state<DebugLogState | null>(null);
   let debugLogBusy = $state(false);
@@ -6495,32 +6574,6 @@
     } finally {
       debugLogBusy = false;
     }
-  }
-  /** How the sink's state reads to someone who did not write it. */
-  function debugLogSummary(d: DebugLogState): { tone: "ok" | "warn" | "danger" | "faint"; text: string } {
-    if (d.state === "failed") {
-      return { tone: "danger", text: d.error || "Not writing, and the reason was not recorded." };
-    }
-    if (d.state === "degraded") {
-      return {
-        tone: "warn",
-        text: d.events_dropped
-          ? `Writing, but ${d.events_dropped.toLocaleString()} record(s) never reached the file.`
-          : "Writing, but close enough to this session's limit to matter.",
-      };
-    }
-    if (d.state === "active") {
-      return {
-        tone: "ok",
-        text: `Writing. ${d.events_written.toLocaleString()} entries, ${formatBytes(d.bytes_written)} so far.`,
-      };
-    }
-    return {
-      tone: "faint",
-      text: d.enabled
-        ? "Not writing yet. A log can only be opened when the app starts, so restart Mewtual."
-        : "Not writing, because you have logging switched off.",
-    };
   }
   // ---- debug console (docs/design-debug-console.md) ------------------------------------
   //
@@ -6804,7 +6857,7 @@
     const target = e.target as HTMLElement | null;
     // Spoilers and censored effects use the same local, reader-controlled reveal. First click
     // reveals them and never follows a link that happens to sit inside.
-    const sp = target?.closest("[data-spoiler], [data-text-fx='censor']") as HTMLElement | null;
+    const sp = target?.closest("[data-spoiler], [data-fx-conceal]") as HTMLElement | null;
     if (sp && !sp.classList.contains("revealed")) {
       e.preventDefault();
       sp.classList.add("revealed");
@@ -6881,7 +6934,7 @@
     const k = (e: Event) => {
       const ev = e as KeyboardEvent;
       if (ev.key !== "Enter" && ev.key !== " ") return;
-      const card = (ev.target as HTMLElement | null)?.closest(".ref-card, [data-spoiler], [data-text-fx='censor']") as HTMLElement | null;
+      const card = (ev.target as HTMLElement | null)?.closest(".ref-card, [data-spoiler], [data-fx-conceal]") as HTMLElement | null;
       if (!card) return;
       ev.preventDefault();
       card.click();
@@ -6909,9 +6962,12 @@
     const speakeseRevealTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
     const pendingRedTruth = new Set<HTMLElement>();
     const redTruthRevealTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
+    const pendingTeletype = new Set<HTMLElement>();
+    const teletypeRevealTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
     let pointerFx: HTMLElement | null = null;
     let speakeseAudioUntil = 0;
     let redTruthAudioUntil = 0;
+    let teletypeAudioUntil = 0;
 
     function effectVisible(el: HTMLElement) {
       const rect = el.getBoundingClientRect();
@@ -7000,6 +7056,36 @@
       }
     }
 
+    function scheduleTeletype(el: HTMLElement) {
+      if (document.documentElement.dataset.textEffects !== "full" || !soundOn) return;
+      const count = [...el.querySelectorAll<HTMLElement>(".fx-teletype-unit")]
+        .filter((unit) => (unit.textContent ?? "").trim()).length;
+      if (!count) return;
+      try {
+        const ctx = audioCtx;
+        if (!ctx || ctx.state !== "running") { pendingTeletype.add(el); return; }
+        if (ctx.currentTime < teletypeAudioUntil) return;
+        const start = ctx.currentTime + 0.025;
+        const plan = teletypeSoundPlan(count, start);
+        teletypeAudioUntil = start + plan.length * TELETYPE_STEP_SECONDS;
+        plan.forEach((click) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = click.waveform;
+          osc.frequency.setValueAtTime(click.frequency, click.at);
+          osc.frequency.exponentialRampToValueAtTime(click.endFrequency, click.stop);
+          gain.gain.setValueAtTime(0.0001, click.at);
+          gain.gain.exponentialRampToValueAtTime(click.peak, click.at + 0.002);
+          gain.gain.exponentialRampToValueAtTime(0.0001, click.stop - 0.002);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(click.at);
+          osc.stop(click.stop);
+        });
+      } catch {
+        // The typed reveal never depends on Web Audio.
+      }
+    }
+
     function revealPending(
       pending: Set<HTMLElement>,
       timers: Map<HTMLElement, ReturnType<typeof setTimeout>>,
@@ -7021,6 +7107,7 @@
       if (document.documentElement.dataset.textEffects !== "full" || !soundOn) {
         revealPending(pendingSpeakese, speakeseRevealTimers);
         revealPending(pendingRedTruth, redTruthRevealTimers);
+        revealPending(pendingTeletype, teletypeRevealTimers);
         return;
       }
       try {
@@ -7029,6 +7116,7 @@
           if (!audioCtx || audioCtx.state !== "running") return;
           revealPending(pendingSpeakese, speakeseRevealTimers, scheduleSpeakese);
           revealPending(pendingRedTruth, redTruthRevealTimers, scheduleRedTruth);
+          revealPending(pendingTeletype, teletypeRevealTimers, scheduleTeletype);
         };
         if (audioCtx.state === "running") playPending();
         else void audioCtx.resume().then(playPending).catch(() => { /* retry on the next gesture */ });
@@ -7070,6 +7158,11 @@
           startOneShot(el, pendingSpeakese, speakeseRevealTimers, scheduleSpeakese);
         } else if (el.dataset.textFx === "red-truth") {
           startOneShot(el, pendingRedTruth, redTruthRevealTimers, scheduleRedTruth);
+        } else if (el.dataset.textFx === "teletype") {
+          startOneShot(el, pendingTeletype, teletypeRevealTimers, scheduleTeletype);
+        } else {
+          // Silent entrances (Decrypt) never wait on an audio gesture.
+          el.classList.add("fx-play");
         }
       }
     }, { threshold: 0.18 });
@@ -7081,7 +7174,7 @@
       for (const effect of effects) {
         effect.querySelectorAll<HTMLElement>(".text-fx-unit").forEach((unit, index) =>
           unit.style.setProperty("--fx-i", String(index)));
-        if (["speakese", "red-truth"].includes(effect.dataset.textFx ?? "") && !observed.has(effect)) {
+        if (ONE_SHOT_EFFECT_IDS.includes(effect.dataset.textFx ?? "") && !observed.has(effect)) {
           observed.add(effect);
           // Picker/settings previews demonstrate the entrance, but selecting or browsing effects
           // must never make sound. Authored content is the only observer-driven audio source.
@@ -7104,7 +7197,7 @@
 
     const onPointerMove = (event: PointerEvent) => {
       const next = document.documentElement.dataset.textEffects === "full"
-        ? (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-text-fx]:not([data-text-fx='censor'])") ?? null
+        ? (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-text-fx]:not([data-fx-conceal])") ?? null
         : null;
       const entered = next !== pointerFx;
       if (pointerFx && pointerFx !== next) {
@@ -10330,19 +10423,847 @@
     void applySink(fp);
     addAnalyser(fp, stream); // speaking detection taps the stream, never the element
   }
-  // --- In-call instruments (the jam layer) ----------------------------------------------------
+  // --- In-call instruments (the jam layer, jam:v2) --------------------------------------------
   // Notes are EVENTS, not audio: tiny JSON frames on a per-peer data channel, synthesized locally
-  // at every ear by the same synth the melody lock uses. Near-zero bandwidth, and muting
-  // instruments is a receive-side choice (global or per peer) that never touches the voice track.
-  // Every note is attributable to the channel it arrived on. Full-mesh latency makes this a
-  // campfire piano, not a DAW.
+  // at every ear. This file only authenticates sources and forwards bounded wire events; every
+  // audio decision past that seam lives in jam-engine.ts behind receiver-owned budgets, per-peer
+  // gates, the Deafen gate and a master limiter. Muting instruments stays a receive-side choice
+  // (global or per peer) that never touches the voice track, and every event is attributable to
+  // the exact channel generation it arrived on. Full-mesh latency: campfire piano, not a DAW.
   const INST_WAVES: OscillatorType[] = ["sine", "triangle", "square", "sawtooth"];
   let instOpen = $state(false); // the stage's instrument drawer
   let instOctave = $state(4); // drawer piano register (C4 base, like the lock)
   let callHeld = $state<number[]>([]); // notes I am sounding into the call
   let remoteHeld = $state<Record<string, number[]>>({}); // fp -> notes they are sounding
-  const remoteWave: Record<string, OscillatorType> = {}; // fp -> their last announced timbre
   let peerMeta = $state<Record<string, PeerState>>({}); // mute/video plus their coarse receive bucket
+  let jamEngine: JamEngine | null = null; // one per call; disposed with the call
+  let jamSelfChan: JamSourceChannel | null = null; // my own local-echo capability
+  let jamMySn = ""; // my sender-session nonce, minted with the engine
+  let jamMyQ = 0; // ONE monotonic sequence across my note and drum events
+  const jamPeerChans: Record<string, JamSourceChannel> = {}; // fp -> current generation capability
+  const jamPeerDecs: Record<string, JamFrameDecoder> = {}; // fp -> that generation's ingress budget
+  const jamPeerBudgets: Record<string, JamPeerBudget> = {}; // fp -> call-epoch budget, survives reconnect
+  const jamPeerInbound: Record<string, JamCausalQueue> = {}; // extends channel ordering across awaits
+  // Local echo shares the sender's q lane too: a note after a drum must not overtake its async
+  // deterministic seed. Human input stays far below the same bounded backlog used for peers.
+  const jamLocalRender = new JamResettableCausalQueue(JAM_INBOUND_PENDING_MAX);
+  // App queues exist above the engine's own async boundary. Bind each retained closure to these
+  // epochs so mute/Deafen revocation remains sticky even if audio is reopened before it executes.
+  let jamRoomRenderGeneration = 0;
+  const jamSourceRenderGeneration: Record<string, number> = {};
+  const jamSourceGateMuted: Record<string, boolean> = {};
+  const jamPeerSn: Record<string, string> = {}; // fp -> their last announced session nonce
+  const jamOutboundEdges = new WeakMap<RTCDataChannel, JamOutboundEdge>();
+  const remoteHeldAt = new Map<string, number>(); // "fp:note" -> when the UI saw the note-on
+  let jamAbuseMuted = $state<Record<string, boolean>>({}); // flood auto-mutes; receive-side only
+  let jamMode = $state<"keys" | "pads">(loadCallSetting("jammode", "keys") === "pads" ? "pads" : "keys");
+  // The metronome LINE is furniture you can fold away; the grid itself keeps running (it belongs
+  // to the room, not to this row's visibility).
+  let jamMetShow = $state(loadCallSetting("metline", "on") !== "off");
+  function toggleJamMetShow() {
+    jamMetShow = !jamMetShow;
+    try { localStorage.setItem("catcoms.call.metline", jamMetShow ? "on" : "off"); } catch { /* ignore */ }
+  }
+  // The MIDI light: red = nothing routed, green = a device is ready, blue = keys arriving now.
+  // Unlike the old text label (rendered only when a device existed, so "no device" looked like
+  // "no feature"), the light always says which of the three worlds you are in; hover names it.
+  let jamMidiState = $derived(
+    !midiSupported || !midiName ? "none" : midiLastAt && nowTick - midiLastAt < 2500 ? "live" : "ready",
+  );
+  let jamMidiTitle = $derived(
+    !midiSupported
+      ? "MIDI is not available in this webview"
+      : !midiName
+        ? "No MIDI device routed. Plug one in, or pick a port in Settings · Devices."
+        : jamMidiState === "live"
+          ? `MIDI · ${midiName} · playing`
+          : `MIDI · ${midiName} · ready`,
+  );
+  let padFlash = $state<Record<number, string>>({}); // pad -> "me" | fp of the latest hit
+  const padFlashTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  const JAM_PAD_KEYS = ["a", "s", "d", "f", "g", "h", "j", "k", "l", ";"];
+  // My sound: a legacy wave (rides `w`, old builds render it directly) or a jam-patch:v1
+  // descriptor. Presets are ordinary descriptors; every edit mints a new content-addressed id.
+  const JAM_PRESETS: { name: string; d: string; patch: JamPatch }[] = [
+    {
+      name: "LANDING",
+      d: "M0 8 Q4 2 8 7 Q13 12 17 5 Q21 0 26 6",
+      patch: {
+        v: 1,
+        o: [{ w: 3, t: 0, c: -8, l: 84 }, { w: 3, t: 0, c: 8, l: 84 }, { w: 0, t: -12, c: 0, l: 46 }],
+        e: { a: 1200, d: 400, s: 62, r: 4800 },
+        f: { m: 0, c: 1800, q: 22, e: 56 },
+        l: { r: 40, d: 30, t: 1 },
+        x: { c: 55, d: 18, r: 72 },
+      },
+    },
+    {
+      name: "DUSK",
+      d: "M0 7 Q6 12 13 7 T26 7",
+      patch: {
+        v: 1,
+        o: [{ w: 2, t: 0, c: -6, l: 70 }, { w: 1, t: 12, c: 6, l: 40 }],
+        e: { a: 15, d: 260, s: 45, r: 900 },
+        f: { m: 0, c: 2600, q: 35, e: 30 },
+        l: { r: 500, d: 18, t: 1 },
+        x: { c: 20, d: 45, r: 35 },
+      },
+    },
+  ];
+  let myPatch = $state<JamPatch | null>(null); // null = legacy wave mode
+  let myPatchName = $state("");
+  type PublishedJamPatch = JamPublishedFrame & Readonly<{
+    descriptor: JamPatch;
+    id: string;
+    sessionNonce: string;
+    wave: LegacyWave;
+    custom: boolean;
+  }>;
+  let jamPublishedPatch: PublishedJamPatch | null = null;
+  const jamPublicationGeneration = new JamPublicationGeneration();
+  let jamPublicationQueue = new JamLatestTaskQueue<PublishedJamPatch | null>();
+  const jamPublicationPacer = new JamPublicationPacer(JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS);
+  let jamEnsurePublication: Promise<PublishedJamPatch | null> | null = null;
+  const jamPendingLocalEvents = new JamInitialPublicationGate<PublishedJamPatch>(JAM_LOCAL_PUBLICATION_PENDING_MAX);
+  let jamEditOpen = $state(false);
+  let jamAnnTimer: ReturnType<typeof setTimeout> | undefined;
+  // The saved sound goes through the same validator as wire and playback input: a corrupted or
+  // out-of-contract local draft falls back to the wave rather than being trusted for having
+  // come from this machine's own storage.
+  (() => {
+    try {
+      const raw = localStorage.getItem("catcoms.jam.patch");
+      if (!raw) return;
+      const saved = JSON.parse(raw) as { name?: unknown; patch?: unknown };
+      const checked = validateJamPatch(saved.patch);
+      if (checked.ok) {
+        myPatch = checked.patch;
+        myPatchName = typeof saved.name === "string" && saved.name ? saved.name.slice(0, 24) : "CUSTOM";
+      }
+    } catch { /* unreadable draft: wave mode */ }
+  })();
+  function jamNonce(): string {
+    const bytes = new Uint8Array(8);
+    crypto.getRandomValues(bytes);
+    const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    return hex === "0000000000000000" ? "0000000000000001" : hex; // all-zero marks legacy channels
+  }
+  function ensureJamEngine(): JamEngine {
+    synthCtx ??= new AudioContext();
+    if (!jamEngine) {
+      jamEngine = new JamEngine(synthCtx);
+      jamMySn = jamNonce();
+      jamMyQ = 0;
+      // Keep the reserved UI lane while binding seeds/fairness to the authenticated call identity.
+      jamSelfChan = jamEngine.openLocalSource(callSelfFp);
+      jamEngine.beginSourceSession(jamSelfChan, jamMySn);
+      jamEngine.setDeafened(callDeafened);
+    }
+    return jamEngine;
+  }
+  function jamCallId(): string {
+    // Bridge server numbers are device-local and differ between participants. The shared channel
+    // id is the stable musical seed scope; this is reproducibility only, never authorization.
+    return callChannel || "?";
+  }
+  function jamApplyMutes(fp: string) {
+    const muted = instRxMuted || !!instMutedPeers[fp] || !!jamAbuseMuted[fp];
+    const wasMuted = jamSourceGateMuted[fp] ?? false;
+    // Advance on both edges. A frame admitted while the gate is closed must not become audible
+    // merely because the outer causal queue drains after the user reopens it.
+    if (muted !== wasMuted) {
+      jamSourceRenderGeneration[fp] = (jamSourceRenderGeneration[fp] ?? 0) + 1;
+    }
+    jamSourceGateMuted[fp] = muted;
+    jamEngine?.setSourceMuted(fp, muted);
+  }
+  function clearPeerJamUi(fp: string) {
+    const { [fp]: _h, ...rest } = remoteHeld;
+    remoteHeld = rest;
+    for (const key of [...remoteHeldAt.keys()]) if (key.startsWith(fp + ":")) remoteHeldAt.delete(key);
+    for (const [pad, who] of Object.entries(padFlash)) {
+      if (who === fp) {
+        const { [Number(pad)]: _p, ...pf } = padFlash;
+        padFlash = pf;
+      }
+    }
+  }
+  function flashPad(pad: number, who: string) {
+    padFlash = { ...padFlash, [pad]: who };
+    clearTimeout(padFlashTimers.get(pad));
+    padFlashTimers.set(pad, setTimeout(() => {
+      if (padFlash[pad] !== who) return;
+      const { [pad]: _x, ...rest } = padFlash;
+      padFlash = rest;
+    }, 200));
+  }
+  // Held-state UI is tracked independently of the audio gates: a muted peer's playing must stay
+  // VISIBLE even while inaudible. The engine stays authoritative for sound; this map is capped
+  // per peer and swept on the same 30s watchdog the engine uses.
+  function uiNoteOn(fp: string, note: number) {
+    const held = remoteHeld[fp] ?? [];
+    if (held.includes(note) || held.length >= 16) return;
+    remoteHeld = { ...remoteHeld, [fp]: [...held, note] };
+    remoteHeldAt.set(`${fp}:${note}`, performance.now());
+  }
+  function uiNoteOff(fp: string, note: number) {
+    const held = remoteHeld[fp] ?? [];
+    if (!held.includes(note)) return;
+    remoteHeld = { ...remoteHeld, [fp]: held.filter((n) => n !== note) };
+    remoteHeldAt.delete(`${fp}:${note}`);
+  }
+  function sweepJamUi() {
+    jamEngine?.sweepWatchdogs();
+    const floor = performance.now() - JAM_REMOTE_HOLD_MAX_MS;
+    for (const [key, at] of [...remoteHeldAt]) {
+      if (at > floor) continue;
+      const sep = key.indexOf(":");
+      uiNoteOff(key.slice(0, sep), Number(key.slice(sep + 1)));
+    }
+  }
+  // --- Metronome: one shared grid, local clicks -----------------------------------------------
+  // The anchor is whoever pressed start; their tempo message names beat 0 in THEIR clock. Every
+  // listener estimates the offset NTP-style over the same data channel and schedules clicks on
+  // the audio clock (jam-clock.ts owns all of that math; webview timers throttle, so the coarse
+  // tick below only tops up a 150ms lookahead window). Out-of-bounds sync degrades HONESTLY to a
+  // local-only click. This clock feeds nothing but the jam layer: never auth, expiry, or storage.
+  let jamMet: JamMetronomeClock | null = null;
+  const jamSelfSync = new JamClockSync(); // never fed: my own grid plans from the exact local fallback
+  const jamClockSyncs: Record<string, JamClockSync> = {}; // fp -> offset estimator toward that clock
+  const jamProbes: Record<string, JamClockProbeTracker> = {}; // fp -> rate-limited probe issuance
+  type JamMetUi = { on: boolean; bpm: number; bpb: number; anchor: string; synced: boolean; beat: number; bar: number };
+  let jamMetUi = $state<JamMetUi | null>(null);
+  let jamMetBpm = $state(((): number => {
+    const v = Number(loadCallSetting("metbpm", "120"));
+    return Number.isInteger(v) && v >= JAM_MET_BPM_MIN && v <= JAM_MET_BPM_MAX ? v : 120;
+  })());
+  let jamMetBpb = $state(((): number => {
+    const v = Number(loadCallSetting("metbpb", "4"));
+    return Number.isInteger(v) && v >= 1 && v <= 8 ? v : 4;
+  })());
+  let jamMetRev = 0; // my anchor revision counter, scoped to (me, jamMySn)
+  let jamMetInterval: ReturnType<typeof setInterval> | undefined;
+  let jamMetPushTimer: ReturnType<typeof setTimeout> | undefined;
+  const jamClickPlayer = new JamClickPlayer();
+  const jamCallCuePlayer = new JamCallCuePlayer();
+  function ensureJamMet(): JamMetronomeClock {
+    const engine = ensureJamEngine();
+    jamMet ??= new JamMetronomeClock(engine.sourceChannels);
+    return jamMet;
+  }
+  function startJamMetTimer() {
+    if (jamMetInterval) return;
+    jamMetInterval = setInterval(jamMetTick, 50);
+    jamMetTick();
+  }
+  function stopJamMetTimer() {
+    clearInterval(jamMetInterval);
+    jamMetInterval = undefined;
+    // Call teardown may already have revoked/nullified the engine. The pool is independently owned
+    // and must still cancel every lookahead node against the shared context.
+    if (synthCtx) jamClickPlayer.cancel(synthCtx);
+  }
+  function jamMetTick() {
+    const engine = jamEngine;
+    const met = jamMet;
+    if (!engine || !met) { stopJamMetTimer(); return; }
+    const snap = met.snapshot();
+    if (!snap) {
+      if (jamMetUi) jamMetUi = null;
+      stopJamMetTimer();
+      return;
+    }
+    const now = performance.now();
+    let sync = jamSelfSync;
+    if (snap.source !== "me") {
+      sync = jamClockSyncs[snap.source] ??= new JamClockSync();
+      // Keep probing the anchor while their grid runs; issue() self-limits to 1/s (burst 4).
+      const probe = (jamProbes[snap.source] ??= new JamClockProbeTracker()).issue(now);
+      if (probe) {
+        const p = callPeers[snap.source];
+        if (p?.dc?.readyState === "open") { try { p.dc.send(JSON.stringify(probe)); } catch { /* edge gone */ } }
+      }
+    }
+    if (engine.context.state !== "running") {
+      // The audio clock is frozen while performance time advances. Skip missed beats without
+      // creating nodes that would pile up and burst out when a later user gesture resumes audio.
+      met.catchUp(sync, now);
+      jamClickPlayer.cancel(engine.context);
+    } else {
+      const clicks = met.plan(sync, now, engine.context.currentTime);
+      if (!callDeafened) for (const click of clicks) jamClickPlayer.play(engine.context, click);
+    }
+    const localOrigin = sync.remoteToLocal(snap.remoteOriginMs) ?? snap.localFallbackOriginMs;
+    const beat = Math.max(0, Math.floor((now - localOrigin) / (60_000 / snap.bpm)));
+    const next: JamMetUi = {
+      on: true,
+      bpm: snap.bpm,
+      bpb: snap.beatsPerBar,
+      anchor: snap.source,
+      synced: snap.source === "me" || sync.isSynced(),
+      beat: beat % snap.beatsPerBar,
+      bar: Math.floor(beat / snap.beatsPerBar) + 1,
+    };
+    if (JSON.stringify(jamMetUi) !== JSON.stringify(next)) jamMetUi = next;
+  }
+  function jamMetStart() {
+    if (!inCall) return;
+    const engine = ensureJamEngine();
+    if (engine.context.state === "suspended") void engine.context.resume().catch(() => { /* next gesture */ });
+    const met = ensureJamMet();
+    if (met.snapshot() || !jamSelfChan) return; // someone's grid already runs, or no session yet
+    jamMetRev += 1;
+    const m: JamMetronome = { t: "m", v: 1, sn: jamMySn, on: 1, rev: jamMetRev, bpm: jamMetBpm, bpb: jamMetBpb, org: performance.now() };
+    met.receive(jamSelfChan, m, performance.now());
+    jamBroadcastFrame(JSON.stringify(m));
+    startJamMetTimer();
+  }
+  // A tempo/signature change while I anchor: re-announce with a fresh revision and a fresh beat 0.
+  // The clock refuses revisions under 2s apart (mirroring every receiver), so pushes self-defer.
+  function jamMetPush() {
+    const met = jamMet;
+    if (!met || !jamSelfChan || !jamMySn) return;
+    const snap = met.snapshot();
+    if (!snap || snap.source !== "me") return;
+    const now = performance.now();
+    const wait = JAM_MET_REV_MIN_INTERVAL_MS - (now - snap.acceptedAtMs);
+    if (wait > 0) {
+      clearTimeout(jamMetPushTimer);
+      jamMetPushTimer = setTimeout(jamMetPush, wait + 50);
+      return;
+    }
+    jamMetRev += 1;
+    const m: JamMetronome = { t: "m", v: 1, sn: jamMySn, on: 1, rev: jamMetRev, bpm: jamMetBpm, bpb: jamMetBpb, org: now };
+    met.receive(jamSelfChan, m, now);
+    jamBroadcastFrame(JSON.stringify(m));
+  }
+  function jamMetStop() {
+    const met = jamMet;
+    if (!met || !jamSelfChan) return;
+    const snap = met.snapshot();
+    if (!snap || snap.source !== "me") return; // only the anchor stops the room's grid
+    const now = performance.now();
+    // Stop is a lifecycle/safety edge and bypasses the tempo-update throttle at every receiver.
+    clearTimeout(jamMetPushTimer);
+    jamMetRev += 1;
+    const m: JamMetronome = { t: "m", v: 1, sn: jamMySn, on: 0, rev: jamMetRev, bpm: snap.bpm, bpb: snap.beatsPerBar, org: snap.remoteOriginMs };
+    met.receive(jamSelfChan, m, now);
+    jamBroadcastFrame(JSON.stringify(m));
+    jamMetUi = null;
+    stopJamMetTimer();
+  }
+  function jamMetNudge(delta: number) {
+    jamMetBpm = Math.min(JAM_MET_BPM_MAX, Math.max(JAM_MET_BPM_MIN, jamMetBpm + delta));
+    try { localStorage.setItem("catcoms.call.metbpm", String(jamMetBpm)); } catch { /* ignore */ }
+    if (jamMetUi?.anchor === "me") {
+      clearTimeout(jamMetPushTimer);
+      jamMetPushTimer = setTimeout(jamMetPush, 300); // coalesce a run of presses into one revision
+    }
+  }
+  function jamMetCycleBpb() {
+    const steps = [2, 3, 4, 6, 8];
+    jamMetBpb = steps[(steps.indexOf(jamMetBpb) + 1) % steps.length] ?? 4;
+    try { localStorage.setItem("catcoms.call.metbpb", String(jamMetBpb)); } catch { /* ignore */ }
+    if (jamMetUi?.anchor === "me") {
+      clearTimeout(jamMetPushTimer);
+      jamMetPushTimer = setTimeout(jamMetPush, 300);
+    }
+  }
+  // A late joiner never saw the start message: the anchor replays the current grid to a fresh
+  // edge, same revision (their first accepted message starts their clock regardless of rev).
+  function jamMetHello(target: RTCDataChannel) {
+    const snap = jamMet?.snapshot();
+    if (!snap || snap.source !== "me") return;
+    const m: JamMetronome = { t: "m", v: 1, sn: jamMySn, on: 1, rev: jamMetRev, bpm: snap.bpm, bpb: snap.beatsPerBar, org: snap.remoteOriginMs };
+    try { target.send(JSON.stringify(m)); } catch { /* edge gone */ }
+  }
+  // --- Key remapping (call instruments only; the vault lock's melody keys are a SECRET entry
+  // surface and deliberately keep their fixed map). Stored per slot: pc 0..12 for the piano,
+  // pad 0..9 for the kit. Effective maps derive slot -> key with customs overriding defaults;
+  // when two slots claim one key the later slot wins, visibly, in the remap list itself.
+  const PIANO_DEFAULT_KEYS = ["a", "w", "s", "e", "d", "f", "t", "g", "y", "h", "u", "j", "k"];
+  function loadJamKeymap(): { piano: Record<number, string>; pads: Record<number, string> } {
+    try {
+      const raw = JSON.parse(localStorage.getItem("catcoms.call.keymap.v1") ?? "{}") as Record<string, unknown>;
+      const out: { piano: Record<number, string>; pads: Record<number, string> } = { piano: {}, pads: {} };
+      for (const [kind, cap] of [["piano", 13], ["pads", 10]] as const) {
+        const m = raw[kind];
+        if (typeof m !== "object" || m === null) continue;
+        for (const [slot, key] of Object.entries(m as Record<string, unknown>)) {
+          const index = Number(slot);
+          if (Number.isInteger(index) && index >= 0 && index < cap && typeof key === "string" && key.length === 1) {
+            out[kind][index] = key.toLowerCase();
+          }
+        }
+      }
+      return out;
+    } catch { return { piano: {}, pads: {} }; }
+  }
+  let jamKeymap = $state(loadJamKeymap());
+  let keymapCapture = $state<{ kind: "piano" | "pads"; index: number } | null>(null); // armed from Settings · Voice & Calls
+  let pianoKeys = $derived.by(() => {
+    const keys = [...PIANO_DEFAULT_KEYS];
+    for (const [slot, key] of Object.entries(jamKeymap.piano)) keys[Number(slot)] = key;
+    return keys;
+  });
+  let padKeys = $derived.by(() => {
+    const keys = [...JAM_PAD_KEYS];
+    for (const [slot, key] of Object.entries(jamKeymap.pads)) keys[Number(slot)] = key;
+    return keys;
+  });
+  let pianoByKey = $derived.by(() => {
+    const m: Record<string, number> = {};
+    pianoKeys.forEach((key, pc) => { m[key] = pc; });
+    return m;
+  });
+  let padByKey = $derived.by(() => {
+    const m: Record<string, number> = {};
+    padKeys.forEach((key, pad) => { m[key] = pad; });
+    return m;
+  });
+  function saveJamKeymap() {
+    try { localStorage.setItem("catcoms.call.keymap.v1", JSON.stringify(jamKeymap)); } catch { /* optional */ }
+  }
+  function keymapBind(key: string) {
+    const cap = keymapCapture;
+    if (!cap) return;
+    // One key means one slot within its kind: a rebind steals the key from whoever held it.
+    const next = { piano: { ...jamKeymap.piano }, pads: { ...jamKeymap.pads } };
+    for (const [slot, held] of Object.entries(next[cap.kind])) if (held === key) delete next[cap.kind][Number(slot)];
+    next[cap.kind][cap.index] = key;
+    jamKeymap = next;
+    keymapCapture = null;
+    saveJamKeymap();
+  }
+  function keymapReset() {
+    jamKeymap = { piano: {}, pads: {} };
+    keymapCapture = null;
+    saveJamKeymap();
+  }
+  // --- Knobs: small-space value entry the pads screenshotted feedback asked for. Grab and drag
+  // up/right to raise (Shift = fine), wheel steps, arrows step when focused. One drag at a time.
+  type JamKnobBinding = { label: string; value: number; min: number; max: number; disp: string; set: (v: number) => void };
+  let jamKnobDrag: { bind: JamKnobBinding; startX: number; startY: number; startVal: number } | null = null;
+  function jamKnobDown(e: PointerEvent, bind: JamKnobBinding) {
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    jamKnobDrag = { bind, startX: e.clientX, startY: e.clientY, startVal: bind.value };
+  }
+  function jamKnobMove(e: PointerEvent) {
+    const drag = jamKnobDrag;
+    if (!drag) return;
+    e.preventDefault();
+    const px = (drag.startY - e.clientY) + (e.clientX - drag.startX);
+    const range = drag.bind.max - drag.bind.min;
+    const sweep = e.shiftKey ? 1200 : 170; // pixels for a full sweep; Shift is the fine grip
+    const raw = drag.startVal + (px / sweep) * range;
+    drag.bind.set(Math.min(drag.bind.max, Math.max(drag.bind.min, Math.round(raw))));
+  }
+  function jamKnobUp() {
+    jamKnobDrag = null;
+  }
+  function jamKnobStep(bind: JamKnobBinding, direction: number, fine: boolean) {
+    const step = fine ? 1 : Math.max(1, Math.round((bind.max - bind.min) / 60));
+    bind.set(Math.min(bind.max, Math.max(bind.min, bind.value + direction * step)));
+  }
+  // --- Saved patches: the local library behind the tiles. Same validator as every other source.
+  function loadJamSaved(): { name: string; patch: JamPatch }[] {
+    try {
+      const raw = JSON.parse(localStorage.getItem("catcoms.jam.saved.v1") ?? "[]");
+      if (!Array.isArray(raw)) return [];
+      const out: { name: string; patch: JamPatch }[] = [];
+      for (const entry of raw.slice(0, 12)) {
+        const name = typeof entry?.name === "string" ? entry.name.slice(0, 12) : "";
+        const checked = validateJamPatch(entry?.patch);
+        if (name && checked.ok && !out.some((s) => s.name === name)) out.push({ name, patch: checked.patch });
+      }
+      return out;
+    } catch { return []; }
+  }
+  let jamSaved = $state(loadJamSaved());
+  let jamSaveName = $state("");
+  let jamCustomOpen = $state(false); // saved patches expand DOWN, never off the row's right edge
+  function jamSavePatch() {
+    if (!myPatch) return;
+    const checked = validateJamPatch(JSON.parse(JSON.stringify(myPatch)));
+    if (!checked.ok) return;
+    const name = (jamSaveName.trim() || `PATCH ${jamSaved.length + 1}`).slice(0, 12).toUpperCase();
+    jamSaved = [...jamSaved.filter((s) => s.name !== name), { name, patch: checked.patch }].slice(-12);
+    try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
+    jamSaveName = "";
+    myPatchName = name;
+    jamCustomOpen = true; // show the tile it just became
+    jamPatchDirty();
+  }
+  function jamDeleteSaved(name: string) {
+    jamSaved = jamSaved.filter((s) => s.name !== name);
+    try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
+    if (myPatchName === name) myPatchName = "CUSTOM"; // the sound keeps playing; only the label detaches
+  }
+  // --- Takes: bounded ephemeral event-log recording (jam-recorder.ts owns every rule). Consent
+  // is honest-client coordination riding the state heartbeat (`rec` what I do, `rc` what I allow);
+  // the recorder starts only when EVERY participant's rc says yes, and an old build that cannot
+  // even display the banner never consents, so it can never be recorded by this client.
+  let jamRec = $state<JamTakeRecorder | null>(null);
+  // Consent pauses retain this original time origin so resumed events cannot move backward.
+  let jamRecTimeline: JamRecorderTimeline = { startMs: null };
+  let jamRecUi = $state<"off" | "arming" | "recording" | "paused">("off");
+  let jamRecConsent = $state(false); // my rc: sticky for this call until I toggle it
+  let jamRecGaps = $state(0);
+  let jamRecClock = $state(0); // seconds, for the banner; a 1s ticker while the recorder lives
+  let jamRecTimer: ReturnType<typeof setInterval> | undefined;
+  let jamTakes = $state<{ id: number; take: JamTake; gaps: number }[]>([]); // ephemeral: dies with the call
+  let jamTakeSeq = 0;
+  let jamTakesOpen = $state(false); // the fold: recording is loud, the machinery is quiet
+  // Recorder recipe lookup is capability-scoped directly into the engine's validated LRU. A
+  // second cache here would eventually disagree about which four recipes remain renderable.
+  function myRecWire(): number {
+    return jamRecUi === "recording" ? 2 : jamRecUi === "off" ? 0 : 1;
+  }
+  function jamRecParticipants(): string[] {
+    return [callSelfFp, ...callParticipants.filter((fp) => fp !== callSelfFp)];
+  }
+  function jamRecArm() {
+    if (!inCall || jamRec || !callSelfFp) return;
+    try {
+      jamRec = new JamTakeRecorder({
+        groupId: `${callServer ?? "?"}`,
+        callId: callChannel || "?",
+        bpm: jamMetUi?.bpm ?? jamMetBpm,
+        beatsPerBar: jamMetUi?.bpb ?? jamMetBpb,
+        participants: jamRecParticipants(),
+      });
+    } catch { return; /* over the participant cap, or no call identity */ }
+    jamRecGaps = 0;
+    jamRecClock = 0;
+    jamRecTimeline = { startMs: null };
+    jamRecConsent = true; // arming a take is consenting to be on it
+    jamRec.setConsent(callSelfFp, true);
+    for (const fp of callParticipants) if (peerMeta[fp]?.rc) jamRec.setConsent(fp, true);
+    clearInterval(jamRecTimer);
+    jamRecTimer = setInterval(() => {
+      if (jamRecUi === "recording") {
+        const elapsedMs = jamRecorderTimelineMs(jamRecTimeline, performance.now());
+        jamRecClock = Math.floor(elapsedMs / 1000);
+        if (elapsedMs > TAKE_MAX_DURATION_MS) jamRecFinish(true);
+      }
+    }, 1000);
+    jamTakesOpen = true;
+    syncJamRec();
+  }
+  function syncJamRec() {
+    const rec = jamRec;
+    if (!rec) {
+      if (jamRecUi !== "off") { jamRecUi = "off"; pushInstState(); }
+      return;
+    }
+    if (rec.state() === "arming" && rec.ready() && rec.start()) {
+      jamRecTimeline = startJamRecorderTimeline(jamRecTimeline, performance.now());
+    }
+    const s = rec.state();
+    const ui = s === "recording" ? "recording" : s === "paused-membership" ? "paused" : "arming";
+    if (ui !== jamRecUi) {
+      jamRecUi = ui;
+      pushInstState(); // the room sees arming/recording/paused move, not just this screen
+    }
+  }
+  function jamRecFinish(keep: boolean) {
+    const rec = jamRec;
+    if (!rec) return;
+    const take = rec.stop();
+    jamRec = null;
+    jamRecTimeline = { startMs: null };
+    clearInterval(jamRecTimer);
+    jamRecTimer = undefined;
+    if (keep && take.events.length) {
+      // Trim the lead-in: time is stamped from the REC press, so waiting before playing left
+      // seconds of dead air at the front of every take: silent "broken" jukebox playback and
+      // rows of empty lead bars on the sheet. A 300ms pickup survives; the music starts where
+      // the music starts. Events are sorted, so the first one is the earliest.
+      const lead = Math.max(0, (take.events[0]?.ms ?? 0) - 300);
+      const trimmed = lead
+        ? { ...take, events: take.events.map((event) => ({ ...event, ms: event.ms - lead })) }
+        : take;
+      jamTakeSeq += 1;
+      jamTakes = [...jamTakes, { id: jamTakeSeq, take: trimmed, gaps: jamRecGaps }];
+    }
+    jamRecUi = "off";
+    pushInstState();
+  }
+  function toggleJamConsent() {
+    jamRecConsent = !jamRecConsent;
+    // Our own consent is part of the recorder's gate, not merely a wire/UI flag. Withdrawal must
+    // stop append admission synchronously before any later local or remote event reaches it.
+    if (applyJamRecorderConsent(jamRec, callSelfFp, jamRecConsent)) syncJamRec();
+    pushInstState();
+  }
+  function jamRecMembership() {
+    jamRec?.membershipChanged(jamRecParticipants());
+    syncJamRec();
+  }
+  function jamRecMs(): number {
+    return jamRecorderTimelineMs(jamRecTimeline, performance.now());
+  }
+  function jamRecGap(result: { ok: boolean } & Record<string, unknown>) {
+    if (result.ok && result.gap) jamRecGaps += 1;
+  }
+  function fmtTakeClock(seconds: number): string {
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+  // Everyone armed, asking, or rolling right now: the honesty surface both call surfaces render
+  // whether or not any drawer or fold is open.
+  let jamRecActive = $derived.by(() => {
+    const rows: { fp: string; rec: number }[] = [];
+    if (jamRecUi !== "off") rows.push({ fp: "me", rec: myRecWire() });
+    for (const [fp, st] of Object.entries(peerMeta)) if (st.rec) rows.push({ fp, rec: st.rec });
+    return rows;
+  });
+  // --- Take playback: local synthesis through the same engine and gates as live playing. Every
+  // lane becomes a synthetic engine source (NUL in the id: no fingerprint can collide), patches
+  // re-validate and re-hash before installing, and nothing is ever re-broadcast. One scheduler
+  // serves both owners: a take-row press (id set, plays from 0) and the jukebox deck (deckCid
+  // set, starts at the room's offset; only the DJ moves the room on when it runs out).
+  let jamPlay: {
+    id: number | null;
+    deckCid: string | null;
+    take: JamTake;
+    chans: (JamSourceChannel | null)[];
+    patches: JamPlaybackPatchSet;
+    startMs: number;
+    baseMs: number;
+    next: number;
+    timer: ReturnType<typeof setInterval>;
+    catchupTimer: ReturnType<typeof setTimeout> | undefined;
+    endTimer: ReturnType<typeof setTimeout> | undefined;
+    draining: boolean;
+    /** Latest take time covered by a Deafen interval; delayed attacks through here stay dropped. */
+    dropAttacksThroughMs: number;
+    done: boolean;
+  } | null = null;
+  let jamPlayingId = $state<number | null>(null);
+  let jamPlayGen = 0; // the installs below await; only the newest press may seat itself
+  let jamPlaybackPreparationQueue = new JamLatestTaskQueue<JamPlaybackPatchSet | null>();
+  let jamPendingPlay: { gen: number; id: number | null; deckCid: string | null } | null = null;
+  function jamDeckPlaybackCid(): string | null {
+    return jamPlay?.deckCid ?? jamPendingPlay?.deckCid ?? null;
+  }
+  function takeEndMs(take: JamTake): number {
+    return take.events[take.events.length - 1]?.ms ?? 0;
+  }
+  async function jamStartTakePlayback(take: JamTake, offsetMs: number, localId: number | null, deckCid: string | null) {
+    jamStopPlayback();
+    const gen = jamPlayGen;
+    jamPendingPlay = { gen, id: localId, deckCid };
+    const engine = ensureJamEngine();
+    // A local take-row press is a gesture. Shared deck state is remote-controlled and may never
+    // resume audio or queue work into a suspended context on its own.
+    if (!takePlaybackIsRemote(deckCid) && engine.context.state === "suspended") {
+      void engine.context.resume().catch(() => { /* next local gesture */ });
+    }
+    const patches = await jamPlaybackPreparationQueue.submit(() => engine.preparePlaybackPatches(
+      take.patches,
+      () => gen === jamPlayGen && jamEngine === engine,
+      { callId: take.call, sources: take.parts },
+    ));
+    if (gen !== jamPlayGen || !patches) {
+      if (jamPendingPlay?.gen === gen) jamPendingPlay = null;
+      return;
+    }
+    const chans = take.lanes.map((lane, index) => {
+      // The lane name owns sequencing/lifecycle; the opaque patch set binds every reconnect lane
+      // back to its original participant for allocator fairness, hat choke and drum seed material.
+      const chan = engine.openPlaybackSource(`take\u0000${index}`, patches, lane.src);
+      if (!chan) return null;
+      const opened = lane.sn === JAM_LEGACY_SESSION_NONCE
+        ? engine.beginLegacySourceSession(chan)
+        : engine.beginSourceSession(chan, lane.sn);
+      return opened ? chan : null;
+    });
+    // Cleanup is capability-scoped. A later playback reuses these source names, so stale async
+    // work must be unable to remove the newer generation when it finally resumes.
+    const abandon = () => {
+      for (const chan of chans) if (chan) engine.removeChannel(chan);
+      if (jamPendingPlay?.gen === gen) jamPendingPlay = null;
+    };
+    if (gen !== jamPlayGen) { abandon(); return; }
+    // Patch-table preparation yields to WebCrypto. Read jukeVol only after that await so a slider
+    // move during loading cannot leave this take at the stale level captured when loading began.
+    // No take graph is constructed until jamPlayTick below, so every lane is gated first.
+    if (deckCid) {
+      const live = jukeNow;
+      if (!live || live.cid !== deckCid || live.paused || jukeStale) {
+        // Retire this still-current lease before releasing its channels. A late continuation must
+        // not be able to seat itself after pause, track replacement, DJ expiry, or call teardown.
+        if (gen === jamPlayGen) jamPlayGen += 1;
+        abandon();
+        return;
+      }
+      for (const chan of chans) if (chan) engine.setSourceLevel(chan.source, jukeVol);
+    }
+    const baseMs = Math.max(0, offsetMs);
+    const firstDue = take.events.findIndex((event) => event.ms >= baseMs);
+    jamPlay = {
+      id: localId,
+      deckCid,
+      take,
+      chans,
+      patches,
+      startMs: performance.now(),
+      baseMs,
+      next: firstDue === -1 ? take.events.length : firstDue,
+      timer: setInterval(() => { void jamPlayTick(); }, 40),
+      catchupTimer: undefined,
+      endTimer: undefined,
+      draining: false,
+      dropAttacksThroughMs: -1,
+      done: false,
+    };
+    jamPendingPlay = null;
+    jamPlayingId = localId;
+    void jamPlayTick();
+  }
+  function jamPlayTake(entry: { id: number; take: JamTake }) {
+    void jamStartTakePlayback(entry.take, 0, entry.id, null);
+  }
+  function jamPlayElapsed(): number {
+    return jamPlay ? jamPlay.baseMs + (performance.now() - jamPlay.startMs) : 0;
+  }
+  async function jamPlayTick() {
+    const pl = jamPlay;
+    const engine = jamEngine;
+    if (!pl || !engine) { jamStopPlayback(); return; }
+    if (pl.draining) return;
+    pl.draining = true;
+    try {
+      const elapsed = jamPlayElapsed();
+      const batchEnd = takeDueBatchEnd(pl.take.events, pl.next, elapsed);
+      while (pl.next < batchEnd) {
+        const event = pl.take.events[pl.next];
+        pl.next += 1;
+        // Deafen drops new attacks but note-offs still close voices that began before its master
+        // gate shut; otherwise those obsolete notes would resurrect when the gate reopened.
+        if (!shouldDispatchTakeEvent(
+          event,
+          callDeafened || event.ms <= pl.dropAttacksThroughMs,
+        )) continue;
+        const chan = pl.chans[event.lane];
+        if (!chan) continue;
+        const lane = pl.take.lanes[event.lane];
+        const remote = takePlaybackIsRemote(pl.deckCid);
+        if ("d" in event) {
+          // Backpressure is part of playback correctness: advancing through a dense take without
+          // awaiting its seed would fill the bounded digest lane and silently lose valid hits.
+          await engine.drum(
+            { callId: pl.take.call, channel: chan, sessionNonce: lane.sn, sequence: event.q, pad: event.n, remote },
+            { patches: pl.patches, part: lane.src },
+          );
+          if (jamPlay !== pl || jamEngine !== engine) return;
+        } else if (event.on === 1) {
+          engine.noteOn(
+            { channel: chan, sequence: event.q, note: event.n, wave: event.w, remote },
+            event.p === undefined ? undefined : { patches: pl.patches, index: event.p },
+          );
+        } else {
+          engine.noteOff({ channel: chan, sequence: event.q, note: event.n });
+        }
+      }
+      if (
+        pl.next < pl.take.events.length && pl.take.events[pl.next].ms <= elapsed &&
+        pl.catchupTimer === undefined
+      ) {
+        // Yield between dense/seek catch-up batches. One zero-delay continuation is enough; the
+        // ordinary interval remains the fallback if the platform clamps timers.
+        pl.catchupTimer = setTimeout(() => {
+          if (jamPlay !== pl) return;
+          pl.catchupTimer = undefined;
+          void jamPlayTick();
+        }, 0);
+      }
+      if (pl.next >= pl.take.events.length && !pl.done && elapsed >= takeEndMs(pl.take)) {
+        pl.done = true;
+        clearInterval(pl.timer);
+        // A take may end while a key is still held. Enter its ordinary envelope release now; simply
+        // retaining the channel would sustain for the whole wait and then hard-cut at teardown.
+        for (const chan of pl.chans) if (chan) engine.releaseChannelHeld(chan);
+        // Keep the transport on this take until its longest permitted release/drum tail has rung.
+        // A listener retains the done marker until the DJ advances, preventing heartbeat-driven
+        // restarts; local previews simply tear down when their bounded tail ends.
+        pl.endTimer = setTimeout(() => {
+          if (jamPlay !== pl) return;
+          if (pl.deckCid) {
+            if (jukeIsDj() && jukeNow?.cid === pl.deckCid) jukeAdvance(true);
+          } else {
+            jamStopPlayback();
+          }
+        }, takeReleaseTailMs(pl.take));
+      }
+    } finally {
+      pl.draining = false;
+    }
+  }
+  function jamStopPlayback() {
+    // Invalidate pending setup even when no playback has seated yet. Patch hashing/installing is
+    // async, and a stop, replacement, or leave must win that race deterministically.
+    jamPlayGen += 1;
+    jamPendingPlay = null;
+    const pl = jamPlay;
+    jamPlay = null;
+    jamPlayingId = null;
+    if (!pl) return;
+    clearInterval(pl.timer);
+    clearTimeout(pl.catchupTimer);
+    clearTimeout(pl.endTimer);
+    for (const chan of pl.chans) if (chan) jamEngine?.removeChannel(chan);
+  }
+  function pad2(value: number): string {
+    return String(value).padStart(2, "0");
+  }
+  // Sheet music: the honest transcript (jam-sheet.ts states its own limits) rendered here and
+  // saved by a command that only accepts this exporter's own output shape.
+  async function jamExportSheet(entry: { id: number; take: JamTake }) {
+    const names = entry.take.parts.map((fp) => (fp === callSelfFp ? "you" : nameOf(fp)));
+    const now = new Date();
+    const name = `mewtual-take-${pad2(entry.id)}-${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}.svg`;
+    try {
+      const svg = jamTakeSheetSvg(entry.take, names, `take ${pad2(entry.id)} · ${callChannelName || "jam"}`);
+      const saved = await invoke<{ path: string; displayed: boolean; warning?: string }>("save_jam_sheet", { name, svg });
+      toast(saved.displayed ? "Sheet music saved to your Downloads folder" : `Sheet music saved to ${saved.path}`, saved.displayed ? "ok" : "info", 6000);
+      if (saved.warning) toast(saved.warning, "info", 7000);
+    } catch (e) {
+      toast(`Could not export sheet music: ${String(e)}`, "err", 8000);
+    }
+  }
+  // A .jamtake in the share is the take's JSON, sealed like any file and replayed by the jukebox
+  // through everyone's own synth. The upload path is the ACTIVE server's, so the one guard is
+  // that the user is looking at the call's server rather than silently sealing into another.
+  async function jamShareTake(entry: { id: number; take: JamTake }) {
+    if (callServer === null) return;
+    if (activeServerId !== callServer) {
+      toast("Switch to the call's server first: the take belongs in that share", "info", 6000);
+      return;
+    }
+    const name = `take-${pad2(entry.id)}${JAM_TAKE_EXT}`;
+    const tid = toast(`Sealing ${name} into the share…`, "info", 0);
+    try {
+      const payload = new File([JSON.stringify(entry.take)], name, { type: JAM_TAKE_MIME });
+      await addSharedFile(payload, "", name, JAM_TAKE_MIME);
+      updateToast(tid, `${name} saved to the share; the jukebox can queue it (normal expiry applies)`, "ok");
+      void refreshFiles();
+      void refreshCallFiles();
+    } catch (e) {
+      updateToast(tid, `Could not save ${name}: ${errorText(e)}`, "err", 9000);
+    }
+  }
+  function jamDiscardTake(id: number) {
+    if (jamPlayingId === id || jamPendingPlay?.id === id) jamStopPlayback();
+    jamTakes = jamTakes.filter((t) => t.id !== id);
+  }
+  function takePlayers(take: JamTake): string {
+    const sources = [...new Set(take.lanes.map((lane) => take.parts[lane.src]))];
+    return sources.map((fp) => (fp === callSelfFp ? "you" : nameOf(fp))).join(" · ") || "nobody";
+  }
+  function takeDuration(take: JamTake): number {
+    return Math.ceil((take.events[take.events.length - 1]?.ms ?? 0) / 1000);
+  }
   function loadStreamSettings(): StreamSettings {
     try {
       return parseStreamSettings(JSON.parse(localStorage.getItem("catcoms.call.stream.v1") ?? "{}"));
@@ -10447,7 +11368,7 @@
     try { localStorage.setItem("catcoms.call.receive-resolution", String(receiveResolutionMode)); } catch { /* optional */ }
     pushInstState();
     if (inCall && callServer !== null && callChannel) {
-      broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight });
+      broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: jamRecConsent ? 1 : 0 });
     }
   }
 
@@ -10466,7 +11387,7 @@
         receiveHeight = next;
         pushInstState();
         if (inCall && callServer !== null && callChannel) {
-          broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: next });
+          broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: next, rec: myRecWire(), rc: jamRecConsent ? 1 : 0 });
         }
       }, 180);
     };
@@ -10486,7 +11407,97 @@
   let instRxMuted = $state(loadCallSetting("instrx", "on") === "off"); // true = not hearing instruments
   function setTimbre(w: OscillatorType) {
     myTimbre = w;
+    myPatch = null;
+    myPatchName = "";
+    jamPublicationGeneration.advance();
+    jamEditOpen = false;
     try { localStorage.setItem("catcoms.call.timbre", w); } catch { /* ignore */ }
+    try { localStorage.removeItem("catcoms.jam.patch"); } catch { /* ignore */ }
+    clearTimeout(jamAnnTimer);
+    jamAnnTimer = setTimeout(() => { void publishJamDraft(); }, 400);
+  }
+  function selectJamPreset(name: string, patch: JamPatch) {
+    myPatch = JSON.parse(JSON.stringify(patch)) as JamPatch;
+    myPatchName = name;
+    jamPatchDirty();
+  }
+  function jamPatchDirty() {
+    try { localStorage.setItem("catcoms.jam.patch", JSON.stringify({ name: myPatchName, patch: myPatch })); } catch { /* optional */ }
+    jamPublicationGeneration.advance();
+    clearTimeout(jamAnnTimer);
+    // Receivers cap announces at one per 2s (burst 3): coalesce a slider drag into one announce.
+    jamAnnTimer = setTimeout(() => { void publishJamDraft(); }, 400);
+  }
+  // Editor mutators: every change replaces the whole descriptor (a new object mints a new id at
+  // announce time) and re-runs through the shared validator before it can reach any wire.
+  function jamEditNum(path: "e" | "f" | "l" | "x", key: string, raw: string | number) {
+    if (!myPatch) return;
+    const value = Math.round(Number(raw));
+    if (!Number.isFinite(value)) return;
+    const next = JSON.parse(JSON.stringify(myPatch)) as JamPatch;
+    (next[path] as unknown as Record<string, number>)[key] = value;
+    myPatch = next;
+    myPatchName = "CUSTOM";
+    jamPatchDirty();
+  }
+  function jamEditOsc(index: number, key: "w" | "t" | "c" | "l", raw: string | number) {
+    if (!myPatch || !myPatch.o[index]) return;
+    const value = Math.round(Number(raw));
+    if (!Number.isFinite(value)) return;
+    const next = JSON.parse(JSON.stringify(myPatch)) as JamPatch;
+    next.o[index][key] = value;
+    myPatch = next;
+    myPatchName = "CUSTOM";
+    jamPatchDirty();
+  }
+  function jamOscCount(count: number) {
+    if (!myPatch) return;
+    const next = JSON.parse(JSON.stringify(myPatch)) as JamPatch;
+    while (next.o.length > Math.max(1, count)) next.o.pop();
+    while (next.o.length < Math.min(3, count)) next.o.push({ w: 3, t: 0, c: 0, l: 60 });
+    myPatch = next;
+    myPatchName = "CUSTOM";
+    jamPatchDirty();
+  }
+  // The osc stack as LAYERS (the owner-picked direction): every collapsed layer is a one-line
+  // summary with its level bar, so the blend reads like a little mixer; exactly one layer opens
+  // its controls at a time. Nothing is lost to the fold: wave/semitones/cents/level all live in
+  // the open layer, and the other editor sections are untouched by this.
+  let jamOscOpen = $state<number | null>(0);
+  function jamWaveIndex(wave: OscillatorType): number {
+    return PATCH_OSC_WAVES.indexOf(wave as (typeof PATCH_OSC_WAVES)[number]);
+  }
+  function jamOscTile(w: number): { wave: OscillatorType; label: string; d: string } {
+    const wave = PATCH_OSC_WAVES[w] ?? "sine";
+    return INST_TILES.find((tile) => tile.wave === wave) ?? INST_TILES[0];
+  }
+  function jamOscSummary(osc: JamOsc): string {
+    const parts = [jamOscTile(osc.w).label];
+    if (osc.t !== 0) parts.push(`${osc.t > 0 ? "+" : ""}${osc.t} st`);
+    if (osc.c !== 0) parts.push(`${osc.c > 0 ? "+" : ""}${osc.c} ct`);
+    return parts.join(" · ");
+  }
+  function jamOscAdd() {
+    if (!myPatch || myPatch.o.length >= 3) return;
+    jamOscCount(myPatch.o.length + 1);
+    jamOscOpen = (myPatch?.o.length ?? 1) - 1; // the new layer opens, ready to shape
+  }
+  function jamOscRemove(index: number) {
+    if (!myPatch || myPatch.o.length <= 1) return;
+    const next = JSON.parse(JSON.stringify(myPatch)) as JamPatch;
+    next.o.splice(index, 1);
+    myPatch = next;
+    myPatchName = "CUSTOM";
+    if (jamOscOpen !== null && jamOscOpen >= next.o.length) jamOscOpen = next.o.length - 1;
+    jamPatchDirty();
+  }
+  function setJamMode(mode: "keys" | "pads") {
+    if (mode === jamMode) return;
+    // Release under the OLD routing rule. Switching while a MIDI key or pedal is down must not
+    // leave a piano voice held merely because its eventual note-off is now routed to a one-shot.
+    releaseMidiNotes();
+    jamMode = mode;
+    try { localStorage.setItem("catcoms.call.jammode", mode); } catch { /* ignore */ }
   }
   // Per-peer voice volume (0..1), remembered per fingerprint.
   let peerVolumes = $state<Record<string, number>>({});
@@ -10515,25 +11526,30 @@
   }
   function toggleDeafen() {
     callDeafened = !callDeafened;
+    // Both edges delimit a new admission epoch: frames received before or during Deafen stay
+    // silent if an async queue drains after audio has been reopened.
+    jamRoomRenderGeneration += 1;
+    // A digest may keep the take drain busy across a fast on→off cycle. Mark the whole interval
+    // on both edges so attacks due inside it remain suppressed after reopen; note-offs still run.
+    if (jamPlay) jamPlay.dropAttacksThroughMs = Math.max(jamPlay.dropAttacksThroughMs, jamPlayElapsed());
     for (const fp of Object.keys(callPeers)) {
       const el = document.getElementById(`call-audio-${fp}`) as HTMLAudioElement | null;
       if (el) el.muted = callDeafened || !!voiceMutedPeers[fp];
     }
     if (jukeAudio) jukeAudio.muted = callDeafened; // the deck is part of "everyone", not an exception
+    // Deafen is one hard room gate: it cancels lookahead clicks and releases every engine voice,
+    // including local previews, so no retained tail can emerge when the master reopens.
+    if (callDeafened && synthCtx) {
+      jamClickPlayer.cancel(synthCtx);
+      jamCallCuePlayer.cancel(synthCtx);
+    }
+    jamEngine?.setDeafened(callDeafened);
     if (callDeafened && !callMuted) toggleMute(); // deafened implies not transmitting either
   }
-  // Note-on flood control: a token bucket per peer (~30 events/s with a small burst). Only
-  // note-ONS spend tokens; note-offs always land, so a throttled peer can never strand a drone.
-  const instBudget: Record<string, { tokens: number; last: number }> = {};
-  function instAllow(fp: string): boolean {
-    const now = performance.now();
-    const b = (instBudget[fp] ??= { tokens: 60, last: now });
-    b.tokens = Math.min(60, b.tokens + ((now - b.last) / 1000) * 30);
-    b.last = now;
-    if (b.tokens < 1) return false;
-    b.tokens -= 1;
-    return true;
-  }
+  // Flood control moved into jam-wire.ts: a pre-parse all-frame budget (1024-byte cap, 80/s),
+  // the musical note-on bucket (30/s, offs never charged), and a sustained-abuse auto-mute. One
+  // call-epoch JamPeerBudget survives reconnect while each channel generation gets a decoder; see
+  // createPeer. A decoder may recover one exact previously verified recipe without fresh tokens.
   // Which video slot I am filling, in the wire's own vocabulary. One function, because the same
   // number has to go out on the data channel AND on every room heartbeat: a heartbeat that omits
   // it is read as a retraction by the peer that folds it in.
@@ -10547,6 +11563,8 @@
       inst: instRxMuted ? 1 : 0,
       vid: myVid(),
       rx: receiveHeight,
+      rec: myRecWire(),
+      rc: jamRecConsent ? 1 : 0,
     });
   }
   function pushInstState() {
@@ -10554,78 +11572,463 @@
       if (p.dc?.readyState === "open") { try { p.dc.send(instState()); } catch { /* edge gone */ } }
     }
   }
-  function handleInstMsg(fp: string, raw: unknown) {
-    if (typeof raw !== "string" || raw.length > 200) return;
-    let m: Record<string, unknown>;
-    try { m = JSON.parse(raw) as Record<string, unknown>; } catch { return; }
-    if (m.t === "s") {
-      const before = peerMeta[fp];
-      const after = mergePeerState(before, m);
-      peerMeta = { ...peerMeta, [fp]: after };
-      if (after.rx !== before?.rx && myVideo === "screen") {
-        const sender = callPeers[fp]?.vidSender;
-        if (sender) void capVideo(sender, "screen", fp);
+  function handleInstState(fp: string, m: Record<string, unknown>) {
+    if (m.t !== "s") return; // unknown extension frames: paid for by the budget, then ignored
+    const before = peerMeta[fp];
+    const after = mergePeerState(before, m);
+    peerMeta = { ...peerMeta, [fp]: after };
+    if (after.rx !== before?.rx && myVideo === "screen") {
+      const sender = callPeers[fp]?.vidSender;
+      if (sender) void capVideo(sender, "screen", fp);
+    }
+    if (jamRec) { jamRec.setConsent(fp, after.rc); syncJamRec(); }
+  }
+  // One authenticated peer's frame. The decoder charges budgets BEFORE parsing; the engine then
+  // re-checks the closed-over channel capability, so authority is never reconstructed from a
+  // frame field or a bare fingerprint.
+  type JamQueuedAdmission = Readonly<{
+    roomGeneration: number;
+    sourceGeneration: number;
+    recorderLease: JamRecorderLease | null;
+  }>;
+  function handleJamFrame(fp: string, chan: JamSourceChannel, dec: JamFrameDecoder, raw: unknown) {
+    const engine = jamEngine;
+    if (!engine || !engine.sourceChannels.isCurrent(chan)) return; // a replaced generation's echo
+    const res = dec.decode(raw, performance.now());
+    if (dec.budget.isAbuseMuted() && !jamAbuseMuted[fp]) {
+      jamAbuseMuted = { ...jamAbuseMuted, [fp]: true };
+      jamApplyMutes(fp);
+      clearPeerJamUi(fp);
+    }
+    if (!res.ok) {
+      return;
+    }
+    if (res.kind === "other") {
+      handleInstState(fp, res.value);
+      return;
+    }
+    const musical = res.kind === "legacy-note" || res.message.t === "n" || res.message.t === "d";
+    const admission: JamQueuedAdmission = {
+      roomGeneration: jamRoomRenderGeneration,
+      sourceGeneration: jamSourceRenderGeneration[fp] ?? 0,
+      // Consent and event time are receipt properties. A later queue/digest completion may not
+      // borrow a restarted recording interval from this same recorder object.
+      recorderLease: musical ? captureJamRecorderLease(jamRec, jamRec ? jamRecMs() : 0) : null,
+    };
+    const queue = jamPeerInbound[fp] ??= new JamCausalQueue(JAM_INBOUND_PENDING_MAX);
+    void queue.enqueue(() => processJamFrame(fp, chan, dec, res, admission)).catch((cause) => {
+      if (cause instanceof JamCausalQueueOverflow && !jamAbuseMuted[fp]) {
+        jamAbuseMuted = { ...jamAbuseMuted, [fp]: true };
+        jamApplyMutes(fp);
+        clearPeerJamUi(fp);
+      }
+      // A rejected digest/frame never wedges later ordered work.
+    });
+  }
+  async function processJamFrame(
+    fp: string,
+    chan: JamSourceChannel,
+    dec: JamFrameDecoder,
+    res: Extract<JamFrameDecode, { ok: true }>,
+    admission: JamQueuedAdmission,
+  ) {
+    const engine = jamEngine;
+    if (!engine || !engine.sourceChannels.isCurrent(chan) || res.kind === "other") return;
+    const render = admission.roomGeneration === jamRoomRenderGeneration &&
+      admission.sourceGeneration === (jamSourceRenderGeneration[fp] ?? 0);
+    if (res.kind === "legacy-note") {
+      // An exact pre-v2 build: the decoder minted receive-only sequencing, the engine binds the
+      // reserved legacy nonce to this authenticated generation. Their four waves render as ever.
+      engine.beginLegacySourceSession(chan);
+      const m = res.message;
+      if (m.on === 1) {
+        const played = engine.noteOn({ channel: chan, sequence: m.q, note: m.n, wave: m.w, remote: true, render });
+        if (!jamSequenceAccepted(played)) return;
+        uiNoteOn(fp, m.n);
+        const recorded = recordLeasedJamNoteOn(jamRec, admission.recorderLease, {
+          source: fp, sessionNonce: JAM_LEGACY_SESSION_NONCE, sequence: m.q, note: m.n, wave: m.w,
+        });
+        if (recorded) jamRecGap(recorded);
+      } else {
+        const played = engine.noteOff({ channel: chan, sequence: m.q, note: m.n });
+        if (!jamSequenceAccepted(played)) return;
+        uiNoteOff(fp, m.n);
+        const recorded = recordLeasedJamNoteOff(jamRec, admission.recorderLease, {
+          source: fp, sessionNonce: JAM_LEGACY_SESSION_NONCE, sequence: m.q, note: m.n,
+        });
+        if (recorded) jamRecGap(recorded);
       }
       return;
     }
-    if (m.t !== "n") return;
-    const note = m.n;
-    if (typeof note !== "number" || !Number.isInteger(note) || note < 0 || note > 127) return;
-    const held = remoteHeld[fp] ?? [];
-    if (m.on === 1) {
-      // Polyphony cap: past 16 held notes this is spam, not music.
-      if (held.includes(note) || held.length >= 16 || !instAllow(fp)) return;
-      remoteHeld = { ...remoteHeld, [fp]: [...held, note] };
-      const w = INST_WAVES.includes(m.w as OscillatorType) ? (m.w as OscillatorType) : "triangle";
-      remoteWave[fp] = w;
-      if (!instRxMuted && !instMutedPeers[fp]) startTone(note, fp, w, 0.12);
-    } else {
-      if (!held.includes(note)) return;
-      remoteHeld = { ...remoteHeld, [fp]: held.filter((n) => n !== note) };
-      stopTone(note, fp);
+    const m = res.message;
+    if (m.t === "n") {
+      if (m.on === 1) {
+        const played = engine.noteOn({ channel: chan, sequence: m.q, note: m.n, wave: m.w, patchId: m.p, remote: true, render });
+        // Muted/suspended playback remains visibly attributable, but replayed or stale sequence
+        // numbers cannot forge UI held state or enter the recorder.
+        if (!jamSequenceAccepted(played)) return;
+        uiNoteOn(fp, m.n);
+        if (jamPeerSn[fp]) {
+          const recorded = recordLeasedJamNoteOn(jamRec, admission.recorderLease, {
+            source: fp,
+            sessionNonce: jamPeerSn[fp],
+            sequence: m.q,
+            note: m.n,
+            wave: m.w,
+            // The engine's validated LRU is the sole recipe authority. A duplicated shadow LRU
+            // used to drift after cache touches and could record a different patch than rendered.
+            patch: m.p ? engine.patchForRecording(chan, m.p) : undefined,
+          });
+          if (recorded) jamRecGap(recorded);
+        }
+      } else {
+        const played = engine.noteOff({ channel: chan, sequence: m.q, note: m.n });
+        if (!jamSequenceAccepted(played)) return;
+        uiNoteOff(fp, m.n);
+        if (jamPeerSn[fp]) {
+          const recorded = recordLeasedJamNoteOff(jamRec, admission.recorderLease, {
+            source: fp, sessionNonce: jamPeerSn[fp], sequence: m.q, note: m.n,
+          });
+          if (recorded) jamRecGap(recorded);
+        }
+      }
+    } else if (m.t === "d") {
+      const sn = jamPeerSn[fp];
+      if (!sn) return; // drums need the announce-carried session nonce first (ordered channel)
+      const played = await engine.drum({
+        callId: jamCallId(), channel: chan, sessionNonce: sn, sequence: m.q, pad: m.n, remote: true, render,
+      });
+      if (!engine.sourceChannels.isCurrent(chan)) return;
+      if (!jamSequenceAccepted(played)) return;
+      flashPad(m.n, fp);
+      const recorded = recordLeasedJamDrum(jamRec, admission.recorderLease, {
+        source: fp, sessionNonce: sn, sequence: m.q, pad: m.n,
+      });
+      if (recorded) jamRecGap(recorded);
+    } else if (m.t === "p") {
+      const installed = res.verifiedReannounce
+        ? engine.installVerifiedReannounce(chan, m.sn, m.id, m.d)
+        : await engine.installPatch(chan, m.sn, m.id, m.d);
+      if ((installed !== "installed" && installed !== "cached") || !engine.sourceChannels.isCurrent(chan)) return;
+      // Only the engine's successful full hash (or an exact prior verification) may update the
+      // persistent call-epoch recipe used by a later channel's one reconnect exception.
+      dec.confirmInstalledPatch(m);
+      jamPeerSn[fp] = m.sn;
+    } else if (m.t === "m") {
+      // Anchor ownership, revision ordering and the 2s revision floor all live in jam-clock.ts;
+      // this only starts/stops the local scheduling pass on what it accepted.
+      const result = ensureJamMet().receive(chan, m, performance.now());
+      if (result === "started" || result === "updated") startJamMetTimer();
+      else if (result === "stopped") {
+        jamMetUi = null;
+        stopJamMetTimer();
+      }
+    } else if (m.t === "c") {
+      if ("q" in m) {
+        // A probe: answer with our receive time immediately, to the probing edge only. Issuance
+        // was charged by the decoder's clock bucket; replies are correlation-checked at their end.
+        const p = callPeers[fp];
+        if (p?.dc?.readyState === "open") {
+          try { p.dc.send(JSON.stringify({ t: "c", r: m.q, tx: m.tx, rx: performance.now() })); } catch { /* edge gone */ }
+        }
+      } else {
+        // A reply: only meaningful against a probe THIS side issued toward that peer.
+        const sample = jamProbes[fp]?.accept(m, performance.now());
+        if (sample) (jamClockSyncs[fp] ??= new JamClockSync()).add(sample);
+      }
     }
   }
-  // My side: sound locally, then fan the event out to every open channel.
-  function instSend(note: number, on: boolean) {
-    const msg = JSON.stringify(on ? { t: "n", on: 1, n: note, w: myTimbre } : { t: "n", on: 0, n: note });
+  // My side: ordinary clock/control frames can fan out directly. Notes and drums go through the
+  // publication-aware edge path below so each channel sees the exact prerequisite announce first.
+  function jamBroadcastFrame(msg: string) {
     for (const p of Object.values(callPeers)) {
       if (p.dc?.readyState === "open") { try { p.dc.send(msg); } catch { /* edge gone */ } }
     }
   }
+
+  function sendJamEdgeFrame(dc: RTCDataChannel, frame: string): boolean {
+    if (dc.readyState !== "open") return false;
+    try { dc.send(frame); return true; } catch { return false; }
+  }
+  function jamEdge(dc: RTCDataChannel): JamOutboundEdge {
+    let edge = jamOutboundEdges.get(dc);
+    if (!edge) {
+      edge = new JamOutboundEdge();
+      jamOutboundEdges.set(dc, edge);
+    }
+    return edge;
+  }
+  function publishJamToEdges(publication: PublishedJamPatch) {
+    for (const peer of Object.values(callPeers)) {
+      const dc = peer.dc;
+      if (!dc || dc.readyState !== "open") continue;
+      const edge = jamEdge(dc);
+      // `open` is idempotent. It also closes the initial-session barrier for an edge whose onopen
+      // raced the first local digest; later publications then send immediately.
+      edge.open(publication, (frame) => sendJamEdgeFrame(dc, frame));
+      edge.publication(publication, (frame) => sendJamEdgeFrame(dc, frame));
+    }
+  }
+  function jamBroadcastEvent(publication: PublishedJamPatch, frame: string) {
+    for (const peer of Object.values(callPeers)) {
+      const dc = peer.dc;
+      if (!dc) continue;
+      jamEdge(dc).event(publication, frame, (value) => sendJamEdgeFrame(dc, value));
+    }
+  }
+  function flushPendingJamEvents(publication: PublishedJamPatch) {
+    jamPendingLocalEvents.flush(publication);
+  }
+  function withPublishedJamPatch(event: (publication: PublishedJamPatch, outbound: boolean) => void) {
+    const admission = jamPendingLocalEvents.submit(jamPublishedPatch, event);
+    if (admission === "live") return;
+    if (admission === "overflow") {
+      // No event has reached an unopened edge or the local engine yet. Drop the whole transient
+      // rather than keeping an unbounded queue or retaining note-ons without their note-offs.
+      callHeld = [];
+      return;
+    }
+    void ensurePublishedJamPatch();
+  }
+  function capturedJamDraft(): {
+    generation: number;
+    descriptor: JamPatch;
+    wave: LegacyWave;
+    custom: boolean;
+    engine: JamEngine;
+    channel: JamSourceChannel;
+    sessionNonce: string;
+  } | null {
+    if (!inCall || !jamEngine || !jamSelfChan || !jamMySn) return null;
+    const wave = myTimbre as LegacyWave;
+    const candidate = myPatch ? JSON.parse(JSON.stringify(myPatch)) : legacyJamPatch(wave);
+    const checked = validateJamPatch(candidate);
+    if (!checked.ok) return null;
+    return {
+      generation: jamPublicationGeneration.current(),
+      descriptor: checked.patch,
+      wave,
+      custom: myPatch !== null,
+      engine: jamEngine,
+      channel: jamSelfChan,
+      sessionNonce: jamMySn,
+    };
+  }
+  async function publishJamDraft(): Promise<PublishedJamPatch | null> {
+    const remaining = jamPublicationPacer.remaining(performance.now());
+    if (remaining > 0) {
+      // Coalesce editor churn onto the latest draft at the first receiver-safe instant. New edges
+      // may still receive the current recipe immediately because their decoder budget is fresh.
+      clearTimeout(jamAnnTimer);
+      jamAnnTimer = setTimeout(() => { void publishJamDraft(); }, remaining + 1);
+      return null;
+    }
+    const captured = capturedJamDraft();
+    if (!captured) return null;
+    return jamPublicationQueue.submit(async () => {
+      let id: string;
+      try { id = await jamPatchId(captured.descriptor); } catch { return null; }
+      if (
+        !jamPublicationGeneration.isCurrent(captured.generation) || !inCall ||
+        jamEngine !== captured.engine || jamSelfChan !== captured.channel || jamMySn !== captured.sessionNonce
+      ) return null;
+      if (captured.custom) {
+        const installed = await captured.engine.installPatch(
+          captured.channel,
+          captured.sessionNonce,
+          id,
+          captured.descriptor,
+        );
+        if (installed !== "installed" && installed !== "cached") return null;
+      }
+      if (
+        !jamPublicationGeneration.isCurrent(captured.generation) || !inCall ||
+        jamEngine !== captured.engine || jamSelfChan !== captured.channel || jamMySn !== captured.sessionNonce
+      ) return null;
+      const publishAt = performance.now();
+      const queuedRemaining = jamPublicationPacer.remaining(publishAt);
+      if (queuedRemaining > 0) {
+        clearTimeout(jamAnnTimer);
+        jamAnnTimer = setTimeout(() => { void publishJamDraft(); }, queuedRemaining + 1);
+        return null;
+      }
+      if (!jamPublicationPacer.publish(publishAt)) return null;
+      const announce = JSON.stringify({ t: "p", v: 1, id, sn: captured.sessionNonce, d: captured.descriptor });
+      const publication: PublishedJamPatch = Object.freeze({
+        key: `${captured.sessionNonce}:${id}`,
+        announce,
+        descriptor: captured.descriptor,
+        id,
+        sessionNonce: captured.sessionNonce,
+        wave: captured.wave,
+        custom: captured.custom,
+      });
+      // Publish atomically on this turn: wire announcement, local renderer and recorder events all
+      // begin using this same immutable object only after validation, hashing and install succeed.
+      jamPublishedPatch = publication;
+      publishJamToEdges(publication);
+      flushPendingJamEvents(publication);
+      return publication;
+    });
+  }
+  function ensurePublishedJamPatch(): Promise<PublishedJamPatch | null> {
+    if (jamPublishedPatch) return Promise.resolve(jamPublishedPatch);
+    if (jamEnsurePublication) return jamEnsurePublication;
+    const ensure = (async () => {
+      while (inCall && !jamPublishedPatch) {
+        const attemptedGeneration = jamPublicationGeneration.current();
+        const published = await publishJamDraft();
+        if (published) return published;
+        // A newer editor generation may have invalidated the captured digest. Loop onto that exact
+        // current draft. A same-generation failure is structural/crypto failure and must not spin.
+        if (jamPublicationGeneration.isCurrent(attemptedGeneration) || !capturedJamDraft()) return null;
+      }
+      return jamPublishedPatch;
+    })();
+    jamEnsurePublication = ensure;
+    void ensure.finally(() => { if (jamEnsurePublication === ensure) jamEnsurePublication = null; });
+    return ensure;
+  }
+  async function openJamOutboundEdge(dc: RTCDataChannel) {
+    const publication = await ensurePublishedJamPatch();
+    if (!publication || dc.readyState !== "open") return;
+    jamEdge(dc).open(publication, (frame) => sendJamEdgeFrame(dc, frame));
+  }
+
+  function instSend(
+    publication: PublishedJamPatch,
+    note: number,
+    on: boolean,
+    outbound: boolean,
+  ): number {
+    const q = jamMyQ;
+    jamMyQ += 1;
+    const frame: Record<string, unknown> = on
+      ? { t: "n", on: 1, n: note, w: publication.wave, q }
+      : { t: "n", on: 0, n: note, q };
+    if (on && publication.custom) frame.p = publication.id;
+    if (outbound) jamBroadcastEvent(publication, JSON.stringify(frame));
+    return q;
+  }
+  function renderLocalJamEvent(
+    engine: JamEngine,
+    channel: JamSourceChannel,
+    roomGeneration: number,
+    task: (render: boolean) => unknown | Promise<unknown>,
+  ) {
+    void jamLocalRender.enqueue(
+      () => task(roomGeneration === jamRoomRenderGeneration),
+      () => {
+        // Retire both closures waiting outside the engine and any active local drum digest. The
+        // next human event starts on a fresh queue; old work cannot arrive as a delayed burst.
+        if (jamEngine === engine && jamSelfChan === channel) engine.invalidateChannelRender(channel);
+      },
+    ).catch(() => { /* a render failure is local and the queue remains usable */ });
+  }
   function instNoteOn(note: number) {
-    if (!inCall || callHeld.includes(note)) return;
+    if (!inCall || callHeld.includes(note) || callHeld.length >= 16) return;
     callHeld = [...callHeld, note];
-    startTone(note, "me", myTimbre);
-    instSend(note, true);
+    const recorderLease = captureJamRecorderLease(jamRec, jamRec ? jamRecMs() : 0);
+    const roomGeneration = jamRoomRenderGeneration;
+    withPublishedJamPatch((publication, outbound) => {
+      const engine = jamEngine;
+      const channel = jamSelfChan;
+      if (!inCall || !engine || !channel || publication.sessionNonce !== jamMySn) return;
+      const q = instSend(publication, note, true, outbound);
+      if (callSelfFp) {
+        const recorded = recordLeasedJamNoteOn(jamRec, recorderLease, {
+          source: callSelfFp,
+          sessionNonce: publication.sessionNonce,
+          sequence: q,
+          note,
+          wave: publication.wave,
+          patch: publication.custom ? publication.descriptor : undefined,
+        });
+        if (recorded) jamRecGap(recorded);
+      }
+      renderLocalJamEvent(engine, channel, roomGeneration, (render) => engine.noteOn({
+          channel,
+          sequence: q,
+          note,
+          wave: publication.wave,
+          patchId: publication.custom ? publication.id : undefined,
+          remote: false,
+          render,
+        }));
+    });
   }
   function instNoteOff(note: number) {
     if (!callHeld.includes(note)) return;
     callHeld = callHeld.filter((n) => n !== note);
-    stopTone(note);
-    instSend(note, false);
+    const recorderLease = captureJamRecorderLease(jamRec, jamRec ? jamRecMs() : 0);
+    const roomGeneration = jamRoomRenderGeneration;
+    withPublishedJamPatch((publication, outbound) => {
+      const engine = jamEngine;
+      const channel = jamSelfChan;
+      if (!inCall || !engine || !channel || publication.sessionNonce !== jamMySn) return;
+      const q = instSend(publication, note, false, outbound);
+      if (callSelfFp) {
+        const recorded = recordLeasedJamNoteOff(jamRec, recorderLease, {
+          source: callSelfFp, sessionNonce: publication.sessionNonce, sequence: q, note,
+        });
+        if (recorded) jamRecGap(recorded);
+      }
+      renderLocalJamEvent(engine, channel, roomGeneration, () => engine.noteOff({ channel, sequence: q, note }));
+    });
   }
   function instReleaseAll() {
     for (const n of [...callHeld]) instNoteOff(n);
   }
-  function stopAllFrom(src: string) {
-    for (const k of [...voices.keys()]) {
-      if (k.startsWith(src + ":")) stopTone(Number(k.slice(src.length + 1)), src);
-    }
+  function jamPadHit(pad: number) {
+    if (!inCall || !Number.isInteger(pad) || pad < 0 || pad >= JAM_KIT.length) return;
+    flashPad(pad, "me");
+    const recorderLease = captureJamRecorderLease(jamRec, jamRec ? jamRecMs() : 0);
+    const roomGeneration = jamRoomRenderGeneration;
+    withPublishedJamPatch((publication, outbound) => {
+      const engine = jamEngine;
+      const channel = jamSelfChan;
+      if (!inCall || !engine || !channel || publication.sessionNonce !== jamMySn) return;
+      const q = jamMyQ;
+      jamMyQ += 1;
+      const callId = jamCallId();
+      if (outbound) jamBroadcastEvent(publication, JSON.stringify({ t: "d", n: pad, q }));
+      if (callSelfFp) {
+        const recorded = recordLeasedJamDrum(jamRec, recorderLease, {
+          source: callSelfFp, sessionNonce: publication.sessionNonce, sequence: q, pad,
+        });
+        if (recorded) jamRecGap(recorded);
+      }
+      renderLocalJamEvent(engine, channel, roomGeneration, (render) => engine.drum({
+        callId, channel, sessionNonce: publication.sessionNonce, sequence: q, pad, remote: false, render,
+      }));
+    });
   }
+  // (Remote voices live in jam-engine.ts now; the `voices` map above belongs to the lock synth.)
+  // Mute gates live in the engine now: muting releases that source's voices, unmuting ungates
+  // future events (a held chord does not restart mid-air; it resumes on the next press).
   function toggleInstRx() {
     instRxMuted = !instRxMuted;
     try { localStorage.setItem("catcoms.call.instrx", instRxMuted ? "off" : "on"); } catch { /* ignore */ }
-    for (const [fp, notes] of Object.entries(remoteHeld)) {
-      if (instRxMuted) stopAllFrom(fp);
-      else if (!instMutedPeers[fp]) for (const n of notes) startTone(n, fp, remoteWave[fp] ?? "triangle", 0.12);
-    }
+    for (const fp of Object.keys(callPeers)) jamApplyMutes(fp);
     pushInstState();
   }
   function toggleInstPeer(fp: string) {
-    const muted = !instMutedPeers[fp];
-    instMutedPeers = { ...instMutedPeers, [fp]: muted };
-    if (muted) stopAllFrom(fp);
-    else if (!instRxMuted) for (const n of remoteHeld[fp] ?? []) startTone(n, fp, remoteWave[fp] ?? "triangle", 0.12);
+    const action = toggleJamPeerMute(!!instMutedPeers[fp], !!jamAbuseMuted[fp]);
+    instMutedPeers = { ...instMutedPeers, [fp]: action.manuallyMuted };
+    if (action.forgiveAbuse) {
+      // Flood mute is already the effective ON state shown by the row. One click means unmute:
+      // forgive the budget and clear any stale manual bit rather than requiring a misleading
+      // mute-then-unmute double click.
+      // The call-epoch budget outlives a replaced/closed decoder, so it—not the current decoder
+      // lookup—is the authority the explicit forgiveness gesture must reset.
+      jamPeerBudgets[fp]?.clearAbuseMute();
+      const { [fp]: _a, ...rest } = jamAbuseMuted;
+      jamAbuseMuted = rest;
+    }
+    jamApplyMutes(fp);
+  }
+  function instPeerEffectivelyMuted(fp: string): boolean {
+    return !!instMutedPeers[fp] || !!jamAbuseMuted[fp];
   }
 
   // --- Drawer surface: register, key tinting, edge markers, now-playing ---------------------
@@ -10641,7 +12044,28 @@
   // silently transpose what everyone else in the call is about to receive.
   function setInstOctave(oct: number) {
     instOctave = Math.min(7, Math.max(1, oct));
-    playBlip((instOctave + 1) * 12);
+    if (callDeafened) return;
+    try {
+      synthCtx ??= new AudioContext();
+      const context = synthCtx;
+      const sourceChannel = jamSelfChan;
+      const previewNote = (instOctave + 1) * 12;
+      if (context.state === "running") {
+        jamCallCuePlayer.play(context, previewNote);
+      } else if (context.state === "suspended") {
+        // This branch is reached only from the local register control. Recheck the call identity
+        // and Deafen after the gesture-authorized resume so a late completion cannot leak a cue.
+        const server = callServer;
+        const channel = callChannel;
+        void context.resume().then(() => {
+          if (
+            inCall && !callDeafened && synthCtx === context && context.state === "running" &&
+            callServer === server && callChannel === channel && sourceChannel !== null &&
+            jamSelfChan === sourceChannel
+          ) jamCallCuePlayer.play(context, previewNote);
+        }).catch(() => {});
+      }
+    } catch { /* silent preview is safe */ }
   }
   // The 25 keys on screen; recomputed on every register shift, so nothing may capture the base.
   let instKeys = $derived(Array.from({ length: 25 }, (_, i) => (instOctave + 1) * 12 + i));
@@ -11655,8 +13079,14 @@
     return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.6;
   }
   function setJukeVol(v: number) {
+    if (!Number.isFinite(v)) return;
     jukeVol = Math.min(1, Math.max(0, v));
     if (jukeAudio) jukeAudio.volume = jukeVol;
+    // A .jamtake has no media element: it plays as synthetic per-lane engine sources. Apply the
+    // same slider to those bounded receiver-owned buses without changing live performers' gains.
+    if (jamPlay?.deckCid) {
+      for (const chan of jamPlay.chans) if (chan) jamEngine?.setSourceLevel(chan.source, jukeVol);
+    }
     try { localStorage.setItem("catcoms.call.jukevol", String(jukeVol)); } catch { /* ignore */ }
   }
   // The one deck element, made on first play and appended like the per-peer call audio.
@@ -11725,13 +13155,16 @@
   // play); as a listener it is the DJ's offset aged on my own clock.
   function jukePos(): number {
     if (!jukeAdopted || !jukeNow) return 0;
+    // A take has no element clock: ageing the adopted offset on the local clock is the position
+    // for EVERYONE, the DJ included (the scheduler runs on the same clock, so they agree).
+    const takeOnDeck = jukeKind === "take";
     return deckPosition({
-      isDj: jukeIsDj(),
+      isDj: takeOnDeck ? false : jukeIsDj(),
       paused: jukeNow.paused,
       stale: jukeStale,
       off: jukeAdopted.off,
       since: performance.now() - jukeAdopted.at,
-      element: jukeElOn(jukeNow.cid),
+      element: takeOnDeck ? null : jukeElOn(jukeNow.cid),
     });
   }
   // Where a load should land. The DJ starts exactly where it pressed; a listener has to age that
@@ -11867,6 +13300,10 @@
   }
   function jukeAdopt(seq: number, fromFp: string, entry: string, cid: string, name: string, off: number, paused: boolean) {
     const same = jukeNow?.entry === entry && jukeNow?.cid === cid;
+    const sameDeckLease = same && jukeAdopted?.seq === seq && jukeAdopted.fromFp === fromFp;
+    // A pause/resume, replacement DJ or different track owns a new continuation epoch. The load
+    // coordinator cancels the old native chunk operation before releasing its active slot.
+    if (!sameDeckLease) jukeTakeLoads.invalidate();
     jukeAdopted = { seq, fromFp, off, at: performance.now() };
     jukeHeard = jukeAdopted.at;
     jukeStale = false;
@@ -11893,10 +13330,14 @@
     const server = callServer;
     if (server === null) return;
     const file = callFiles.find((candidate) => candidate.cid === cid);
+    // A .jamtake is our own validated event-log format, replayed through the jam synth rather
+    // than any platform media decoder; it passes the same availability and trust gates first.
+    const isTake = mediaKind(now.name, file?.mime ?? "") === "take";
     const mime = file ? safeMime(file.mime) : "";
-    if (!file || !(mime.startsWith("audio/") || mime.startsWith("video/"))) {
+    if (!file || (isTake && !mayFetchJamTake(file.size)) || (!isTake && !(mime.startsWith("audio/") || mime.startsWith("video/")))) {
       jukeTrustBlocked = "unavailable";
       parkJukeboxMedia();
+      if (jamDeckPlaybackCid()) jamStopPlayback();
       return;
     }
     const approvalKey = scopedMediaKey(server, cid);
@@ -11906,9 +13347,16 @@
     )) {
       jukeTrustBlocked = "consent";
       parkJukeboxMedia();
+      if (jamDeckPlaybackCid()) jamStopPlayback();
       return;
     }
     jukeTrustBlocked = "";
+    const activeTakeCid = jamDeckPlaybackCid();
+    if (activeTakeCid && activeTakeCid !== cid) jamStopPlayback(); // the room moved on
+    if (isTake) {
+      void jukeApplyTake(cid);
+      return;
+    }
     // The element streams straight out of the vault, so there is no fetch-then-play step any
     // more: playback starts on the first chunk instead of the last, and a seek costs one chunk.
     // A track nobody can serve now surfaces as an element error rather than a thrown fetch,
@@ -11961,6 +13409,174 @@
     jukeBuffering = false;
     jukeBlocked = false;
   }
+  // The take deck: fetch the whole (bounded) file once, validate it with the one take validator,
+  // then drive the jam playback scheduler from the room's transport. No element, no decoder.
+  const jukeTakeCache = new JamTakeCache();
+  const jukeTakeLoads = new JamTakeLoadCoordinator<void>();
+  const jukeTakeCancellationNonce = jamNonce();
+  let jukeTakeProgressLease: JamTakeProgressLease | null = null;
+  let jukeTakeCancellationSeq = 0;
+
+  function jukeTakeAdmission(server: number, cid: string): "ok" | "consent" | "unavailable" {
+    const now = jukeNow;
+    const file = callFiles.find((candidate) => candidate.cid === cid);
+    if (
+      !now || now.cid !== cid || !file ||
+      mediaKind(now.name, file.mime) !== "take" || !mayFetchJamTake(file.size)
+    ) return "unavailable";
+    return mayLoadJukeboxFile(
+      fileTrustFor(server), file.author_identity, file.author_verified,
+      jukeExplicitApprovals.has(scopedMediaKey(server, cid)),
+    ) ? "ok" : "consent";
+  }
+
+  function jukeTakeLeaseIsCurrent(lease: JamTakePlaybackLease, coordinatorCurrent: () => boolean): boolean {
+    return coordinatorCurrent() && callLifecycleSession.isCurrent(lease.callLease) &&
+      jamTakePlaybackLeaseCurrent(lease, {
+        inCall,
+        callLease: activeCallLease,
+        server: callServer,
+        channel: callChannel,
+        cid: jukeNow?.cid ?? null,
+      });
+  }
+
+  function jukeApplyTake(cid: string) {
+    const server = callServer;
+    const channel = callChannel;
+    const callLease = activeCallLease;
+    if (!inCall || server === null || !channel || !callLifecycleSession.isCurrent(callLease)) return;
+    parkJukeboxMedia(); // the media element never holds a take
+    const lease = { callLease, server, channel, cid };
+    jukeTakeCancellationSeq = (jukeTakeCancellationSeq % 1_000_000_000) + 1;
+    const cancellation = `jam:${jukeTakeCancellationNonce}:${callLease}:${jukeTakeCancellationSeq}`;
+    let cancellationReadyResolve!: () => void;
+    let cancellationReadySettled = false;
+    const cancellationReady = new Promise<void>((resolve) => { cancellationReadyResolve = resolve; });
+    const markCancellationReady = () => {
+      if (cancellationReadySettled) return;
+      cancellationReadySettled = true;
+      cancellationReadyResolve();
+    };
+    void jukeTakeLoads.submit(
+      cid,
+      (coordinatorCurrent) =>
+        jukeApplyTakeNow(lease, coordinatorCurrent, cancellation, markCancellationReady),
+      async () => {
+        // Do not acknowledge preemption until the short native registration attempt has settled.
+        // This removes the cancel-before-register race without serializing newer downloads behind
+        // the potentially slow whole-file command.
+        await cancellationReady;
+        await invoke("cancel_inline_download", { cancellation });
+      },
+    );
+  }
+
+  async function jukeApplyTakeNow(
+    lease: JamTakePlaybackLease,
+    coordinatorCurrent: () => boolean,
+    cancellation: string,
+    markCancellationReady: () => void,
+  ) {
+    const { server, cid } = lease;
+    if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent)) {
+      markCancellationReady();
+      return;
+    }
+    const initialAdmission = jukeTakeAdmission(server, cid);
+    if (initialAdmission !== "ok") {
+      markCancellationReady();
+      jukeTrustBlocked = initialAdmission;
+      return;
+    }
+    let take = jukeTakeCache.get(cid);
+    if (!take) {
+      const progressLease = { callLease: lease.callLease, server, cid, cancellation };
+      jukeTakeProgressLease = progressLease;
+      jukeFetch = { source: "local", percent: 0, provider: "" };
+      let base64 = "";
+      let cancellationRegistered = false;
+      try {
+        try {
+          await invoke("begin_inline_download", { cancellation });
+          cancellationRegistered = true;
+        } finally {
+          markCancellationReady();
+        }
+        // Registration is a separate short command so cancellation cannot race ahead of a native
+        // operation that does not exist yet. If the deck changed during registration, `finally`
+        // retires the permit without beginning a read.
+        if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent)) return;
+        ({ value: base64 } = await invokeDebugged<string>("download_file", { server, cid, cancellation }));
+      } catch (e) {
+        if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent)) return;
+        diagRecord({ section: "channels", code: "JUKEBOX.TAKE.FETCH_FAILED", level: "warn", fields: { failure: classifyInvokeFailure(e) } });
+        jukeFetch = null;
+        jukeFail(cid);
+        return;
+      } finally {
+        if (jukeTakeProgressLease === progressLease) jukeTakeProgressLease = null;
+        if (cancellationRegistered) {
+          // Normally `download_file` has already removed its RAII registration. This also closes
+          // the begin→invoke gap and every frontend exception path; unknown ids are harmless.
+          await invoke("cancel_inline_download", { cancellation }).catch(() => {});
+        }
+      }
+      // Re-run both lifecycle and current listing/trust admission. A call reset clears the cache,
+      // but it cannot cancel an already executing native command, and the next call may adopt the
+      // same known CID without having a listing or approval for it.
+      if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent)) return;
+      const finalAdmission = jukeTakeAdmission(server, cid);
+      if (finalAdmission !== "ok") {
+        jukeFetch = null;
+        jukeTrustBlocked = finalAdmission;
+        return;
+      }
+      const text = decodeJamTakeBase64(base64);
+      if (text === null) {
+        jukeFetch = null;
+        diagRecord({ section: "channels", code: "JUKEBOX.TAKE.INVALID", level: "warn", fields: { error: "take payload exceeds its encoded or decoded size limit" } });
+        jukeFail(cid);
+        return;
+      }
+      const parsed = parseJamTakeJson(text);
+      jukeFetch = null;
+      if (!parsed.ok) {
+        diagRecord({ section: "channels", code: "JUKEBOX.TAKE.INVALID", level: "warn", fields: { error: parsed.error } });
+        jukeFail(cid);
+        return;
+      }
+      take = parsed.take;
+      jukeTakeCache.set(cid, take);
+    } else {
+      // A cache hit owns no native operation, so invalidation can retire the coordinator slot now.
+      markCancellationReady();
+    }
+    if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent) || jukeTakeAdmission(server, cid) !== "ok") return;
+    jukeFetch = null;
+    jukeDur = Math.max(1, Math.ceil(takeEndMs(take) / 1000));
+    const live = jukeNow;
+    if (!live || live.cid !== cid) return;
+    if (live.paused || jukeStale) {
+      if (jamDeckPlaybackCid() === cid) jamStopPlayback(); // position lives in the transport, not here
+      return;
+    }
+    const targetMs = Math.max(0, jukeTarget() * 1000);
+    if (jamPlay?.deckCid === cid) {
+      if (jamPlay.done) return; // release tail / waiting for the DJ's next transport frame
+      if (Math.abs(jamPlayElapsed() - targetMs) <= 2000) return; // in step; a ping needs no restart
+    }
+    diagRecord({
+      section: "channels",
+      code: "JUKEBOX.TAKE.STARTED",
+      level: "debug",
+      fields: { events: take.events.length, offset_ms: Math.round(targetMs), first_event_ms: take.events[0]?.ms ?? -1 },
+    });
+    void jamStartTakePlayback(take, targetMs, null, cid);
+    // No media element means the "webview will not start audio" chip has nothing to watch; the
+    // suspended-synth case is surfaced here instead, and every deck press tries a resume.
+    if (jamEngine && jamEngine.context.state === "suspended") jukeBlocked = true;
+  }
   function approveCurrentJukeboxTrack() {
     if (!jukeNow || callServer === null) return;
     jukeExplicitApprovals.add(scopedMediaKey(callServer, jukeNow.cid));
@@ -11992,6 +13608,7 @@
   }
   /** The user's click, which is the one thing an autoplay policy is waiting for. */
   function jukeUnblock() {
+    jukeWakeSynth(); // a blocked take deck is a suspended synth, not a refusing element
     const el = jukeAudio;
     if (!el) return;
     void jukeStart(el);
@@ -12100,6 +13717,10 @@
   function jukeStop() {
     jukeBlocked = false; // nothing is loaded: there is no playback being held back
     jukeLocalFail = "";
+    // An invalidated native take fetch returns without touching current UI state. Clear its old
+    // progress here so emptying/replacing the deck cannot strand a LOADING chip indefinitely.
+    jukeFetch = null;
+    if (jamDeckPlaybackCid()) jamStopPlayback(); // the take deck stops with the transport
     const el = jukeAudio;
     if (!el) return;
     el.pause();
@@ -12108,14 +13729,23 @@
   }
   // Controls. Every one of them broadcasts and applies through jukeSend, so pressing anything here
   // is what makes me the DJ.
+  // Takes replay through the jam engine, whose AudioContext may still be suspended; presses are
+  // user gestures, so they are exactly when a resume is allowed to succeed.
+  function jukeWakeSynth() {
+    if (jamEngine && jamEngine.context.state === "suspended") {
+      void jamEngine.context.resume().then(() => { jukeBlocked = false; }).catch(() => { /* next press */ });
+    }
+  }
   function jukePlayEntry(id: string) {
     const e = jukeQueue.find((x) => x.id === id);
     if (!e) return;
+    jukeWakeSynth();
     jukeFailed.delete(e.cid); // an explicit press is also a retry of a track that would not fetch
     jukeSend(e.id, e.cid, e.name, 0, false);
   }
   function jukeToggle() {
     if (!inCall) return;
+    jukeWakeSynth();
     if (!jukeNow || !jukeNow.cid) {
       const first = jukePlayable()[0];
       if (first) jukePlayEntry(first.id);
@@ -12186,11 +13816,14 @@
     jukeStale = true; // anyone's next press claims the deck
     jukeBlocked = false; // a frozen deck is not one the webview is refusing to start
     jukeAudio?.pause();
+    if (jamDeckPlaybackCid()) jamStopPlayback(); // a dead DJ's take freezes exactly like their track
   }
   // Leaving the room takes the deck with it. There are no blobs to release any more: the element
   // streamed from the vault rather than holding a decrypted copy of the track.
   function jukeReset() {
     jukeStop();
+    jukeTakeLoads.invalidate(); // queued/running whole-file continuations belong to the old call
+    jukeTakeCache.clear(); // validated takes belong to the room's share, not the next room's
     jukeAudio?.remove();
     jukeAudio = null;
     jukeFailed.clear();
@@ -12236,6 +13869,7 @@
     { key: "all", label: "ALL" },
     { key: "audio", label: "AUDIO" },
     { key: "video", label: "VIDEO" },
+    { key: "take", label: "TAKES" },
   ];
   let jukePickKind = $state<MediaFilter>("all");
   let jukePickFiles = $derived(mediaChoices(files, jukePickKind));
@@ -12245,6 +13879,7 @@
     all: mediaChoices(files, "all").length,
     audio: mediaChoices(files, "audio").length,
     video: mediaChoices(files, "video").length,
+    take: mediaChoices(files, "take").length,
   });
   // `files` is the ACTIVE server's share, while the room is on callServer: they are the same list
   // only while you are looking at the server you are called into. Every share-derived chip (gone,
@@ -13099,8 +14734,27 @@
     // build just never opens its end; notes then go nowhere, which degrades cleanly.
     try {
       peer.dc = pc.createDataChannel("inst", { negotiated: true, id: 7, ordered: true });
-      peer.dc.onopen = () => pushInstState();
-      peer.dc.onmessage = (e) => handleInstMsg(fp, e.data);
+      // jam:v2 provenance: the handler closes over THIS generation's capability and budget. A
+      // recovered connection re-runs this block and mints a new pair, so a queued callback from
+      // the replaced channel fails the engine's isCurrent check instead of speaking for it.
+      const jamChan = ensureJamEngine().openSource(fp);
+      const jamBudget = jamPeerBudgets[fp] ??= new JamPeerBudget();
+      const jamDec = new JamFrameDecoder(jamBudget);
+      jamPeerChans[fp] = jamChan;
+      jamPeerDecs[fp] = jamDec;
+      // A replacement channel gets its own async ordering lane. Work already queued on the old
+      // lane retains that old capability and will fail closed without delaying the new edge.
+      jamPeerInbound[fp] = new JamCausalQueue(JAM_INBOUND_PENDING_MAX);
+      delete jamPeerSn[fp];
+      clearPeerJamUi(fp);
+      jamApplyMutes(fp);
+      const dc = peer.dc;
+      dc.onopen = () => {
+        pushInstState();
+        void openJamOutboundEdge(dc); // publication barrier before this edge's first note/drum
+        jamMetHello(dc); // and, if I anchor the grid, the running metronome
+      };
+      dc.onmessage = (e) => handleJamFrame(fp, jamChan, jamDec, e.data);
     } catch {
       /* data channels unavailable: voice still works */
     }
@@ -13141,6 +14795,7 @@
     };
     callPeers[fp] = peer;
     callParticipants = Object.keys(callPeers);
+    jamRecMembership(); // any membership-set change pauses a rolling take
     return peer;
   }
   function removePeer(fp: string) {
@@ -13162,13 +14817,27 @@
     const { [fp]: _budget, ...budgets } = peerVideoBudget;
     peerVideoBudget = budgets;
     // Silence and forget anything they were sounding; a dead edge must not drone on.
-    stopAllFrom(fp);
-    const { [fp]: _h, ...rh } = remoteHeld;
-    remoteHeld = rh;
+    jamEngine?.removeSource(fp);
+    clearPeerJamUi(fp);
+    delete jamPeerChans[fp];
+    delete jamPeerDecs[fp];
+    delete jamPeerInbound[fp];
+    delete jamPeerSn[fp];
+    delete jamSourceRenderGeneration[fp];
+    delete jamSourceGateMuted[fp];
+    delete jamClockSyncs[fp];
+    delete jamProbes[fp];
+    // Consent is channel-fresh. A reconnecting peer must announce `rc` again before an existing
+    // take can resume; retaining a prior edge's consent would record before the new edge opted in.
+    applyJamRecorderConsent(jamRec, fp, false);
+    if (jamMet?.anchorLeft(fp)) {
+      // Dumb failover by design: the grid stops with its anchor; anyone can start a new one.
+      jamMetUi = null;
+      stopJamMetTimer();
+    }
+    jamRecMembership(); // the recorder pauses rather than pretend the set held
     const { [fp]: _m, ...pm } = peerMeta;
     peerMeta = pm;
-    delete instBudget[fp];
-    delete remoteWave[fp];
     dropAnalyser(fp); // a dead edge must not keep a name lit
     const { [fp]: _v, ...vm } = voiceMutedPeers;
     voiceMutedPeers = vm;
@@ -13368,6 +15037,8 @@
     callServerName = servers.find((s) => s.id === server)?.name ?? "";
     inCall = true;
     activeCallLease = joinLease;
+    ensureJamEngine(); // fresh engine, session nonce and sequence domain for this call
+    void ensurePublishedJamPatch(); // local echo + every edge wait on the same verified recipe
     void refreshCallProfiles();
     void refreshCallFiles();
     callMuted = false;
@@ -13380,15 +15051,16 @@
     alertedRooms.delete(roomKey(server, channel));
     recordPresence(server, channel, callSelfFp);
     void refreshJukebox(); // the room's queue, whatever the DJ is currently on
-    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight }); // announce + trigger existing members to offer
+    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: jamRecConsent ? 1 : 0 }); // announce + trigger existing members to offer
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
       if (callChannel && callServer !== null) {
         // vid rides the heartbeat for the same reason mic does: it is the only thing that repairs
         // a data-channel state message that never arrived, and the video tile is gated on it.
-        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight });
+        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: jamRecConsent ? 1 : 0 });
         recordPresence(callServer, callChannel, callSelfFp); // keep my own presence fresh
         jukeTick(); // the DJ's re-announce (and the listener's DJ-left check) ride this tick
+        sweepJamUi(); // engine hold watchdogs + the drawer's own 30s held-note honesty sweep
         // Re-read the winning candidate pair: an ICE restart can migrate a live call from
         // direct to relayed (or back) with no connection-state change to notice it by.
         for (const [fp, p] of Object.entries(callPeers)) {
@@ -13396,6 +15068,20 @@
         }
       }
     }, 5000);
+  }
+  // The roster read is server-scoped (not tied to the viewed server), so an eviction lands even
+  // while the user browses elsewhere. Errors keep the call: the next members-changed retries, and
+  // failing open here only preserves the status quo ante rather than granting anything new.
+  async function reconcileCallRoster(server: number) {
+    let allowed: Set<string>;
+    try {
+      const r = await invoke<Member[]>("get_members", { server });
+      allowed = new Set(r.map((m) => m.fingerprint));
+    } catch { return; }
+    if (!inCall || callServer !== server) return;
+    for (const fp of Object.keys(callPeers)) {
+      if (!allowed.has(fp)) removePeer(fp);
+    }
   }
   function leaveVoice() {
     // Permission prompts are not cancellable. Invalidate before any teardown so a chooser that
@@ -13420,6 +15106,58 @@
     callHeld = [];
     remoteHeld = {};
     peerMeta = {};
+    // The engine dies with the call: every node torn down, every capability revoked. The next
+    // call mints a fresh engine, session nonce and sequence domain.
+    stopJamMetTimer();
+    if (synthCtx) jamCallCuePlayer.cancel(synthCtx);
+    jamEngine?.dispose();
+    jamEngine = null;
+    jamSelfChan = null;
+    jamMySn = "";
+    jamMyQ = 0;
+    jamPublishedPatch = null;
+    jamEnsurePublication = null;
+    jamPublicationPacer.reset();
+    jamPublicationGeneration.advance();
+    // A digest from the departed call may never settle. Its generation checks make completion
+    // inert; replacing the O(1) coalescer prevents it from blocking the next call's first patch.
+    jamPublicationQueue = new JamLatestTaskQueue<PublishedJamPatch | null>();
+    jamPendingLocalEvents.clear();
+    jamLocalRender.reset();
+    remoteHeldAt.clear();
+    for (const t of padFlashTimers.values()) clearTimeout(t);
+    padFlashTimers.clear();
+    padFlash = {};
+    jamAbuseMuted = {};
+    for (const key of Object.keys(jamPeerChans)) delete jamPeerChans[key];
+    for (const key of Object.keys(jamPeerDecs)) delete jamPeerDecs[key];
+    for (const key of Object.keys(jamPeerBudgets)) delete jamPeerBudgets[key];
+    for (const key of Object.keys(jamPeerInbound)) delete jamPeerInbound[key];
+    for (const key of Object.keys(jamPeerSn)) delete jamPeerSn[key];
+    for (const key of Object.keys(jamSourceRenderGeneration)) delete jamSourceRenderGeneration[key];
+    for (const key of Object.keys(jamSourceGateMuted)) delete jamSourceGateMuted[key];
+    clearTimeout(jamAnnTimer);
+    clearTimeout(jamMetPushTimer);
+    jamMet = null; // its channel registry died with the engine
+    jamMetUi = null;
+    jamMetRev = 0;
+    for (const key of Object.keys(jamClockSyncs)) delete jamClockSyncs[key];
+    for (const key of Object.keys(jamProbes)) delete jamProbes[key];
+    // Takes are ephemeral BY CONTRACT: the recorder, the playback deck and every kept take die
+    // with the call, and consent resets so the next call starts from an explicit yes.
+    jamStopPlayback();
+    jamPlaybackPreparationQueue = new JamLatestTaskQueue<JamPlaybackPatchSet | null>();
+    if (jamRec) { jamRec.stop(); jamRec = null; }
+    clearInterval(jamRecTimer);
+    jamRecTimer = undefined;
+    jamRecUi = "off";
+    jamRecConsent = false;
+    jamRecGaps = 0;
+    jamRecClock = 0;
+    jamRecTimeline = { startMs: null };
+    jamTakes = [];
+    jamTakesOpen = false;
+    keymapCapture = null;
     instOpen = false;
     stageOpen = false;
     focusOpen = false;
@@ -13427,6 +15165,7 @@
     callDeafened = false;
     voiceMutedPeers = {};
     jukeReset();
+    jukeTakeProgressLease = null;
     stopMeters();
     navigator.mediaDevices?.removeEventListener?.("devicechange", onDeviceChange);
     if (localStream) {
@@ -13500,6 +15239,7 @@
           const sender = callPeers[fromFp]?.vidSender;
           if (sender) capVideo(sender, "screen", fromFp);
         }
+        if (jamRec) { jamRec.setConsent(fromFp, after.rc); syncJamRec(); }
       }
       if (type === "voice-ping") {
         const peer = callPeers[fromFp];
@@ -13533,7 +15273,9 @@
       // to five seconds away, if the DJ is still here to send it at all.
       jukeAnnounceTo(server, fromFp);
       if (callPeers[fromFp]) { recoverPeer(callPeers[fromFp]); return; }
-      playBlip(79); // audible arrival: there is no lobby, so the room itself says someone joined
+      // Signalling is remote-controlled: it may only add a cue to audio the user has already
+      // enabled, and can neither create nor resume a suspended context or bypass Deafen.
+      if (!callDeafened && synthCtx?.state === "running") jamCallCuePlayer.play(synthCtx, 79);
       createPeer(fromFp); // its tracks + data channel raise onnegotiationneeded, which sends the offer
     } else if (type === "offer") {
       const peer = callPeers[fromFp] ?? createPeer(fromFp);
@@ -14629,8 +16371,14 @@
   // empty parts of it are a drag region and these three drive the window. The maximise glyph has
   // to follow the real window state, which also changes by snap, double-click and the OS.
   const appWindow = getCurrentWindow();
+  const nativeVaultLock = new NativeVaultLockCoordinator(
+    (uiStateJson) => invoke<NativeVaultLockOutcome>("lock_session", { uiStateJson }),
+  );
   let winMaximized = $state(false);
   let windowCloseInFlight = false;
+  // The first continuity failure leaves a confirmed-locked window open with a warning. Repeating
+  // close is the user's explicit acknowledgement that exiting without that latest snapshot is OK.
+  let closeAfterContinuityError = false;
   // The live frontend-logging installation, kept so unmount can stop it. Not reactive state: it is
   // held purely so the teardown has something to call.
   let uiLogging: UiLogging | null = null;
@@ -14863,6 +16611,12 @@
         // still interrupt storage and is intentionally not presented as transactionally safe.
         event.preventDefault();
         if (windowCloseInFlight) return;
+        // Do not let a close race an unlock which already crossed the bridge. Once that attempt
+        // settles, the user can close again against one unambiguous native session generation.
+        if (unlocking) {
+          error = "Wait for this unlock attempt to finish, then close Mewtual again.";
+          return;
+        }
         windowCloseInFlight = true;
         callLifecycleSession.invalidate();
         micCaptureSession.invalidate();
@@ -14870,21 +16624,43 @@
         screenAudioCaptureSession.invalidate();
         if (inCall) leaveVoice();
         clearTimeout(uiStateSaveTimer);
-        const finalContinuityJson = !locked && uiStateReady ? continuityJson() : null;
-        let nativeLocked = false;
+        const finalContinuityJson = locked
+          ? nativeVaultLock.snapshot()
+          : (uiStateReady ? continuityJson() : null);
         try {
-          if (!locked) {
-            await invoke("lock_session", { uiStateJson: finalContinuityJson });
-            nativeLocked = true;
-          }
-          await appWindow.destroy();
-        } catch (e) {
-          // `destroy()` can fail after native locking succeeded. In that case the WebView remains
-          // visible but can no longer read the vault, so immediately apply the same plaintext/UI
-          // teardown as Ctrl+L without issuing a redundant native lock command.
-          if (nativeLocked) lockScreen(true);
+          // Native code owns lock -> snapshot -> destroy ordering. This also crosses the same
+          // commit mutex as a Ctrl+L request that survived a webview remount; in the ordinary
+          // same-webview race it receives that request's exact immutable snapshot again.
+          const result = await invoke<NativeVaultCloseOutcome>("close_vault_window", {
+            uiStateJson: finalContinuityJson,
+            discardContinuityError: closeAfterContinuityError,
+          });
+          // A response means the window deliberately remained alive (continuity warning or native
+          // destroy failure) and native locking is confirmed, so frontend teardown is now safe.
+          lockScreen(true);
           windowCloseInFlight = false;
-          error = `Could not safely close the vault: ${e}`;
+          if (result.deferred) {
+            closeAfterContinuityError = true;
+            error = `The vault is locked, but Mewtual could not save the latest screen state: ${result.continuity_error}. Close the window again to exit without that latest screen state.`;
+          } else if (result.destroy_error) {
+            error = `The vault is locked, but the window could not close: ${result.destroy_error}`;
+          }
+        } catch (e) {
+          // A rejected bridge response cannot tell us whether native locking ran. Never leave a
+          // merely visual lock over potentially authorized IPC: destroy the webview directly, and
+          // if that capability also fails, restart the process so native state is unquestionably
+          // gone. Only when all three paths fail do we keep the existing view and describe native
+          // state as unknown, with the conservative instruction to treat it as unlocked.
+          try {
+            await appWindow.destroy();
+          } catch (destroyError) {
+            try {
+              await relaunch();
+            } catch (restartError) {
+              windowCloseInFlight = false;
+              error = `Mewtual could not confirm the native vault lock or close this window. Treat this session as unlocked; save your work and try again. Lock error: ${errorText(e)}. Window error: ${errorText(destroyError)}. Restart error: ${errorText(restartError)}.`;
+            }
+          }
         }
       }),
       // Capture is a native setting, and the webview is one of the things that feeds it. Told
@@ -15005,6 +16781,9 @@
       }),
       listen<{ server: number; count: number }>("members-changed", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
+        // Revocation tears down the data plane: a removed member's live call edges (voice, video,
+        // instruments) must not outlive their membership on the strength of an old handshake.
+        if (inCall && callServer === e.payload.server) void reconcileCallRoster(e.payload.server);
         if (e.payload.server === activeServerId) {
           refreshMembers();
           if (view === "files") refreshFiles(); // membership change ⇒ re-check fetch availability
@@ -15036,11 +16815,22 @@
         bytes_total: number;
         network_bytes_done: number;
         provider: string | null;
+        cancellation: string | null;
       }>("download-progress", (e) => {
         // The deck reads the same events the Downloads surface does. It has no download of its
         // own to key off: the media element pulls ranges, and the backend emits progress for the
         // chunks it needs, so this is the only view the deck gets of how a track is coming in.
-        if (jukeNow?.cid === e.payload.cid) jukeFetch = fetchPhase(e.payload);
+        const tokenizedTake = typeof e.payload.cancellation === "string"
+          && shouldApplyJamTakeProgress(jukeTakeProgressLease, {
+            server: e.payload.server,
+            cid: e.payload.cid,
+            cancellation: e.payload.cancellation,
+          }, activeCallLease);
+        const currentMediaRead = e.payload.cancellation == null
+          && inCall && e.payload.server === callServer && jukeKind !== "take";
+        if (jukeNow?.cid === e.payload.cid && (tokenizedTake || currentMediaRead)) {
+          jukeFetch = fetchPhase(e.payload);
+        }
         const d = downloads[dlKey(e.payload.server, e.payload.cid)];
         if (!d) return; // only track explicitly-initiated downloads
         const now = Date.now();
@@ -15262,21 +17052,42 @@
       }
       // The same home row, routed into the call instead of the lock. `!locked` keeps the two
       // apart: while locked the branch above owns these keys and has already returned.
+      // A remap capture in flight (armed from Settings) eats exactly one printable key; Escape
+      // backs out. It outranks every shortcut below while armed, which is the whole point of it.
+      if (!locked && keymapCapture && !e.ctrlKey && !e.metaKey && !e.altKey && !typingTarget(e.target)) {
+        e.preventDefault();
+        if (e.key === "Escape") keymapCapture = null;
+        else {
+          const k = e.key.toLowerCase();
+          if (k.length === 1 && !e.repeat) keymapBind(k);
+        }
+        return;
+      }
       if (!locked && inCall && instOpen && (stageOpen || focusOpen) && !e.ctrlKey && !e.metaKey && !e.altKey && !typingTarget(e.target)) {
         const k = e.key.toLowerCase();
-        const pc = KEY_TO_PC[k];
-        if (pc !== undefined) {
-          e.preventDefault();
-          if (e.repeat) return; // auto-repeat is one long hold, not a stream of notes
-          const note = (instOctave + 1) * 12 + pc;
-          instKeyNotes.set(k, note); // pinned: z/x mid-hold must still release THIS note
-          instNoteOn(note);
-          return;
-        }
-        if (k === "z" || k === "x") {
-          e.preventDefault();
-          if (!e.repeat) setInstOctave(instOctave + (k === "x" ? 1 : -1));
-          return;
+        if (jamMode === "pads") {
+          // The home row (or its remap), but as one-shot pads: no keyup, chokes engine-side.
+          const pad = padByKey[k];
+          if (pad !== undefined) {
+            e.preventDefault();
+            if (!e.repeat) jamPadHit(pad);
+            return;
+          }
+        } else {
+          const pc = pianoByKey[k];
+          if (pc !== undefined) {
+            e.preventDefault();
+            if (e.repeat) return; // auto-repeat is one long hold, not a stream of notes
+            const note = (instOctave + 1) * 12 + pc;
+            instKeyNotes.set(k, note); // pinned: z/x mid-hold must still release THIS note
+            instNoteOn(note);
+            return;
+          }
+          if (k === "z" || k === "x") {
+            e.preventDefault();
+            if (!e.repeat) setInstOctave(instOctave + (k === "x" ? 1 : -1));
+            return;
+          }
         }
       }
       // Alt+arrow walks the location history, as it does in a browser or a file manager.
@@ -16980,21 +18791,148 @@
   the focus view docks it under the control bar. One copy so the two can never drift, and so a
   note held while switching surfaces is still the same held note.
 -->
+{#snippet jamKnob(bind: JamKnobBinding)}
+  {@const deg = -135 + 270 * ((bind.value - bind.min) / (bind.max - bind.min || 1))}
+  <div
+    class="jam-knob"
+    role="slider"
+    tabindex="0"
+    aria-label={bind.label}
+    aria-valuemin={bind.min}
+    aria-valuemax={bind.max}
+    aria-valuenow={bind.value}
+    aria-valuetext={bind.disp}
+    title={`${bind.label}: drag up or right (Shift for fine), scroll, or arrow keys`}
+    onpointerdown={(e) => jamKnobDown(e, bind)}
+    onpointermove={jamKnobMove}
+    onpointerup={jamKnobUp}
+    onpointercancel={jamKnobUp}
+    onwheel={(e) => { e.preventDefault(); jamKnobStep(bind, e.deltaY < 0 ? 1 : -1, e.shiftKey); }}
+    onkeydown={(e) => {
+      const d = e.key === "ArrowUp" || e.key === "ArrowRight" ? 1 : e.key === "ArrowDown" || e.key === "ArrowLeft" ? -1 : 0;
+      if (d) { e.preventDefault(); jamKnobStep(bind, d, e.shiftKey); }
+    }}
+  >
+    <svg class="jam-knob-face" viewBox="0 0 32 32" aria-hidden="true">
+      <circle cx="16" cy="16" r="13" class="jam-knob-ring" />
+      <g style={`transform: rotate(${deg}deg); transform-origin: 16px 16px`}>
+        <line x1="16" y1="16" x2="16" y2="5.5" class="jam-knob-tick" />
+      </g>
+    </svg>
+    <span class="jam-knob-lbl">{bind.label}</span>
+    <span class="jam-knob-val">{bind.disp}</span>
+  </div>
+{/snippet}
+
+<!-- The recording honesty surface: rendered by BOTH call surfaces, drawer open or not. -->
+{#snippet jamRecBanner()}
+  {#if jamRecActive.length}
+    {@const live = jamRecActive.some((r) => r.rec === 2)}
+    <div class="jam-rec-banner" class:live>
+      <span class="jam-rec-dot" class:armed={!live}></span>
+      <span class="jam-rec-text">
+        {live ? "REC" : "RECORD?"} · {jamRecActive.map((r) => (r.fp === "me" ? "you" : nameOf(r.fp))).join(", ")}
+        {live ? "" : "· starts when everyone allows it"}
+      </span>
+      <span class="stage-spacer"></span>
+      {#if jamRecActive.some((r) => r.fp !== "me")}
+        <button class="ghost jam-save-btn" class:on={jamRecConsent} onclick={toggleJamConsent}
+          title={jamRecConsent ? "Withdraw consent; recorders including you pause" : "Allow recorders in this call to include your playing"}
+        >{jamRecConsent ? "ALLOWED" : "ALLOW"}</button>
+      {/if}
+    </div>
+  {/if}
+{/snippet}
+
 {#snippet instDrawer()}
   <div class="inst-drawer">
     <div class="inst-head">
       <span class="inst-head-ico">{@render icoNote()}</span>
       <span class="stage-label">INSTRUMENTS</span>
+      <div class="jam-mode" role="group" aria-label="Instrument surface">
+        <button class="ghost jam-mode-btn" class:on={jamMode === "keys"} aria-pressed={jamMode === "keys"} title="The piano surface" onclick={() => setJamMode("keys")}>KEYS</button>
+        <button class="ghost jam-mode-btn" class:on={jamMode === "pads"} aria-pressed={jamMode === "pads"} title="The drum pads (your friends keep whichever surface they picked)" onclick={() => setJamMode("pads")}>PADS</button>
+      </div>
+      <button
+        class="ghost jam-cog"
+        title="Instrument settings: remap the piano and pad keys (Settings · Voice &amp; Calls)"
+        aria-label="Instrument settings"
+        onclick={() => openSettings("voice")}
+      >{@render icoGear()}</button>
       <span class="stage-spacer"></span>
-      {#if midiName}<span class="inst-midi">MIDI · {midiName}</span>{/if}
+      <button
+        class="ghost jam-cog"
+        class:on={jamMetShow}
+        class:live={!!jamMetUi && !jamMetShow}
+        aria-pressed={jamMetShow}
+        title={jamMetShow ? "Hide the metronome line (a running grid keeps clicking)" : jamMetUi ? "Show the metronome line: a grid is running" : "Show the metronome line"}
+        aria-label="Show or hide the metronome line"
+        onclick={toggleJamMetShow}
+      >
+        <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 13.5 8 2.5l2.5 11z" /><path d="M8 9l3.5-4.5" /><path d="M4 13.5h8" /></svg>
+      </button>
+      <span class="jam-midi-dot" class:ready={jamMidiState === "ready"} class:live={jamMidiState === "live"} title={jamMidiTitle} role="img" aria-label={jamMidiTitle}></span>
     </div>
 
+    <!-- The shared grid. The click each ear hears is local; what is shared is WHERE the beats
+         are. Live playing stays campfire-loose; anything stamped on this grid lands tight.
+         The row hides behind the head toggle; a hidden grid still runs and still clicks. -->
+    {#if jamMetShow}
+    <div class="jam-met">
+      {#if jamMetUi}
+        {#if jamMetUi.anchor === "me"}
+          <button class="ghost jam-met-btn on" title="Stop the room's metronome" aria-label="Stop the metronome" onclick={jamMetStop}>
+            <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 13.5 8 2.5l2.5 11z" /><path d="M8 9l3.5-4.5" /><path d="M4 13.5h8" /></svg>
+          </button>
+        {:else}
+          <span class="jam-met-btn ro" title={`${nameOf(jamMetUi.anchor)} anchors the grid`}>
+            <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 13.5 8 2.5l2.5 11z" /><path d="M8 9l3.5-4.5" /><path d="M4 13.5h8" /></svg>
+          </span>
+        {/if}
+        <span class="jam-met-bpm">{jamMetUi.bpm}</span>
+        <span class="jam-met-lbl">bpm</span>
+        {#if jamMetUi.anchor === "me"}
+          <button class="ghost small inst-oct-btn" title="Slower (takes effect within 2s)" aria-label="Slower" onclick={() => jamMetNudge(-5)}>−</button>
+          <button class="ghost small inst-oct-btn" title="Faster (takes effect within 2s)" aria-label="Faster" onclick={() => jamMetNudge(5)}>＋</button>
+          <button class="ghost jam-met-sig" title="Beats per bar" onclick={jamMetCycleBpb}>{jamMetUi.bpb}/4</button>
+        {:else}
+          <span class="jam-met-sig ro">{jamMetUi.bpb}/4</span>
+        {/if}
+        <span class="jam-pips" aria-hidden="true">
+          {#each Array.from({ length: jamMetUi.bpb }) as _u, i (i)}
+            <span class="jam-pip" class:beat={i === jamMetUi.beat} class:bar={i === 0}></span>
+          {/each}
+        </span>
+        <span class="jam-met-bar">bar {jamMetUi.bar}</span>
+        <span class="stage-spacer"></span>
+        <span class="jam-met-lbl">grid · {jamMetUi.anchor === "me" ? "you" : nameOf(jamMetUi.anchor)}</span>
+        {#if jamMetUi.synced}
+          <span class="jam-met-chip ok" title="Your click follows the anchor's grid (offset measured over the call itself)">SYNCED</span>
+        {:else}
+          <span class="jam-met-chip warn" title="Clock offset to the anchor is not established; your click keeps time by itself until it is">LOCAL ONLY</span>
+        {/if}
+      {:else}
+        <button class="ghost jam-met-btn" title="Start a shared metronome; your clock anchors the room's grid" aria-label="Start the metronome" onclick={jamMetStart}>
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 13.5 8 2.5l2.5 11z" /><path d="M8 9l3.5-4.5" /><path d="M4 13.5h8" /></svg>
+        </button>
+        <span class="jam-met-bpm">{jamMetBpm}</span>
+        <span class="jam-met-lbl">bpm</span>
+        <button class="ghost small inst-oct-btn" title="Slower" aria-label="Slower" onclick={() => jamMetNudge(-5)}>−</button>
+        <button class="ghost small inst-oct-btn" title="Faster" aria-label="Faster" onclick={() => jamMetNudge(5)}>＋</button>
+        <button class="ghost jam-met-sig" title="Beats per bar" onclick={jamMetCycleBpb}>{jamMetBpb}/4</button>
+        <span class="stage-spacer"></span>
+        <span class="jam-met-lbl">the click is local · the grid is shared</span>
+      {/if}
+    </div>
+    {/if}
+
+    {#if jamMode === "keys"}
     <div class="inst-ctl">
       {#each INST_TILES as t (t.wave)}
         <button
           class="ghost inst-wave"
-          class:on={myTimbre === t.wave}
-          aria-pressed={myTimbre === t.wave}
+          class:on={!myPatch && myTimbre === t.wave}
+          aria-pressed={!myPatch && myTimbre === t.wave}
           title={`Send your notes as a ${t.wave} wave`}
           onclick={() => setTimbre(t.wave)}
         >
@@ -17004,12 +18942,181 @@
           <span class="inst-wave-lbl">{t.label}</span>
         </button>
       {/each}
+      <span class="jam-ctl-sep"></span>
+      {#each JAM_PRESETS as pr (pr.name)}
+        <button
+          class="ghost inst-wave"
+          class:on={!!myPatch && myPatchName === pr.name}
+          aria-pressed={!!myPatch && myPatchName === pr.name}
+          title={`Send your notes as the ${pr.name} patch; older builds hear your ${myTimbre} wave instead`}
+          onclick={() => selectJamPreset(pr.name, pr.patch)}
+        >
+          <svg class="inst-wv" viewBox="0 0 26 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d={pr.d} />
+          </svg>
+          <span class="inst-wave-lbl">{pr.name}</span>
+        </button>
+      {/each}
+      {#if jamSaved.length}
+        <button
+          class="ghost inst-wave"
+          class:on={jamCustomOpen || jamSaved.some((sv) => !!myPatch && myPatchName === sv.name)}
+          aria-expanded={jamCustomOpen}
+          title="Your saved patches (they open downward, not off the edge of this row)"
+          onclick={() => (jamCustomOpen = !jamCustomOpen)}
+        >
+          <svg class="inst-wv" viewBox="0 0 26 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M0 9 Q5 3 9 8 T17 6 T26 8" />
+          </svg>
+          <span class="inst-wave-lbl">CUSTOM · {jamSaved.length}</span>
+        </button>
+      {/if}
+      {#if myPatch}
+        <button
+          class="ghost inst-wave jam-edit-btn"
+          class:on={jamEditOpen}
+          aria-pressed={jamEditOpen}
+          title="Shape this patch. Every edit mints a new patch id; friends hear it within a beat."
+          onclick={() => (jamEditOpen = !jamEditOpen)}
+        ><span class="inst-wave-lbl">EDIT</span></button>
+      {/if}
       <span class="stage-spacer"></span>
       <button class="ghost small inst-oct-btn" title="Register down (z)" aria-label="Register down" onclick={() => setInstOctave(instOctave - 1)}>−</button>
       <span class="inst-oct">C{instOctave}–C{instOctave + 2}</span>
       <button class="ghost small inst-oct-btn" title="Register up (x)" aria-label="Register up" onclick={() => setInstOctave(instOctave + 1)}>＋</button>
     </div>
 
+    {#if jamCustomOpen && jamSaved.length}
+      <div class="jam-custom">
+        {#each jamSaved as sv (sv.name)}
+          <div class="jam-custom-tile">
+            <button
+              class="ghost inst-wave"
+              class:on={!!myPatch && myPatchName === sv.name}
+              aria-pressed={!!myPatch && myPatchName === sv.name}
+              title={`Your saved patch ${sv.name}; older builds hear your ${myTimbre} wave instead`}
+              onclick={() => selectJamPreset(sv.name, sv.patch)}
+            >
+              <svg class="inst-wv" viewBox="0 0 26 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M0 9 Q5 3 9 8 T17 6 T26 8" />
+              </svg>
+              <span class="inst-wave-lbl">{sv.name}</span>
+            </button>
+            <button class="ghost jam-tile-del" title={`Forget the saved patch ${sv.name} (the sound keeps playing until you switch)`} aria-label={`Delete saved patch ${sv.name}`} onclick={() => jamDeleteSaved(sv.name)}>✕</button>
+          </div>
+        {/each}
+      </div>
+    {/if}
+
+    {#if jamEditOpen && myPatch}
+      <div class="jam-edit">
+        <div class="jam-sect">
+          <div class="jam-edit-hd"><span>osc stack</span></div>
+          {#each myPatch?.o ?? [] as osc, i (i)}
+            {@const openLayer = jamOscOpen === i}
+            <div class="jam-layer" class:open={openLayer}>
+              <button class="ghost jam-layer-head" aria-expanded={openLayer} title={openLayer ? "Fold this layer" : "Open this layer's controls"} onclick={() => (jamOscOpen = openLayer ? null : i)}>
+                <svg class="inst-wv" viewBox="0 0 26 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d={jamOscTile(osc.w).d} />
+                </svg>
+                <span class="jam-layer-sum">{jamOscSummary(osc)}</span>
+                <span class="jam-lvlbar"><i style={`width:${osc.l}%`}></i></span>
+                <span class="jam-layer-sum lvl">{osc.l}</span>
+              </button>
+              {#if openLayer}
+                <div class="jam-layer-body">
+                  <div class="jam-osc">
+                    {#each INST_TILES as t (t.wave)}
+                      {@const wi = jamWaveIndex(t.wave)}
+                      <button class="ghost jam-osc-w" class:on={osc.w === wi} title={`Layer ${i + 1}: ${t.wave}`} onclick={() => jamEditOsc(i, "w", wi)}>{t.label}</button>
+                    {/each}
+                    {#if (myPatch?.o.length ?? 1) > 1}
+                      <button class="ghost jam-tile-del" title="Remove this layer" aria-label="Remove this layer" onclick={() => jamOscRemove(i)}>✕</button>
+                    {/if}
+                  </div>
+                  <div class="jam-knobs">
+                    {@render jamKnob({ label: "st", value: osc.t, min: -24, max: 24, disp: String(osc.t), set: (v) => jamEditOsc(i, "t", v) })}
+                    {@render jamKnob({ label: "ct", value: osc.c, min: -50, max: 50, disp: String(osc.c), set: (v) => jamEditOsc(i, "c", v) })}
+                    {@render jamKnob({ label: "lvl", value: osc.l, min: 0, max: 100, disp: String(osc.l), set: (v) => jamEditOsc(i, "l", v) })}
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/each}
+          {#if (myPatch?.o.length ?? 3) < 3}
+            <button class="ghost jam-layer-add" title="Add an oscillator layer (3 max)" onclick={jamOscAdd}>＋ layer</button>
+          {/if}
+        </div>
+        <div class="jam-sect">
+          <div class="jam-edit-hd"><span>envelope</span></div>
+          <div class="jam-knobs">
+            {@render jamKnob({ label: "atk", value: myPatch.e.a, min: 0, max: 5000, disp: `${(myPatch.e.a / 1000).toFixed(1)}s`, set: (v) => jamEditNum("e", "a", v) })}
+            {@render jamKnob({ label: "dec", value: myPatch.e.d, min: 0, max: 5000, disp: `${(myPatch.e.d / 1000).toFixed(1)}s`, set: (v) => jamEditNum("e", "d", v) })}
+            {@render jamKnob({ label: "sus", value: myPatch.e.s, min: 0, max: 100, disp: String(myPatch.e.s), set: (v) => jamEditNum("e", "s", v) })}
+            {@render jamKnob({ label: "rel", value: myPatch.e.r, min: 0, max: 8000, disp: `${(myPatch.e.r / 1000).toFixed(1)}s`, set: (v) => jamEditNum("e", "r", v) })}
+          </div>
+          <div class="jam-edit-hd"><span>filter</span></div>
+          <div class="jam-osc">
+            <button class="ghost jam-osc-w" class:on={myPatch.f.m === 0} title="Lowpass" onclick={() => jamEditNum("f", "m", 0)}>LP</button>
+            <button class="ghost jam-osc-w" class:on={myPatch.f.m === 1} title="Highpass" onclick={() => jamEditNum("f", "m", 1)}>HP</button>
+            <button class="ghost jam-osc-w" class:on={myPatch.f.m === 2} title="Bandpass" onclick={() => jamEditNum("f", "m", 2)}>BP</button>
+          </div>
+          <div class="jam-knobs">
+            {@render jamKnob({ label: "cut", value: myPatch.f.c, min: 20, max: 18000, disp: myPatch.f.c >= 1000 ? `${(myPatch.f.c / 1000).toFixed(1)}k` : String(myPatch.f.c), set: (v) => jamEditNum("f", "c", v) })}
+            {@render jamKnob({ label: "res", value: myPatch.f.q, min: 0, max: 100, disp: String(myPatch.f.q), set: (v) => jamEditNum("f", "q", v) })}
+            {@render jamKnob({ label: "env", value: myPatch.f.e, min: -100, max: 100, disp: String(myPatch.f.e), set: (v) => jamEditNum("f", "e", v) })}
+          </div>
+        </div>
+        <div class="jam-sect">
+          <div class="jam-edit-hd"><span>lfo</span></div>
+          <div class="jam-osc">
+            <button class="ghost jam-osc-w" class:on={myPatch.l.t === 0} title="LFO off" onclick={() => jamEditNum("l", "t", 0)}>OFF</button>
+            <button class="ghost jam-osc-w" class:on={myPatch.l.t === 1} title="LFO wobbles the filter cutoff" onclick={() => jamEditNum("l", "t", 1)}>CUT</button>
+            <button class="ghost jam-osc-w" class:on={myPatch.l.t === 2} title="LFO wobbles the pitch (a bounded vibrato)" onclick={() => jamEditNum("l", "t", 2)}>PIT</button>
+          </div>
+          <div class="jam-knobs">
+            {@render jamKnob({ label: "rate", value: myPatch.l.r, min: 1, max: 1200, disp: `${(myPatch.l.r / 100).toFixed(2)}hz`, set: (v) => jamEditNum("l", "r", v) })}
+            {@render jamKnob({ label: "dep", value: myPatch.l.d, min: 0, max: 100, disp: String(myPatch.l.d), set: (v) => jamEditNum("l", "d", v) })}
+          </div>
+          <div class="jam-edit-hd"><span>room sends</span></div>
+          <div class="jam-knobs">
+            {@render jamKnob({ label: "cho", value: myPatch.x.c, min: 0, max: 100, disp: String(myPatch.x.c), set: (v) => jamEditNum("x", "c", v) })}
+            {@render jamKnob({ label: "del", value: myPatch.x.d, min: 0, max: 100, disp: String(myPatch.x.d), set: (v) => jamEditNum("x", "d", v) })}
+            {@render jamKnob({ label: "rev", value: myPatch.x.r, min: 0, max: 100, disp: String(myPatch.x.r), set: (v) => jamEditNum("x", "r", v) })}
+          </div>
+        </div>
+        <div class="jam-sect">
+          <div class="jam-edit-hd"><span>save</span></div>
+          <div class="jam-save">
+            <input class="jam-save-name" type="text" maxlength="12" placeholder="patch name" bind:value={jamSaveName} />
+            <button class="ghost jam-save-btn" title="Keep this patch as a tile on this device" onclick={jamSavePatch}>SAVE</button>
+          </div>
+          <div class="jam-edit-note">Saved patches live on this device only. Friends hear edits automatically; older builds hear your {myTimbre} wave.</div>
+        </div>
+      </div>
+    {/if}
+    {/if}
+
+    {#if jamMode === "pads"}
+      <!-- The fixed ten-pad kit (jam-kit:v1), one-shots on the home row. A pad wears the colour
+           of whoever hit it last; chokes are engine-side and source-scoped. -->
+      <div class="jam-pads">
+        {#each JAM_KIT as pad (pad.id)}
+          {@const who = padFlash[pad.id] ?? ""}
+          <button
+            type="button"
+            class="jam-pad"
+            class:hit={who === "me"}
+            style={who && who !== "me" ? `background:${instColor(who)};border-color:${instColor(who)};color:#131218` : ""}
+            title={who && who !== "me" ? `${pad.name} · ${nameOf(who)}` : `${pad.name} (${padKeys[pad.id]})`}
+            onpointerdown={() => jamPadHit(pad.id)}
+          >
+            <span class="jam-pad-nm">{pad.name}</span>
+            <span class="jam-pad-ky">{padKeys[pad.id]}</span>
+          </button>
+        {/each}
+      </div>
+    {:else}
     <!-- 25 keys from the register base. Mine wins the tint over a peer's: I have to be
          able to see what I am playing even while someone else holds the same note. -->
     <div class="inst-board">
@@ -17054,6 +19161,70 @@
         </div>
       {/if}
     </div>
+    {/if}
+
+    <!-- Takes: folded by default (recording is loud, the machinery is quiet). The red state on
+         the fold strip stays visible even closed; the room-wide banner lives on the stage. -->
+    <div class="jam-takes">
+      <button class="ghost jam-takes-head" aria-expanded={jamTakesOpen} onclick={() => (jamTakesOpen = !jamTakesOpen)}>
+        {#if jamTakesOpen}{@render icoChevDown()}{:else}{@render icoChevUp()}{/if}
+        <span class="stage-label">TAKES</span>
+        {#if jamRecUi === "recording"}
+          <span class="jam-rec-dot"></span><span class="jam-rec-lbl">REC {fmtTakeClock(jamRecClock)}</span>
+        {:else if jamRecUi === "arming"}
+          <span class="jam-rec-lbl dim">waiting for the room</span>
+        {:else if jamRecUi === "paused"}
+          <span class="jam-rec-lbl dim">paused: the room changed</span>
+        {/if}
+        <span class="stage-spacer"></span>
+        {#if jamTakes.length}<span class="jam-met-lbl">{jamTakes.length} kept · end with the call</span>{/if}
+      </button>
+      {#if jamTakesOpen}
+        <div class="jam-takes-body">
+          <div class="jam-take-row">
+            {#if jamRec}
+              <button class="ghost jam-save-btn rec" onclick={() => jamRecFinish(true)} title="Stop and keep this take">STOP · KEEP</button>
+              <button class="ghost jam-save-btn" onclick={() => jamRecFinish(false)} title="Stop and throw it away">DISCARD</button>
+              {#if jamRecUi === "arming"}
+                {@const waiting = callParticipants.filter((fp) => !peerMeta[fp]?.rc)}
+                <span class="jam-edit-note">waiting for {waiting.length ? waiting.map(nameOf).join(", ") : "the room"} · older builds can never consent</span>
+              {:else if jamRecGaps}
+                <span class="jam-met-chip warn">{jamRecGaps} lost</span>
+              {/if}
+            {:else}
+              <button class="ghost jam-save-btn rec" onclick={jamRecArm} title="Ask the room to record; the take starts when everyone allows it">REC</button>
+              <span class="jam-edit-note">a take is the note events, not audio · the whole room sees it</span>
+            {/if}
+            <span class="stage-spacer"></span>
+            <button class="ghost jam-legacy" class:on={jamRecConsent} onclick={toggleJamConsent} title="Whether recorders in this call may include your playing">{jamRecConsent ? "YOU ALLOW REC" : "ALLOW REC"}</button>
+          </div>
+          {#each jamTakes as t (t.id)}
+            <div class="jam-take-row">
+              {#if jamPlayingId === t.id}
+                <button class="ghost jam-take-play on" onclick={jamStopPlayback} title="Stop playback" aria-label="Stop playback">
+                  <svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.6" y="2.6" width="6.8" height="6.8" fill="currentColor" /></svg>
+                </button>
+              {:else}
+                <button class="ghost jam-take-play" onclick={() => void jamPlayTake(t)} title="Replay locally through your own synth; nothing is re-sent" aria-label="Play take">
+                  <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.8 10.5 6 3 10.2z" fill="currentColor" /></svg>
+                </button>
+              {/if}
+              <span class="jam-take-name">take {String(t.id).padStart(2, "0")} · {fmtTakeClock(takeDuration(t.take))} · {t.take.met.bpm}bpm</span>
+              <span class="jam-take-who">{takePlayers(t.take)}</span>
+              {#if t.gaps}<span class="jam-met-chip warn" title="Some events were lost in transit; the take has holes it does not hide">{t.gaps} lost</span>{/if}
+              <span class="stage-spacer"></span>
+              <button class="ghost jam-take-play" onclick={() => void jamExportSheet(t)} title="Save as sheet music (SVG) to your Downloads folder; all players, plain note values" aria-label="Save sheet music">
+                <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 1.5h5l3 3v6h-8z" /><path d="M7 1.5v3h3" /><path d="M4 7h4M4 9h4" /></svg>
+              </button>
+              <button class="ghost jam-take-play" onclick={() => void jamShareTake(t)} title="Seal the take into the encrypted share (.jamtake); the jukebox can queue and replay it" aria-label="Save to the share">
+                <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 1.5v6" /><path d="M3.5 5 6 7.5 8.5 5" /><path d="M2 9.5h8" /></svg>
+              </button>
+              <button class="ghost jam-tile-del" onclick={() => jamDiscardTake(t.id)} title="Discard this take" aria-label="Discard take">✕</button>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
 
     <!-- Now playing: the audible truth, spelled out. Mine first, then everyone else's. -->
     <div class="inst-now">
@@ -17067,6 +19238,10 @@
             <span class="inst-sep">·</span>
             <span class="inst-chord">{chordName(instNowMine)}</span>
           {/if}
+          {#if myPatch && myPatchName}
+            <span class="inst-sep">·</span>
+            <span class="inst-chord">{myPatchName}</span>
+          {/if}
         </span>
       {/if}
       {#each instNowPeers as p (p.fp)}
@@ -17077,9 +19252,17 @@
           <span class="inst-notes">{p.notes.map(noteName).join(" ")}</span>
         </span>
       {/each}
+      {#each Object.keys(jamAbuseMuted) as fp (fp)}
+        <span class="inst-who jam-flood" title="This peer flooded the instrument channel and is muted for you only. Unmute them on their row to forgive it.">
+          <span class="inst-sw" style={`background:${instColor(fp)}`}></span>
+          <span class="inst-nm">{nameOf(fp)}</span>
+          <span class="inst-sep">·</span>
+          <span class="inst-notes">flood-muted</span>
+        </span>
+      {/each}
     </div>
 
-    <div class="inst-hint">a w s e d f t g y h u j play · z/x shift · click keys or midi</div>
+    <div class="inst-hint">{jamMode === "pads" ? `${padKeys.join(" ")} hit pads · MIDI uses GM drum notes · your hat chokes your open hat, never theirs` : `${pianoKeys.slice(0, 12).join(" ")} play · z/x shift · click keys or midi`}</div>
   </div>
 {/snippet}
 
@@ -18531,7 +20714,7 @@
                  written, so it would read as unread until the day it happened. -->
             {#snippet newsRow(n: NewsItem)}
               <li class="inbox-item" class:unseen={isNewsItemUnseen(n, statusCursors, newsTsCeilings)}>
-                <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
+                <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-fx-conceal]:not(.revealed)")) jumpToNews(n); }}>
                   <div class="inbox-meta">
                     {#if n.kind === "event"}
                       <span class="inbox-tag event-tag">⧗ event</span>
@@ -20557,9 +22740,9 @@
                   >{@render icoMicOff()}</button>
                   <button
                     class="ghost stage-tog"
-                    class:on={instMutedPeers[fp]}
-                    aria-pressed={!!instMutedPeers[fp]}
-                    title={instMutedPeers[fp] ? "Hear their instrument again" : "Mute their instrument for you only"}
+                    class:on={instPeerEffectivelyMuted(fp)}
+                    aria-pressed={instPeerEffectivelyMuted(fp)}
+                    title={instPeerEffectivelyMuted(fp) ? "Hear their instrument again" : "Mute their instrument for you only"}
                     onclick={() => toggleInstPeer(fp)}
                   >{@render icoNote()}</button>
                 </div>
@@ -20633,6 +22816,7 @@
           {#if streamSettingsOpen}{@render streamSettingsPanel(false)}{/if}
         </div>
 
+        {@render jamRecBanner()}
         <!-- The deck sits between what you do and what you play: it is the room's, not yours. -->
         {@render jukeDock()}
 
@@ -20763,7 +22947,7 @@
 
         {#if streamSettingsOpen}<div class="focus-stream-panel">{@render streamSettingsPanel(false)}</div>{/if}
 
-        <div class="focus-dock juke-dock-slot">{@render jukeDock()}</div>
+        <div class="focus-dock juke-dock-slot">{@render jamRecBanner()}{@render jukeDock()}</div>
 
         {#if instOpen}
           <div class="focus-dock">{@render instDrawer()}</div>
@@ -20844,25 +23028,72 @@
 
     {#if textEffectTarget && !showTextEffectCatalog && textEffectSelection.start !== textEffectSelection.end}
       {@const fxTarget = textEffectTarget}
+      {@const flipped = textEffectBarExpanded && textEffectBubble.y < 360}
+      {@const room = flipped ? innerHeight - textEffectBubble.bottom - 16 : textEffectBubble.y - 16}
       <div
         class="text-fx-selection-bar"
-        style={`left:${textEffectBubble.x}px;top:${textEffectBubble.y}px`}
+        class:expanded={textEffectBarExpanded}
+        class:flipped
+        style={`left:${textEffectBarLeft(textEffectBarExpanded)}px;top:${flipped ? textEffectBubble.bottom : textEffectBubble.y}px;--fx-room:${Math.max(120, room)}px`}
         role="toolbar"
         aria-label={`Apply a text effect to selected ${textEffectTargetLabel(fxTarget)}`}
       >
-        {#each quickTextEffects as effect (effect.id)}
+        <div class="text-fx-strip">
+          {#each quickTextEffects as effect (effect.id)}
+            <button
+              type="button"
+              class="text-fx-aa"
+              aria-label={`Apply ${effect.label}`}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => applyTextEffect(effect.id, fxTarget)}
+            >
+              <span class="text-fx-aa-live" aria-hidden="true">{@html textEffectHtml(effect.id, "Aa")}</span>
+              <span class="text-fx-speech" role="tooltip"><strong>{effect.label}</strong>{effect.description}{#if textEffectKeybinds[effect.id]}<kbd>{textEffectKeybinds[effect.id]}</kbd>{/if}</span>
+            </button>
+          {/each}
           <button
             type="button"
-            class="text-fx-aa"
-            aria-label={`Apply ${effect.label}`}
+            class="text-fx-aa more"
+            class:active={textEffectBarExpanded}
+            title={textEffectBarExpanded ? "Back to your most-used effects" : "Every text effect, by section"}
+            aria-expanded={textEffectBarExpanded}
             onmousedown={(e) => e.preventDefault()}
-            onclick={() => applyTextEffect(effect.id, fxTarget)}
-          >
-            <span class="text-fx-aa-live" aria-hidden="true">{@html textEffectHtml(effect.id, "Aa")}</span>
-            <span class="text-fx-speech" role="tooltip"><strong>{effect.label}</strong>{effect.description}{#if textEffectKeybinds[effect.id]}<kbd>{textEffectKeybinds[effect.id]}</kbd>{/if}</span>
-          </button>
-        {/each}
-        <button type="button" class="text-fx-aa more" title="Every text effect and copyable code" onmousedown={(e) => e.preventDefault()} onclick={() => (showTextEffectCatalog = true)}>＋</button>
+            onclick={toggleTextEffectBar}
+          >{textEffectBarExpanded ? "−" : "＋"}</button>
+        </div>
+        {#if textEffectBarExpanded}
+          <div class="text-fx-bar-panel">
+            <input class="text-fx-search" bind:value={textEffectQuery} placeholder="Find shaky, trans pride, cyber, CRT…" aria-label="Search text effects" />
+            <div class="text-fx-bar-scroll">
+              {#each TEXT_EFFECT_GROUPS as group}
+                {@const effects = filteredTextEffects.filter((effect) => effect.group === group)}
+                {#if effects.length}
+                  <section class="text-fx-bar-group">
+                    <h3>{group}<span class="text-fx-group-count">{effects.length}</span></h3>
+                    <div class="text-fx-bar-grid">
+                      {#each effects as effect (effect.id)}
+                        <button
+                          type="button"
+                          class="text-fx-cell"
+                          title={`${effect.label}: ${effect.description}`}
+                          aria-label={`Apply ${effect.label}`}
+                          onmousedown={(e) => e.preventDefault()}
+                          onclick={() => applyTextEffect(effect.id, fxTarget)}
+                        >
+                          <span class="text-fx-cell-preview" aria-hidden="true">{@html textEffectHtml(effect.id, effect.preview)}</span>
+                          <span class="text-fx-cell-name">{effect.label}{#if textEffectKeybinds[effect.id]}<kbd>{textEffectKeybinds[effect.id]}</kbd>{/if}</span>
+                        </button>
+                      {/each}
+                    </div>
+                  </section>
+                {/if}
+              {/each}
+              {#if !filteredTextEffects.length}
+                <p class="muted small text-fx-bar-empty">No effect matches that. Try a mood, a colour, or a flag name.</p>
+              {/if}
+            </div>
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -20884,8 +23115,12 @@
             {#each TEXT_EFFECT_GROUPS as group}
               {@const effects = filteredTextEffects.filter((effect) => effect.group === group)}
               {#if effects.length}
-                <section class="text-fx-group">
-                  <h3>{group}</h3>
+                <details
+                  class="text-fx-group"
+                  open={!!textEffectQuery.trim() || !collapsedTextEffectGroups[group]}
+                  ontoggle={(e) => { if (!textEffectQuery.trim()) collapsedTextEffectGroups[group] = !e.currentTarget.open; }}
+                >
+                  <summary><h3>{group}<span class="text-fx-group-count">{effects.length}</span></h3></summary>
                   <div class="text-fx-grid">
                     {#each effects as effect (effect.id)}
                       <div class="text-fx-choice">
@@ -20898,7 +23133,7 @@
                       </div>
                     {/each}
                   </div>
-                </section>
+                </details>
               {/if}
             {/each}
           </div>
@@ -22045,6 +24280,41 @@
                 <button type="button" class="ghost small" onclick={() => (settingsPage = "devices")}>Open Devices</button>
               </section>
               <section class="set-section">
+                <h3>Instrument keys</h3>
+                <p class="muted small">
+                  Which keys play the call piano and drum pads, on this device only. Click a slot, then press
+                  its new key (Esc cancels); a key can hold one slot per instrument, so a rebind steals it from
+                  the old slot. The vault's melody unlock keeps its fixed keys; this never touches it.
+                </p>
+                <div class="jam-keymap">
+                  <div class="jam-edit-hd"><span>piano keys</span></div>
+                  <div class="jam-km-grid">
+                    {#each pianoKeys as key, pc (pc)}
+                      {@const capturing = keymapCapture?.kind === "piano" && keymapCapture.index === pc}
+                      <button class="ghost jam-km" class:cap={capturing} title={`Rebind ${pc === 12 ? "the top C" : NOTE_NAMES[pc]}`} onclick={() => (keymapCapture = capturing ? null : { kind: "piano", index: pc })}>
+                        <span class="jam-km-note">{pc === 12 ? "C+" : NOTE_NAMES[pc]}</span>
+                        <span class="jam-km-key">{capturing ? "…" : key}</span>
+                      </button>
+                    {/each}
+                  </div>
+                  <div class="jam-edit-hd"><span>drum pads</span></div>
+                  <div class="jam-km-grid">
+                    {#each padKeys as key, pad (pad)}
+                      {@const capturing = keymapCapture?.kind === "pads" && keymapCapture.index === pad}
+                      <button class="ghost jam-km" class:cap={capturing} title={`Rebind ${JAM_KIT[pad].name}`} onclick={() => (keymapCapture = capturing ? null : { kind: "pads", index: pad })}>
+                        <span class="jam-km-note">{JAM_KIT[pad].name}</span>
+                        <span class="jam-km-key">{capturing ? "…" : key}</span>
+                      </button>
+                    {/each}
+                  </div>
+                  <div class="jam-km-foot">
+                    <span class="jam-edit-note">{keymapCapture ? "Press the new key (Esc cancels)." : "Changes apply immediately, in and out of calls."}</span>
+                    <span class="stage-spacer"></span>
+                    <button class="ghost jam-save-btn" onclick={keymapReset}>RESET</button>
+                  </div>
+                </div>
+              </section>
+              <section class="set-section">
                 <h3>Screen sharing</h3>
                 {@render streamSettingsPanel(true)}
               </section>
@@ -22198,8 +24468,8 @@
                 <h3>Debug log</h3>
                 <p class="muted small">
                   On by default during the alpha. Mewtual writes a text log next to its data so you
-                  can reproduce a problem and send the file to someone who can read it. Turning it
-                  off is permanent until you turn it back on.
+                  can reproduce a problem and send the file to someone who can read it. The switch
+                  controls the next launch; it cannot start or stop the current session's file.
                 </p>
                 <!-- Two different things, said plainly. The file and the in-app record are separate
                      sinks with separate settings, and a reader who assumes this checkbox is the
@@ -22213,20 +24483,17 @@
                   <label class="toggle">
                     <input type="checkbox" checked={debugLog.enabled} disabled={debugLogBusy}
                       onchange={(e) => toggleDebugLog(e.currentTarget.checked)} />
-                    <span>Keep a debug log</span>
+                    <span>Write a debug log on next launch</span>
                   </label>
-                  <!-- Preference and reality, always both. The gap between them is the whole
-                       reason this reads the sink instead of echoing the checkbox above. -->
-                  {@const health = debugLogSummary(debugLog)}
-                  <div class="dbg-kv">
-                    <span class="k">You asked for</span>
-                    <span class="v">{debugLog.enabled ? "A debug log" : "No debug log"}</span>
-                    <span class="k">Actually</span>
-                    <span class="v"><span class="chip {health.tone}">{debugLog.state.toUpperCase()}</span></span>
-                  </div>
-                  <p class="muted small">{health.text}</p>
-                  {#if !debugLog.enabled && debugLog.active}
-                    <p class="muted small">Still writing this session's log. It stops at the next restart.</p>
+                  <!-- Current evidence gets one plain sentence. A second sentence appears only
+                       when changing the next-launch preference cannot affect this process. -->
+                  {@const logStatus = debugLogSettingsStatus(debugLog)}
+                  <p class="muted small">
+                    <span class="chip {logStatus.tone}">{logStatus.label}</span>
+                    {logStatus.detail}
+                  </p>
+                  {#if logStatus.restartNotice}
+                    <p class="muted small">{logStatus.restartNotice}</p>
                   {/if}
                   <div class="field">
                     <span class="muted small">Log folder</span>

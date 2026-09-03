@@ -817,6 +817,52 @@ export function sinkSummary(sink: DebugLogSink | null): { tone: SinkTone; text: 
 }
 
 /**
+ * Current-session wording for Settings, kept separate from the next-launch checkbox.
+ *
+ * Tauri's tracing subscriber is install-once, so changing `enabled` cannot start or stop this
+ * process's writer. The old two-column "You asked for / Actually" display exposed that internal
+ * model without explaining the time boundary. This projection instead names the current state and
+ * mentions a restart only when the saved preference and running process differ.
+ */
+export function debugLogSettingsStatus(sink: DebugLogSink): {
+  tone: SinkTone;
+  label: string;
+  detail: string;
+  restartNotice: string;
+} {
+  const tone = sinkSummary(sink).tone;
+  const currentlyWriting = sink.state === "active" || sink.state === "degraded";
+  let label: string;
+  let detail: string;
+
+  if (sink.state === "failed") {
+    label = "Could not write log";
+    detail = sink.error || "The reason was not recorded.";
+  } else if (sink.state === "degraded") {
+    label = "Writing with gaps";
+    detail = sink.events_dropped
+      ? `${sink.events_dropped.toLocaleString()} record(s) did not reach the file.`
+      : "This session is close to its log size limit.";
+  } else if (sink.state === "active") {
+    label = "Writing now";
+    detail = `${sink.events_written.toLocaleString()} entries, ${formatBytes(sink.bytes_written)} so far.`;
+  } else {
+    label = "Not writing";
+    detail = sink.enabled
+      ? "No log file was opened for this session."
+      : "No log file is being written this session.";
+  }
+
+  const restartNotice = currentlyWriting && !sink.enabled
+    ? "Logging is off for the next launch. This session will keep writing until you restart Mewtual."
+    : sink.state === "stopped" && sink.enabled
+      ? "Logging is on for the next launch. Restart Mewtual to begin writing."
+      : "";
+
+  return { tone, label, detail, restartNotice };
+}
+
+/**
  * The sink's health as copyable lines.
  *
  * Beside the summary for the reason every serialiser here is: a pasted report that does not match

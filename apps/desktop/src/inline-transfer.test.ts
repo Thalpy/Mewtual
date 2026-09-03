@@ -82,16 +82,20 @@ function invokeSites(command: string): Array<[string, number]> {
     .filter(([, n]) => n > 0);
 }
 
-test("only the text reader pulls a whole file into the window", () => {
+test("only whole-file READERS pull a shared file into the window", () => {
   // download_file returns the file as one base64 string. Every visual surface streams instead
-  // (catcoms-media:), and saving writes natively, so exactly one caller should remain: the
-  // reader, which genuinely needs the bytes in JS and is bounded twice over.
+  // (catcoms-media:), and saving writes natively, so the callers that remain are the ones that
+  // genuinely need the bytes IN JS, each bounded by more than the file-size cap:
+  //   - the text reader (bounded twice over);
+  //   - the jukebox take deck, which must hand the bytes to the jam-take validator before a
+  //     single event reaches Web Audio; a take is capped at 512 KiB by its own format.
+  // Two, named, and a third has to be argued for here rather than slipped past a pattern.
   const sites = invokeSites("download_file");
   const total = sites.reduce((n, [, count]) => n + count, 0);
   assert.equal(
     total,
-    1,
-    `download_file should have exactly one caller (the text reader), found: ${JSON.stringify(sites)}`,
+    2,
+    `download_file should have exactly two callers (text reader, take deck), found: ${JSON.stringify(sites)}`,
   );
 });
 

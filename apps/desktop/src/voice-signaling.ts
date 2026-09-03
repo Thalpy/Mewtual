@@ -36,8 +36,22 @@ export function heartbeatRecovery(input: {
   return null;
 }
 
-/** What a peer says about itself: the two mute states plus which video slot they are filling. */
-export type PeerState = { mic: boolean; inst: boolean; vid: number; rx: 720 | 1080 | 1440 | 2160 };
+/**
+ * What a peer says about itself: the two mute states, which video slot they are filling, and the
+ * jam-take coordination pair. `rec` is what THEY are doing (0 none, 1 arming/paused: asking the
+ * room, 2 recording); `rc` is whether they consent to being recorded. Both are honest-client
+ * signals re-sent on every heartbeat; an old build sends neither, which correctly reads as "not
+ * recording, has not consented", so a mixed-version room can never start a take that build
+ * cannot see.
+ */
+export type PeerState = {
+  mic: boolean;
+  inst: boolean;
+  vid: number;
+  rx: 720 | 1080 | 1440 | 2160;
+  rec: 0 | 1 | 2;
+  rc: boolean;
+};
 
 /**
  * Fold a peer's broadcast state into what we already hold for them.
@@ -51,7 +65,7 @@ export type PeerState = { mic: boolean; inst: boolean; vid: number; rx: 720 | 10
  */
 export function mergePeerState(
   prev: PeerState | undefined,
-  msg: { mic?: unknown; inst?: unknown; vid?: unknown; rx?: unknown },
+  msg: { mic?: unknown; inst?: unknown; vid?: unknown; rx?: unknown; rec?: unknown; rc?: unknown },
 ): PeerState {
   const receiveHeight =
     msg.rx === 720 || msg.rx === 1080 || msg.rx === 1440 || msg.rx === 2160
@@ -62,6 +76,10 @@ export function mergePeerState(
     inst: msg.inst === 1,
     vid: typeof msg.vid === "number" ? msg.vid : prev?.vid ?? 0,
     rx: receiveHeight,
+    // Like mic: freshly claimed by every message, so absence (an old build, or a build that
+    // stopped sending it) reads as the safe zero, never as a sticky earlier claim.
+    rec: msg.rec === 1 ? 1 : msg.rec === 2 ? 2 : 0,
+    rc: msg.rc === 1,
   };
 }
 

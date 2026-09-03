@@ -77,8 +77,8 @@ use bytes::Bytes;
 use catcoms_rt::{
     Clock, ConnectionDirection, ConnectionFamily, ConnectionPath, ConnectionTransport,
     CryptoRngCore, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerConnectionSnapshot, PeerId,
-    ProtocolId, RendezvousRegistration, Responder, SystemClock, Topic, TransportError,
-    TransportEvent, MAX_PEER_DIAL_BATCH,
+    ProtocolId, RendezvousRegistration, RequestCancellation, Responder, SharedRequestKeepalive,
+    SystemClock, Topic, TransportError, TransportEvent, MAX_PEER_DIAL_BATCH,
 };
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
@@ -1203,6 +1203,9 @@ enum Command {
     Request {
         peer: PeerId,
         data: Bytes,
+        /// Retain upper-layer accounting after its waiting future is cancelled. The actor moves
+        /// this keepalive into `pending_req` until libp2p reports the exact request complete.
+        cancellation: Option<RequestCancellation>,
         reply: oneshot::Sender<Result<Bytes, TransportError>>,
     },
     /// Send only over a connection that is live when this command is handled. Unlike
@@ -3113,6 +3116,13 @@ async fn run_ipv6_port_mapper_with<C, R, D>(
     }
 }
 
+struct PendingRequest {
+    reply: oneshot::Sender<Result<Bytes, TransportError>>,
+    /// Deliberately unread: ownership is the accounting action. It survives a dropped waiter and
+    /// is released only by the matching response/failure event.
+    _keepalive: Option<SharedRequestKeepalive>,
+}
+
 struct Actor {
     swarm: Swarm<MeshBehaviour>,
     /// Whether this product instance explicitly opted into changing the local gateway.
@@ -3194,7 +3204,9 @@ struct Actor {
     /// (signed peer records) lives above the transport.
     recent_peers: HashMap<PeerId, RecentPeer>,
     recent_peer_order: VecDeque<PeerId>,
-    pending_req: HashMap<OutboundRequestId, oneshot::Sender<Result<Bytes, TransportError>>>,
+    /// Request waiters plus accounting that must survive cancellation of the waiting future.
+    /// The keepalive leaves only when libp2p reports this exact request responded/failed.
+    pending_req: HashMap<OutboundRequestId, PendingRequest>,
     pending_publish: Vec<(Topic, Bytes)>,
     /// Peers this node uses as **infrastructure**: rendezvous nodes it registers or discovers at,
     /// and relays it holds (or is opening) a circuit reservation on. Learned from the commands
@@ -3755,21 +3767,42 @@ impl Actor {
                     tracing::trace!(bytes = len, "published");
                 }
             }
-            Command::Request { peer, data, reply } => match self.request_target(&peer) {
-                Some(libp2p_peer) => {
-                    tracing::debug!(peer = %libp2p_peer, bytes = data.len(), "send request");
-                    let id = self
-                        .swarm
-                        .behaviour_mut()
-                        .request_response
-                        .send_request(&libp2p_peer, data.to_vec());
-                    self.pending_req.insert(id, reply);
+            Command::Request {
+                peer,
+                data,
+                cancellation,
+                reply,
+            } => {
+                if cancellation
+                    .as_ref()
+                    .is_some_and(RequestCancellation::is_cancelled)
+                {
+                    let _ = reply.send(Err(TransportError::Cancelled));
+                } else {
+                    let keepalive = cancellation.and_then(|value| value.keepalive());
+                    match self.request_target(&peer) {
+                        Some(libp2p_peer) => {
+                            tracing::debug!(peer = %libp2p_peer, bytes = data.len(), "send request");
+                            let id = self
+                                .swarm
+                                .behaviour_mut()
+                                .request_response
+                                .send_request(&libp2p_peer, data.to_vec());
+                            self.pending_req.insert(
+                                id,
+                                PendingRequest {
+                                    reply,
+                                    _keepalive: keepalive,
+                                },
+                            );
+                        }
+                        None => {
+                            tracing::warn!(?peer, "request to unknown peer");
+                            let _ = reply.send(Err(TransportError::Unreachable(peer)));
+                        }
+                    }
                 }
-                None => {
-                    tracing::warn!(?peer, "request to unknown peer");
-                    let _ = reply.send(Err(TransportError::Unreachable(peer)));
-                }
-            },
+            }
             Command::RequestConnected { peer, data, reply } => {
                 let live = self
                     .peers
@@ -3788,7 +3821,13 @@ impl Actor {
                             .behaviour_mut()
                             .request_response
                             .send_request(&libp2p_peer, data.to_vec());
-                        self.pending_req.insert(id, reply);
+                        self.pending_req.insert(
+                            id,
+                            PendingRequest {
+                                reply,
+                                _keepalive: None,
+                            },
+                        );
                     }
                     None => {
                         tracing::trace!(?peer, "connected-only request refused: peer is not live");
@@ -4582,8 +4621,8 @@ impl Actor {
                     request_id,
                     response,
                 } => {
-                    if let Some(reply) = self.pending_req.remove(&request_id) {
-                        let _ = reply.send(Ok(Bytes::from(response)));
+                    if let Some(pending) = self.pending_req.remove(&request_id) {
+                        let _ = pending.reply.send(Ok(Bytes::from(response)));
                     }
                 }
             },
@@ -4600,8 +4639,8 @@ impl Actor {
                 // mid-request and a request that simply timed out are three different problems and
                 // a log that spells them all the same way sends you looking in the wrong place.
                 tracing::warn!(peer = %peer, error = %error, "outbound request failed");
-                if let Some(reply) = self.pending_req.remove(&request_id) {
-                    let _ = reply.send(Err(match error {
+                if let Some(pending) = self.pending_req.remove(&request_id) {
+                    let _ = pending.reply.send(Err(match error {
                         request_response::OutboundFailure::Timeout => {
                             TransportError::Timeout(to_peer(&peer))
                         }
@@ -5555,7 +5594,12 @@ impl MeshHandle {
     ) -> Result<Bytes, TransportError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::Request { peer, data, reply })
+            .send(Command::Request {
+                peer,
+                data,
+                cancellation: None,
+                reply,
+            })
             .await
             .map_err(|_| TransportError::Closed)?;
         rx.await.map_err(|_| TransportError::Closed)?
@@ -5636,10 +5680,42 @@ impl MeshTransport for MeshService {
     ) -> Result<Bytes, TransportError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::Request { peer, data, reply })
+            .send(Command::Request {
+                peer,
+                data,
+                cancellation: None,
+                reply,
+            })
             .await
             .map_err(|_| TransportError::Closed)?;
         rx.await.map_err(|_| TransportError::Closed)?
+    }
+
+    async fn request_cancellable(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        data: Bytes,
+        mut cancellation: RequestCancellation,
+    ) -> Result<Bytes, TransportError> {
+        if cancellation.is_cancelled() {
+            return Err(TransportError::Cancelled);
+        }
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Request {
+                peer,
+                data,
+                cancellation: Some(cancellation.clone()),
+                reply,
+            })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(TransportError::Cancelled),
+            result = rx => result.map_err(|_| TransportError::Closed)?,
+        }
     }
 
     async fn request_connected(
@@ -5802,6 +5878,17 @@ mod tests {
     struct CommitObservedPermit {
         address: String,
         commits: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct RequestDropObserved {
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for RequestDropObserved {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     impl catcoms_rt::DialPermit for CommitObservedPermit {
@@ -7675,6 +7762,86 @@ mod tests {
             reconnected.is_err(),
             "the connected-only request must not reconnect from recent_peers"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_keeps_accounting_until_the_matching_transport_completion() {
+        let listen: Multiaddr = "/memory/918277".parse().unwrap();
+        let mut server_swarm = build_memory_swarm();
+        let server_id = *server_swarm.local_peer_id();
+        server_swarm.listen_on(listen.clone()).unwrap();
+        let server = MeshService::spawn(server_swarm);
+        let client = Arc::new(MeshService::new_memory(None, &[]).unwrap());
+        let server_peer = server.local_peer();
+
+        let bound: Multiaddr = format!("{listen}/p2p/{server_id}").parse().unwrap();
+        client.dial(bound).await.unwrap();
+        for node in [client.as_ref(), &server] {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if matches!(
+                        node.next_event().await,
+                        Some(TransportEvent::PeerConnected(_))
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("the memory peers should connect");
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let keepalive: SharedRequestKeepalive = Arc::new(RequestDropObserved {
+            drops: Arc::clone(&drops),
+        });
+        let (cancel, receiver) = watch::channel(false);
+        let cancellation = RequestCancellation::new(receiver, Some(keepalive));
+        let request_client = Arc::clone(&client);
+        let request = tokio::spawn(async move {
+            request_client
+                .request_cancellable(
+                    server_peer,
+                    ProtocolId(RR_PROTOCOL),
+                    Bytes::from_static(b"bounded"),
+                    cancellation,
+                )
+                .await
+        });
+
+        let responder = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(TransportEvent::Request {
+                    data, responder, ..
+                }) = server.next_event().await
+                {
+                    assert_eq!(&data[..], b"bounded");
+                    break responder;
+                }
+            }
+        })
+        .await
+        .expect("the request should enter the remote transport");
+        cancel.send(true).unwrap();
+        assert!(matches!(
+            request.await.unwrap(),
+            Err(TransportError::Cancelled)
+        ));
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "cancelling the waiter must not recycle accounting for live libp2p work"
+        );
+
+        responder.respond(Bytes::from_static(b"late"));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while drops.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the matching response should retire the pending request and its keepalive");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     #[test]

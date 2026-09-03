@@ -173,6 +173,13 @@ table with the commit that closed it.
   current member can claim receipt without displaying content, so the UI says delivered/held and
   never read. Receipt traffic adds message-timing metadata to peers already participating in the
   encrypted group; it is not broadcast outside the group.
+- **Epoch-managed document operations above 1 MiB disclose their coarse size.** P1 bounds the
+  domain envelope to 64 KiB and a whole signed operation to 256 KiB, so conforming creative and
+  registry operations stay inside the existing sealed-op padding ladder. The generic legacy
+  replication codec still permits larger Automerge operations: above the one-MiB padding ceiling
+  they receive only the authenticated length footer, not another power-of-two bucket. A forwarding
+  group member can therefore estimate such a legacy bulk edit's ciphertext size. Content remains
+  encrypted, the network frame cap still bounds work, and P1 admission rejects the operation.
 - **Adaptive stream resolution reveals only a coarse call preference.** A call participant sends
   one of four height buckets, not its exact window, monitor dimensions, or pixel ratio. The sender
   treats it as an advisory upper bound and independently caps each WebRTC encoding. Screen tracks
@@ -190,6 +197,81 @@ table with the commit that closed it.
   grants can be live, and the graph/output track is released when the last grant ends. The call microphone is a separate sender. The
   WebView/OS decides whether window/application audio is available, so this is not an OBS-equivalent
   native process-capture guarantee.
+- **Jam events are untrusted member input rendered inside a receiver-owned, bounded synthesizer.**
+  The jam engine does not authenticate peers itself: the identity used to mint its source-channel
+  capability must come from the already authenticated call connection, never a sender-controlled
+  frame field. Each callback must present the opaque capability minted for that exact generation;
+  reopen/removal invalidates older queued callbacks before they can recreate sender state. Every data-channel
+  delivery is size- and rate-charged before parsing; valid patches pass the same strict, unknown-
+  field-rejecting validator regardless of whether they came from the wire, local storage, import,
+  or take playback. A patch selects values inside one fixed topology and cannot introduce graph
+  edges, code, samples, assets, or feedback. Per-peer held limits, a global tail-inclusive voice
+  limit, release/hold watchdogs, and receiver-owned gates/limiter bound honest-renderer work and
+  output. Take playback also releases unmatched held notes when the event log ends before its
+  bounded tail teardown, rather than sustaining them for that whole grace period. A malicious
+  member can still make bounded noise and a modified receiver can discard or
+  reinterpret events. Remote events are not queued into a suspended audio context. A content hash
+  promises the same recipe, not identical platform audio. Exact legacy note frames have a separate
+  receive-only compatibility domain; they gain no patch, drum, clock, or recording authority.
+  Ordered data-channel delivery is extended across asynchronous digests, and outbound wire,
+  renderer and recorder events share one immutable published recipe. Unopened edges retain no
+  musical history: open establishes only the current patch, then fresh live events begin. This
+  chooses an explicit sequence gap over collapsing paced history into a receiver-budget burst or
+  losing a release behind an accepted attack. Reconnects cannot reset the call-epoch peer budget or leave
+  an old channel's digest blocking its replacement. A fresh channel gets one exact raw recipe
+  reannouncement only when that peer/call budget previously observed the engine hash-verify it;
+  this avoids another digest/token while distinct recipes still spend the persistent patch bucket.
+  Sender publication pacing matches the receiver
+  patch budget, while publication/playback preparation coalesce to one running plus one latest task,
+  and take scheduler work and pending drum digests have separate per-pass/per-source/global caps.
+  Drum work is channel-generation ordered with bounded backpressure: dense takes await it, local
+  echoes share one causal event lane, and stale generation work cannot block its replacement.
+  Local causal overflow advances a resettable queue generation, cancels queued/active engine work,
+  and releases current local voices before a fresh queue admits more input; retained attacks cannot
+  emerge later as a local burst.
+  Monotonic room/source admission generations advance on both gate edges, and engine render
+  generations advance on revocation, making Deafen and mute sticky for work already queued or
+  hashing even if the user reopens audio before that work settles. Local input captures its room
+  generation before asynchronous patch publication;
+  the audible voice count is not treated as a bound on unresolved crypto work. Auto-muted music retains only a tiny separately rate-limited
+  `t:"s"` lane so an instrument flood cannot freeze consent withdrawal or call state.
+  Deafen and member removal are security-relevant integration points: shipment requires Deafen to
+  destroy the instrument room graph (including buffered wet state) and release all voices including
+  local previews. Remote-controlled call cues cannot create/resume suspended audio, have a global
+  overlap cap and receiver limiter, and are cancelled at Deafen/leave. Roster revocation must close the removed
+  member's call/data-channel connection. Recording consent and performer labels are honest-client
+  coordination until the planned group-bound, domain-separated durable per-participant aggregate
+  lane commitments exist; another endpoint can always record audio or events without announcing it.
+  Within an honest renderer, take reconnect lanes attributed to one participant share allocator,
+  choke and digest budgets. That owner is an engine-minted playback domain, not the unsigned stored
+  label, so a forged label cannot consume or choke a same-named live member's voices. Local live
+  seed material is bound to the authenticated self fingerprint rather than the reserved `me` lane.
+  A recorder lease exists only for events received while its consent gate is already recording and
+  binds the recorder's monotonic uninterrupted-recording generation before the App causal queue;
+  withdrawal/restart invalidates pre-withdrawal work, and events received while paused have no
+  lease. Disconnect retracts that edge's consent and reconnect must announce fresh consent.
+  Shared-take ingress rejects oversize listings before whole-file download, bounds encoded bytes
+  before decode, keeps a bounded per-call LRU, and serializes/coalesces downloads. Each take read
+  has a native cancellation signal observed inside the actor-owned chunk fetch; cancellation
+  acknowledgement preempts the stale JavaScript slot, while a transport-owned keepalive retains
+  its native charge until the exact submitted request responds, fails or times out. A four-request
+  process cap and exact UI-generation cleanup therefore bound rapid call churn even against a
+  withholding peer. Explicit lock cancels every slot, and unclaimed
+  begin-only registrations are replaceable at the cap so reload cannot starve playback. Inline
+  reads that omit a caller token receive an unforgeable native token under the same cap and lock
+  cancellation, while caller tokens include a per-WebView random nonce so reset counters cannot
+  collide with a still-active predecessor. The transport trait has no cancellable-request default:
+  every implementation must declare the ownership rule. Both libp2p and in-memory queues retain
+  accounting at their underlying owner; wrappers delegate, while test fakes that do not transfer
+  it own no detached work. Compatibility or alternate transports therefore cannot silently inherit
+  an unbounded path. A completion must
+  still match the exact call lease/server/channel/deck and pass the current listing and trust policy;
+  a fetch started in an old call cannot populate a later call even when both adopt the same CID.
+  Tokenized progress is accepted only for that exact call/server/CID/token, and tokenless progress
+  is excluded while a take is on deck, preventing queued old-group provider telemetry from
+  repainting the replacement deck.
+  The current take `group` value is device-local
+  scope metadata, not the stable group binding needed by phase 6.
 - **A shared file is authenticated bytes, not trusted content.** Explicit save streams into a
   non-overwriting `.part`, checks the declared size and whole-file content address, sanitizes the
   peer-provided name to one leaf, atomically publishes only after verification, and reveals it in
@@ -283,7 +365,7 @@ table with the commit that closed it.
 | UI continuity and backup confidentiality | Drafts/read positions are vault-sealed and bounded; sealed records use destination-specific create-new siblings, file sync, rename and parent-directory sync on Unix, so concurrent record types cannot alias, pre-planted staging symlinks are rejected, and abrupt termination exposes a complete predecessor or replacement rather than a partial record. A failed post-rename directory flush is disclosed as committed-but-not-durable. Offline backup copies only the already-sealed vault tree without following links. Export creates another offline guessing target and exposes filesystem metadata; it does not weaken record encryption. Catastrophic filesystem/hardware failure remains outside the guarantee. | `catcoms-app::ServerStore`; desktop `create_backup` |
 | Vault creation and secret rotation | A non-blocking OS-backed sibling lock serializes first creation and rewrap across processes; contention returns `VaultBusy` for retry instead of hanging behind a suspended process. The current wrapper is authenticated; the same root DEK is published through a unique create-new, file-synced staging sibling with rename and Unix directory sync, so concurrent app instances cannot return mismatched first-run DEKs or both report a conflicting rewrap. New/replacement secrets are capped at 4096 bytes. A v1 wrapper with a legacy 4097..65536-byte secret receives one bounded compatibility open and is atomically migrated to fixed-input v2; larger inputs are rejected. This intentionally loses downgrade compatibility with v1-only builds, not ciphertext confidentiality. Wrapper reads accept exactly 89 bytes and never allocate from a hostile file length. | `catcoms-storage::{open_or_create_vault,change_vault_passphrase}`; desktop `change_vault_secret` |
 | Vault single-writer lifetime | `ServerStore::open` acquires a separate non-blocking OS session lock before unsealing and retains it until drop/process exit. A second desktop cannot start duplicate MLS, registry, invite-ledger or transport writers from the same snapshot; it receives `VaultBusy`. Normal exit and abort release the OS lock. Explicit UI lock keeps the native mount but closes IPC; re-unlock performs verify-only authentication against `vault.bin`, and a wrong secret cannot reopen the session. This is same-host installation exclusion, not distributed consensus or protection from malware with the user's OS authority. | `catcoms-storage::{acquire_vault_session,verify_vault_passphrase}`; `catcoms-app::ServerStore`; desktop `unlock` |
-| Desktop explicit-lock IPC boundary | Every non-bootstrap Tauri command requires both a mounted vault and an open UI session. Lock atomically saves bounded continuity state then closes the command boundary; actor events are dropped, late frontend/native cache publications are exact-generation gated, and plaintext export publication holds the exact-generation commit guard while actors continue native background network/persistence work | desktop `require_unlocked_session`; `require_ui_session_generation`; `lock_session`; `forward_events` |
+| Desktop explicit-lock IPC boundary | Every non-bootstrap Tauri command requires both a mounted vault and an open UI session. Lock atomically saves bounded continuity state then closes the command boundary; actor events are dropped, late frontend/native cache publications are exact-generation gated, and plaintext export publication holds the exact-generation commit guard while actors continue native background network/persistence work. Native window-close attempts serialize, and a duplicate caller cannot overtake an unacknowledged continuity failure to destroy the window. | desktop `require_unlocked_session`; `require_ui_session_generation`; `lock_session`; `close_vault_window`; `forward_events` |
 | Moderation-record attribution and field integrity | Each event/vote has a canonical group-bound Ed25519 signature; the reader verifies signer fingerprint and linked-device origin, so records cannot be altered or replayed into another server without detection | `catcoms-app::moderation` |
 | Path traversal | Virtual file paths normalized (drops `.`/`..`/empty) so a path can't escape the share | `catcoms-app::normalize_path` |
 

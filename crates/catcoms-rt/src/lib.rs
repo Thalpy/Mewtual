@@ -24,6 +24,7 @@ pub use rng::{CryptoRng, CryptoRngCore, OsCryptoRng, RngCore};
 pub use transport::{
     BoxedDialPermit, ConnectionDirection, ConnectionFamily, ConnectionPath, ConnectionTransport,
     DialPermit, DialSubmission, DiscoveredPeer, MeshTransport, PeerConnectionSnapshot, PeerId,
-    ProtocolId, RendezvousRegistration, Responder, ResponderRx, Topic, TransportError,
-    TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT, MAX_PEER_DIAL_BATCH,
+    ProtocolId, RendezvousRegistration, RequestCancellation, RequestKeepalive, Responder,
+    ResponderRx, SharedRequestKeepalive, Topic, TransportError, TransportEvent,
+    MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT, MAX_PEER_DIAL_BATCH,
 };

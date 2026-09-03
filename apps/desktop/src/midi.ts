@@ -20,6 +20,40 @@ export const CC_SUSTAIN = 64;
 export const CC_ALL_SOUND_OFF = 120;
 export const CC_ALL_NOTES_OFF = 123;
 
+/**
+ * General MIDI drum notes for jam-kit:v1's fixed pad order:
+ * kick, snare, rim, clap, closed/open hat, low/high tom, ride, crash.
+ *
+ * Controllers are not required to transmit on GM channel 10. The active Pads surface is the
+ * receiver-side routing decision, so the note number alone selects a pad on any routed channel.
+ */
+export const MIDI_JAM_PAD_NOTES = [36, 38, 37, 39, 42, 46, 45, 50, 51, 49] as const;
+
+/** Return the jam-kit:v1 pad for a General MIDI drum note, or null for an unmapped key. */
+export function midiJamPad(note: number): number | null {
+  if (!Number.isInteger(note)) return null;
+  const pad = MIDI_JAM_PAD_NOTES.indexOf(note as (typeof MIDI_JAM_PAD_NOTES)[number]);
+  return pad === -1 ? null : pad;
+}
+
+export type MidiInstrumentAction =
+  | Readonly<{ kind: "note"; note: number; on: boolean }>
+  | Readonly<{ kind: "pad"; pad: number }>;
+
+/**
+ * Translate one routed MIDI note edge for the currently visible instrument surface.
+ * Pads are one-shots: only a mapped note-on creates an action; releases are bookkeeping only.
+ */
+export function midiInstrumentAction(
+  note: number,
+  on: boolean,
+  mode: "keys" | "pads",
+): MidiInstrumentAction | null {
+  if (mode === "keys") return { kind: "note", note, on };
+  const pad = midiJamPad(note);
+  return on && pad !== null ? { kind: "pad", pad } : null;
+}
+
 /** One decoded packet. `realtime` and `other` exist so the monitor can name what it saw. */
 export type MidiMessage =
   | { kind: "noteon"; channel: number; note: number; velocity: number }

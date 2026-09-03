@@ -116,6 +116,26 @@ test("a queue entry with no mime falls back to its extension", () => {
   assert.equal(mediaKind(""), "other");
 });
 
+test("a jam take is its own kind, by extension or by its exact mime, and never by accident", () => {
+  // Kind "take" routes a queued file to the jam synth instead of the media element, so the
+  // detection has to hold from a bare queue entry (name only) AND from the share listing (mime).
+  assert.equal(mediaKind("take-01.jamtake"), "take");
+  assert.equal(mediaKind("TAKE-01.JAMTAKE"), "take");
+  assert.equal(mediaKind("whatever.bin", "application/x-mewtual-jamtake"), "take");
+  // The exact mime wins even over a media-looking name; the validator decides what plays anyway.
+  assert.equal(mediaKind("sneaky.mp4", "application/x-mewtual-jamtake"), "take");
+  // A random JSON or unknown application mime is NOT a take: takes are opted into, never sniffed.
+  assert.equal(mediaKind("data.json", "application/json"), "other");
+  const files = [
+    { cid: "a1", name: "song.mp3", mime: "audio/mpeg" },
+    { cid: "b2", name: "take-01.jamtake", mime: "application/x-mewtual-jamtake" },
+    { cid: "c3", name: "notes.txt", mime: "text/plain" },
+  ];
+  assert.deepEqual(mediaChoices(files, "take").map((f) => f.cid), ["b2"]);
+  assert.deepEqual(mediaChoices(files, "all").map((f) => f.cid), ["a1", "b2"], "ALL includes takes, never plain files");
+  assert.deepEqual(mediaChoices(files, "audio").map((f) => f.cid), ["a1"]);
+});
+
 test("a non-media mime still falls through to the extension, and that is safe", () => {
   // The name of this test used to claim the opposite of what it asserted. The behaviour is that
   // a mime naming neither audio nor video is treated as "no useful mime" and the extension

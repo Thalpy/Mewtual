@@ -676,6 +676,16 @@ export function errorText(error: unknown): string {
   return `${view.message} (${view.code}${trace})`;
 }
 
+/** Human-facing vault-gate copy without discarding the support code or trace. */
+export function vaultUnlockErrorText(error: unknown): string {
+  const view = describeError(error);
+  if (view.code !== "VAULT.OPEN.REFUSED") return errorText(error);
+  const trace = view.trace ? ` · ${view.trace}` : "";
+  // Authentication failure can also mean a damaged/tampered wrapper, so do not assert that the
+  // user definitely typed the wrong passphrase. This says what happened and gives the safe retry.
+  return `That passphrase did not unlock this vault. Check it and try again. (${view.code}${trace})`;
+}
+
 /**
  * Build an instrumented `invoke`.
  *

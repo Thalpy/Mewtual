@@ -12,7 +12,7 @@ bytes.workspace = true
 # `time` is not in the workspace default set, but `SystemClock::sleep` needs it. It used to build
 # only because some other crate in the graph happened to enable it, so a dependent that pulled in
 # catcoms-rt on its own failed to compile.
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 
 [dev-dependencies]

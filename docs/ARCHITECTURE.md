@@ -11,7 +11,7 @@ code was written), the honest residual risks, and the phased build plan.
 | Stack | Rust core (shared `rlib`+`cdylib`) + Svelte 5 UI, packaged via **Tauri 2** to Linux/Windows/Android from one codebase. |
 | Group crypto | **MLS (RFC 9420)** via `openmls`, ciphersuite `0x0003` (X25519 + ChaCha20-Poly1305 + SHA-256 + Ed25519), `PrivateMessage` wire format only. One MLS group == one server/connection. Per-**device** identity (a human with N devices = N leaves). |
 | Channels | NOT separate groups; each channel/wiki/status/calendar/moderation document derives an independent key via the MLS exporter secret + a canonical, injective `(doc_type, doc_id)` context. |
-| Delivery | Encrypted **CRDT documents** (`automerge`) synced P2P. Chat logs are append-oriented; policy documents are not assumed append-only without protocol enforcement. A newly applied remote op queues an authenticated, connected-only delivery receipt for its exact document/change hash; causal descendant evidence remains the compatibility fallback. Receipts prove delivery, never reading. |
+| Delivery | Encrypted **CRDT documents** (`automerge`) synced P2P. Chat logs are append-oriented; policy documents are not assumed append-only without protocol enforcement. New Studio/index/reply/registry types use the owner-receipted bounded epoch-close protocol in [`design-epoch-close.md`](design-epoch-close.md); this is distinct from per-operation delivery receipts. A newly applied remote op queues an authenticated, connected-only delivery receipt for its exact document/change hash; causal descendant evidence remains the compatibility fallback. Delivery receipts prove delivery, never reading. |
 | Networking | **rust-libp2p** (QUIC + TCP + WSS for the application mesh). Direct reachability uses stable ports plus best-effort **UPnP IGD, IPv4 PCP/NAT-PMP, and IPv6 PCP firewall pinholes**; zero-knowledge **circuit-relay v2 + DCUtR** hole-punching and authenticated rendezvous cover harder networks; **AutoNAT v2** performs scoped dial-back testing through explicitly enabled relay/rendezvous nodes. PCPv6 binds the exact global listener address to that interface's scoped default router, requests short leases for TCP and UDP/QUIC, and honors the router's assigned lifetime up to 24 hours. AutoNAT serving is experimental and off by default; its pre-socket guard enforces exact source/target matching, direct public-address shape, global/per-prefix/per-peer rate buckets and concurrency caps. Invites embed bootstrap multiaddrs. A 60-second `JoinReply` lets the inviter (or one explicitly authorized current-member helper) dial a joiner's validated public routes back. Separately, an opted-in current member can publish a two-minute signed **switchboard offer**; a fresh, explicitly labelled assisted invite may endorse up to three such members, and the joiner must consent before they are contacted after direct routes fail. A switchboard forwards only the admission exchange to the invite's named inviter and must catch up the exact MLS Add before becoming the joiner's first member path; it never signs/adopts the Welcome or becomes a general circuit relay. An already-admitted but isolated member can create a ten-minute, member-signed `MemberRecoveryCode` containing at most four direct literal-IP, terminal-peer-bound candidates. The recipient verifies its exact current device→transport binding and seals expiring consent before the bounded dial; only a later outbound Noise-authenticated route is promoted, without destroying the last proven contact on failure. |
 | Live media | Calls and screen shares use WebRTC separately from the libp2p application mesh. A receiver advertises only its nearest 720p/1080p/1440p/2160p display bucket (with resize hysteresis); a screen sender parks each edge, applies per-peer resolution/bitrate/frame-rate limits, and only then attaches the screen track. Client-wide presets are exposed both in Settings and from the call-stage cog. Screen audio defaults off; the user may request the selected surface's audio or grant multiple independently chosen application/window sources, which are mixed locally into one audio sender and forgotten when sharing stops. Its 160-kbps-per-peer cap is reported as planned unless the WebView applies it. Permission-prompt results carry lifecycle leases so stop, leave, lock, mode changes, and competing requests stop late tracks rather than resurrecting capture. It reports the estimated aggregate mesh upload and prefers H.265/AV1/VP9 with compatible fallbacks when the WebView exposes them. Runtime stats, not preference order, are the source of truth for the negotiated codec. |
 | Invites | Strictly **single-use, device-bound** (one device per invite); revocable/expirable. |
@@ -53,8 +53,9 @@ is broken. The load-bearing fixes:
    module deleted); blob-fetch padding/quantization + per-session outer
    re-encryption; eclipse resistance (≥2 rendezvous + member peer-exchange + roster-size
    check + cached addresses); decorrelated cache eviction (jitter) + holder liveness probe
-   + mandatory archive-pin role; deterministic byte-identical compaction at an all-acked
-   low-watermark; resumable chunked anti-entropy under relay caps; panic-revoke (any
+   + mandatory archive-pin role; bounded deterministic owner-receipted checkpoints for P1
+   document types (with provisional edits and two-version recovery, not an all-acked consensus
+   claim); resumable chunked anti-entropy under relay caps; panic-revoke (any
    sibling device removes another) and `mint_invite` gated behind the auth-bound key;
    per-server "relay-only / hide my IP" mode; pure-Rust crypto on the hot path;
    metadata-index aging/re-keying.
@@ -266,14 +267,40 @@ safe to expose. Export creates another permanent offline guessing surface and le
 metadata visible. Changing the live secret atomically rewrites only the DEK wrapper; it cannot revoke
 an older export and never rotates the server/blob encryption keys.
 
+Normal window close is a native-owned lock/snapshot/destroy transaction. Close attempts serialize
+inside `AppState`; once a continuity failure has been returned, another already-queued caller must
+also defer until a later request explicitly acknowledges losing that latest screen snapshot. This
+prevents duplicate WebView calls from replacing the failure with a newer success and destroying the
+only surface capable of warning the user. The decision is bound to the close request's own native
+generation because another lock caller may acquire the shared commit mutex first and consume that
+newer snapshot. Plaintext jam-sheet export uses the same exact-generation commit guard and holds it
+through both Downloads publication and OS reveal.
+
+Bounded whole-file reads may reserve a native cancellation registration before invoking
+`download_file`. The signal crosses the Tauri bridge into the server actor's chunk-fetch `select!`,
+because dropping a webview promise or reply receiver does not cancel an actor command already in
+progress. Registrations are process-capped and generation-bound. A shared opaque keepalive crosses
+the sync/transport seam and remains in libp2p's pending-request row until that exact request
+responds, fails or times out, even when the JavaScript/native waiter has already been cancelled.
+Their begin step commits under the exact UI-session guard. Locking signals active operations and
+drops unclaimed permits; transport work stays counted until its terminal event, while an unclaimed begin-only
+permit may also be displaced instead of stranding capacity after a webview reload. Legacy callers
+that omit a cancellation token receive a reserved native token, so they share the same cap and
+lock cancellation without changing the IPC shape.
+`MeshTransport::request_cancellable` intentionally has no default: every transport must state the
+accounting lifetime. Production libp2p and the in-memory transport transfer the keepalive to their
+actual pending/queued owner; wrappers delegate to that implementation, and non-transferring test
+fakes own no detached lower work.
+
 ## 5. Roadmap (test-gated, block by block)
 
 0. Workspace + `Clock`/`Transport` seams + canonical wire format + CI/lint gate.
 1. Device identity + unified key hierarchy (`SecureKeyStore` tiers; desktop impls).
 2. MLS `ServerGroup` (local, no network) + channel-key derivation.
 3. Invites (MLS-bound, single-use, device-bound) + InviteLedger.
-4. Replication engine: inner-signed ops, proposal/commit split, snapshot catch-up,
-   deterministic compaction.
+4. Replication engine: inner-signed ops, proposal/commit split, snapshot catch-up. P1 adds
+   owner-receipted deterministic checkpoints only for its new document types; see its own staged
+   implementation status rather than treating compaction as already shipped globally.
 5. Storage & retention: CID blockstore, 3-scope expiry, clock-injected GC, file crypto.
 6. Real mesh: libp2p, relay-v2/DCUtR, rendezvous, scoped gossipsub, eclipse resistance.
 7. End-to-end local integration over real sockets + consolidated security suite.

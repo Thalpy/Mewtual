@@ -13,10 +13,11 @@
 //! which the recovery machinery re-detects on the next inbound event (self-healing).
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::time::Duration;
 
 use catcoms_crypto::{DeviceCertificate, DeviceId};
-use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId};
+use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId, RequestCancellation};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -48,6 +49,28 @@ const PEX_REQUEST_MS: u64 = 3_000;
 /// A fetched + decrypted file chunk: its plaintext bytes plus the provider that served it (or an
 /// error string). One chunk per command keeps the actor responsive during a large download.
 type ChunkResult = Result<(Vec<u8>, Option<String>), String>;
+
+/// Await one actor-owned chunk fetch while retaining a native cancellation edge.
+///
+/// Dropping only the bridge's reply receiver does not cancel an [`AppCommand`] already executing
+/// inside the actor. The cancellation receiver must therefore participate in the same `select!`
+/// as the `Server` future so a stale room cannot keep this actor pinned behind a withholding peer.
+async fn fetch_chunk_or_cancel<F>(mut cancel: Option<RequestCancellation>, fetch: F) -> ChunkResult
+where
+    F: Future<Output = ChunkResult>,
+{
+    let Some(cancel) = cancel.as_mut() else {
+        return fetch.await;
+    };
+    if cancel.is_cancelled() {
+        return Err("download cancelled".to_string());
+    }
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err("download cancelled".to_string()),
+        result = fetch => result,
+    }
+}
 
 /// The user-visible operation a command belongs to, carried across the actor boundary.
 ///
@@ -482,6 +505,8 @@ pub enum AppCommand {
     FetchFileChunk {
         cid: Vec<u8>,
         idx: usize,
+        /// Present only for bounded inline operations that registered native cancellation.
+        cancel: Option<RequestCancellation>,
         reply: oneshot::Sender<ChunkResult>,
     },
     /// The size and declared type of a listed file, read from the index without decrypting any
@@ -2005,10 +2030,25 @@ impl ServerActor {
     /// Fetch + decrypt a single chunk (`idx`) of a file: `(plaintext bytes, provider)`. One chunk
     /// per call so the actor interleaves other work between chunks (the orchestrator reassembles).
     pub async fn fetch_file_chunk(&self, cid: Vec<u8>, idx: usize) -> ChunkResult {
+        self.fetch_file_chunk_cancellable(cid, idx, None).await
+    }
+
+    /// As [`Self::fetch_file_chunk`], with cancellation observed inside the actor-owned fetch.
+    pub async fn fetch_file_chunk_cancellable(
+        &self,
+        cid: Vec<u8>,
+        idx: usize,
+        cancel: Option<RequestCancellation>,
+    ) -> ChunkResult {
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
-            .send(AppCommand::FetchFileChunk { cid, idx, reply })
+            .send(AppCommand::FetchFileChunk {
+                cid,
+                idx,
+                cancel,
+                reply,
+            })
             .await
             .is_err()
         {
@@ -3507,12 +3547,25 @@ where
                     // Fetch ONE chunk, then return to the select! loop; so a large download no
                     // longer pins the actor: other commands + sync_once interleave between chunks
                     // (the bridge orchestrates the per-chunk loop + reassembly + progress).
-                    Some(AppCommand::FetchFileChunk { cid, idx, reply }) => {
+                    Some(AppCommand::FetchFileChunk { cid, idx, cancel, reply }) => {
                         let res = match <[u8; 32]>::try_from(cid.as_slice()) {
-                            Ok(arr) => server
-                                .fetch_file_chunk(&Cid::from_bytes(arr), idx)
-                                .await
-                                .map_err(|e| e.to_string()),
+                            Ok(arr) => {
+                                let server_cancellation = cancel.clone();
+                                fetch_chunk_or_cancel(
+                                cancel,
+                                async {
+                                    server
+                                        .fetch_file_chunk_cancellable(
+                                            &Cid::from_bytes(arr),
+                                            idx,
+                                            server_cancellation,
+                                        )
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                },
+                            )
+                            .await
+                            },
                             Err(_) => Err("bad content address".to_string()),
                         };
                         let _ = reply.send(res);
@@ -4658,6 +4711,26 @@ mod tests {
     use tokio::time::timeout;
 
     const GENERAL: u128 = 1;
+
+    #[tokio::test]
+    async fn cancellation_interrupts_an_actor_owned_chunk_future() {
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        let cancellation = RequestCancellation::new(receiver, None);
+        let stalled = fetch_chunk_or_cancel(Some(cancellation), std::future::pending());
+        tokio::pin!(stalled);
+
+        assert!(timeout(Duration::from_millis(10), &mut stalled)
+            .await
+            .is_err());
+        cancel.send(true).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), &mut stalled)
+                .await
+                .expect("cancellation must wake the actor")
+                .unwrap_err(),
+            "download cancelled"
+        );
+    }
 
     #[tokio::test]
     async fn fallible_member_routes_distinguishes_a_stopped_actor_from_an_empty_view() {

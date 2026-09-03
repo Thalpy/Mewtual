@@ -40,7 +40,10 @@ use catcoms_net::{
     JoinReply, MeshHandle, MeshObservationSnapshot, MeshService, PortMappingMechanism,
     PortMappingSnapshot, PortMappingTransport, RelayAddressSnapshot, RendezvousTarget,
 };
-use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
+use catcoms_rt::{
+    Clock, MeshTransport, OsCryptoRng, PeerId, RequestCancellation, RngCore,
+    SharedRequestKeepalive, SystemClock, TransportEvent,
+};
 use catcoms_sync::{fingerprint, join_namespace, PreOwnerConnectionHandoff, JOIN_REPLY_PROOF_KIND};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
@@ -221,6 +224,68 @@ impl NetworkChangeSignal {
     }
 }
 
+/// One immutable final UI snapshot waiting to cross the native lock commit boundary.
+///
+/// It lives natively because a webview remount destroys JavaScript promises. A later close with no
+/// local snapshot can still consume this exact transaction instead of overtaking and losing it.
+#[derive(Debug)]
+struct PendingUiLockSnapshot {
+    generation: u64,
+    json: String,
+}
+
+/// Latest native continuity result, retained until the next authenticated UI generation.
+#[derive(Clone, Debug)]
+struct UiLockCompletion {
+    generation: u64,
+    error: Option<String>,
+}
+
+/// Maximum cancellable whole-file reads registered by the webview at once.
+///
+/// The common media path streams and does not use these slots. Four permits legitimate overlap
+/// between a take and text previews while bounding abandoned native work under rapid call churn.
+const MAX_CANCELLABLE_INLINE_DOWNLOADS: usize = 4;
+const INLINE_DOWNLOAD_CANCELLATION_ID_MAX_BYTES: usize = 96;
+
+#[derive(Debug)]
+struct InlineDownloadCancellation {
+    generation: u64,
+    started: bool,
+    signal: watch::Sender<bool>,
+}
+
+/// Exact registration shared with any transport request that can outlive `download_file`.
+#[derive(Clone, Debug)]
+struct InlineDownloadLease {
+    inner: Arc<InlineDownloadLeaseInner>,
+}
+
+#[derive(Debug)]
+struct InlineDownloadLeaseInner {
+    table: Arc<StdMutex<HashMap<String, InlineDownloadCancellation>>>,
+    id: String,
+    generation: u64,
+}
+
+impl InlineDownloadLease {
+    fn request_keepalive(&self) -> SharedRequestKeepalive {
+        self.inner.clone()
+    }
+}
+
+impl Drop for InlineDownloadLeaseInner {
+    fn drop(&mut self) {
+        let mut table = self.table.lock().unwrap_or_else(|e| e.into_inner());
+        if table
+            .get(&self.id)
+            .is_some_and(|entry| entry.generation == self.generation)
+        {
+            table.remove(&self.id);
+        }
+    }
+}
+
 /// App state managed by Tauri: every running server keyed by a bridge-assigned id, plus the
 /// on-disk store once the user has unlocked it with a passphrase (`None` = in-memory only).
 #[derive(Default)]
@@ -230,6 +295,10 @@ struct AppState {
     /// actor installations than the process can perform in its lifetime; zero has no special
     /// meaning and is permitted after that theoretical wrap.
     next_server_instance: AtomicU64,
+    /// Bounded cancellation registry for inline reads such as `.jamtake` playback. The signal is
+    /// threaded into the actor's chunk future; dropping only a Tauri invoke would not cancel it.
+    inline_downloads: Arc<StdMutex<HashMap<String, InlineDownloadCancellation>>>,
+    next_inline_download_generation: AtomicU64,
     /// One endpoint budget shared by every server swarm and pre-join discovery attempt in this
     /// desktop process. Per-server ranking remains inside each actor; this is the final bound on
     /// actual socket fan-out across groups.
@@ -279,6 +348,20 @@ struct AppState {
     /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
     /// reply event or server registration to occur after `lock_session` itself has completed.
     ui_session_commit: Mutex<()>,
+    /// The newest exact Ctrl+L/close snapshot registered before either command waits on the shared
+    /// commit mutex. A remounted close can consume it even though its JS coordinator is gone.
+    pending_ui_lock_snapshot: Mutex<Option<PendingUiLockSnapshot>>,
+    /// Lets a remounted close report a completed older snapshot failure instead of treating its own
+    /// snapshot-less idempotent lock as proof that continuity succeeded.
+    last_ui_lock_completion: Mutex<Option<UiLockCompletion>>,
+    /// Serializes native window-close attempts and keeps an unacknowledged continuity failure from
+    /// being overtaken by a duplicate caller. The window may be destroyed only after the first
+    /// failure was returned visibly and a later request explicitly accepts that snapshot loss.
+    vault_window_close: Mutex<()>,
+    /// Sticky close-specific data-loss evidence. Ordinary Ctrl+L locking also publishes
+    /// `last_ui_lock_completion`, so that shared slot may legitimately be replaced later; it must
+    /// never erase the warning a native close still owes before destroying the only UI surface.
+    vault_window_close_debt: Mutex<Option<String>>,
     /// The **new device's** half of an in-flight grant ceremony (multi-device M2): the device
     /// identity + single-use nonce minted by `pairing_begin`, held until the grant bundle is
     /// pasted back. One slot; starting a new ceremony abandons any previous one; and, like
@@ -1476,6 +1559,9 @@ struct CallSignalEvt {
 struct DownloadProgressEvt {
     server: u64,
     cid: String,
+    /// Exact caller token for cancellable inline reads. `None` preserves the existing media/file
+    /// progress shape while allowing take playback to reject queued events from an older call.
+    cancellation: Option<String>,
     done: usize,
     total: usize,
     bytes_done: u64,
@@ -2254,19 +2340,23 @@ fn port_is_bindable(port: u16) -> bool {
 }
 
 /// Ask the OS for a port that is free for both TCP and UDP, so the TCP and QUIC listeners can
-/// share one number. The OS only hands out a free *TCP* port, so the UDP half is re-probed and the
-/// draw retried; a handful of attempts is plenty in practice.
+/// share one number. Hold the TCP reservation while probing UDP: dropping it and immediately
+/// rebinding the same TCP port is not reliable on Windows and used to produce a spurious zero even
+/// though the OS had just selected a usable port. Both reservations are released together before
+/// libp2p binds, so the final hand-off remains inherently racy but does not race against ourselves.
 fn os_chosen_port() -> u16 {
     for _ in 0..16 {
-        let Ok(probe) = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) else {
+        let v4 = std::net::Ipv4Addr::UNSPECIFIED;
+        let Ok(tcp_probe) = std::net::TcpListener::bind((v4, 0)) else {
             return 0;
         };
-        let Ok(local) = probe.local_addr() else {
+        let Ok(local) = tcp_probe.local_addr() else {
             return 0;
         };
         let port = local.port();
-        drop(probe);
-        if port_is_bindable(port) {
+        if let Ok(udp_probe) = std::net::UdpSocket::bind((v4, port)) {
+            drop(udp_probe);
+            drop(tcp_probe);
             return port;
         }
     }
@@ -8091,6 +8181,250 @@ async fn get_wiki_pinned_cids(
     Ok(actor.wiki_pinned_cids().await)
 }
 
+fn valid_inline_download_cancellation_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= INLINE_DOWNLOAD_CANCELLATION_ID_MAX_BYTES
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'-' | b'_'))
+}
+
+/// Reclaim one begin-only permit at the bound. Such an entry owns no actor work and has no native
+/// completion path after its webview disappears; active entries are never displaced.
+fn reclaim_abandoned_inline_download_at_capacity(
+    table: &mut HashMap<String, InlineDownloadCancellation>,
+) {
+    if table.len() < MAX_CANCELLABLE_INLINE_DOWNLOADS {
+        return;
+    }
+    let abandoned = table
+        .iter()
+        .filter(|(_, entry)| !entry.started)
+        .min_by_key(|(_, entry)| entry.generation)
+        .map(|(id, _)| id.clone());
+    if let Some(abandoned) = abandoned {
+        if let Some(entry) = table.remove(&abandoned) {
+            let _ = entry.signal.send(true);
+        }
+    }
+}
+
+fn require_inline_download_capacity(
+    table: &mut HashMap<String, InlineDownloadCancellation>,
+) -> Result<(), String> {
+    reclaim_abandoned_inline_download_at_capacity(table);
+    if table.len() >= MAX_CANCELLABLE_INLINE_DOWNLOADS {
+        Err("too many inline downloads are already active".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn register_inline_download(state: &AppState, id: &str) -> Result<(), String> {
+    if !valid_inline_download_cancellation_id(id) {
+        return Err("invalid inline-download cancellation id".to_string());
+    }
+    let mut table = state
+        .inline_downloads
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Lock publishes this flag before acquiring the same table to cancel its contents. Testing it
+    // while holding the table closes the otherwise possible sweep-before-insert race.
+    if state.session_lock_requested.load(Ordering::Acquire) {
+        return Err("the vault is locked".to_string());
+    }
+    if let Some(existing) = table.get(id) {
+        if existing.started {
+            return Err("inline-download cancellation id is already registered".to_string());
+        }
+        // A reloaded webview can restart its local sequence and reuse the exact id left by its
+        // predecessor. Begin-only authority owns no actor work, so replace it atomically; rejecting
+        // it would let the abandoned registration deny the fresh view's first take load.
+        if let Some(abandoned) = table.remove(id) {
+            let _ = abandoned.signal.send(true);
+        }
+    }
+    require_inline_download_capacity(&mut table)?;
+    let generation = state
+        .next_inline_download_generation
+        .fetch_add(1, Ordering::Relaxed);
+    let (signal, _receiver) = watch::channel(false);
+    table.insert(
+        id.to_string(),
+        InlineDownloadCancellation {
+            generation,
+            started: false,
+            signal,
+        },
+    );
+    Ok(())
+}
+
+/// Claim a process-owned slot for callers of the compatibility form that omit a cancellation id.
+/// The reserved `#native:` prefix is outside the webview token grammar, so injected IPC cannot
+/// collide with or cancel these entries; explicit lock remains their cancellation authority.
+fn claim_internal_inline_download(
+    state: &AppState,
+) -> Result<(InlineDownloadLease, watch::Receiver<bool>), String> {
+    let (id, generation, receiver) = {
+        let mut table = state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if state.session_lock_requested.load(Ordering::Acquire) {
+            return Err("the vault is locked".to_string());
+        }
+        require_inline_download_capacity(&mut table)?;
+
+        // At most four ids can be live. Even after the theoretical u64 wrap, five attempts find
+        // an unused id without allowing a stale RAII lease to alias the new registration.
+        let mut identity = None;
+        for _ in 0..=MAX_CANCELLABLE_INLINE_DOWNLOADS {
+            let generation = state
+                .next_inline_download_generation
+                .fetch_add(1, Ordering::Relaxed);
+            let id = format!("#native:{generation}");
+            if !table.contains_key(&id) {
+                identity = Some((id, generation));
+                break;
+            }
+        }
+        let (id, generation) = identity
+            .ok_or_else(|| "could not allocate an inline-download generation".to_string())?;
+        let (signal, receiver) = watch::channel(false);
+        table.insert(
+            id.clone(),
+            InlineDownloadCancellation {
+                generation,
+                started: true,
+                signal,
+            },
+        );
+        (id, generation, receiver)
+    };
+    Ok((
+        InlineDownloadLease {
+            inner: Arc::new(InlineDownloadLeaseInner {
+                table: Arc::clone(&state.inline_downloads),
+                id,
+                generation,
+            }),
+        },
+        receiver,
+    ))
+}
+
+fn claim_inline_download(
+    state: &AppState,
+    id: &str,
+) -> Result<(InlineDownloadLease, watch::Receiver<bool>), String> {
+    if !valid_inline_download_cancellation_id(id) {
+        return Err("invalid inline-download cancellation id".to_string());
+    }
+    let (generation, receiver) = {
+        let mut table = state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = table
+            .get_mut(id)
+            .ok_or_else(|| "inline-download cancellation id is not registered".to_string())?;
+        if entry.started {
+            return Err("inline-download cancellation id was already claimed".to_string());
+        }
+        entry.started = true;
+        (entry.generation, entry.signal.subscribe())
+    };
+    Ok((
+        InlineDownloadLease {
+            inner: Arc::new(InlineDownloadLeaseInner {
+                table: Arc::clone(&state.inline_downloads),
+                id: id.to_string(),
+                generation,
+            }),
+        },
+        receiver,
+    ))
+}
+
+fn cancel_inline_download_registration(state: &AppState, id: &str) -> Result<bool, String> {
+    if !valid_inline_download_cancellation_id(id) {
+        return Err("invalid inline-download cancellation id".to_string());
+    }
+    let signal = {
+        let mut table = state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match table.get(id) {
+            Some(entry) if entry.started => Some(entry.signal.clone()),
+            Some(_) => table.remove(id).map(|entry| entry.signal),
+            None => None,
+        }
+    };
+    if let Some(signal) = signal {
+        // Active registrations remain counted until their exact RAII lease observes cancellation
+        // and returns. Otherwise repeated cancel/start churn could exceed the process-wide cap.
+        let _ = signal.send(true);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+fn cancel_all_inline_downloads(state: &AppState) {
+    let signals = {
+        let mut table = state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let signals = table
+            .values()
+            .filter(|entry| entry.started)
+            .map(|entry| entry.signal.clone())
+            .collect::<Vec<_>>();
+        // Begin-only registrations have no command that can own their cleanup. Active entries
+        // stay counted until their RAII leases return, preserving the global cap across unlock.
+        table.retain(|_, entry| entry.started);
+        signals
+    };
+    for signal in signals {
+        let _ = signal.send(true);
+    }
+}
+
+fn ensure_inline_download_not_cancelled(
+    cancellation: Option<&watch::Receiver<bool>>,
+) -> Result<(), String> {
+    if cancellation.is_some_and(|receiver| *receiver.borrow()) {
+        Err("download cancelled".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// Reserve one bounded native cancellation signal before starting a whole-file take read.
+#[tauri::command]
+async fn begin_inline_download(
+    state: State<'_, AppState>,
+    cancellation: String,
+) -> Result<(), String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    // Hold the same commit boundary as lock-sensitive publication. Either this registration is
+    // visible for a subsequent lock to drain, or the newer lock generation rejects it first.
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    register_inline_download(&state, &cancellation)
+}
+
+/// Cancel and retire an inline read. Safe while locking because it can only destroy authority.
+#[tauri::command]
+fn cancel_inline_download(state: State<'_, AppState>, cancellation: String) -> Result<(), String> {
+    // Do not reveal whether a token existed while the vault gate is closed. Cancellation remains
+    // idempotent and available because it can only remove authority and bounded background work.
+    let _ = cancel_inline_download_registration(&state, &cancellation)?;
+    Ok(())
+}
+
 /// Download a small shared file by content-address hex; returns base64-encoded bytes. Fetches the
 /// file ONE chunk per actor command (emitting `download-progress` after each), so the actor returns
 /// to its loop between chunks and interleaves other commands + network sync. The whole reassembled
@@ -8109,6 +8443,7 @@ async fn download_file(
     server: u64,
     cid: String,
     trace: Option<String>,
+    cancellation: Option<String>,
 ) -> Result<String, AppError> {
     let op = Operation::start(
         trace,
@@ -8119,11 +8454,29 @@ async fn download_file(
     );
     let raw = hex::decode(cid.trim())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, format!("bad cid: {e}")))?;
+    let progress_cancellation = cancellation.clone();
+    // The shared RAII lease removes this exact generation only after both the command and any
+    // lower transport request have returned. Ordinary callers receive an internal native token;
+    // take playback registers its caller token first so a stale call can preempt its waiter.
+    let (cancellation_lease, cancellation) = match cancellation.as_deref() {
+        Some(id) => {
+            let (lease, receiver) = claim_inline_download(&state, id)
+                .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+            (Some(lease), Some(receiver))
+        }
+        None => {
+            let (lease, receiver) = claim_internal_inline_download(&state)
+                .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+            (Some(lease), Some(receiver))
+        }
+    };
     let target: [u8; 32] = raw
         .clone()
         .try_into()
         .map_err(|_| op.fail(codes::FILE_DOWNLOAD_FAILED, "bad cid length"))?;
     let actor = op.actor(&state, server).await?;
+    ensure_inline_download_not_cancelled(cancellation.as_ref())
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
         op.fail(
             codes::FILE_DOWNLOAD_FAILED,
@@ -8131,6 +8484,8 @@ async fn download_file(
         )
     })?;
     inline_download_allowed(size).map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+    ensure_inline_download_not_cancelled(cancellation.as_ref())
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     require_unlocked_session(&state)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
@@ -8143,6 +8498,7 @@ async fn download_file(
         DownloadProgressEvt {
             server,
             cid: cid.clone(),
+            cancellation: progress_cancellation.clone(),
             done: 0,
             total,
             bytes_done: 0,
@@ -8155,14 +8511,26 @@ async fn download_file(
     let mut out = Vec::with_capacity(size as usize);
     let mut network_bytes_done = 0u64;
     for i in 0..total {
+        ensure_inline_download_not_cancelled(cancellation.as_ref())
+            .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
         // A transfer can outlive the click that started it. Do not return plaintext or continue
         // emitting file metadata after an explicit lock closes the webview session.
         require_unlocked_session(&state)
             .await
             .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+        let request_cancellation = cancellation.as_ref().map(|signal| {
+            RequestCancellation::new(
+                signal.clone(),
+                cancellation_lease
+                    .as_ref()
+                    .map(InlineDownloadLease::request_keepalive),
+            )
+        });
         let (chunk, provider) = actor
-            .fetch_file_chunk(raw.clone(), i)
+            .fetch_file_chunk_cancellable(raw.clone(), i, request_cancellation)
             .await
+            .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+        ensure_inline_download_not_cancelled(cancellation.as_ref())
             .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
         if provider.is_some() {
             network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
@@ -8183,6 +8551,7 @@ async fn download_file(
             DownloadProgressEvt {
                 server,
                 cid: cid.clone(),
+                cancellation: progress_cancellation.clone(),
                 done: i + 1,
                 total,
                 bytes_done: out.len() as u64,
@@ -8199,6 +8568,8 @@ async fn download_file(
             "this file's chunks hold less data than it declares",
         ));
     }
+    ensure_inline_download_not_cancelled(cancellation.as_ref())
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     if Cid::of(&out).as_bytes() != &target {
         // Every chunk verified and the whole did not. Recorded as its own outcome because it means
         // something specific: a manifest whose parts are individually honest and collectively not.
@@ -8210,8 +8581,16 @@ async fn download_file(
     require_unlocked_session(&state)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    ensure_inline_download_not_cancelled(cancellation.as_ref())
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+    let encoded = B64.encode(&out);
+    ensure_inline_download_not_cancelled(cancellation.as_ref())
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+    require_unlocked_session(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     op.succeeded("FILE.DOWNLOAD.COMPLETED");
-    Ok(B64.encode(&out))
+    Ok(encoded)
 }
 
 /// Post to the server status feed. **Owner/admin only** unless the feed has been opened to
@@ -11396,6 +11775,329 @@ async fn save_space_layout(
     })
 }
 
+// Kept as one literal so jam-sheet.test.ts can pin the cross-language renderer/save contract.
+const JAM_SHEET_STYLE: &str = r#"text{font-family:Georgia,serif}.st{stroke:#444;stroke-width:1}.bar{stroke:#444;stroke-width:1}.nh{fill:#111}.nh.open{fill:#fff;stroke:#111;stroke-width:1.6}.stem{stroke:#111;stroke-width:1.4}.flag{stroke:#111;stroke-width:1.4;fill:none}.acc{font-size:11px;fill:#111}.clef{font-size:34px;fill:#111}.who{font-size:13px;fill:#333;font-style:italic}.ttl{font-size:19px;fill:#111}.sub{font-size:12px;fill:#555}.xh{stroke:#111;stroke-width:1.6}.ped{font-size:9px;fill:#666;font-family:monospace}.led{stroke:#444;stroke-width:1}.bt{stroke:#b9b2a0;stroke-width:0.6;stroke-dasharray:2 4}"#;
+
+#[derive(Debug)]
+struct JamSheetTag<'a> {
+    name: &'a str,
+    attrs: Vec<(&'a str, &'a str)>,
+    self_closing: bool,
+}
+
+/// Parse the renderer's deliberately tiny opening-tag syntax. This is not a permissive XML
+/// parser: accepting browser error recovery here would make it very difficult to prove that an
+/// apparent attribute boundary cannot be reinterpreted as active SVG.
+fn jam_sheet_tag(input: &str) -> Option<(JamSheetTag<'_>, &str)> {
+    let after_open = input.strip_prefix('<')?;
+    let end = after_open.find('>')?;
+    let raw = &after_open[..end];
+    let remaining = &after_open[end + 1..];
+    if raw.is_empty() || raw.starts_with('/') || raw.starts_with('!') || raw.starts_with('?') {
+        return None;
+    }
+    let (body, self_closing) = match raw.strip_suffix('/') {
+        Some(body) => (body, true),
+        None => (raw, false),
+    };
+    let name_end = body.find(' ').unwrap_or(body.len());
+    let name = &body[..name_end];
+    if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_lowercase()) {
+        return None;
+    }
+
+    let mut attrs = Vec::new();
+    let mut rest = &body[name_end..];
+    while !rest.is_empty() {
+        rest = rest.strip_prefix(' ')?;
+        let equals = rest.find('=')?;
+        let key = &rest[..equals];
+        if key.is_empty()
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b':')
+        {
+            return None;
+        }
+        let value_start = rest[equals + 1..].strip_prefix('"')?;
+        let quote = value_start.find('"')?;
+        let value = &value_start[..quote];
+        if value.contains(['<', '>', '\0']) {
+            return None;
+        }
+        attrs.push((key, value));
+        rest = &value_start[quote + 1..];
+    }
+    Some((
+        JamSheetTag {
+            name,
+            attrs,
+            self_closing,
+        },
+        remaining,
+    ))
+}
+
+fn jam_sheet_attrs(tag: &JamSheetTag<'_>, names: &[&str]) -> bool {
+    tag.attrs.len() == names.len()
+        && tag
+            .attrs
+            .iter()
+            .zip(names)
+            .all(|((actual, _), expected)| actual == expected)
+}
+
+fn jam_sheet_number(value: &str) -> bool {
+    if value.is_empty() || value.len() > 24 {
+        return false;
+    }
+    let mut dots = 0;
+    let mut digits = 0;
+    for (index, byte) in value.bytes().enumerate() {
+        match byte {
+            b'0'..=b'9' => digits += 1,
+            b'.' if dots == 0 => dots += 1,
+            b'-' if index == 0 => {}
+            _ => return false,
+        }
+    }
+    digits > 0
+        && value
+            .parse::<f64>()
+            .is_ok_and(|number| number.is_finite() && number.abs() <= 4_000_000.0)
+}
+
+fn jam_sheet_text(text: &str) -> bool {
+    if text.chars().any(char::is_control) || text.contains(['<', '>']) {
+        return false;
+    }
+    let mut remaining = text;
+    while let Some(amp) = remaining.find('&') {
+        remaining = &remaining[amp..];
+        let entity = ["&amp;", "&lt;", "&gt;", "&quot;"]
+            .into_iter()
+            .find(|entity| remaining.starts_with(entity));
+        let Some(entity) = entity else {
+            return false;
+        };
+        remaining = &remaining[entity.len()..];
+    }
+    true
+}
+
+fn jam_sheet_root(tag: &JamSheetTag<'_>) -> bool {
+    if tag.self_closing
+        || tag.name != "svg"
+        || !jam_sheet_attrs(
+            tag,
+            &["xmlns", "viewBox", "width", "height", "data-mewtual-sheet"],
+        )
+        || tag.attrs[0].1 != "http://www.w3.org/2000/svg"
+        || tag.attrs[4].1 != "v1"
+        || !jam_sheet_number(tag.attrs[2].1)
+        || !jam_sheet_number(tag.attrs[3].1)
+    {
+        return false;
+    }
+    let view: Vec<&str> = tag.attrs[1].1.split(' ').collect();
+    view.len() == 4
+        && view[0] == "0"
+        && view[1] == "0"
+        && view[2] == tag.attrs[2].1
+        && view[3] == tag.attrs[3].1
+}
+
+fn jam_sheet_element(tag: &JamSheetTag<'_>) -> bool {
+    match tag.name {
+        "rect" => {
+            tag.self_closing
+                && jam_sheet_attrs(tag, &["x", "y", "width", "height", "fill"])
+                && tag.attrs[..4]
+                    .iter()
+                    .all(|(_, value)| jam_sheet_number(value))
+                && tag.attrs[4].1 == "#fffdf6"
+        }
+        "line" => {
+            tag.self_closing
+                && jam_sheet_attrs(tag, &["x1", "y1", "x2", "y2", "class"])
+                && tag.attrs[..4]
+                    .iter()
+                    .all(|(_, value)| jam_sheet_number(value))
+                && matches!(tag.attrs[4].1, "st" | "bar" | "stem" | "xh" | "led" | "bt")
+        }
+        "ellipse" => {
+            tag.self_closing
+                && jam_sheet_attrs(tag, &["cx", "cy", "rx", "ry", "class"])
+                && tag.attrs[..4]
+                    .iter()
+                    .all(|(_, value)| jam_sheet_number(value))
+                && matches!(tag.attrs[4].1, "nh" | "nh open")
+        }
+        "path" => {
+            tag.self_closing
+                && jam_sheet_attrs(tag, &["d", "class"])
+                && tag.attrs[1].1 == "flag"
+                && tag.attrs[0].1.len() <= 160
+                && tag.attrs[0].1.starts_with('M')
+                && tag.attrs[0].1.contains(" q")
+                && tag.attrs[0].1.bytes().all(|byte| {
+                    byte.is_ascii_digit() || matches!(byte, b'M' | b'q' | b' ' | b'.' | b'-')
+                })
+        }
+        _ => false,
+    }
+}
+
+fn jam_sheet_text_tag(tag: &JamSheetTag<'_>) -> bool {
+    if tag.self_closing || tag.name != "text" {
+        return false;
+    }
+    let ordinary = jam_sheet_attrs(tag, &["x", "y", "class"]);
+    let anchored =
+        jam_sheet_attrs(tag, &["x", "y", "class", "text-anchor"]) && tag.attrs[3].1 == "middle";
+    (ordinary || anchored)
+        && jam_sheet_number(tag.attrs[0].1)
+        && jam_sheet_number(tag.attrs[1].1)
+        && matches!(
+            tag.attrs[2].1,
+            "who" | "ttl" | "sub" | "acc" | "clef" | "ped"
+        )
+}
+
+/// Validate the exact inert SVG subset emitted by jam-sheet.ts.
+///
+/// The webview is not the authority for writing active markup into Downloads. Only flat geometry,
+/// escaped text, a fixed stylesheet and numeric coordinates are accepted; links, event handlers,
+/// external resources, namespaces, animation, foreign content and browser-recovery syntax are
+/// unrepresentable in this grammar.
+fn validate_jam_sheet_svg(svg: &str) -> bool {
+    if svg.is_empty() || svg.len() > 4_000_000 {
+        return false;
+    }
+    let Some((root, after_root)) = jam_sheet_tag(svg) else {
+        return false;
+    };
+    if !jam_sheet_root(&root) {
+        return false;
+    }
+    let Some((style, after_style_open)) = jam_sheet_tag(after_root) else {
+        return false;
+    };
+    if style.name != "style" || style.self_closing || !style.attrs.is_empty() {
+        return false;
+    }
+    let Some(mut remaining) = after_style_open
+        .strip_prefix(JAM_SHEET_STYLE)
+        .and_then(|value| value.strip_prefix("</style>"))
+    else {
+        return false;
+    };
+
+    loop {
+        if remaining == "</svg>" {
+            return true;
+        }
+        let Some((tag, after_tag)) = jam_sheet_tag(remaining) else {
+            return false;
+        };
+        if tag.name == "text" {
+            if !jam_sheet_text_tag(&tag) {
+                return false;
+            }
+            let Some(end) = after_tag.find("</text>") else {
+                return false;
+            };
+            if !jam_sheet_text(&after_tag[..end]) {
+                return false;
+            }
+            remaining = &after_tag[end + "</text>".len()..];
+        } else {
+            if !jam_sheet_element(&tag) {
+                return false;
+            }
+            remaining = after_tag;
+        }
+    }
+}
+
+fn validate_jam_sheet_name(name: &str) -> bool {
+    let Some(stem) = name
+        .strip_prefix("mewtual-take-")
+        .and_then(|value| value.strip_suffix(".svg"))
+    else {
+        return false;
+    };
+    let Some((take, date)) = stem.split_once('-') else {
+        return false;
+    };
+    !take.is_empty()
+        && take.len() <= 10
+        && take.bytes().all(|byte| byte.is_ascii_digit())
+        && date.len() == 8
+        && date.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Export a jam-take sheet transcript to Downloads and reveal it without executing it.
+///
+/// Although jam-sheet.ts generates the content, IPC input is still untrusted. The validator pins
+/// it to that renderer's inert versioned grammar before any bytes are written.
+#[tauri::command]
+async fn save_jam_sheet(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    svg: String,
+) -> Result<SavedFileResult, String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    save_jam_sheet_to_downloads(
+        &state,
+        generation,
+        &downloads,
+        &name,
+        &svg,
+        std::future::ready(()),
+        reveal_path,
+    )
+    .await
+}
+
+/// Testable sheet-export commit core. Validation may be expensive at the 4 MiB cap, so the exact
+/// UI generation is rechecked after it and the returned commit guard remains held through both
+/// plaintext publication and reveal.
+async fn save_jam_sheet_to_downloads<F, R>(
+    state: &AppState,
+    generation: u64,
+    downloads: &Path,
+    name: &str,
+    svg: &str,
+    before_commit: F,
+    reveal: R,
+) -> Result<SavedFileResult, String>
+where
+    F: Future<Output = ()>,
+    R: FnOnce(&Path) -> Result<(), String>,
+{
+    if !validate_jam_sheet_name(&name) {
+        return Err("the sheet export has an unexpected file name".into());
+    }
+    if !validate_jam_sheet_svg(&svg) {
+        return Err("the sheet export is not a Mewtual sheet transcript".into());
+    }
+    before_commit.await;
+    let _commit = require_ui_session_generation(state, generation).await?;
+    let path = write_download(downloads, name, svg.as_bytes())?;
+    let warning = reveal(&path)
+        .err()
+        .map(|error| format!("The sheet was saved, but Downloads could not be opened: {error}"));
+    Ok(SavedFileResult {
+        path: path.to_string_lossy().into_owned(),
+        displayed: warning.is_none(),
+        warning,
+        content_validation: None,
+    })
+}
+
 /// What a streamed save needs from the running app: somewhere to get chunks, and an answer to
 /// "is this still allowed to happen?".
 ///
@@ -11573,6 +12275,7 @@ impl SaveSource for ActorSaveSource<'_> {
             DownloadProgressEvt {
                 server: self.server,
                 cid: self.cid.clone(),
+                cancellation: None,
                 done,
                 total: self.total,
                 bytes_done,
@@ -11696,6 +12399,87 @@ async fn authenticate_mounted_store(
     Ok(true)
 }
 
+/// Resolve continuity debt from the locked UI generation before reopening native IPC.
+///
+/// A write failure retains the exact validated snapshot, so every unlock attempt retries it and
+/// remains locked until persistence succeeds. Malformed state cannot become valid by retrying; its
+/// first unlock attempt surfaces the loss and consumes only that error, making a repeated unlock an
+/// explicit acknowledgement instead of permanently stranding the vault gate.
+async fn settle_ui_lock_continuity_before_unlock(
+    state: &AppState,
+    expected_generation: u64,
+) -> Result<(), String> {
+    let pending = {
+        let mut slot = state.pending_ui_lock_snapshot.lock().await;
+        if matches!(slot.as_ref(), Some(snapshot) if snapshot.generation <= expected_generation) {
+            slot.take()
+        } else {
+            None
+        }
+    };
+
+    if let Some(snapshot) = pending {
+        let result = match validate_ui_state_json(&snapshot.json) {
+            Err(error) => Err(error),
+            Ok(()) => {
+                let store = state.store.lock().await;
+                match store.as_ref() {
+                    Some(store) => store
+                        .save_ui_state(snapshot.json.as_bytes(), &mut OsCryptoRng)
+                        .map_err(|error| error.to_string()),
+                    None => Err("unlock the vault before saving UI state".to_string()),
+                }
+            }
+        };
+        if let Err(error) = result {
+            let generation = snapshot.generation;
+            let mut slot = state.pending_ui_lock_snapshot.lock().await;
+            let replace = match slot.as_ref() {
+                Some(current) => current.generation <= generation,
+                None => true,
+            };
+            if replace {
+                *slot = Some(snapshot);
+            }
+            *state.last_ui_lock_completion.lock().await = Some(UiLockCompletion {
+                generation,
+                error: Some(error.clone()),
+            });
+            return Err(format!(
+                "the vault is still locked because its latest screen state could not be saved: {error}; fix the storage problem and try again"
+            ));
+        }
+
+        // A successful retry resolves the old completion error for this generation. Return here
+        // instead of interpreting that stale error below as an irrecoverable malformed snapshot.
+        // Do not clear a newer completion: a concurrent lock publishes its generation before it
+        // waits for the commit guard held by our caller.
+        let mut completion = state.last_ui_lock_completion.lock().await;
+        if matches!(completion.as_ref(), Some(previous) if previous.generation <= expected_generation)
+        {
+            *completion = None;
+        }
+        return Ok(());
+    }
+
+    let mut completion = state.last_ui_lock_completion.lock().await;
+    if let Some(previous) = completion.as_ref() {
+        if previous.generation <= expected_generation {
+            if let Some(error) = previous.error.as_ref() {
+                let message = format!(
+                    "the vault is still locked because its latest screen state was invalid and could not be saved: {error}; unlock again to continue without that latest screen state"
+                );
+                // No retryable snapshot exists for malformed input. Consume the warning only after
+                // surfacing it once, so a deliberate second unlock is the acknowledgement.
+                *completion = None;
+                return Err(message);
+            }
+            *completion = None;
+        }
+    }
+    Ok(())
+}
+
 /// Commit a successful authentication only if no newer explicit lock began while Argon2, disk
 /// reads, or actor reloads were in flight. The generation is checked on both sides of updating the
 /// flags because `lock_session_inner` deliberately invalidates commands before awaiting this
@@ -11710,6 +12494,11 @@ async fn finalize_unlock_session(
     if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
         return Err("unlock was superseded by a newer lock request; try again".into());
     }
+    settle_ui_lock_continuity_before_unlock(state, expected_generation).await?;
+    // A successful authenticated transition either retried the exact pending bytes or crossed the
+    // explicit malformed-snapshot acknowledgement flow. The old close warning is now resolved and
+    // must not leak into a later, newly authorized UI session.
+    *state.vault_window_close_debt.lock().await = None;
     let servers = if include_running_servers {
         Some(running_servers(state).await)
     } else {
@@ -11923,39 +12712,225 @@ async fn resume_session(state: State<'_, AppState>) -> Result<Option<Vec<Reloade
 async fn lock_session(
     state: State<'_, AppState>,
     ui_state_json: Option<String>,
-) -> Result<(), String> {
-    lock_session_inner(&state, ui_state_json).await
+) -> Result<LockSessionOutcome, String> {
+    // Tauri requires async commands borrowing `State` to use a `Result` return. The outer error is
+    // reserved for bridge/dispatch failure; application-level continuity failure stays inside the
+    // resolved outcome so the webview knows native locking completed.
+    Ok(lock_session_outcome_inner(&state, ui_state_json).await)
+}
+
+/// IPC-visible lock completion. A continuity error is data-loss evidence, not evidence that the
+/// security boundary remained open, so it must not be collapsed into a rejected command.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct LockSessionOutcome {
+    continuity_error: Option<String>,
+}
+
+async fn lock_session_outcome_inner(
+    state: &AppState,
+    ui_state_json: Option<String>,
+) -> LockSessionOutcome {
+    LockSessionOutcome {
+        continuity_error: lock_session_inner(state, ui_state_json).await.err(),
+    }
+}
+
+/// Result of a native-owned window close. If this response reaches the webview then native locking
+/// is complete; successful destruction normally removes the recipient before it can observe one.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct CloseVaultWindowOutcome {
+    continuity_error: Option<String>,
+    deferred: bool,
+    destroy_error: Option<String>,
+}
+
+/// Lock the UI session and decide whether the close may proceed. Kept separate from the actual
+/// Tauri window mutation so the security/durability policy is deterministic under unit tests.
+async fn close_vault_window_plan_inner(
+    state: &AppState,
+    ui_state_json: Option<String>,
+    discard_continuity_error: bool,
+) -> (LockSessionOutcome, bool) {
+    let _close = state.vault_window_close.lock().await;
+    // Two close/lock requests can cross the bridge before the first response disables the WebView.
+    // The general lock-completion slot may be replaced by a later Ctrl+L success, so close debt has
+    // its own latch. Only a later close carrying the explicit loss acknowledgement may consume it.
+    {
+        let mut debt = state.vault_window_close_debt.lock().await;
+        if let Some(error) = debt.as_ref().cloned() {
+            if discard_continuity_error {
+                *debt = None;
+                return (
+                    LockSessionOutcome {
+                        continuity_error: Some(error),
+                    },
+                    true,
+                );
+            }
+            return (
+                LockSessionOutcome {
+                    continuity_error: Some(error),
+                },
+                false,
+            );
+        }
+    }
+    let had_local_snapshot = ui_state_json.is_some();
+    let (requested_generation, result) =
+        lock_session_with_generation_inner(state, ui_state_json).await;
+    let mut outcome = LockSessionOutcome {
+        continuity_error: result.err(),
+    };
+    // The commit mutex is shared by all lock callers, so an older ordinary Ctrl+L may consume and
+    // validate the close's newer pending snapshot. In that interleaving this close itself sees no
+    // pending bytes. Bind its decision to the generation it registered and recover the completion
+    // produced by whichever caller actually consumed that generation (or a newer replacement).
+    if had_local_snapshot && outcome.continuity_error.is_none() {
+        if let Some(completion) = state.last_ui_lock_completion.lock().await.as_ref() {
+            if completion.generation >= requested_generation {
+                outcome.continuity_error.clone_from(&completion.error);
+            }
+        }
+    }
+    // After a remount the JS snapshot is gone, but a prior native lock may already have consumed
+    // it. Preserve that transaction's result rather than letting this snapshot-less idempotent lock
+    // overwrite a failure with `Ok(())`.
+    if !had_local_snapshot && outcome.continuity_error.is_none() {
+        if let Some(completion) = state.last_ui_lock_completion.lock().await.as_ref() {
+            outcome.continuity_error.clone_from(&completion.error);
+        }
+    }
+    if let Some(error) = outcome.continuity_error.as_ref() {
+        if !discard_continuity_error {
+            *state.vault_window_close_debt.lock().await = Some(error.clone());
+        }
+    }
+    let may_destroy = outcome.continuity_error.is_none() || discard_continuity_error;
+    (outcome, may_destroy)
+}
+
+/// Native owns the lock -> final snapshot -> destroy sequence. The frontend's ordinary close
+/// handler cannot enforce this ordering with an ACL-granted `destroy()` call alone, and a webview
+/// remount cannot retain a JavaScript Promise for an earlier Ctrl+L request. Calling the same
+/// idempotent native lock again crosses `ui_session_commit`; when the current webview retained the
+/// snapshot it submits those exact immutable bytes again.
+#[tauri::command]
+async fn close_vault_window(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ui_state_json: Option<String>,
+    discard_continuity_error: bool,
+) -> Result<CloseVaultWindowOutcome, String> {
+    let (lock, may_destroy) =
+        close_vault_window_plan_inner(&state, ui_state_json, discard_continuity_error).await;
+    if !may_destroy {
+        return Ok(CloseVaultWindowOutcome {
+            continuity_error: lock.continuity_error,
+            deferred: true,
+            destroy_error: None,
+        });
+    }
+
+    let destroy_error = match app.get_webview_window("main") {
+        Some(window) => window.destroy().err().map(|error| error.to_string()),
+        None => Some("the main window no longer exists".to_string()),
+    };
+    Ok(CloseVaultWindowOutcome {
+        continuity_error: lock.continuity_error,
+        deferred: false,
+        destroy_error,
+    })
 }
 
 /// Testable core of the explicit lock operation. Closing the command boundary is unconditional:
 /// malformed continuity state or a vault write failure is reported, but must never leave the
 /// sensitive webview session open as a side effect of that error.
 async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> Result<(), String> {
+    lock_session_with_generation_inner(state, ui_state_json)
+        .await
+        .1
+}
+
+/// Execute one lock request and return the exact generation it registered. Native window-close
+/// policy needs this provenance because a different caller may consume the request's snapshot
+/// while holding the shared commit mutex.
+async fn lock_session_with_generation_inner(
+    state: &AppState,
+    ui_state_json: Option<String>,
+) -> (u64, Result<(), String>) {
     // Invalidate old work before awaiting anything. The commit mutex is acquired next so, once
     // this function returns, an old join can neither emit its private reply nor register/persist.
     state.session_lock_requested.store(true, Ordering::Release);
-    state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
+    // Cancellation destroys authority and must not wait behind the persistence transaction. This
+    // also retires unclaimed registrations left by a reloaded/crashed webview.
+    cancel_all_inline_downloads(state);
+    let lock_generation = state
+        .ui_session_generation
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1);
+    // Register before either session mutex await. A later close from a remounted webview carries no
+    // JS snapshot, but it can still save this exact native transaction if it reaches commit first.
+    if let Some(json) = ui_state_json {
+        let mut pending = state.pending_ui_lock_snapshot.lock().await;
+        let replace = match pending.as_ref() {
+            Some(snapshot) => snapshot.generation <= lock_generation,
+            None => true,
+        };
+        if replace {
+            *pending = Some(PendingUiLockSnapshot {
+                generation: lock_generation,
+                json,
+            });
+        }
+    }
     *state.session_resumable.lock().await = false;
     let _session_commit = state.ui_session_commit.lock().await;
+    // Close the registration/early-sweep race as a second line of defence. Registration itself
+    // checks `session_lock_requested` while holding the cancellation table, but this post-commit
+    // drain also retires any future registration path that was already inside the UI commit seam.
+    cancel_all_inline_downloads(state);
     // Save the final draft/read snapshot and close IPC as one ordered native operation. Two
     // separate fire-and-forget commands could race, causing the save to arrive after the lock and
     // be correctly rejected by the new session gate.
-    let save_result = if let Some(json) = ui_state_json {
-        match validate_ui_state_json(&json) {
-            Err(error) => Err(error),
+    let pending_snapshot = state.pending_ui_lock_snapshot.lock().await.take();
+    let completed_generation = pending_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.generation);
+    let (save_result, retry_snapshot) = match pending_snapshot {
+        Some(snapshot) => match validate_ui_state_json(&snapshot.json) {
+            Err(error) => (Err(error), None),
             Ok(()) => {
                 let guard = state.store.lock().await;
-                match guard.as_ref() {
+                let result = match guard.as_ref() {
                     Some(store) => store
-                        .save_ui_state(json.as_bytes(), &mut OsCryptoRng)
+                        .save_ui_state(snapshot.json.as_bytes(), &mut OsCryptoRng)
                         .map_err(|error| error.to_string()),
                     None => Err("unlock the vault before saving UI state".to_string()),
-                }
+                };
+                let retry = result.as_ref().err().map(|_| snapshot);
+                (result, retry)
             }
-        }
-    } else {
-        Ok(())
+        },
+        None => (Ok(()), None),
     };
+    if let Some(snapshot) = retry_snapshot {
+        // Disk failures can be transient. Retain exact bytes for the warning's second close or a
+        // remounted webview; malformed input is intentionally not retained and retried forever.
+        let mut pending = state.pending_ui_lock_snapshot.lock().await;
+        let replace = match pending.as_ref() {
+            Some(current) => current.generation <= snapshot.generation,
+            None => true,
+        };
+        if replace {
+            *pending = Some(snapshot);
+        }
+    }
+    if let Some(generation) = completed_generation {
+        *state.last_ui_lock_completion.lock().await = Some(UiLockCompletion {
+            generation,
+            error: save_result.clone().err(),
+        });
+    }
     // The media cache holds decrypted chunks of shared files. Locking must drop them along with
     // the rest of the session's plaintext, not leave a film resident until something evicts it.
     state.media_cache.lock().await.clear();
@@ -11972,7 +12947,7 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
     for upload in abandoned {
         discard_pending_upload(state, upload).await;
     }
-    save_result
+    (lock_generation, save_result)
 }
 
 // ---------------------------------------------------------------------------
@@ -14071,6 +15046,7 @@ pub fn run() {
             vault_exists,
             resume_session,
             lock_session,
+            close_vault_window,
             unlock,
             found_server,
             preview_invite,
@@ -14112,6 +15088,8 @@ pub fn run() {
             send_call_signal,
             call_media_key,
             dismiss_dm_request,
+            begin_inline_download,
+            cancel_inline_download,
             download_file,
             file_available,
             delete_file,
@@ -14204,6 +15182,7 @@ pub fn run() {
             open_external_url,
             save_and_open_space_guide,
             save_space_layout,
+            save_jam_sheet,
             save_group_file
         ])
         .run(tauri::generate_context!())
@@ -15206,6 +16185,215 @@ mod tests {
         // a ~341 MB JS string built on the webview's main thread, reachable by scrolling past an
         // embedded file rather than by any deliberate action.
         assert!(inline_download_allowed(MAX_FILE_BYTES as u64).is_err());
+    }
+
+    #[test]
+    fn cancellable_inline_downloads_are_globally_bounded_and_reusable() {
+        let state = AppState::default();
+        let mut leases = Vec::new();
+        for index in 0..MAX_CANCELLABLE_INLINE_DOWNLOADS {
+            let id = format!("jam:1:{index}");
+            register_inline_download(&state, &id).unwrap();
+            leases.push(claim_inline_download(&state, &id).unwrap());
+        }
+        assert!(register_inline_download(&state, "jam:1:overflow")
+            .unwrap_err()
+            .contains("too many"));
+        assert!(cancel_inline_download_registration(&state, "jam:1:0").unwrap());
+        let cancelled = leases.remove(0);
+        drop(cancelled);
+        register_inline_download(&state, "jam:1:replacement").unwrap();
+        assert_eq!(
+            state
+                .inline_downloads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            MAX_CANCELLABLE_INLINE_DOWNLOADS
+        );
+        drop(leases);
+    }
+
+    #[test]
+    fn abandoned_unclaimed_inline_registration_cannot_starve_a_reload() {
+        let state = AppState::default();
+        for index in 0..MAX_CANCELLABLE_INLINE_DOWNLOADS {
+            register_inline_download(&state, &format!("jam:1:{index}")).unwrap();
+        }
+        register_inline_download(&state, "jam:2:fresh").unwrap();
+        let fresh = claim_inline_download(&state, "jam:2:fresh").unwrap();
+        assert_eq!(
+            state
+                .inline_downloads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            MAX_CANCELLABLE_INLINE_DOWNLOADS
+        );
+        drop(fresh);
+    }
+
+    #[test]
+    fn abandoned_unclaimed_inline_registration_can_be_replaced_by_the_same_id() {
+        let state = AppState::default();
+        register_inline_download(&state, "jam:1:1").unwrap();
+        let old_receiver = state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("jam:1:1")
+            .unwrap()
+            .signal
+            .subscribe();
+
+        register_inline_download(&state, "jam:1:1").unwrap();
+        assert!(
+            *old_receiver.borrow(),
+            "the abandoned generation is explicitly retired"
+        );
+        let (_lease, fresh_receiver) = claim_inline_download(&state, "jam:1:1").unwrap();
+        assert!(
+            !*fresh_receiver.borrow(),
+            "the replacement owns an independent cancellation generation"
+        );
+    }
+
+    #[test]
+    fn active_inline_registration_does_not_collide_with_a_fresh_webview_nonce() {
+        let state = AppState::default();
+        register_inline_download(&state, "jam:aaaaaaaaaaaaaaaa:1:1").unwrap();
+        let (_old_lease, _old_receiver) =
+            claim_inline_download(&state, "jam:aaaaaaaaaaaaaaaa:1:1").unwrap();
+
+        register_inline_download(&state, "jam:bbbbbbbbbbbbbbbb:1:1").unwrap();
+        let (_new_lease, new_receiver) =
+            claim_inline_download(&state, "jam:bbbbbbbbbbbbbbbb:1:1").unwrap();
+        assert!(
+            !*new_receiver.borrow(),
+            "reset call/sequence counters remain independent across WebView nonces"
+        );
+    }
+
+    #[test]
+    fn cancellation_wakes_a_claimed_download_and_keeps_it_counted_until_return() {
+        let state = AppState::default();
+        register_inline_download(&state, "jam:9:1").unwrap();
+        let (old_lease, old_receiver) = claim_inline_download(&state, "jam:9:1").unwrap();
+        assert!(cancel_inline_download_registration(&state, "jam:9:1").unwrap());
+        assert!(
+            *old_receiver.borrow(),
+            "the actor receives the cancellation edge"
+        );
+
+        assert!(register_inline_download(&state, "jam:9:1").is_err());
+        drop(old_lease);
+        register_inline_download(&state, "jam:9:1").unwrap();
+        let (_new_lease, new_receiver) = claim_inline_download(&state, "jam:9:1").unwrap();
+        assert!(
+            !*new_receiver.borrow(),
+            "an old RAII guard cannot retire a reused id generation"
+        );
+    }
+
+    #[test]
+    fn session_lock_retires_every_inline_download_registration() {
+        let state = AppState::default();
+        register_inline_download(&state, "jam:4:1").unwrap();
+        let (lease, receiver) = claim_inline_download(&state, "jam:4:1").unwrap();
+        register_inline_download(&state, "jam:4:2").unwrap();
+
+        cancel_all_inline_downloads(&state);
+        assert!(
+            *receiver.borrow(),
+            "claimed actor work receives cancellation"
+        );
+        {
+            let table = state
+                .inline_downloads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            assert_eq!(
+                table.len(),
+                1,
+                "active work remains counted until its return"
+            );
+            assert!(table.contains_key("jam:4:1"));
+            assert!(
+                !table.contains_key("jam:4:2"),
+                "unclaimed work retires at lock"
+            );
+        }
+        drop(lease);
+        assert!(state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty());
+    }
+
+    #[test]
+    fn inline_download_cancellation_ids_have_a_small_inert_grammar() {
+        let state = AppState::default();
+        assert!(register_inline_download(&state, "jam:2:17").is_ok());
+        assert!(register_inline_download(&state, "../escape").is_err());
+        assert!(register_inline_download(
+            &state,
+            &"x".repeat(INLINE_DOWNLOAD_CANCELLATION_ID_MAX_BYTES + 1)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn omitted_token_inline_downloads_share_the_global_cap_and_lock_cancellation() {
+        let state = AppState::default();
+        let mut active = (0..MAX_CANCELLABLE_INLINE_DOWNLOADS)
+            .map(|_| claim_internal_inline_download(&state).unwrap())
+            .collect::<Vec<_>>();
+        let overflow = match claim_internal_inline_download(&state) {
+            Err(error) => error,
+            Ok(_) => panic!("a fifth compatibility-path download exceeded the global cap"),
+        };
+        assert!(overflow.contains("too many"));
+
+        cancel_all_inline_downloads(&state);
+        assert!(
+            active.iter().all(|(_, receiver)| *receiver.borrow()),
+            "lock cancellation reaches every compatibility-path operation"
+        );
+        drop(active.pop());
+        let (_replacement, receiver) = claim_internal_inline_download(&state).unwrap();
+        assert!(
+            !*receiver.borrow(),
+            "a returned native lease restores exactly one slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_registration_cannot_overtake_explicit_lock_after_commit_admission() {
+        let state = Arc::new(AppState::default());
+        // Model begin_inline_download after it acquired the exact-generation commit guard but
+        // immediately before its synchronous table insertion.
+        let admitted_begin = state.ui_session_commit.lock().await;
+        let locking_state = Arc::clone(&state);
+        let locking =
+            tokio::spawn(
+                async move { lock_session_with_generation_inner(&locking_state, None).await },
+            );
+        while !state.session_lock_requested.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(register_inline_download(&state, "jam:1:lock-race")
+            .unwrap_err()
+            .contains("locked"));
+        drop(admitted_begin);
+        let (_generation, result) = locking.await.unwrap();
+        result.unwrap();
+        assert!(state
+            .inline_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty());
     }
 
     #[test]
@@ -16929,17 +18117,211 @@ mod tests {
             "explicit lock must purge cached plaintext file metadata"
         );
 
-        // Validation errors are returned to the caller, but the security boundary still closes.
+        // Validation errors are returned as a completed-lock outcome, rather than an ambiguous IPC
+        // rejection, and the security boundary still closes.
         *state.session_resumable.lock().await = true;
-        assert!(lock_session_inner(&state, Some("not json".into()))
-            .await
-            .is_err());
+        let outcome = lock_session_outcome_inner(&state, Some("not json".into())).await;
+        assert!(outcome.continuity_error.is_some());
         assert_eq!(
             require_unlocked_session(&state).await.unwrap_err(),
             "the vault is locked"
         );
         // The vault remains mounted so actors and persistence may continue behind the UI lock.
         assert!(state.store.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn native_close_defers_one_continuity_failure_then_allows_acknowledged_exit() {
+        let state = AppState::default();
+        *state.session_resumable.lock().await = true;
+
+        let (first, first_may_destroy) =
+            close_vault_window_plan_inner(&state, Some("not json".into()), false).await;
+        assert!(first.continuity_error.is_some());
+        assert!(!first_may_destroy, "the first failure must remain visible");
+        assert_eq!(
+            require_unlocked_session(&state).await.unwrap_err(),
+            "the vault is locked",
+            "the warning is shown only after the native boundary closed",
+        );
+
+        let (acknowledged, second_may_destroy) =
+            close_vault_window_plan_inner(&state, Some("not json".into()), true).await;
+        assert!(acknowledged.continuity_error.is_some());
+        assert!(
+            second_may_destroy,
+            "a repeated close explicitly accepts loss of only the latest screen snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_close_cannot_overtake_an_unacknowledged_continuity_failure() {
+        let state = AppState::default();
+        *state.session_resumable.lock().await = true;
+
+        let (first, first_may_destroy) =
+            close_vault_window_plan_inner(&state, Some("not json".into()), false).await;
+        assert!(first.continuity_error.is_some());
+        assert!(!first_may_destroy);
+
+        // This is the duplicate that could already be queued across the bridge before the first
+        // response changes frontend state. Even valid bytes are not an acknowledgement of losing
+        // the failed snapshot, so it must not authorize destruction.
+        let (duplicate, duplicate_may_destroy) = close_vault_window_plan_inner(
+            &state,
+            Some(r#"{"version":1,"drafts":{},"readMarks":{}}"#.into()),
+            false,
+        )
+        .await;
+        assert_eq!(duplicate.continuity_error, first.continuity_error);
+        assert!(!duplicate_may_destroy);
+    }
+
+    #[tokio::test]
+    async fn ordinary_lock_completion_cannot_erase_native_close_debt() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+
+        let (failed_close, may_destroy) =
+            close_vault_window_plan_inner(&state, Some("not json".into()), false).await;
+        assert!(failed_close.continuity_error.is_some());
+        assert!(!may_destroy);
+
+        // Model an already-queued Ctrl+L command completing after the close plan. Its successful
+        // snapshot legitimately replaces the general lock-completion slot, but not close debt.
+        let valid = r#"{"version":1,"drafts":{},"readMarks":{}}"#;
+        let later_lock = lock_session_outcome_inner(&state, Some(valid.into())).await;
+        assert_eq!(later_lock.continuity_error, None);
+        assert_eq!(
+            state
+                .last_ui_lock_completion
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|completion| completion.error.as_ref()),
+            None,
+        );
+
+        let (duplicate, duplicate_may_destroy) =
+            close_vault_window_plan_inner(&state, Some(valid.into()), false).await;
+        assert_eq!(duplicate.continuity_error, failed_close.continuity_error);
+        assert!(!duplicate_may_destroy);
+    }
+
+    #[tokio::test]
+    async fn ordinary_lock_consuming_close_snapshot_cannot_authorize_destruction() {
+        let state = Arc::new(AppState::default());
+        *state.session_resumable.lock().await = true;
+
+        // Queue both requests behind the real production commit mutex. Tokio mutex waiters are
+        // FIFO: A registers first, B replaces its pending snapshot, then A consumes B's bytes.
+        let boundary = state.ui_session_commit.lock().await;
+        let ordinary_state = Arc::clone(&state);
+        let ordinary = tokio::spawn(async move {
+            lock_session_inner(&ordinary_state, Some("ordinary-invalid".into())).await
+        });
+        while state.ui_session_generation.load(Ordering::Acquire) < 1
+            || state
+                .pending_ui_lock_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .map(|s| s.generation)
+                != Some(1)
+        {
+            tokio::task::yield_now().await;
+        }
+
+        let close_state = Arc::clone(&state);
+        let closing = tokio::spawn(async move {
+            close_vault_window_plan_inner(&close_state, Some("close-invalid".into()), false).await
+        });
+        while state.ui_session_generation.load(Ordering::Acquire) < 2
+            || state
+                .pending_ui_lock_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .map(|s| s.generation)
+                != Some(2)
+        {
+            tokio::task::yield_now().await;
+        }
+        drop(boundary);
+
+        assert!(
+            ordinary.await.unwrap().is_err(),
+            "A validates B's invalid snapshot"
+        );
+        let (outcome, may_destroy) = closing.await.unwrap();
+        assert!(outcome.continuity_error.is_some());
+        assert!(
+            !may_destroy,
+            "B must recover its generation-bound failure even though A consumed the bytes"
+        );
+        assert!(state.vault_window_close_debt.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn successful_reunlock_resolves_old_native_close_debt() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let (failed, may_destroy) =
+            close_vault_window_plan_inner(&state, Some("not json".into()), false).await;
+        assert!(failed.continuity_error.is_some());
+        assert!(!may_destroy);
+
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        assert!(finalize_unlock_session(&state, generation, false)
+            .await
+            .is_err());
+        assert!(
+            state.vault_window_close_debt.lock().await.is_some(),
+            "the first unlock merely surfaces malformed-state loss"
+        );
+        assert!(finalize_unlock_session(&state, generation, false)
+            .await
+            .is_ok());
+        assert!(state.vault_window_close_debt.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remounted_close_consumes_the_exact_native_pending_lock_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        let latest = r#"{"version":1,"drafts":{"room":"before remount"},"readMarks":{}}"#;
+
+        // This is the native transaction left behind after the Ctrl+L webview was remounted. The
+        // new component has no JS snapshot and therefore calls close with `None`.
+        *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
+            generation: 1,
+            json: latest.into(),
+        });
+        let (outcome, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
+        assert!(outcome.continuity_error.is_none());
+        assert!(may_destroy);
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .load_ui_state()
+                .unwrap(),
+            latest.as_bytes(),
+            "snapshot-less remounted close must finish the exact pending native transaction",
+        );
+        assert!(state.pending_ui_lock_snapshot.lock().await.is_none());
     }
 
     #[tokio::test]
@@ -17105,6 +18487,101 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn remounted_unlock_retries_the_exact_native_continuity_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = false;
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let latest = r#"{"version":1,"drafts":{"room":"survives remount"},"readMarks":{}}"#;
+
+        // A reloaded webview has no JavaScript coordinator or Promise. Native state is therefore
+        // the only durable-in-process record that the prior resolved lock outcome reported a
+        // failed write and retained these exact bytes.
+        *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
+            generation,
+            json: latest.into(),
+        });
+        *state.last_ui_lock_completion.lock().await = Some(UiLockCompletion {
+            generation,
+            error: Some("injected first write failure".into()),
+        });
+
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .expect("unlock must retry the native snapshot before reopening IPC");
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .load_ui_state()
+                .unwrap(),
+            latest.as_bytes(),
+        );
+        assert!(state.pending_ui_lock_snapshot.lock().await.is_none());
+        assert!(state.last_ui_lock_completion.lock().await.is_none());
+        assert!(*state.session_resumable.lock().await);
+    }
+
+    #[tokio::test]
+    async fn failed_unlock_retry_keeps_the_exact_snapshot_and_vault_locked() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.session_resumable.lock().await = false;
+        state.session_lock_requested.store(true, Ordering::Release);
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let latest = r#"{"version":1,"drafts":{"room":"retry me"},"readMarks":{}}"#;
+        *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
+            generation,
+            json: latest.into(),
+        });
+
+        let error = finalize_unlock_session(&state, generation, false)
+            .await
+            .err()
+            .expect("persistence failure must refuse to unlock");
+        assert!(error.contains("still locked"));
+        assert_eq!(
+            state
+                .pending_ui_lock_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .map(|snapshot| snapshot.json.as_str()),
+            Some(latest),
+            "a failed retry must retain the immutable bytes rather than accept older continuity",
+        );
+        assert!(!*state.session_resumable.lock().await);
+        assert!(state.session_lock_requested.load(Ordering::Acquire));
+
+        // Model a transient persistence problem clearing. The next unlock retries the same native
+        // transaction and only then reopens the IPC boundary.
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .expect("the retained exact snapshot should be retryable");
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .load_ui_state()
+                .unwrap(),
+            latest.as_bytes(),
+        );
+        assert!(state.pending_ui_lock_snapshot.lock().await.is_none());
+        assert!(state.last_ui_lock_completion.lock().await.is_none());
+        assert!(*state.session_resumable.lock().await);
+    }
+
     #[test]
     fn a_committed_secret_rewrap_is_never_reported_as_unchanged() {
         let result = vault_secret_change_result(Err(
@@ -17133,7 +18610,20 @@ mod tests {
                 .unwrap(),
             "the test pauses the unlock after real vault authentication"
         );
-        lock_session_inner(&state, None).await.unwrap();
+        let newer_generation = state
+            .ui_session_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        state.session_lock_requested.store(true, Ordering::Release);
+        let newer_snapshot = r#"{"version":1,"drafts":{"room":"newer lock"},"readMarks":{}}"#;
+        *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
+            generation: newer_generation,
+            json: newer_snapshot.into(),
+        });
+        *state.last_ui_lock_completion.lock().await = Some(UiLockCompletion {
+            generation: newer_generation,
+            error: Some("newer lock still owns this continuity debt".into()),
+        });
 
         assert!(
             finalize_unlock_session(&state, stale_generation, true)
@@ -17147,6 +18637,26 @@ mod tests {
         );
         assert!(state.session_lock_requested.load(Ordering::Acquire));
         assert!(!*state.session_resumable.lock().await);
+        assert_eq!(
+            state
+                .pending_ui_lock_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .map(|snapshot| snapshot.json.as_str()),
+            Some(newer_snapshot),
+            "a stale unlock must not retire a newer lock's exact snapshot",
+        );
+        assert_eq!(
+            state
+                .last_ui_lock_completion
+                .lock()
+                .await
+                .as_ref()
+                .map(|completion| completion.generation),
+            Some(newer_generation),
+            "a stale unlock must not erase the newer lock's user-visible failure evidence",
+        );
     }
 
     #[tokio::test]
@@ -18633,6 +20143,94 @@ mod tests {
             r#"{"kind":"something-else","version":1,"space":{}}"#
         ));
         assert!(!validate_space_layout_json("not json"));
+    }
+
+    #[test]
+    fn jam_sheet_export_accepts_only_the_inert_renderer_grammar() {
+        let safe = format!(
+            concat!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 120" width="960" height="120" data-mewtual-sheet="v1"><style>{}</style>"#,
+                r##"<rect x="0" y="0" width="960" height="120" fill="#fffdf6"/>"##,
+                r#"<line x1="1" y1="2" x2="3.5" y2="4" class="st"/>"#,
+                r#"<ellipse cx="5" cy="6" rx="4.6" ry="3.4" class="nh open"/>"#,
+                r#"<path d="M5 6 q7 -3 8 -12" class="flag"/>"#,
+                r#"<text x="56" y="30" class="ttl">Mika &amp; Rook</text></svg>"#,
+            ),
+            JAM_SHEET_STYLE,
+        );
+        assert!(validate_jam_sheet_svg(&safe));
+
+        for active in [
+            safe.replace("</svg>", "<script>alert(1)</script></svg>"),
+            safe.replace("<svg ", "<svg onload=\"alert(1)\" "),
+            safe.replace("</svg>", "<foreignobject>html</foreignobject></svg>"),
+            safe.replace(
+                "</svg>",
+                "<image href=\"https://example.invalid/x\"/></svg>",
+            ),
+            safe.replace(JAM_SHEET_STYLE, "text{fill:url(https://example.invalid/x)}"),
+        ] {
+            assert!(
+                !validate_jam_sheet_svg(&active),
+                "active SVG syntax was admitted"
+            );
+        }
+        assert!(!validate_jam_sheet_svg(&safe.replace(
+            "data-mewtual-sheet=\"v1\"",
+            "data-mewtual-sheet=\"v2\""
+        )));
+        assert!(validate_jam_sheet_name("mewtual-take-01-20260902.svg"));
+        assert!(validate_jam_sheet_name("mewtual-take-100-20260902.svg"));
+        assert!(!validate_jam_sheet_name("notes.svg"));
+        assert!(!validate_jam_sheet_name("mewtual-take-01-2026-09-02.svg"));
+    }
+
+    #[tokio::test]
+    async fn jam_sheet_export_cannot_publish_or_reveal_after_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let safe = format!(
+            concat!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 120" width="960" height="120" data-mewtual-sheet="v1"><style>{}</style>"#,
+                r##"<rect x="0" y="0" width="960" height="120" fill="#fffdf6"/>"##,
+                "</svg>"
+            ),
+            JAM_SHEET_STYLE,
+        );
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let export_state = Arc::clone(&state);
+        let export_root = root.path().to_path_buf();
+        let export_started = Arc::clone(&started);
+        let export_release = Arc::clone(&release);
+        let exporting = tokio::spawn(async move {
+            save_jam_sheet_to_downloads(
+                &export_state,
+                generation,
+                &export_root,
+                "mewtual-take-01-20260902.svg",
+                &safe,
+                async move {
+                    export_started.notify_one();
+                    export_release.notified().await;
+                },
+                |_| panic!("stale sheet export must never reach reveal"),
+            )
+            .await
+        });
+        started.notified().await;
+
+        lock_session_inner(&state, None).await.unwrap();
+        release.notify_one();
+        assert!(exporting.await.unwrap().is_err());
+        assert!(
+            !root.path().join("mewtual-take-01-20260902.svg").exists(),
+            "no plaintext sheet may appear after the UI generation was locked"
+        );
     }
 
     #[test]

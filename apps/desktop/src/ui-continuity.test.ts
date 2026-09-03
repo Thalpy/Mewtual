@@ -69,8 +69,38 @@ test("ordinary window close awaits the native final vault snapshot before destru
   assert.ok(start >= 0 && end > start);
   const handler = source.slice(start, end);
   assert.match(handler, /event\.preventDefault\(\)/);
-  assert.ok(handler.indexOf('await invoke("lock_session"') < handler.indexOf("await appWindow.destroy()"));
-  assert.match(handler, /if \(nativeLocked\) lockScreen\(true\)/);
+  assert.match(handler, /nativeVaultLock\.snapshot\(\)/, "close must reuse Ctrl+L's exact snapshot");
+  assert.match(handler, /invoke<NativeVaultCloseOutcome>\("close_vault_window"/);
+  assert.match(handler, /discardContinuityError: closeAfterContinuityError/);
+  assert.match(handler, /await appWindow\.destroy\(\)/, "ambiguous native failure must destroy the webview");
+  assert.match(handler, /await relaunch\(\)/, "failed emergency destroy must terminate the native session");
+  assert.match(handler, /errorText\(e\)/, "a structured Tauri failure must remain readable");
+
+  const capability = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL("../src-tauri/capabilities/default.json", import.meta.url)),
+      "utf8",
+    ),
+  ) as { permissions?: string[] };
+  assert.ok(
+    capability.permissions?.includes("core:window:allow-destroy"),
+    "the post-snapshot destroy call must be permitted or the app strands a locked window",
+  );
+  assert.deepEqual(
+    (capability as { windows?: string[] }).windows,
+    ["main"],
+    "destroy authority must remain scoped to the single main webview",
+  );
+});
+
+test("the vault gate renders a typed unlock refusal instead of object Object", () => {
+  const source = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
+  const start = source.indexOf("async function unlock(secret = unlockSecret())");
+  const end = source.indexOf("// Ctrl+L: drop back", start);
+  assert.ok(start >= 0 && end > start);
+  const unlock = source.slice(start, end);
+  assert.match(unlock, /error = vaultUnlockErrorText\(e\)/);
+  assert.doesNotMatch(unlock, /error = String\(e\)/);
 });
 
 test("a read mark from a build that only stored a timestamp upgrades in place", () => {

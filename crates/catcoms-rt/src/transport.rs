@@ -10,8 +10,9 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::fmt;
+use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 /// A stable peer identifier. In production this is derived from a libp2p public
 /// key; here it is an opaque 32-byte value so tests need no real keys.
@@ -86,12 +87,69 @@ pub enum TransportError {
     /// The transport has shut down.
     #[error("transport closed")]
     Closed,
+    /// The caller explicitly retired this request before a response arrived.
+    #[error("request cancelled")]
+    Cancelled,
     /// The remote received a request but dropped it without replying.
     #[error("request handler dropped without responding")]
     NoResponse,
     /// A caller supplied a peer-bound dial batch that violated the transport contract.
     #[error("invalid peer-bound dial batch")]
     InvalidDialBatch,
+}
+
+/// Opaque accounting authority retained until a transport-owned request really terminates.
+///
+/// A caller future can be cancelled while a production transport still owns an outbound stream.
+/// Keeping this object in the transport's pending table prevents outer concurrency permits from
+/// being recycled into unbounded lower-layer work. The blanket implementation deliberately gives
+/// transports no operations beyond ownership and eventual drop.
+pub trait RequestKeepalive: Send + Sync + fmt::Debug {}
+impl<T: Send + Sync + fmt::Debug> RequestKeepalive for T {}
+
+/// Shared, object-safe ownership token for one transport request.
+pub type SharedRequestKeepalive = Arc<dyn RequestKeepalive>;
+
+/// Cancellation signal plus optional accounting authority for an addressed request.
+#[derive(Clone)]
+pub struct RequestCancellation {
+    signal: watch::Receiver<bool>,
+    keepalive: Option<SharedRequestKeepalive>,
+}
+
+impl fmt::Debug for RequestCancellation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RequestCancellation")
+            .field("cancelled", &self.is_cancelled())
+            .field("has_keepalive", &self.keepalive.is_some())
+            .finish()
+    }
+}
+
+impl RequestCancellation {
+    /// Bind a native cancellation receiver to accounting that outlives the caller future.
+    pub fn new(signal: watch::Receiver<bool>, keepalive: Option<SharedRequestKeepalive>) -> Self {
+        Self { signal, keepalive }
+    }
+
+    /// Whether cancellation was already published.
+    pub fn is_cancelled(&self) -> bool {
+        *self.signal.borrow()
+    }
+
+    /// Wait until cancellation is published or its authority disappears.
+    pub async fn cancelled(&mut self) {
+        while !self.is_cancelled() {
+            if self.signal.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+
+    /// Clone the accounting authority for transport actor ownership.
+    pub fn keepalive(&self) -> Option<SharedRequestKeepalive> {
+        self.keepalive.clone()
+    }
 }
 
 /// Maximum direct routes accepted by one peer-bound reciprocal-dial batch.
@@ -159,12 +217,17 @@ pub type BoxedDialPermit = Box<dyn DialPermit>;
 /// Reply handle handed to a request handler. Dropping it without calling
 /// [`Responder::respond`] surfaces [`TransportError::NoResponse`] to the caller.
 #[derive(Debug)]
-pub struct Responder(pub(crate) oneshot::Sender<Bytes>);
+pub struct Responder {
+    pub(crate) reply: oneshot::Sender<Bytes>,
+    /// Optional request accounting retained by in-memory delivery until the queued request is
+    /// actually handled or dropped. Production libp2p keeps the same authority in `pending_req`.
+    pub(crate) _keepalive: Option<SharedRequestKeepalive>,
+}
 
 impl Responder {
     /// Send the reply back to the requester.
     pub fn respond(self, data: Bytes) {
-        let _ = self.0.send(data);
+        let _ = self.reply.send(data);
     }
 
     /// Create a responder paired with its receiver. A transport implementation
@@ -173,7 +236,13 @@ impl Responder {
     /// reply and forward it over the wire.
     pub fn channel() -> (Responder, ResponderRx) {
         let (tx, rx) = oneshot::channel();
-        (Responder(tx), ResponderRx(rx))
+        (
+            Responder {
+                reply: tx,
+                _keepalive: None,
+            },
+            ResponderRx(rx),
+        )
     }
 }
 
@@ -390,6 +459,19 @@ pub trait MeshTransport: Send + Sync {
         peer: PeerId,
         proto: ProtocolId,
         data: Bytes,
+    ) -> Result<Bytes, TransportError>;
+
+    /// Send an addressed request whose caller may explicitly retire it.
+    ///
+    /// This has no default deliberately: every transport must state where the keepalive lives
+    /// after caller cancellation. An inherited wrapper around `request` is unsafe when that future
+    /// can transfer work into a lower actor before it is dropped.
+    async fn request_cancellable(
+        &self,
+        peer: PeerId,
+        proto: ProtocolId,
+        data: Bytes,
+        cancellation: RequestCancellation,
     ) -> Result<Bytes, TransportError>;
 
     /// Send an addressed request only over a connection that is live at handling time.

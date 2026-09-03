@@ -230,7 +230,7 @@ const SANITIZE = {
     "class", "href", "title", "data-wikilink", "data-emoji", "data-embed-cid", "data-alt",
     "data-remote-url",
     "data-mention", "data-spoiler", "data-file-cid", "data-status-id", "data-event-id",
-    "data-text-fx", "data-pride", "data-fx-tone",
+    "data-text-fx", "data-pride", "data-fx-tone", "data-fx-glyph", "data-fx-glyph2", "data-fx-conceal",
     "tabindex", "role", "aria-hidden", "aria-label", "colspan",
   ],
 };

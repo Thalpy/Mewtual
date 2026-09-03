@@ -13498,12 +13498,398 @@ button.fx-order {
 }
 .text-fx-censor.revealed::after { display: none; }
 
+/* Decrypt: each letter hides behind two fixed stand-in glyphs that alternate, then locks in. */
+.text-fx-decrypt {
+  color: #9ff7c9;
+  font-family: var(--mono);
+  letter-spacing: 0.03em;
+  text-shadow: 0 0 4px rgb(80 255 170 / 0.4);
+}
+[data-text-effects="full"] .text-fx-decrypt .fx-decrypt-unit {
+  position: relative;
+  display: inline-block;
+}
+[data-text-effects="full"] .text-fx-decrypt .fx-decrypt-unit[data-fx-glyph] { color: transparent; }
+[data-text-effects="full"] .text-fx-decrypt .fx-decrypt-unit[data-fx-glyph]::before,
+[data-text-effects="full"] .text-fx-decrypt .fx-decrypt-unit[data-fx-glyph]::after {
+  content: attr(data-fx-glyph);
+  position: absolute;
+  inset: 0;
+  color: #5fe0a4;
+  opacity: 0.85;
+  text-align: center;
+  text-shadow: none;
+}
+[data-text-effects="full"] .text-fx-decrypt .fx-decrypt-unit[data-fx-glyph]::after {
+  content: attr(data-fx-glyph2);
+  opacity: 0;
+}
+[data-text-effects="full"] .text-fx-decrypt.fx-play .fx-decrypt-unit[data-fx-glyph] {
+  animation: text-fx-decrypt-lock 440ms steps(1, end) both;
+  animation-delay: calc(var(--fx-i, 0) * 55ms);
+}
+[data-text-effects="full"] .text-fx-decrypt.fx-play .fx-decrypt-unit[data-fx-glyph]::before {
+  animation: text-fx-decrypt-a 440ms steps(1, end) both;
+  animation-delay: inherit;
+}
+[data-text-effects="full"] .text-fx-decrypt.fx-play .fx-decrypt-unit[data-fx-glyph]::after {
+  animation: text-fx-decrypt-b 440ms steps(1, end) both;
+  animation-delay: inherit;
+}
+@keyframes text-fx-decrypt-lock {
+  0%, 90% { color: transparent; }
+  91% { color: #ffffff; text-shadow: 0 0 6px #b8ffe0; }
+  100% { color: #9ff7c9; }
+}
+@keyframes text-fx-decrypt-a { 0%, 25%, 50%, 75% { opacity: 0.85; } 12%, 37%, 62%, 91%, 100% { opacity: 0; } }
+@keyframes text-fx-decrypt-b { 0%, 25%, 50%, 75%, 91%, 100% { opacity: 0; } 12%, 37%, 62% { opacity: 0.85; } }
+
+/* Heartbeat: a lub-dub scale pulse; the second beat blooms red. */
+.text-fx-heartbeat {
+  color: #ffb3c1;
+  font-weight: 700;
+  text-shadow: 0 0 4px rgb(255 60 100 / 0.35);
+}
+[data-text-effects="full"] .text-fx-heartbeat {
+  transform-origin: 50% 60%;
+  animation: text-fx-heartbeat 1.35s ease-in-out infinite;
+}
+@keyframes text-fx-heartbeat {
+  0%, 100% { transform: scale(1); text-shadow: 0 0 4px rgb(255 60 100 / 0.35); }
+  14% { transform: scale(1.08); }
+  24% { transform: scale(1); }
+  36% { transform: scale(1.14); text-shadow: 0 0 10px rgb(255 40 90 / 0.8), 0 0 22px rgb(255 40 90 / 0.45); }
+  52% { transform: scale(1); }
+}
+
+/* Jelly: squash-and-stretch entrance on the outer span, idle and pointer wobble on the inner. */
+.text-fx-jelly {
+  color: #b8ff8a;
+  font-weight: 800;
+  text-shadow: 0 1px 0 #3f8a1f, 0 0 6px rgb(120 255 120 / 0.35);
+}
+.text-fx-jelly .text-fx-visual { display: inline-block; transform-origin: 50% 100%; }
+[data-text-effects="full"] .text-fx-jelly {
+  transform-origin: 50% 100%;
+  animation: text-fx-jelly-in 900ms cubic-bezier(0.2, 0.9, 0.3, 1.3) both;
+}
+[data-text-effects="full"] .text-fx-jelly .text-fx-visual {
+  animation: text-fx-jelly-idle 3.2s ease-in-out infinite;
+}
+[data-text-effects="full"] .text-fx-jelly.fx-pointer .text-fx-visual {
+  animation: text-fx-jelly-wobble 720ms cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+@keyframes text-fx-jelly-in {
+  0% { transform: translateY(-0.6em) scale(0.7, 1.35); opacity: 0; }
+  40% { transform: translateY(0) scale(1.25, 0.72); opacity: 1; }
+  65% { transform: scale(0.88, 1.12); }
+  82% { transform: scale(1.06, 0.95); }
+  100% { transform: none; }
+}
+@keyframes text-fx-jelly-idle {
+  0%, 100% { transform: scale(1, 1); }
+  50% { transform: scale(1.02, 0.97); }
+}
+@keyframes text-fx-jelly-wobble {
+  0% { transform: scale(1.3, 0.7); }
+  35% { transform: scale(0.82, 1.18) skewX(-4deg); }
+  60% { transform: scale(1.1, 0.92) skewX(3deg); }
+  80% { transform: scale(0.96, 1.04); }
+  100% { transform: none; }
+}
+
+/* Frost: ice-blue type with a rime that creeps in from the edges and one glint above. */
+.text-fx-frost {
+  isolation: isolate;
+  color: #d9f4ff;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-shadow: 0 0 1px #fff, 0 0 5px rgb(140 220 255 / 0.7), 0 0 12px rgb(80 170 255 / 0.35);
+}
+.text-fx-frost .text-fx-visual { position: relative; z-index: 2; }
+.fx-frost-rime {
+  position: absolute;
+  z-index: 1;
+  inset: -0.25em -0.3em;
+  display: block;
+  border-radius: 0.4em;
+  opacity: 0.5;
+  background:
+    radial-gradient(ellipse at 0% 50%, rgb(200 240 255 / 0.55), transparent 55%),
+    radial-gradient(ellipse at 100% 50%, rgb(200 240 255 / 0.55), transparent 55%),
+    radial-gradient(circle at 30% 0%, rgb(255 255 255 / 0.32), transparent 40%),
+    radial-gradient(circle at 70% 100%, rgb(255 255 255 / 0.32), transparent 40%);
+  pointer-events: none;
+}
+.text-fx-frost::after {
+  content: "✧";
+  position: absolute;
+  z-index: 3;
+  top: -0.6em;
+  left: 14%;
+  color: #fff;
+  font-size: 0.55em;
+  text-shadow: 0 0 5px #bfeeff;
+  pointer-events: none;
+}
+[data-text-effects="full"] .fx-frost-rime { animation: text-fx-frost-creep 4.5s ease-in-out infinite alternate; }
+[data-text-effects="full"] .text-fx-frost::after { animation: text-fx-frost-glint 2.3s ease-in-out infinite; }
+@keyframes text-fx-frost-creep {
+  from { opacity: 0.22; transform: scaleX(0.84); }
+  to { opacity: 0.72; transform: scaleX(1.06); }
+}
+@keyframes text-fx-frost-glint {
+  0%, 70%, 100% { opacity: 0.25; scale: 0.7; rotate: 0deg; }
+  82% { opacity: 1; scale: 1.25; rotate: 90deg; }
+}
+
+/* Legendary: a gold sheen sweeps across and one sparkle fires as it reaches the end. */
+.text-fx-legendary {
+  color: transparent;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  background-image: linear-gradient(100deg, #7a4d05 0%, #f5c542 28%, #fff4c2 42%, #f0b322 56%, #a86f0a 78%, #f5c542 100%);
+  background-size: 220% 100%;
+  background-position: 0 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 3px rgb(255 200 80 / 0.45));
+}
+.text-fx-legendary::after {
+  content: "✦";
+  position: absolute;
+  top: -0.7em;
+  right: -0.5em;
+  color: #fff6c8;
+  -webkit-text-fill-color: #fff6c8;
+  font-size: 0.6em;
+  text-shadow: 0 0 6px #ffd76a;
+  pointer-events: none;
+}
+[data-text-effects="full"] .text-fx-legendary { animation: text-fx-legendary-sheen 3.2s ease-in-out infinite; }
+[data-text-effects="full"] .text-fx-legendary::after { animation: text-fx-legendary-spark 3.2s ease-in-out infinite; }
+@keyframes text-fx-legendary-sheen {
+  0% { background-position: 120% 0; }
+  60%, 100% { background-position: -120% 0; }
+}
+@keyframes text-fx-legendary-spark {
+  0%, 55%, 100% { opacity: 0; scale: 0.4; rotate: 0deg; }
+  70% { opacity: 1; scale: 1.25; rotate: 45deg; }
+  85% { opacity: 0.6; scale: 0.9; rotate: 70deg; }
+}
+
+/* Whisper: small, faint, softened; it leans in and sharpens when the pointer arrives. */
+.text-fx-whisper {
+  color: color-mix(in srgb, var(--text) 62%, transparent);
+  font-size: 0.86em;
+  font-style: italic;
+  letter-spacing: 0.06em;
+  opacity: 0.8;
+  filter: blur(0.4px);
+  transition: filter 200ms ease, opacity 200ms ease, letter-spacing 320ms ease, translate 90ms ease;
+}
+[data-text-effects="full"] .text-fx-whisper { animation: text-fx-whisper-breathe 4s ease-in-out infinite alternate; }
+[data-text-effects="full"] .text-fx-whisper.fx-pointer {
+  opacity: 1;
+  letter-spacing: 0.02em;
+  filter: blur(0) brightness(1.1);
+  animation: none;
+}
+@keyframes text-fx-whisper-breathe { from { opacity: 0.6; } to { opacity: 0.88; } }
+
+/* Void: near-black letters in a violet aura; a few glyphs drift loose on long cycles. */
+/* The fill is deep purple rather than black, with a lavender edge stroke, so each glyph stays
+   legible on the dark ground instead of reading as a gap inside its own aura. */
+.text-fx-void {
+  color: #06030d;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  /* Black inside, and the legibility lives at the rim: a lavender outline drawn under the fill
+     (paint-order keeps the interior solid), then a tight bright ring, then the soft violet aura. */
+  -webkit-text-stroke: 0.8px rgb(205 184 255 / 0.9);
+  paint-order: stroke fill;
+  text-shadow: 0 0 1px #d9c8ff, 0 0 4px #a67cff, 0 0 10px rgb(138 77 255 / 0.8), 0 0 22px rgb(110 60 240 / 0.5);
+}
+[data-text-effects="full"] .text-fx-void { animation: text-fx-void-breathe 5s ease-in-out infinite alternate; }
+[data-text-effects="full"] .text-fx-void .fx-void-unit { display: inline-block; }
+[data-text-effects="full"] .text-fx-void .fx-void-unit.fx-i-5 { animation: text-fx-void-drift 9s ease-in-out infinite; }
+[data-text-effects="full"] .text-fx-void .fx-void-unit.fx-i-13 { animation: text-fx-void-drift 9s ease-in-out -3.1s infinite; }
+[data-text-effects="full"] .text-fx-void .fx-void-unit.fx-i-2 { animation: text-fx-void-drift 9s ease-in-out -6.7s infinite; }
+@keyframes text-fx-void-breathe {
+  from { text-shadow: 0 0 1px #d9c8ff, 0 0 4px #a67cff, 0 0 10px rgb(138 77 255 / 0.7), 0 0 20px rgb(110 60 240 / 0.4); }
+  to { text-shadow: 0 0 1px #ede4ff, 0 0 5px #b993ff, 0 0 13px rgb(150 95 255 / 0.9), 0 0 28px rgb(120 70 255 / 0.65); }
+}
+@keyframes text-fx-void-drift {
+  0%, 86%, 100% { transform: none; opacity: 1; }
+  90% { transform: translate(0.05em, -0.34em) rotate(-9deg); opacity: 0.5; }
+  95% { transform: translate(-0.04em, 0.15em) rotate(6deg); opacity: 0.75; }
+}
+
+/* Hologram: translucent cyan projection with horizontal jitter and chromatic offset. */
+.text-fx-hologram {
+  color: rgb(150 240 255 / 0.82);
+  font-family: var(--mono);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-shadow: 1.5px 0 rgb(255 70 90 / 0.55), -1.5px 0 rgb(60 120 255 / 0.55), 0 0 8px rgb(90 220 255 / 0.5);
+  background: repeating-linear-gradient(0deg, rgb(120 230 255 / 0.08) 0 1px, transparent 1px 3px);
+}
+[data-text-effects="full"] .text-fx-hologram { animation: text-fx-hologram 2.6s steps(1, end) infinite; }
+@keyframes text-fx-hologram {
+  0%, 60%, 66%, 86%, 100% { transform: none; opacity: 0.92; text-shadow: 1.5px 0 rgb(255 70 90 / 0.55), -1.5px 0 rgb(60 120 255 / 0.55), 0 0 8px rgb(90 220 255 / 0.5); }
+  61% { transform: translateX(-2px) skewX(-4deg); opacity: 0.7; text-shadow: 3px 0 rgb(255 70 90 / 0.75), -3px 0 rgb(60 120 255 / 0.75), 0 0 8px rgb(90 220 255 / 0.5); }
+  63% { transform: translateX(2px); opacity: 0.85; text-shadow: -2px 0 rgb(255 70 90 / 0.7), 2px 0 rgb(60 120 255 / 0.7), 0 0 8px rgb(90 220 255 / 0.5); }
+  64% { opacity: 0.5; }
+  82% { opacity: 0.78; }
+}
+
+/* Neon: a humming tube glow where two letters flicker at their own cadence. */
+.text-fx-neon {
+  color: #fff0f6;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-shadow: 0 0 2px #fff, 0 0 6px #ff4fa3, 0 0 14px #ff2d8a, 0 0 26px rgb(255 45 138 / 0.55);
+}
+[data-text-effects="full"] .text-fx-neon { animation: text-fx-neon-hum 2.2s ease-in-out infinite alternate; }
+[data-text-effects="full"] .text-fx-neon .fx-neon-unit { display: inline-block; }
+[data-text-effects="full"] .text-fx-neon .fx-neon-unit.fx-i-3 { animation: text-fx-neon-flicker 4.3s steps(1, end) infinite; }
+[data-text-effects="full"] .text-fx-neon .fx-neon-unit.fx-i-11 { animation: text-fx-neon-flicker 4.3s steps(1, end) -1.7s infinite; }
+@keyframes text-fx-neon-hum {
+  from { text-shadow: 0 0 2px #fff, 0 0 6px #ff4fa3, 0 0 14px #ff2d8a, 0 0 24px rgb(255 45 138 / 0.5); }
+  to { text-shadow: 0 0 2px #fff, 0 0 7px #ff64b0, 0 0 17px #ff2d8a, 0 0 32px rgb(255 45 138 / 0.7); }
+}
+@keyframes text-fx-neon-flicker {
+  0%, 80%, 84%, 87%, 100% { opacity: 1; }
+  81%, 85% { opacity: 0.3; text-shadow: none; }
+  83% { opacity: 0.7; }
+  86% { opacity: 0.45; }
+}
+
+/* Corrupted: letters intermittently flip to a fixed block glyph and back. */
+.text-fx-corrupted {
+  color: #ffd2a8;
+  font-family: var(--mono);
+  text-shadow: 0 0 3px rgb(255 120 60 / 0.35);
+}
+[data-text-effects="full"] .text-fx-corrupted .fx-corrupted-unit {
+  position: relative;
+  display: inline-block;
+  animation: text-fx-corrupt-char 3.7s steps(1, end) infinite;
+  animation-delay: calc(var(--fx-i, 0) * -463ms);
+}
+[data-text-effects="full"] .text-fx-corrupted .fx-corrupted-unit[data-fx-glyph]::after {
+  content: attr(data-fx-glyph);
+  position: absolute;
+  inset: 0;
+  color: #ff6a3d;
+  opacity: 0;
+  text-align: center;
+  animation: text-fx-corrupt-glyph 3.7s steps(1, end) infinite;
+  animation-delay: inherit;
+}
+@keyframes text-fx-corrupt-char {
+  0%, 91%, 97%, 100% { color: #ffd2a8; transform: none; }
+  92%, 96% { color: transparent; transform: translateX(1px); }
+}
+@keyframes text-fx-corrupt-glyph {
+  0%, 91%, 97%, 100% { opacity: 0; }
+  92%, 96% { opacity: 1; }
+}
+
+/* Teletype: letters arrive one at a time behind a blinking block cursor. */
+.text-fx-teletype {
+  color: #e9e2c9;
+  font-family: var(--mono);
+  letter-spacing: 0.02em;
+}
+.fx-teletype-cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  margin-left: 0.08em;
+  vertical-align: -0.15em;
+  background: #e9e2c9;
+  opacity: 0.85;
+}
+[data-text-effects="full"] .text-fx-teletype .fx-teletype-unit { display: inline-block; opacity: 0; }
+[data-text-effects="full"] .text-fx-teletype.fx-play .fx-teletype-unit {
+  animation: text-fx-type 30ms steps(1, end) both;
+  animation-delay: calc(var(--fx-i, 0) * 48ms);
+}
+[data-text-effects="full"] .fx-teletype-cursor { animation: text-fx-cursor-blink 1s steps(1, end) infinite; }
+@keyframes text-fx-type { to { opacity: 1; } }
+@keyframes text-fx-cursor-blink { 0%, 49% { opacity: 0.85; } 50%, 100% { opacity: 0; } }
+
+/* Utility effects are static in every mode. Blur conceals content, so Plain never strips it. */
+.text-fx-blur {
+  border-radius: 2px;
+  filter: blur(5px);
+  cursor: pointer;
+  user-select: none;
+  transition: filter 260ms ease;
+}
+.text-fx-blur:not(.revealed):hover { filter: blur(4px); }
+.text-fx-blur.revealed {
+  filter: none;
+  background: rgb(239 142 199 / 0.08);
+  user-select: text;
+}
+
+.text-fx-highlight {
+  margin: 0 -0.05em;
+  padding: 0 0.18em;
+  border-radius: 0.12em 0.3em 0.1em 0.25em;
+  color: #1a1400;
+  background: linear-gradient(104deg, rgb(255 228 92 / 0) 0.4%, #ffe45c 1.5%, #ffe45c 97%, rgb(255 228 92 / 0) 98%);
+  font-weight: 600;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.text-fx-key { font-size: 0.86em; }
+.fx-keycap {
+  display: inline-block;
+  padding: 0.05em 0.42em 0.1em;
+  border: 1px solid color-mix(in srgb, var(--text) 35%, var(--border));
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--panel) 82%, #fff);
+  color: var(--text);
+  font: 600 0.92em/1.35 var(--mono);
+  letter-spacing: 0.02em;
+  vertical-align: 0.05em;
+  box-shadow: 0 1px 0 rgb(0 0 0 / 0.35);
+}
+.fx-keycap-join { margin: 0 0.22em; color: var(--text-2); font-size: 0.85em; }
+
+.text-fx-tag {
+  padding: 0.08em 0.5em 0.1em;
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font: 700 0.66em/1.5 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  vertical-align: 0.12em;
+}
+
+.text-fx-fine-print { color: var(--text-2); font-size: 0.78em; letter-spacing: 0.01em; }
+.text-fx-shout { font-size: 1.4em; font-weight: 800; line-height: 1.05; letter-spacing: -0.01em; }
+.text-fx-spaced { letter-spacing: 0.12em; word-spacing: 0.22em; line-height: 1.75; }
+
 /* Low is the calm rendering: semantic colour remains, but nothing moves, reacts, or speaks. */
 [data-text-effects="low"] .text-fx,
 [data-text-effects="low"] .text-fx::before,
 [data-text-effects="low"] .text-fx::after,
+[data-text-effects="low"] .text-fx-visual,
 [data-text-effects="low"] .text-fx-unit,
+[data-text-effects="low"] .text-fx-unit::before,
+[data-text-effects="low"] .text-fx-unit::after,
 [data-text-effects="low"] .fx-red-truth-flourish,
+[data-text-effects="low"] .fx-frost-rime,
+[data-text-effects="low"] .fx-teletype-cursor,
 [data-text-effects="low"] .fx-blossom-petal {
   animation: none !important;
   translate: none !important;
@@ -13512,24 +13898,37 @@ button.fx-order {
 [data-text-effects="low"] .text-fx,
 [data-text-effects="low"] .text-fx::before,
 [data-text-effects="low"] .text-fx::after,
+[data-text-effects="low"] .text-fx-visual,
 [data-text-effects="low"] .text-fx-unit { transform: none !important; }
 [data-text-effects="low"] .fx-speakese-unit,
 [data-text-effects="low"] .fx-red-truth-unit,
+[data-text-effects="low"] .fx-teletype-unit,
 [data-text-effects="off"] .fx-speakese-unit,
-[data-text-effects="off"] .fx-red-truth-unit { opacity: 1 !important; }
+[data-text-effects="off"] .fx-red-truth-unit,
+[data-text-effects="off"] .fx-teletype-unit { opacity: 1 !important; }
 [data-text-effects="low"] .fx-red-truth-flourish {
   opacity: 0.34;
   transform: translate(-50%, -50%) scale(0.45) rotate(45deg);
 }
 
-/* Plain removes authored decoration locally. Censor is intentionally excluded: it is content. */
-[data-text-effects="off"] .text-fx:not(.text-fx-censor),
-[data-text-effects="off"] .text-fx:not(.text-fx-censor)::before,
-[data-text-effects="off"] .text-fx:not(.text-fx-censor)::after,
-[data-text-effects="off"] .text-fx:not(.text-fx-censor) .text-fx-unit {
+/* Plain removes authored decoration locally. Concealing effects (censor, blur) are intentionally
+   excluded: they are content. */
+[data-text-effects="off"] .text-fx:not([data-fx-conceal]),
+[data-text-effects="off"] .text-fx:not([data-fx-conceal])::before,
+[data-text-effects="off"] .text-fx:not([data-fx-conceal])::after,
+[data-text-effects="off"] .text-fx:not([data-fx-conceal]) .text-fx-visual,
+[data-text-effects="off"] .text-fx:not([data-fx-conceal]) .text-fx-unit,
+[data-text-effects="off"] .text-fx:not([data-fx-conceal]) .text-fx-unit::before,
+[data-text-effects="off"] .text-fx:not([data-fx-conceal]) .text-fx-unit::after,
+[data-text-effects="off"] .text-fx:not([data-fx-conceal]) .fx-keycap,
+[data-text-effects="off"] .text-fx:not([data-fx-conceal]) .fx-keycap-join {
   animation: none !important;
   display: inline !important;
   overflow: visible !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
   color: inherit !important;
   background: none !important;
   box-shadow: none !important;
@@ -13538,14 +13937,22 @@ button.fx-order {
   font-style: inherit !important;
   font-weight: inherit !important;
   letter-spacing: inherit !important;
+  word-spacing: inherit !important;
+  text-transform: inherit !important;
   opacity: 1 !important;
   text-shadow: none !important;
   transform: none !important;
   translate: none !important;
+  vertical-align: baseline !important;
   -webkit-text-fill-color: currentColor !important;
+  -webkit-text-stroke: 0 !important;
 }
-[data-text-effects="off"] .text-fx:not(.text-fx-censor)::after { content: none !important; }
+[data-text-effects="off"] .text-fx:not([data-fx-conceal])::after,
+[data-text-effects="off"] .text-fx:not([data-fx-conceal]) .text-fx-unit::before,
+[data-text-effects="off"] .text-fx:not([data-fx-conceal]) .text-fx-unit::after { content: none !important; }
 [data-text-effects="off"] .fx-red-truth-flourish,
+[data-text-effects="off"] .fx-frost-rime,
+[data-text-effects="off"] .fx-teletype-cursor,
 [data-text-effects="off"] .fx-blossom-petals { display: none !important; }
 [data-text-effects="off"] .text-fx-perfect-cherry-blossom .text-fx-visual {
   color: inherit !important;
@@ -13557,8 +13964,13 @@ button.fx-order {
   .text-fx,
   .text-fx::before,
   .text-fx::after,
+  .text-fx-visual,
   .text-fx-unit,
+  .text-fx-unit::before,
+  .text-fx-unit::after,
   .fx-red-truth-flourish,
+  .fx-frost-rime,
+  .fx-teletype-cursor,
   .fx-blossom-petal {
     animation: none !important;
     translate: none !important;
@@ -13567,9 +13979,16 @@ button.fx-order {
   .text-fx,
   .text-fx::before,
   .text-fx::after,
+  .text-fx-visual,
   .text-fx-unit { transform: none !important; }
   .fx-speakese-unit,
-  .fx-red-truth-unit { opacity: 1 !important; }
+  .fx-red-truth-unit,
+  .fx-teletype-unit { opacity: 1 !important; }
+  /* Without motion a scrambled letter would never resolve: show the real glyph, drop the stand-ins. */
+  .fx-decrypt-unit[data-fx-glyph] { color: #9ff7c9 !important; }
+  .fx-decrypt-unit[data-fx-glyph]::before,
+  .fx-decrypt-unit[data-fx-glyph]::after,
+  .fx-corrupted-unit[data-fx-glyph]::after { content: none !important; }
   .fx-red-truth-flourish {
     opacity: 0.34;
     transform: translate(-50%, -50%) scale(0.45) rotate(45deg);
@@ -13610,12 +14029,12 @@ button.fx-order {
 .text-fx-trigger.active { border-color: var(--accent); box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 22%, transparent); }
 
 .text-fx-selection-bar {
+  --fx-room: 400px;
   position: fixed;
   z-index: 1200;
   transform: translate(-50%, -100%);
   display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
+  flex-direction: column;
   max-width: min(560px, calc(100vw - 18px));
   padding: 5px;
   border: 1px solid color-mix(in srgb, var(--accent) 62%, var(--border));
@@ -13635,6 +14054,93 @@ button.fx-order {
   background: var(--panel);
   transform: translateX(-50%) rotate(45deg);
 }
+.text-fx-strip {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+/* Unfolded: the strip stays on top as the most-used row; the sectioned grid opens beneath it. */
+.text-fx-selection-bar.expanded {
+  width: min(760px, calc(100vw - 18px));
+  max-width: none;
+}
+.text-fx-selection-bar.flipped { transform: translate(-50%, 0); }
+.text-fx-selection-bar.flipped::after {
+  top: -6px;
+  bottom: auto;
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 1px solid var(--accent);
+  border-top: 1px solid var(--accent);
+}
+.text-fx-selection-bar.expanded .text-fx-strip {
+  justify-content: flex-start;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border);
+}
+.text-fx-aa.more.active { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.text-fx-bar-panel { display: flex; flex-direction: column; min-height: 0; padding-top: 6px; }
+.text-fx-bar-panel .text-fx-search { margin: 0 3px 6px; width: calc(100% - 6px); }
+.text-fx-bar-scroll {
+  min-height: 0;
+  max-height: min(420px, calc(var(--fx-room) - 96px));
+  padding: 0 3px 4px;
+  overflow: auto;
+}
+.text-fx-bar-group h3 {
+  margin: 8px 0 5px;
+  color: var(--text-2);
+  font: 0.62rem/1 var(--mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.text-fx-bar-group:first-child h3 { margin-top: 2px; }
+.text-fx-bar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 4px;
+}
+.text-fx-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  padding: 7px 8px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: rgb(255 255 255 / 0.018);
+  color: var(--text);
+  text-align: left;
+}
+.text-fx-cell:hover,
+.text-fx-cell:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.text-fx-cell-preview {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 0.74rem;
+  line-height: 1.3;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.text-fx-cell-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  color: var(--text-2);
+  font: 0.6rem/1.2 var(--mono);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.text-fx-cell-name kbd { font-size: 0.55rem; }
+.text-fx-bar-empty { margin: 8px 3px; }
+
 .text-fx-aa {
   position: relative;
   flex: 0 0 38px;
@@ -13699,6 +14205,28 @@ button.fx-order {
   letter-spacing: 0.16em;
   text-transform: uppercase;
 }
+.text-fx-group summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.text-fx-group summary::-webkit-details-marker { display: none; }
+.text-fx-group summary::before {
+  content: "▸";
+  flex: 0 0 auto;
+  margin-top: 7px;
+  color: var(--text-2);
+  font-size: 0.62rem;
+  transition: transform 0.14s ease;
+}
+.text-fx-group[open] summary::before { transform: rotate(90deg); }
+.text-fx-group summary:hover h3,
+.text-fx-group summary:focus-visible h3 { color: var(--text); }
+.text-fx-group summary:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.text-fx-group-count { margin-left: 8px; color: var(--text-2); letter-spacing: 0; opacity: 0.7; }
 .text-fx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 7px; }
 .text-fx-choice { position: relative; display: flex; min-width: 0; border: 1px solid var(--border); background: rgb(255 255 255 / 0.018); }
 .text-fx-choice:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
@@ -14675,4 +15203,666 @@ button.dbg-mode.on {
   /* No visual change unredacted; the hook exists so the markup says what is maskable. */
   font: inherit;
   color: inherit;
+}
+
+/* ===================== Jam layer: patch tiles, editor, drum pads ===================== */
+/* Tokens only (livery/preset compliant). The one literal is #131218 text on a peer's
+   name-colour fill, matching the piano's rheld precedent: peer colours are identity, not theme. */
+.jam-mode {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-left: 0.5rem;
+}
+.jam-mode-btn {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  padding: 2px 10px;
+  border-radius: 0;
+  color: var(--muted);
+}
+.jam-mode-btn.on {
+  background: var(--accent-dim);
+  color: var(--accent-hi);
+}
+.jam-legacy {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+.jam-legacy.on {
+  color: var(--warn);
+  border-color: var(--warn-brd);
+  background: var(--warn-dim);
+}
+.jam-ctl-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border-soft);
+  margin: 0 2px;
+}
+.jam-pads {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  padding: 4px 0;
+}
+.jam-pad {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 64px;
+  padding: 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  cursor: pointer;
+  color: var(--text-2);
+}
+.jam-pad.hit {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.jam-pad-nm {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.jam-pad-ky {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  opacity: 0.7;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0 5px;
+}
+.jam-edit {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 6px 0 2px;
+}
+.jam-edit-col {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.jam-edit-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+  text-transform: uppercase;
+  margin-top: 2px;
+}
+.jam-osc {
+  display: flex;
+  gap: 4px;
+}
+.jam-osc-w {
+  font-family: var(--mono);
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 2px 7px;
+  color: var(--muted);
+}
+.jam-osc-w.on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+.jam-prm {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  color: var(--muted);
+}
+.jam-prm span {
+  width: 2.4em;
+  flex: none;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.jam-prm b {
+  width: 3.2em;
+  flex: none;
+  text-align: right;
+  font-weight: 400;
+  color: var(--text-2);
+}
+.jam-prm input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+  height: 14px;
+}
+.jam-edit-note {
+  font-size: 0.66rem;
+  color: var(--muted);
+  line-height: 1.45;
+  margin-top: 4px;
+}
+.jam-flood .inst-notes {
+  color: var(--warn);
+}
+
+/* Jam metronome transport */
+.jam-met {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 0 4px;
+}
+.jam-met-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text-2);
+}
+.jam-met-btn.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.jam-met-btn.ro {
+  color: var(--muted);
+  cursor: default;
+}
+.jam-met-bpm {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.jam-met-lbl {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.jam-met-sig {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 2px 7px;
+}
+.jam-met-sig.ro {
+  border-color: transparent;
+  color: var(--muted);
+}
+.jam-pips {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.jam-pip {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+}
+.jam-pip.bar {
+  border-color: var(--accent);
+}
+.jam-pip.beat {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 7px 1px color-mix(in oklab, var(--accent) 55%, transparent);
+}
+.jam-met-bar {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--muted);
+}
+.jam-met-chip {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.1em;
+  border-radius: 999px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+}
+.jam-met-chip.ok {
+  color: var(--ok);
+  border-color: var(--ok-brd);
+  background: var(--ok-dim);
+}
+.jam-met-chip.warn {
+  color: var(--warn);
+  border-color: var(--warn-brd);
+  background: var(--warn-dim);
+}
+
+/* Jam feedback round: wrapping tile row, knob editor, remap, takes, recording banner */
+.inst-ctl,
+.inst-head {
+  flex-wrap: wrap; /* the register +/- (and the head chips) must never hide past a scroll */
+  row-gap: 4px;
+}
+.jam-edit {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); /* narrow docks stack, never squeeze */
+}
+.jam-edit-hd {
+  white-space: nowrap;
+}
+.jam-osc-w {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 2px 0;
+  text-align: center;
+}
+.jam-sect {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.jam-knobs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.jam-knob {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  width: 44px;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+  border-radius: var(--r);
+}
+.jam-knob:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.jam-knob-face {
+  width: 30px;
+  height: 30px;
+}
+.jam-knob-ring {
+  fill: var(--bg-elev);
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+.jam-knob:hover .jam-knob-ring,
+.jam-knob:focus-visible .jam-knob-ring {
+  stroke: var(--accent);
+}
+.jam-knob-tick {
+  stroke: var(--accent-hi);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.jam-knob-lbl {
+  font-family: var(--mono);
+  font-size: 0.54rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.jam-knob-val {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  color: var(--text-2);
+}
+.jam-save {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.jam-save-name {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  padding: 4px 7px;
+}
+button.jam-save-btn {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text-2);
+  background: transparent;
+}
+button.jam-save-btn.on {
+  background: var(--ok-dim);
+  border-color: var(--ok-brd);
+  color: var(--ok);
+}
+button.jam-save-btn.rec {
+  color: var(--danger);
+  border-color: var(--danger-brd);
+  background: var(--danger-dim);
+}
+button.jam-tile-del {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  align-self: center;
+}
+button.jam-tile-del:hover {
+  color: var(--danger);
+  border-color: var(--danger-brd);
+}
+.jam-keymap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r);
+  padding: 8px 10px;
+  margin: 2px 0 4px;
+}
+.jam-km-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+button.jam-km {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 3px 7px;
+  color: var(--muted);
+  background: transparent;
+}
+button.jam-km.cap {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent-hi);
+}
+.jam-km-key {
+  border: 1px solid var(--border-soft);
+  border-radius: 3px;
+  padding: 0 5px;
+  color: var(--text-2);
+  min-width: 1.4em;
+  text-align: center;
+}
+.jam-km-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.jam-takes {
+  border-top: 1px solid var(--border-soft);
+  margin-top: 4px;
+}
+button.jam-takes-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 5px 2px;
+  background: transparent;
+  color: var(--muted);
+}
+.jam-takes-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 0 6px;
+}
+.jam-take-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+button.jam-take-play {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text-2);
+  background: transparent;
+  flex: none;
+}
+button.jam-take-play svg {
+  width: 11px;
+  height: 11px;
+}
+button.jam-take-play.on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+.jam-take-name {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  color: var(--text);
+  white-space: nowrap;
+}
+.jam-take-who {
+  font-size: 0.66rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jam-rec-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 7px 1px color-mix(in oklab, var(--danger) 55%, transparent);
+  flex: none;
+}
+.jam-rec-dot.armed {
+  background: var(--warn);
+  box-shadow: 0 0 7px 1px color-mix(in oklab, var(--warn) 55%, transparent);
+}
+.jam-rec-lbl {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--danger);
+}
+.jam-rec-lbl.dim {
+  color: var(--warn);
+}
+.jam-rec-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--warn-brd);
+  background: var(--warn-faint);
+  border-radius: var(--r);
+  padding: 5px 10px;
+  margin: 4px 0;
+}
+.jam-rec-banner.live {
+  border-color: var(--danger-brd);
+  background: var(--danger-dim);
+}
+.jam-rec-text {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  color: var(--text-2);
+}
+/* Saved patches: a drawer that grows DOWN, so the tile row keeps its width at any dock size. */
+.jam-custom {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r);
+  padding: 8px 10px;
+  margin: 2px 0 4px;
+}
+.jam-custom-tile {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+/* Osc stack as layers: collapsed rows read like mixer channels; one unfolds at a time. */
+.jam-layer {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-elev);
+}
+.jam-layer.open {
+  border-color: var(--accent);
+}
+button.jam-layer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 9px;
+  background: transparent;
+  color: var(--text-2);
+  border-radius: var(--r);
+}
+.jam-layer.open .jam-layer-head {
+  color: var(--accent-hi);
+}
+.jam-layer-sum {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.jam-layer-sum.lvl {
+  color: var(--muted);
+  min-width: 2em;
+  text-align: right;
+}
+.jam-lvlbar {
+  flex: 1;
+  min-width: 24px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--bg-0);
+  overflow: hidden;
+}
+.jam-lvlbar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  opacity: 0.85;
+}
+.jam-layer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 9px 8px;
+}
+button.jam-layer-add {
+  border: 1px dashed var(--border);
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  padding: 4px 0;
+  text-align: center;
+}
+button.jam-layer-add:hover {
+  color: var(--accent-hi);
+  border-color: var(--accent);
+}
+/* Drawer head: the settings cog, the metronome-line toggle, and the MIDI light. */
+button.jam-cog {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--muted);
+  background: transparent;
+}
+button.jam-cog .ico {
+  width: 13px;
+  height: 13px;
+}
+button.jam-cog.on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+button.jam-cog.live {
+  color: var(--accent-hi); /* a grid runs behind the folded line: the glyph says so */
+}
+.jam-midi-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--danger); /* no device routed */
+  box-shadow: 0 0 6px 1px color-mix(in oklab, var(--danger) 45%, transparent);
+}
+.jam-midi-dot.ready {
+  background: var(--ok);
+  box-shadow: 0 0 6px 1px color-mix(in oklab, var(--ok) 45%, transparent);
+}
+.jam-midi-dot.live {
+  background: var(--info);
+  box-shadow: 0 0 7px 1px color-mix(in oklab, var(--info) 55%, transparent);
+}
+/* Opening a fold (EDIT, TAKES, REMAP) can push the surface past its height cap; without a
+   reserved gutter the arriving scrollbar steals ~10px of width, the wrapping tile rows re-wrap
+   and the centred drawer lurches sideways: the reported "swish". The gutter is reserved up
+   front so unfolding only ever grows the surface downward. */
+.stage,
+.focus-dock {
+  scrollbar-gutter: stable;
 }

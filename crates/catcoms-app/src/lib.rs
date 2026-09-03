@@ -30,7 +30,9 @@ pub use catcoms_crypto::DeviceId;
 use catcoms_crypto::verify_with_public_bytes;
 pub use catcoms_crypto::{DeviceCertificate, DeviceRevocation};
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
-use catcoms_rt::{Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId};
+use catcoms_rt::{
+    Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId, RequestCancellation,
+};
 use catcoms_storage::{BlobStore, FileManifest};
 // Re-export the content-address type: it's part of the app's public file surface, and the bridge
 // verifies a reassembled download against it.
@@ -4279,11 +4281,30 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         chunk_ref: &FileRef,
         idx: usize,
     ) -> Result<(Vec<u8>, Option<String>), AppError> {
+        self.fetch_and_open_chunk_cancellable(chunk_ref, idx, None)
+            .await
+    }
+
+    /// Cancellable chunk path for bounded whole-file reads. Local blobs complete normally; a
+    /// network miss carries cancellation/accounting into the transport actor that owns it.
+    async fn fetch_and_open_chunk_cancellable(
+        &mut self,
+        chunk_ref: &FileRef,
+        idx: usize,
+        cancellation: Option<RequestCancellation>,
+    ) -> Result<(Vec<u8>, Option<String>), AppError> {
         let ccid = chunk_ref.ciphertext_cid;
         // Path existence is not enough: a corrupt sealed record must be fetched again. Capture
         // the signed responder so repair remains attributable in the transfer UI.
         let provider = if self.sync.get_blob(&ccid).is_none() {
-            self.sync.request_blob_best_provider(&ccid).await?
+            match cancellation {
+                Some(cancellation) => {
+                    self.sync
+                        .request_blob_best_provider_cancellable(&ccid, cancellation)
+                        .await?
+                }
+                None => self.sync.request_blob_best_provider(&ccid).await?,
+            }
         } else {
             None
         };
@@ -4453,6 +4474,17 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         cid: &Cid,
         idx: usize,
     ) -> Result<(Vec<u8>, Option<String>), AppError> {
+        self.fetch_file_chunk_cancellable(cid, idx, None).await
+    }
+
+    /// Cancellable [`Self::fetch_file_chunk`] whose network request retains caller accounting
+    /// until the production transport reports that exact request responded, failed, or timed out.
+    pub async fn fetch_file_chunk_cancellable(
+        &mut self,
+        cid: &Cid,
+        idx: usize,
+        cancellation: Option<RequestCancellation>,
+    ) -> Result<(Vec<u8>, Option<String>), AppError> {
         // Re-resolve the manifest each call (cheap vs. a chunk fetch). Deliberate: it keeps the
         // per-chunk path current with the index, so a file unlisted mid-download fails cleanly here
         // rather than serving from a stale manifest.
@@ -4470,7 +4502,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let Some(chunk_ref) = manifest.chunks.get(idx).cloned() else {
             return Err(AppError::Invalid(format!("chunk {idx} is out of range")));
         };
-        self.fetch_and_open_chunk(&chunk_ref, idx).await
+        self.fetch_and_open_chunk_cancellable(&chunk_ref, idx, cancellation)
+            .await
     }
 
     /// Whether this device already holds **all** of the file's chunk blobs locally; i.e. it can
