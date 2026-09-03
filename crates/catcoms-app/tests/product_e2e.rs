@@ -473,12 +473,33 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
     alice.discovery_pass().await;
     bob.discovery_pass().await;
 
-    assert_eq!(
-        alice.actor.online_members().await,
-        vec![bob.fp.clone()],
-        "Alice's roster shows Bob online"
-    );
-    assert_eq!(bob.actor.online_members().await, vec![alice.fp.clone()]);
+    // Waited for rather than asserted outright. A discovery pass ends when the actor has handled
+    // the drive command, which is not when the connections it opened have been seen: the
+    // transport's connect edge arrives on another arm of the actor's select loop, so a query sent
+    // straight after can be answered before it lands. Worse, the event channel is bounded, and a
+    // test holding a query open while never reading events can fill it and stall the very actor
+    // it is waiting on. `until` drains as it waits, which is why the roster settles here and did
+    // not on a loaded machine.
+    let seen = until(
+        "Alice's roster shows Bob online",
+        &mut alice.events,
+        || async {
+            let online = alice.actor.online_members().await;
+            (online == vec![bob.fp.clone()]).then_some(online)
+        },
+    )
+    .await;
+    assert_eq!(seen, vec![bob.fp.clone()]);
+    let seen = until(
+        "Bob's roster shows Alice online",
+        &mut bob.events,
+        || async {
+            let online = bob.actor.online_members().await;
+            (online == vec![alice.fp.clone()]).then_some(online)
+        },
+    )
+    .await;
+    assert_eq!(seen, vec![alice.fp.clone()]);
 
     // The UI does not poll `online_members`; it renders whatever `ConnectivityChanged` carries.
     // A build that filled the map but never emitted the event would still ship dark dots.
@@ -510,19 +531,29 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
     alice.discovery_pass().await;
     carol.discovery_pass().await;
 
-    let mut online = alice.actor.online_members().await;
-    online.sort();
     let mut expected = vec![bob.fp.clone(), carol.fp.clone()];
     expected.sort();
-    assert_eq!(
-        online, expected,
-        "the founder sees both other members online"
-    );
-    assert_eq!(
-        carol.actor.online_members().await,
-        vec![alice.fp.clone()],
-        "the newest member sees the peer it actually spoke to"
-    );
+    let online = until(
+        "the founder sees both other members online",
+        &mut alice.events,
+        || async {
+            let mut online = alice.actor.online_members().await;
+            online.sort();
+            (online == expected).then_some(online)
+        },
+    )
+    .await;
+    assert_eq!(online, expected);
+    let seen = until(
+        "the newest member sees the peer it actually spoke to",
+        &mut carol.events,
+        || async {
+            let online = carol.actor.online_members().await;
+            (online == vec![alice.fp.clone()]).then_some(online)
+        },
+    )
+    .await;
+    assert_eq!(seen, vec![alice.fp.clone()]);
 
     // --- and one goes away ---
     //
