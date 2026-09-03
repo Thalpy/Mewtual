@@ -37,6 +37,11 @@
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { ImageSrcCache } from "./image-src";
+  import {
+    findMatches, noSearchFilters, reactionCount, searchFilterCount, searchIsEmpty,
+    type SearchCorpusChannel, type SearchHitRef, type SearchMessage, type SearchResponse,
+    type SearchSpec,
+  } from "./search-index";
   import { chatScopeKey, reconcileActiveChannel, scopeHoldsConversation } from "./chatscope";
   import {
     WIKI_REVIEW_UNKNOWN,
@@ -2208,7 +2213,6 @@
   // attachment kind, reactions, reply/pin/edit state: plus a sort order, so the same pass answers
   // "the clip Dana posted last week" as well as "where did we say quorum". Filters stand on their
   // own: with an empty query the filters alone select the matches.
-  type SearchSort = "oldest" | "newest" | "author" | "reactions" | "replies";
   type SearchFilters = ReturnType<typeof noFilters>;
   // A hit is (channel, index in that channel's list, the message): the index drives the in-pane
   // highlight/scroll for the open channel, the id drives the jump when a hit lives elsewhere.
@@ -2216,33 +2220,7 @@
   const SEARCH_RESULT_CAP = 50; // rows rendered in the results list (stepping still covers them all)
   // Facets that select messages. `sort` and the two match modifiers are deliberately absent from
   // the "n filters" count: they shape the query/order, they don't narrow on their own.
-  const NON_FACETS = ["sort", "caseSensitive", "wholeWord"];
-  function noFilters() {
-    return {
-      channel: "", // "" = the open channel · "*" = every channel here · else a channel id
-      from: "", // author fingerprint ("" = anyone)
-      mentions: "", // a member the message @-mentions
-      after: "", // yyyy-mm-dd (inclusive, local day)
-      before: "", // yyyy-mm-dd (inclusive, local day)
-      hasImage: false,
-      hasVideo: false,
-      hasAudio: false,
-      hasFile: false, // a non-media attachment
-      hasLink: false,
-      isReply: false,
-      hasReplies: false,
-      isPinned: false,
-      isEdited: false,
-      mentionsMe: false,
-      fromMe: false,
-      reacted: false,
-      reactedByMe: false,
-      emoji: "", // a specific reaction emoji
-      caseSensitive: false,
-      wholeWord: false,
-      sort: "oldest" as SearchSort,
-    };
-  }
+  const noFilters = noSearchFilters;
   let showSearch = $state(false);
   let showSearchAdv = $state(false);
   let searchQuery = $state("");
@@ -2251,54 +2229,9 @@
   let filters = $state<SearchFilters>(noFilters());
   // cid → MIME, from the fileshare index, for classifying a message's `![alt](cid:…)` embeds.
   let fileMime = $derived.by(() => new Map(files.map((f) => [f.cid.toLowerCase(), f.mime] as const)));
-  const EMBED_RE = /!\[[^\]]*\]\(cid:([0-9a-fA-F]{1,64})\)/g;
-  // What a message carries. `safeMime` accepts only image/video/audio, so anything else: and any
-  // cid not in the index yet: reads as a plain attachment, matching how the embed resolver treats it.
-  function msgKinds(text: string) {
-    const k = { image: false, video: false, audio: false, file: false, link: false };
-    for (const m of text.matchAll(EMBED_RE)) {
-      const mime = safeMime(fileMime.get(m[1].toLowerCase()) ?? "");
-      if (mime.startsWith("image/")) k.image = true;
-      else if (mime.startsWith("video/")) k.video = true;
-      else if (mime.startsWith("audio/")) k.audio = true;
-      else k.file = true;
-    }
-    k.link = /\bhttps?:\/\/\S/i.test(text);
-    return k;
-  }
-  // A yyyy-mm-dd date input → a local-time bound (start of that day, or its last millisecond so
-  // "before" is inclusive). Returns null for an empty/half-typed value, which disables the bound.
-  function dayBound(s: string, end: boolean): number | null {
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
-    if (!m) return null;
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-    if (Number.isNaN(d.getTime())) return null;
-    if (end) d.setHours(23, 59, 59, 999);
-    return d.getTime();
-  }
   // How many facets are narrowing the result: drives the "Filters (n)" badge and lets an
   // empty query still search (filters alone are a valid search).
-  let filterCount = $derived(
-    Object.entries(filters).filter(([k, v]) => !NON_FACETS.includes(k) && v !== "" && v !== false).length
-  );
-  function reactionCount(m: Msg): number {
-    return m.reactions.reduce((n, r) => n + r.by.length, 0);
-  }
-  // The text predicate, honouring the case/whole-word modifiers. Null when there's no query, so
-  // the caller can tell "match everything" from "match nothing".
-  function textMatcher(raw: string): ((t: string) => boolean) | null {
-    const q = raw.trim();
-    if (!q) return null;
-    if (!filters.wholeWord) {
-      if (filters.caseSensitive) return (t) => t.includes(q);
-      const lower = q.toLowerCase();
-      return (t) => t.toLowerCase().includes(lower);
-    }
-    // `\b` misbehaves when the query starts/ends with punctuation, so bound on non-word-or-edge.
-    const esc = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`(?:^|\\W)${esc}(?:\\W|$)`, filters.caseSensitive ? "" : "i");
-    return (t) => re.test(t);
-  }
+  let filterCount = $derived(searchFilterCount(filters));
 
   // ---- corpus: which channels the search covers -------------------------------------------
   // Every in-scope channel, the open one included, is fetched once into `chanMsgs` (a whole-history
@@ -2350,41 +2283,121 @@
     return n;
   });
 
-  let searchMatches = $derived.by(() => {
-    const match = textMatcher(searchQuery);
-    if (!match && !filterCount) return [] as SearchHit[];
-    const after = dayBound(filters.after, false);
-    const before = dayBound(filters.before, true);
-    const mentionMark = filters.mentions ? `@[${mentionName(nameOf(filters.mentions))}]` : "";
-    const wantKind = filters.hasImage || filters.hasVideo || filters.hasAudio || filters.hasFile || filters.hasLink;
+  // ---- running the scan --------------------------------------------------------------------
+  // Matching reads every message of every in-scope channel, which is the one piece of UI work
+  // sized by how much has been said. It runs in a worker (`search-worker.ts`) so a keystroke
+  // never waits for it; if the worker cannot start, the same pure function runs inline and the
+  // feature behaves exactly as it did before, jank included. Ordering stays here because it needs
+  // display names, and sorting the matches is cheap next to finding them.
+  let searchMatches = $state.raw<SearchHit[]>([]);
+  let searchWorker: Worker | null = null;
+  let searchWorkerCorpus = ""; // the corpus the worker holds, by `searchCorpusKey`
+  let searchQueryId = 0;
+  // What the worker's copy of the corpus must match. Names the channels and their sizes rather
+  // than a count, so swapping one channel for another of equal length still re-sends it.
+  let searchCorpusKey = $derived(
+    searchCorpusChannels()
+      .map((c) => `${c.ch}:${c.rows.length}`)
+      .join("|"),
+  );
+  function searchSpec(): SearchSpec {
+    return {
+      query: searchQuery,
+      // Plain data, for the same reason the corpus is: this crosses to a worker.
+      filters: $state.snapshot(filters) as SearchFilters,
+      myFp,
+      myMentionName,
+      mentionMark: filters.mentions ? `@[${mentionName(nameOf(filters.mentions))}]` : "",
+      mimeByCid: Object.fromEntries(fileMime),
+      replyCounts: Object.fromEntries(corpusReplies),
+    };
+  }
+  function searchCorpusChannels(): SearchCorpusChannel[] {
+    const active = cur?.active ?? "";
+    const ids = filters.channel === "*" ? searchChannels.map((c) => c.id) : [filters.channel || active];
+    return ids
+      .filter((ch) => chanMsgs[ch])
+      .map((ch) => ({ ch, rows: chanMsgs[ch] as SearchMessage[] }));
+  }
+  /**
+   * The same corpus as plain data. Loaded histories are deep reactive state, and a proxy cannot
+   * cross to a worker: posting one fails with `DataCloneError` and search silently stops
+   * answering. Snapshotting costs one pass per corpus change, not one per keystroke.
+   */
+  function searchCorpusSnapshot(): SearchCorpusChannel[] {
+    return searchCorpusChannels().map((channel) => ({
+      ch: channel.ch,
+      rows: $state.snapshot(channel.rows) as SearchMessage[],
+    }));
+  }
+  function hitsFromRefs(refs: SearchHitRef[]): SearchHit[] {
     const out: SearchHit[] = [];
-    for (const h of searchCorpus) {
-      const m = h.m;
-      if (match && !match(m.text)) continue;
-      if (filters.from && m.author !== filters.from) continue;
-      if (filters.fromMe && m.author !== myFp) continue;
-      if (mentionMark && !m.text.includes(mentionMark)) continue;
-      if (after !== null && m.ts < after) continue;
-      if (before !== null && m.ts > before) continue;
-      if (filters.isReply && !m.reply_to) continue;
-      if (filters.hasReplies && !(m.id && corpusReplies.get(m.id))) continue;
-      if (filters.isPinned && !m.pinned) continue;
-      if (filters.isEdited && !m.edited) continue;
-      if (filters.mentionsMe && !mentionsMe(m.text)) continue;
-      if (filters.reacted && !m.reactions.length) continue;
-      if (filters.reactedByMe && !m.reactions.some((r) => r.by.includes(myFp))) continue;
-      if (filters.emoji && !m.reactions.some((r) => r.emoji === filters.emoji)) continue;
-      if (wantKind) {
-        const k = msgKinds(m.text);
-        if (filters.hasImage && !k.image) continue;
-        if (filters.hasVideo && !k.video) continue;
-        if (filters.hasAudio && !k.audio) continue;
-        if (filters.hasFile && !k.file) continue;
-        if (filters.hasLink && !k.link) continue;
-      }
-      out.push(h);
+    for (const ref of refs) {
+      const m = chanMsgs[ref.ch]?.[ref.idx];
+      if (m) out.push({ ch: ref.ch, idx: ref.idx, m });
     }
     return sortMatches(out);
+  }
+  function ensureSearchWorker(): Worker | null {
+    if (searchWorker) return searchWorker;
+    try {
+      const worker = new Worker(new URL("./search-worker.ts", import.meta.url), { type: "module" });
+      worker.onmessage = (event: MessageEvent<SearchResponse>) => {
+        // A late answer to a superseded query would overwrite a newer result with an older one.
+        if (event.data.id !== searchQueryId) return;
+        searchMatches = hitsFromRefs(event.data.hits);
+        settleSearchScroll();
+      };
+      worker.onerror = () => {
+        // Fall back for the rest of the session rather than leaving search dead.
+        worker.terminate();
+        searchWorker = null;
+        searchWorkerCorpus = "";
+        runSearchInline();
+      };
+      searchWorker = worker;
+      searchWorkerCorpus = "";
+      return worker;
+    } catch {
+      return null; // no worker support, or the page's policy refuses one: run inline
+    }
+  }
+  function runSearchInline() {
+    searchMatches = hitsFromRefs(findMatches(searchCorpusChannels(), searchSpec()));
+    settleSearchScroll();
+  }
+  function stopSearchWorker() {
+    searchWorker?.terminate();
+    searchWorker = null;
+    searchWorkerCorpus = "";
+  }
+  $effect(() => {
+    // Read every input here so the scan re-runs when any of them moves.
+    const spec = searchSpec();
+    const corpusKey = searchCorpusKey;
+    const open = showSearch;
+    untrack(() => {
+      if (!open) {
+        searchMatches = [];
+        return;
+      }
+      if (searchIsEmpty(spec)) {
+        searchMatches = [];
+        settleSearchScroll();
+        return;
+      }
+      const worker = ensureSearchWorker();
+      if (!worker) {
+        runSearchInline();
+        return;
+      }
+      if (searchWorkerCorpus !== corpusKey) {
+        worker.postMessage({ type: "corpus", corpus: searchCorpusSnapshot() });
+        searchWorkerCorpus = corpusKey;
+      }
+      searchQueryId += 1;
+      worker.postMessage({ type: "query", id: searchQueryId, spec });
+    });
   });
   // Sorted by timestamp rather than corpus position: a multi-channel corpus is grouped by channel,
   // so "oldest first" has to interleave the channels to mean anything.
@@ -2530,10 +2543,18 @@
   // Re-run from the top after any query/filter change (deriveds recompute on read, so the first
   // match below is already the new one). Only scrolls: refining a query never yanks you into
   // another channel; that's reserved for ↑/↓ and clicking a result.
-  function refilter() {
-    searchPos = 0;
+  // The scan is asynchronous now, so "jump to the first hit" is a request that the next result
+  // settles rather than something readable the moment the query changes.
+  let pendingSearchScroll = false;
+  function settleSearchScroll() {
+    if (!pendingSearchScroll) return;
+    pendingSearchScroll = false;
     const h = searchMatches[0];
     if (h && h.ch === (cur?.active ?? "")) void scrollToMatch(h.idx);
+  }
+  function refilter() {
+    searchPos = 0;
+    pendingSearchScroll = true;
   }
   function clearFilters() {
     Object.assign(filters, noFilters());
@@ -2553,6 +2574,8 @@
     showSearchAdv = false;
     searchQuery = "";
     chanMsgs = {};
+    // The worker holds a copy of the corpus, so closing search drops it there too.
+    stopSearchWorker();
     clearFilters();
   }
   // The date shortcuts: "today" and the last n days, in the local calendar.
@@ -5039,6 +5062,7 @@
     emojiUrls = {};
     storageHealthCache.clear();
     imageSrcCache.clear(); // avatars and icons are member content; do not retain them behind lock
+    stopSearchWorker(); // likewise its copy of the searched history
     if (locked) return;
     // Lock wins over an in-progress secret change and drops every transient secret first.
     vaultChangeCurrent = "";
@@ -17414,6 +17438,7 @@
       clearTimeout(updateTimer);
       clearInterval(pingTimer);
       subs.forEach((p) => p.then((un) => un()));
+      stopSearchWorker(); // it holds a copy of the corpus and outlives the component otherwise
       // Last, so anything the teardown above logs still has somewhere to go. Stopping restores the
       // console, removes both window listeners and sends whatever is still queued; without it a
       // remount leaves the old hooks live and every event gets recorded twice.
