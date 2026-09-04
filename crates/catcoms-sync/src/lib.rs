@@ -16121,6 +16121,198 @@ mod tests {
         assert!(doc.get(ROOT, "only").unwrap().is_some());
     }
 
+    /// The other two ways a source fails a document: it answers nothing at all, and it answers
+    /// something that will not decode. Neither says the gap is filled, so neither may end the
+    /// pursuit of it, and both must leave that source alone long enough for another to be tried.
+    #[tokio::test]
+    async fn a_failed_request_keeps_the_document_and_cools_off_the_source() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(3).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let mut carol = it.next().unwrap();
+        let (alice_peer, carol_peer) = (alice.local_peer(), carol.local_peer());
+        let bob_peer = bob.local_peer();
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut carol, bob_peer, ids[1]);
+        for node in [&mut alice, &mut bob, &mut carol] {
+            node.open_channel(DocType::Channel, 91).await.unwrap();
+        }
+        alice
+            .post(DocType::Channel, 91, |doc| doc.put(ROOT, "only", "post"))
+            .await
+            .unwrap();
+        for node in [&mut bob, &mut carol] {
+            assert!(matches!(
+                node.transport.next_event().await,
+                Some(TransportEvent::Gossip { .. })
+            ));
+        }
+        prove_live_member(&mut carol, alice_peer, ids[0]);
+        let (got, ()) = tokio::join!(
+            carol.request_catchup(alice_peer, DocType::Channel, 91),
+            async {
+                let Some(TransportEvent::Request {
+                    from,
+                    data,
+                    responder,
+                    ..
+                }) = alice.transport.next_event().await
+                else {
+                    panic!("Carol's catch-up is the next event");
+                };
+                let response = alice.handle_request(from, &data);
+                responder.respond(Bytes::from(response));
+            }
+        );
+        assert_eq!(got.unwrap(), 1);
+
+        let doc_queued = |bob: &ChannelSync<MemNetwork, ChaCha20Rng>| {
+            bob.catchup_queue.iter().any(|task| {
+                matches!(
+                    task,
+                    CatchupTask::Doc {
+                        doc_type: DocType::Channel,
+                        doc_id: 91
+                    }
+                )
+            })
+        };
+
+        // Answer one: silence. Dropping the responder is a peer that accepted the request and
+        // never came back, which is what a timeout resolves to.
+        bob.catchup_queue.clear();
+        bob.enqueue_doc_catchup(DocType::Channel, 91);
+        let (_, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            let Some(TransportEvent::Request { responder, .. }) =
+                alice.transport.next_event().await
+            else {
+                panic!("the drain's request is the next event");
+            };
+            drop(responder);
+        });
+        assert!(
+            doc_queued(&bob),
+            "a request that answered nothing has not filled the gap, so the gap is still ours"
+        );
+        assert!(
+            bob.catchup_peer_is_cooling(alice_peer, DocType::Channel, 91),
+            "and that source is left alone about this document while another is tried"
+        );
+
+        // Answer two: nonsense. Same conclusion, reached by a different failure.
+        bob.catchup_cooldowns.clear();
+        let (_, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            let Some(TransportEvent::Request { responder, .. }) =
+                alice.transport.next_event().await
+            else {
+                panic!("the drain's request is the next event");
+            };
+            responder.respond(Bytes::from(vec![CATCHUP_SINCE_UNDERSTOOD, 9, 9, 9, 9, 9]));
+        });
+        assert!(
+            doc_queued(&bob),
+            "a bundle that will not decode fills nothing"
+        );
+        assert!(bob.catchup_peer_is_cooling(alice_peer, DocType::Channel, 91));
+
+        // And with every source cooled off, the task lies dormant rather than vanishing: it is
+        // still owned, and there is simply nobody eligible to ask until a window expires or
+        // another member appears. (That the work then reaches a second source is
+        // `a_document_reaches_the_second_source_when_the_first_will_not_serve_it`.)
+        bob.cool_off_catchup_peer(carol_peer, DocType::Channel, 91);
+        let cooled = [alice_peer, carol_peer];
+        assert!(
+            bob.pick_catchup_peer_excluding(None, &cooled).is_none(),
+            "no source is eligible for this document while they are all cooling"
+        );
+        assert!(doc_queued(&bob), "and the gap is still owned");
+    }
+
+    /// The actor drops its tick whenever a command arrives, so any await in the drain can simply
+    /// stop existing. What was in flight then, and everything queued behind it, has to survive
+    /// that: a quiet document has no later op to rediscover a lost gap with, so work dropped here
+    /// is a channel that stays short for the rest of the session.
+    #[tokio::test]
+    async fn a_cancelled_tick_gives_back_the_task_it_was_holding() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+
+        // Two documents waiting, so the second one proves the rest of the queue is not lost with
+        // the first. The queue used to be emptied into a local vector before the first request.
+        bob.catchup_queue.clear();
+        bob.enqueue_doc_catchup(DocType::Channel, 92);
+        bob.enqueue_doc_catchup(DocType::Channel, 93);
+
+        // Alice accepts the request and says nothing, so the drain is still waiting when the tick
+        // is taken away from it.
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            futures::future::join(bob.drain_catchup_queue(), async {
+                let Some(TransportEvent::Request { responder, .. }) =
+                    alice.transport.next_event().await
+                else {
+                    panic!("the drain's request is the next event");
+                };
+                std::mem::forget(responder); // accepted, never answered
+            }),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the drain was still mid-request");
+
+        assert!(
+            bob.catchup_inflight.is_some(),
+            "the task it was holding is on the synchronizer, not on the dropped stack"
+        );
+        assert_eq!(
+            bob.catchup_queue.len(),
+            1,
+            "and the rest of the queue was never moved off it"
+        );
+
+        // The next tick takes the held one back before anything else, so both gaps are owned
+        // again by the queue itself. Driven under the same bound, because with nobody answering
+        // it will go straight back to waiting on the peer it picks.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            futures::future::join(bob.drain_catchup_queue(), async {
+                if let Some(TransportEvent::Request { responder, .. }) =
+                    alice.transport.next_event().await
+                {
+                    std::mem::forget(responder);
+                }
+            }),
+        )
+        .await;
+        let mut owned: Vec<u128> = bob
+            .catchup_queue
+            .iter()
+            .filter_map(|task| match task {
+                CatchupTask::Doc { doc_id, .. } => Some(*doc_id),
+                _ => None,
+            })
+            .collect();
+        if let Some((CatchupTask::Doc { doc_id, .. }, _)) = bob.catchup_inflight {
+            owned.push(doc_id);
+        }
+        owned.sort();
+        assert_eq!(
+            owned,
+            vec![92, 93],
+            "both gaps survived the cancellation, neither the one in flight nor the one behind it"
+        );
+    }
+
     /// The shapes a build made before the paging request can parse, pinned here so a later change
     /// to the response grammar cannot silently strand the population that is already installed.
     ///
