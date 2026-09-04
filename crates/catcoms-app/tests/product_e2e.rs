@@ -650,9 +650,11 @@ async fn the_eclipse_advisory_stays_quiet_for_a_healthy_group() {
             );
         }
     }
+    let mut everyone: Vec<String> = others.iter().map(|m| m.fp.clone()).collect();
+    everyone.sort();
     assert_eq!(
-        alice.actor.online_members().await.len(),
-        3,
+        alice.settle_online(&everyone).await,
+        everyone,
         "the group really was healthy for the whole run, so the quiet means something"
     );
 
@@ -949,7 +951,7 @@ async fn a_restarted_server_recovers_its_state_and_re_finds_its_peers_without_a_
     alice.discovery_pass().await;
     bob.discovery_pass().await;
     assert_eq!(
-        alice.actor.online_members().await,
+        alice.settle_online(&[bob.fp.clone()]).await,
         vec![bob.fp.clone()],
         "the session being persisted actually had a proven peer"
     );
