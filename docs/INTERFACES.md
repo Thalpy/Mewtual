@@ -611,6 +611,17 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     change means holding its dependencies, so anything causally behind a named hash is already held.
     A hash the server does not know selects nothing. Members-only on exactly the same terms as
     `KIND_CATCHUP`.
+  - **The `KIND_CATCHUP_SINCE` response is responder-signed**, like commit catch-up, PEX and blob
+    fetch: `bytes responder_pubkey ‖ bytes signature(64) ‖ bytes answer`, where `answer` is
+    `[marker] ‖ op bundle` and the signature covers a transcript under
+    `catcoms/doc-catchup-resp/v1` binding the group id, the **requester's** key, and the request's
+    timestamp, nonce and epoch. The requester rejects an answer whose signer is not a current
+    roster member, or whose signature does not verify against the request it actually sent. Sealed
+    operations authenticate their own authors, but an **empty** bundle carries no such proof and
+    the marker in front of it is durable control state: it can end a search, open a claim on a
+    document, or push the requester between sources. Catch-up sources are deliberately drawn from
+    untrusted candidates as well as proven members, so that state carries membership proof of its
+    own. An empty response is the one reply that needs none, because it asserts nothing.
   - **`KIND_CATCHUP_SINCE` response markers**, which are a continuation signal and not a version:
     - `1` `CATCHUP_SINCE_UNDERSTOOD`: this bundle is everything the server was holding for you.
     - `2` `CATCHUP_SINCE_MORE`: the bundle was cut to the budget and unsent ops remain; ask again.
@@ -631,13 +642,25 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
       group-wide, not per document, so the best source known can easily be an honest member who
       never opened that channel. The requester keeps the task, sets that source aside, and asks
       somebody else.
-    - **Only the peer that claimed a continuation can retire it.** A `2` records that peer as the
-      claimant for the document (for `CATCHUP_CONTINUATION_TTL_MS` of elapsed time, so a claimant
-      that never returns cannot pin the task forever). While that claim stands, a `1` from any
-      *other* peer does not close the task: it says what that peer has, not what the claimant was
-      withholding. The drain also asks the claimant first. Without this, one peer's zero-progress
-      completion erased another's proven continuation, and a modified peer could skip the
-      non-progress bound entirely by answering `1` instead of `2`.
+    - **Only the peer that claimed a continuation can retire it.** A `2` **that moved the
+      requester's frontier** records that peer as the claimant for the document (for
+      `CATCHUP_CONTINUATION_TTL_MS` of elapsed time, so a claimant that never returns cannot pin
+      the task forever). While that claim stands, a `1` from any *other* peer does not close the
+      task: it says what that peer has, not what the claimant was withholding. The drain also asks
+      the claimant first. Without this, one peer's zero-progress completion erased another's proven
+      continuation, and a modified peer could skip the non-progress bound entirely by answering `1`
+      instead of `2`.
+    - A `2` that moved nothing neither mints nor refreshes a claim, and exhausting the
+      non-progress budget **revokes** the claim as well as cooling the peer off. Otherwise a
+      claimant could keep a document open indefinitely by answering "ask me again" on a timer:
+      the cooldown paused it, the ten-minute claim was renewed on its next round, and no other
+      source's completion could ever end the search.
+    - **`1` with an empty bundle is one source's answer, not the group's.** A member that has
+      opened the channel but not yet caught it up holds a real, empty document, so it answers `1`
+      rather than `3`, and that answer is true and useless. Each such answer marks that source as
+      checked at the current local version; the document is treated as caught up only once every
+      eligible source has said it at the same version, and any answer that moves the version
+      starts the sweep again. A later member connection is a natural reason for another sweep.
     - Continuation is the **server's** answer, because only it knows what it withheld. A requester
       that inferred it from "did I apply anything" stopped on a chunk of ops it already held, and
       on a chunk that could carry nothing because the next op was larger than the budget.
@@ -676,7 +699,10 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     open-channel and explicit catch-up commands call, awaited inline by the actor) stops after the
     paged attempt and queues the document instead; only the drain follows through to `KIND_CATCHUP`
     and its two-minute deadline. Otherwise a peer that answers "I cannot page" and then withholds
-    could hold a server's actor, and everything it serves, for that whole window.
+    could hold a server's actor, and everything it serves, for that whole window. `request_catchup`
+    also queues the document when its own attempt fails, so a named request made outside the drain
+    (an explicit catch-up, a channel discovered through a join contact) does not lose the gap to a
+    timeout or a malformed answer.
   - `1` KIND_JOIN; body `bytes invite.encode() ‖ bytes key_package`; response =
     `[JOIN_READY] ‖ bytes welcome ‖ bytes signature(64) ‖ bytes sealed_routing` (the admitter signs
     `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome ‖ sealed_routing`). Not member-authed.
