@@ -982,13 +982,17 @@ timestamp rule (`readCeiling`/`effectiveTs`, five-minute grace, own rows never c
 when there is no usable cursor: a read mark written before ids existed, or one whose message has
 since been deleted.
 
-`get_message_tail(server, channel, limit, afterId)` (`Server::message_tail`) returns the newest
-`limit` rows (oldest first, `limit` clamped to 1..=256 at the bridge) each with a `targets_me` flag,
-plus `addressed_after_cursor`. The flag on a row is an `@[my name]` mention under the composer's
-normalization, or a reply to one of my messages, with the parent resolved against the **whole**
-channel. `addressed_after_cursor` answers the same question over **every** row after `afterId`
-(normally the channel's read mark), carried or not: one catch-up or one busy minute can append more
-messages than a tail holds, and a mention followed by that many ordinary messages must still ring.
+`get_message_tail(server, channel, limit, afterId, afterTs)` (`Server::message_tail`) returns the
+newest `limit` rows (oldest first, `limit` clamped to 1..=256 at the bridge) each with a
+`targets_me` flag, plus `addressed_after_cursor`. The flag on a row is an `@[my name]` mention under
+the composer's normalization, or a reply to one of my messages, with the parent resolved against the
+**whole** channel. `addressed_after_cursor` answers the same question over **every** row after the
+cursor (normally the channel's read mark), carried or not: one catch-up or one busy minute can
+append more messages than a tail holds, and a mention followed by that many ordinary messages must
+still ring. `afterId` is the cursor; `afterTs` is what is left of it once the message it named has
+been deleted, and decides on its own in that case. Only a cursor with neither means nothing has been
+read here, where the whole channel counts; without `afterTs` a deleted read mark read as exactly
+that, so an old mention rang again on every arrival, forever.
 It exists for the arrival ticker, which runs for every arrival in every channel not on screen and
 used to fetch that channel's entire history to read its last row.
 
