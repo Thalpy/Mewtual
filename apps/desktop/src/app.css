@@ -7115,6 +7115,41 @@ button.you-panel:hover {
   overflow-y: auto;
 }
 
+/* A secret field with a Show/Hide button beside it. The input keeps the row's spare width so a
+   long passphrase is not squeezed by the control that reveals it. */
+.reveal-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.reveal-row input {
+  flex: 1;
+  min-width: 0;
+}
+.reveal-row .reveal-btn {
+  flex: none;
+}
+
+/* The folded shared-media choice on the start surface. Reads as one line stating the current
+   answer until it is opened, so the primary action stays above the fold at the default size. */
+.start-trust > summary {
+  cursor: pointer;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  font-size: 0.85em;
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+.start-trust > summary > .muted {
+  margin-left: auto;
+}
+.start-trust[open] > summary {
+  margin-bottom: 0.5rem;
+}
+
 /* --- Start-surface tabs (join / found): .stx-seg's language scaled up to a primary
    control. The join tab leads because pasting an invite is the common case. --- */
 .start-tabs {
@@ -7410,6 +7445,8 @@ button.stage-chev {
   background: transparent;
   border-color: transparent;
   color: var(--text-2);
+  /* A control must never be squeezed to nothing to make room for a label. */
+  flex: none;
 }
 button.stage-chev:hover {
   background: var(--bg-elev);
@@ -7454,8 +7491,14 @@ button.stage-chev:hover {
   z-index: 60;
 }
 
+/* The call header carries a growing row of controls (E2E, CONN, tally, focus, watch-share,
+   fullscreen, dock, collapse) and the window can be narrow. Without wrapping, the row simply
+   overflowed the right edge and the LAST control went off-screen: that was the collapse button,
+   so a narrow window could leave no way to put the call away. Wrapping keeps every control
+   reachable at any width; the label and the room name below give way first. */
 .stage-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 7px;
   padding: 8px 8px 8px 12px;
@@ -7476,6 +7519,11 @@ button.stage-chev:hover {
   text-transform: uppercase;
   color: var(--muted);
   white-space: nowrap;
+  /* The room name is the part that may be truncated when the header runs out of room; the
+     controls beside it are not. A long channel name must not push them out of reach. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .stage-spacer {
   flex: 1;

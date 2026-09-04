@@ -38,6 +38,7 @@
   } from "./message-paging";
   import { ImageSrcCache } from "./image-src";
   import { pastedMedia, pastedName } from "./clipboard-media";
+  import { dismissOnBackdrop } from "./overlay-dismiss";
   import {
     DEFAULT_PEER_LEVEL, MAX_PEER_LEVEL, RemoteAudioRouter, effectivePeerGain, normalizePeerLevel,
     peerGain, type PeerAudioKind,
@@ -353,6 +354,12 @@
   // Chosen before founding/joining so no newly opened server can render shared media under an
   // implicit policy. Specific-member trust starts empty until the roster is authenticated.
   let onboardingFileTrust = $state<FileTrustMode>("on-demand");
+  /** How the folded onboarding summary names each choice, so folding it hides no decision. */
+  const ONBOARDING_TRUST_LABELS: Record<FileTrustMode, string> = {
+    "on-demand": "on demand",
+    specific: "specific people",
+    everyone: "everyone here",
+  };
   let fileTrustPolicies = $state<FileTrustPolicies>({});
   // Roving-tabindex arrows for the start tabs: with two tabs, either arrow means "the other one".
   function startTabArrows(e: KeyboardEvent) {
@@ -1249,6 +1256,7 @@
     stopPlayback();
     releaseAll();
     passphrase = "";
+    revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
     sigilStrokes = [];
     sigilDrawing = [];
     sigilColors = Array(19).fill(0);
@@ -1422,6 +1430,9 @@
   // rune band derived from (session seed, word): it reshuffles as you type but leaks nothing
   //; not even the length (a per-character or tiled inscription would).
   let sigilShowWord = $state(false);
+  // Whether the passphrase field is showing its text. Session-only and defaults to hidden: it is
+  // for checking what you have typed, not a preference to persist onto a lock screen.
+  let revealPassphrase = $state(false);
   let sigilSeed = $state(1);
   let sigilSecret = $derived(encodeSigil(sigilStrokes, sigilColors, sigilEmojis, sigilWord));
   let sigilBits = $derived(sigilBitsOf(sigilStrokes, sigilColors, sigilEmojis, sigilWord));
@@ -5288,6 +5299,7 @@
       nativeVaultLock.reset();
       closeAfterContinuityError = false;
       passphrase = "";
+    revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
       sigilStrokes = [];
       sigilDrawing = [];
       sigilColors = Array(19).fill(0);
@@ -5414,6 +5426,7 @@
     uiStateLoadGeneration += 1;
     clearTimeout(uiStateSaveTimer);
     passphrase = "";
+    revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
     error = "";
     syncIntent = false;
     locked = true;
@@ -20760,14 +20773,27 @@
       {#if unlockMethod === "pass"}
         <label class="field">
           <span class="muted">Passphrase</span>
-          <!-- svelte-ignore a11y_autofocus -->
-          <input
-            type="password"
-            bind:value={passphrase}
-            onkeydown={(e) => e.key === "Enter" && passphrase && (changingVaultSecret ? submitVaultSecretChange() : gateSubmit())}
-            placeholder="passphrase"
-            autofocus
-          />
+          <div class="reveal-row">
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              type={revealPassphrase ? "text" : "password"}
+              bind:value={passphrase}
+              onkeydown={(e) => e.key === "Enter" && passphrase && (changingVaultSecret ? submitVaultSecretChange() : gateSubmit())}
+              placeholder="passphrase"
+              autofocus
+            />
+            <!-- Off by default, and never remembered: revealing is for checking a long
+                 passphrase you are part way through typing, not a setting to leave on. The
+                 sigil's magic word already had this; the passphrase did not. -->
+            <button
+              type="button"
+              class="ghost small reveal-btn"
+              aria-pressed={revealPassphrase}
+              title={revealPassphrase ? "Hide the passphrase" : "Show the passphrase"}
+              aria-label={revealPassphrase ? "Hide the passphrase" : "Show the passphrase"}
+              onclick={() => (revealPassphrase = !revealPassphrase)}
+            >{revealPassphrase ? "Hide" : "Show"}</button>
+          </div>
         </label>
       {:else if unlockMethod === "sigil"}
         <p class="muted small">
@@ -21070,6 +21096,15 @@
         <input bind:value={displayName} placeholder="display name" />
         <small class="muted">Who you are to the people in the group, not what the group is called.</small>
       </label>
+      <!-- Folded by default. It is a real choice and it is made before anything is founded or
+           joined, but it is three cards of prose sitting directly above the primary action, and
+           at the default window size it pushed "Join / Found a server" below the fold entirely.
+           The summary states the current answer, so folding it hides nothing. -->
+      <details class="start-trust">
+        <summary>
+          Shared media: <b>{ONBOARDING_TRUST_LABELS[onboardingFileTrust]}</b>
+          <span class="muted small">change</span>
+        </summary>
       <fieldset class="file-trust-onboarding">
         <legend>Before this server can fetch shared media automatically</legend>
         <label class:selected={onboardingFileTrust === "on-demand"}>
@@ -21086,6 +21121,7 @@
         </label>
         <p class="muted small">Files fetched into Mewtual stay encrypted in its vault. Opening or exporting content still hands untrusted bytes to a decoder or another app.</p>
       </fieldset>
+      </details>
       <div class="start-tabs" role="tablist" aria-label="Join or found a server">
         <button
           type="button"
@@ -23778,7 +23814,7 @@
     -->
     {#if inCall && jukePickerOpen}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay juke-pick-over" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) jukePickerOpen = false; }}>
+      <div class="overlay juke-pick-over" role="presentation" use:dismissOnBackdrop={() => (jukePickerOpen = false)}>
         <div class="overlay-card juke-pick">
           <header class="overlay-head">
             <h2>Add from share</h2>
@@ -23915,7 +23951,7 @@
 
     {#if textEffectTarget && showTextEffectCatalog}
       {@const fxTarget = textEffectTarget}
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) { showTextEffectCatalog = false; textEffectTarget = null; } }}>
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={() => { showTextEffectCatalog = false; textEffectTarget = null; }}>
         <div class="overlay-card text-fx-catalog" role="dialog" aria-modal="true" aria-labelledby="text-fx-title">
           <header class="overlay-head">
             <div><span class="name-studio-label">TEXT EFFECTS // {textEffectTargetLabel(fxTarget).toUpperCase()}</span><h2 id="text-fx-title">Make the selected words act</h2></div>
@@ -23961,7 +23997,7 @@
       {@const fp = profileCard}
       {@const p = profiles[fp]}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) profileCard = null; }}>
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={() => (profileCard = null)}>
         <div class="overlay-card profile-card">
           <header class="overlay-head">
             <h2>Profile</h2>
@@ -24015,7 +24051,7 @@
     {#if verifyFor}
       {@const vfp = verifyFor}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) verifyFor = null; }}>
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={() => (verifyFor = null)}>
         <div class="overlay-card verify-card">
           <header class="overlay-head">
             <h2>Verify {nameOf(vfp)}</h2>
@@ -24051,7 +24087,7 @@
 
     {#if scanOpen}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeScan(null); }}>
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={() => closeScan(null)}>
         <div class="overlay-card scan-card">
           <header class="overlay-head">
             <h2>Scan a code</h2>
@@ -24068,7 +24104,9 @@
 
     {#if showLinkDevice}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeLinkDevice(); }}>
+      <!-- Holds a typed transport passphrase and a pasted grant, so a stray drag closing it
+           costs real work; the action requires the press to have started on the backdrop. -->
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={closeLinkDevice}>
         <div class="overlay-card">
           <header class="overlay-head">
             <h2>Link a device</h2>
@@ -26200,7 +26238,7 @@
 
     {#if lightbox}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="lightbox" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeLightbox(); }}>
+      <div class="lightbox" role="presentation" use:dismissOnBackdrop={closeLightbox}>
         <div class="lightbox-bar">
           <span class="lightbox-name" title={lightboxFile?.name ?? lightbox.alt}>
             {lightboxFile?.name || lightbox.alt || "image"}
@@ -26224,7 +26262,7 @@
           class="lightbox-stage"
           class:zoomed={lightboxZoom}
           role="presentation"
-          onclick={(e) => { if (e.target === e.currentTarget) closeLightbox(); }}
+          use:dismissOnBackdrop={closeLightbox}
         >
           <button
             class="lightbox-img"
@@ -26240,7 +26278,7 @@
 
     {#if fileInfo}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeFileInfo(); }}>
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={closeFileInfo}>
         <div class="overlay-card">
           <header class="overlay-head">
             <h2 class="file-info-title">📄 {fileInfo.name}</h2>
@@ -26458,7 +26496,7 @@
 
     {#if showQuickSwitch}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay qs-overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeQuickSwitch(); }}>
+      <div class="overlay qs-overlay" role="presentation" use:dismissOnBackdrop={closeQuickSwitch}>
         <div class="qs-card">
           <!-- svelte-ignore a11y_autofocus -->
           <input

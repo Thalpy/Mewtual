@@ -14,8 +14,10 @@
       {
         "label": "main",
         "title": "Mewtual",
-        "width": 900,
-        "height": 640,
+        "width": 1024,
+        "height": 720,
+        "minWidth": 720,
+        "minHeight": 560,
         "resizable": true,
         "decorations": false
       }
