@@ -624,10 +624,20 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
       marker without breaking the population installed today. It is a defensive downgrade, not a
       guarantee of convergence: what it buys is another route to try, and the fallback it takes is
       the compatibility grammar with the costs described under `KIND_CATCHUP`.
-    - A peer that understands the kind but **holds no such document** answers `1` with an empty
-      bundle, not an empty response. Silence there would be indistinguishable from an older build
-      and would send every requester asking a peer that simply is not in that channel down the
-      compatibility path.
+    - `3` `CATCHUP_SINCE_ABSENT`: understood, and this peer does not hold the document at all.
+      Deliberately **not** `1` with an empty bundle, and deliberately not silence. Silence reads as
+      an older build and takes the compatibility path; `1` reads as "the document is complete",
+      which retires the gap on the strength of an answer that was never about it. Peer selection is
+      group-wide, not per document, so the best source known can easily be an honest member who
+      never opened that channel. The requester keeps the task, sets that source aside, and asks
+      somebody else.
+    - **Only the peer that claimed a continuation can retire it.** A `2` records that peer as the
+      claimant for the document (for `CATCHUP_CONTINUATION_TTL_MS` of elapsed time, so a claimant
+      that never returns cannot pin the task forever). While that claim stands, a `1` from any
+      *other* peer does not close the task: it says what that peer has, not what the claimant was
+      withholding. The drain also asks the claimant first. Without this, one peer's zero-progress
+      completion erased another's proven continuation, and a modified peer could skip the
+      non-progress bound entirely by answering `1` instead of `2`.
     - Continuation is the **server's** answer, because only it knows what it withheld. A requester
       that inferred it from "did I apply anything" stopped on a chunk of ops it already held, and
       on a chunk that could carry nothing because the next op was larger than the budget.
@@ -643,9 +653,12 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     nothing is legitimate (the frontier on the wire is capped, so an honest peer can replay a
     prefix already held), so it is believed and asked again; but an unbroken run of
     `MAX_NONPROGRESSING_CATCHUP_ROUNDS` (8) such rounds from one peer for one document marks that
-    peer in `failed_catchup_peers`, so `pick_catchup_peer` prefers another source. That bounds the
+    peer under a per-document cooldown, so the next drain prefers another source. That bounds the
     one loop an authenticated member can drive by itself, where every answer says "ask me again"
     and no answer carries anything usable. The run resets the moment that peer applies anything.
+    Per document rather than globally on purpose: a peer that cannot serve one document may be the
+    only holder of another, and the global failed set is cleared by any inbound traffic from that
+    peer, so it could never be a durable statement about a document anyway.
   - **Request order, always**: `KIND_CATCHUP_SINCE` first, *including* when the frontier is empty
     (which subtracts nothing and so asks for everything, still in bounded chunks), falling back to
     `KIND_CATCHUP` only on an empty or unrecognised-marker response. Asking the paged way only
@@ -657,6 +670,13 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     the next drain to hand to another source. The task in flight lives in `catchup_inflight` on
     the synchronizer rather than on the stack, because the actor cancels its tick whenever a
     command arrives, and a quiet document has no later inbound op to rediscover a lost gap with.
+    A restored task is put back ahead of the queue cap, since it was admitted before the drain took
+    it and the command that cancelled the tick may have taken its slot.
+  - **A UI-facing catch-up never waits on the compatibility request.** `request_catchup` (what the
+    open-channel and explicit catch-up commands call, awaited inline by the actor) stops after the
+    paged attempt and queues the document instead; only the drain follows through to `KIND_CATCHUP`
+    and its two-minute deadline. Otherwise a peer that answers "I cannot page" and then withholds
+    could hold a server's actor, and everything it serves, for that whole window.
   - `1` KIND_JOIN; body `bytes invite.encode() ‖ bytes key_package`; response =
     `[JOIN_READY] ‖ bytes welcome ‖ bytes signature(64) ‖ bytes sealed_routing` (the admitter signs
     `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome ‖ sealed_routing`). Not member-authed.

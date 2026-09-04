@@ -691,16 +691,10 @@ async fn catch_up_is_refused_to_a_non_member() {
     assert_eq!(commits.unwrap(), 0, "non-member gets no commits");
     let (ops, _) = tokio::join!(
         msy.request_catchup(alice_peer, DocType::Channel, CHANNEL),
-        // Two serves, because a document catch-up now asks the paged way first and only falls
-        // back to the whole-history grammar when that answer is empty. A refusal is empty, so
-        // Mallory asks twice and is refused twice.
-        async {
-            asy.run_once().await.unwrap();
-            asy.run_once().await.unwrap();
-        },
+        asy.run_once(),
     );
     assert_eq!(ops.unwrap(), 0, "non-member gets no document history");
-    assert_eq!(asy.stats().requests_rejected, 3);
+    assert_eq!(asy.stats().requests_rejected, 2);
 }
 
 /// 6d-1b: a member that missed a membership commit recovers it on demand with

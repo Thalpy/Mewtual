@@ -167,6 +167,15 @@ const CATCHUP_SINCE_UNDERSTOOD: u8 = 1;
 /// inferred it from "did I apply anything" stopped on a chunk of ops it already had, and on a
 /// chunk that could carry nothing because the next op was larger than the budget.
 const CATCHUP_SINCE_MORE: u8 = 2;
+/// The serving peer understands the request and simply does not hold this document.
+///
+/// Distinct from [`CATCHUP_SINCE_UNDERSTOOD`] with an empty bundle, which says "you have
+/// everything I have of it", because the requester must not treat the two the same. Peer
+/// selection is group-wide, not document-wide: the best source this node knows may be a perfectly
+/// honest member who has never opened the channel being asked about. Reading that as a completed
+/// catch-up retired the gap on the strength of an answer that was never about the gap, and in a
+/// quiet channel nothing would raise it again.
+const CATCHUP_SINCE_ABSENT: u8 = 3;
 /// Consecutive rounds one peer may claim [`CATCHUP_SINCE_MORE`] while moving this node's
 /// frontier nowhere, before a different source is preferred for that document.
 ///
@@ -192,6 +201,11 @@ const MAX_CATCHUP_STALL_ENTRIES: usize = 256;
 /// free to serve. A cooldown says the thing that is actually true, about the pair it is true of,
 /// and expires on its own.
 const CATCHUP_PEER_COOLDOWN_MS: u64 = 30_000;
+
+/// How long a peer's claim that a document has more to come is honoured, on the injected elapsed
+/// clock. Long enough that an ordinary reconnection resumes from the source that made it; bounded
+/// so a claimant that never returns cannot pin the task against every other source forever.
+const CATCHUP_CONTINUATION_TTL_MS: u64 = 600_000;
 const MAX_DELIVERY_RECEIPT_OUTBOX: usize = 128;
 const MAX_DELIVERY_RECEIPT_TARGETS: usize = 64;
 const RECIPROCAL_ATTEST_DOMAIN: &str = "catcoms/reciprocal/helper-attestation/v1";
@@ -3703,6 +3717,11 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// `(document, peer)` to the elapsed time before which that peer is not worth asking about
     /// that document again. See [`CATCHUP_PEER_COOLDOWN_MS`].
     catchup_cooldowns: HashMap<(DocType, u128, PeerId), u64>,
+    /// Documents some peer has said it was still withholding operations for, and which peer said
+    /// so, with the elapsed time the claim lapses at. Only that peer can retire its own claim, so
+    /// a different source answering "that is everything I have" cannot close a gap it never knew
+    /// about. The expiry is what keeps a claimant that never comes back from pinning the task.
+    catchup_continuations: HashMap<(DocType, u128), (PeerId, u64)>,
     /// An in-progress fork-resolution contest (only when `max_committer_rank >= 1`).
     pending: Option<PendingResolve>,
     /// Provisional-Welcome (or rejection) pushes to deliver to joiners once a
@@ -3995,6 +4014,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             catchup_stalls: HashMap::new(),
             catchup_inflight: None,
             catchup_cooldowns: HashMap::new(),
+            catchup_continuations: HashMap::new(),
             pending: None,
             welcome_outbox: Vec::new(),
             add_request_queue: VecDeque::new(),
@@ -5078,7 +5098,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             if let (Some(peer), CatchupTask::Doc { doc_type, doc_id }) = (asked, interrupted) {
                 self.cool_off_catchup_peer(peer, doc_type, doc_id);
             }
-            self.requeue_catchup(interrupted);
+            // Restored ahead of the cap rather than through it. This task was already admitted
+            // before the drain took it, and the command that cancelled the tick may have filled
+            // the slot it vacated; refusing it there would discard proven recovery work in favour
+            // of work that has not been tried yet.
+            if !self.catchup_queue.contains(&interrupted) {
+                self.catchup_queue.insert(0, interrupted);
+            }
         }
         // Bounded by what was queued on entry, so a task re-queued by this drain waits for the
         // next tick rather than being retried inside this one.
@@ -5133,7 +5159,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     .collect(),
                 CatchupTask::Commits { .. } => Vec::new(),
             };
-            let Some(peer) = self.pick_catchup_peer_excluding(avoid, &cooling) else {
+            // The peer that said this document has more to come is asked first while its claim
+            // stands: it is the only source whose answer can retire that claim.
+            let preferred = match task {
+                CatchupTask::Doc { doc_type, doc_id } => self
+                    .catchup_continuation_source(doc_type, doc_id)
+                    .filter(|peer| {
+                        !cooling.contains(peer)
+                            && Some(*peer) != avoid
+                            && self.peer_is_connected(*peer)
+                    }),
+                CatchupTask::Commits { .. } => None,
+            };
+            let Some(peer) =
+                preferred.or_else(|| self.pick_catchup_peer_excluding(avoid, &cooling))
+            else {
                 // No usable catch-up source known yet; keep the task for a later
                 // tick (a new peer may appear), and likewise when the exclusion is
                 // what ruled everyone out (the re-queued copy drops it). If every
@@ -5217,7 +5257,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // not marked, the document was not re-queued, and a second, healthy source
                     // was never asked. The serving peer is marked for the same reason the commit
                     // branch marks one, so the next drain picks somebody else.
-                    if let Err(e) = self.request_catchup(peer, doc_type, doc_id).await {
+                    if let Err(e) = self
+                        .request_catchup_allowing_legacy(peer, doc_type, doc_id)
+                        .await
+                    {
                         tracing::debug!(error = %e, ?doc_type, doc_id, ?peer, "doc catch-up failed");
                         self.cool_off_catchup_peer(peer, doc_type, doc_id);
                         self.enqueue_doc_catchup(doc_type, doc_id);
@@ -5244,6 +5287,49 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .saturating_add(CATCHUP_PEER_COOLDOWN_MS);
         self.catchup_cooldowns
             .insert((doc_type, doc_id, peer), until);
+    }
+
+    /// Record that `peer` said it is still withholding operations for this document.
+    fn note_catchup_continuation(&mut self, peer: PeerId, doc_type: DocType, doc_id: u128) {
+        if self.catchup_continuations.len() >= MAX_CATCHUP_STALL_ENTRIES {
+            let now = self.clock.monotonic_ms();
+            self.catchup_continuations
+                .retain(|_, (_, until)| *until > now);
+            if self.catchup_continuations.len() >= MAX_CATCHUP_STALL_ENTRIES {
+                self.catchup_continuations.clear();
+            }
+        }
+        let until = self
+            .clock
+            .monotonic_ms()
+            .saturating_add(CATCHUP_CONTINUATION_TTL_MS);
+        self.catchup_continuations
+            .insert((doc_type, doc_id), (peer, until));
+    }
+
+    /// Whether some peer **other than** `peer` has an unexpired claim that this document has more
+    /// to come. That claim is the reason a zero-progress completion from anyone else is not a
+    /// completion of anything.
+    fn continuation_owed_by_other(&self, peer: PeerId, doc_type: DocType, doc_id: u128) -> bool {
+        self.catchup_continuations
+            .get(&(doc_type, doc_id))
+            .is_some_and(|(claimant, until)| {
+                *claimant != peer && *until > self.clock.monotonic_ms()
+            })
+    }
+
+    /// Forget any claim on this document, because the peer that made it has now finished.
+    fn clear_catchup_continuation(&mut self, doc_type: DocType, doc_id: u128) {
+        self.catchup_continuations.remove(&(doc_type, doc_id));
+    }
+
+    /// The peer that last said this document has more to come, while that claim is unexpired.
+    /// Preferred by the drain, because it is the only source that can retire its own claim.
+    fn catchup_continuation_source(&self, doc_type: DocType, doc_id: u128) -> Option<PeerId> {
+        self.catchup_continuations
+            .get(&(doc_type, doc_id))
+            .filter(|(_, until)| *until > self.clock.monotonic_ms())
+            .map(|(peer, _)| *peer)
     }
 
     /// Whether `peer` is currently being left alone about this document.
@@ -5409,8 +5495,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
              catch-up source for this document"
         );
         self.catchup_stalls.remove(&(doc_type, doc_id, peer));
+        // Only about this document. The global failed set would make one document's unhelpful
+        // source ineligible for every other document too, including ones it is the only holder
+        // of, and nothing clears that entry until unrelated traffic happens to arrive from it.
         self.cool_off_catchup_peer(peer, doc_type, doc_id);
-        self.note_failed_catchup_peer(peer);
     }
 
     /// Forget a `(document, peer)` non-progress run, because that peer just moved us or told us
@@ -9935,6 +10023,33 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         doc_type: DocType,
         doc_id: u128,
     ) -> Result<usize, SyncError> {
+        self.request_catchup_inner(peer, doc_type, doc_id, false)
+            .await
+    }
+
+    /// [`Self::request_catchup`] with the whole-history compatibility request allowed.
+    ///
+    /// Only the recovery drain uses this. That request can legally take over two minutes, and the
+    /// drain runs inside the tick the actor cancels whenever a command arrives, so waiting there
+    /// costs nothing anybody is watching; the in-flight task survives the cancellation and is
+    /// tried again. A UI-facing command awaits its request inline and must not spend that long.
+    async fn request_catchup_allowing_legacy(
+        &mut self,
+        peer: catcoms_rt::PeerId,
+        doc_type: DocType,
+        doc_id: u128,
+    ) -> Result<usize, SyncError> {
+        self.request_catchup_inner(peer, doc_type, doc_id, true)
+            .await
+    }
+
+    async fn request_catchup_inner(
+        &mut self,
+        peer: catcoms_rt::PeerId,
+        doc_type: DocType,
+        doc_id: u128,
+        allow_legacy: bool,
+    ) -> Result<usize, SyncError> {
         let heads = self
             .docs
             .get_mut(&(doc_type, doc_id))
@@ -9955,6 +10070,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .await?
         {
             return Ok(applied);
+        }
+        if !allow_legacy {
+            // Asked from a UI-facing command, which is awaited inline by the actor: the peer has
+            // just told us it cannot page, and the only thing left to ask it is the request that
+            // may legally take two minutes. Blocking the actor's selector on that would freeze
+            // the server for anyone watching, and a peer that accepts and then withholds could
+            // do it deliberately. Queued instead: the drain performs it, and the drain is inside
+            // the tick the actor already cancels whenever a command arrives.
+            self.enqueue_doc_catchup(doc_type, doc_id);
+            return Ok(0);
         }
         self.request_full_catchup(peer, doc_type, doc_id).await
     }
@@ -9995,8 +10120,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some((&CATCHUP_SINCE_UNDERSTOOD, bundle)) => {
                 // It is finished with us, so an unbroken run of "ask me again" has ended.
                 self.clear_catchup_stall(peer, doc_type, doc_id);
-                self.apply_catchup_response(doc_type, doc_id, bundle)
-                    .map(Some)
+                let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
+                // "That is everything I have" is only a completion of the gap when it comes from
+                // the peer that said there was more of it. Peer selection is group-wide, so the
+                // next drain can easily ask somebody who holds a prefix, or nothing; letting that
+                // answer close the task threw away a continuation another member had already
+                // proved, and gave a modified peer a way around the non-progress bound by simply
+                // saying "done" instead of "more".
+                if self.continuation_owed_by_other(peer, doc_type, doc_id) {
+                    self.cool_off_catchup_peer(peer, doc_type, doc_id);
+                    self.enqueue_doc_catchup(doc_type, doc_id);
+                } else {
+                    self.clear_catchup_continuation(doc_type, doc_id);
+                }
+                Ok(Some(applied))
+            }
+            Some((&CATCHUP_SINCE_ABSENT, _)) => {
+                // An honest member who is simply not in this channel. It has told us nothing
+                // about the gap, so the gap stays exactly as it was; only this source is set
+                // aside, so the next drain asks somebody else.
+                tracing::debug!(?doc_type, doc_id, ?peer, "peer does not hold this document");
+                self.clear_catchup_stall(peer, doc_type, doc_id);
+                self.cool_off_catchup_peer(peer, doc_type, doc_id);
+                self.enqueue_doc_catchup(doc_type, doc_id);
+                Ok(Some(0))
             }
             Some((&CATCHUP_SINCE_MORE, bundle)) => {
                 let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
@@ -10012,6 +10159,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 } else {
                     self.note_nonprogressing_catchup(peer, doc_type, doc_id);
                 }
+                // Remember who said it, so nobody else's "that is everything" can retire it.
+                self.note_catchup_continuation(peer, doc_type, doc_id);
                 // Queued either way. The peer said the gap is real, so the gap outlives any
                 // verdict about the peer: exhausting one source's benefit of the doubt marks
                 // that source and must still leave the work for the next drain to hand to
@@ -11057,12 +11206,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // here made "I have no such document" indistinguishable from "I am an older build", and
         // sent every requester asking a peer that simply is not in that channel down the
         // compatibility path, with the longest deadline and the largest response in the protocol
-        // behind it. The marker plus an empty bundle says the true thing: understood, nothing
-        // for you, do not ask again.
+        // behind it. Its own marker, rather than "understood, empty", because those two answers
+        // mean opposite things to a requester chasing a gap: one says the document is complete,
+        // the other says this particular member is not the one to ask.
         if !self.docs.contains_key(&(doc_type, doc_id)) {
             let (empty, _) = size_capped_ops(&[], MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE).ok()?;
             let mut response = Vec::with_capacity(empty.len() + 1);
-            response.push(CATCHUP_SINCE_UNDERSTOOD);
+            response.push(CATCHUP_SINCE_ABSENT);
             response.extend_from_slice(&empty);
             return Some(response);
         }
@@ -15949,15 +16099,19 @@ mod tests {
                  marked the bad peer and threw away the only thing that would pick a good one"
             );
             assert_eq!(
-                bob.failed_catchup_peers.contains(&alice_peer),
+                bob.catchup_peer_is_cooling(alice_peer, DocType::Channel, 88),
                 round == usize::from(MAX_NONPROGRESSING_CATCHUP_ROUNDS),
                 "an honest peer replaying a prefix we already hold gets a bounded benefit of the \
                  doubt, and is passed over only once it is spent"
             );
+            assert!(
+                bob.failed_catchup_peers.is_empty(),
+                "and is passed over for THIS document only: it may be the only source of another"
+            );
         }
 
         // Not a permanent verdict on the peer either: one usable round resets the run.
-        bob.failed_catchup_peers.clear();
+        bob.catchup_cooldowns.clear();
         alice
             .post(DocType::Channel, 88, |doc| doc.put(ROOT, "real", "two"))
             .await
@@ -15972,7 +16126,7 @@ mod tests {
         );
         assert_eq!(applied.unwrap(), 1);
         assert!(
-            !bob.failed_catchup_peers.contains(&alice_peer),
+            !bob.catchup_peer_is_cooling(alice_peer, DocType::Channel, 88),
             "a peer that starts answering properly is a good source again"
         );
     }
@@ -16070,8 +16224,8 @@ mod tests {
             assert!(attempted, "the drain kept the task and asked with it");
         }
         assert!(
-            bob.failed_catchup_peers.contains(&alice_peer),
-            "the source that would not serve is marked"
+            bob.catchup_peer_is_cooling(alice_peer, DocType::Channel, 90),
+            "the source that would not serve is set aside for this document"
         );
         assert_eq!(
             bob.doc(DocType::Channel, 90).map(|d| d.op_count()),
@@ -16248,6 +16402,168 @@ mod tests {
             "no source is eligible for this document while they are all cooling"
         );
         assert!(doc_queued(&bob), "and the gap is still owned");
+    }
+
+    /// A successful answer that carries nothing is not the same claim as a completed document,
+    /// and the difference decides whether a gap survives.
+    ///
+    /// Peer selection is group-wide, not per document, so the source a drain picks may be an
+    /// honest member who has never opened the channel being asked about. Its answer says nothing
+    /// about the gap. Worse, once another peer has said it is withholding operations, only that
+    /// peer's own answer can retire the claim: a stranger's "that is everything I have" must not
+    /// close a continuation somebody else proved, or a modified peer could skip the non-progress
+    /// bound entirely by saying "done" instead of "more".
+    #[tokio::test]
+    async fn a_peer_without_the_document_cannot_close_a_gap_another_peer_proved() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(3).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let mut carol = it.next().unwrap();
+        let (alice_peer, carol_peer) = (alice.local_peer(), carol.local_peer());
+        let bob_peer = bob.local_peer();
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        prove_live_member(&mut bob, carol_peer, ids[2]);
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut carol, bob_peer, ids[1]);
+        // Alice and Bob are in the channel. Carol never opens it: she is a current member with
+        // nothing to say about this document, which is the honest case the marker is for.
+        alice.open_channel(DocType::Channel, 94).await.unwrap();
+        bob.open_channel(DocType::Channel, 94).await.unwrap();
+        alice
+            .post(DocType::Channel, 94, |doc| doc.put(ROOT, "one", "x"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            bob.transport.next_event().await,
+            Some(TransportEvent::Gossip { .. })
+        ));
+
+        let doc_queued = |bob: &ChannelSync<MemNetwork, ChaCha20Rng>| {
+            bob.catchup_queue.iter().any(|task| {
+                matches!(
+                    task,
+                    CatchupTask::Doc {
+                        doc_type: DocType::Channel,
+                        doc_id: 94
+                    }
+                )
+            })
+        };
+
+        // Asking the member who does not hold it leaves the gap exactly where it was.
+        bob.catchup_queue.clear();
+        let (applied, ()) = tokio::join!(
+            bob.request_catchup(carol_peer, DocType::Channel, 94),
+            async {
+                let Some(TransportEvent::Request {
+                    from,
+                    data,
+                    responder,
+                    ..
+                }) = carol.transport.next_event().await
+                else {
+                    panic!("the paging request is the next event");
+                };
+                let response = carol.handle_request(from, &data);
+                responder.respond(Bytes::from(response));
+            }
+        );
+        assert_eq!(applied.unwrap(), 0);
+        assert!(
+            doc_queued(&bob),
+            "a member who is not in the channel has told us nothing about the backlog"
+        );
+        assert!(
+            bob.catchup_peer_is_cooling(carol_peer, DocType::Channel, 94),
+            "only that source is set aside, so the next drain asks somebody else"
+        );
+        assert_eq!(
+            bob.doc(DocType::Channel, 94).map(|d| d.op_count()),
+            Some(0),
+            "and nothing was applied"
+        );
+
+        // Now the harder half. Alice says she is withholding more, which is the claim that makes
+        // the gap real; then Carol answers a completed, empty catch-up. Carol's answer is about
+        // Carol, and must not retire Alice's claim.
+        let (empty_bundle, _) =
+            size_capped_ops(&[], MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE).unwrap();
+        let mut more = vec![CATCHUP_SINCE_MORE];
+        more.extend_from_slice(&empty_bundle);
+        let (_, ()) = tokio::join!(
+            bob.request_catchup(alice_peer, DocType::Channel, 94),
+            async {
+                let Some(TransportEvent::Request { responder, .. }) =
+                    alice.transport.next_event().await
+                else {
+                    panic!("the paging request is the next event");
+                };
+                responder.respond(Bytes::from(more));
+            }
+        );
+        assert_eq!(
+            bob.catchup_continuation_source(DocType::Channel, 94),
+            Some(alice_peer),
+            "the peer that said there is more is the one that can say there is not"
+        );
+
+        let mut done = vec![CATCHUP_SINCE_UNDERSTOOD];
+        done.extend_from_slice(&empty_bundle);
+        bob.catchup_queue.clear();
+        let (_, ()) = tokio::join!(
+            bob.request_catchup(carol_peer, DocType::Channel, 94),
+            async {
+                let Some(TransportEvent::Request { responder, .. }) =
+                    carol.transport.next_event().await
+                else {
+                    panic!("the paging request is the next event");
+                };
+                responder.respond(Bytes::from(done));
+            }
+        );
+        assert!(
+            doc_queued(&bob),
+            "another peer's completed answer cannot close a continuation it never knew about"
+        );
+        assert_eq!(
+            bob.catchup_continuation_source(DocType::Channel, 94),
+            Some(alice_peer),
+            "and the claim still stands"
+        );
+
+        // Alice, and only Alice, can end it: her own completed answer retires her own claim.
+        bob.catchup_cooldowns.clear();
+        let (applied, ()) = tokio::join!(
+            bob.request_catchup(alice_peer, DocType::Channel, 94),
+            async {
+                let Some(TransportEvent::Request {
+                    from,
+                    data,
+                    responder,
+                    ..
+                }) = alice.transport.next_event().await
+                else {
+                    panic!("the paging request is the next event");
+                };
+                let response = alice.handle_request(from, &data);
+                responder.respond(Bytes::from(response));
+            }
+        );
+        assert_eq!(
+            applied.unwrap(),
+            1,
+            "and she had the operation she promised"
+        );
+        assert_eq!(
+            bob.catchup_continuation_source(DocType::Channel, 94),
+            None,
+            "the claimant's own completion is what ends the pursuit"
+        );
     }
 
     /// The actor drops its tick whenever a command arrives, so any await in the drain can simply
