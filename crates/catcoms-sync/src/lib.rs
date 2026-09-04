@@ -180,6 +180,18 @@ const MAX_NONPROGRESSING_CATCHUP_ROUNDS: u8 = 8;
 /// Ceiling on the non-progress ledger. Its keys are all this node's own (documents it has open,
 /// peers it chose to ask), so it cannot be grown from outside; the cap is belt and braces.
 const MAX_CATCHUP_STALL_ENTRIES: usize = 256;
+
+/// How long one peer is left alone about one document after it failed to fill that gap, on the
+/// injected elapsed clock.
+///
+/// `failed_catchup_peers` is the wrong place to record this on its own: it is global rather than
+/// per document, and `remember_peer` clears it on any inbound traffic from that peer, so a peer
+/// that is busy talking to us is un-marked the moment it does. That turned "this source could not
+/// serve this document" into a preference lasting until its next packet, and two nodes each
+/// blocked on the other's unanswerable request would re-pick each other every tick, neither ever
+/// free to serve. A cooldown says the thing that is actually true, about the pair it is true of,
+/// and expires on its own.
+const CATCHUP_PEER_COOLDOWN_MS: u64 = 30_000;
 const MAX_DELIVERY_RECEIPT_OUTBOX: usize = 128;
 const MAX_DELIVERY_RECEIPT_TARGETS: usize = 64;
 const RECIPROCAL_ATTEST_DOMAIN: &str = "catcoms/reciprocal/helper-attestation/v1";
@@ -564,6 +576,23 @@ const MAX_CATCHUP_RESPONSE: usize = 16 * 1024 * 1024;
 /// roughly 1 Mb/s per chunk. A progress-based deadline that resets as bytes arrive would remove
 /// even that, and needs transport-level progress the `MeshTransport` seam does not expose yet.
 const CATCHUP_REQUEST_MS: u64 = 2_000;
+
+/// Deadline for the whole-history compatibility request (`KIND_CATCHUP`), which is a different
+/// bargain from the paged one and needs a different number.
+///
+/// That grammar cannot be told to page, so its answer is bounded only by the 16 MiB response
+/// ceiling, and [`CATCHUP_REQUEST_MS`] applied to it is precisely the throughput requirement the
+/// paging budget exists to avoid: a legal maximum response needs roughly 67 Mb/s to arrive inside
+/// two seconds. Sized instead to the same ~1 Mb/s floor the chunk budget leaves, which the
+/// ceiling puts at a little over two minutes.
+///
+/// Waiting that long is worth saying out loud. It is only ever reached against a peer that
+/// answered the paged request with "I do not know this kind", so two current peers can never
+/// spend it on each other and the simultaneous-request deadlock bound is untouched. Against such
+/// a peer the alternative is not a faster catch-up but none: a request that always times out
+/// converges never. The actor's own `select!` still cancels an in-flight tick when a command
+/// arrives, so the wait cannot hold the UI, and the task stays queued to be retried.
+const FULL_CATCHUP_REQUEST_MS: u64 = 135_000;
 /// Bytes of ops one catch-up response may carry.
 ///
 /// Small on purpose: it is what makes [`CATCHUP_REQUEST_MS`] a deadlock bound rather than a
@@ -3668,6 +3697,12 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// moving nothing. Reset the moment that peer applies anything, so only an unbroken run
     /// counts. See [`MAX_NONPROGRESSING_CATCHUP_ROUNDS`].
     catchup_stalls: HashMap<(DocType, u128, PeerId), u8>,
+    /// The task whose request is in flight right now, held here rather than on the stack so that
+    /// cancelling the tick cannot lose it. Restored to the queue by the next drain.
+    catchup_inflight: Option<(CatchupTask, Option<PeerId>)>,
+    /// `(document, peer)` to the elapsed time before which that peer is not worth asking about
+    /// that document again. See [`CATCHUP_PEER_COOLDOWN_MS`].
+    catchup_cooldowns: HashMap<(DocType, u128, PeerId), u64>,
     /// An in-progress fork-resolution contest (only when `max_committer_rank >= 1`).
     pending: Option<PendingResolve>,
     /// Provisional-Welcome (or rejection) pushes to deliver to joiners once a
@@ -3958,6 +3993,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             delivery_receipt_revision: 0,
             failed_catchup_peers: VecDeque::new(),
             catchup_stalls: HashMap::new(),
+            catchup_inflight: None,
+            catchup_cooldowns: HashMap::new(),
             pending: None,
             welcome_outbox: Vec::new(),
             add_request_queue: VecDeque::new(),
@@ -5022,9 +5059,38 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// (so `run_once` can yield rather than block on a fresh event); a task with
     /// no known peer is re-queued and does not count.
     async fn drain_catchup_queue(&mut self) -> bool {
-        let tasks = std::mem::take(&mut self.catchup_queue);
+        // A task in flight when this future is dropped is put back before anything else happens.
+        //
+        // The actor races `sync_once` against UI commands and its own timer, so any await in here
+        // can simply stop existing mid-tick. The queue used to be emptied into a local vector
+        // before the first request, which meant a cancelled tick took the in-flight task and
+        // every task behind it with it, and nothing remembered the gap: a quiet document has no
+        // later inbound op to rediscover it with, so a UI keystroke could make a channel
+        // permanently short for the rest of the session. Ownership stays on `self` instead: one
+        // task moves into `catchup_inflight` for exactly as long as its request lasts, and the
+        // rest are left in the queue where they started.
+        if let Some((interrupted, asked)) = self.catchup_inflight.take() {
+            // The peer it was mid-conversation with is cooled off before the task goes back.
+            // Without that, a tick cancelled while blocked on an unresponsive peer re-picks the
+            // same peer on the very next tick and blocks again, which is how a node with a
+            // standing task stops serving anybody else: two of them chasing each other never let
+            // go. Cooling the pair off keeps the gap owned while freeing the tick.
+            if let (Some(peer), CatchupTask::Doc { doc_type, doc_id }) = (asked, interrupted) {
+                self.cool_off_catchup_peer(peer, doc_type, doc_id);
+            }
+            self.requeue_catchup(interrupted);
+        }
+        // Bounded by what was queued on entry, so a task re-queued by this drain waits for the
+        // next tick rather than being retried inside this one.
+        let mut remaining = self.catchup_queue.len();
         let mut attempted = false;
-        for task in tasks {
+        while remaining > 0 {
+            remaining -= 1;
+            if self.catchup_queue.is_empty() {
+                break;
+            }
+            let task = self.catchup_queue.remove(0);
+            self.catchup_inflight = Some((task, None));
             // The exclusion is consulted for this attempt only; `retry` is the same task with
             // it dropped, so an exclusion can delay recovery by a tick but never prevent it.
             let (avoid, retry) = match task {
@@ -5049,18 +5115,44 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             } = task
             {
                 if gap <= self.group.epoch() && self.pending_commits.is_empty() {
+                    self.catchup_inflight = None;
                     continue;
                 }
             }
-            let Some(peer) = self.pick_catchup_peer_avoiding(avoid) else {
+            // A document task also skips any peer still cooling off about that document.
+            let cooling: Vec<PeerId> = match task {
+                CatchupTask::Doc { doc_type, doc_id } => self
+                    .catchup_cooldowns
+                    .keys()
+                    .filter(|(t, id, peer)| {
+                        *t == doc_type
+                            && *id == doc_id
+                            && self.catchup_peer_is_cooling(*peer, doc_type, doc_id)
+                    })
+                    .map(|(_, _, peer)| *peer)
+                    .collect(),
+                CatchupTask::Commits { .. } => Vec::new(),
+            };
+            let Some(peer) = self.pick_catchup_peer_excluding(avoid, &cooling) else {
                 // No usable catch-up source known yet; keep the task for a later
                 // tick (a new peer may appear), and likewise when the exclusion is
                 // what ruled everyone out (the re-queued copy drops it). If every
                 // known peer is instead marked failed, that means we have tried them
-                // all without filling the gap; stop chasing until a fresh peer is seen.
-                if self.known_peers.is_empty() || avoid.is_some() {
-                    self.catchup_queue.push(retry);
+                // all without filling the gap.
+                //
+                // A document gap is kept even then. Every source being marked failed is a
+                // statement about the sources, not about whether the gap is real, and dropping
+                // the task made it one: the exclusions are cleared as soon as any of those peers
+                // is seen again, but by then nothing remembered there was anything to ask for. A
+                // held task costs one of `max_catchup_queue` slots and issues no request until a
+                // peer is eligible, so it lies dormant rather than spinning.
+                let keep = self.known_peers.is_empty()
+                    || avoid.is_some()
+                    || matches!(retry, CatchupTask::Doc { .. });
+                if keep {
+                    self.requeue_catchup(retry);
                 }
+                self.catchup_inflight = None;
                 continue;
             };
             // Do not sign a request for a peer we are not connected to.
@@ -5077,10 +5169,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // Deferring costs nothing: the task is re-queued, connections are established by the
             // dial plan and PEX, and the next tick signs a request that can actually leave.
             if !self.peer_is_connected(peer) {
-                self.catchup_queue.push(retry);
+                self.requeue_catchup(retry);
+                self.catchup_inflight = None;
                 continue;
             }
             attempted = true;
+            // Now that a peer is chosen, record it with the task: if this tick is cancelled while
+            // waiting on it, the restore knows who not to ask again immediately.
+            self.catchup_inflight = Some((task, Some(peer)));
             match task {
                 CatchupTask::Commits {
                     from_epoch, gap_at, ..
@@ -5115,11 +5211,59 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     }
                 }
                 CatchupTask::Doc { doc_type, doc_id } => {
-                    let _ = self.request_catchup(peer, doc_type, doc_id).await;
+                    // A failed request says nothing about whether the gap is still there, so the
+                    // task outlives it. Discarding the result left a timeout, a refusal or a
+                    // malformed answer looking exactly like a completed catch-up: the peer was
+                    // not marked, the document was not re-queued, and a second, healthy source
+                    // was never asked. The serving peer is marked for the same reason the commit
+                    // branch marks one, so the next drain picks somebody else.
+                    if let Err(e) = self.request_catchup(peer, doc_type, doc_id).await {
+                        tracing::debug!(error = %e, ?doc_type, doc_id, ?peer, "doc catch-up failed");
+                        self.cool_off_catchup_peer(peer, doc_type, doc_id);
+                        self.enqueue_doc_catchup(doc_type, doc_id);
+                    }
                 }
             }
+            self.catchup_inflight = None;
         }
         attempted
+    }
+
+    /// Leave `peer` alone about this document for a while, because it just failed to fill the gap.
+    fn cool_off_catchup_peer(&mut self, peer: PeerId, doc_type: DocType, doc_id: u128) {
+        if self.catchup_cooldowns.len() >= MAX_CATCHUP_STALL_ENTRIES {
+            let now = self.clock.monotonic_ms();
+            self.catchup_cooldowns.retain(|_, until| *until > now);
+            if self.catchup_cooldowns.len() >= MAX_CATCHUP_STALL_ENTRIES {
+                self.catchup_cooldowns.clear();
+            }
+        }
+        let until = self
+            .clock
+            .monotonic_ms()
+            .saturating_add(CATCHUP_PEER_COOLDOWN_MS);
+        self.catchup_cooldowns
+            .insert((doc_type, doc_id, peer), until);
+    }
+
+    /// Whether `peer` is currently being left alone about this document.
+    fn catchup_peer_is_cooling(&self, peer: PeerId, doc_type: DocType, doc_id: u128) -> bool {
+        self.catchup_cooldowns
+            .get(&(doc_type, doc_id, peer))
+            .is_some_and(|until| *until > self.clock.monotonic_ms())
+    }
+
+    /// Put a task back on the queue, without letting a re-queue exceed the cap or duplicate a
+    /// task already waiting.
+    fn requeue_catchup(&mut self, task: CatchupTask) {
+        if self.catchup_queue.contains(&task) {
+            return;
+        }
+        if self.catchup_queue.len() >= self.config.max_catchup_queue {
+            tracing::warn!("catch-up queue full; dropping a re-queued task");
+            return;
+        }
+        self.catchup_queue.push(task);
     }
 
     /// Seed the **untrusted candidate** pool with a peer this node already reached outside the
@@ -5167,7 +5311,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// verified response still promotes into `member_peers`, so no unproven peer becomes any
     /// easier to believe.
     fn pick_catchup_peer_avoiding(&self, avoid: Option<PeerId>) -> Option<PeerId> {
-        let eligible = |p: &PeerId| !self.failed_catchup_peers.contains(p) && Some(*p) != avoid;
+        self.pick_catchup_peer_excluding(avoid, &[])
+    }
+
+    /// [`Self::pick_catchup_peer_avoiding`], also skipping every peer in `cooling`: the sources
+    /// that have already failed to fill *this* gap recently. Kept separate from the global failed
+    /// set, which any inbound traffic from a peer clears.
+    fn pick_catchup_peer_excluding(
+        &self,
+        avoid: Option<PeerId>,
+        cooling: &[PeerId],
+    ) -> Option<PeerId> {
+        let eligible = |p: &PeerId| {
+            !self.failed_catchup_peers.contains(p) && Some(*p) != avoid && !cooling.contains(p)
+        };
         let live = |p: &PeerId| eligible(p) && self.connected_peers.contains(p);
         let mut proven = self.member_peers.iter().rev().map(|proof| proof.peer);
         proven
@@ -5224,19 +5381,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Record a paging round from `peer` that claimed more was waiting but moved this node's
-    /// frontier nowhere, and answer whether to keep asking **that peer** for this document.
+    /// frontier nowhere, and once an unbroken run of them is long enough, mark that peer so
+    /// [`Self::pick_catchup_peer`] prefers another source.
     ///
-    /// Returning `false` does not abandon the document: the peer is marked so
-    /// [`Self::pick_catchup_peer`] prefers another source, and any later trigger (a gossiped op
-    /// whose dependencies are missing, an ordinary tick) queues it again. What it does end is the
-    /// one loop an authenticated member can drive on its own, where every answer is "ask me
-    /// again" and no answer ever carries anything this node can use.
-    fn note_nonprogressing_catchup(
-        &mut self,
-        peer: PeerId,
-        doc_type: DocType,
-        doc_id: u128,
-    ) -> bool {
+    /// The document itself is never abandoned here: the caller re-queues it either way, so
+    /// marking the peer is what hands the same work to somebody else on the next drain. What
+    /// this ends is the one loop an authenticated member can drive on its own, where every
+    /// answer is "ask me again" and no answer ever carries anything this node can use.
+    fn note_nonprogressing_catchup(&mut self, peer: PeerId, doc_type: DocType, doc_id: u128) {
         if self.catchup_stalls.len() >= MAX_CATCHUP_STALL_ENTRIES {
             self.catchup_stalls.clear();
         }
@@ -5246,7 +5398,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .or_insert(0);
         *seen = seen.saturating_add(1);
         if *seen < MAX_NONPROGRESSING_CATCHUP_ROUNDS {
-            return true;
+            return;
         }
         tracing::warn!(
             ?doc_type,
@@ -5257,8 +5409,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
              catch-up source for this document"
         );
         self.catchup_stalls.remove(&(doc_type, doc_id, peer));
+        self.cool_off_catchup_peer(peer, doc_type, doc_id);
         self.note_failed_catchup_peer(peer);
-        false
     }
 
     /// Forget a `(document, peer)` non-progress run, because that peer just moved us or told us
@@ -8521,7 +8673,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// request before it is authenticated; shuffling means a peer can bias the draw but cannot own
     /// it, and `PEX_FAILURE_BACKOFF_MS` then removes it for several ticks when it fails to answer.
     pub fn take_pex_targets(&mut self) -> Vec<PeerId> {
-        let now = self.clock.now_ms();
+        // Elapsed time, not wall time. This schedule is session-local retry state, which the
+        // `Clock` seam says belongs on the monotonic half: read from the wall clock, an operating
+        // system correction backwards extends a five-minute backoff by however far the correction
+        // went, and one forwards erases it.
+        let now = self.clock.monotonic_ms();
         // One local CYCLON age step per shuffle opportunity. Saturation keeps a long-offline
         // member from wrapping to "new"; a refreshed descriptor resets to zero in store_record.
         for (device, age) in &mut self.peer_record_age {
@@ -8577,7 +8733,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// consume every pass. Public because the actor bounds each request itself and so is the one
     /// that observes the timeout.
     pub fn note_pex_failure(&mut self, peer: PeerId) {
-        let at = self.clock.now_ms().saturating_add(PEX_FAILURE_BACKOFF_MS);
+        // Monotonic, to match `take_pex_targets`: the two must read the same clock or the
+        // comparison means nothing.
+        let at = self
+            .clock
+            .monotonic_ms()
+            .saturating_add(PEX_FAILURE_BACKOFF_MS);
         self.note_pex_next_eligible(peer, at);
     }
 
@@ -9744,10 +9905,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: PeerId,
         req: Vec<u8>,
         what: &'static str,
+        within_ms: u64,
     ) -> Result<Bytes, SyncError> {
         // The deadline runs on the injected clock like every other wait in this crate, so a
         // deterministic test advances into it rather than sleeping through it.
-        let deadline = clock.sleep(std::time::Duration::from_millis(CATCHUP_REQUEST_MS));
+        let deadline = clock.sleep(std::time::Duration::from_millis(within_ms));
         let answer = transport.request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req));
         futures::pin_mut!(deadline, answer);
         match futures::future::select(answer, deadline).await {
@@ -9778,14 +9940,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .get_mut(&(doc_type, doc_id))
             .map(|doc| doc.sync_frontier(MAX_CATCHUP_SINCE_HEADS))
             .unwrap_or_default();
-        // Nothing held means nothing to subtract; that is the full history's business.
-        if !heads.is_empty() {
-            if let Some(applied) = self
-                .request_catchup_since(peer, doc_type, doc_id, &heads)
-                .await?
-            {
-                return Ok(applied);
-            }
+        // Ask the paged way first even with nothing held at all. An empty frontier subtracts
+        // nothing, so it means "send me everything", and the answer still arrives in bounded
+        // chunks with a continuation marker on each. Skipping to the whole-history request
+        // because there was nothing to subtract sent the commonest case there is, a freshly
+        // opened or freshly joined document, down the one path that answers with the largest
+        // response in the protocol; and that response is bounded by the same short deadline the
+        // chunk budget exists to make safe, so a history no bigger than a few megabytes could
+        // not converge at all over an ordinary link.
+        //
+        // The whole-history request is now only ever reached for a peer that cannot page.
+        if let Some(applied) = self
+            .request_catchup_since(peer, doc_type, doc_id, &heads)
+            .await?
+        {
+            return Ok(applied);
         }
         self.request_full_catchup(peer, doc_type, doc_id).await
     }
@@ -9817,6 +9986,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             peer,
             req,
             "incremental doc catch-up",
+            CATCHUP_REQUEST_MS,
         )
         .await?;
         match resp.split_first() {
@@ -9839,10 +10009,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // counted, and an unbroken run of them sends the next request somewhere else.
                 if applied > 0 {
                     self.clear_catchup_stall(peer, doc_type, doc_id);
-                    self.enqueue_doc_catchup(doc_type, doc_id);
-                } else if self.note_nonprogressing_catchup(peer, doc_type, doc_id) {
-                    self.enqueue_doc_catchup(doc_type, doc_id);
+                } else {
+                    self.note_nonprogressing_catchup(peer, doc_type, doc_id);
                 }
+                // Queued either way. The peer said the gap is real, so the gap outlives any
+                // verdict about the peer: exhausting one source's benefit of the doubt marks
+                // that source and must still leave the work for the next drain to hand to
+                // another. Dropping the task there marked the bad peer and threw away the only
+                // thing that would have caused a good one to be picked.
+                self.enqueue_doc_catchup(doc_type, doc_id);
                 Ok(Some(applied))
             }
             // A marker this build has no meaning for. Treated as "this peer cannot page for me"
@@ -9876,9 +10051,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.build_authed_request(KIND_CATCHUP, &encode_catchup_req(doc_type, doc_id))?;
         tracing::debug!(?doc_type, doc_id, ?peer, "request doc catch-up");
         self.stats.doc_catchups_requested += 1;
-        let resp =
-            Self::request_within_deadline(&self.transport, &*self.clock, peer, req, "doc catch-up")
-                .await?;
+        // The compatibility grammar's own deadline: it cannot be told to page, so it must be
+        // allowed the time its largest legal answer needs. See `FULL_CATCHUP_REQUEST_MS`.
+        let resp = Self::request_within_deadline(
+            &self.transport,
+            &*self.clock,
+            peer,
+            req,
+            "doc catch-up",
+            FULL_CATCHUP_REQUEST_MS,
+        )
+        .await?;
         if resp.is_empty() {
             return Ok(0); // peer had nothing for this document
         }
@@ -10172,6 +10355,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             peer,
             req,
             "commit catch-up",
+            CATCHUP_REQUEST_MS,
         )
         .await?;
         if resp.is_empty() {
@@ -10851,6 +11035,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     fn serve_catchup_since(&mut self, data: &[u8]) -> Option<Vec<u8>> {
         let (inner, _pubkey, _auth) = self.authenticate_request(KIND_CATCHUP_SINCE, data)?;
         let (doc_type, doc_id, heads) = decode_catchup_since_req(&inner).ok()?;
+        // A document this peer does not hold is answered, not left silent. An empty response is
+        // the wire's way of saying "I do not know this request kind", and the requester's only
+        // sane reading of that is to fall back to the whole-history grammar; so staying silent
+        // here made "I have no such document" indistinguishable from "I am an older build", and
+        // sent every requester asking a peer that simply is not in that channel down the
+        // compatibility path, with the longest deadline and the largest response in the protocol
+        // behind it. The marker plus an empty bundle says the true thing: understood, nothing
+        // for you, do not ask again.
+        if !self.docs.contains_key(&(doc_type, doc_id)) {
+            let (empty, _) = size_capped_ops(&[], MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE).ok()?;
+            let mut response = Vec::with_capacity(empty.len() + 1);
+            response.push(CATCHUP_SINCE_UNDERSTOOD);
+            response.extend_from_slice(&empty);
+            return Some(response);
+        }
         let doc = self.docs.get_mut(&(doc_type, doc_id))?;
         match doc.export_catchup_since(&heads, &self.group, &self.device, &mut self.rng) {
             Ok(bundle) => {
@@ -15318,24 +15517,14 @@ mod tests {
         alice.open_channel(DocType::Channel, 81).await.unwrap();
         bob.open_channel(DocType::Channel, 81).await.unwrap();
 
-        // Bob takes the opening post live, so he has a frontier and everything below goes down
-        // the paging request rather than the whole-history one. The chunk budget and the bounded
-        // rounds it produces belong to that request; the whole-history shape cannot tell a peer
-        // to ask again, so it deliberately keeps the larger response budget.
-        alice
-            .post(DocType::Channel, 81, |doc| doc.put(ROOT, "opener", "hello"))
-            .await
-            .unwrap();
-        assert!(matches!(
-            bob.transport.next_event().await,
-            Some(TransportEvent::Gossip { .. })
-        ));
-        let (seeded, _) = tokio::join!(
-            bob.request_catchup(alice_peer, DocType::Channel, 81),
-            alice.run_once(),
-        );
-        assert_eq!(seeded.unwrap(), 1, "Bob starts with a frontier, not empty");
-
+        // Bob holds nothing for this document, which is the commonest case there is: a freshly
+        // opened or freshly joined channel. It has to page like any other. Asking the paged way
+        // only when there was something to subtract sent exactly this case to the whole-history
+        // grammar, whose answer is bounded by nothing but the 16 MiB response ceiling while
+        // still being bounded by the short deadline the chunk budget exists to make safe. The
+        // rounds below are the proof it pages: the whole-history path would deliver all of this
+        // in one.
+        //
         // Comfortably more than one chunk's worth, written while Bob was away.
         let body = "x".repeat(16_384);
         let posts = 40;
@@ -15359,7 +15548,7 @@ mod tests {
             .doc(DocType::Channel, 81)
             .map(|doc| doc.op_count())
             .unwrap_or(0)
-            < posts + 1
+            < posts
         {
             rounds += 1;
             assert!(rounds < 50, "catch-up must make progress, not spin");
@@ -15724,15 +15913,7 @@ mod tests {
                 )
             })
         };
-        let mut rounds = 0;
-        let mut kept_asking = 0;
-        loop {
-            rounds += 1;
-            assert!(
-                rounds < 64,
-                "a peer that never moves us must stop being asked, not be asked forever"
-            );
-            bob.catchup_queue.clear();
+        for round in 1..=usize::from(MAX_NONPROGRESSING_CATCHUP_ROUNDS) {
             let hostile = hostile.clone();
             let (applied, ()) = tokio::join!(
                 bob.request_catchup(alice_peer, DocType::Channel, 88),
@@ -15746,22 +15927,20 @@ mod tests {
                 }
             );
             assert_eq!(applied.unwrap(), 0, "nothing usable ever arrives");
-            if !queued(&bob) {
-                break;
-            }
-            kept_asking += 1;
+            assert!(
+                queued(&bob),
+                "the gap outlives any verdict about the peer: dropping the task at the threshold \
+                 marked the bad peer and threw away the only thing that would pick a good one"
+            );
+            assert_eq!(
+                bob.failed_catchup_peers.contains(&alice_peer),
+                round == usize::from(MAX_NONPROGRESSING_CATCHUP_ROUNDS),
+                "an honest peer replaying a prefix we already hold gets a bounded benefit of the \
+                 doubt, and is passed over only once it is spent"
+            );
         }
-        assert_eq!(
-            kept_asking,
-            usize::from(MAX_NONPROGRESSING_CATCHUP_ROUNDS) - 1,
-            "an honest peer replaying a prefix we already hold gets a bounded benefit of the doubt"
-        );
-        assert!(
-            bob.failed_catchup_peers.contains(&alice_peer),
-            "and is then passed over, so another member can finish what it would not"
-        );
 
-        // Not a permanent verdict on the document: one usable round resets the run.
+        // Not a permanent verdict on the peer either: one usable round resets the run.
         bob.failed_catchup_peers.clear();
         alice
             .post(DocType::Channel, 88, |doc| doc.put(ROOT, "real", "two"))
@@ -15780,6 +15959,166 @@ mod tests {
             !bob.failed_catchup_peers.contains(&alice_peer),
             "a peer that starts answering properly is a good source again"
         );
+    }
+
+    /// The failover the bound exists for, driven through the queue rather than by hand: with two
+    /// sources for the same document, one of which only ever says "ask me again", the document
+    /// still arrives. Nothing here enqueues the task after the first time; if the drain ever
+    /// dropped it, or only ever re-picked the peer that would not serve it, this cannot converge.
+    #[tokio::test]
+    async fn a_document_reaches_the_second_source_when_the_first_will_not_serve_it() {
+        use automerge::transaction::Transactable;
+        use automerge::{ReadDoc as _, ROOT};
+
+        let (_hub, mut members, ids) = build_members(3).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let mut carol = it.next().unwrap();
+        let (alice_peer, carol_peer) = (alice.local_peer(), carol.local_peer());
+        let bob_peer = bob.local_peer();
+        // Only Alice is a live source to begin with, so the picker's first choice is not a race.
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut carol, bob_peer, ids[1]);
+        for node in [&mut alice, &mut bob, &mut carol] {
+            node.open_channel(DocType::Channel, 90).await.unwrap();
+        }
+
+        // Alice writes, and Carol takes the op straight off the wire, so both hold the document
+        // and either could serve it. Handled by hand rather than through `run_once`, which would
+        // also drain Carol's own catch-up queue against peers this test never has answer.
+        alice
+            .post(DocType::Channel, 90, |doc| doc.put(ROOT, "only", "post"))
+            .await
+            .unwrap();
+        for node in [&mut bob, &mut carol] {
+            assert!(matches!(
+                node.transport.next_event().await,
+                Some(TransportEvent::Gossip { .. })
+            ));
+        }
+        prove_live_member(&mut carol, alice_peer, ids[0]);
+        let (got, ()) = tokio::join!(
+            carol.request_catchup(alice_peer, DocType::Channel, 90),
+            async {
+                let Some(TransportEvent::Request {
+                    from,
+                    data,
+                    responder,
+                    ..
+                }) = alice.transport.next_event().await
+                else {
+                    panic!("Carol's catch-up is the next event");
+                };
+                let response = alice.handle_request(from, &data);
+                responder.respond(Bytes::from(response));
+            }
+        );
+        assert_eq!(got.unwrap(), 1, "Carol can serve this document");
+
+        let (empty_bundle, _) =
+            size_capped_ops(&[], MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE).unwrap();
+        let mut hostile = vec![CATCHUP_SINCE_MORE];
+        hostile.extend_from_slice(&empty_bundle);
+
+        // The one enqueue in this test. Everything after it is the drain's own bookkeeping.
+        bob.catchup_queue.clear(); // whatever opening the channel queued is not the subject here
+        bob.enqueue_doc_catchup(DocType::Channel, 90);
+
+        // Alice is asked, and answers "ask me again" while sending nothing, until her benefit of
+        // the doubt runs out. The drain, not the test, decides to ask again each time.
+        for _ in 0..usize::from(MAX_NONPROGRESSING_CATCHUP_ROUNDS) {
+            let hostile = hostile.clone();
+            // Bounded, so a drain that stopped asking fails here instead of hanging.
+            let (attempted, served) = tokio::join!(
+                bob.drain_catchup_queue(),
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        match alice.transport.next_event().await {
+                            Some(TransportEvent::Request { responder, .. }) => {
+                                responder.respond(Bytes::from(hostile));
+                                return;
+                            }
+                            Some(_) => continue, // ordinary gossip from the others
+                            None => panic!("the transport closed"),
+                        }
+                    }
+                })
+            );
+            assert!(
+                served.is_ok(),
+                "the drain must still be asking: a gap dropped here is a gap nothing recovers"
+            );
+            assert!(attempted, "the drain kept the task and asked with it");
+        }
+        assert!(
+            bob.failed_catchup_peers.contains(&alice_peer),
+            "the source that would not serve is marked"
+        );
+        assert_eq!(
+            bob.doc(DocType::Channel, 90).map(|d| d.op_count()),
+            Some(0),
+            "and nothing has arrived yet"
+        );
+
+        // Carol comes into view. Nothing re-queues the document here: if the drain had dropped it
+        // when Alice was marked, there would be nothing left to hand her.
+        prove_live_member(&mut bob, carol_peer, ids[2]);
+        // The property under test is that this task is still owned after the threshold, which is
+        // what the next drain hands to Carol. Unrelated recovery work queued along the way is not
+        // the subject and would just need extra peers to answer it.
+        assert!(
+            bob.catchup_queue.iter().any(|task| matches!(
+                task,
+                CatchupTask::Doc {
+                    doc_type: DocType::Channel,
+                    doc_id: 90
+                }
+            )),
+            "the document survived the source that would not serve it"
+        );
+        bob.catchup_queue.retain(|task| {
+            matches!(
+                task,
+                CatchupTask::Doc {
+                    doc_type: DocType::Channel,
+                    doc_id: 90
+                }
+            )
+        });
+        let mut converged = false;
+        for _ in 0..8 {
+            let (_, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+                let Some(TransportEvent::Request {
+                    from,
+                    data,
+                    responder,
+                    ..
+                }) = carol.transport.next_event().await
+                else {
+                    panic!("the drain's request is the next event");
+                };
+                let response = carol.handle_request(from, &data);
+                responder.respond(Bytes::from(response));
+            });
+            if bob
+                .doc(DocType::Channel, 90)
+                .map(|d| d.op_count())
+                .unwrap_or(0)
+                == 1
+            {
+                converged = true;
+                break;
+            }
+        }
+        assert!(
+            converged,
+            "a document with a willing source must arrive even when an unwilling one was asked first"
+        );
+        let doc = bob.doc(DocType::Channel, 90).unwrap().doc();
+        assert!(doc.get(ROOT, "only").unwrap().is_some());
     }
 
     /// The shapes a build made before the paging request can parse, pinned here so a later change
@@ -15970,7 +16309,10 @@ mod tests {
         let mut bad = bundle[0].clone();
         bad.epoch = bad.epoch.saturating_add(1);
         bundle.push(bad);
-        let response = encode_bundle(&bundle);
+        // Answered in the paged grammar, which is what Bob asks with: the subject here is a
+        // bundle whose later frame fails verification, not a peer too old to page.
+        let mut response = vec![CATCHUP_SINCE_UNDERSTOOD];
+        response.extend_from_slice(&encode_bundle(&bundle));
 
         let (result, ()) = tokio::join!(
             bob.request_catchup(alice_peer, DocType::Channel, 79),
@@ -18392,6 +18734,23 @@ mod tests {
         // The backoff expires; it is a deprioritisation, not a ban.
         clock.advance_ms(PEX_FAILURE_BACKOFF_MS);
         assert!(alice.take_pex_targets().contains(&silent));
+
+        // And it is measured in elapsed time, not wall time. Read from the wall clock, an
+        // operating-system correction backwards would extend a five-minute backoff by however
+        // far the correction went, and a correction forwards would erase it: neither has
+        // anything to do with how long this peer has actually been given to answer.
+        alice.note_pex_failure(silent);
+        clock.set_wall_ms(1);
+        clock.advance_ms(MIN_PEX_INTERVAL_MS);
+        assert!(
+            !alice.take_pex_targets().contains(&silent),
+            "a wall-clock jump backwards does not end the backoff early"
+        );
+        clock.advance_ms(PEX_FAILURE_BACKOFF_MS);
+        assert!(
+            alice.take_pex_targets().contains(&silent),
+            "and elapsed time still ends it"
+        );
     }
 
     #[tokio::test]

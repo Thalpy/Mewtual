@@ -69,6 +69,11 @@ const SETTLE_TICKS: usize = 12;
 /// the product's own ticks.
 const PEX_BACKOFF_STEP_MS: u64 = 360_000;
 
+/// Injected-clock time each polling step of [`until_ticking`] lets pass. Comfortably clears the
+/// sync layer's two-second request deadline within a few steps, without racing far enough ahead
+/// to trip the freshness horizons these tests also depend on.
+const TICK_STEP_MS: u64 = 300;
+
 /// A stand-in reachable address for a node's published peer record. Loopback and LAN addresses
 /// are stripped inside `publish_self_record`, so a record built from them would carry none and
 /// the cross-session cache would have nothing to hold; TEST-NET-3 is routable-looking and
@@ -353,6 +358,40 @@ where
                 return value;
             }
             let _ = timeout(Duration::from_millis(20), events.recv()).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the product never converged: {label}"))
+}
+
+/// [`until`], with the injected clock advancing as it waits.
+///
+/// Some waits are only resolved by a deadline expiring. Two nodes can each be blocked on a
+/// request the other cannot answer while it is blocked, and what breaks that in the product is
+/// `CATCHUP_REQUEST_MS`: the request gives up, the task is re-queued, and the next tick succeeds.
+/// A `ManualClock` that nobody advances never reaches any deadline, so such a wait can only be
+/// resolved by work being *lost* somewhere, which is not a property to write tests against. Time
+/// passing is what actually happens; this says so.
+async fn until_ticking<F, Fut, T>(
+    label: &str,
+    clock: &ManualClock,
+    events: &mut Receiver<TracedEvent>,
+    mut probe: F,
+) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    timeout(WAIT, async {
+        loop {
+            // The probe is a command, and a wedged actor cannot answer one, so it is given a
+            // bound rather than awaited outright: waiting for it to return before letting time
+            // pass would mean time never passes in exactly the case the deadline is for.
+            if let Ok(Some(value)) = timeout(Duration::from_millis(50), probe()).await {
+                return value;
+            }
+            let _ = timeout(Duration::from_millis(20), events.recv()).await;
+            clock.advance_ms(TICK_STEP_MS);
         }
     })
     .await
@@ -744,8 +783,13 @@ async fn a_channel_one_member_created_is_readable_by_a_member_who_opens_it_late(
     // that silently starts working at the next live message.
     alice.actor.open_channel(plans).await;
     alice.actor.catch_up_any(plans).await;
-    let texts: Vec<String> = until(
+    // Ticking, because both nodes can be waiting on each other here: Alice is blocked on the
+    // catch-up she just asked for while Bob's own tick is blocked on a request Alice cannot
+    // answer until she is done. What unwedges that in the product is the request deadline
+    // expiring, and a clock nobody advances never reaches it.
+    let texts: Vec<String> = until_ticking(
         "the late-opening member catches the backlog up",
+        &clock,
         &mut alice.events,
         || async {
             let msgs = alice.actor.messages(plans).await;

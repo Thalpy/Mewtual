@@ -597,7 +597,11 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     that kind existed can ask for or parse. It carries no way to say "there is more", so it is
     capped at the 16 MiB response ceiling rather than at the paging chunk: a peer that cannot be
     told to page has nothing that re-asks after a short answer, and its only route back would be
-    the next gossiped op whose dependencies it lacks.
+    the next gossiped op whose dependencies it lacks. Because of that ceiling it gets its own
+    deadline, `FULL_CATCHUP_REQUEST_MS`, sized to the same ~1 Mb/s floor the chunk budget leaves;
+    `CATCHUP_REQUEST_MS` applied to a legal maximum response would demand roughly 67 Mb/s. Two
+    current peers never spend that deadline on each other, because this request is only reached
+    when the paged one came back empty or with a marker we do not know.
   - `19` KIND_CATCHUP_SINCE; **authed** body wrapping `u16 doc_type ‖ u128 doc_id ‖ u32 count(≤64) ‖
     32-byte change hashes`; response = `[marker] ‖ op bundle`, carrying only the ops behind the server's
     frontier and not behind the hashes named. The hashes are the requester's automerge heads **plus
@@ -617,7 +621,13 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
       cannot page for us, and never as a malformed response. A malformed reading would propagate
       out of `request_catchup` and take the whole-history fallback with it, stranding the document
       against a peer that was answering perfectly well. This is what lets a later build add a
-      marker without breaking the population installed today.
+      marker without breaking the population installed today. It is a defensive downgrade, not a
+      guarantee of convergence: what it buys is another route to try, and the fallback it takes is
+      the compatibility grammar with the costs described under `KIND_CATCHUP`.
+    - A peer that understands the kind but **holds no such document** answers `1` with an empty
+      bundle, not an empty response. Silence there would be indistinguishable from an older build
+      and would send every requester asking a peer that simply is not in that channel down the
+      compatibility path.
     - Continuation is the **server's** answer, because only it knows what it withheld. A requester
       that inferred it from "did I apply anything" stopped on a chunk of ops it already held, and
       on a chunk that could carry nothing because the next op was larger than the budget.
@@ -636,8 +646,17 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     peer in `failed_catchup_peers`, so `pick_catchup_peer` prefers another source. That bounds the
     one loop an authenticated member can drive by itself, where every answer says "ask me again"
     and no answer carries anything usable. The run resets the moment that peer applies anything.
-  - **Mixed-version order** for a document with no local ops: `KIND_CATCHUP_SINCE` first when a
-    frontier exists, falling back to `KIND_CATCHUP` on an empty or unrecognised-marker response.
+  - **Request order, always**: `KIND_CATCHUP_SINCE` first, *including* when the frontier is empty
+    (which subtracts nothing and so asks for everything, still in bounded chunks), falling back to
+    `KIND_CATCHUP` only on an empty or unrecognised-marker response. Asking the paged way only
+    when there was something to subtract sent the commonest case there is, a freshly opened or
+    freshly joined document, to the largest response in the protocol under the shortest deadline.
+  - **A detected gap stays owned until it is filled.** The queue keeps the task across every
+    outcome that is not an authoritative "that is everything": a timeout, a refusal, a malformed
+    answer and an exhausted non-progress allowance all mark the peer and leave the work queued for
+    the next drain to hand to another source. The task in flight lives in `catchup_inflight` on
+    the synchronizer rather than on the stack, because the actor cancels its tick whenever a
+    command arrives, and a quiet document has no later inbound op to rediscover a lost gap with.
   - `1` KIND_JOIN; body `bytes invite.encode() ‖ bytes key_package`; response =
     `[JOIN_READY] ‖ bytes welcome ‖ bytes signature(64) ‖ bytes sealed_routing` (the admitter signs
     `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome ‖ sealed_routing`). Not member-authed.
