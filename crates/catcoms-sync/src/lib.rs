@@ -167,6 +167,19 @@ const CATCHUP_SINCE_UNDERSTOOD: u8 = 1;
 /// inferred it from "did I apply anything" stopped on a chunk of ops it already had, and on a
 /// chunk that could carry nothing because the next op was larger than the budget.
 const CATCHUP_SINCE_MORE: u8 = 2;
+/// Consecutive rounds one peer may claim [`CATCHUP_SINCE_MORE`] while moving this node's
+/// frontier nowhere, before a different source is preferred for that document.
+///
+/// A round that applies nothing is legitimate: the frontier on the wire is capped, so it can
+/// understate what we hold and an honest peer replays a prefix we already have. That is why the
+/// continuation marker is believed rather than second-guessed from what landed. But the bytes are
+/// written by another member, and "there is more" plus a bundle we cannot use is the one answer
+/// an authenticated peer can repeat forever to keep us asking. A bounded run absorbs the honest
+/// case; past it the peer has told us nothing usable enough times to prefer somebody else.
+const MAX_NONPROGRESSING_CATCHUP_ROUNDS: u8 = 8;
+/// Ceiling on the non-progress ledger. Its keys are all this node's own (documents it has open,
+/// peers it chose to ask), so it cannot be grown from outside; the cap is belt and braces.
+const MAX_CATCHUP_STALL_ENTRIES: usize = 256;
 const MAX_DELIVERY_RECEIPT_OUTBOX: usize = 128;
 const MAX_DELIVERY_RECEIPT_TARGETS: usize = 64;
 const RECIPROCAL_ATTEST_DOMAIN: &str = "catcoms/reciprocal/helper-attestation/v1";
@@ -3651,6 +3664,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// skipped when choosing the next catch-up source so one bad/stale peer can't
     /// dead-end recovery. Cleared once a catch-up makes progress.
     failed_catchup_peers: VecDeque<PeerId>,
+    /// Consecutive paging rounds each `(document, peer)` has answered with "there is more" while
+    /// moving nothing. Reset the moment that peer applies anything, so only an unbroken run
+    /// counts. See [`MAX_NONPROGRESSING_CATCHUP_ROUNDS`].
+    catchup_stalls: HashMap<(DocType, u128, PeerId), u8>,
     /// An in-progress fork-resolution contest (only when `max_committer_rank >= 1`).
     pending: Option<PendingResolve>,
     /// Provisional-Welcome (or rejection) pushes to deliver to joiners once a
@@ -3940,6 +3957,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             delivery_receipts: HashMap::new(),
             delivery_receipt_revision: 0,
             failed_catchup_peers: VecDeque::new(),
+            catchup_stalls: HashMap::new(),
             pending: None,
             welcome_outbox: Vec::new(),
             add_request_queue: VecDeque::new(),
@@ -5203,6 +5221,50 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         while self.failed_catchup_peers.len() > self.config.max_known_peers {
             self.failed_catchup_peers.pop_front();
         }
+    }
+
+    /// Record a paging round from `peer` that claimed more was waiting but moved this node's
+    /// frontier nowhere, and answer whether to keep asking **that peer** for this document.
+    ///
+    /// Returning `false` does not abandon the document: the peer is marked so
+    /// [`Self::pick_catchup_peer`] prefers another source, and any later trigger (a gossiped op
+    /// whose dependencies are missing, an ordinary tick) queues it again. What it does end is the
+    /// one loop an authenticated member can drive on its own, where every answer is "ask me
+    /// again" and no answer ever carries anything this node can use.
+    fn note_nonprogressing_catchup(
+        &mut self,
+        peer: PeerId,
+        doc_type: DocType,
+        doc_id: u128,
+    ) -> bool {
+        if self.catchup_stalls.len() >= MAX_CATCHUP_STALL_ENTRIES {
+            self.catchup_stalls.clear();
+        }
+        let seen = self
+            .catchup_stalls
+            .entry((doc_type, doc_id, peer))
+            .or_insert(0);
+        *seen = seen.saturating_add(1);
+        if *seen < MAX_NONPROGRESSING_CATCHUP_ROUNDS {
+            return true;
+        }
+        tracing::warn!(
+            ?doc_type,
+            doc_id,
+            ?peer,
+            rounds = *seen,
+            "peer keeps saying it withheld more while sending nothing usable; preferring another \
+             catch-up source for this document"
+        );
+        self.catchup_stalls.remove(&(doc_type, doc_id, peer));
+        self.note_failed_catchup_peer(peer);
+        false
+    }
+
+    /// Forget a `(document, peer)` non-progress run, because that peer just moved us or told us
+    /// it was finished. Only an unbroken run is evidence of anything.
+    fn clear_catchup_stall(&mut self, peer: PeerId, doc_type: DocType, doc_id: u128) {
+        self.catchup_stalls.remove(&(doc_type, doc_id, peer));
     }
 
     /// Queue a membership-commit catch-up from `from_epoch` (deduped: at most one
@@ -9760,18 +9822,46 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         match resp.split_first() {
             // An older peer, or one that refused: ask the way it understands.
             None => Ok(None),
-            Some((&CATCHUP_SINCE_UNDERSTOOD, bundle)) => self
-                .apply_catchup_response(doc_type, doc_id, bundle)
-                .map(Some),
+            Some((&CATCHUP_SINCE_UNDERSTOOD, bundle)) => {
+                // It is finished with us, so an unbroken run of "ask me again" has ended.
+                self.clear_catchup_stall(peer, doc_type, doc_id);
+                self.apply_catchup_response(doc_type, doc_id, bundle)
+                    .map(Some)
+            }
             Some((&CATCHUP_SINCE_MORE, bundle)) => {
                 let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
                 // The peer said it withheld some, so ask again whatever this round applied. A
                 // chunk can legitimately apply nothing (ops already held, or one op too large to
                 // share the budget) and the gap still be real.
-                self.enqueue_doc_catchup(doc_type, doc_id);
+                //
+                // Believing that marker is right and is also the whole of what a hostile member
+                // controls here, so believing it forever is not: a round that moves nothing is
+                // counted, and an unbroken run of them sends the next request somewhere else.
+                if applied > 0 {
+                    self.clear_catchup_stall(peer, doc_type, doc_id);
+                    self.enqueue_doc_catchup(doc_type, doc_id);
+                } else if self.note_nonprogressing_catchup(peer, doc_type, doc_id) {
+                    self.enqueue_doc_catchup(doc_type, doc_id);
+                }
                 Ok(Some(applied))
             }
-            Some(_) => Err(SyncError::Malformed),
+            // A marker this build has no meaning for. Treated as "this peer cannot page for me"
+            // rather than as a malformed response, because the two are told apart by nothing but
+            // which build is newer, and only one of the readings is safe to be wrong about: the
+            // error propagates out of `request_catchup` and takes the whole-history fallback with
+            // it, leaving the document stuck against a peer that was answering perfectly well.
+            // Falling back costs one extra request and can always converge. A future marker can
+            // therefore be added here without stranding anything built today.
+            Some((marker, _)) => {
+                tracing::debug!(
+                    ?doc_type,
+                    doc_id,
+                    ?peer,
+                    marker,
+                    "unrecognised incremental catch-up marker; falling back to whole history"
+                );
+                Ok(None)
+            }
         }
     }
 
@@ -10812,15 +10902,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let doc = self.docs.get(&(doc_type, doc_id))?;
         match doc.export_catchup(&self.group, &self.device, &mut self.rng) {
             Ok(bundle) => {
-                // Bound the response we generate (mirror the inbound cap): serve a contiguous
-                // prefix that fits the chunk budget, so one answer stays inside the request
-                // deadline. This shape carries no "ask again" marker, but it does not need one:
-                // only a peer holding nothing asks this way, so every op served is new to it, and
-                // applying anything queues the follow-up, which goes down the paging path. The
-                // response ceiling is the wire limit, letting a single op too large for the
-                // budget still travel alone rather than be silently withheld.
+                // Deliberately the whole-response budget, not the chunk one, and deliberately
+                // unchanged from the shape released peers already talk.
+                //
+                // This grammar has no way to say "there is more". A peer built before
+                // `KIND_CATCHUP_SINCE` existed answers a truncated prefix by applying it and
+                // stopping: nothing in it re-asks after a short answer, so its only route back is
+                // the next gossiped op whose dependencies it lacks. Serving it 256 KiB where its
+                // own build serves 16 MiB would leave a quiet channel's history short until
+                // somebody happens to speak. Peers that can be told to page ask with
+                // `KIND_CATCHUP_SINCE`, which is where the chunk budget and the deadline bound
+                // belong; this shape is only ever asked by a peer holding nothing at all.
                 let (prefix, served) =
-                    match size_capped_ops(&bundle, MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE) {
+                    match size_capped_ops(&bundle, MAX_CONTROL_RESPONSE, MAX_CONTROL_RESPONSE) {
                         Ok(capped) => capped,
                         Err(e) => {
                             tracing::error!(error = %e, ?doc_type, doc_id, "cannot serve catch-up");
@@ -15224,6 +15318,24 @@ mod tests {
         alice.open_channel(DocType::Channel, 81).await.unwrap();
         bob.open_channel(DocType::Channel, 81).await.unwrap();
 
+        // Bob takes the opening post live, so he has a frontier and everything below goes down
+        // the paging request rather than the whole-history one. The chunk budget and the bounded
+        // rounds it produces belong to that request; the whole-history shape cannot tell a peer
+        // to ask again, so it deliberately keeps the larger response budget.
+        alice
+            .post(DocType::Channel, 81, |doc| doc.put(ROOT, "opener", "hello"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            bob.transport.next_event().await,
+            Some(TransportEvent::Gossip { .. })
+        ));
+        let (seeded, _) = tokio::join!(
+            bob.request_catchup(alice_peer, DocType::Channel, 81),
+            alice.run_once(),
+        );
+        assert_eq!(seeded.unwrap(), 1, "Bob starts with a frontier, not empty");
+
         // Comfortably more than one chunk's worth, written while Bob was away.
         let body = "x".repeat(16_384);
         let posts = 40;
@@ -15247,7 +15359,7 @@ mod tests {
             .doc(DocType::Channel, 81)
             .map(|doc| doc.op_count())
             .unwrap_or(0)
-            < posts
+            < posts + 1
         {
             rounds += 1;
             assert!(rounds < 50, "catch-up must make progress, not spin");
@@ -15558,6 +15670,210 @@ mod tests {
             doc.get(ROOT, "last").unwrap().is_some(),
             "the op behind the duplicate chunk arrived"
         );
+    }
+
+    /// Believing the continuation marker is right, and is also the whole of what a hostile member
+    /// controls on this path. "Ask me again" plus a bundle carrying nothing is a valid response,
+    /// so an authenticated peer can repeat it for as long as we are willing to ask.
+    #[tokio::test]
+    async fn a_peer_that_only_ever_says_ask_again_is_dropped_for_another_source() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        alice.open_channel(DocType::Channel, 88).await.unwrap();
+        bob.open_channel(DocType::Channel, 88).await.unwrap();
+
+        // Bob needs a frontier, or he asks for the whole history instead of paging.
+        alice
+            .post(DocType::Channel, 88, |doc| doc.put(ROOT, "seed", "one"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            bob.transport.next_event().await,
+            Some(TransportEvent::Gossip { .. })
+        ));
+        let (seeded, _) = tokio::join!(
+            bob.request_catchup(alice_peer, DocType::Channel, 88),
+            alice.run_once(),
+        );
+        assert_eq!(seeded.unwrap(), 1);
+
+        // The hostile answer, built with the real encoder so it is a response the honest parser
+        // accepts: the continuation marker, then a bundle of no operations at all.
+        let (empty_bundle, served) =
+            size_capped_ops(&[], MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE).unwrap();
+        assert_eq!(served, 0);
+        let mut hostile = vec![CATCHUP_SINCE_MORE];
+        hostile.extend_from_slice(&empty_bundle);
+
+        let queued = |bob: &ChannelSync<MemNetwork, ChaCha20Rng>| {
+            bob.catchup_queue.iter().any(|task| {
+                matches!(
+                    task,
+                    CatchupTask::Doc {
+                        doc_type: DocType::Channel,
+                        doc_id: 88
+                    }
+                )
+            })
+        };
+        let mut rounds = 0;
+        let mut kept_asking = 0;
+        loop {
+            rounds += 1;
+            assert!(
+                rounds < 64,
+                "a peer that never moves us must stop being asked, not be asked forever"
+            );
+            bob.catchup_queue.clear();
+            let hostile = hostile.clone();
+            let (applied, ()) = tokio::join!(
+                bob.request_catchup(alice_peer, DocType::Channel, 88),
+                async {
+                    let Some(TransportEvent::Request { responder, .. }) =
+                        alice.transport.next_event().await
+                    else {
+                        panic!("the paging request is the next event");
+                    };
+                    responder.respond(Bytes::from(hostile));
+                }
+            );
+            assert_eq!(applied.unwrap(), 0, "nothing usable ever arrives");
+            if !queued(&bob) {
+                break;
+            }
+            kept_asking += 1;
+        }
+        assert_eq!(
+            kept_asking,
+            usize::from(MAX_NONPROGRESSING_CATCHUP_ROUNDS) - 1,
+            "an honest peer replaying a prefix we already hold gets a bounded benefit of the doubt"
+        );
+        assert!(
+            bob.failed_catchup_peers.contains(&alice_peer),
+            "and is then passed over, so another member can finish what it would not"
+        );
+
+        // Not a permanent verdict on the document: one usable round resets the run.
+        bob.failed_catchup_peers.clear();
+        alice
+            .post(DocType::Channel, 88, |doc| doc.put(ROOT, "real", "two"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            bob.transport.next_event().await,
+            Some(TransportEvent::Gossip { .. })
+        ));
+        let (applied, _) = tokio::join!(
+            bob.request_catchup(alice_peer, DocType::Channel, 88),
+            alice.run_once(),
+        );
+        assert_eq!(applied.unwrap(), 1);
+        assert!(
+            !bob.failed_catchup_peers.contains(&alice_peer),
+            "a peer that starts answering properly is a good source again"
+        );
+    }
+
+    /// The shapes a build made before the paging request can parse, pinned here so a later change
+    /// to the response grammar cannot silently strand the population that is already installed.
+    ///
+    /// Two directions matter. A build without `KIND_CATCHUP_SINCE` answers it the way it answers
+    /// any request kind it does not know, with nothing; and it asks with `KIND_CATCHUP`, whose
+    /// response must stay a bare bundle with no marker byte in front of it.
+    #[tokio::test]
+    async fn an_older_build_can_still_catch_up_in_both_directions() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        alice.open_channel(DocType::Channel, 89).await.unwrap();
+        bob.open_channel(DocType::Channel, 89).await.unwrap();
+        for i in 0..3 {
+            alice
+                .post(DocType::Channel, 89, |doc| {
+                    doc.put(ROOT, format!("m{i}"), "hello")
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                bob.transport.next_event().await,
+                Some(TransportEvent::Gossip { .. })
+            ));
+        }
+
+        // Direction one: a current requester asking a peer that predates the paging request. That
+        // peer's dispatch has no arm for the kind, so it answers with an empty response, and the
+        // requester must read that as "ask the way it understands" rather than as a failure.
+        let older_peer_answer = Vec::new();
+        let (applied, ()) = tokio::join!(
+            bob.request_catchup_since(alice_peer, DocType::Channel, 89, &[[7u8; 32]]),
+            async {
+                let Some(TransportEvent::Request { responder, .. }) =
+                    alice.transport.next_event().await
+                else {
+                    panic!("the paging request is the next event");
+                };
+                responder.respond(Bytes::from(older_peer_answer));
+            }
+        );
+        assert_eq!(
+            applied.unwrap(),
+            None,
+            "an empty answer means the peer does not page, not that the exchange failed"
+        );
+
+        // The same must hold for a marker a future build invents. Reading it as malformed would
+        // take the whole-history fallback down with it and strand the document against a peer
+        // that was answering perfectly well.
+        let (applied, ()) = tokio::join!(
+            bob.request_catchup_since(alice_peer, DocType::Channel, 89, &[[7u8; 32]]),
+            async {
+                let Some(TransportEvent::Request { responder, .. }) =
+                    alice.transport.next_event().await
+                else {
+                    panic!("the paging request is the next event");
+                };
+                responder.respond(Bytes::from(vec![99u8, 0, 0, 0, 0]));
+            }
+        );
+        assert_eq!(
+            applied.unwrap(),
+            None,
+            "a marker from a newer build is a peer that cannot page for us, not a broken one"
+        );
+
+        // And the fallback it takes really does converge.
+        let (applied, _) = tokio::join!(
+            bob.request_catchup(alice_peer, DocType::Channel, 89),
+            alice.run_once(),
+        );
+        assert_eq!(applied.unwrap(), 3);
+
+        // Direction two: an older requester asking a current peer. It asks with `KIND_CATCHUP`,
+        // and all it can parse is a bare bundle. A marker byte in front of this response, or a
+        // prefix cut to the paging budget it has no way to continue, would both be regressions
+        // invisible to every same-version test.
+        let (req, _auth) = bob
+            .build_authed_request(KIND_CATCHUP, &encode_catchup_req(DocType::Channel, 89))
+            .unwrap();
+        let legacy = alice.handle_request(bob_peer, &req);
+        let bundle = decode_bundle(&legacy)
+            .expect("the whole-history response is a bare bundle, with no marker in front of it");
+        assert_eq!(bundle.len(), 3, "and it carries the history, not a prefix");
     }
 
     #[tokio::test]

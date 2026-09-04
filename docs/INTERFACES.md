@@ -591,27 +591,53 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
   Ciphertext = XChaCha20-Poly1305 of the encoded `SignedOp` under `channel_secret(doc,epoch)`.
 - **`CommitRecord`** (control payload): `bytes group_id ‖ u64 commit_epoch ‖ bytes committer_device(32) ‖ bytes mls_commit ‖ bytes base_auth(32) ‖ bytes committer_sig(64)`.
 - **Request/response** (`ProtocolId("/catcoms/rr/1")`): first payload byte = **kind**:
-  - `0` KIND_CATCHUP; **authed** body wrapping `u16 doc_type ‖ u128 doc_id`; response = op bundle.
+  - `0` KIND_CATCHUP; **authed** body wrapping `u16 doc_type ‖ u128 doc_id`; response = op bundle,
+    bare, with **no marker byte in front of it**. This is the shape every build understands, and
+    it is frozen: it predates `KIND_CATCHUP_SINCE` and is the only catch-up a peer built before
+    that kind existed can ask for or parse. It carries no way to say "there is more", so it is
+    capped at the 16 MiB response ceiling rather than at the paging chunk: a peer that cannot be
+    told to page has nothing that re-asks after a short answer, and its only route back would be
+    the next gossiped op whose dependencies it lacks.
   - `19` KIND_CATCHUP_SINCE; **authed** body wrapping `u16 doc_type ‖ u128 doc_id ‖ u32 count(≤64) ‖
-    32-byte change hashes`; response = `[1] ‖ op bundle`, carrying only the ops behind the server's
+    32-byte change hashes`; response = `[marker] ‖ op bundle`, carrying only the ops behind the server's
     frontier and not behind the hashes named. The hashes are the requester's automerge heads **plus
     their immediate ancestors** (`EncryptedDoc::sync_frontier`): a member that wrote while it could
     not reach anyone has a head nobody else has seen, and a peer that cannot see a hash can subtract
     nothing behind it, so naming the parents keeps the exchange incremental. Sound because holding a
     change means holding its dependencies, so anything causally behind a named hash is already held.
-    A hash the server does not know selects nothing. The leading marker byte separates "nothing for
-    you" (`[1]` with an empty bundle) from "I do not know this kind" (an empty response), which is
-    how a requester detects an older peer and re-asks with `KIND_CATCHUP`. Members-only on exactly
-    the same terms as `KIND_CATCHUP`, and truncation is still progress: the requester applies the
-    prefix, its frontier moves, and the next request asks for less.
-  - **Both catch-up serves are capped at `MAX_CATCHUP_CHUNK` (256 KiB), not at the 16 MiB a
-    response may legally reach.** The cap is what makes `CATCHUP_REQUEST_MS` a deadlock bound
+    A hash the server does not know selects nothing. Members-only on exactly the same terms as
+    `KIND_CATCHUP`.
+  - **`KIND_CATCHUP_SINCE` response markers**, which are a continuation signal and not a version:
+    - `1` `CATCHUP_SINCE_UNDERSTOOD`: this bundle is everything the server was holding for you.
+    - `2` `CATCHUP_SINCE_MORE`: the bundle was cut to the budget and unsent ops remain; ask again.
+    - empty response (no marker at all): "I do not know this kind". A peer built before kind 19
+      existed answers every unknown kind this way, which is how a requester detects it and re-asks
+      with `KIND_CATCHUP`.
+    - **any other first byte**: treated exactly like the empty response, i.e. as a peer that
+      cannot page for us, and never as a malformed response. A malformed reading would propagate
+      out of `request_catchup` and take the whole-history fallback with it, stranding the document
+      against a peer that was answering perfectly well. This is what lets a later build add a
+      marker without breaking the population installed today.
+    - Continuation is the **server's** answer, because only it knows what it withheld. A requester
+      that inferred it from "did I apply anything" stopped on a chunk of ops it already held, and
+      on a chunk that could carry nothing because the next op was larger than the budget.
+  - **`KIND_CATCHUP_SINCE` serves are capped at `MAX_CATCHUP_CHUNK` (256 KiB)**, not at the 16 MiB
+    a response may legally reach. The cap is what makes `CATCHUP_REQUEST_MS` a deadlock bound
     rather than a throughput requirement: without it, a valid connection that could not move a
     whole history inside the deadline would time out, retry, and time out again, so a large gap
-    could never converge at all. A round that applied anything queues the next one
-    (`apply_catchup_response`), so a history arrives over several bounded exchanges and the
-    exchange ends on the first round that applies nothing. Each round occupies the tick for one
-    bounded request rather than for a whole history.
+    could never converge at all. A non-empty remainder always serves **at least one op**, up to the
+    16 MiB ceiling, so an individually oversized op travels alone instead of being silently
+    withheld: a bundle of zero ops is how the wire says "nothing for you", and a peer still holding
+    something must never send one.
+  - **Requester termination and non-progress.** The exchange ends on `1`. A `2` that applied
+    nothing is legitimate (the frontier on the wire is capped, so an honest peer can replay a
+    prefix already held), so it is believed and asked again; but an unbroken run of
+    `MAX_NONPROGRESSING_CATCHUP_ROUNDS` (8) such rounds from one peer for one document marks that
+    peer in `failed_catchup_peers`, so `pick_catchup_peer` prefers another source. That bounds the
+    one loop an authenticated member can drive by itself, where every answer says "ask me again"
+    and no answer carries anything usable. The run resets the moment that peer applies anything.
+  - **Mixed-version order** for a document with no local ops: `KIND_CATCHUP_SINCE` first when a
+    frontier exists, falling back to `KIND_CATCHUP` on an empty or unrecognised-marker response.
   - `1` KIND_JOIN; body `bytes invite.encode() ‖ bytes key_package`; response =
     `[JOIN_READY] ‖ bytes welcome ‖ bytes signature(64) ‖ bytes sealed_routing` (the admitter signs
     `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome ‖ sealed_routing`). Not member-authed.
