@@ -5184,17 +5184,25 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 }
             }
             // A document task also skips any peer still cooling off about that document.
+            // Two different reasons not to ask a peer about this document right now: it is
+            // cooling off after failing us, or it has already answered at this version and the
+            // sweep is waiting on somebody else. Both keep it out of this attempt; only the
+            // second is a discharged obligation.
             let cooling: Vec<PeerId> = match task {
-                CatchupTask::Doc { doc_type, doc_id } => self
-                    .catchup_cooldowns
-                    .keys()
-                    .filter(|(t, id, peer)| {
-                        *t == doc_type
-                            && *id == doc_id
-                            && self.catchup_peer_is_cooling(*peer, doc_type, doc_id)
-                    })
-                    .map(|(_, _, peer)| *peer)
-                    .collect(),
+                CatchupTask::Doc { doc_type, doc_id } => {
+                    let mut out: Vec<PeerId> = self
+                        .catchup_cooldowns
+                        .keys()
+                        .filter(|(t, id, peer)| {
+                            *t == doc_type
+                                && *id == doc_id
+                                && self.catchup_peer_is_cooling(*peer, doc_type, doc_id)
+                        })
+                        .map(|(_, _, peer)| *peer)
+                        .collect();
+                    out.extend(self.sources_checked(doc_type, doc_id));
+                    out
+                }
                 CatchupTask::Commits { .. } => Vec::new(),
             };
             // The peer that said this document has more to come is asked first while its claim
@@ -5358,29 +5366,38 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.catchup_sources_checked.remove(&(doc_type, doc_id));
     }
 
-    /// Whether some eligible source has **not** yet said it has nothing further at this version.
+    /// The sources already asked at this document's current version. Empty once the version moves,
+    /// because every earlier answer was about a state this node has passed.
+    fn sources_checked(&self, doc_type: DocType, doc_id: u128) -> BTreeSet<PeerId> {
+        self.catchup_sources_checked
+            .get(&(doc_type, doc_id))
+            .filter(|(version, _)| *version == self.doc_version(doc_type, doc_id))
+            .map(|(_, peers)| peers.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether some source still owes this sweep an answer at this version.
     ///
     /// A peer that has opened the channel but not yet caught it up holds a real but empty
     /// document, so it answers "you have everything I have" rather than "I do not hold this".
     /// That answer is true and useless, and taking it as the end of the search left a member
     /// permanently empty whenever the picker happened to reach such a peer first.
+    ///
+    /// A cooling source still owes an answer. Being unavailable for the moment is not the same as
+    /// having answered, and treating it as the same lost documents to an ordinary schedule: a tick
+    /// cancelled mid-request cools the peer it was talking to, and any empty replica answering
+    /// next would then find nobody outstanding and close a gap that source was about to fill. A
+    /// cooldown delays completion; it does not satisfy it.
+    ///
+    /// Only **proven** members are owed to. An unproven candidate is worth asking opportunistically
+    /// and is not worth waiting on: making one mandatory would let any peer pin every sweep open
+    /// by staying connected and saying nothing.
     fn unchecked_source_exists(&self, doc_type: DocType, doc_id: u128) -> bool {
-        let checked = self
-            .catchup_sources_checked
-            .get(&(doc_type, doc_id))
-            .filter(|(version, _)| *version == self.doc_version(doc_type, doc_id))
-            .map(|(_, peers)| peers)
-            .cloned()
-            .unwrap_or_default();
+        let checked = self.sources_checked(doc_type, doc_id);
         self.member_peers
             .iter()
             .map(|proof| proof.peer)
-            .chain(self.known_peers.iter().copied())
-            .any(|peer| {
-                self.connected_peers.contains(&peer)
-                    && !checked.contains(&peer)
-                    && !self.catchup_peer_is_cooling(peer, doc_type, doc_id)
-            })
+            .any(|peer| self.connected_peers.contains(&peer) && !checked.contains(&peer))
     }
 
     /// Record that `peer` said it is still withholding operations for this document.
@@ -10272,9 +10289,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // saying "done" instead of "more".
                 if applied > 0 {
                     // It gave us something and says that is all it has. The search starts again
-                    // from the new version, and its own claim, if it had one, is discharged.
+                    // from the new version.
                     self.clear_sources_checked(doc_type, doc_id);
-                    self.clear_catchup_continuation(doc_type, doc_id);
+                    // Its own claim, if it had one, is discharged; somebody else's is not.
+                    // Carrying operations proves this peer had something to give, not that it
+                    // knows what another peer is still withholding, and clearing the claim on
+                    // that basis let any member end another's continuation by answering with a
+                    // single valid operation of its own.
+                    if !self.continuation_owed_by_other(peer, doc_type, doc_id) {
+                        self.clear_catchup_continuation(doc_type, doc_id);
+                    } else {
+                        self.enqueue_doc_catchup(doc_type, doc_id);
+                    }
                 } else if self.continuation_owed_by_other(peer, doc_type, doc_id) {
                     self.cool_off_catchup_peer(peer, doc_type, doc_id);
                     self.enqueue_doc_catchup(doc_type, doc_id);
@@ -10378,10 +10404,36 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             FULL_CATCHUP_REQUEST_MS,
         )
         .await?;
-        if resp.is_empty() {
-            return Ok(0); // peer had nothing for this document
+        let applied = if resp.is_empty() {
+            0 // peer had nothing for this document
+        } else {
+            self.apply_catchup_response(doc_type, doc_id, &resp)?
+        };
+        if applied > 0 {
+            self.clear_sources_checked(doc_type, doc_id);
+            return Ok(applied);
         }
-        self.apply_catchup_response(doc_type, doc_id, &resp)
+        // A zero-operation answer here is the same claim the paged grammar makes with its
+        // completion marker, and it has to be weighed the same way; otherwise the compatibility
+        // path is a way around the whole state machine. This shape is a bare unsigned bundle, so
+        // it cannot say who sent it: an empty one from an unproven candidate proves nothing at
+        // all, and would once have been enough to retire the gap for good. Only a peer already
+        // proven to be a current member discharges its part of the sweep this way; anyone else is
+        // simply set aside and the search continues.
+        if self.peer_is_proven_member(peer) {
+            self.note_source_checked(peer, doc_type, doc_id);
+        }
+        self.cool_off_catchup_peer(peer, doc_type, doc_id);
+        if self.unchecked_source_exists(doc_type, doc_id) {
+            self.enqueue_doc_catchup(doc_type, doc_id);
+        }
+        Ok(0)
+    }
+
+    /// Whether this transport peer has an authenticated current-member binding: it served a
+    /// signed catch-up that verified against the roster, rather than merely being reachable.
+    fn peer_is_proven_member(&self, peer: PeerId) -> bool {
+        self.member_peers.iter().any(|proof| proof.peer == peer)
     }
 
     /// Verify, apply and acknowledge a served bundle. Shared by both catch-up shapes, which
@@ -16807,6 +16859,121 @@ mod tests {
         );
     }
 
+    /// Carrying operations proves a peer had something to give. It does not make that peer an
+    /// authority on what a different peer is still withholding, so its completion cannot retire
+    /// somebody else's claim just because the round happened to move us.
+    #[tokio::test]
+    async fn a_useful_answer_from_a_stranger_does_not_discharge_the_claimant() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(3).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let mut carol = it.next().unwrap();
+        let (alice_peer, carol_peer) = (alice.local_peer(), carol.local_peer());
+        let bob_peer = bob.local_peer();
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        prove_live_member(&mut bob, carol_peer, ids[2]);
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut carol, bob_peer, ids[1]);
+        for node in [&mut alice, &mut bob, &mut carol] {
+            node.open_channel(DocType::Channel, 98).await.unwrap();
+        }
+        // Alice writes two operations and Carol writes one of her own, so Carol has something
+        // genuinely useful to hand over that says nothing about what Alice still holds.
+        for key in ["a1", "a2"] {
+            alice
+                .post(DocType::Channel, 98, |doc| doc.put(ROOT, key, "x"))
+                .await
+                .unwrap();
+        }
+        carol
+            .post(DocType::Channel, 98, |doc| doc.put(ROOT, "c1", "y"))
+            .await
+            .unwrap();
+        // Drop every broadcast, so catch-up is the only path that delivers anything here: Bob sees
+        // all three posts, Carol sees Alice's two, and Alice sees Carol's one.
+        for (node, count) in [(&mut bob, 3), (&mut carol, 2), (&mut alice, 1)] {
+            for _ in 0..count {
+                assert!(matches!(
+                    node.transport.next_event().await,
+                    Some(TransportEvent::Gossip { .. })
+                ));
+            }
+        }
+
+        // Alice hands over one operation and says she is withholding more.
+        let one_op = {
+            let bundle = alice
+                .docs
+                .get_mut(&(DocType::Channel, 98))
+                .unwrap()
+                .export_catchup_since(&[], &alice.group, &alice.device, &mut alice.rng)
+                .unwrap();
+            size_capped_ops(&bundle[..1], MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE)
+                .unwrap()
+                .0
+        };
+        let mut more = vec![CATCHUP_SINCE_MORE];
+        more.extend_from_slice(&one_op);
+        bob.catchup_queue.clear();
+        let (applied, ()) = tokio::join!(
+            bob.request_catchup(alice_peer, DocType::Channel, 98),
+            async {
+                let Some(TransportEvent::Request {
+                    data, responder, ..
+                }) = alice.transport.next_event().await
+                else {
+                    panic!("the paging request is the next event");
+                };
+                responder.respond(Bytes::from(signed_catchup_answer(&mut alice, &data, more)));
+            }
+        );
+        assert_eq!(applied.unwrap(), 1);
+        assert_eq!(
+            bob.catchup_continuation_source(DocType::Channel, 98),
+            Some(alice_peer)
+        );
+
+        // Carol now answers honestly and usefully: her own operation, and "that is all I have".
+        bob.catchup_cooldowns.clear();
+        let (applied, ()) = tokio::join!(
+            bob.request_catchup(carol_peer, DocType::Channel, 98),
+            async {
+                let Some(TransportEvent::Request {
+                    from,
+                    data,
+                    responder,
+                    ..
+                }) = carol.transport.next_event().await
+                else {
+                    panic!("the paging request is the next event");
+                };
+                let response = carol.handle_request(from, &data);
+                responder.respond(Bytes::from(response));
+            }
+        );
+        assert!(applied.unwrap() > 0, "Carol's own operation is applied");
+        assert_eq!(
+            bob.catchup_continuation_source(DocType::Channel, 98),
+            Some(alice_peer),
+            "and Alice is still the one who said she was holding something back"
+        );
+        assert!(
+            bob.catchup_queue.iter().any(|task| matches!(
+                task,
+                CatchupTask::Doc {
+                    doc_type: DocType::Channel,
+                    doc_id: 98
+                }
+            )),
+            "so the document is still being chased"
+        );
+    }
+
     /// A member that has opened the channel but not caught it up holds a real, empty document, so
     /// it answers "you have everything I have" rather than "I do not hold this". That answer is
     /// true, and useless, and taking it as the end of the search left the asker permanently empty
@@ -16897,6 +17064,193 @@ mod tests {
             }
         );
         assert_eq!(applied.unwrap(), 1);
+    }
+
+    /// The compatibility grammar is not a way around the search.
+    ///
+    /// A peer that answers nothing to the paged request sends the drain down `KIND_CATCHUP`, whose
+    /// reply is a bare unsigned bundle that cannot say who sent it. An empty one used to end the
+    /// pursuit outright, which meant an outsider could reach the same terminal state the signature
+    /// work was added to prevent, simply by declining to page and then answering with nothing.
+    #[tokio::test]
+    async fn an_empty_legacy_answer_is_one_source_speaking_for_itself() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(3).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let carol = it.next().unwrap();
+        let (alice_peer, carol_peer) = (alice.local_peer(), carol.local_peer());
+        let bob_peer = bob.local_peer();
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        prove_live_member(&mut bob, carol_peer, ids[2]);
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        for node in [&mut alice, &mut bob] {
+            node.open_channel(DocType::Channel, 99).await.unwrap();
+        }
+        alice
+            .post(DocType::Channel, 99, |doc| doc.put(ROOT, "only", "post"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            bob.transport.next_event().await,
+            Some(TransportEvent::Gossip { .. })
+        ));
+
+        // Carol behaves like a build that does not know the paged request, and then has nothing
+        // to say to the one it does know. Two answers, both empty, neither signed.
+        bob.catchup_queue.clear();
+        bob.enqueue_doc_catchup(DocType::Channel, 99);
+        let (_, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            for _ in 0..2 {
+                let Some(TransportEvent::Request { responder, .. }) =
+                    carol.transport.next_event().await
+                else {
+                    panic!("the drain's requests are the next events");
+                };
+                responder.respond(Bytes::new());
+            }
+        });
+        assert_eq!(
+            bob.doc(DocType::Channel, 99).map(|d| d.op_count()),
+            Some(0),
+            "nothing arrived"
+        );
+        assert!(
+            bob.catchup_queue.iter().any(|task| matches!(
+                task,
+                CatchupTask::Doc {
+                    doc_type: DocType::Channel,
+                    doc_id: 99
+                }
+            )),
+            "and an empty compatibility answer did not end the search for Alice's history"
+        );
+
+        // Alice, who does hold it, is reached next.
+        bob.catchup_cooldowns.clear();
+        let (_, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            let Some(TransportEvent::Request {
+                from,
+                data,
+                responder,
+                ..
+            }) = alice.transport.next_event().await
+            else {
+                panic!("the drain asks the source that has not answered yet");
+            };
+            let response = alice.handle_request(from, &data);
+            responder.respond(Bytes::from(response));
+        });
+        assert_eq!(
+            bob.doc(DocType::Channel, 99).map(|d| d.op_count()),
+            Some(1),
+            "and the document arrives"
+        );
+    }
+
+    /// A source that is merely unavailable for the moment has not answered.
+    ///
+    /// Cooling a peer off is how this node stops asking one that just failed it, and cancelling a
+    /// tick mid-request cools the peer it was talking to. If that also counted as having answered
+    /// the sweep, an empty replica replying next would find nobody outstanding and close a gap the
+    /// cooling source was about to fill; the cooldown then expires with no task left to use it.
+    #[tokio::test]
+    async fn a_cooling_source_still_owes_the_sweep_an_answer() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(3).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let mut carol = it.next().unwrap();
+        let (alice_peer, carol_peer) = (alice.local_peer(), carol.local_peer());
+        let bob_peer = bob.local_peer();
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        prove_live_member(&mut bob, carol_peer, ids[2]);
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut carol, bob_peer, ids[1]);
+        for node in [&mut alice, &mut bob, &mut carol] {
+            node.open_channel(DocType::Channel, 97).await.unwrap();
+        }
+        alice
+            .post(DocType::Channel, 97, |doc| doc.put(ROOT, "only", "post"))
+            .await
+            .unwrap();
+        for node in [&mut bob, &mut carol] {
+            assert!(matches!(
+                node.transport.next_event().await,
+                Some(TransportEvent::Gossip { .. })
+            ));
+        }
+
+        // Alice holds the history and is cooling: exactly what a cancelled tick leaves behind.
+        bob.catchup_queue.clear();
+        bob.enqueue_doc_catchup(DocType::Channel, 97);
+        bob.cool_off_catchup_peer(alice_peer, DocType::Channel, 97);
+
+        // Carol, the empty replica, answers honestly.
+        let (applied, ()) = tokio::join!(
+            bob.request_catchup(carol_peer, DocType::Channel, 97),
+            async {
+                let Some(TransportEvent::Request {
+                    from,
+                    data,
+                    responder,
+                    ..
+                }) = carol.transport.next_event().await
+                else {
+                    panic!("the paging request is the next event");
+                };
+                let response = carol.handle_request(from, &data);
+                responder.respond(Bytes::from(response));
+            }
+        );
+        assert_eq!(applied.unwrap(), 0);
+        assert!(
+            bob.unchecked_source_exists(DocType::Channel, 97),
+            "Alice has not answered; she is merely not askable this second"
+        );
+        assert!(
+            bob.catchup_queue.iter().any(|task| matches!(
+                task,
+                CatchupTask::Doc {
+                    doc_type: DocType::Channel,
+                    doc_id: 97
+                }
+            )),
+            "so the gap is still owned when her cooldown expires"
+        );
+
+        // And when the cooldowns lapse, the drain asks her rather than Carol. Both are askable
+        // again at this point, so the only thing keeping Carol out of the draw is that she has
+        // already answered at this version: "checked" has to exclude her on its own, or a
+        // most-recently-seen source can be asked over and over while the one that holds the
+        // history is never reached.
+        bob.catchup_cooldowns.clear();
+        let (_, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            let Some(TransportEvent::Request {
+                from,
+                data,
+                responder,
+                ..
+            }) = alice.transport.next_event().await
+            else {
+                panic!("the drain asks the source that still owes it an answer");
+            };
+            let response = alice.handle_request(from, &data);
+            responder.respond(Bytes::from(response));
+        });
+        assert_eq!(
+            bob.doc(DocType::Channel, 97).map(|d| d.op_count()),
+            Some(1),
+            "and the document arrives"
+        );
     }
 
     /// Catch-up sources are drawn from untrusted candidates as well as proven members, and the

@@ -661,6 +661,21 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
       checked at the current local version; the document is treated as caught up only once every
       eligible source has said it at the same version, and any answer that moves the version
       starts the sweep again. A later member connection is a natural reason for another sweep.
+      **A cooling source still owes the sweep an answer**: being unavailable for a moment is not
+      the same as having answered, and treating it as the same lost a document to an ordinary
+      schedule (a cancelled tick cools the peer it was mid-request with, and the next empty replica
+      to answer would find nobody outstanding). The picker excludes both cooling and
+      already-checked sources from an attempt; only the second is a discharged obligation. Only
+      **proven** members are owed to, so an unproven candidate cannot pin a sweep open by staying
+      connected and saying nothing.
+    - **A `1` that carried operations discharges only its own sender's claim.** Carrying content
+      proves that peer had something to give, not that it knows what a different peer is still
+      withholding, so it restarts the version sweep but leaves another peer's claim standing.
+    - **`KIND_CATCHUP` answers go through the same rule.** Its bundle is bare and unsigned, so an
+      empty one cannot say who sent it: a zero-operation legacy answer marks the source checked
+      only when that transport peer already carries an authenticated current-member binding, and
+      otherwise just cools it and continues. Without that, declining to page and then answering
+      with nothing was a way around the whole state machine, available to any peer on the wire.
     - Continuation is the **server's** answer, because only it knows what it withheld. A requester
       that inferred it from "did I apply anything" stopped on a chunk of ops it already held, and
       on a chunk that could carry nothing because the next op was larger than the budget.
