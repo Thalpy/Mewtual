@@ -59,6 +59,10 @@ fn general() -> u128 {
 /// path *fails* the test instead of wedging CI.
 const WAIT: Duration = Duration::from_secs(60);
 
+/// Discovery ticks a roster is given to settle. Generous for the same reason as `WAIT`: a
+/// working path takes one or two, so only a broken one spends them all.
+const SETTLE_TICKS: usize = 12;
+
 /// A stand-in reachable address for a node's published peer record. Loopback and LAN addresses
 /// are stripped inside `publish_self_record`, so a record built from them would carry none and
 /// the cross-session cache would have nothing to hold; TEST-NET-3 is routable-looking and
@@ -118,6 +122,38 @@ impl Node {
     async fn discovery_pass(&self) {
         let _ = self.actor.drive_discovery().await;
         let _ = self.actor.member_count().await;
+    }
+
+    /// Tick discovery until this node's roster reports exactly `expected` online, and answer
+    /// with what it last saw either way.
+    ///
+    /// One pass is not the promise. A pass ends when the actor has handled the drive command,
+    /// which is neither when the connections it opened have been observed (the transport's
+    /// connect edge arrives on another arm of the actor's select loop) nor when a peer that was
+    /// not reachable during it becomes reachable. What the product promises is that the tick its
+    /// timer sends every minute converges, and that is what this asserts. Asserting after
+    /// exactly one pass instead was a scheduling assumption that held on an idle machine and
+    /// lost on a loaded one, leaving the founder's roster a member short.
+    ///
+    /// The drain between attempts is load-bearing rather than tidiness: the actor's event
+    /// channel is bounded, so a test that only ever queries can fill it and stall the very actor
+    /// it is waiting on.
+    async fn settle_online(&mut self, expected: &[String]) -> Vec<String> {
+        let mut want = expected.to_vec();
+        want.sort();
+        let mut online = Vec::new();
+        for attempt in 0..SETTLE_TICKS {
+            if attempt > 0 {
+                let _ = drain(&mut self.events).await;
+                self.discovery_pass().await;
+            }
+            online = self.actor.online_members().await;
+            online.sort();
+            if online == want {
+                break;
+            }
+        }
+        online
     }
 
     async fn shutdown(self) {
@@ -473,33 +509,15 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
     alice.discovery_pass().await;
     bob.discovery_pass().await;
 
-    // Waited for rather than asserted outright. A discovery pass ends when the actor has handled
-    // the drive command, which is not when the connections it opened have been seen: the
-    // transport's connect edge arrives on another arm of the actor's select loop, so a query sent
-    // straight after can be answered before it lands. Worse, the event channel is bounded, and a
-    // test holding a query open while never reading events can fill it and stall the very actor
-    // it is waiting on. `until` drains as it waits, which is why the roster settles here and did
-    // not on a loaded machine.
-    let seen = until(
-        "Alice's roster shows Bob online",
-        &mut alice.events,
-        || async {
-            let online = alice.actor.online_members().await;
-            (online == vec![bob.fp.clone()]).then_some(online)
-        },
-    )
-    .await;
-    assert_eq!(seen, vec![bob.fp.clone()]);
-    let seen = until(
-        "Bob's roster shows Alice online",
-        &mut bob.events,
-        || async {
-            let online = bob.actor.online_members().await;
-            (online == vec![alice.fp.clone()]).then_some(online)
-        },
-    )
-    .await;
-    assert_eq!(seen, vec![alice.fp.clone()]);
+    assert_eq!(
+        alice.settle_online(&[bob.fp.clone()]).await,
+        vec![bob.fp.clone()],
+        "Alice's roster shows Bob online"
+    );
+    assert_eq!(
+        bob.settle_online(&[alice.fp.clone()]).await,
+        vec![alice.fp.clone()]
+    );
 
     // The UI does not poll `online_members`; it renders whatever `ConnectivityChanged` carries.
     // A build that filled the map but never emitted the event would still ship dark dots.
@@ -533,27 +551,16 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
 
     let mut expected = vec![bob.fp.clone(), carol.fp.clone()];
     expected.sort();
-    let online = until(
-        "the founder sees both other members online",
-        &mut alice.events,
-        || async {
-            let mut online = alice.actor.online_members().await;
-            online.sort();
-            (online == expected).then_some(online)
-        },
-    )
-    .await;
-    assert_eq!(online, expected);
-    let seen = until(
-        "the newest member sees the peer it actually spoke to",
-        &mut carol.events,
-        || async {
-            let online = carol.actor.online_members().await;
-            (online == vec![alice.fp.clone()]).then_some(online)
-        },
-    )
-    .await;
-    assert_eq!(seen, vec![alice.fp.clone()]);
+    assert_eq!(
+        alice.settle_online(&expected).await,
+        expected,
+        "the founder sees both other members online"
+    );
+    assert_eq!(
+        carol.settle_online(&[alice.fp.clone()]).await,
+        vec![alice.fp.clone()],
+        "the newest member sees the peer it actually spoke to"
+    );
 
     // --- and one goes away ---
     //
