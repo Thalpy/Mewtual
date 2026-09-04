@@ -7491,6 +7491,29 @@ button.stage-chev:hover {
   z-index: 60;
 }
 
+/* A stage the user has dragged. `left`/`top` are set inline and are measured from the window,
+   so the centring transform and both dock edges have to give way or the panel lands somewhere
+   other than where it was dropped. `bottom: auto` is what releases the bottom dock. */
+.stage.floating {
+  transform: none;
+  right: auto;
+  bottom: auto;
+}
+/* The header is the drag handle. It is also a row of buttons, so only the gaps between them
+   show the move cursor; a press on a control is that control's press. */
+.stage-head {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.stage-head.dragging {
+  cursor: grabbing;
+}
+.stage-head button,
+.stage-head input {
+  cursor: pointer;
+}
+
 /* The call header carries a growing row of controls (E2E, CONN, tally, focus, watch-share,
    fullscreen, dock, collapse) and the window can be narrow. Without wrapping, the row simply
    overflowed the right edge and the LAST control went off-screen: that was the collapse button,

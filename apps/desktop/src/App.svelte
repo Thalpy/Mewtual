@@ -40,6 +40,14 @@
   import { pastedMedia, pastedName } from "./clipboard-media";
   import { dismissOnBackdrop } from "./overlay-dismiss";
   import {
+    DEFAULT_PUSH_TO_TALK, bindableKey, keyLabel, micTransmitting, parsePushToTalk,
+    pushToTalkEvent, type PushToTalkSettings,
+  } from "./push-to-talk";
+  import {
+    clampToBounds, dragTo, parsePosition, startsDrag,
+    type DragBounds, type Point, type Size,
+  } from "./overlay-drag";
+  import {
     DEFAULT_PEER_LEVEL, MAX_PEER_LEVEL, RemoteAudioRouter, effectivePeerGain, normalizePeerLevel,
     peerGain, type PeerAudioKind,
   } from "./call-audio";
@@ -10508,11 +10516,12 @@
       ? (servers.find((s) => s.id === callServer)?.name ?? callServerName)
       : "",
   );
-  // Which dock slot the voice chrome occupies. Two slots rather than free dragging: the dock is
-  // a fixed centred overlay, and a freely draggable surface near the top edge would fight the
-  // titlebar's own drag region for no real gain.
+  // Which dock slot the voice chrome occupies. The stage may also be dragged anywhere (see
+  // `stagePos`); the two docks remain, because "put it back" needs somewhere definite to go, and
+  // choosing a dock is how a dragged stage is returned to one.
   let callDockTop = $state(loadCallSetting("dock", "top") !== "bottom");
   function toggleDockSlot() {
+    resetStagePos(); // docking is the answer to "put it back", so it discards a dragged position
     callDockTop = !callDockTop;
     try {
       localStorage.setItem("catcoms.call.dock", callDockTop ? "top" : "bottom");
@@ -10866,7 +10875,11 @@
     const stream = await ensureMic();
     if (!stream) return;
     callMuted = false;
-    for (const t of stream.getAudioTracks()) t.enabled = true;
+    // Through the gate, not straight to `true`: turning the microphone on under push to talk
+    // must leave it closed until the key is actually held.
+    for (const t of stream.getAudioTracks()) {
+      t.enabled = micTransmitting(pushToTalk, callMuted, pttHeld);
+    }
     for (const p of Object.values(callPeers)) {
       for (const t of stream.getTracks()) {
         try { p.micSender = p.pc.addTrack(t, stream); } catch { /* already added on this edge */ }
@@ -15917,8 +15930,127 @@
   }
   function toggleMute() {
     callMuted = !callMuted;
-    if (localStream) for (const t of localStream.getAudioTracks()) t.enabled = !callMuted;
+    applyMicGate();
     pushInstState(); // peers show my mute state; tell them now rather than at the next ping
+  }
+  /**
+   * Put the microphone in the state the mute button and the talk key jointly ask for.
+   *
+   * One place, because there are now two things that can silence it and a track left enabled by
+   * whichever ran second is a live microphone the user believes is off.
+   */
+  function applyMicGate() {
+    const live = micTransmitting(pushToTalk, callMuted, pttHeld);
+    if (localStream) for (const t of localStream.getAudioTracks()) t.enabled = live;
+  }
+  // --- Push to talk -----------------------------------------------------------------------
+  // In-app only, and the settings page says so: a system-wide version needs a keyboard hook,
+  // because a global shortcut is exclusive and would take the key away from the game you are
+  // holding it in. See push-to-talk.ts.
+  // --- Dragging the voice stage ---------------------------------------------------------------
+  // Docked top or bottom and centred is fine until it covers what you are reading. A dragged
+  // position replaces the dock entirely; the dock button puts it back. Clamping lives in
+  // overlay-drag.ts, and is re-applied on resize so a smaller window cannot strand it.
+  const STAGE_POS_KEY = "catcoms.call.stagepos.v1";
+  const TITLEBAR_PX = 30; // --titlebar-h; the stage may never go under our own chrome
+  let stagePos = $state<Point | null>(loadStagePos());
+  let stageEl = $state<HTMLElement | null>(null);
+  // Reactive because the header's grabbing cursor reads it.
+  let stageDrag = $state<{ pointer: Point; origin: Point; id: number } | null>(null);
+  function loadStagePos(): Point | null {
+    try { return parsePosition(JSON.parse(localStorage.getItem(STAGE_POS_KEY) ?? "null")); }
+    catch { return null; }
+  }
+  function saveStagePos(next: Point | null) {
+    stagePos = next;
+    try {
+      if (next) localStorage.setItem(STAGE_POS_KEY, JSON.stringify(next));
+      else localStorage.removeItem(STAGE_POS_KEY);
+    } catch { /* the position still holds for this session */ }
+  }
+  function stageBounds(): DragBounds {
+    return { width: window.innerWidth, height: window.innerHeight, insetTop: TITLEBAR_PX };
+  }
+  function stageSize(): Size {
+    const r = stageEl?.getBoundingClientRect();
+    return { width: r?.width ?? 400, height: r?.height ?? 300 };
+  }
+  function onStagePointerDown(e: PointerEvent) {
+    // The header is also a row of controls: a press that landed on one is that control's.
+    const onControl = !!(e.target as HTMLElement | null)?.closest?.("button, input, a, select");
+    if (!startsDrag(e.button, onControl) || !stageEl) return;
+    const rect = stageEl.getBoundingClientRect();
+    stageDrag = { pointer: { x: e.clientX, y: e.clientY }, origin: { x: rect.left, y: rect.top }, id: e.pointerId };
+    // Capture so the drag survives the pointer outrunning the header, which it always does.
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* older webview */ }
+    e.preventDefault();
+  }
+  function onStagePointerMove(e: PointerEvent) {
+    if (!stageDrag || e.pointerId !== stageDrag.id) return;
+    saveStagePos(dragTo(stageDrag.origin, stageDrag.pointer, { x: e.clientX, y: e.clientY }, stageSize(), stageBounds()));
+  }
+  function onStagePointerUp(e: PointerEvent) {
+    if (!stageDrag || e.pointerId !== stageDrag.id) return;
+    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    stageDrag = null;
+  }
+  /** Put the stage back on its dock, discarding a dragged position. */
+  function resetStagePos() {
+    saveStagePos(null);
+  }
+  /** Pull a dragged stage back inside a window that just got smaller. */
+  function reclampStage() {
+    if (stagePos) saveStagePos(clampToBounds(stagePos, stageSize(), stageBounds()));
+  }
+  const PTT_KEY = "catcoms.call.ptt.v1";
+  let pushToTalk = $state<PushToTalkSettings>(loadPushToTalk());
+  let pttHeld = $state(false);
+  let pttCapturing = $state(false); // the settings page is waiting for the next keypress
+  function loadPushToTalk(): PushToTalkSettings {
+    try { return parsePushToTalk(JSON.parse(localStorage.getItem(PTT_KEY) ?? "null")); }
+    catch { return DEFAULT_PUSH_TO_TALK; }
+  }
+  function savePushToTalk(next: PushToTalkSettings) {
+    pushToTalk = parsePushToTalk(next);
+    try { localStorage.setItem(PTT_KEY, JSON.stringify(pushToTalk)); } catch { /* session only */ }
+    pttHeld = false; // a mode or key change starts from "not talking", never mid-press
+    applyMicGate();
+    pushInstState();
+  }
+  /** Whether a key event landed somewhere the user is typing, in which case it is a keystroke. */
+  function eventIsTyping(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el || !el.tagName) return false;
+    const tag = el.tagName.toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
+  }
+  function onPttKeyDown(e: KeyboardEvent) {
+    if (pttCapturing) {
+      // Binding: swallow the key entirely so setting Space does not also press a button.
+      e.preventDefault();
+      pttCapturing = false;
+      if (bindableKey(e.code)) savePushToTalk({ mode: "ptt", key: e.code });
+      return;
+    }
+    if (e.repeat) return; // auto-repeat is still one press
+    if (!pushToTalkEvent(pushToTalk, { code: e.code, typing: eventIsTyping(e.target), inCall })) return;
+    if (pttHeld) return;
+    pttHeld = true;
+    applyMicGate();
+    pushInstState();
+  }
+  function onPttKeyUp(e: KeyboardEvent) {
+    // Deliberately not gated on `typing`: a key pressed outside a field and released after focus
+    // moved into one must still close the microphone. Only the press is choosy.
+    if (!pttHeld || e.code !== pushToTalk.key) return;
+    releasePtt();
+  }
+  /** Close the talk gate. Also the answer to losing focus, where no keyup is ever delivered. */
+  function releasePtt() {
+    if (!pttHeld) return;
+    pttHeld = false;
+    applyMicGate();
+    pushInstState();
   }
   function joinActiveVoice() {
     if (activeServerId !== null && cur?.active) joinVoice(cur.active, activeServerId, activeName());
@@ -17060,6 +17192,10 @@
     const w = window.innerWidth;
     const h = window.innerHeight;
     const shrank = (scrunchW > 0 && w < scrunchW) || (scrunchH > 0 && h < scrunchH);
+    // A dragged voice stage is placed against the old window; a smaller one can leave it wholly
+    // outside, with nothing left to grab. Pull it back on every resize, not only a shrink: a
+    // maximise followed by a restore is two resizes and only the second one strands it.
+    reclampStage();
     scrunchW = w;
     scrunchH = h;
     if (!shrank) return;
@@ -17762,6 +17898,13 @@
     // Global keyboard shortcuts: Escape closes the top-most overlay/menu; Ctrl/Cmd+1–5 switch
     // tabs; Ctrl/Cmd+K opens the quick switcher.
     const onKey = (e: KeyboardEvent) => {
+      // First, before any other binding can claim it: while the settings page is waiting for a
+      // key to bind, the next press IS the answer and must reach nothing else.
+      if (pttCapturing) {
+        onPttKeyDown(e);
+        return;
+      }
+      onPttKeyDown(e);
       if (!locked && !e.repeat) {
         const target = activeTextEffectTarget();
         const effect = target ? effectForKeybind(textEffectKeybinds, keybindFromEvent(e)) : "";
@@ -17949,6 +18092,7 @@
     };
     // Melody keys are held instruments, not triggers: the lift is what commits the note value.
     const onKeyUp = (e: KeyboardEvent) => {
+      onPttKeyUp(e); // the lift closes the microphone wherever the press happened to land
       const k = e.key.toLowerCase();
       if (k === "t") spaceTrayHeld = false; // the tray is held open, not toggled
       // Release by the pinned note, not by what sits at that key now: the register may have
@@ -17973,6 +18117,10 @@
       instKeyNotes.clear();
       instReleaseAll(); // a note stranded here keeps sounding in every other ear in the call
       spaceTrayHeld = false; // the keyup that would close it may land in another window
+      // Same reasoning, and it matters more: a talk key held as focus leaves would otherwise
+      // never see its keyup, and the microphone would stay open for the rest of the call.
+      releasePtt();
+      pttCapturing = false; // an abandoned binding prompt does not wait forever
     };
     // The thumb buttons walk the same history as the title bar's arrows. They arrive as buttons
     // 3 and 4; preventDefault stops the webview from acting on them as well.
@@ -23424,8 +23572,27 @@
     {/if}
 
     {#if inCall && stageOpen && !focusOpen}
-      <div class="stage" class:top={callDockTop} class:away={callElsewhere}>
-        <header class="stage-head">
+      <!-- A dragged position replaces the dock outright: `floating` drops the centring transform
+           so left/top mean what they say. The dock button clears it. -->
+      <div
+        class="stage"
+        class:top={callDockTop}
+        class:away={callElsewhere}
+        class:floating={!!stagePos}
+        bind:this={stageEl}
+        style={stagePos ? `left:${stagePos.x}px;top:${stagePos.y}px` : ""}
+      >
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <header
+          class="stage-head"
+          class:dragging={!!stageDrag}
+          onpointerdown={onStagePointerDown}
+          onpointermove={onStagePointerMove}
+          onpointerup={onStagePointerUp}
+          onpointercancel={onStagePointerUp}
+          ondblclick={resetStagePos}
+          title={stagePos ? "Drag to move; double-click to put it back on its dock" : "Drag to move"}
+        >
           <span class="stage-live"></span>
           <span class="stage-label">VOICE</span>
           {@render callServerTag()}
@@ -23585,10 +23752,17 @@
             {@render micMeter()}
           </div>
           <div class="stage-acts">
+            <!-- Under push to talk the button still means mute, but the label has to say which
+                 of the two gates is currently closed, or a silent microphone looks like a bug. -->
             <button class="ghost stage-act" class:muted={callMuted} title={callMuted ? "Unmute" : "Mute your microphone"} onclick={toggleMute}>
               {#if callMuted}{@render icoMicOff()}{:else}{@render icoMic()}{/if}
               <span class="stage-act-lbl">{callMuted ? "Muted" : "Mute"}</span>
             </button>
+            {#if pushToTalk.mode === "ptt" && !callMuted}
+              <span class="stage-chip" class:struck={!pttHeld} title={`Push to talk: hold ${keyLabel(pushToTalk.key)} to speak`}>
+                {pttHeld ? "ON AIR" : `HOLD ${keyLabel(pushToTalk.key).toUpperCase()}`}
+              </span>
+            {/if}
             <button class="ghost stage-act" class:muted={callDeafened} title={callDeafened ? "Hear the room again" : "Deafen: stop hearing everyone"} onclick={toggleDeafen}>
               {@render icoSpeaker()}
               <span class="stage-act-lbl">{callDeafened ? "Deafened" : "Deafen"}</span>
@@ -25128,6 +25302,39 @@
               <div class="stx-crumb">SETTINGS // APP // VOICE &amp; CALLS</div>
               <h1>Voice &amp; Calls</h1>
               <section class="set-section">
+                <h3>Microphone</h3>
+                <div class="file-trust-modes">
+                  <button
+                    type="button"
+                    class:active={pushToTalk.mode === "open"}
+                    onclick={() => savePushToTalk({ ...pushToTalk, mode: "open" })}
+                  ><b>Open</b><small>Live whenever you are unmuted</small></button>
+                  <button
+                    type="button"
+                    class:active={pushToTalk.mode === "ptt"}
+                    disabled={!pushToTalk.key}
+                    title={pushToTalk.key ? "" : "Set a key first"}
+                    onclick={() => savePushToTalk({ ...pushToTalk, mode: "ptt" })}
+                  ><b>Push to talk</b><small>Live only while a key is held</small></button>
+                </div>
+                <div class="rename-row">
+                  <span class="muted small">Talk key</span>
+                  <button
+                    type="button"
+                    class="ghost small"
+                    class:on={pttCapturing}
+                    onclick={() => (pttCapturing = !pttCapturing)}
+                  >{pttCapturing ? "Press a key…" : keyLabel(pushToTalk.key)}</button>
+                  {#if pushToTalk.key}
+                    <button type="button" class="ghost small" onclick={() => savePushToTalk({ mode: "open", key: "" })}>Clear</button>
+                  {/if}
+                </div>
+                <p class="muted small">
+                  Push to talk works while Mewtual has focus. It deliberately does not register a
+                  system-wide shortcut: that would take the key away from whatever else you are
+                  holding it in, which for a key you press while playing something is the opposite
+                  of what you want. Muting still silences the microphone whatever the key is doing.
+                </p>
                 <h3>Devices</h3>
                 <p class="muted small">Microphone and output pickers live on the call stage (they swap live, mid-call) and are remembered here between calls.</p>
                 <p class="muted small">A MIDI keyboard for the call instrument is set up in Settings → Devices, along with a monitor for checking one that is not behaving.</p>
