@@ -647,9 +647,15 @@ impl PendingUpload {
 /// webview that starts uploads and never finishes them.
 const MAX_PENDING_UPLOADS: usize = 16;
 /// Total sealed-but-unpublished bytes all in-flight uploads may hold. The entry cap does not bound
-/// this on its own: sixteen uploads that each seal every chunk and never finish would stage 4 GiB
-/// of vault data that no manifest names.
-const MAX_STAGED_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
+/// this on its own: sixteen uploads that each seal every chunk and never finish would stage
+/// sixteen whole files of vault data that no manifest names.
+///
+/// Has to clear one whole [`MAX_FILE_BYTES`] file with room to spare, or the largest legal upload
+/// would be refused by this budget before it started. At 2 GiB one gigabyte-scale upload fits
+/// alongside ordinary traffic, and a second concurrent one waits rather than doubling the vault;
+/// the idle sweep releases whatever an abandoned caller left behind.
+const MAX_STAGED_UPLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const _: () = assert!(MAX_STAGED_UPLOAD_BYTES > MAX_FILE_BYTES as u64);
 /// How long an upload may go untouched before a later `begin` collects it. A caller that vanished
 /// (most commonly a webview reload, which loses the ids while the native side keeps running) has
 /// no way to cancel its own uploads, so nothing else would ever release them.
@@ -7166,6 +7172,48 @@ async fn get_livery(state: State<'_, AppState>, server: u64) -> Result<UiLivery,
     })
 }
 
+/// The largest file this server accepts, in bytes, and the band an owner may move it within.
+///
+/// The frontend uses this to refuse an over-large file with a sentence naming the real limit,
+/// rather than letting the upload begin and fail. The native side still enforces it.
+#[derive(Serialize, Clone)]
+struct UiFileSizeLimit {
+    /// What this server currently accepts.
+    limit: u64,
+    /// The protocol ceiling: no server may be set above this.
+    max: u64,
+    /// The smallest an owner may set, so the fileshare stays usable.
+    min: u64,
+}
+
+#[tauri::command]
+async fn get_file_size_limit(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<UiFileSizeLimit, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(UiFileSizeLimit {
+        limit: actor.file_size_limit().await,
+        max: catcoms_app::MAX_FILE_BYTES as u64,
+        min: catcoms_app::MIN_FILE_SIZE_LIMIT,
+    })
+}
+
+/// Set the largest file this server accepts; owner/admin only, re-seals the server.
+///
+/// Lowering it does not withdraw files already shared. It governs what may be added next.
+#[tauri::command]
+async fn set_file_size_limit(
+    state: State<'_, AppState>,
+    server: u64,
+    bytes: u64,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.set_file_size_limit(bytes).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
 /// Publish (or clear, with `""`) the shared **server name**; owner/admin only, re-seals the
 /// server. Independent of the colours and both images: setting it disturbs none of them.
 ///
@@ -7283,7 +7331,7 @@ async fn begin_file_upload(
     );
     // Reaching the actor is both the session gate and proof the server exists, before this
     // reserves a slot for it.
-    actor_of(&state, server)
+    let actor = actor_of(&state, server)
         .await
         .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
     if upload_id.is_empty()
@@ -7294,10 +7342,14 @@ async fn begin_file_upload(
     {
         return Err(op.fail(codes::FILE_UPLOAD_REFUSED, "bad upload id"));
     }
-    if size > MAX_FILE_BYTES as u64 {
+    // This server's own limit, which the owner sets and which can never exceed the protocol
+    // ceiling. Checked here rather than only at publish so an over-large file is refused before
+    // a single slice is staged, instead of after the whole thing has been sealed into the vault.
+    let limit = actor.file_size_limit().await;
+    if size > limit {
         return Err(op.fail(
             codes::FILE_UPLOAD_REFUSED,
-            format!("file is larger than the {MAX_FILE_BYTES}-byte limit"),
+            format!("file is larger than this server's {limit}-byte limit"),
         ));
     }
     let chunk_total = upload_chunk_count(size);
@@ -15514,6 +15566,8 @@ pub fn run() {
             set_server_cursor,
             get_livery,
             set_shared_server_name,
+            get_file_size_limit,
+            set_file_size_limit,
             set_member_badge,
             get_badges,
             get_devices,
@@ -16635,7 +16689,13 @@ mod tests {
         assert_eq!(upload_chunk_count(CHUNK_BYTES as u64), 1);
         assert_eq!(upload_chunk_count(CHUNK_BYTES as u64 + 1), 2);
         assert_eq!(upload_chunk_count(CHUNK_BYTES as u64 * 3), 3);
-        assert_eq!(upload_chunk_count(MAX_FILE_BYTES as u64), 32);
+        // Derived, not a literal: this was `32` and silently became wrong the moment the file
+        // ceiling was raised. That the count also matches what a manifest may declare is
+        // static-asserted in `catcoms-app`, which owns both constants.
+        assert_eq!(
+            upload_chunk_count(MAX_FILE_BYTES as u64),
+            MAX_FILE_BYTES.div_ceil(CHUNK_BYTES),
+        );
         for size in [0u64, 1, 4242, CHUNK_BYTES as u64 * 2 + 7] {
             let sliced = (0..upload_chunk_count(size))
                 .map(|i| {

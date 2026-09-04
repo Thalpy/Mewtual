@@ -376,6 +376,39 @@
   // One box for both was the whole bug: a server ended up named after whoever opened it.
   let newServerName = $state("");
   let joinServerName = $state("");
+  // This server's upload limit, and the band the owner may move it within. Read per server so
+  // the composer can refuse an over-large file with a sentence naming the real number instead of
+  // starting an upload that the native side rejects.
+  type FileSizeLimit = { limit: number; max: number; min: number };
+  let fileSizeLimit = $state<FileSizeLimit | null>(null);
+  let fileLimitDraftMib = $state(0); // the owner's editor, in whole MiB
+  async function refreshFileSizeLimit() {
+    const server = activeServerId;
+    if (server === null) { fileSizeLimit = null; return; }
+    try {
+      const next = await invoke<FileSizeLimit>("get_file_size_limit", { server });
+      if (activeServerId !== server) return; // switched while this was in flight
+      fileSizeLimit = next;
+      fileLimitDraftMib = Math.round(next.limit / (1024 * 1024));
+    } catch {
+      fileSizeLimit = null; // unknown: the native side is still the enforcer
+    }
+  }
+  async function saveFileSizeLimit() {
+    const server = activeServerId;
+    if (server === null || !fileSizeLimit) return;
+    busy = true;
+    try {
+      const bytes = Math.round(fileLimitDraftMib) * 1024 * 1024;
+      await invoke("set_file_size_limit", { server, bytes });
+      await refreshFileSizeLimit();
+      toast(`Uploads to this server are now capped at ${formatBytes(bytes)}`, "ok", 3500);
+    } catch (e) {
+      error = errorText(e);
+    } finally {
+      busy = false;
+    }
+  }
   // The settings takeovers are Discord-shaped: a sidebar of pages, one page shown at a
   // time. Page ids are stable route names; the catalogs below are the sidebars' contents.
   // `setSearch` filters BOTH sidebars by label (cleared on open, "/" focuses it).
@@ -5952,6 +5985,7 @@
       refreshDevices(),
       refreshModeration(),
       refreshWikiPages(),
+      refreshFileSizeLimit(),
     ]);
     if (!viewCurrent(gen, id)) return; // moved on while this group was loading
     groupLoading = false;
@@ -8850,6 +8884,15 @@
   ): Promise<string> {
     if (activeServerId === null) throw new Error("no server selected");
     const server = activeServerId;
+    // Refuse an over-large file here, where the message can name the actual limit and the file.
+    // The native side enforces the same bound and is what actually decides; this exists so the
+    // answer is a sentence rather than a failed transfer row. An unknown limit defers entirely.
+    if (fileSizeLimit && file.size > fileSizeLimit.limit) {
+      throw new Error(
+        `${formatBytes(file.size)} is over this server's ${formatBytes(fileSizeLimit.limit)} limit`
+        + (canModerate ? ". You can raise it in Server settings, File Trust." : "."),
+      );
+    }
     const uploadId = crypto.randomUUID();
     const key = uploadKey(server, uploadId);
     const started = Date.now();
@@ -25597,6 +25640,46 @@
             {:else if serverSettingsPage === "filetrust"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // FILE TRUST</div>
               <h1>File Trust</h1>
+              <!-- The upload cap is a SERVER policy and the trust modes below are a LOCAL one.
+                   They share this page because both answer "what may files do here", but the
+                   wording has to keep saying which is which. -->
+              {#if fileSizeLimit}
+                <section class="set-section">
+                  <h3>Largest file members may share</h3>
+                  {#if canModerate && !cur?.isDm}
+                    <p class="muted small">
+                      Applies to everyone on this server. Raising it lets members commit each other
+                      to bigger downloads, so it is worth setting to what you actually need.
+                    </p>
+                    <form class="rename-row" onsubmit={(e) => { e.preventDefault(); saveFileSizeLimit(); }}>
+                      <input
+                        type="number"
+                        min={Math.ceil(fileSizeLimit.min / (1024 * 1024))}
+                        max={Math.floor(fileSizeLimit.max / (1024 * 1024))}
+                        step="1"
+                        bind:value={fileLimitDraftMib}
+                        aria-label="Largest file in MiB"
+                      />
+                      <span class="muted small">MiB</span>
+                      <button
+                        class="ghost small"
+                        disabled={busy || Math.round(fileLimitDraftMib) * 1024 * 1024 === fileSizeLimit.limit}
+                      >Apply</button>
+                    </form>
+                    <p class="muted small">
+                      Currently <b>{formatBytes(fileSizeLimit.limit)}</b>. Anything from
+                      {formatBytes(fileSizeLimit.min)} to {formatBytes(fileSizeLimit.max)}; the
+                      upper figure is the most the protocol can carry, not a preference.
+                      Lowering it does not withdraw files already shared.
+                    </p>
+                  {:else}
+                    <p class="muted small">
+                      This server accepts files up to <b>{formatBytes(fileSizeLimit.limit)}</b>.
+                      The owner sets this.
+                    </p>
+                  {/if}
+                </section>
+              {/if}
               <section class="set-section file-trust-settings">
                 <h3>Automatic fetch and decoding on this device</h3>
                 <p class="muted small">This is your local, vault-sealed choice. It does not endorse a member to anyone else and it never blocks an explicit Load, Play, Open, or Download click.</p>

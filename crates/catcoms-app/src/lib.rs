@@ -2423,6 +2423,19 @@ impl Role {
 }
 
 const FILES: &str = "files";
+
+/// The reserved root key holding per-server fileshare settings; today the owner's upload limit.
+///
+/// NUL-prefixed and holding a `Map`, exactly like the wiki's `\u{0}cfg`, for the same two
+/// reasons: the file index's own entries live in a `List` under [`FILES`], so this can never
+/// collide with one, and a peer that predates the setting merges the key through the CRDT
+/// without ever reading it. Such a peer keeps enforcing the compiled-in maximum, which is the
+/// safe direction to be wrong in: it refuses uploads the owner would have allowed, rather than
+/// admitting ones the owner forbade.
+const FILE_CFG_KEY: &str = "\u{0}cfg";
+/// The `\u{0}cfg` field: the largest file this server accepts, in bytes.
+const FCFG_MAX_FILE_BYTES: &str = "max_file_bytes";
+
 const F_NAME: &str = "name";
 const F_AUTHOR: &str = "author";
 // 10c: a virtual folder path for organisation (e.g. "", "docs", "embed/<fp>", "wiki/<page>",
@@ -2493,10 +2506,32 @@ impl FileExpiry {
     }
 }
 
-/// Maximum file size accepted by [`Server::add_file`]. Chunked transfer splits a file into
-/// [`CHUNK_BYTES`] pieces, so this is a whole-**file** cap (256 MiB), no longer the per-blob
-/// transport limit. (GB-scale + background/streaming download is a follow-up.)
-pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
+/// Hard maximum file size the protocol will carry. Chunked transfer splits a file into
+/// [`CHUNK_BYTES`] pieces, so this is a whole-**file** cap, no longer the per-blob transport
+/// limit.
+///
+/// This is the ceiling, not the policy. What a given server actually accepts is
+/// [`Server::file_size_limit`], which an owner sets per server and which can only ever be lower
+/// than this. Nothing may be uploaded past this one, because a manifest naming more than
+/// [`catcoms_storage::MAX_CHUNKS`] chunks does not parse.
+///
+/// Raised from 256 MiB on 2026-09-04. Transfers were already the right shape for it: an upload
+/// streams a slice at a time and seals a chunk at a time, and a download goes from the actor to
+/// disk one chunk at a time without the bytes ever entering the webview. Resumable/background
+/// transfer is still a follow-up, so a failed 1 GiB transfer restarts from zero.
+pub const MAX_FILE_BYTES: usize = 1024 * 1024 * 1024;
+
+/// What a server accepts before its owner says otherwise: the limit that applied everywhere
+/// before servers had one of their own, so an existing server behaves exactly as it did.
+///
+/// Deliberately well below [`MAX_FILE_BYTES`]. A member should not be able to commit everyone
+/// else to a gigabyte download because the owner never looked at the setting.
+pub const DEFAULT_FILE_SIZE_LIMIT: u64 = 256 * 1024 * 1024;
+
+/// The smallest limit an owner may set. Below this the fileshare stops being useful for the
+/// things it is used for (a screenshot, a short clip), and a limit of zero would read as a
+/// misconfiguration rather than a policy.
+pub const MIN_FILE_SIZE_LIMIT: u64 = 1024 * 1024;
 
 /// Maximum number of file-index rows this implementation publishes or materializes. A current
 /// malicious member can still append CRDT rows, but rows beyond this deterministic boundary do
@@ -2791,6 +2826,31 @@ fn file_entry_attestation_payload(
         push_attested_part(&mut out, part);
     }
     out
+}
+
+/// The largest file this server accepts, from the index doc's reserved config map.
+///
+/// Unions conflicting config maps, winner last, exactly like the wiki's review window. A value
+/// outside the permitted band is treated as unset rather than obeyed: the setting is written by
+/// an owner's client, and a junk one should fall back to the default rather than either opening
+/// the server up or closing it down by accident. An index written before the setting existed
+/// simply has no key, which reads as the default.
+fn read_file_size_limit(doc: &AutoCommit) -> u64 {
+    let mut limit = DEFAULT_FILE_SIZE_LIMIT;
+    for cfg in reserved_map_objs(doc, FILE_CFG_KEY) {
+        let v = int_field(doc, &cfg, FCFG_MAX_FILE_BYTES);
+        if (MIN_FILE_SIZE_LIMIT..=MAX_FILE_BYTES as u64).contains(&v) {
+            limit = v;
+        }
+    }
+    limit
+}
+
+/// Write the server's upload limit into the index doc's reserved config map.
+fn write_file_size_limit(doc: &mut AutoCommit, bytes: u64) -> Result<(), AutomergeError> {
+    let cfg = reserved_map_obj(doc, FILE_CFG_KEY)?;
+    doc.put(&cfg, FCFG_MAX_FILE_BYTES, bytes)?;
+    Ok(())
 }
 
 /// Append a file entry (name + author + folder path + encoded `FileRef` + circulation expiry)
@@ -4158,9 +4218,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         bytes: &[u8],
         progress: Option<&tokio::sync::mpsc::Sender<(usize, usize)>>,
     ) -> Result<Cid, AppError> {
-        if bytes.len() > MAX_FILE_BYTES {
+        // This server's own limit, not the protocol ceiling. `file_size_limit` can never answer
+        // above `MAX_FILE_BYTES`, so checking it alone still enforces both.
+        let limit = self.file_size_limit();
+        if bytes.len() as u64 > limit {
             return Err(AppError::Invalid(format!(
-                "file too large: {} bytes (max {MAX_FILE_BYTES})",
+                "file too large: {} bytes (this server's limit is {limit})",
                 bytes.len()
             )));
         }
@@ -5809,6 +5872,43 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The largest file this server accepts, in bytes.
+    ///
+    /// Never above [`MAX_FILE_BYTES`], and [`DEFAULT_FILE_SIZE_LIMIT`] until an owner sets one,
+    /// including when the index document has not been opened yet: a limit that answered
+    /// "unlimited" while the doc was still loading would be the wrong way to be wrong.
+    pub fn file_size_limit(&self) -> u64 {
+        self.sync
+            .doc(DocType::FileIndex, FILE_INDEX_DOC)
+            .map(|d| read_file_size_limit(d.doc()))
+            .unwrap_or(DEFAULT_FILE_SIZE_LIMIT)
+    }
+
+    /// Set the largest file this server accepts. **Owner or admin only**, like the livery.
+    ///
+    /// Bounded at both ends: [`MIN_FILE_SIZE_LIMIT`] so the fileshare stays usable, and
+    /// [`MAX_FILE_BYTES`] because past that a manifest does not parse and the upload would fail
+    /// later and less clearly. Lowering it does not withdraw files already shared; it governs
+    /// what may be added next.
+    pub async fn set_file_size_limit(&mut self, bytes: u64) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can set the file size limit".into(),
+            ));
+        }
+        if !(MIN_FILE_SIZE_LIMIT..=MAX_FILE_BYTES as u64).contains(&bytes) {
+            return Err(AppError::Invalid(format!(
+                "file size limit must be between {MIN_FILE_SIZE_LIMIT} and {MAX_FILE_BYTES} bytes"
+            )));
+        }
+        self.sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                write_file_size_limit(d, bytes)
+            })
+            .await?;
+        Ok(())
     }
 
     /// The server's wiki review window in days; `0` = edits publish immediately (the default).
@@ -9810,6 +9910,83 @@ mod tests {
         let got = after.get(&alice.my_fingerprint()).expect("own profile");
         assert!(got.banner.is_empty(), "the banner was cleared");
         assert_eq!(got.avatar, p.avatar, "the avatar survived");
+    }
+
+    #[tokio::test]
+    async fn a_server_owner_sets_its_upload_limit_within_the_protocol_ceiling() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        alice.open_roles().await.unwrap();
+
+        // Until an owner says otherwise a server accepts what it always accepted, so raising the
+        // protocol ceiling does not silently raise every existing server's limit with it.
+        assert_eq!(alice.file_size_limit(), DEFAULT_FILE_SIZE_LIMIT);
+        assert!(
+            DEFAULT_FILE_SIZE_LIMIT < MAX_FILE_BYTES as u64,
+            "the default has to leave headroom or the setting is pointless"
+        );
+
+        alice.set_file_size_limit(700 * 1024 * 1024).await.unwrap();
+        assert_eq!(alice.file_size_limit(), 700 * 1024 * 1024);
+
+        // An owner may go all the way to the ceiling, and not one byte past it: beyond that a
+        // manifest names more chunks than parse, so the upload would fail later and less clearly.
+        alice
+            .set_file_size_limit(MAX_FILE_BYTES as u64)
+            .await
+            .unwrap();
+        assert_eq!(alice.file_size_limit(), MAX_FILE_BYTES as u64);
+        assert!(matches!(
+            alice.set_file_size_limit(MAX_FILE_BYTES as u64 + 1).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.set_file_size_limit(MIN_FILE_SIZE_LIMIT - 1).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert_eq!(
+            alice.file_size_limit(),
+            MAX_FILE_BYTES as u64,
+            "a refused write leaves the setting alone"
+        );
+
+        // Lowering it governs what may be added next. A file over the CURRENT limit is refused
+        // even though the protocol could carry it.
+        alice
+            .set_file_size_limit(MIN_FILE_SIZE_LIMIT)
+            .await
+            .unwrap();
+        let too_big = vec![0u8; MIN_FILE_SIZE_LIMIT as usize + 1];
+        let refused = alice
+            .add_file("big.bin", "application/octet-stream", "", &too_big)
+            .await;
+        assert!(
+            matches!(refused, Err(AppError::Invalid(ref m)) if m.contains("this server's limit")),
+            "the refusal names the server's limit, not the protocol's: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_junk_or_out_of_band_stored_limit_reads_as_the_default() {
+        // The setting is written by an owner's client, so a value outside the band is either a
+        // bug or a hostile write. Neither may open the server up or close it down: both fall
+        // back to the default, which is also what an index written before the setting reads as.
+        let mut doc = AutoCommit::new();
+        assert_eq!(
+            read_file_size_limit(&doc),
+            DEFAULT_FILE_SIZE_LIMIT,
+            "an index with no config key at all"
+        );
+        write_file_size_limit(&mut doc, MAX_FILE_BYTES as u64 + 1).unwrap();
+        assert_eq!(read_file_size_limit(&doc), DEFAULT_FILE_SIZE_LIMIT);
+        write_file_size_limit(&mut doc, 0).unwrap();
+        assert_eq!(read_file_size_limit(&doc), DEFAULT_FILE_SIZE_LIMIT);
+        write_file_size_limit(&mut doc, 700 * 1024 * 1024).unwrap();
+        assert_eq!(
+            read_file_size_limit(&doc),
+            700 * 1024 * 1024,
+            "a legal one holds"
+        );
     }
 
     #[tokio::test]

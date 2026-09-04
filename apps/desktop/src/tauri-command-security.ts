@@ -74,6 +74,10 @@ export const TAURI_COMMAND_GROUPS = {
       "get_dm_requests", "file_available", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
       "get_wiki_history", "get_wiki_pending", "get_wiki_review_days", "get_roles", "get_moderation",
+      // The server's upload cap, off the file index document every member already reads. The
+      // webview uses it to refuse an over-large file with a useful sentence; the native side
+      // enforces the same bound, so this is presentation rather than authorization.
+      "get_file_size_limit",
       // Whether plain members may post to this server's announcement feed. One boolean off the
       // feed document every member already reads, so it exposes nothing `get_statuses` did not.
       // The webview uses it to decide whether to draw a composer, which is presentation: the
@@ -134,6 +138,9 @@ export const TAURI_COMMAND_GROUPS = {
       // publishes the group's own name to every member and is owner/admin, enforced natively in
       // the same place the livery and icon are: the settings page only hides the control.
       "rename_server", "set_shared_server_name",
+      // The server's upload cap. Owner/admin natively, and bounded natively at both ends: the
+      // page cannot set it above the protocol ceiling by sending a larger number.
+      "set_file_size_limit",
       "set_livery", "set_server_icon", "set_server_cursor", "set_member_badge",
       "delete_file", "set_file_expiry", "delete_event", "set_wiki_format", "delete_wiki_page",
       "rename_wiki_page", "set_wiki_review_days", "approve_wiki_edit", "reject_wiki_edit",

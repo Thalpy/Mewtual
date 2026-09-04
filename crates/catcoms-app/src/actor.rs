@@ -662,6 +662,13 @@ pub enum AppCommand {
     WikiPendingEdits {
         reply: oneshot::Sender<Vec<WikiPendingEdit>>,
     },
+    /// Query the largest file this server accepts, in bytes.
+    FileSizeLimit { reply: oneshot::Sender<u64> },
+    /// Set the largest file this server accepts, in bytes (owner/admin only).
+    SetFileSizeLimit {
+        bytes: u64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Query the wiki review window in days (0 = off).
     WikiReviewDays { reply: oneshot::Sender<u32> },
     /// Set the wiki review window in days, 0..=30 (owner/admin only).
@@ -2745,6 +2752,36 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// The largest file this server accepts, in bytes. Answers the default rather than a
+    /// misleading zero if the actor has stopped.
+    pub async fn file_size_limit(&self) -> u64 {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::FileSizeLimit { reply })
+            .await
+            .is_err()
+        {
+            return crate::DEFAULT_FILE_SIZE_LIMIT;
+        }
+        rx.await.unwrap_or(crate::DEFAULT_FILE_SIZE_LIMIT)
+    }
+
+    /// Set the largest file this server accepts, in bytes; owner/admin only (a `FilesChanged`
+    /// event follows, because the limit lives in the file index document).
+    pub async fn set_file_size_limit(&self, bytes: u64) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetFileSizeLimit { bytes, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
     /// Set the wiki review window in days, 0..=30; owner/admin only (a `WikiUpdated` event
     /// follows).
     pub async fn set_wiki_review_days(&self, days: u32) -> Result<(), String> {
@@ -4022,6 +4059,21 @@ where
                     }
                     Some(AppCommand::WikiPendingEdits { reply }) => {
                         let _ = reply.send(server.wiki_pending_edits());
+                    }
+                    Some(AppCommand::FileSizeLimit { reply }) => {
+                        let _ = reply.send(server.file_size_limit());
+                    }
+                    Some(AppCommand::SetFileSizeLimit { bytes, reply }) => {
+                        let res = server
+                            .set_file_size_limit(bytes)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        // The limit lives in the file index document, so this is a file change
+                        // as far as every reader is concerned.
+                        if files_changed(&server, &mut file_count) {
+                            let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                        }
                     }
                     Some(AppCommand::WikiReviewDays { reply }) => {
                         let _ = reply.send(server.wiki_review_days());
