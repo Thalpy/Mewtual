@@ -63,6 +63,12 @@ const WAIT: Duration = Duration::from_secs(60);
 /// working path takes one or two, so only a broken one spends them all.
 const SETTLE_TICKS: usize = 12;
 
+/// Injected-clock time to advance between settle ticks. Comfortably past the sync layer's
+/// five-minute PEX failure backoff, so a peer backed off by a missed real-time deadline is
+/// eligible to be asked again on the next tick, exactly as it would be after a minute or two of
+/// the product's own ticks.
+const PEX_BACKOFF_STEP_MS: u64 = 360_000;
+
 /// A stand-in reachable address for a node's published peer record. Loopback and LAN addresses
 /// are stripped inside `publish_self_record`, so a record built from them would carry none and
 /// the cross-session cache would have nothing to hold; TEST-NET-3 is routable-looking and
@@ -135,16 +141,28 @@ impl Node {
     /// exactly one pass instead was a scheduling assumption that held on an idle machine and
     /// lost on a loaded one, leaving the founder's roster a member short.
     ///
+    /// Advancing `clock` between attempts is what makes those later ticks mean anything, and is
+    /// the half this helper was missing when it still let the Linux runner fail. A PEX request is
+    /// bounded by a **real-time** deadline, but a peer that misses it is backed off on the
+    /// **injected** clock, for five minutes of it. On a loaded machine the deadline is missed;
+    /// with a `ManualClock` nobody advances, the backoff then never expires, `take_pex_targets`
+    /// stops offering that peer, and every further tick is a no-op against a roster that can
+    /// never fill. That is why waiting did not recover it and only more ticks did not either. In
+    /// the product a minute of real time passes between ticks and the backoff simply expires; the
+    /// tests have to say so out loud.
+    ///
     /// The drain between attempts is load-bearing rather than tidiness: the actor's event
     /// channel is bounded, so a test that only ever queries can fill it and stall the very actor
     /// it is waiting on.
-    async fn settle_online(&mut self, expected: &[String]) -> Vec<String> {
+    async fn settle_online(&mut self, clock: &ManualClock, expected: &[String]) -> Vec<String> {
         let mut want = expected.to_vec();
         want.sort();
         let mut online = Vec::new();
         for attempt in 0..SETTLE_TICKS {
             if attempt > 0 {
                 let _ = drain(&mut self.events).await;
+                // Past any PEX backoff a missed deadline may have set.
+                clock.advance_ms(PEX_BACKOFF_STEP_MS);
                 self.discovery_pass().await;
             }
             online = self.actor.online_members().await;
@@ -510,12 +528,12 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
     bob.discovery_pass().await;
 
     assert_eq!(
-        alice.settle_online(&[bob.fp.clone()]).await,
+        alice.settle_online(&clock, &[bob.fp.clone()]).await,
         vec![bob.fp.clone()],
         "Alice's roster shows Bob online"
     );
     assert_eq!(
-        bob.settle_online(&[alice.fp.clone()]).await,
+        bob.settle_online(&clock, &[alice.fp.clone()]).await,
         vec![alice.fp.clone()]
     );
 
@@ -552,12 +570,12 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
     let mut expected = vec![bob.fp.clone(), carol.fp.clone()];
     expected.sort();
     assert_eq!(
-        alice.settle_online(&expected).await,
+        alice.settle_online(&clock, &expected).await,
         expected,
         "the founder sees both other members online"
     );
     assert_eq!(
-        carol.settle_online(&[alice.fp.clone()]).await,
+        carol.settle_online(&clock, &[alice.fp.clone()]).await,
         vec![alice.fp.clone()],
         "the newest member sees the peer it actually spoke to"
     );
@@ -653,7 +671,7 @@ async fn the_eclipse_advisory_stays_quiet_for_a_healthy_group() {
     let mut everyone: Vec<String> = others.iter().map(|m| m.fp.clone()).collect();
     everyone.sort();
     assert_eq!(
-        alice.settle_online(&everyone).await,
+        alice.settle_online(&clock, &everyone).await,
         everyone,
         "the group really was healthy for the whole run, so the quiet means something"
     );
@@ -951,7 +969,7 @@ async fn a_restarted_server_recovers_its_state_and_re_finds_its_peers_without_a_
     alice.discovery_pass().await;
     bob.discovery_pass().await;
     assert_eq!(
-        alice.settle_online(&[bob.fp.clone()]).await,
+        alice.settle_online(&clock, &[bob.fp.clone()]).await,
         vec![bob.fp.clone()],
         "the session being persisted actually had a proven peer"
     );
