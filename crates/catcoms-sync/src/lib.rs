@@ -10128,9 +10128,25 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         doc_type: DocType,
         doc_id: u128,
     ) -> Result<usize, SyncError> {
+        // One attempt, and the gap outlives it either way.
+        //
+        // This is the call the UI makes when a channel is opened, and it used to be the only
+        // chance that channel got: no peer to ask yet, or one attempt that failed, and nothing
+        // remembered there was a backlog to fetch. A quiet channel then stayed empty until
+        // somebody happened to speak in it. Queueing means the ordinary drain picks it up on a
+        // later tick, against whichever source is eligible by then.
         match self.pick_catchup_peer() {
-            Some(peer) => self.request_catchup(peer, doc_type, doc_id).await,
-            None => Ok(0),
+            Some(peer) => {
+                let result = self.request_catchup(peer, doc_type, doc_id).await;
+                if result.is_err() {
+                    self.enqueue_doc_catchup(doc_type, doc_id);
+                }
+                result
+            }
+            None => {
+                self.enqueue_doc_catchup(doc_type, doc_id);
+                Ok(0)
+            }
         }
     }
 
