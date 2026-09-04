@@ -1,0 +1,45 @@
+name: Bug report
+description: Something in Mewtual does not work the way it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Mewtual's own **Send feedback** window fills most of this in for you, including the
+        app version and environment. Filing from here instead is fine; the fields below are
+        the same ones.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, and what the app did instead of what you expected.
+      placeholder: I pressed X while Y, and the window closed instead of Z.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: Settings → Updates, or the title bar. For example `0.3.0-alpha.13`.
+      placeholder: 0.3.0-alpha.13
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system
+      placeholder: Windows 11
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: |
+        **Before attaching a debug log:** `debug_log_*.txt` is written unminimised and can
+        contain addresses, names and message text. Read it before posting it, or describe
+        what it said instead. Never paste an invite, a passphrase or a friend code.

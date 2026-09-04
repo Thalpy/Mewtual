@@ -1,0 +1,21 @@
+name: Feature request
+description: Something Mewtual should be able to do and cannot.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like Mewtual to do?
+      placeholder: Let me hold a key to talk, so the microphone is not live the whole call.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: What are you trying to get done?
+      description: >
+        The situation it comes up in, rather than the solution. It often turns out there is a
+        better answer than the one that first comes to mind, and that is much easier to find
+        with the problem in front of us.
+    validations:
+      required: false

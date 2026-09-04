@@ -1,0 +1,46 @@
+name: Label issues
+
+# The issue forms in `.github/ISSUE_TEMPLATE` carry their own labels, so anything filed from
+# GitHub is already tagged. This exists for the other path: Mewtual's in-app "Send feedback"
+# opens a prefilled `/issues/new?labels=…` URL, and that label is silently dropped often enough
+# that reports have arrived untagged (#10 and #12 both did, while the labels they asked for
+# exist). The app writes a `**Type:** Bug report` / `**Type:** Feature request` line as the first
+# thing in the body, so the report says what it is regardless of what the URL managed to carry.
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply the label the report asks for
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body || "";
+            // Anchored to the app's own first line rather than searched for anywhere in the
+            // text, so a bug report that happens to mention the words "feature request" is
+            // still labelled a bug.
+            const declared = /^\s*\*\*Type:\*\*\s*(Bug report|Feature request)\s*$/im.exec(body);
+            if (!declared) {
+              core.info("No app-declared type in this issue; leaving its labels alone.");
+              return;
+            }
+            const label = declared[1] === "Bug report" ? "bug" : "enhancement";
+            const existing = context.payload.issue.labels.map((l) => l.name);
+            if (existing.includes(label)) {
+              core.info(`Already labelled ${label}.`);
+              return;
+            }
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              labels: [label],
+            });
+            core.info(`Labelled ${label}.`);
