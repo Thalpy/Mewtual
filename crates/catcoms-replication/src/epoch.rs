@@ -279,6 +279,11 @@ pub struct IntentLedger {
 }
 
 impl IntentLedger {
+    /// Full scope authenticated by the enclosing vault record, including for an empty ledger.
+    pub fn document(&self) -> &LogicalDocument {
+        &self.document
+    }
+
     /// Create an empty ledger for one server-bound logical document.
     pub fn new(document: LogicalDocument) -> Self {
         Self {

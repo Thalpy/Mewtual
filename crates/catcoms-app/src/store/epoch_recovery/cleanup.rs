@@ -70,6 +70,14 @@ impl ServerStore {
         self.cleanup_epoch_files(EpochInventoryCoverage::RecoveryAndOwnerReceipts)
     }
 
+    /// Also remove unpublished intent attempts, never final replay instructions. Source edits
+    /// must not have been accepted before the final rename and durability barrier succeeded.
+    pub fn cleanup_epoch_storage_staging_with_intents(
+        &mut self,
+    ) -> Result<EpochStorageCleanup<'_>, AppError> {
+        self.cleanup_epoch_files(EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents)
+    }
+
     fn cleanup_epoch_files(
         &mut self,
         coverage: EpochInventoryCoverage,
@@ -122,6 +130,11 @@ impl<'a> EpochStorageCleanup<'a> {
             return Ok(self.progress);
         }
         self.failed = true;
+        // Invalidate all prior intent-budget/scan tokens BEFORE any possible unlink or panic.
+        // Even an empty retry must complete syncing and rescan before spending again.
+        if self.coverage == EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents {
+            self.store.intent_generation = std::sync::Arc::new(());
+        }
         let mut next = self.progress;
         for _ in 0..ENTRIES_PER_STEP {
             let Some(entry) = self.directory.next() else {

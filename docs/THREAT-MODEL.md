@@ -235,6 +235,22 @@ table with the commit that closed it.
   No actor, startup or network path invokes it
   yet. Durability remains file-sync/atomic replacement plus Unix parent sync, not protection from
   device failure or restoration of an older vault backup.
+- **Saved local intents are replay data, not completion or impersonation authority.** The
+  prepare-only vault adapter binds the local mount id and full group/type/key, checks the actual
+  local device's current roster signing key, and saves before reporting success. It bounds public
+  envelope fields before encoding and verifies the embedded ledger scope even when empty.
+  Type-specific semantic validation remains the coordinator's job. There is no retirement API:
+  neither a received operation nor its marker can delete a pending intent. New writes charge
+  ordinary content and full replacement peak. A separate 64 MiB vault cap counts physical final
+  intent bytes and all temporaries, including unknown ownership; an explicit three-family scan
+  is required. Mount/generation provenance rejects cross-vault, stale and duplicated budget use
+  after intent write/sync/cleanup attempts. Both budgets fail closed after uncertain I/O.
+  Exact retries sync an authenticated unchanged final and parent without a replacement copy,
+  so a committed write at the cap can still pass its durability barrier. Cleanup removes only
+  unpublished siblings, not saved intents, and still needs a fresh scan before credit is released.
+  Parent sync remains Unix-only; hostile local path replacement, device failure and backup
+  rollback remain outside these guarantees. Storage admission across other record types,
+  multi-record retirement, replay and network/editor integration are still unwired.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
   no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains

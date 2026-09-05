@@ -1,4 +1,4 @@
-//! Shared bounded discovery of recovery and owner-journal files, not all P1 storage.
+//! Shared bounded discovery of recovery, owner-journal and opt-in intent files, not all P1 storage.
 //!
 //! A scan borrows the mounted store exclusively across steps. It never repairs, promotes or
 //! removes a file. Bodies are authenticated one at a time and discarded; only bounded metadata
@@ -8,17 +8,19 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::store::epoch_budget::MAX_ACCOUNTED_RECORDS;
-use crate::store::epoch_owner;
+use crate::store::{epoch_intents, epoch_owner};
 use catcoms_wire::DocType;
 
 /// Explicit file-family coverage, carried unchanged through cleanup, scan and completed result.
-/// Neither variant includes blobs, epoch snapshots, intents or other future P1 record families.
+/// No variant includes blobs, epoch snapshots or other future P1 record families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpochInventoryCoverage {
     /// Compatibility mode: existing recovery-only APIs never inspect/delete owner journals.
     RecoveryOnly,
-    /// Both currently implemented standalone P1 store record families, under one store borrow.
+    /// Compatibility mode: recovery and owner journals only, under one store borrow.
     RecoveryAndOwnerReceipts,
+    /// Explicit opt-in to local intent files as well; older APIs retain their narrower coverage.
+    RecoveryOwnerReceiptsAndIntents,
 }
 
 /// Physical record family; a digest alone must never identify a temporary's destination.
@@ -28,6 +30,8 @@ pub enum EpochRecordKind {
     Recovery,
     /// Owner-local pending and published receipt decisions.
     OwnerReceipts,
+    /// Device-local replay instructions, never inbound peer submissions.
+    Intents,
 }
 
 impl EpochRecordKind {
@@ -35,24 +39,28 @@ impl EpochRecordKind {
         match self {
             Self::Recovery => ".recovery",
             Self::OwnerReceipts => ".owner-receipts",
+            Self::Intents => ".intents",
         }
     }
     fn domain(self) -> &'static [u8] {
         match self {
             Self::Recovery => RECORD_DOMAIN,
             Self::OwnerReceipts => epoch_owner::RECORD_DOMAIN,
+            Self::Intents => epoch_intents::RECORD_DOMAIN,
         }
     }
     fn scope(self, server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {
         match self {
             Self::Recovery => scope_bytes(server, document),
             Self::OwnerReceipts => epoch_owner::scope_bytes(server, document),
+            Self::Intents => epoch_intents::scope_bytes(server, document),
         }
     }
     fn sealed_cap(self) -> usize {
         match self {
             Self::Recovery => MAX_SEALED_BYTES,
             Self::OwnerReceipts => epoch_owner::MAX_SEALED_BYTES,
+            Self::Intents => epoch_intents::MAX_SEALED_BYTES,
         }
     }
 }
@@ -74,6 +82,8 @@ pub struct EpochStorageScanProgress {
     pub recovery_records: usize,
     /// Successfully authenticated owner journals; always zero in recovery-only mode.
     pub owner_receipt_records: usize,
+    /// Authenticated local intent ledgers; zero unless coverage explicitly includes intents.
+    pub intent_records: usize,
     /// Canonically named staging siblings, including empty or partial files.
     pub orphan_files: usize,
     /// Physical ciphertext bytes read and authenticated (no orphan bodies are read).
@@ -144,6 +154,7 @@ impl std::fmt::Debug for EpochStorageOrphan {
 /// let unverified_empty = EpochStorageInventory::default();
 /// ```
 pub struct EpochStorageInventory {
+    pub(in crate::store) intent_generation: std::sync::Arc<()>,
     coverage: EpochInventoryCoverage,
     records: BTreeMap<(EpochRecordKind, [u8; 32]), EpochStorageInventoryEntry>,
     orphans: BTreeMap<String, EpochStorageOrphan>,
@@ -161,8 +172,9 @@ impl std::fmt::Debug for EpochStorageInventory {
 }
 
 impl EpochStorageInventory {
-    fn empty(coverage: EpochInventoryCoverage) -> Self {
+    fn empty(coverage: EpochInventoryCoverage, intent_generation: std::sync::Arc<()>) -> Self {
         Self {
+            intent_generation,
             coverage,
             records: BTreeMap::new(),
             orphans: BTreeMap::new(),
@@ -195,7 +207,7 @@ impl EpochStorageInventory {
 
     /// Inputs from the reported coverage for a future complete server inventory. Refuses if ANY orphan
     /// is unresolved: an unknown file might belong to this server, even when others do not.
-    /// Known temporaries are charged wholly as settlement scratch to the verified destination.
+    /// Recovery/owner temporaries charge settlement scratch; intent temporaries charge content.
     /// This does not construct a budget: callers must still inventory every other managed type
     /// and exclude writes across composition. Multiple documents' orphans can pin conflicting
     /// reserves; cleanup must resolve that, never pretend the temporary bytes are absent.
@@ -230,6 +242,9 @@ impl EpochStorageInventory {
                     EpochRecordKind::OwnerReceipts => {
                         b"catcoms/epoch-owner-temp-inventory/v1".as_slice()
                     }
+                    EpochRecordKind::Intents => {
+                        b"catcoms/epoch-intent-temp-inventory/v1".as_slice()
+                    }
                 })
                 .expect("constant fits");
                 e.put_bytes(orphan.name.as_bytes())
@@ -237,9 +252,17 @@ impl EpochStorageInventory {
                 result.push(StorageRecord {
                     id: *blake3::hash(&e.finish()).as_bytes(),
                     document: entry.record.document,
-                    footprint: Footprint {
-                        settlement: orphan.bytes,
-                        ..Footprint::default()
+                    // Intent writes never borrow settlement space, including after a crash.
+                    footprint: if orphan.kind() == EpochRecordKind::Intents {
+                        Footprint {
+                            content: orphan.bytes,
+                            ..Footprint::default()
+                        }
+                    } else {
+                        Footprint {
+                            settlement: orphan.bytes,
+                            ..Footprint::default()
+                        }
                     },
                 });
             }
@@ -284,6 +307,12 @@ impl ServerStore {
         self.scan_epoch_files(EpochInventoryCoverage::RecoveryAndOwnerReceipts)
     }
 
+    /// Explicit three-family inventory; required to bootstrap/reconcile the vault intent cap.
+    /// Still excludes epoch snapshots and other unimplemented P1 file families.
+    pub fn scan_epoch_storage_with_intents(&mut self) -> Result<EpochStorageScan<'_>, AppError> {
+        self.scan_epoch_files(EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents)
+    }
+
     pub(in crate::store) fn scan_epoch_files(
         &mut self,
         coverage: EpochInventoryCoverage,
@@ -296,10 +325,11 @@ impl ServerStore {
             ));
         }
         let directory = fs::read_dir(path).map_err(|e| AppError::Io(e.to_string()))?;
+        let inventory = EpochStorageInventory::empty(coverage, self.intent_generation.clone());
         Ok(EpochStorageScan {
             store: self,
             directory,
-            inventory: EpochStorageInventory::empty(coverage),
+            inventory,
             progress: EpochStorageScanProgress::default(),
             failed: false,
             entry_limit: MAX_DIRECTORY_ENTRIES,
@@ -395,6 +425,9 @@ impl EpochStorageScan<'_> {
                         EpochRecordKind::OwnerReceipts => {
                             self.store.read_epoch_owner_plain(&entry.path())
                         }
+                        EpochRecordKind::Intents => {
+                            self.store.read_epoch_intent_plain(&entry.path())
+                        }
                     }?
                     .ok_or_else(|| invalid("epoch record disappeared during inventory"))?;
                     self.progress.authenticated_bytes = self
@@ -420,6 +453,10 @@ impl EpochStorageScan<'_> {
                             epoch_owner::EpochOwnerReceiptState::decode(&plain, scope, &document)?;
                             epoch_owner::storage_record(server, &document, scope, size)?
                         }
+                        EpochRecordKind::Intents => {
+                            epoch_intents::EpochIntentState::decode(&plain, scope, &document)?;
+                            epoch_intents::storage_record(server, &document, scope, size)?
+                        }
                     };
                     if self
                         .inventory
@@ -440,6 +477,7 @@ impl EpochStorageScan<'_> {
                     match family {
                         EpochRecordKind::Recovery => self.progress.recovery_records += 1,
                         EpochRecordKind::OwnerReceipts => self.progress.owner_receipt_records += 1,
+                        EpochRecordKind::Intents => self.progress.intent_records += 1,
                     }
                     break;
                 }
@@ -524,7 +562,16 @@ pub(super) fn storage_name(
     name: &OsStr,
     coverage: EpochInventoryCoverage,
 ) -> Result<Option<(EpochRecordKind, RecoveryName)>, AppError> {
-    for family in [EpochRecordKind::Recovery, EpochRecordKind::OwnerReceipts] {
+    for family in [
+        EpochRecordKind::Recovery,
+        EpochRecordKind::OwnerReceipts,
+        EpochRecordKind::Intents,
+    ] {
+        if family == EpochRecordKind::Intents
+            && coverage != EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents
+        {
+            continue;
+        }
         if family == EpochRecordKind::OwnerReceipts
             && coverage == EpochInventoryCoverage::RecoveryOnly
         {

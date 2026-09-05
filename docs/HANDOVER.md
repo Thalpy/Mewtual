@@ -60,8 +60,26 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   Existing recovery-only APIs keep their scope and old type names as aliases. Neither path is
   automatically invoked on user vaults; other managed types, server-removal lifecycle and the sole
   production budget/coordinator still need integration.
+  Local intent preparation now has a vault-backed, append-only adapter: the local MLS device
+  supplies the author, current membership and full scope are checked, and a new intent is sealed
+  before the call succeeds. There is no intent-retirement API yet. Exact retries flush the
+  authenticated unchanged final file and parent without another copy, including after a
+  post-rename failure at the cap. Other writes still pay ordinary-content replacement peak.
+  Explicit `*_with_intents` inventory/cleanup covers all three implemented families without
+  changing either older API's coverage. A vault-wide `EpochIntentBudget` counts final ciphertext,
+  framing, unpublished siblings and replacement peak inside 64 MiB; this is conservatively
+  stricter than payload-only accounting. A private mount/generation token invalidates stale or
+  duplicate budgets before any intent write/sync/cleanup attempt. Intent temporary bytes charge
+  ordinary content, not the settlement reserve. Tests cover restart, both caps, cross-vault/group
+  rejection, uncertain writes, stale inventory, mixed-family accounting and both document limits.
+  Preparing an envelope is not type-specific validation, a live edit or replay; the coordinator
+  still must validate domain semantics, serialize all record families and retire intents only
+  with the checkpoint/recovery transaction. No new path runs automatically on user vaults.
   Follow-up coverage: native Windows reparse/junction refusal and forced enumeration-order
   fixtures (current tests vary creation order; attribution itself occurs only after EOF).
+  Intent review follow-ups: an already-accepted author removed through actual MLS membership,
+  and a caught panic specifically during retry-sync (outsider rejection, writer panic and sync
+  error are covered). Final adversarial review found no blocker/high/medium defect in this slice.
   Budgets still require every managed record type; multi-record settlement,
   complete managed-type cleanup and sole-writer wiring remain deferred. No guessed future deletion grants headroom, and
   the low-level unaccounted save is not a production admission path.

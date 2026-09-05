@@ -988,6 +988,40 @@ ignoring even malformed owner-only aliases (while charging traversal); combined 
 Other managed families, sole-writer admission, startup/actor/network integration and retention of
 saved records remain separate work. No cleanup operation is automatically invoked yet.
 
+`ServerStore::load_epoch_intents(server, document)` returns read-only `EpochIntentState::pending()`
+entries in derived-id order. `prepare_epoch_intent(server, document, operation, device, group, rng,
+server_budget, intent_budget)` reloads, verifies the local device's current roster signing key and
+group, checks the domain envelope bounds/scope, and durably adds one intent before returning.
+The caller must validate type-specific semantics first. There is no public raw-save or retirement
+API. Exact duplicate intents preserve newer entries and sync the authenticated unchanged final
+file plus parent without rewriting; sync-only admission reserves no bytes. New entries use ordinary
+content replacement accounting. Reads alone do not repair an uncertain save or authorize replay
+as a different author. File and parent durability are the existing file-sync/Unix-parent-sync model.
+
+The new explicit `scan_epoch_storage_with_intents` and
+`cleanup_epoch_storage_staging_with_intents` APIs return the same incremental jobs with fixed
+`EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents`. Earlier APIs still exclude intents,
+even malformed intent-only aliases. `EpochRecordKind::Intents` identifies `.intents` finals and
+staging siblings; `EpochStorageScanProgress::intent_records` counts authenticated ledgers.
+Namespace-specific bounds and `(kind, digest)` orphan attribution apply unchanged. Intent final
+AND temporary bytes charge content, never settlement. Saved ledgers are never cleanup targets.
+
+`EpochIntentBudget::from_inventory(&completed_inventory)` requires this three-family coverage,
+counts intent files across ALL servers in the vault, and includes unknown-owner temporaries.
+`reconcile` blocks the old budget on failure; `bytes()` is observed physical occupancy. The
+64 MiB cap (`MAX_VAULT_INTENT_BYTES`) includes sealing/framing and peak temporary copies, a
+conservative interpretation of the design's payload cap; the 65,536-record rail counts empty
+intent temporaries too. A private process-local mount/generation token is retained by inventories
+and budgets, and replaced before intent write/sync/cleanup I/O: duplicate budgets, prior-session
+budgets and stale completed inventories cannot authorize another intent update. Exact flush
+retries need neither replacement headroom nor a new RNG nonce. Both accounting guards remain
+unready after errors/panics, with no guessed refunds. The token does not track other file families:
+their metadata/admission and the sole complete per-server budget remain coordinator work.
+`IntentLedger::document()` exposes its full scope for the enclosing store decoder's equality check.
+
+This is a persist-before-edit prerequisite, not live editing or automatic replay. Retirement must
+be implemented with checkpoint/recovery persistence; no store/actor/network path invokes it yet.
+
 `get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
 the complete bounded `states` array. The webview accepts only a strictly newer revision for its
 current server/channel view, so a delayed query completion or event cannot replace fresher receipt

@@ -28,8 +28,10 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::AppError;
 
+mod epoch_intents;
 mod epoch_owner;
 mod epoch_recovery;
+pub use epoch_intents::{EpochIntentBudget, EpochIntentState, MAX_VAULT_INTENT_BYTES};
 pub use epoch_owner::EpochOwnerReceiptState;
 pub use epoch_recovery::cleanup::{
     EpochStorageCleanup, EpochStorageCleanup as EpochRecoveryCleanup, EpochStorageCleanupProgress,
@@ -378,6 +380,9 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 pub struct ServerStore {
     dir: PathBuf,
     keys: KeyHierarchy,
+    // Process-local freshness only, never wire authority. Replaced before any intent-file I/O;
+    // budgets made from older scans (or another mounted vault) cannot authorize a new write.
+    intent_generation: std::sync::Arc<()>,
     // This OS lock is intentionally held until the store is dropped. The in-process Tauri mutex
     // serializes commands, while this guard prevents a second app process from forking durable MLS,
     // invite-ledger, registry, or transport state from the same starting snapshot.
@@ -405,6 +410,7 @@ impl ServerStore {
         Ok(Self {
             dir,
             keys,
+            intent_generation: std::sync::Arc::new(()),
             _session: session,
         })
     }

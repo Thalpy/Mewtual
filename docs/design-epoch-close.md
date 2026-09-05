@@ -9,7 +9,9 @@ transitions now also have a standalone vault-sealed store API with crash-safe re
 peak-space accounting, bounded recovery-file inventory discovery and explicit staging cleanup.
 Owner receipt decisions now have an accounted vault-backed prepare/completion adapter with exact
 crash retries. A combined bounded inventory/cleanup covers owner journals and recovery files;
-publication, other managed-file families and production orchestration are not wired yet. Studio
+explicit intent-covering variants and vault-backed local intent preparation now add the third
+family. Publication, intent retirement, other managed-file families and production orchestration
+are not wired yet. Studio
 materializers, settlement orchestration, sync discovery, complete storage integration and app/UI events
 remain later slices and the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
@@ -501,6 +503,26 @@ scope. Owner bodies use their small namespace-specific cap and schema; their sav
 protocol allowance. Orphans require an authenticated destination of the SAME namespace, never a
 matching digest in another family. Combined cleanup removes only unpublished attempts, never
 saved pending/high-water decisions. This union is not all P1 storage or a production budget bootstrap.
+
+Local intent preparation is now a standalone vault adapter. It stores the existing bounded
+`IntentLedger` under a full local-server/group/type/key scope, with the author derived from the
+actual local MLS device and checked against current membership. New intents save before success;
+no accepted intent is removed by this adapter. An exact matching retry authenticates the existing
+ledger (including any newer intents), then syncs that unchanged file and its parent without a
+second copy. This repairs the post-rename durability boundary even when no copy fits at the cap.
+New writes charge full ordinary-content replacement peak, not the settlement reserve.
+
+`scan_epoch_storage_with_intents` and `cleanup_epoch_storage_staging_with_intents` opt into all
+three implemented families; earlier coverage stays unchanged. Intent temporaries charge content
+and cleanup never removes final ledgers. The dedicated vault intent budget is constructed only
+from completed three-family inventory. Its 64 MiB cap conservatively counts physical final bytes,
+framing, all intent temporaries (even unresolved ones), and peak replacement copies. A private
+mounted-store generation invalidates older budgets and scan results before intent write/sync or
+cleanup attempts; failures require fresh inventory reconciliation. Per-document 10,000-intent /
+4 MiB canonical-operation limits still come from the core ledger. Global intent metadata also has
+the scanner's 65,536-record rail. This does not admit other managed families' metadata: the sole
+coordinator still must compose all storage types, validate domain semantics before preparation,
+replay only as the original author, and retire intents atomically with checkpoint/recovery state.
 
 ## 13. Application events
 

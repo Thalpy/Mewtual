@@ -187,6 +187,24 @@ impl std::fmt::Debug for EpochStorageBudget {
 }
 
 impl EpochStorageBudget {
+    /// Internal durability-only retry for an authenticated UNCHANGED final file. No write, rename,
+    /// allocation or deletion is permitted under this guard: only file/parent flushes. This lets a
+    /// previously committed intent cross its durability barrier even when ordinary storage is full.
+    pub(super) fn reserve_sync(
+        &mut self,
+        scope: &StorageScope,
+        record: StorageRecord,
+    ) -> Result<StorageReservation<'_>, BudgetError> {
+        self.verify_record(scope, record.id, Some(record))?;
+        let final_usage = self.usage;
+        self.ready = false;
+        Ok(StorageReservation {
+            budget: self,
+            record,
+            final_usage,
+        })
+    }
+
     /// Construct only from a complete verified inventory, not a partial directory page. Reject
     /// duplicate ids instead of silently reducing usage. Unknown/orphan bytes must be included.
     /// Empty orphan files still consume a metadata slot (a crash can precede the first write).
@@ -421,6 +439,31 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn sync_only_reservation_charges_no_copy_and_remains_fail_closed_on_abandonment() {
+        let mut budget = full();
+        let scope = scope();
+        let old = budget.records[&[1; 32]];
+        let usage = budget.usage();
+        budget.reserve_sync(&scope, old).unwrap().commit();
+        assert_eq!(budget.usage(), usage);
+        let guard = budget.reserve_sync(&scope, old).unwrap();
+        std::mem::forget(guard);
+        assert!(budget.requires_reconciliation());
+        assert_eq!(
+            budget.reserve_sync(&scope, old).unwrap_err(),
+            BudgetError::Reconcile
+        );
+        let mut budget = full();
+        let mut forged = old;
+        forged.footprint.content -= 1;
+        assert_eq!(
+            budget.reserve_sync(&scope, forged).unwrap_err(),
+            BudgetError::Inventory
+        );
+        assert!(budget.requires_reconciliation());
     }
 
     #[test]
