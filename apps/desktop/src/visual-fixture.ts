@@ -231,6 +231,18 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
     }
     case "get_pinned_messages":
       return clone((CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []).filter((m) => m.pinned));
+    case "get_messages_by_id": {
+      // The arrival read: the named rows wherever they sort, each with its addressing bit. Ids
+      // that name nothing are absent, exactly as the native command answers.
+      const all = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Array<{
+        id: string;
+        text: string;
+      }>;
+      const wanted = Array.isArray(args.ids) ? (args.ids as string[]) : [];
+      return all
+        .filter((row) => wanted.includes(row.id))
+        .map((row) => ({ ...row, targets_me: row.text.includes("@[Rowan]") }));
+    }
     case "get_message_tail": {
       const all = clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []) as Array<{ id: string; text: string }>;
       const limit = typeof args.limit === "number" && args.limit > 0 ? Math.trunc(args.limit) : all.length;

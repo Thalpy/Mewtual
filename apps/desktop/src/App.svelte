@@ -17027,6 +17027,15 @@
   }
 
   const NOTIFY_TAIL_ROWS = 64;
+  /** Read the named rows from the actor, wherever they sort. Empty if none of them are there. */
+  async function fetchArrivals(server: number, channel: string, ids: string[]): Promise<TailMsg[]> {
+    try {
+      return await invoke<TailMsg[]>("get_messages_by_id", { server, channel, ids });
+    } catch {
+      return [];
+    }
+  }
+
   async function notifyLatestChannelMessage(
     server: number,
     channel: string,
@@ -17048,19 +17057,32 @@
         "get_message_tail",
         { server, channel, limit: NOTIFY_TAIL_ROWS, afterId: cursor.id || null, afterTs: cursor.ts || null },
       );
-      // The row that arrived, not the row that sorts last. Messages are ordered by the sender's
-      // timestamp, so one that was delayed, or written on a device whose clock is behind, lands
-      // wherever its stamp says rather than at the end: headlining the last row then announced
-      // somebody else's older message, or nothing at all when that row had already been seen.
-      // The actor names what arrived; the tail is only where the text is read from.
-      const arrived = arrivals.length
-        ? tail.rows.filter((row) => arrivals.includes(row.id))
-        : [];
-      const latest = arrived[arrived.length - 1] ?? tail.rows[tail.rows.length - 1];
+      // The rows that arrived, read by id rather than looked for in the tail. Messages are ordered
+      // by the sender's timestamp, so one that was delayed, or written on a device whose clock is
+      // behind, sorts wherever its stamp says: it can be arbitrarily far from the end, which is
+      // exactly the case this exists for. Searching the tail for it found nothing and fell back to
+      // headlining the last row, which is a message the ticker has usually already announced.
+      const arrived = arrivals.length ? await fetchArrivals(server, channel, arrivals) : [];
+      if (arrivals.length && !arrived.length) {
+        // Named rows that are no longer there: deleted between arriving and being read. Nothing to
+        // announce, and announcing something else would be a lie about what happened.
+        return;
+      }
+      // A mention among the arrivals is the headline; otherwise the last of them. Keeping the
+      // headline and the classification on one row is what stops the ticker's text, its sound and
+      // its click target from describing three different messages.
+      const targeted = arrived.find((row) => row.targets_me && row.author !== myFp);
+      const latest = targeted ?? arrived[arrived.length - 1] ?? tail.rows[tail.rows.length - 1];
       let kind: "message" | "mention" = mode === "mention" ? "mention" : "message";
-      // Mention detection depends on the active server's identity and profile, so if the user
-      // switches servers during this fetch, degrade to an ordinary message notification.
-      if (mode === "detect" && server === activeServerId && tail.addressed_after_cursor) {
+      // Whether the row that arrived is addressed to me is a property of that row, not of where it
+      // sits: `addressed_after_cursor` answers over the rows past the read mark, and a message that
+      // sorts before that mark is not among them. A delayed mention was being announced as an
+      // ordinary message for that reason alone. The cursor scan still answers for an event that
+      // named no arrivals, and for mentions further back than this one.
+      const detected =
+        mode === "detect" && server === activeServerId &&
+        (latest?.targets_me === true ? latest.author !== myFp : tail.addressed_after_cursor);
+      if (detected) {
         if (!mentionChannels.has(channel)) mentionChannels = new Set(mentionChannels).add(channel);
         kind = "mention";
       }
@@ -17651,13 +17673,18 @@
               void notifyLatestChannelMessage(server, channel, "detect", change.arrivals ?? []);
               return;
             }
-            // Same rule as the fetched branch: describe what arrived, not what sorts last. With
-            // rows in timestamp order the two are only the same message when the arrival is also
-            // the newest thing said, which a delayed or behind-the-clock sender breaks.
+            // Same rule as the fetched branch: describe what arrived, not what sorts last. Being
+            // at the end of the conversation does not mean the loaded page contains an arrival
+            // that sorted earlier, so anything this page cannot account for is read by id.
             const arrived = change.arrivals.length
               ? messages.filter((m) => change.arrivals.includes(m.id))
               : [];
-            const last = arrived[arrived.length - 1] ?? messages[messages.length - 1];
+            if (change.arrivals.length && arrived.length < change.arrivals.length) {
+              void notifyLatestChannelMessage(server, channel, "detect", change.arrivals);
+              return;
+            }
+            const targeted = arrived.find((m) => m.targets_me && m.author !== myFp);
+            const last = targeted ?? arrived[arrived.length - 1] ?? messages[messages.length - 1];
             const forMe = last && last.author !== myFp && last.targets_me;
             notifyMessage(server, channel, last, forMe ? "mention" : "message");
           });

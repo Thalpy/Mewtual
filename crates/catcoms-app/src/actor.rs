@@ -320,6 +320,12 @@ pub enum AppCommand {
         after_ts: u64,
         reply: oneshot::Sender<crate::MessageTail>,
     },
+    /// Query the named rows, wherever they sort, each with whether it addresses me.
+    MessagesById {
+        channel: u128,
+        ids: Vec<String>,
+        reply: oneshot::Sender<Vec<(ChatMessage, bool)>>,
+    },
     /// Query a bounded slice of a channel around an anchor (see [`crate::MessagePageQuery`]).
     MessagePage {
         channel: u128,
@@ -1316,6 +1322,29 @@ impl ServerActor {
             .is_err()
         {
             return crate::MessageTail::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// The named rows, wherever they sort, each with whether it addresses me (see
+    /// [`Server::messages_by_id`]). Ids that name nothing are absent from the answer.
+    pub async fn messages_by_id(
+        &self,
+        channel: u128,
+        ids: Vec<String>,
+    ) -> Vec<(ChatMessage, bool)> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::MessagesById {
+                channel,
+                ids,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Vec::new();
         }
         rx.await.unwrap_or_default()
     }
@@ -3460,6 +3489,13 @@ where
                     }) => {
                         let _ = reply.send(server.message_tail(channel, limit, &after_id, after_ts));
                     }
+                    Some(AppCommand::MessagesById {
+                        channel,
+                        ids,
+                        reply,
+                    }) => {
+                        let _ = reply.send(server.messages_by_id(channel, &ids));
+                    }
                     Some(AppCommand::MessagePage {
                         channel,
                         query,
@@ -5116,6 +5152,68 @@ mod tests {
         let change = channel_delta(&server, GENERAL, &mut sigs).expect("a pin is a change");
         assert!(!change.messages_appended);
         assert!(change.arrivals.is_empty());
+    }
+
+    /// An arrival is read by name, from wherever it sorts, and carries its own addressing.
+    ///
+    /// Both are what the tail could not give. A message ordered by its sender's timestamp can sit
+    /// arbitrarily far back, so a bounded tail does not contain it; and whether it addresses this
+    /// member is a property of that row, where the tail could only say whether anything *after the
+    /// read mark* did, which a row sorting before that mark is not.
+    #[tokio::test]
+    async fn an_arrival_is_found_by_id_and_carries_its_own_addressing() {
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_channel(GENERAL).await.unwrap();
+        server.open_profiles().await.unwrap();
+        server
+            .set_profile(crate::Profile {
+                name: "Alice Cat".into(),
+                ..crate::Profile::default()
+            })
+            .await
+            .unwrap();
+        async fn post_at(
+            server: &mut Server<MemNetwork, ChaCha20Rng>,
+            id: &str,
+            text: &str,
+            ts: u64,
+        ) {
+            let (id, text) = (id.to_string(), text.to_string());
+            server
+                .sync
+                .post(crate::DocType::Channel, GENERAL, move |d| {
+                    crate::append_message(d, &id, "bob", &text, ts, "")
+                })
+                .await
+                .unwrap();
+        }
+        // A long conversation, and then a mention that was said before all of it.
+        for i in 0..200u64 {
+            post_at(&mut server, &format!("m{i}"), "chatter", 10_000 + i).await;
+        }
+        post_at(&mut server, "delayed", "@[Alice Cat] over here", 1_000).await;
+
+        let rows = server.messages_by_id(GENERAL, &["delayed".to_string()]);
+        assert_eq!(rows.len(), 1, "found by name, not by looking near the end");
+        assert_eq!(rows[0].0.id, "delayed");
+        assert!(rows[0].1, "and it says for itself that it addresses me");
+
+        // The tail cannot answer either question about it.
+        let tail = server.message_tail(GENERAL, 64, "m199", 10_199);
+        assert!(
+            !tail.rows.iter().any(|(m, _)| m.id == "delayed"),
+            "the row is nowhere near the rows a notification would otherwise read"
+        );
+        assert!(
+            !tail.addressed_after_cursor,
+            "and the cursor scan cannot see a mention that sorts before the mark"
+        );
+
+        // Ids that name nothing are simply absent, rather than something else standing in.
+        assert!(server
+            .messages_by_id(GENERAL, &["no-such-row".to_string()])
+            .is_empty());
     }
 
     #[tokio::test]

@@ -7344,6 +7344,44 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Without it a deleted read mark reads as "nothing here has been read", so a channel read
     /// years ago rings again for its oldest mention, and keeps ringing. Pass `0` only to mean
     /// this member has genuinely read nothing here.
+    /// The named rows, wherever they sit, each with whether it addresses this member.
+    ///
+    /// Rows are ordered by their senders' timestamps, so a message that has just arrived is not
+    /// necessarily near the end: a delayed one, or one from a device whose clock is behind, can
+    /// sort arbitrarily far back. Looking for it in a bounded tail, or in whatever page the reader
+    /// happens to have loaded, therefore finds nothing and leaves the caller describing an
+    /// unrelated row. Ids are looked up against the whole materialized channel instead, which is
+    /// already in memory; ids that name nothing are simply absent from the answer, which is how a
+    /// caller learns a row was deleted before it could be read.
+    pub fn messages_by_id(&self, channel: u128, ids: &[String]) -> Vec<(ChatMessage, bool)> {
+        let me = self.my_fingerprint();
+        let marker = self.mention_marker();
+        self.with_channel(channel, |c| {
+            let mut out: Vec<(ChatMessage, bool)> = ids
+                .iter()
+                .filter_map(|id| c.by_id.get(id).map(|index| (*index, id)))
+                .map(|(index, _)| {
+                    let m = &c.messages[index];
+                    let parent = (!m.reply_to.is_empty())
+                        .then(|| c.by_id.get(&m.reply_to).map(|&i| &c.messages[i]))
+                        .flatten();
+                    (
+                        index,
+                        m.clone(),
+                        addresses_me(m, &me, marker.as_deref(), parent),
+                    )
+                })
+                // Answered in the order they read, so a caller that has to pick one can pick the
+                // last without having to think about the order it asked in.
+                .map(|(index, m, to_me)| (index, (m, to_me)))
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .into_values()
+                .collect();
+            out.shrink_to_fit();
+            out
+        })
+    }
+
     pub fn message_tail(
         &self,
         channel: u128,

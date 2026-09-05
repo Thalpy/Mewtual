@@ -1150,6 +1150,16 @@ a delayed message, or one from a device whose clock is behind, lands wherever it
 Anything describing an arrival reads those ids; taking the end of the list describes whatever is
 newest, which after such an arrival is a message the reader has very likely already seen.
 
+`get_messages_by_id(server, channel, ids)` (`Server::messages_by_id`) reads those rows, wherever
+they sort, each with the same `targets_me` bit `get_message_tail` carries. Knowing an arrival's id
+is no use if the query cannot reach it: a delayed row can sort arbitrarily far back, so neither a
+bounded tail nor the page the reader has loaded is guaranteed to contain it, and searching those
+and falling back to the last row announces a message already announced. Ids naming no row come
+back absent, which is how a caller learns a row was deleted rather than substituting another for
+it. Classification comes from the arriving row's own `targets_me`, not from
+`addressed_after_cursor`: that scan answers over the rows past the read mark, and a message that
+sorts before the mark is not among them, so a delayed mention read as an ordinary message.
+
 **Still open, and the reason this does not close the whole "buried message" report:** the unread
 summary decides by position, so a message that arrives with a timestamp below the read mark sorts
 before it and is counted as read. Before rows were ordered, a late arrival usually appended after

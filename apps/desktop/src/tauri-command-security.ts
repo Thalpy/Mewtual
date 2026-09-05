@@ -95,6 +95,7 @@ export const TAURI_COMMAND_GROUPS = {
       // The newest few rows of one channel plus an "addressed to me" bit per row, for the
       // arrival ticker: the same text `get_messages` serves, bounded instead of the whole log.
       "get_message_tail",
+      "get_messages_by_id",
       // A bounded, contiguous slice of one channel around an anchor (tail / message id / index),
       // with per-row reply context: the paged replacement for reading the whole log.
       "get_message_page",

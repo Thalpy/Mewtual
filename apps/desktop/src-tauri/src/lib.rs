@@ -3133,9 +3133,9 @@ async fn persist_server(state: &AppState, server: u64) {
     // when a server is removed and reinstalled.
     let Some((ticket, instance, actor)) = ({
         let mut servers = state.servers.lock().await;
-        servers.get_mut(&server).map(|entry| {
-            (entry.persist.request(), entry.instance, entry.actor.clone())
-        })
+        servers
+            .get_mut(&server)
+            .map(|entry| (entry.persist.request(), entry.instance, entry.actor.clone()))
     }) else {
         return;
     };
@@ -11058,6 +11058,35 @@ async fn get_message_tail(
     })
 }
 
+/// Read the named rows, wherever they sort, each with an "addressed to me" bit.
+///
+/// The arrival read. Rows are ordered by their senders' timestamps, so a message that has just
+/// arrived is not necessarily near the end and looking for it in a bounded tail, or in the page
+/// the reader happens to have loaded, finds nothing. Ids that name no row come back absent, which
+/// is how a caller learns the row was deleted rather than mistaking somebody else's message for it.
+#[tauri::command]
+async fn get_messages_by_id(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    ids: Vec<String>,
+) -> Result<Vec<UiTailMessage>, String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    // One notification's worth. A caller with more ids than this is not announcing an arrival.
+    let mut ids = ids;
+    ids.truncate(MAX_MESSAGE_TAIL);
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .messages_by_id(id, ids)
+        .await
+        .into_iter()
+        .map(|(m, targets_me)| UiTailMessage {
+            message: ui_message(m),
+            targets_me,
+        })
+        .collect())
+}
+
 /// What [`get_message_tail`] answers: the newest rows, and whether anything at all after the
 /// caller's cursor addresses this member, including rows the tail was too short to carry.
 #[derive(Serialize)]
@@ -15679,6 +15708,7 @@ pub fn run() {
             get_inbox,
             get_messages,
             get_message_tail,
+            get_messages_by_id,
             get_message_page,
             get_pinned_messages,
             get_channel_heads,
@@ -15729,7 +15759,10 @@ mod tests {
         assert!(counters.needs_write(fourth));
         // An older write finishing late may never retire a newer request.
         counters.completed_through(covering);
-        assert!(counters.needs_write(fourth), "completion never goes backwards");
+        assert!(
+            counters.needs_write(fourth),
+            "completion never goes backwards"
+        );
         counters.completed_through(counters.requested);
         assert!(!counters.needs_write(fourth));
     }
@@ -17534,7 +17567,11 @@ mod tests {
 
         // And the allocation stays bounded: past the cap it is a window again, which is no worse
         // than the behaviour it replaces.
-        assert!(serves_whole_image("image/jpeg", false, MAX_WHOLE_IMAGE_BYTES));
+        assert!(serves_whole_image(
+            "image/jpeg",
+            false,
+            MAX_WHOLE_IMAGE_BYTES
+        ));
         assert!(!serves_whole_image(
             "image/jpeg",
             false,
@@ -17554,7 +17591,12 @@ mod tests {
             2,
             "one byte past a chunk needs the next one"
         );
-        for total in [1u64, 4242, CHUNK_BYTES as u64 * 3 + 7, MAX_WHOLE_IMAGE_BYTES] {
+        for total in [
+            1u64,
+            4242,
+            CHUNK_BYTES as u64 * 3 + 7,
+            MAX_WHOLE_IMAGE_BYTES,
+        ] {
             let covered = media_chunk_span(total) as u64 * CHUNK_BYTES as u64;
             assert!(
                 covered >= total,
@@ -19008,11 +19050,17 @@ mod tests {
         };
         let mut departing = build(91, 91);
         departing.open_channel(1).await.unwrap();
-        departing.send_message(1, "from the departed incarnation").await.unwrap();
+        departing
+            .send_message(1, "from the departed incarnation")
+            .await
+            .unwrap();
         let (old_actor, old_events, old_task) = spawn(departing);
         let mut replacement = build(92, 92);
         replacement.open_channel(1).await.unwrap();
-        replacement.send_message(1, "from the replacement").await.unwrap();
+        replacement
+            .send_message(1, "from the replacement")
+            .await
+            .unwrap();
         let replacement_group = replacement.group_id();
         let replacement_device = replacement.device_id();
         let (new_actor, new_events, new_task) = spawn(replacement);
@@ -19091,7 +19139,14 @@ mod tests {
             Some("from the replacement".to_string()),
         );
         assert_eq!(
-            state.servers.lock().await.get(&SERVER).unwrap().persist.completed,
+            state
+                .servers
+                .lock()
+                .await
+                .get(&SERVER)
+                .unwrap()
+                .persist
+                .completed,
             1,
             "the stale writer retires nothing: only the replacement's own write counts"
         );
