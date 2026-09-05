@@ -5186,6 +5186,9 @@ mod tests {
             .unwrap();
         server.send_message(GENERAL, "my own opener").await.unwrap();
         let mine = server.messages(GENERAL)[0].id.clone();
+        // The opener carries a real clock reading, and rows are ordered by timestamp now, so the
+        // rows written by hand below have to sit after it rather than in a small range of their own.
+        let base = server.messages(GENERAL)[0].ts + 1;
 
         // A peer's rows, written straight into the document with the canonical schema.
         async fn post_as(
@@ -5205,11 +5208,11 @@ mod tests {
                 .unwrap();
         }
         for i in 0..5 {
-            post_as(&mut server, &format!("filler-{i}"), "filler", "", 100 + i).await;
+            post_as(&mut server, &format!("filler-{i}"), "filler", "", base + i).await;
         }
-        post_as(&mut server, "reply", "re: opener", &mine, 200).await;
-        post_as(&mut server, "mention", "@[Alice Cat] ping", "", 300).await;
-        post_as(&mut server, "plain", "nothing for alice", "", 400).await;
+        post_as(&mut server, "reply", "re: opener", &mine, base + 100).await;
+        post_as(&mut server, "mention", "@[Alice Cat] ping", "", base + 200).await;
+        post_as(&mut server, "plain", "nothing for alice", "", base + 300).await;
 
         let tail = server.message_tail(GENERAL, 3, "", 0);
         assert_eq!(
@@ -5246,11 +5249,11 @@ mod tests {
                 &format!("burst-{i}"),
                 "ordinary chatter",
                 "",
-                500 + i,
+                base + 400 + i,
             )
             .await;
         }
-        let after_burst = server.message_tail(GENERAL, 3, "filler-0", 100);
+        let after_burst = server.message_tail(GENERAL, 3, "filler-0", base);
         assert!(
             after_burst.rows.iter().all(|(_, to_me)| !*to_me),
             "nothing in the carried window is addressed to me"
@@ -5261,7 +5264,7 @@ mod tests {
         );
         assert!(
             !server
-                .message_tail(GENERAL, 3, "plain", 400)
+                .message_tail(GENERAL, 3, "plain", base + 300)
                 .addressed_after_cursor,
             "a cursor past the mention leaves only ordinary chatter"
         );
@@ -5272,13 +5275,13 @@ mod tests {
         // ringing on every arrival, for a conversation the member finished with long ago.
         assert!(
             !server
-                .message_tail(GENERAL, 3, "deleted-row", 400)
+                .message_tail(GENERAL, 3, "deleted-row", base + 300)
                 .addressed_after_cursor,
             "a lost cursor still knows the time it was at, and the mention is behind it"
         );
         assert!(
             server
-                .message_tail(GENERAL, 3, "deleted-row", 200)
+                .message_tail(GENERAL, 3, "deleted-row", base + 100)
                 .addressed_after_cursor,
             "and it does not swallow a mention that came after that time"
         );
@@ -5314,27 +5317,38 @@ mod tests {
 
         server.send_message(GENERAL, "my own opener").await.unwrap();
         let mine = server.messages(GENERAL)[0].id.clone();
+        // Rows are ordered by timestamp, so these have to be stamped in the order the assertions
+        // below expect to read them, and after the opener's real clock reading.
+        let base = server.messages(GENERAL)[0].ts + 1;
         async fn post_as(
             server: &mut Server<MemNetwork, ChaCha20Rng>,
             id: &str,
             text: &str,
             reply_to: &str,
+            ts: u64,
         ) {
             let (id, text, reply_to) = (id.to_string(), text.to_string(), reply_to.to_string());
             server
                 .sync
                 .post(crate::DocType::Channel, GENERAL, move |d| {
-                    crate::append_message(d, &id, "bob", &text, 7, &reply_to)
+                    crate::append_message(d, &id, "bob", &text, ts, &reply_to)
                 })
                 .await
                 .unwrap();
         }
         for i in 0..5 {
-            post_as(&mut server, &format!("filler-{i}"), &"x".repeat(300), "").await;
+            post_as(
+                &mut server,
+                &format!("filler-{i}"),
+                &"x".repeat(300),
+                "",
+                base + i,
+            )
+            .await;
         }
-        post_as(&mut server, "reply", "re: opener", &mine).await;
-        post_as(&mut server, "reply-2", "re: filler", "filler-0").await;
-        post_as(&mut server, "plain", "nothing for alice", "").await;
+        post_as(&mut server, "reply", "re: opener", &mine, base + 100).await;
+        post_as(&mut server, "reply-2", "re: filler", "filler-0", base + 200).await;
+        post_as(&mut server, "plain", "nothing for alice", "", base + 300).await;
         // 9 rows: mine, filler-0..4, reply, reply-2, plain.
 
         let ids = |page: &crate::MessagePage| {
@@ -5446,9 +5460,10 @@ mod tests {
         );
         assert_eq!(ids(&first_reply), vec!["reply-2"]);
 
-        // Unread: the divider sits at ts 7 (everything Bob wrote is at 7, so nothing is past it);
-        // at ts 6 all eight of Bob's rows are past it and the first is filler-0 at index 1. My own
-        // row never counts. A far-future row is clamped to the ceiling, so it cannot count either.
+        // Unread: with the divider at Bob's newest row nothing is past it; at my own opener's
+        // stamp all eight of Bob's rows are, and the first is filler-0 at index 1. My own row
+        // never counts. A far-future row is clamped to the ceiling, so it cannot count either.
+        let newest = base + 300;
         let probe = |divider_ts: u64| MessagePageQuery {
             anchor: PageAnchor::Tail,
             before: 0,
@@ -5460,50 +5475,58 @@ mod tests {
             }),
         };
         // My own opener carries the (manual) clock's 1_000, which is the newest plausible stamp.
-        let none = server.message_page(GENERAL, &probe(7)).unread.unwrap();
+        let none = server.message_page(GENERAL, &probe(newest)).unread.unwrap();
         assert_eq!(
             (none.count, none.first_index, none.ceiling_ts),
-            (0, None, 1_000)
+            (0, None, newest)
         );
-        let all = server.message_page(GENERAL, &probe(6)).unread.unwrap();
+        let all = server
+            .message_page(GENERAL, &probe(base - 1))
+            .unread
+            .unwrap();
         assert_eq!((all.count, all.first_index), (8, Some(1)));
         post_as_at(&mut server, "future", "from a broken clock", u64::MAX / 2).await;
-        let clamped = server.message_page(GENERAL, &probe(7)).unread.unwrap();
+        // Read from just under the newest real row, so the clamped row has somewhere to count.
+        let clamped = server
+            .message_page(GENERAL, &probe(newest - 1))
+            .unread
+            .unwrap();
         assert_eq!(
             (clamped.count, clamped.ceiling_ts),
-            (1, 1_000),
-            "an implausible timestamp is pulled down to the ceiling: it counts once, like any \
-             other new row, and can never move the boundary into the future"
+            (2, newest),
+            "an implausible timestamp is pulled down to the ceiling: it counts once, like the \
+             other row past the divider, and can never move the boundary into the future"
         );
         // The cursor is the message id, because a timestamp cannot separate two messages sent in
         // the same millisecond and cannot order two senders' clocks at all. Both of those hid a
         // real arrival while the divider was a timestamp comparison.
-        post_as_at(&mut server, "same-ms-a", "first of two", 500).await;
-        post_as_at(&mut server, "same-ms-b", "second of two", 500).await;
-        post_as_at(
-            &mut server,
-            "backwards",
-            "an older clock, later in the log",
-            400,
-        )
-        .await;
+        let same_ms = newest + 10;
+        post_as_at(&mut server, "same-ms-a", "first of two", same_ms).await;
+        post_as_at(&mut server, "same-ms-b", "second of two", same_ms).await;
+        // Written last, stamped earlier. Rows are ordered by their stamps now, so this one sits
+        // where its stamp says rather than where it was written, which is the whole point: it can
+        // no longer appear after a mark the reader set at a later moment.
+        post_as_at(&mut server, "backwards", "an older clock", newest + 5).await;
         let by_id = |id: &str| MessagePageQuery {
             anchor: PageAnchor::Tail,
             before: 0,
             after: 0,
             unread: Some(crate::UnreadProbe {
                 divider_id: id.to_string(),
-                divider_ts: 500,
-                now_ms: 1_000,
+                divider_ts: same_ms,
+                now_ms: u64::from(u32::MAX),
             }),
         };
         let after_first = server
             .message_page(GENERAL, &by_id("same-ms-a"))
             .unread
             .unwrap();
+        // Two: the second message of the millisecond, which a timestamp cursor could not have
+        // separated from the first, and the broken-clock row from earlier, which sorts last
+        // because that is what its stamp says.
         assert_eq!(
             after_first.count, 2,
-            "the second message of the millisecond, and the one with the older stamp, are unread"
+            "the second message of the millisecond is unread, which a timestamp could not say"
         );
         let after_second = server
             .message_page(GENERAL, &by_id("same-ms-b"))
@@ -5511,7 +5534,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             after_second.count, 1,
-            "only the backwards-stamped row is left"
+            "and after it only the broken-clock row is left"
         );
         let deleted_cursor = server
             .message_page(GENERAL, &by_id("no-such-row"))
@@ -5520,7 +5543,7 @@ mod tests {
         assert_eq!(
             deleted_cursor.count,
             server
-                .message_page(GENERAL, &probe(500))
+                .message_page(GENERAL, &probe(same_ms))
                 .unread
                 .unwrap()
                 .count,

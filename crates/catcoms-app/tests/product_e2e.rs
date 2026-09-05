@@ -832,6 +832,111 @@ async fn a_channel_one_member_created_is_readable_by_a_member_who_opens_it_late(
     bob.shutdown().await;
 }
 
+/// A member that talks while it is behind must not push what it says into the past.
+///
+/// Sending appends at the end of the list **as the sending replica currently sees it**. A member
+/// missing history therefore appends after the last row it knows about, not after the last row
+/// that exists, and when the missing history arrives the two are concurrent insertions that the
+/// merge orders by a rule which knows nothing about when anything was said. Reported from a real
+/// session as a day of messages sitting above two earlier days.
+///
+/// It was never only cosmetic. Every reader-facing decision took its meaning from that order: the
+/// page, the day dividers, the unread boundary, the row a notification describes. A delivered
+/// message could land above the read mark and be treated as already seen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_that_speaks_while_behind_does_not_bury_its_message_in_the_past() {
+    let plans = channel_id("plans");
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_700_000_000_000);
+    let mut alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
+    let invite = mint(&alice.actor, 7).await;
+    let mut bob = join_node(
+        &hub,
+        &clock,
+        test_transport_peer(2),
+        "bob",
+        2,
+        alice.peer,
+        &invite,
+    )
+    .await;
+    ready(&bob.actor).await;
+
+    // Alice writes two days of history that Bob has never seen: he has not opened the channel, so
+    // nothing of it reaches him.
+    alice.actor.open_channel(plans).await;
+    alice.actor.send_message(plans, "wednesday").await;
+    clock.advance_ms(24 * 60 * 60_000);
+    alice.actor.send_message(plans, "thursday").await;
+    until(
+        "Alice holds her own two days",
+        &mut alice.events,
+        || async { (alice.actor.messages(plans).await.len() == 2).then_some(()) },
+    )
+    .await;
+
+    // Bob opens the channel a day later and speaks before any of it has arrived. From where he is
+    // standing his message is the newest thing in the world; from the document's, it is concurrent
+    // with two days he has not seen.
+    clock.advance_ms(24 * 60 * 60_000);
+    bob.actor.open_channel(plans).await;
+    bob.actor.send_message(plans, "saturday").await;
+    until("Bob has said his piece", &mut bob.events, || async {
+        (bob.actor.messages(plans).await.len() == 1).then_some(())
+    })
+    .await;
+
+    // Now the history arrives.
+    bob.actor.catch_up(alice.peer, plans).await;
+    let texts: Vec<String> = until(
+        "Bob catches up the days he missed",
+        &mut bob.events,
+        || async {
+            let msgs = bob.actor.messages(plans).await;
+            eprintln!(
+                "MARK bob {:?}",
+                msgs.iter().map(|m| m.text.clone()).collect::<Vec<_>>()
+            );
+            (msgs.len() == 3).then(|| msgs.into_iter().map(|m| m.text).collect())
+        },
+    )
+    .await;
+    assert_eq!(
+        texts,
+        vec!["wednesday", "thursday", "saturday"],
+        "what Bob said last reads last, not above the days he had not yet seen"
+    );
+
+    // And both members read the same conversation, which is the property that makes it an order
+    // rather than one node's opinion.
+    until(
+        "Alice sees Bob's message too",
+        &mut alice.events,
+        || async { (alice.actor.messages(plans).await.len() == 3).then_some(()) },
+    )
+    .await;
+    let hers: Vec<String> = alice
+        .actor
+        .messages(plans)
+        .await
+        .into_iter()
+        .map(|m| m.text)
+        .collect();
+    assert_eq!(hers, texts, "both members render the same order");
+
+    // The row a notification would describe is Bob's message, not a row from Wednesday: the tail
+    // is where the newest thing is.
+    let tail = alice.actor.message_tail(plans, 1, String::new(), 0).await;
+    assert_eq!(
+        tail.rows.last().map(|(m, _)| m.text.as_str()),
+        Some("saturday"),
+        "the newest row is the one that arrived, so an arrival announces itself"
+    );
+
+    alice.shutdown().await;
+    bob.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------------------------
 // 5. Files.
 // ---------------------------------------------------------------------------------------------

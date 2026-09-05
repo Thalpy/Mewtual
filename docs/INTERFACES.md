@@ -1126,6 +1126,30 @@ slow older response overwrite a newer one and put the reader back on stale rows.
 conversation invalidates every outstanding request. Deliberately not a comparison of `version`: two
 requests can carry the same version and still need an order.
 
+**A channel's rows are read in timestamp order, from every conflicting `messages` list.** Two
+things the CRDT does not do for us, both of which reached users:
+
+- The list is created lazily by whoever posts first, so two members posting before either has seen
+  the other's creation op each make one. Automerge keeps both and `get(ROOT, MESSAGES)` returns
+  only one, leaving the other member's posts in the document and unreachable. This is the defect
+  the status feed escaped by moving to distinct root keys; channels did not. Reads now take every
+  conflicting list. Writes still use the one `get` returns, so writers converge on a single list
+  as soon as they have seen each other. **Known limit:** editing, deleting and reacting still
+  resolve through `get`, so a row stranded in a losing list is visible but not yet mutable.
+- A send appends at the end of the list *as the sending replica sees it*, so a member that is
+  behind appends after the last row it knows about. When the missing history arrives, the two are
+  concurrent insertions and the merge orders them by a rule that knows nothing about when anything
+  was said: a day of messages could sit above two earlier days. Rows are therefore sorted by `ts`
+  with a **stable** sort, so ties keep the merge's own deterministic order — which for the case
+  that produces ties, one person typing faster than the clock ticks, is the order they were sent
+  in. Adding the id as a tiebreak would replace that with alphabetical order.
+
+This is not a causal ordering key: two senders' clocks can still disagree, and a reply can still
+sort above its parent if they disagree badly enough. What it guarantees is that every member
+renders the same conversation in the same order, and that paging, day dividers, the unread
+boundary, the notification tail and the delivery anchor all mean the same thing, because they all
+read this one order.
+
 With an `unread` probe (`{divider_id | null, divider_ts | null, now_ms}`: the client's frozen read
 cursor, its timestamp, and its own clock) the page also carries `{ceiling_ts, first_index, count}`
 over the whole channel, so a client holding one slice still places the divider and counts past it.

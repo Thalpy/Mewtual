@@ -576,13 +576,54 @@ fn unread_summary(channel: &MaterializedChannel, me: &str, probe: &UnreadProbe) 
 pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
     use automerge::{ReadDoc as _, ValueRef};
     let mut out = Vec::new();
-    if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, MESSAGES) {
-        for item in doc.list_range(&list, ..) {
-            if matches!(item.value, ValueRef::Object(ObjType::Map)) {
-                out.push(read_message(doc, &item.id()));
+    // Every conflicting list, not just the one that wins the key.
+    //
+    // The list is created lazily by whoever posts first. Two members who both post before either
+    // has seen the other's creation op each make one, and Automerge keeps both while `get` can
+    // only hand back one of them: the other member's messages are still in the document and
+    // simply cannot be reached. This is the same defect the status feed hit and moved to distinct
+    // root keys to avoid (see the note above `STATUS_POST_PREFIX`); channels never followed, and
+    // a member whose posts landed in the losing list watched them disappear.
+    //
+    // Reading all of them costs nothing when there is one, which is the ordinary case, and needs
+    // no change to what is written or stored. Writers keep using the list `get` returns, so they
+    // converge on a single one as soon as they have seen each other.
+    if let Ok(values) = doc.get_all(ROOT, MESSAGES) {
+        for (value, list) in values {
+            if !matches!(value, automerge::Value::Object(ObjType::List)) {
+                continue;
+            }
+            for item in doc.list_range(&list, ..) {
+                if matches!(item.value, ValueRef::Object(ObjType::Map)) {
+                    out.push(read_message(doc, &item.id()));
+                }
             }
         }
     }
+    // The list's own order is not the conversation's order, and using it as one put messages
+    // inside the past.
+    //
+    // A send appends at the end of the list *as the sending replica currently sees it*. A member
+    // that is behind therefore appends after the last row it knows about, not after the last row
+    // that exists; when the history it was missing arrives, the two are concurrent insertions and
+    // the merge orders them by its own rule, which knows nothing about when anything was said.
+    // What that looked like was a Saturday burst sitting above Wednesday and Thursday, and it was
+    // never only cosmetic: the paged read, the day dividers, the unread boundary, the tail a
+    // notification describes and the "latest own message" delivery anchor all take their meaning
+    // from this order, so a delivered message could land above the read mark and be treated as
+    // already seen.
+    //
+    // A **stable** sort on the timestamp alone. Ties therefore keep the order the list already
+    // had, which is the merge's own deterministic order, so every replica still agrees; and for
+    // the case that produces ties in practice, one person typing a burst faster than the clock
+    // ticks, that order is the order they were sent in. Adding the id as a tiebreak would replace
+    // that with alphabetical nonsense: a burst of three would come out first, third, second.
+    //
+    // Not a substitute for a proper causal ordering key. Two senders' clocks can still disagree,
+    // and a reply can still sort above its parent if they disagree badly enough. What this
+    // guarantees is that every member renders the same conversation in the same order, and that
+    // the order is the one the timestamps describe.
+    out.sort_by_key(|m| m.ts);
     out
 }
 
@@ -868,6 +909,62 @@ fn delete_message_in_doc(doc: &mut AutoCommit, id: &str) -> Result<bool, Automer
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod message_list_conflict_tests {
+    use super::*;
+    use automerge::AutoCommit;
+
+    /// Two members posting for the first time before either has seen the other create the list.
+    ///
+    /// Automerge keeps both lists and `get(ROOT, MESSAGES)` can only return one of them, so half
+    /// the conversation is still in the document and unreachable. It is the defect the status feed
+    /// hit and escaped by moving to distinct root keys; channels stayed on the shared list, and a
+    /// member whose posts landed in the losing one watched them disappear.
+    #[test]
+    fn messages_written_into_two_concurrently_created_lists_are_all_still_read() {
+        let mut alice = AutoCommit::new();
+        let mut bob = AutoCommit::new();
+        // Neither has seen the other, so each creates the list on its own first post.
+        append_message(&mut alice, "a1", "alice", "hers", 100, "").unwrap();
+        append_message(&mut bob, "b1", "bob", "his", 200, "").unwrap();
+        alice.merge(&mut bob).unwrap();
+
+        let texts: Vec<String> = read_messages(&alice).into_iter().map(|m| m.text).collect();
+        assert_eq!(
+            texts,
+            vec!["hers".to_string(), "his".to_string()],
+            "both first posts survive the merge, in the order their timestamps describe"
+        );
+
+        // And once they have seen each other, further posts go to one list and stay in order.
+        append_message(&mut alice, "a2", "alice", "after", 300, "").unwrap();
+        let texts: Vec<String> = read_messages(&alice).into_iter().map(|m| m.text).collect();
+        assert_eq!(texts, vec!["hers", "his", "after"]);
+    }
+
+    /// A member that speaks while behind appends at the end of what **it** can see, so its message
+    /// is concurrent with the history it has not received. The merge orders those two branches by
+    /// its own rule, which knows nothing about when anything was said.
+    #[test]
+    fn a_message_sent_while_behind_does_not_read_as_older_than_the_history_it_missed() {
+        let mut alice = AutoCommit::new();
+        append_message(&mut alice, "w", "alice", "wednesday", 100, "").unwrap();
+        // Bob's copy stops there: he has the first day and nothing after it.
+        let mut bob = alice.fork();
+        append_message(&mut alice, "t", "alice", "thursday", 200, "").unwrap();
+        // And he says something on the third, appending after the last row he can see.
+        append_message(&mut bob, "s", "bob", "saturday", 300, "").unwrap();
+
+        bob.merge(&mut alice).unwrap();
+        let texts: Vec<String> = read_messages(&bob).into_iter().map(|m| m.text).collect();
+        assert_eq!(
+            texts,
+            vec!["wednesday", "thursday", "saturday"],
+            "what was said last reads last, whatever order the merge put the branches in"
+        );
+    }
 }
 
 // --- the status feed's conflict-free post layout ----------------------------
