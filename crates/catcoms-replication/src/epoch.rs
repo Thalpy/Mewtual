@@ -1098,12 +1098,22 @@ impl Receipt {
             || group.member_signature_key(&owner).as_deref() != Some(&self.owner_public_key)
             || self.tenure_start_group_epoch != expected_tenure_start_group_epoch
             || self.tenure_start_group_epoch > group.epoch()
-            || self.tenure_id
-                != tenure_id(
-                    &self.document.server_id,
-                    &self.owner_public_key,
-                    self.tenure_start_group_epoch,
-                )
+        {
+            return Err(ReplError::EpochAuthority);
+        }
+        self.restore_verified_from_vault()
+    }
+
+    /// Recreate a previously verified capability from an authenticated local restart unit.
+    /// This deliberately does not assert present-day owner authority. Never use it on network
+    /// receipts: succession must not erase locally verified history, nor authorize new history.
+    pub(crate) fn restore_verified_from_vault(&self) -> Result<VerifiedReceipt, ReplError> {
+        if self.tenure_id
+            != tenure_id(
+                &self.document.server_id,
+                &self.owner_public_key,
+                self.tenure_start_group_epoch,
+            )
             || self.closed_epoch == u64::MAX
             || self.inherited.epoch() > self.closed_epoch
             || !verify_with_public_bytes(
@@ -1409,6 +1419,16 @@ fn canonical_receipt_pair(a: Receipt, b: Receipt) -> (Receipt, Receipt) {
     }
 }
 
+/// Same-epoch alternatives or changed inheritance within a tenure are equivocation. Ordinary
+/// successive receipts, and choices in different owner tenures, are not fault evidence.
+fn receipts_conflict(a: &Receipt, b: &Receipt) -> bool {
+    a.document == b.document
+        && a.tenure_id == b.tenure_id
+        && a.hash() != b.hash()
+        && (a.closed_epoch == b.closed_epoch
+            || TenureSelection::from(a) != TenureSelection::from(b))
+}
+
 /// Result of atomically ingesting a receipt and transitioning its epoch gate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiptIngest {
@@ -1460,7 +1480,7 @@ impl ReceiptBook {
         Ok((outcome, operations))
     }
 
-    fn ingest_verified(&mut self, receipt: Receipt) -> Result<ReceiptIngest, ReplError> {
+    pub(crate) fn ingest_verified(&mut self, receipt: Receipt) -> Result<ReceiptIngest, ReplError> {
         if self
             .document
             .as_ref()
@@ -1634,6 +1654,9 @@ impl ReceiptBook {
             if a.hash() >= b.hash()
                 || a.document != b.document
                 || a.tenure_id != b.tenure_id
+                // Two successive, consistent receipts are progress, not equivocation. A
+                // spliced vault book must not turn that ordinary history into a durable fault.
+                || !receipts_conflict(a, b)
                 || latest
                     .as_ref()
                     .is_none_or(|latest| latest.hash() != a.hash() && latest.hash() != b.hash())
@@ -1948,6 +1971,85 @@ impl EpochGate {
         self.inner.lock().expect("epoch gate poisoned").phase
     }
 
+    /// Check the pieces of a registry restart unit together. Matching only operation hashes
+    /// would leave share/byte accounting or the receipt seal independently replaceable. The
+    /// opening receipt is retained separately even once the book advances to the closing one.
+    pub(crate) fn verify_restart(
+        &self,
+        operations: &[AdmittedOperation],
+        book: &ReceiptBook,
+        opening: Option<&Receipt>,
+    ) -> Result<(), ReplError> {
+        let inner = self.inner.lock().expect("epoch gate poisoned");
+        if operations.len() != inner.operations.len()
+            || operations
+                .iter()
+                .any(|op| inner.operations.get(&op.op_hash) != Some(op))
+            || book
+                .document
+                .as_ref()
+                .is_some_and(|doc| doc != &self.document)
+        {
+            return Err(ReplError::Malformed);
+        }
+        if let Some(receipt) = opening {
+            if receipt.document != self.document
+                || receipt.closed_epoch.checked_add(1) != Some(self.epoch)
+            {
+                return Err(ReplError::EpochScope);
+            }
+            receipt.restore_verified_from_vault()?;
+        } else if self.epoch != 0 {
+            return Err(ReplError::EpochScope);
+        }
+        // A book may keep the opening receipt as its previous head. No unrelated older head
+        // belongs in this one-epoch unit; long-term owner issuance is a separate journal.
+        if book
+            .previous_until_installed
+            .as_ref()
+            .is_some_and(|r| Some(r) != opening)
+        {
+            return Err(ReplError::Malformed);
+        }
+        for receipt in book
+            .latest
+            .iter()
+            .chain(book.previous_until_installed.iter())
+            .chain(book.fault.iter().flat_map(|(a, b)| [a, b]))
+        {
+            if receipt.document != self.document
+                || (receipt.closed_epoch != self.epoch && Some(receipt) != opening)
+            {
+                return Err(ReplError::EpochScope);
+            }
+            receipt.restore_verified_from_vault()?;
+        }
+        let valid = match inner.phase {
+            EpochPhase::Open => !book.is_faulted() && book.latest.as_ref() == opening,
+            EpochPhase::Closing => {
+                !book.is_faulted()
+                    && book.latest.as_ref().is_some_and(|r| {
+                        r.closed_epoch == self.epoch
+                            && Some(r.hash()) == inner.receipt_hash
+                            && opening.is_none_or(|prior| {
+                                prior.tenure_id != r.tenure_id
+                                    || TenureSelection::from(prior) == TenureSelection::from(r)
+                            })
+                    })
+            }
+            EpochPhase::Fault => book.fault.as_ref().is_some_and(|(a, b)| {
+                receipts_conflict(a, b)
+                    && (a.closed_epoch == self.epoch || b.closed_epoch == self.epoch)
+            }),
+            // Settlement/pruning is intentionally unavailable through the registry coordinator.
+            EpochPhase::Settled => false,
+        };
+        if !valid {
+            return Err(ReplError::Malformed);
+        }
+        Ok(())
+    }
+
     /// Update the owner whose operations are exempt from the per-device share.
     ///
     /// Succession does not replace an open epoch, so this update uses the same gate as admission.
@@ -2035,7 +2137,11 @@ impl EpochGate {
                 Self::admit_open(inner, owner, op)
             }
             EpochPhase::Closing => {
-                if inner.quarantine.len() == MAX_QUARANTINED {
+                // Re-announced ciphertext is not another pending operation. Apart from wasting
+                // the bounded slots, duplicates made our own canonical snapshot undecodable.
+                if inner.quarantine.contains(&op.op_hash) {
+                    Ok(Admission::Quarantined)
+                } else if inner.quarantine.len() == MAX_QUARANTINED {
                     Ok(Admission::RejectedQuarantineFull)
                 } else {
                     inner.quarantine.push_back(op.op_hash);
@@ -2920,6 +3026,71 @@ impl RecoverySlots {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_receipt_matrix_requires_real_equivocation_and_cannot_hide_it_in_closing() {
+        let owner = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&owner).unwrap();
+        let document =
+            LogicalDocument::new(group.group_id(), DocType::DocRegistry, b"matrix".to_vec())
+                .unwrap();
+        let sign = |epoch, inherited| {
+            Receipt::sign(
+                document.clone(),
+                epoch,
+                [epoch as u8; 32],
+                [9; 32],
+                0,
+                inherited,
+                &owner,
+            )
+            .unwrap()
+        };
+        let opening = sign(0, InheritedCheckpoint::EpochZero);
+        let normal = sign(1, InheritedCheckpoint::EpochZero);
+        let conflict = sign(
+            1,
+            InheritedCheckpoint::Checkpoint {
+                epoch: 1,
+                close_record_hash: [7; 32],
+                seed_change_hash: [8; 32],
+            },
+        );
+        let gate = EpochGate::new(document.clone(), 1, 1, owner.device_id());
+
+        // An ordinary opening -> closing pair cannot be relabelled as persisted equivocation.
+        let pair = canonical_receipt_pair(opening.clone(), normal);
+        let fake_fault = ReceiptBook {
+            document: Some(document.clone()),
+            tenure: Some(TenureSelection::from(&pair.0)),
+            latest: Some(pair.0.clone()),
+            fault: Some(pair),
+            ..ReceiptBook::default()
+        };
+        gate.inner.lock().unwrap().phase = EpochPhase::Fault;
+        assert!(ReceiptBook::decode(&fake_fault.encode().unwrap()).is_err());
+        assert!(gate
+            .verify_restart(&[], &fake_fault, Some(&opening))
+            .is_err());
+
+        // Conversely, different inherited fields in the SAME tenure must not restore Closing.
+        let mut hidden_fault = ReceiptBook {
+            document: Some(document),
+            tenure: Some(TenureSelection::from(&conflict)),
+            latest: Some(conflict.clone()),
+            previous_until_installed: Some(opening.clone()),
+            ..ReceiptBook::default()
+        };
+        {
+            let mut inner = gate.inner.lock().unwrap();
+            inner.phase = EpochPhase::Closing;
+            inner.receipt_hash = Some(conflict.hash());
+        }
+        hidden_fault = ReceiptBook::decode(&hidden_fault.encode().unwrap()).unwrap();
+        assert!(gate
+            .verify_restart(&[], &hidden_fault, Some(&opening))
+            .is_err());
+    }
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()

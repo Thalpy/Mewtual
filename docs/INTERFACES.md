@@ -434,6 +434,19 @@ pub struct RegistryProjection; // admitted pointers, explicit overflow and tombs
 registry_document(server_id, bucket) -> Result<LogicalDocument>;
 edit_registry(..., &DomainOp) -> Result<SealedOp>; ingest_registry(...) -> Result<Admission>;
 checkpoint_registry_close(...) -> Result<(CheckpointSeed, ClosureStats)>; // verified named closure, source untouched
+// catcoms_replication::registry_epoch; one exclusively owned restart unit, not a disk adapter:
+pub struct RegistryEpoch; // private EncryptedDoc + EpochGate + ReceiptBook + opening receipt
+  new(&ServerGroup, bucket, actor:DeviceId) -> Result<Self>;
+  from_checkpoint(&ServerGroup, bucket, actor, Receipt, expected_tenure_start, seed) -> Result<Self>;
+  edit(&MlsDevice, &ServerGroup, rng, &DomainOp) -> Result<SealedOp>;
+  ingest(&SealedOp, &ServerGroup, &MlsDevice) -> Result<Admission>;
+  seal(Receipt, &ServerGroup, expected_tenure_start) -> Result<ReceiptIngest>; // retains full source
+  doc_id(); epoch(); phase(); op_count(); quarantined_len(); projection(); // detached/read-only
+  snapshot() -> Result<Vec<u8>>; // raw seed + signed log + gate/book, bounded version 1
+  restore(vault_authenticated_bytes, &ServerGroup, expected_bucket, actor) -> Result<Self>;
+// Restore is local-only, not network authorization. Caller journals intent before edit and
+// atomically vault-persists the unit before publishing/acknowledging. No mutable handles escape;
+// no pruning, source replacement, fault repair or recovery acknowledgement API exists yet.
 ```
 
 ---

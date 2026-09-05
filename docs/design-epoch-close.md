@@ -420,6 +420,15 @@ equal-value conflicts from concurrent bucket creation. An already-applied put/to
 only its new intent marker, but the requested value must already exist at those exact causal
 heads; a value held solely on another merged branch cannot justify the no-op.
 
+The implemented `RegistryEpoch` coordinator now keeps that typed document, gate, receipt book
+and opening receipt privately owned under one exclusive mutation interface. Its bounded local
+restart format stores the raw seed and signed operations, not a separate Automerge save; restore
+rebuilds the DAG, validates typed changes and matches complete gate metadata and receipt phase.
+Receipt admission only closes editing and retains the full source. It is not yet attached to
+vault inventory, live discovery or the recovery-first settlement transaction; its snapshot must
+be authenticated and atomically persisted before publishing. Successor construction leaves the
+predecessor untouched and gives no authority to discard it.
+
 **Catch-up.** Requests carry up to 64 heads and an opaque provider cursor bound by HMAC to
 `(provider, requester, doc type, doc id, log generation, position, expiry 10 minutes)`; pages
 are topologically ordered and dependency-complete relative to the heads plus everything

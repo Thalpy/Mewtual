@@ -440,7 +440,7 @@ pub fn ingest_registry(
     )
 }
 
-fn preflight(
+pub(crate) fn preflight(
     document: &LogicalDocument,
     bucket: u8,
     epoch: u64,
@@ -491,7 +491,7 @@ fn validate_domain(
     Ok(op)
 }
 
-fn validate_registry_change(
+pub(crate) fn validate_registry_change(
     document: &LogicalDocument,
     bucket: u8,
     epoch: u64,

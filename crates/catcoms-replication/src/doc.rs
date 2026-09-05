@@ -119,6 +119,79 @@ impl EncryptedDoc {
         self.checkpoint.as_ref()
     }
 
+    /// Borrow the complete accepted log for the bounded registry restart format. Its order is
+    /// dependency-complete because registry admission refuses unavailable predecessors.
+    pub(crate) fn signed_log(&self) -> &[SignedOp] {
+        &self.log
+    }
+
+    /// Rebuild an authenticated vault log, not an independently serialized Automerge image.
+    /// Historical roster/share exemptions have already been admitted and are checked against
+    /// the saved gate by the coordinator. Recheck signatures, exact semantics and dependencies;
+    /// no absent, unsigned or queued change may contribute to the reconstructed projection.
+    pub(crate) fn restore_domain_log<V>(
+        &mut self,
+        logical: &LogicalDocument,
+        operations: Vec<SignedOp>,
+        mut validate: V,
+    ) -> Result<Vec<AdmittedOperation>, ReplError>
+    where
+        V: FnMut(&DomainOp, &Change, &AutoCommit) -> Result<(), ReplError>,
+    {
+        if !self.log.is_empty() || operations.len() > crate::epoch::MAX_EPOCH_OPERATIONS {
+            return Err(ReplError::EpochBound);
+        }
+        let mut total = 0usize;
+        let mut metadata = Vec::new();
+        let mut ids = HashSet::new();
+        for op in operations {
+            self.check_doc(op.doc_type, op.doc_id)?;
+            let encoded_len = op.encode().len();
+            total = total.saturating_add(encoded_len);
+            if encoded_len > MAX_SIGNED_EPOCH_OP_BYTES || total > crate::epoch::MAX_EPOCH_BYTES {
+                return Err(ReplError::EpochBound);
+            }
+            if !op.verify() {
+                return Err(ReplError::BadSignature);
+            }
+            let domain = op.parsed_domain_op()?.ok_or(ReplError::Malformed)?;
+            if domain.doc_type != logical.doc_type || domain.logical_key != logical.logical_key {
+                return Err(ReplError::EpochScope);
+            }
+            let change = Change::from_bytes(op.delta.clone()).map_err(|_| ReplError::Malformed)?;
+            if change.actor_id().to_bytes() != op.author_device.as_bytes() {
+                return Err(ReplError::EpochAuthority);
+            }
+            let domain_op_id = domain.id(&op.author_device);
+            if !ids.insert(domain_op_id)
+                || self.applied.contains(&op.hash())
+                || self.doc.get_change_by_hash(&change.hash()).is_some()
+                || (self.checkpoint.is_some() && change.deps().is_empty())
+                || change
+                    .deps()
+                    .iter()
+                    .any(|h| self.doc.get_change_by_hash(h).is_none())
+            {
+                return Err(ReplError::Malformed);
+            }
+            validate(&domain, &change, &self.doc)?;
+            self.doc
+                .apply_changes([change])
+                .map_err(crate::checkpoint::am_error)?;
+            if !self.has_domain_marker(&domain_op_id)? {
+                return Err(ReplError::Malformed);
+            }
+            metadata.push(AdmittedOperation {
+                op_hash: op.hash(),
+                domain_op_id,
+                author: op.author_device,
+                encoded_len,
+            });
+            self.record(op);
+        }
+        Ok(metadata)
+    }
+
     /// Serve the checkpoint's raw seed by hash without duplicating it in the user-op log.
     pub fn checkpoint_bytes(&mut self) -> Result<Option<Vec<u8>>, ReplError> {
         self.checkpoint

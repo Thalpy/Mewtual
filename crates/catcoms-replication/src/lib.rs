@@ -25,6 +25,7 @@ pub mod doc;
 pub mod epoch;
 pub mod op;
 pub mod registry;
+pub mod registry_epoch;
 
 use thiserror::Error;
 

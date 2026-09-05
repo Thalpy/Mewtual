@@ -8,6 +8,50 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 registry restart coordinator (2026-09-05).** `catcoms_replication::registry_epoch::RegistryEpoch`
+  privately owns the typed registry document, gate and receipt book. Its versioned, bounded
+  restart unit carries the raw receipt-bound seed and signed log, not an independent Automerge
+  save. Restore checks scope, signatures, causal dependencies, typed changes, full gate accounting
+  and the Open/Closing/Fault receipt matrix before returning an editable object. Historical local
+  admission survives owner/member changes; fresh receipts still require current-owner/tenure
+  verification and future share exemptions refresh from the verified group.
+  Receipt admission retains the entire source log. Duplicate post-seal arrivals now reuse their
+  quarantine slot; previously they could produce a gate snapshot that its decoder rejected.
+  This is an **in-memory coordinator and restart codec**, not an attached vault record or live
+  settlement path. Intent-before-edit and snapshot-before-publish ordering remain the caller's
+  responsibility. It cannot prune, finish settlement, acknowledge recovery, or select a successor
+  in place of its source. Storage inventory/accounting for this record, receipt/seed discovery,
+  recovery-first multi-record transactions, repair/adoption orchestration and Studio consumers remain.
+  A different new-tenure receipt during Closing fails closed without replacing the saved seal;
+  applying that rewind needs the deferred recovery worker. A checked held-op resealing/serving
+  accessor is also needed for crash-after-persist/before-publish retries before live integration.
+
+  Rough P1 implementation estimate requested by the user: **45%, with about ±10 percentage
+  points uncertainty**. This is an engineering estimate, not a usability/readiness percentage.
+  Core protocol and storage primitives are furthest along; production settlement, network joining
+  and end-to-end recovery remain substantial. UI remains owner-owned and unchanged by this slice.
+
+  Review focus for a second human/adversarial pass: `registry_epoch.rs` constructors/seal/restore,
+  `doc.rs::restore_domain_log`, and `epoch.rs::verify_restart`. Try splicing individually valid
+  saved parts, substituting a seed, omitting dependencies, replaying a post-seal operation, and
+  restoring after owner removal. The invariant is exact signed-log/gate agreement with no
+  independently trusted materialized document, and no source retirement on receipt admission.
+
+  Verification: 13 new regressions (12 `registry_epoch` tests and the receipt restart-matrix
+  test), plus all 25 `epoch_close` integration tests, pass. Final `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests), and
+  `npm.cmd --prefix apps/desktop test` (1037 tests) pass. `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, `scripts/check-no-ambient.sh`
+  (Git Bash on Windows) and diff checks pass. Adversarial review
+  found and fixed fabricated fault evidence and hidden same-tenure inheritance conflicts on
+  restore; re-review reports no remaining blocker/high/medium finding. The listed integration
+  limitations remain explicit follow-ups, not completed guarantees.
+  One root-suite run timed out in the existing real-TCP
+  `join_over_a_relay_then_upgrade_to_direct_via_dcutr_over_real_tcp` test after transport dial
+  failures; `cargo test -p catcoms-sync --all-features --test tcp_dcutr_e2e` passed unchanged in
+  isolation (0.16 s), followed by a passing complete root rerun. No timeout, assertion or
+  networking code was changed by this slice.
+
 - **Creative frontend dependency audit and C0c blob seam (2026-09-05).** UI remains owner-owned.
   `publish_pix` and `request_blob_bounded` now reach Server/actor/Tauri via `creative.rs` and
   `creative_blobs.rs`; see the exact IPC contract in INTERFACES section 5. The Rust PIX1 validator

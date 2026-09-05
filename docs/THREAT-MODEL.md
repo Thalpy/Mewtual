@@ -264,6 +264,17 @@ table with the commit that closed it.
   Parent sync remains Unix-only; hostile local path replacement, device failure and backup
   rollback remain outside these guarantees. Storage admission across other record types,
   multi-record retirement, replay and network/editor integration are still unwired.
+- **Registry restart consistency is not settlement durability.** The `RegistryEpoch` coordinator
+  rebuilds only a receipt-bound raw seed plus bounded, individually signed and schema-checked
+  changes. It accepts no separately saved Automerge state that could introduce unsigned roots.
+  Restored gate metadata must match every log operation's hash, id, full author and encoded size;
+  lifecycle phase must agree with retained receipts. Local vault restore preserves historical
+  authority after succession, never authorizes a newly received old-owner receipt, and refreshes
+  the current quota-exempt owner before admission. Repeated late hashes cannot consume extra
+  quarantine slots or make a snapshot undecodable. The restart codec assumes authenticated local
+  vault bytes; it is not a wire authorization path or an attached storage record. Callers still
+  must persist intents and the whole unit before publication, and persist excluded recovery before
+  source retirement. No production discovery, pruning, repair or multi-record settlement is wired.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
   no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains
