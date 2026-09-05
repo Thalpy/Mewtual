@@ -17027,13 +17027,16 @@
   }
 
   const NOTIFY_TAIL_ROWS = 64;
-  /** Read the named rows from the actor, wherever they sort. Empty if none of them are there. */
+  /**
+   * Read the named rows from the actor, wherever they sort.
+   *
+   * Deliberately not error-swallowing. An empty answer means those rows are genuinely gone, which
+   * the caller answers with silence; a failed lookup means it does not know, which is a different
+   * thing and is answered further out by keeping the sound and inventing no headline. Collapsing
+   * the two would let a locked vault or a closed server look exactly like a deleted message.
+   */
   async function fetchArrivals(server: number, channel: string, ids: string[]): Promise<TailMsg[]> {
-    try {
-      return await invoke<TailMsg[]>("get_messages_by_id", { server, channel, ids });
-    } catch {
-      return [];
-    }
+    return await invoke<TailMsg[]>("get_messages_by_id", { server, channel, ids });
   }
 
   async function notifyLatestChannelMessage(
@@ -17064,8 +17067,10 @@
       // headlining the last row, which is a message the ticker has usually already announced.
       const arrived = arrivals.length ? await fetchArrivals(server, channel, arrivals) : [];
       if (arrivals.length && !arrived.length) {
-        // Named rows that are no longer there: deleted between arriving and being read. Nothing to
-        // announce, and announcing something else would be a lie about what happened.
+        // The lookup succeeded and those rows are not there: deleted between arriving and being
+        // read. Nothing to announce, silently, and announcing something else would be a lie about
+        // what happened. A lookup that *failed* never reaches here; it is caught below, where the
+        // sound is kept and no headline is invented.
         return;
       }
       // A mention among the arrivals is the headline; otherwise the last of them. Keeping the
