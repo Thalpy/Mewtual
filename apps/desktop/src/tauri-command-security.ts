@@ -74,6 +74,10 @@ export const TAURI_COMMAND_GROUPS = {
       "get_dm_requests", "file_available", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
       "get_wiki_history", "get_wiki_pending", "get_wiki_review_days", "get_roles", "get_moderation",
+      // The server's upload cap, off the file index document every member already reads. The
+      // webview uses it to refuse an over-large file with a useful sentence; the native side
+      // enforces the same bound, so this is presentation rather than authorization.
+      "get_file_size_limit",
       // Whether plain members may post to this server's announcement feed. One boolean off the
       // feed document every member already reads, so it exposes nothing `get_statuses` did not.
       // The webview uses it to decide whether to draw a composer, which is presentation: the
@@ -88,6 +92,15 @@ export const TAURI_COMMAND_GROUPS = {
       // Route booleans + the mapping status line only; concrete addresses stay native-side.
       "check_invite_routes",
       "get_messages",
+      // The newest few rows of one channel plus an "addressed to me" bit per row, for the
+      // arrival ticker: the same text `get_messages` serves, bounded instead of the whole log.
+      "get_message_tail",
+      "get_messages_by_id",
+      // A bounded, contiguous slice of one channel around an anchor (tail / message id / index),
+      // with per-row reply context: the paged replacement for reading the whole log.
+      "get_message_page",
+      // The pinned rows of one channel by name, so a paged client need not scan for the flag.
+      "get_pinned_messages",
       // Counts and timestamps only, no message text: the projection unread badges are rebuilt
       // from after a lock or a restart, neither of which the live event stream survives.
       "get_channel_heads",
@@ -122,7 +135,14 @@ export const TAURI_COMMAND_GROUPS = {
   policy_controlled_writes: {
     boundary: "Role/author/policy-sensitive mutations; UI visibility is never authorization.",
     commands: [
-      "rename_server", "set_livery", "set_server_icon", "set_server_cursor", "set_member_badge",
+      // `rename_server` is the LOCAL rail label and needs no role. `set_shared_server_name`
+      // publishes the group's own name to every member and is owner/admin, enforced natively in
+      // the same place the livery and icon are: the settings page only hides the control.
+      "rename_server", "set_shared_server_name",
+      // The server's upload cap. Owner/admin natively, and bounded natively at both ends: the
+      // page cannot set it above the protocol ceiling by sending a larger number.
+      "set_file_size_limit",
+      "set_livery", "set_server_icon", "set_server_cursor", "set_member_badge",
       "delete_file", "set_file_expiry", "delete_event", "set_wiki_format", "delete_wiki_page",
       "rename_wiki_page", "set_wiki_review_days", "approve_wiki_edit", "reject_wiki_edit",
       "restore_wiki_page", "warn_message", "create_kick_case", "cast_kick_vote",
@@ -145,7 +165,15 @@ export const TAURI_COMMAND_GROUPS = {
   },
   router_boundary: {
     boundary: "Best-effort router port mappings for the active call's media sockets; exact caller-named ports, bounded leases, no other router state.",
-    commands: ["map_call_port", "unmap_call_port"],
+    commands: [
+      "map_call_port", "unmap_call_port",
+      // Reads this machine's own LAN address, so the webview can recognise the ICE host
+      // candidates it gathered on virtual adapters (VirtualBox, WSL, Hyper-V) and stop sending
+      // peers addresses none of them can reach. Discloses nothing new: the same address is
+      // already inside every host candidate the call plane signals, and the page is the one
+      // that gathered it. Takes no argument and touches no other network state.
+      "default_route_address",
+    ],
   },
   mesh_repair_boundary: {
     boundary: "User-triggered member-route retry and out-of-band recovery; current-roster signatures, canonical routes and shared endpoint/process budgets remain authoritative.",

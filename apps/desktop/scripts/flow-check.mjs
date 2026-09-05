@@ -216,6 +216,12 @@ const SEND_SCENARIO = `(async () => {
       const rows = await base(cmd, payload, opts);
       return rows.concat(sent);
     }
+    // The log reads pages now; the appended rows ride the tail page the fixture serves.
+    if (cmd === "get_message_page" && payload.server === 1 && payload.channel === "general") {
+      const page = await base(cmd, payload, opts);
+      const extra = sent.map((m) => ({ ...m, targets_me: false, reply_count: 0, reply_to_preview: null }));
+      return { ...page, rows: page.rows.concat(extra), total: page.total + sent.length };
+    }
     return base(cmd, payload, opts);
   };
 
@@ -245,6 +251,53 @@ const SEND_SCENARIO = `(async () => {
   await sleep(500);
   out.secondShown = visible("flow probe two");
   out.errorToast = document.querySelector(".error-toast")?.textContent?.trim() ?? null;
+  return out;
+})();`;
+
+// Search reads every message of every channel in scope, so the scan runs in a worker. That worker
+// is the part no unit test can prove: it has to be constructible under the app's own CSP, and its
+// answer has to arrive and land in the list. Both are invisible from Node, and a failure is
+// silent (the app falls back to scanning inline), so this drives the real thing.
+const SEARCH_SCENARIO = `(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const out = {};
+  const toggle = document.querySelector(".search-toggle");
+  out.toggleFound = !!toggle;
+  if (!toggle) return out;
+  toggle.click();
+  await sleep(200);
+  const input = document.querySelector(".msg-search input");
+  out.inputFound = !!input;
+  if (!input) return out;
+  // The result list lives in the advanced panel; the plain bar only steps through matches.
+  const filtersToggle = document.querySelector(".search-filters-toggle");
+  out.filtersFound = !!filtersToggle;
+  if (!filtersToggle) return out;
+  filtersToggle.click();
+  await sleep(150);
+
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+  const type = (text) => {
+    setter.call(input, text);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const rows = () => Array.from(document.querySelectorAll(".search-results li"));
+
+  type("spacing");
+  await sleep(600);
+  out.hitCount = rows().length;
+  out.hitText = rows()[0]?.textContent?.includes("spacing") ?? false;
+
+  // Narrowing to something absent must empty the list rather than leave the previous answer up:
+  // a stale result is the failure mode a worker introduces and an inline scan cannot have.
+  type("zzzz-no-such-message");
+  await sleep(600);
+  out.missCount = rows().length;
+
+  // And back, to prove the worker is still answering after a query that matched nothing.
+  type("spacing");
+  await sleep(600);
+  out.returnCount = rows().length;
   return out;
 })();`;
 
@@ -476,6 +529,19 @@ try {
     composerClearedAfterFirst: true,
     secondShown: true,
     errorToast: null,
+  });
+
+  await cdp.navigate(URL_UNDER_TEST);
+  await cdp.waitReady();
+  const search = await cdp.eval(SEARCH_SCENARIO);
+  failed |= !assertEqual("search flow", search, {
+    toggleFound: true,
+    inputFound: true,
+    filtersFound: true,
+    hitCount: 1,
+    hitText: true,
+    missCount: 0,
+    returnCount: 1,
   });
 
   // A fresh load keeps the scenarios independent: the send test's IPC patch and its

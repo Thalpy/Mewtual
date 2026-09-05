@@ -453,7 +453,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   async open_channel(DocType, doc_id) -> Result<()>;       // create doc + subscribe its ns_secret_L-keyed topic
   async post(DocType, doc_id, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<()>;  // edit + gossip
   async run_once() -> Result<bool>;                        // drain outbox + recovery + sub-resync; then handle ONE event
-  async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;        // document history catch-up
+  async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;        // incremental where possible; see KIND_CATCHUP_SINCE
   async request_commit_catchup(peer:PeerId, from_epoch:u64) -> Result<usize>;  // missed-commit recovery (ordered replay, SIGNED response)
   // 6e-3d-6 pre-dial member tag (keyed by ns_secret_L): a discoverer rejects a Sybil/forged record before dialing.
   membership_tag(rz_peer:&[u8], slot:u64, peer_id:&[u8], seq:u64) -> Option<[u8;16]>;
@@ -591,7 +591,181 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
   Ciphertext = XChaCha20-Poly1305 of the encoded `SignedOp` under `channel_secret(doc,epoch)`.
 - **`CommitRecord`** (control payload): `bytes group_id ‖ u64 commit_epoch ‖ bytes committer_device(32) ‖ bytes mls_commit ‖ bytes base_auth(32) ‖ bytes committer_sig(64)`.
 - **Request/response** (`ProtocolId("/catcoms/rr/1")`): first payload byte = **kind**:
-  - `0` KIND_CATCHUP; **authed** body wrapping `u16 doc_type ‖ u128 doc_id`; response = op bundle.
+  - `0` KIND_CATCHUP; **authed** body wrapping `u16 doc_type ‖ u128 doc_id`; response = op bundle,
+    bare, with **no marker byte in front of it**. This is the shape every build understands, and
+    it is frozen: it predates `KIND_CATCHUP_SINCE` and is the only catch-up a peer built before
+    that kind existed can ask for or parse. It carries no way to say "there is more", so it is
+    capped at the 16 MiB response ceiling rather than at the paging chunk: a peer that cannot be
+    told to page has nothing that re-asks after a short answer, and its only route back would be
+    the next gossiped op whose dependencies it lacks. Because of that ceiling it gets its own
+    deadline, `FULL_CATCHUP_REQUEST_MS`, sized to the same ~1 Mb/s floor the chunk budget leaves;
+    `CATCHUP_REQUEST_MS` applied to a legal maximum response would demand roughly 67 Mb/s. Two
+    current peers never spend that deadline on each other, because this request is only reached
+    when the paged one came back empty or with a marker we do not know.
+  - `19` KIND_CATCHUP_SINCE; **authed** body wrapping `u16 doc_type ‖ u128 doc_id ‖ u32 count(≤64) ‖
+    32-byte change hashes`; response = `[marker] ‖ op bundle`, carrying only the ops behind the server's
+    frontier and not behind the hashes named. The hashes are the requester's automerge heads **plus
+    their immediate ancestors** (`EncryptedDoc::sync_frontier`): a member that wrote while it could
+    not reach anyone has a head nobody else has seen, and a peer that cannot see a hash can subtract
+    nothing behind it, so naming the parents keeps the exchange incremental. Sound because holding a
+    change means holding its dependencies, so anything causally behind a named hash is already held.
+    A hash the server does not know selects nothing. Members-only on exactly the same terms as
+    `KIND_CATCHUP`.
+  - **The authenticated request binds the transport peer it is sent from**, for
+    `KIND_CATCHUP_SINCE` and **only** for it. The requester's own peer id goes into the request
+    transcript, and the server rebuilds it from where the bytes actually arrived, so a request
+    relayed verbatim by a third endpoint fails to verify rather than being answered on that
+    endpoint's behalf. Without it, an endpoint could forward a member's live request to a real
+    member, collect the answer signed against it, and present that answer as evidence about
+    itself.
+    A transcript is what a signature is over, so adding a field to one changes what an older build
+    computes: `KIND_PEX` and `KIND_COMMIT_CATCHUP` exist on the released build and keep signing
+    exactly what it signs, or a mixed pair fails in both directions — and a commit catch-up that
+    stops verifying is a member stuck at an old epoch, unable to open anything sealed under the
+    new one. They instead stop being a way to *prove* anything about a transport peer: a proof from
+    them is recorded as unbound (see `ProvenMemberPeer::bound`). An unbound proof may **prefer** a
+    source and nothing else: it cannot be an obligation a document's search waits on, cannot let an
+    unsigned empty legacy answer discharge one, and cannot displace a binding proved at both ends
+    on either axis (the same device from another peer, or another device at the same peer). A
+    refusal is decided before anything is touched, so a claim that will be refused cannot clear the
+    state it was going to replace on the way to being refused; an accepted replacement carries the
+    displaced identity's continuation claim with it rather than leaving one naming an endpoint the
+    member no longer answers at. Reciprocal forwarding is excluded from binding for a different
+    reason: it relays on somebody's behalf by design.
+    **Not yet gated on `bound`:** `proven_member_path`, `has_proven_connected_member_peer` and the
+    reconnect sweep still accept an unbound proof, as they did before this work. PEX is how most
+    peers become proven at all, so requiring a bound proof there would leave a node with no member
+    path until a document catch-up happened; tightening it is its own change with its own behaviour
+    to re-establish, and is tracked with the periodic anti-entropy work.
+  - **The `KIND_CATCHUP_SINCE` response is responder-signed**, like commit catch-up, PEX and blob
+    fetch: `bytes responder_pubkey ‖ bytes signature(64) ‖ bytes answer`, where `answer` is
+    `[marker] ‖ op bundle` and the signature covers a transcript under
+    `catcoms/doc-catchup-resp/v1` binding the group id, the **requester's** key, the **responder's
+    transport peer**, and the request's timestamp, nonce and epoch. The requester rebuilds the
+    responder peer from the one it actually contacted, so an answer cannot be attributed to an
+    endpoint other than the one that produced it. The bundle inside is capped at
+    `MAX_SIGNED_CATCHUP_BUNDLE`, the response ceiling less the envelope, because the ceiling
+    limits the frame that leaves the node rather than the bundle within it: sizing the bundle to
+    the whole ceiling produced answers that were legal to build and impossible to send. The requester rejects an answer whose signer is not a current
+    roster member, or whose signature does not verify against the request it actually sent. Sealed
+    operations authenticate their own authors, but an **empty** bundle carries no such proof and
+    the marker in front of it is durable control state: it can end a search, open a claim on a
+    document, or push the requester between sources. Catch-up sources are deliberately drawn from
+    untrusted candidates as well as proven members, so that state carries membership proof of its
+    own. An empty response is the one reply that needs none, because it asserts nothing.
+  - **`KIND_CATCHUP_SINCE` response markers**, which are a continuation signal and not a version:
+    - `1` `CATCHUP_SINCE_UNDERSTOOD`: this bundle is everything the server was holding for you.
+    - `2` `CATCHUP_SINCE_MORE`: the bundle was cut to the budget and unsent ops remain; ask again.
+    - empty response (no marker at all): "I do not know this kind". A peer built before kind 19
+      existed answers every unknown kind this way, which is how a requester detects it and re-asks
+      with `KIND_CATCHUP`.
+    - **any other first byte**: treated exactly like the empty response, i.e. as a peer that
+      cannot page for us, and never as a malformed response. A malformed reading would propagate
+      out of `request_catchup` and take the whole-history fallback with it, stranding the document
+      against a peer that was answering perfectly well. This is what lets a later build add a
+      marker without breaking the population installed today. It is a defensive downgrade, not a
+      guarantee of convergence: what it buys is another route to try, and the fallback it takes is
+      the compatibility grammar with the costs described under `KIND_CATCHUP`.
+    - `3` `CATCHUP_SINCE_ABSENT`: understood, and this peer does not hold the document at all.
+      Deliberately **not** `1` with an empty bundle, and deliberately not silence. Silence reads as
+      an older build and takes the compatibility path; `1` reads as "the document is complete",
+      which retires the gap on the strength of an answer that was never about it. Peer selection is
+      group-wide, not per document, so the best source known can easily be an honest member who
+      never opened that channel. The requester keeps the task, sets that source aside, and asks
+      somebody else.
+    - **Only the peer that claimed a continuation can retire it.** A `2` **that moved the
+      requester's frontier** records that peer as the claimant for the document (for
+      `CATCHUP_CONTINUATION_TTL_MS` of elapsed time, so a claimant that never returns cannot pin
+      the task forever). While that claim stands, a `1` from any *other* peer does not close the
+      task: it says what that peer has, not what the claimant was withholding. The drain also asks
+      the claimant first. Without this, one peer's zero-progress completion erased another's proven
+      continuation, and a modified peer could skip the non-progress bound entirely by answering `1`
+      instead of `2`.
+    - A `2` that moved nothing neither mints nor refreshes a claim, and exhausting the
+      non-progress budget **revokes** the claim as well as cooling the peer off. Otherwise a
+      claimant could keep a document open indefinitely by answering "ask me again" on a timer:
+      the cooldown paused it, the ten-minute claim was renewed on its next round, and no other
+      source's completion could ever end the search.
+    - **`1` with an empty bundle is one source's answer, not the group's.** A member that has
+      opened the channel but not yet caught it up holds a real, empty document, so it answers `1`
+      rather than `3`, and that answer is true and useless. Each such answer marks that source as
+      checked at the current local version; the document is treated as caught up only once every
+      eligible source has said it at the same version, and any answer that moves the version
+      starts the sweep again. A later member connection is a natural reason for another sweep.
+      **A cooling source still owes the sweep an answer**: being unavailable for a moment is not
+      the same as having answered, and treating it as the same lost a document to an ordinary
+      schedule (a cancelled tick cools the peer it was mid-request with, and the next empty replica
+      to answer would find nobody outstanding). The picker excludes both cooling and
+      already-checked sources from an attempt; only the second is a discharged obligation. Only
+      **proven** members are owed to, so an unproven candidate cannot pin a sweep open by staying
+      connected and saying nothing; the exception is a node with **no** proven source at all
+      (a fresh join or restore), where nothing that answers has proved it was entitled to, so each
+      connected candidate is asked once before the search can end.
+      A source's answers are forgotten when it **reconnects** and when it is **newly proven**.
+      Otherwise a peer could leave, write something, return, and be excluded from the very sweep
+      its reconnect queued; and a peer that was only a candidate when it answered would keep that
+      answer after becoming a source the sweep must hear from. Forgetting only forgets: queueing
+      the work is left to `sweep_docs_on_reconnect`, which already declines to aim a whole-node
+      sweep at a peer that has not proved it can serve one.
+      **Known gap.** A node that restores with documents on disk and no proof cache does not sweep
+      on its first reconnect, and proving its first member does not sweep either, so a room that
+      stays quiet can remain as short as the restore left it. The same applies to a source that
+      quietly advances while staying connected and never changing standing. Closing both needs a
+      bounded periodic anti-entropy pass, spread across documents and peers; whole-node sweeps at
+      those moments were tried and aim catch-up requests at peers that cannot yet serve them.
+      One member device holds at most one proof, and one transport peer at most one device, so a
+      device cannot manufacture sweep obligations or evict honest proofs by answering from many
+      identities.
+    - **A `1` that carried operations discharges only its own sender's claim.** Carrying content
+      proves that peer had something to give, not that it knows what a different peer is still
+      withholding, so it restarts the version sweep but leaves another peer's claim standing.
+    - **`KIND_CATCHUP` answers go through the same rule.** Its bundle is bare and unsigned, so an
+      empty one cannot say who sent it: a zero-operation legacy answer marks the source checked
+      only when that transport peer already carries an authenticated current-member binding, and
+      otherwise just cools it and continues. Without that, declining to page and then answering
+      with nothing was a way around the whole state machine, available to any peer on the wire.
+    - Continuation is the **server's** answer, because only it knows what it withheld. A requester
+      that inferred it from "did I apply anything" stopped on a chunk of ops it already held, and
+      on a chunk that could carry nothing because the next op was larger than the budget.
+  - **`KIND_CATCHUP_SINCE` serves are capped at `MAX_CATCHUP_CHUNK` (256 KiB)**, not at the 16 MiB
+    a response may legally reach. The cap is what makes `CATCHUP_REQUEST_MS` a deadlock bound
+    rather than a throughput requirement: without it, a valid connection that could not move a
+    whole history inside the deadline would time out, retry, and time out again, so a large gap
+    could never converge at all. A non-empty remainder always serves **at least one op**, up to the
+    16 MiB ceiling, so an individually oversized op travels alone instead of being silently
+    withheld: a bundle of zero ops is how the wire says "nothing for you", and a peer still holding
+    something must never send one.
+  - **Requester termination and non-progress.** The exchange ends on `1`. A `2` that applied
+    nothing is legitimate (the frontier on the wire is capped, so an honest peer can replay a
+    prefix already held), so it is believed and asked again; but an unbroken run of
+    `MAX_NONPROGRESSING_CATCHUP_ROUNDS` (8) such rounds from one peer for one document marks that
+    peer under a per-document cooldown, so the next drain prefers another source. That bounds the
+    one loop an authenticated member can drive by itself, where every answer says "ask me again"
+    and no answer carries anything usable. The run resets the moment that peer applies anything.
+    Per document rather than globally on purpose: a peer that cannot serve one document may be the
+    only holder of another, and the global failed set is cleared by any inbound traffic from that
+    peer, so it could never be a durable statement about a document anyway.
+  - **Request order, always**: `KIND_CATCHUP_SINCE` first, *including* when the frontier is empty
+    (which subtracts nothing and so asks for everything, still in bounded chunks), falling back to
+    `KIND_CATCHUP` only on an empty or unrecognised-marker response. Asking the paged way only
+    when there was something to subtract sent the commonest case there is, a freshly opened or
+    freshly joined document, to the largest response in the protocol under the shortest deadline.
+  - **A detected gap stays owned until it is filled.** The queue keeps the task across every
+    outcome that is not an authoritative "that is everything": a timeout, a refusal, a malformed
+    answer and an exhausted non-progress allowance all mark the peer and leave the work queued for
+    the next drain to hand to another source. The task in flight lives in `catchup_inflight` on
+    the synchronizer rather than on the stack, because the actor cancels its tick whenever a
+    command arrives, and a quiet document has no later inbound op to rediscover a lost gap with.
+    A restored task is put back ahead of the queue cap, since it was admitted before the drain took
+    it and the command that cancelled the tick may have taken its slot.
+  - **A UI-facing catch-up never waits on the compatibility request.** `request_catchup` (what the
+    open-channel and explicit catch-up commands call, awaited inline by the actor) stops after the
+    paged attempt and queues the document instead; only the drain follows through to `KIND_CATCHUP`
+    and its two-minute deadline. Otherwise a peer that answers "I cannot page" and then withholds
+    could hold a server's actor, and everything it serves, for that whole window. `request_catchup`
+    also queues the document when its own attempt fails, so a named request made outside the drain
+    (an explicit catch-up, a channel discovered through a join contact) does not lose the gap to a
+    timeout or a malformed answer.
   - `1` KIND_JOIN; body `bytes invite.encode() ‖ bytes key_package`; response =
     `[JOIN_READY] ‖ bytes welcome ‖ bytes signature(64) ‖ bytes sealed_routing` (the admitter signs
     `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome ‖ sealed_routing`). Not member-authed.
@@ -912,6 +1086,117 @@ never seen before" rather than a count that grew: a concurrent append+delete bat
 merge can leave the count untouched. First sight of a channel reports nothing, because the UI
 fetches messages when it opens one. The bridge forwards the flags on the `channel-updated` payload
 (`messages_appended`, `messages_changed`, `topic`, `jukebox`).
+
+The signature is recomputed only for a channel whose document **moved**. `Server::doc_version(doc_type,
+doc_id)` is the number of signed ops applied to a document this session (O(1); every content change,
+local or remote, live or caught up, is exactly one op, and duplicates never count), and the actor keeps
+the last version it projected for every document it watches. A network event that touched nothing a
+projection reads costs no document walk; before this, every gossip frame, presence blip and receipt
+re-materialized every open channel plus the status feed, wiki, roles and (Ed25519-verified)
+moderation records. Membership-derived projections (roles, moderation) also re-read on an epoch or
+member-count change, and the wiki keeps its full compare while a review is pending, because a pending
+edit auto-accepts at its deadline with no op written. Delivery snapshots are deliberately **not**
+gated: every tick still dirties every open channel (the recompute is throttled to one second per
+channel and short-circuits when this device has no recent own messages), because the one-second
+delivery timer that this arms is also what cancels a sync tick blocked in an outbound request.
+The actor's `select!` drops the in-flight `sync_once` future whenever the timer or a command
+fires; without that wake, two members that simultaneously issue a request to each other (a doc
+catch-up one way, PEX the other) each sit on the other's inbound request until the request
+timeout, and `process_recovery_e2e` fails. `Server::messages` is served from a per-channel materialization
+cached under the same version (`with_messages` borrows it without copying), so the actor's change
+check, `get_messages`, the unread heads and the inbox share one walk per change.
+
+**Paged history** (`docs/design-native-paging.md`). The webview no longer reads a channel whole:
+`get_message_page(server, channel, anchor, before, after, unread?)` (`Server::message_page`) returns
+one contiguous slice `{version, total, start, anchor_index, rows, unread}` around an anchor
+(`{kind:"tail"}`, `{kind:"id", id}`, `{kind:"index", index}`, `{kind:"first_reply_to", id}`), with
+`before`/`after` rows either side (each clamped to 2048 at the bridge). Ids are the durable anchor
+(they survive concurrent inserts, edits and deletes around them); an id that names no current row
+yields `anchor_index: null` and no rows, and the client re-anchors by index. Every row carries
+`targets_me`, `reply_count` and `reply_to_preview` (`{id, author, text[..200]}` of the parent),
+resolved natively against the whole channel. `get_pinned_messages(server, channel)` returns the
+pinned rows by name. `get_messages` remains for the explicit whole-history readers (server-wide
+search corpus, moderation timeline).
+
+**Only the newest page response may be applied.** Every path that can replace the loaded slice
+(open, refresh, reveal, jump, re-anchor) awaits a promise, and those settle in whatever order the
+actor and the bridge produce them; checking only that the server and channel are unchanged let a
+slow older response overwrite a newer one and put the reader back on stale rows. `PageAdmission`
+(`message-paging.ts`) issues one token per request, `applyPage` refuses any other, and leaving the
+conversation invalidates every outstanding request. Deliberately not a comparison of `version`: two
+requests can carry the same version and still need an order.
+
+**A channel's rows are read in timestamp order, from every conflicting `messages` list.** Two
+things the CRDT does not do for us, both of which reached users:
+
+- The list is created lazily by whoever posts first, so two members posting before either has seen
+  the other's creation op each make one. Automerge keeps both and `get(ROOT, MESSAGES)` returns
+  only one, leaving the other member's posts in the document and unreachable. This is the defect
+  the status feed escaped by moving to distinct root keys; channels did not. Reads now take every
+  conflicting list. Writes still use the one `get` returns, so writers converge on a single list
+  as soon as they have seen each other. **Known limit:** editing, deleting and reacting still
+  resolve through `get`, so a row stranded in a losing list is visible but not yet mutable.
+- A send appends at the end of the list *as the sending replica sees it*, so a member that is
+  behind appends after the last row it knows about. When the missing history arrives, the two are
+  concurrent insertions and the merge orders them by a rule that knows nothing about when anything
+  was said: a day of messages could sit above two earlier days. Rows are therefore sorted by `ts`
+  with a **stable** sort, so ties keep the merge's own deterministic order — which for the case
+  that produces ties, one person typing faster than the clock ticks, is the order they were sent
+  in. Adding the id as a tiebreak would replace that with alphabetical order.
+
+**A `channel-updated` delta names the rows that arrived** (`arrivals`, capped at 32 ids, in the
+order they now read), because with rows in timestamp order an arrival is not always the last row:
+a delayed message, or one from a device whose clock is behind, lands wherever its stamp says.
+Anything describing an arrival reads those ids; taking the end of the list describes whatever is
+newest, which after such an arrival is a message the reader has very likely already seen.
+
+`get_messages_by_id(server, channel, ids)` (`Server::messages_by_id`) reads those rows, wherever
+they sort, each with the same `targets_me` bit `get_message_tail` carries. Knowing an arrival's id
+is no use if the query cannot reach it: a delayed row can sort arbitrarily far back, so neither a
+bounded tail nor the page the reader has loaded is guaranteed to contain it, and searching those
+and falling back to the last row announces a message already announced. Ids naming no row come
+back absent, which is how a caller learns a row was deleted rather than substituting another for
+it. Classification comes from the arriving row's own `targets_me`, not from
+`addressed_after_cursor`: that scan answers over the rows past the read mark, and a message that
+sorts before the mark is not among them, so a delayed mention read as an ordinary message.
+
+**Still open, and the reason this does not close the whole "buried message" report:** the unread
+summary decides by position, so a message that arrives with a timestamp below the read mark sorts
+before it and is counted as read. Before rows were ordered, a late arrival usually appended after
+the mark and was counted; ordering them made that case worse rather than better. Fixing it needs
+observation state — what this device had actually seen when the mark was set — rather than a
+better ordering, since a genuinely unseen message can legitimately belong earlier in the
+conversation. The `arrivals` ids above are the signal that work should build on.
+
+This is not a causal ordering key: two senders' clocks can still disagree, and a reply can still
+sort above its parent if they disagree badly enough. What it guarantees is that every member
+renders the same conversation in the same order, and that paging, day dividers, the unread
+boundary, the notification tail and the delivery anchor all mean the same thing, because they all
+read this one order.
+
+With an `unread` probe (`{divider_id | null, divider_ts | null, now_ms}`: the client's frozen read
+cursor, its timestamp, and its own clock) the page also carries `{ceiling_ts, first_index, count}`
+over the whole channel, so a client holding one slice still places the divider and counts past it.
+**`divider_id` is the cursor**, matching the durable badge in `unread.ts`: when it names a row,
+everything after that row that somebody else wrote is unread, which needs no clock and so cannot be
+fooled by two messages sharing a millisecond or by a sender whose clock ran backwards. The
+timestamp rule (`readCeiling`/`effectiveTs`, five-minute grace, own rows never count) applies only
+when there is no usable cursor: a read mark written before ids existed, or one whose message has
+since been deleted.
+
+`get_message_tail(server, channel, limit, afterId, afterTs)` (`Server::message_tail`) returns the
+newest `limit` rows (oldest first, `limit` clamped to 1..=256 at the bridge) each with a
+`targets_me` flag, plus `addressed_after_cursor`. The flag on a row is an `@[my name]` mention under
+the composer's normalization, or a reply to one of my messages, with the parent resolved against the
+**whole** channel. `addressed_after_cursor` answers the same question over **every** row after the
+cursor (normally the channel's read mark), carried or not: one catch-up or one busy minute can
+append more messages than a tail holds, and a mention followed by that many ordinary messages must
+still ring. `afterId` is the cursor; `afterTs` is what is left of it once the message it named has
+been deleted, and decides on its own in that case. Only a cursor with neither means nothing has been
+read here, where the whole channel counts; without `afterTs` a deleted read mark read as exactly
+that, so an old mention rang again on every arrival, forever.
+It exists for the arrival ticker, which runs for every arrival in every channel not on screen and
+used to fetch that channel's entire history to read its last row.
 
 `get_channel_heads(server)` is how unread badges survive what the event stream cannot. Actor
 notifications are deliberately dropped at the native boundary while the vault is locked, and a

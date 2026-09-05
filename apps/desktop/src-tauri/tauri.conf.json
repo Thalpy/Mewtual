@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Mewtual",
-  "version": "0.3.0-alpha.13",
+  "version": "0.3.0-alpha.14",
   "identifier": "com.catcoms.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -14,8 +14,10 @@
       {
         "label": "main",
         "title": "Mewtual",
-        "width": 900,
-        "height": 640,
+        "width": 1024,
+        "height": 720,
+        "minWidth": 720,
+        "minHeight": 560,
         "resizable": true,
         "decorations": false
       }

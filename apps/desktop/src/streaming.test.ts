@@ -53,6 +53,23 @@ test("stream presets have visible safe defaults and sanitize persisted values", 
   }
 });
 
+test("a share carries the surface's audio unless it has been explicitly silenced", () => {
+  // Sharing a screen with no sound reads as a broken stream rather than as a choice, and the
+  // recovery costs the moment being shared. Audio is what an unconfigured share asks for.
+  assert.equal(DEFAULT_STREAM_SETTINGS.audioMode, "surface");
+  assert.equal(parseStreamSettings(null).audioMode, "surface");
+  assert.equal(parseStreamSettings({}).audioMode, "surface");
+  assert.equal(
+    parseStreamSettings({ audioMode: "system" }).audioMode,
+    "surface",
+    "a value from no version of this app is not a choice either",
+  );
+  // The half that makes the default acceptable: silence chosen once stays chosen. Folding an
+  // absent value and a stored "none" together is what would make it unreachable.
+  assert.equal(parseStreamSettings({ audioMode: "none" }).audioMode, "none");
+  assert.equal(parseStreamSettings({ audioMode: "separate" }).audioMode, "separate");
+});
+
 test("streamer mixer levels are finite, bounded and map to linear Web Audio gain", () => {
   assert.equal(normalizeStreamAudioLevel(-1), 0);
   assert.equal(normalizeStreamAudioLevel(99.6), 100);
@@ -156,6 +173,67 @@ test("a rejected capture downscale still plans from the actual 4K source", () =>
   const plan = peerStreamPlan(settings, 720, 2160);
   assert.equal(plan.transportHeight, 720);
   assert.equal(plan.scaleResolutionDownBy, 3);
+});
+
+test("a budget refused because negotiation moved under it is retried, not treated as a refusal", async () => {
+  // The field failure this exists for (2026-09-02): the first cap for a screen share is applied
+  // to a transceiver added moments earlier, negotiation completes during the write, and Chromium
+  // rejects the stale snapshot. Because a screen cap PARKS its sender before applying, treating
+  // that as "the encoder refused the budget" left the share attached to nothing and sending no
+  // video at all, silently, for the rest of the call.
+  const controller = new PeerVideoBudgetController();
+  const reads: number[] = [];
+  let cname = "";
+  let attempts = 0;
+  const track = { kind: "video" } as MediaStreamTrack;
+  const sender = {
+    getParameters: () => {
+      reads.push(reads.length);
+      // Negotiation completes after the first read: the RTCP identity appears.
+      cname = "post-negotiation";
+      return { encodings: [{}], rtcp: { cname } } as unknown as RTCRtpSendParameters;
+    },
+    setParameters: (parameters: RTCRtpSendParameters) => {
+      attempts += 1;
+      if (attempts === 1) {
+        return Promise.reject(new Error(
+          "Failed to execute 'setParameters' on 'RTCRtpSender': Attempted to set RtpParameters with modified RTCP parameters",
+        ));
+      }
+      assert.equal((parameters as unknown as { rtcp: { cname: string } }).rtcp.cname, cname);
+      return Promise.resolve();
+    },
+    replaceTrack: () => Promise.resolve(),
+  };
+  const result = await controller.apply(sender, DEFAULT_STREAM_SETTINGS, 1080, 1080, true, track);
+  assert.equal(result.state, "applied", "the retry succeeds and the share keeps its video");
+  assert.equal(attempts, 2, "exactly one retry, not a loop");
+  assert.equal(reads.length, 2, "the retry must read parameters again, not resend the stale ones");
+});
+
+test("a budget the encoder genuinely refuses twice still parks the sender", async () => {
+  // The retry must not swallow a real refusal: an uncapped screen encode is the thing the pause
+  // exists to prevent, so two failures still park the edge rather than leaving it sending.
+  const controller = new PeerVideoBudgetController();
+  let attempts = 0;
+  const track = { kind: "video" } as MediaStreamTrack;
+  let parked = 0;
+  const sender = {
+    getParameters: () => ({ encodings: [{}] }) as RTCRtpSendParameters,
+    setParameters: () => {
+      attempts += 1;
+      return Promise.reject(new Error("encoder says no"));
+    },
+    replaceTrack: (t: MediaStreamTrack | null) => {
+      if (t === null) parked += 1;
+      return Promise.resolve();
+    },
+  };
+  const result = await controller.apply(sender, DEFAULT_STREAM_SETTINGS, 1080, 1080, true, track);
+  assert.equal(attempts, 2, "it tried twice");
+  assert.equal(result.state, "paused");
+  assert.match(String(result.error), /encoder says no/);
+  assert.ok(parked >= 1, "the edge is parked rather than left sending an uncapped encode");
 });
 
 test("sender budgets coalesce a resize burst to one pending newest request", async () => {

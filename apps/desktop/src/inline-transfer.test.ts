@@ -111,7 +111,13 @@ test("no shared file is rendered by turning it into a data: URL", () => {
   //   - an imported notification tone, a local file the user picked and which is size-checked
   //     before it is decoded.
   // Both are named here rather than pattern-matched around, so a third one has to be argued for.
-  const allowed = ["imgSrc: profile avatar/banner", "readBase64: notification tone import"];
+  // Matched by shape rather than by position: which file each lives in is an organisational
+  // detail (the profile helper is `image-src.ts`), and a guard that pins the order fails for a
+  // move that changes nothing about the property it guards.
+  const allowed = [
+    { what: "the profile image helper (image-src.ts)", shape: /\$\{b64\}/ },
+    { what: "the notification tone import", shape: /readBase64/ },
+  ];
   const found: string[] = [];
   for (const [name, text] of frontendSources()) {
     for (const site of text.match(/`data:\$\{[^`]*base64,\$\{[^`]*`/g) ?? []) {
@@ -123,8 +129,9 @@ test("no shared file is rendered by turning it into a data: URL", () => {
     allowed.length,
     `unexpected base64 data: URL construction:\n  ${found.join("\n  ")}`,
   );
-  assert.match(found[0], /\$\{b64\}/, "the profile image helper");
-  assert.match(found[1], /readBase64/, "the tone import");
+  for (const { what, shape } of allowed) {
+    assert.equal(found.filter((site) => shape.test(site)).length, 1, `exactly one site is ${what}`);
+  }
 });
 
 test("uploads are sent in slices sized by the native side, not by the frontend", () => {

@@ -81,21 +81,27 @@ function validWave(value: string): value is LegacyWave {
 
 /**
  * Bounded ephemeral take log. Authenticated source identity is a method argument, never an event
- * property accepted from the sender. Consent remains honest-client coordination and is surfaced
- * as explicit state rather than being mistaken for an endpoint-enforceable privacy boundary.
+ * property accepted from the sender.
+ *
+ * A take is not a recording of anybody. It holds the note events the jam layer already broadcasts
+ * to every ear in the room, and those events are synthesized locally at each of them: no
+ * microphone, no voice, no audio of any kind is captured, and playing one back plays the same
+ * synthesizer everyone was already hearing live. It used to require unanimous consent, which
+ * treated it as though it were a recording of the room and made a normal thing (keeping the riff
+ * that just happened) need everyone in the call to agree first. Membership is still enforced,
+ * because a take's participant set is part of what it claims to be.
  */
 export class JamTakeRecorder {
   readonly config: JamRecorderConfig;
   private readonly parts: string[];
   private readonly partIndex = new Map<string, number>();
-  private readonly consents = new Set<string>();
   private readonly lanes: JamTakeLane[] = [];
   private readonly laneState = new Map<string, LaneState>();
   private readonly patches: JamPatch[] = [];
   private readonly patchIndex = new Map<string, number>();
   private readonly events: JamTakeEvent[] = [];
   private stateValue: JamRecorderState = "arming";
-  /** Invalidates receipt-time leases whenever consent/membership leaves recording. */
+  /** Invalidates receipt-time leases whenever a membership change leaves recording. */
   private recordingGeneration = 0;
   private membershipMatches = true;
   private resumeAfterMembershipPause = false;
@@ -141,25 +147,8 @@ export class JamTakeRecorder {
     return this.stateValue === "recording" && generation === this.recordingGeneration;
   }
 
-  setConsent(source: string, consent: boolean): boolean {
-    if (!this.partIndex.has(source) || this.stateValue === "stopped") return false;
-    if (consent) this.consents.add(source);
-    else {
-      this.consents.delete(source);
-      if (this.stateValue === "recording") {
-        this.recordingGeneration += 1;
-        this.stateValue = "arming";
-      }
-    }
-    return true;
-  }
-
-  ready(): boolean {
-    return this.parts.every((source) => this.consents.has(source));
-  }
-
   start(): boolean {
-    if (this.stateValue === "stopped" || !this.membershipMatches || !this.ready()) return false;
+    if (this.stateValue === "stopped" || !this.membershipMatches) return false;
     this.stateValue = "recording";
     return true;
   }
@@ -177,7 +166,7 @@ export class JamTakeRecorder {
       }
       this.stateValue = "paused-membership";
     } else if (this.stateValue === "paused-membership") {
-      this.stateValue = this.resumeAfterMembershipPause && this.ready() ? "recording" : "arming";
+      this.stateValue = this.resumeAfterMembershipPause ? "recording" : "arming";
       this.resumeAfterMembershipPause = false;
     }
   }
@@ -323,20 +312,11 @@ export class JamTakeRecorder {
   }
 }
 
-/** Shared UI seam for local consent changes; local and remote withdrawal hit the same state gate. */
-export function applyJamRecorderConsent(
-  recorder: JamTakeRecorder | null,
-  source: string,
-  consent: boolean,
-): boolean {
-  return !!recorder && !!source && recorder.setConsent(source, consent);
-}
-
 export type JamRecorderLease = Readonly<{ recorder: JamTakeRecorder; generation: number; ms: number }>;
 
 export type JamRecorderTimeline = Readonly<{ startMs: number | null }>;
 
-/** Set a recorder's monotonic origin exactly once; consent pause/resume preserves it. */
+/** Set a recorder's monotonic origin exactly once; a membership pause/resume preserves it. */
 export function startJamRecorderTimeline(
   timeline: JamRecorderTimeline,
   nowMs: number,
@@ -354,8 +334,8 @@ export function jamRecorderTimelineMs(timeline: JamRecorderTimeline, nowMs: numb
 /**
  * Capture recorder identity and event time before an asynchronous render/digest boundary.
  *
- * Admission is decided at receipt, not after the await. An event received while consent is still
- * arming must never become recordable merely because the same recorder starts before hashing ends.
+ * Admission is decided at receipt, not after the await. An event received while the recorder is
+ * still arming must never become recordable merely because it starts before hashing ends.
  */
 export function captureJamRecorderLease(
   recorder: JamTakeRecorder | null,

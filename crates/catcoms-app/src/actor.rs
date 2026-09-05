@@ -33,6 +33,9 @@ use crate::{
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
 const DISCOVERY_DRAIN_MS: u64 = 500;
+/// Arrival ids one channel delta carries. A notification needs the rows that arrived, not all of
+/// them; a catch-up that lands a thousand messages says so with the flag and the count.
+const MAX_REPORTED_ARRIVALS: usize = 32;
 /// Minimum gap between delivery snapshots for one channel (ms, on the injected clock). Delivery
 /// evidence is derived by walking the channel document's change graph, so it is recomputed on a
 /// timer rather than on every inbound op; and the event only fires when the result actually
@@ -309,6 +312,31 @@ pub enum AppCommand {
         channel: u128,
         reply: oneshot::Sender<Vec<ChatMessage>>,
     },
+    /// Query the newest `limit` messages of a channel, each with whether it addresses me.
+    MessageTail {
+        channel: u128,
+        limit: usize,
+        after_id: String,
+        after_ts: u64,
+        reply: oneshot::Sender<crate::MessageTail>,
+    },
+    /// Query the named rows, wherever they sort, each with whether it addresses me.
+    MessagesById {
+        channel: u128,
+        ids: Vec<String>,
+        reply: oneshot::Sender<Vec<(ChatMessage, bool)>>,
+    },
+    /// Query a bounded slice of a channel around an anchor (see [`crate::MessagePageQuery`]).
+    MessagePage {
+        channel: u128,
+        query: crate::MessagePageQuery,
+        reply: oneshot::Sender<crate::MessagePage>,
+    },
+    /// Query every pinned message of a channel.
+    PinnedMessages {
+        channel: u128,
+        reply: oneshot::Sender<Vec<ChatMessage>>,
+    },
     /// Query a channel's lightweight activity stats (count + timestamps; no text).
     MessageStats {
         channel: u128,
@@ -381,6 +409,11 @@ pub enum AppCommand {
     /// Set (or clear, with `""`) the shared server cursor (owner/admin only).
     SetServerCursor {
         cursor: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Set (or clear, with `""`) the shared server name (owner/admin only).
+    SetServerName {
+        name: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query the server's published livery.
@@ -638,6 +671,13 @@ pub enum AppCommand {
     WikiPendingEdits {
         reply: oneshot::Sender<Vec<WikiPendingEdit>>,
     },
+    /// Query the largest file this server accepts, in bytes.
+    FileSizeLimit { reply: oneshot::Sender<u64> },
+    /// Set the largest file this server accepts, in bytes (owner/admin only).
+    SetFileSizeLimit {
+        bytes: u64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Query the wiki review window in days (0 = off).
     WikiReviewDays { reply: oneshot::Sender<u32> },
     /// Set the wiki review window in days, 0..=30 (owner/admin only).
@@ -847,12 +887,21 @@ pub enum AppCommand {
 /// them renders. A single "it changed" signal is therefore ambiguous exactly where the UI needs
 /// certainty: only a genuine arrival may raise an unread badge, while an edit, a reaction or a
 /// queue add should refresh the view and nothing else.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChannelChange {
     /// At least one message id is present that was not there before: a real arrival. This is the
     /// only flag that may create unread state. Deliberately not inferred from the message count,
     /// which a concurrent append+delete batch (or a catch-up merge) can leave untouched.
     pub messages_appended: bool,
+    /// The ids that were not present last time, in the order they now read, capped at
+    /// [`MAX_REPORTED_ARRIVALS`].
+    ///
+    /// Rows are ordered by timestamp, so an arrival is not always the last row: a delayed message,
+    /// or one from a device whose clock is behind, lands wherever its stamp says. Anything that
+    /// wants to describe what arrived has to be told which rows those were; inferring it from the
+    /// end of the list describes whatever is newest, which after such an arrival is somebody
+    /// else's older message.
+    pub arrivals: Vec<String>,
     /// The rendered message list moved without an arrival: an edit, a delete, a reaction or a pin.
     pub messages_changed: bool,
     /// The channel topic changed.
@@ -1250,6 +1299,93 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// The newest `limit` messages of a channel, oldest first, each paired with whether it is
+    /// addressed to me (see [`Server::message_tail`]). Empty if the actor has stopped.
+    pub async fn message_tail(
+        &self,
+        channel: u128,
+        limit: usize,
+        after_id: String,
+        after_ts: u64,
+    ) -> crate::MessageTail {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::MessageTail {
+                channel,
+                limit,
+                after_id,
+                after_ts,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return crate::MessageTail::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// The named rows, wherever they sort, each with whether it addresses me (see
+    /// [`Server::messages_by_id`]). Ids that name nothing are absent from the answer.
+    pub async fn messages_by_id(
+        &self,
+        channel: u128,
+        ids: Vec<String>,
+    ) -> Vec<(ChatMessage, bool)> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::MessagesById {
+                channel,
+                ids,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// A bounded slice of a channel around an anchor (see [`Server::message_page`]). An empty
+    /// default page if the actor has stopped.
+    pub async fn message_page(
+        &self,
+        channel: u128,
+        query: crate::MessagePageQuery,
+    ) -> crate::MessagePage {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::MessagePage {
+                channel,
+                query,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return crate::MessagePage::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Every pinned message of a channel (see [`Server::pinned_messages`]).
+    pub async fn pinned_messages(&self, channel: u128) -> Vec<ChatMessage> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::PinnedMessages { channel, reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Fetch one activity head per channel (no message text), for rebuilding unread state.
     pub async fn channel_heads(&self) -> Vec<ChannelHead> {
         let (reply, rx) = oneshot::channel();
@@ -1584,6 +1720,21 @@ impl ServerActor {
         if self
             .cmd_tx
             .send(AppCommand::SetServerIcon { icon, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Set (or clear, with `""`) the shared server name (owner/admin only; a `LiveryUpdated`
+    /// event follows). Publishing colours or either image never disturbs it.
+    pub async fn set_server_name(&self, name: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetServerName { name, reply })
             .await
             .is_err()
         {
@@ -2642,6 +2793,36 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// The largest file this server accepts, in bytes. Answers the default rather than a
+    /// misleading zero if the actor has stopped.
+    pub async fn file_size_limit(&self) -> u64 {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::FileSizeLimit { reply })
+            .await
+            .is_err()
+        {
+            return crate::DEFAULT_FILE_SIZE_LIMIT;
+        }
+        rx.await.unwrap_or(crate::DEFAULT_FILE_SIZE_LIMIT)
+    }
+
+    /// Set the largest file this server accepts, in bytes; owner/admin only (a `FilesChanged`
+    /// event follows, because the limit lives in the file index document).
+    pub async fn set_file_size_limit(&self, bytes: u64) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetFileSizeLimit { bytes, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
     /// Set the wiki review window in days, 0..=30; owner/admin only (a `WikiUpdated` event
     /// follows).
     pub async fn set_wiki_review_days(&self, days: u32) -> Result<(), String> {
@@ -2967,6 +3148,12 @@ where
         // `channel_delta`), so an edit/delete/add all surface a `ChannelUpdated` that says which
         // of the three it was.
         let mut counts: HashMap<u128, ChannelSignature> = HashMap::new();
+        // Per document: the version it was last projected at. Every `*_changed` check below used
+        // to re-materialize its whole document on every network event, so a long channel made
+        // every gossip frame, presence blip and receipt cost a full walk of the history; the
+        // version comparison is what lets an unchanged document cost nothing.
+        let mut versions = DocVersions::default();
+        let mut last_delivery_evidence = server.delivery_evidence_revision();
         let mut members = server.member_count();
         // The directory itself is shared. Seed `general` for legacy/new servers, then open every
         // known message document so later gossip and reconnect catch-up have somewhere to land.
@@ -2981,7 +3168,7 @@ where
             if let Err(e) = server.open_channel(channel).await {
                 tracing::warn!(error = %e, channel, "open listed channel failed");
             }
-            channel_delta(&server, channel, &mut counts);
+            channel_delta_if_moved(&server, channel, &mut counts, &mut versions);
         }
         // Open the per-server profile document and seed this member's name from the
         // display name, so the roster/messages show a name immediately (the user can
@@ -3092,6 +3279,7 @@ where
                             &mut server,
                             &mut last_channels,
                             &mut counts,
+                            &mut versions,
                             &event_tx,
                             None,
                             locally_created,
@@ -3109,6 +3297,7 @@ where
                             &mut server,
                             &mut last_channels,
                             &mut counts,
+                            &mut versions,
                             &event_tx,
                             Some(peer),
                             None,
@@ -3123,7 +3312,7 @@ where
                         // emitting; the UI fetches messages on open (switchTo → refresh); only a
                         // later add/edit/delete should fire ChannelUpdated. `channel_delta` reports
                         // nothing on first sight for exactly this reason.
-                        channel_delta(&server, channel, &mut counts);
+                        channel_delta_if_moved(&server, channel, &mut counts, &mut versions);
                         let _ = ack.send(());
                     }
                     Some(AppCommand::SendMessage {
@@ -3141,7 +3330,7 @@ where
                         }
                         let change = res
                             .is_ok()
-                            .then(|| channel_delta(&server, channel, &mut counts))
+                            .then(|| channel_delta_if_moved(&server, channel, &mut counts, &mut versions))
                             .flatten();
                         let _ = reply.send(res);
                         if let Some(change) = change {
@@ -3161,7 +3350,7 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                        if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
                             let _ = event_tx
                                 .send(AppEvent::ChannelUpdated { channel, change })
                                 .await;
@@ -3173,7 +3362,7 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                        if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
                             let _ = event_tx
                                 .send(AppEvent::ChannelUpdated { channel, change })
                                 .await;
@@ -3190,7 +3379,7 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                        if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
                             let _ = event_tx
                                 .send(AppEvent::ChannelUpdated { channel, change })
                                 .await;
@@ -3207,7 +3396,7 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                        if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
                             let _ = event_tx
                                 .send(AppEvent::ChannelUpdated { channel, change })
                                 .await;
@@ -3223,7 +3412,7 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                        if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
                             let _ = event_tx
                                 .send(AppEvent::ChannelUpdated { channel, change })
                                 .await;
@@ -3243,7 +3432,7 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                        if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
                             let _ = event_tx
                                 .send(AppEvent::ChannelUpdated { channel, change })
                                 .await;
@@ -3259,7 +3448,7 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                        if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
                             let _ = event_tx
                                 .send(AppEvent::ChannelUpdated { channel, change })
                                 .await;
@@ -3272,7 +3461,7 @@ where
                         if let Err(e) = server.request_channel_catchup(peer, channel).await {
                             tracing::warn!(error = %e, channel, "catch-up failed");
                         }
-                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                        if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
                             let _ = event_tx
                                 .send(AppEvent::ChannelUpdated { channel, change })
                                 .await;
@@ -3282,7 +3471,7 @@ where
                         if let Err(e) = server.request_channel_catchup_any(channel).await {
                             tracing::warn!(error = %e, channel, "any-peer catch-up failed");
                         }
-                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                        if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
                             let _ = event_tx
                                 .send(AppEvent::ChannelUpdated { channel, change })
                                 .await;
@@ -3290,6 +3479,32 @@ where
                     }
                     Some(AppCommand::Messages { channel, reply }) => {
                         let _ = reply.send(server.messages(channel));
+                    }
+                    Some(AppCommand::MessageTail {
+                        channel,
+                        limit,
+                        after_id,
+                        after_ts,
+                        reply,
+                    }) => {
+                        let _ = reply.send(server.message_tail(channel, limit, &after_id, after_ts));
+                    }
+                    Some(AppCommand::MessagesById {
+                        channel,
+                        ids,
+                        reply,
+                    }) => {
+                        let _ = reply.send(server.messages_by_id(channel, &ids));
+                    }
+                    Some(AppCommand::MessagePage {
+                        channel,
+                        query,
+                        reply,
+                    }) => {
+                        let _ = reply.send(server.message_page(channel, &query));
+                    }
+                    Some(AppCommand::PinnedMessages { channel, reply }) => {
+                        let _ = reply.send(server.pinned_messages(channel));
                     }
                     Some(AppCommand::MessageStats { channel, reply }) => {
                         let _ = reply.send(server.message_stats(channel));
@@ -3342,13 +3557,13 @@ where
                         if let Err(e) = server.set_profile(profile).await {
                             tracing::warn!(error = %e, "set_profile failed");
                         }
-                        sync_profiles(&mut server, &mut last_profiles, &event_tx).await;
+                        sync_profiles(&mut server, &mut last_profiles, &event_tx, true).await;
                     }
                     Some(AppCommand::CatchUpProfiles { peer }) => {
                         if let Err(e) = server.request_profiles_catchup(peer).await {
                             tracing::warn!(error = %e, "profiles catch-up failed");
                         }
-                        sync_profiles(&mut server, &mut last_profiles, &event_tx).await;
+                        sync_profiles(&mut server, &mut last_profiles, &event_tx, true).await;
                     }
                     Some(AppCommand::Profiles { reply }) => {
                         let _ = reply.send(server.profiles());
@@ -3362,6 +3577,13 @@ where
                     }
                     Some(AppCommand::SetServerIcon { icon, reply }) => {
                         let res = server.set_server_icon(icon).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if livery_changed(&server, &mut last_livery) {
+                            let _ = event_tx.send(AppEvent::LiveryUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::SetServerName { name, reply }) => {
+                        let res = server.set_server_name(name).await.map_err(|e| e.to_string());
                         let _ = reply.send(res);
                         if livery_changed(&server, &mut last_livery) {
                             let _ = event_tx.send(AppEvent::LiveryUpdated).await;
@@ -3886,6 +4108,21 @@ where
                     Some(AppCommand::WikiPendingEdits { reply }) => {
                         let _ = reply.send(server.wiki_pending_edits());
                     }
+                    Some(AppCommand::FileSizeLimit { reply }) => {
+                        let _ = reply.send(server.file_size_limit());
+                    }
+                    Some(AppCommand::SetFileSizeLimit { bytes, reply }) => {
+                        let res = server
+                            .set_file_size_limit(bytes)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        // The limit lives in the file index document, so this is a file change
+                        // as far as every reader is concerned.
+                        if files_changed(&server, &mut file_count) {
+                            let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                        }
+                    }
                     Some(AppCommand::WikiReviewDays { reply }) => {
                         let _ = reply.send(server.wiki_review_days());
                     }
@@ -4191,12 +4428,22 @@ where
                             &mut server,
                             &mut last_channels,
                             &mut counts,
+                            &mut versions,
                             &event_tx,
                             None,
                             None,
                         )
                         .await;
+                        // Only a channel whose document moved can have changed; the version
+                        // check is O(1), the delta it guards walks the channel's history.
+                        let mut moved_channels = Vec::new();
                         for channel in counts.keys().copied().collect::<Vec<_>>() {
+                            if !versions.moved(&server, crate::DocType::Channel, channel) {
+                                continue;
+                            }
+                            moved_channels.push(channel);
+                            // The version was consumed just above; a second check here would
+                            // read "unchanged" and swallow the very change it is meant to report.
                             if let Some(change) = channel_delta(&server, channel, &mut counts) {
                                 let _ = event_tx
                                     .send(AppEvent::ChannelUpdated { channel, change })
@@ -4204,43 +4451,89 @@ where
                             }
                         }
                         let mc = server.member_count();
+                        // Roles derive from the roles document AND the group (the owner is the
+                        // designated committer; the roster is the MLS membership), and moderation
+                        // derives from roles plus the device registry; so those two projections
+                        // are re-read when any of their inputs moved, not only their own document.
+                        let membership_moved = mc != members || versions.epoch_moved(&server);
                         if mc != members {
                             members = mc;
                             let _ = event_tx.send(AppEvent::MembersChanged { count: mc }).await;
                         }
-                        sync_profiles(&mut server, &mut last_profiles, &event_tx).await;
-                        if livery_changed(&server, &mut last_livery) {
+                        let profiles_moved =
+                            versions.moved(&server, crate::DocType::Profile, crate::PROFILE_DOC);
+                        sync_profiles(&mut server, &mut last_profiles, &event_tx, profiles_moved)
+                            .await;
+                        if versions.moved(&server, crate::DocType::Livery, crate::LIVERY_DOC)
+                            && livery_changed(&server, &mut last_livery)
+                        {
                             let _ = event_tx.send(AppEvent::LiveryUpdated).await;
                         }
-                        if badges_changed(&server, &mut last_badges) {
+                        if versions.moved(&server, crate::DocType::Badges, crate::BADGES_DOC)
+                            && badges_changed(&server, &mut last_badges)
+                        {
                             let _ = event_tx.send(AppEvent::BadgesUpdated).await;
                         }
-                        if devices_changed(&server, &mut last_devices) {
+                        let devices_moved =
+                            versions.moved(&server, crate::DocType::Devices, crate::DEVICES_DOC);
+                        if devices_moved && devices_changed(&server, &mut last_devices) {
                             let _ = event_tx.send(AppEvent::DevicesUpdated).await;
                         }
-                        if files_changed(&server, &mut file_count) {
+                        if versions.moved(
+                            &server,
+                            crate::DocType::FileIndex,
+                            crate::FILE_INDEX_DOC,
+                        ) && files_changed(&server, &mut file_count)
+                        {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
-                        if status_changed(&server, &mut last_statuses) {
+                        if versions.moved(&server, crate::DocType::Status, crate::STATUS_DOC)
+                            && status_changed(&server, &mut last_statuses)
+                        {
                             let _ = event_tx.send(AppEvent::StatusUpdated).await;
                         }
-                        if events_changed(&server, &mut last_events) {
+                        if versions.moved(&server, crate::DocType::Calendar, crate::CALENDAR_DOC)
+                            && events_changed(&server, &mut last_events)
+                        {
                             let _ = event_tx.send(AppEvent::EventsUpdated).await;
                         }
-                        if wiki_changed(&server, &mut last_wiki) {
+                        // The wiki's effective state is read-time: a pending edit auto-accepts at
+                        // its deadline with no op written. While anything is pending the full
+                        // compare keeps running so that moment is still noticed; with nothing
+                        // pending, only the document moving can change what is rendered.
+                        let wiki_moved =
+                            versions.moved(&server, crate::DocType::Wiki, crate::WIKI_DOC);
+                        if (wiki_moved || !last_wiki.2.is_empty())
+                            && wiki_changed(&server, &mut last_wiki)
+                        {
                             let _ = event_tx.send(AppEvent::WikiUpdated).await;
                         }
-                        if roles_changed(&server, &mut last_roles) {
+                        let roles_moved = versions.moved(
+                            &server,
+                            crate::DocType::MemberRoles,
+                            crate::ROLES_DOC,
+                        ) | membership_moved
+                            | devices_moved;
+                        if roles_moved && roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
                         }
-                        if moderation_changed(&server, &mut last_moderation) {
+                        // Re-validating moderation evidence costs one signature check per record,
+                        // which is exactly the work that must not run on every gossip frame.
+                        if (versions.moved(
+                            &server,
+                            crate::DocType::Moderation,
+                            crate::moderation::MODERATION_DOC,
+                        ) | roles_moved)
+                            && moderation_changed(&server, &mut last_moderation)
+                        {
                             let _ = event_tx.send(AppEvent::ModerationUpdated).await;
                         }
                         // Presence: emit when the set of currently-reachable members changes
                         // (a peer connected or dropped). `online_members` is sorted, so the Vec
                         // compare is order-stable.
                         let online = server.online_members();
-                        if online != last_online {
+                        let presence_changed = online != last_online;
+                        if presence_changed {
                             last_online = online.clone();
                             let _ = event_tx
                                 .send(AppEvent::ConnectivityChanged { online })
@@ -4265,7 +4558,21 @@ where
                         // our messages. Recomputing walks the channel's change graph, so it is
                         // rate-limited per channel; throttled channels remain dirty and receive a
                         // deterministic timer wake if no later network event arrives.
-                        delivery_dirty.extend(counts.keys().copied());
+                        //
+                        // Only a channel whose document moved can carry new causal evidence. An
+                        // explicit receipt lives outside the documents and a delivery row also
+                        // names how many members are reachable, so either of those dirties
+                        // everything. This gating was reverted once, because the timer it arms was
+                        // the only thing cancelling a tick stuck in an outbound request; that is
+                        // now the request's own deadline (`CATCHUP_REQUEST_MS`), so the wake is a
+                        // wake again rather than a load-bearing accident.
+                        let delivery_evidence = server.delivery_evidence_revision();
+                        if delivery_evidence != last_delivery_evidence || presence_changed {
+                            last_delivery_evidence = delivery_evidence;
+                            delivery_dirty.extend(counts.keys().copied());
+                        } else {
+                            delivery_dirty.extend(moved_channels.iter().copied());
+                        }
                         for (channel, snapshot) in recompute_due_delivery(
                             &mut server,
                             &mut delivery,
@@ -4314,6 +4621,7 @@ async fn sync_channels<T, R>(
     server: &mut Server<T, R>,
     last: &mut Vec<ChannelInfo>,
     sigs: &mut HashMap<u128, ChannelSignature>,
+    versions: &mut DocVersions,
     event_tx: &EventSink,
     catchup_peer: Option<PeerId>,
     locally_created: Option<u128>,
@@ -4321,6 +4629,15 @@ async fn sync_channels<T, R>(
     T: MeshTransport,
     R: CryptoRngCore,
 {
+    // The directory is one small document; comparing its version first keeps the common case
+    // (nothing changed) from re-reading it on every network event.
+    if !versions.moved(
+        server,
+        crate::DocType::ChannelIndex,
+        crate::CHANNEL_INDEX_DOC,
+    ) {
+        return;
+    }
     let next = server.channels();
     if next == *last {
         return;
@@ -4344,10 +4661,63 @@ async fn sync_channels<T, R>(
                 );
             }
         }
-        channel_delta(server, channel.id, sigs);
+        channel_delta_if_moved(server, channel.id, sigs, versions);
     }
     *last = next;
     let _ = event_tx.send(AppEvent::ChannelsUpdated).await;
+}
+
+/// The last-seen version of every document the actor projects (see [`Server::doc_version`]),
+/// plus the group epoch. A projection is only re-read when its inputs moved; before this record
+/// existed, every one of them was re-materialized on every network event.
+#[derive(Default)]
+struct DocVersions {
+    seen: HashMap<(crate::DocType, u128), u64>,
+    epoch: Option<u64>,
+}
+
+impl DocVersions {
+    /// Whether `(doc_type, doc_id)` changed since the last call for it (recording the current
+    /// version). The first call for a document always reports movement, so a projection is
+    /// seeded on first sight exactly as it was when every tick re-read everything.
+    fn moved<T, R>(&mut self, server: &Server<T, R>, doc_type: crate::DocType, doc_id: u128) -> bool
+    where
+        T: MeshTransport,
+        R: CryptoRngCore,
+    {
+        let version = server.doc_version(doc_type, doc_id);
+        self.seen.insert((doc_type, doc_id), version) != Some(version)
+    }
+
+    /// Whether the MLS epoch advanced since the last call (recording it): the signal that the
+    /// roster, and so everything derived from membership, may have changed.
+    fn epoch_moved<T, R>(&mut self, server: &Server<T, R>) -> bool
+    where
+        T: MeshTransport,
+        R: CryptoRngCore,
+    {
+        let epoch = server.epoch();
+        self.epoch.replace(epoch) != Some(epoch)
+    }
+}
+
+/// [`channel_delta`], skipped when the channel's document has not moved since the last look.
+/// The version check is O(1); the delta walks the channel's whole history. A skipped check can
+/// never hide a change, since every change to a channel is an op on its document.
+fn channel_delta_if_moved<T, R>(
+    server: &Server<T, R>,
+    channel: u128,
+    sigs: &mut HashMap<u128, ChannelSignature>,
+    versions: &mut DocVersions,
+) -> Option<ChannelChange>
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    if !versions.moved(server, crate::DocType::Channel, channel) {
+        return None;
+    }
+    channel_delta(server, channel, sigs)
 }
 
 /// The last-seen fingerprint of one channel's rendered content, kept per open channel so a change
@@ -4402,20 +4772,37 @@ where
     // A content signature (not just the count) so an EDIT; which doesn't change the count; is
     // detected too, both locally and when a peer's edit arrives. Cheap over a channel's message
     // list, which this actor already materializes on every sync tick.
+    let previous_ids = sigs.get(&channel).map(|sig| sig.ids.clone());
     let mut messages_hasher = std::collections::hash_map::DefaultHasher::new();
     let mut ids = std::collections::HashSet::new();
-    for m in &server.messages(channel) {
-        m.id.hash(&mut messages_hasher);
-        m.text.hash(&mut messages_hasher);
-        m.edited.hash(&mut messages_hasher);
-        m.pinned.hash(&mut messages_hasher);
-        // Reactions change the rendered message too (count unchanged), so fold them in.
-        for r in &m.reactions {
-            r.emoji.hash(&mut messages_hasher);
-            r.by.hash(&mut messages_hasher);
+    // The ids that were not here last time, in the order they now read. Rows are ordered by
+    // timestamp, so an arrival is not always the last row: a message can be delayed, or come from
+    // a device whose clock is behind, and land anywhere in the list. Naming them is the only way
+    // for anything downstream to describe what actually arrived rather than what happens to sit at
+    // the end. Bounded, because this only has to carry an announcement.
+    let mut arrivals: Vec<String> = Vec::new();
+    server.with_messages(channel, |msgs| {
+        for m in msgs {
+            if let Some(seen) = &previous_ids {
+                if !seen.contains(&hash_of(&m.id))
+                    && !m.id.is_empty()
+                    && arrivals.len() < MAX_REPORTED_ARRIVALS
+                {
+                    arrivals.push(m.id.clone());
+                }
+            }
+            m.id.hash(&mut messages_hasher);
+            m.text.hash(&mut messages_hasher);
+            m.edited.hash(&mut messages_hasher);
+            m.pinned.hash(&mut messages_hasher);
+            // Reactions change the rendered message too (count unchanged), so fold them in.
+            for r in &m.reactions {
+                r.emoji.hash(&mut messages_hasher);
+                r.by.hash(&mut messages_hasher);
+            }
+            ids.insert(hash_of(&m.id));
         }
-        ids.insert(hash_of(&m.id));
-    }
+    });
     let messages = messages_hasher.finish();
 
     let next = ChannelSignature {
@@ -4433,6 +4820,7 @@ where
     let appended = next.ids.iter().any(|id| !previous.ids.contains(id));
     let change = ChannelChange {
         messages_appended: appended,
+        arrivals,
         messages_changed: !appended && next.messages != previous.messages,
         topic: next.topic != previous.topic,
         jukebox: next.jukebox != previous.jukebox,
@@ -4677,11 +5065,12 @@ async fn sync_profiles<T, R>(
     server: &mut Server<T, R>,
     last_profiles: &mut HashMap<String, Profile>,
     event_tx: &EventSink,
+    profiles_moved: bool,
 ) where
     T: MeshTransport,
     R: CryptoRngCore,
 {
-    if profiles_changed(server, last_profiles) {
+    if profiles_moved && profiles_changed(server, last_profiles) {
         let _ = event_tx.send(AppEvent::ProfilesUpdated).await;
     }
     // Always attempt to resolve missing avatars; the peer holding one is often only known
@@ -4711,6 +5100,121 @@ mod tests {
     use tokio::time::timeout;
 
     const GENERAL: u128 = 1;
+
+    /// A delta says which rows arrived, not which row sorts last.
+    ///
+    /// Rows are ordered by the sender's timestamp, so a message that was delayed, or written on a
+    /// device whose clock is behind, lands wherever its stamp says. Reading the end of the list to
+    /// find "the new one" then describes whatever is newest, which after such an arrival is a
+    /// message somebody has very likely already seen.
+    #[tokio::test]
+    async fn a_channel_delta_names_the_rows_that_arrived_not_the_newest_row() {
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_channel(GENERAL).await.unwrap();
+        async fn post_at(server: &mut Server<MemNetwork, ChaCha20Rng>, id: &str, ts: u64) {
+            let id = id.to_string();
+            server
+                .sync
+                .post(crate::DocType::Channel, GENERAL, move |d| {
+                    crate::append_message(d, &id, "bob", "text", ts, "")
+                })
+                .await
+                .unwrap();
+        }
+        let mut sigs = HashMap::new();
+
+        // First sight seeds the record and reports nothing.
+        post_at(&mut server, "newest", 2_000).await;
+        assert!(channel_delta(&server, GENERAL, &mut sigs).is_none());
+
+        // Now a message that was said earlier arrives. It sorts before the row already here, so
+        // the last row is unchanged and only the arrival list can say what happened.
+        post_at(&mut server, "delayed", 1_000).await;
+        let change = channel_delta(&server, GENERAL, &mut sigs).expect("an arrival is a change");
+        assert!(change.messages_appended);
+        assert_eq!(
+            change.arrivals,
+            vec!["delayed".to_string()],
+            "the row that arrived, not the row that sorts last"
+        );
+        let rows = server.with_messages(GENERAL, |m| {
+            m.iter().map(|m| m.id.clone()).collect::<Vec<_>>()
+        });
+        assert_eq!(
+            rows,
+            vec!["delayed".to_string(), "newest".to_string()],
+            "and it really did sort before the row that was already here"
+        );
+
+        // A pin re-renders the log without anything arriving, and names nothing.
+        server.set_pin(GENERAL, "newest", true).await.unwrap();
+        let change = channel_delta(&server, GENERAL, &mut sigs).expect("a pin is a change");
+        assert!(!change.messages_appended);
+        assert!(change.arrivals.is_empty());
+    }
+
+    /// An arrival is read by name, from wherever it sorts, and carries its own addressing.
+    ///
+    /// Both are what the tail could not give. A message ordered by its sender's timestamp can sit
+    /// arbitrarily far back, so a bounded tail does not contain it; and whether it addresses this
+    /// member is a property of that row, where the tail could only say whether anything *after the
+    /// read mark* did, which a row sorting before that mark is not.
+    #[tokio::test]
+    async fn an_arrival_is_found_by_id_and_carries_its_own_addressing() {
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_channel(GENERAL).await.unwrap();
+        server.open_profiles().await.unwrap();
+        server
+            .set_profile(crate::Profile {
+                name: "Alice Cat".into(),
+                ..crate::Profile::default()
+            })
+            .await
+            .unwrap();
+        async fn post_at(
+            server: &mut Server<MemNetwork, ChaCha20Rng>,
+            id: &str,
+            text: &str,
+            ts: u64,
+        ) {
+            let (id, text) = (id.to_string(), text.to_string());
+            server
+                .sync
+                .post(crate::DocType::Channel, GENERAL, move |d| {
+                    crate::append_message(d, &id, "bob", &text, ts, "")
+                })
+                .await
+                .unwrap();
+        }
+        // A long conversation, and then a mention that was said before all of it.
+        for i in 0..200u64 {
+            post_at(&mut server, &format!("m{i}"), "chatter", 10_000 + i).await;
+        }
+        post_at(&mut server, "delayed", "@[Alice Cat] over here", 1_000).await;
+
+        let rows = server.messages_by_id(GENERAL, &["delayed".to_string()]);
+        assert_eq!(rows.len(), 1, "found by name, not by looking near the end");
+        assert_eq!(rows[0].0.id, "delayed");
+        assert!(rows[0].1, "and it says for itself that it addresses me");
+
+        // The tail cannot answer either question about it.
+        let tail = server.message_tail(GENERAL, 64, "m199", 10_199);
+        assert!(
+            !tail.rows.iter().any(|(m, _)| m.id == "delayed"),
+            "the row is nowhere near the rows a notification would otherwise read"
+        );
+        assert!(
+            !tail.addressed_after_cursor,
+            "and the cursor scan cannot see a mention that sorts before the mark"
+        );
+
+        // Ids that name nothing are simply absent, rather than something else standing in.
+        assert!(server
+            .messages_by_id(GENERAL, &["no-such-row".to_string()])
+            .is_empty());
+    }
 
     #[tokio::test]
     async fn cancellation_interrupts_an_actor_owned_chunk_future() {
@@ -4777,6 +5281,613 @@ mod tests {
             name,
         )
         .unwrap()
+    }
+
+    /// The version gate must be exactly as sensitive as the delta it guards: a quiet tick costs
+    /// nothing, and no change `channel_delta` would report is ever swallowed; including an edit,
+    /// which changes content without changing the count.
+    #[tokio::test]
+    async fn channel_delta_is_skipped_only_while_the_document_is_untouched() {
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_channel(GENERAL).await.unwrap();
+        let mut sigs = HashMap::new();
+        let mut versions = DocVersions::default();
+        assert!(
+            channel_delta_if_moved(&server, GENERAL, &mut sigs, &mut versions).is_none(),
+            "first sight seeds the record and reports nothing"
+        );
+        assert!(
+            sigs.contains_key(&GENERAL),
+            "the record was seeded even though nothing was reported"
+        );
+        assert!(
+            !versions.moved(&server, crate::DocType::Channel, GENERAL),
+            "an untouched document has not moved"
+        );
+
+        server.send_message(GENERAL, "hi").await.unwrap();
+        let change = channel_delta_if_moved(&server, GENERAL, &mut sigs, &mut versions)
+            .expect("a send moves the document");
+        assert!(change.messages_appended);
+        assert!(
+            channel_delta_if_moved(&server, GENERAL, &mut sigs, &mut versions).is_none(),
+            "a change is reported once"
+        );
+
+        let id = server.messages(GENERAL)[0].id.clone();
+        server.edit_message(GENERAL, &id, "hello").await.unwrap();
+        let change = channel_delta_if_moved(&server, GENERAL, &mut sigs, &mut versions)
+            .expect("an edit moves the document even though the count is unchanged");
+        assert!(change.messages_changed && !change.messages_appended);
+    }
+
+    /// The cached materialization is keyed by document version, so a read after any write sees
+    /// the new content, reactions included (they change a row without adding one).
+    #[tokio::test]
+    async fn message_reads_follow_every_document_version() {
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_channel(GENERAL).await.unwrap();
+        assert!(server.messages(GENERAL).is_empty());
+        let before = server.doc_version(crate::DocType::Channel, GENERAL);
+        server.send_message(GENERAL, "one").await.unwrap();
+        assert!(server.doc_version(crate::DocType::Channel, GENERAL) > before);
+        assert_eq!(server.messages(GENERAL).len(), 1);
+        let id = server.messages(GENERAL)[0].id.clone();
+        server.toggle_reaction(GENERAL, &id, "👍").await.unwrap();
+        assert_eq!(server.messages(GENERAL)[0].reactions.len(), 1);
+        server.send_message(GENERAL, "two").await.unwrap();
+        assert_eq!(
+            server.with_messages(GENERAL, |m| m
+                .iter()
+                .map(|m| m.text.clone())
+                .collect::<Vec<_>>()),
+            vec!["one".to_string(), "two".to_string()]
+        );
+    }
+
+    /// A tail read ships only the newest rows, but "addressed to me" is answered against the whole
+    /// channel: a reply whose parent is older than the tail still counts, a mention counts, and my
+    /// own rows never do.
+    #[tokio::test]
+    async fn message_tail_is_bounded_and_resolves_addressing_against_the_whole_channel() {
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_channel(GENERAL).await.unwrap();
+        server.open_profiles().await.unwrap();
+        server
+            .set_profile(Profile {
+                name: "Alice Cat".into(),
+                ..Profile::default()
+            })
+            .await
+            .unwrap();
+        server.send_message(GENERAL, "my own opener").await.unwrap();
+        let mine = server.messages(GENERAL)[0].id.clone();
+        // The opener carries a real clock reading, and rows are ordered by timestamp now, so the
+        // rows written by hand below have to sit after it rather than in a small range of their own.
+        let base = server.messages(GENERAL)[0].ts + 1;
+
+        // A peer's rows, written straight into the document with the canonical schema.
+        async fn post_as(
+            server: &mut Server<MemNetwork, ChaCha20Rng>,
+            id: &str,
+            text: &str,
+            reply_to: &str,
+            ts: u64,
+        ) {
+            let (id, text, reply_to) = (id.to_string(), text.to_string(), reply_to.to_string());
+            server
+                .sync
+                .post(crate::DocType::Channel, GENERAL, move |d| {
+                    crate::append_message(d, &id, "bob", &text, ts, &reply_to)
+                })
+                .await
+                .unwrap();
+        }
+        for i in 0..5 {
+            post_as(&mut server, &format!("filler-{i}"), "filler", "", base + i).await;
+        }
+        post_as(&mut server, "reply", "re: opener", &mine, base + 100).await;
+        post_as(&mut server, "mention", "@[Alice Cat] ping", "", base + 200).await;
+        post_as(&mut server, "plain", "nothing for alice", "", base + 300).await;
+
+        let tail = server.message_tail(GENERAL, 3, "", 0);
+        assert_eq!(
+            tail.rows
+                .iter()
+                .map(|(m, _)| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["reply", "mention", "plain"],
+            "the newest rows, oldest first"
+        );
+        assert_eq!(
+            tail.rows
+                .iter()
+                .map(|(_, to_me)| *to_me)
+                .collect::<Vec<_>>(),
+            vec![true, true, false],
+            "the reply's parent is outside the tail and is still resolved"
+        );
+        let whole = server.message_tail(GENERAL, 100, "", 0);
+        assert_eq!(
+            whole.rows.len(),
+            9,
+            "a wide limit is clamped to the history"
+        );
+        assert_eq!(whole.rows[0].0.id, mine);
+        assert!(!whole.rows[0].1, "my own row is never addressed to me");
+
+        // A burst longer than the tail. The mention is now far outside the rows a notification
+        // would carry, and it still has to ring: the answer is computed over the whole channel
+        // past this device's cursor, not over the window.
+        for i in 0..10 {
+            post_as(
+                &mut server,
+                &format!("burst-{i}"),
+                "ordinary chatter",
+                "",
+                base + 400 + i,
+            )
+            .await;
+        }
+        let after_burst = server.message_tail(GENERAL, 3, "filler-0", base);
+        assert!(
+            after_burst.rows.iter().all(|(_, to_me)| !*to_me),
+            "nothing in the carried window is addressed to me"
+        );
+        assert!(
+            after_burst.addressed_after_cursor,
+            "the mention behind the burst is still reported"
+        );
+        assert!(
+            !server
+                .message_tail(GENERAL, 3, "plain", base + 300)
+                .addressed_after_cursor,
+            "a cursor past the mention leaves only ordinary chatter"
+        );
+
+        // A read mark whose message has been deleted. The id no longer names anything, but the
+        // timestamp still says how far this device had read, and it has to be believed: treating
+        // the channel as unread from its first row makes an old mention ring again, and go on
+        // ringing on every arrival, for a conversation the member finished with long ago.
+        assert!(
+            !server
+                .message_tail(GENERAL, 3, "deleted-row", base + 300)
+                .addressed_after_cursor,
+            "a lost cursor still knows the time it was at, and the mention is behind it"
+        );
+        assert!(
+            server
+                .message_tail(GENERAL, 3, "deleted-row", base + 100)
+                .addressed_after_cursor,
+            "and it does not swallow a mention that came after that time"
+        );
+        assert!(
+            server
+                .message_tail(GENERAL, 3, "no-such-id", 0)
+                .addressed_after_cursor,
+            "no cursor at all is the one case where the whole channel is unaccounted for"
+        );
+    }
+
+    /// A page is a contiguous slice around an anchor in the channel's current order, and every
+    /// row carries what it needs from the rest of the channel (reply parent, reply count,
+    /// addressing) so a caller can hold only the slice.
+    #[tokio::test]
+    async fn message_page_slices_around_an_anchor_and_resolves_row_context() {
+        use crate::{MessagePageQuery, PageAnchor};
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_channel(GENERAL).await.unwrap();
+
+        let empty = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Tail,
+                before: 5,
+                after: 5,
+                unread: None,
+            },
+        );
+        assert_eq!(empty.total, 0);
+        assert!(empty.anchor_index.is_none() && empty.rows.is_empty());
+
+        server.send_message(GENERAL, "my own opener").await.unwrap();
+        let mine = server.messages(GENERAL)[0].id.clone();
+        // Rows are ordered by timestamp, so these have to be stamped in the order the assertions
+        // below expect to read them, and after the opener's real clock reading.
+        let base = server.messages(GENERAL)[0].ts + 1;
+        async fn post_as(
+            server: &mut Server<MemNetwork, ChaCha20Rng>,
+            id: &str,
+            text: &str,
+            reply_to: &str,
+            ts: u64,
+        ) {
+            let (id, text, reply_to) = (id.to_string(), text.to_string(), reply_to.to_string());
+            server
+                .sync
+                .post(crate::DocType::Channel, GENERAL, move |d| {
+                    crate::append_message(d, &id, "bob", &text, ts, &reply_to)
+                })
+                .await
+                .unwrap();
+        }
+        for i in 0..5 {
+            post_as(
+                &mut server,
+                &format!("filler-{i}"),
+                &"x".repeat(300),
+                "",
+                base + i,
+            )
+            .await;
+        }
+        post_as(&mut server, "reply", "re: opener", &mine, base + 100).await;
+        post_as(&mut server, "reply-2", "re: filler", "filler-0", base + 200).await;
+        post_as(&mut server, "plain", "nothing for alice", "", base + 300).await;
+        // 9 rows: mine, filler-0..4, reply, reply-2, plain.
+
+        let ids = |page: &crate::MessagePage| {
+            page.rows
+                .iter()
+                .map(|r| r.message.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let tail = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Tail,
+                before: 2,
+                after: 0,
+                unread: None,
+            },
+        );
+        assert_eq!(tail.total, 9);
+        assert_eq!(
+            tail.version,
+            server.doc_version(crate::DocType::Channel, GENERAL)
+        );
+        assert_eq!((tail.start, tail.anchor_index), (6, Some(8)));
+        assert_eq!(ids(&tail), vec!["reply", "reply-2", "plain"]);
+
+        let around = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Id("filler-2".into()),
+                before: 1,
+                after: 1,
+                unread: None,
+            },
+        );
+        assert_eq!((around.start, around.anchor_index), (2, Some(3)));
+        assert_eq!(ids(&around), vec!["filler-1", "filler-2", "filler-3"]);
+
+        let missing = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Id("nope".into()),
+                before: 3,
+                after: 3,
+                unread: None,
+            },
+        );
+        assert_eq!(missing.total, 9);
+        assert!(missing.anchor_index.is_none() && missing.rows.is_empty());
+
+        let clamped = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Index(999),
+                before: 0,
+                after: 50,
+                unread: None,
+            },
+        );
+        assert_eq!((clamped.start, clamped.anchor_index), (8, Some(8)));
+        assert_eq!(ids(&clamped), vec!["plain"]);
+
+        let whole = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Index(0),
+                before: 0,
+                after: 100,
+                unread: None,
+            },
+        );
+        assert_eq!(whole.rows.len(), 9);
+        let row = |id: &str| whole.rows.iter().find(|r| r.message.id == id).unwrap();
+        assert_eq!(row(&mine).reply_count, 1, "one reply names my opener");
+        assert_eq!(row("filler-0").reply_count, 1);
+        assert_eq!(row("plain").reply_count, 0);
+        let reply = row("reply");
+        assert!(reply.targets_me, "a reply to my message addresses me");
+        let preview = reply.reply_to_preview.as_ref().expect("parent resolved");
+        assert_eq!(
+            (preview.id.as_str(), preview.author.as_str()),
+            (mine.as_str(), server.my_fingerprint().as_str())
+        );
+        let reply_2 = row("reply-2");
+        assert!(
+            !reply_2.targets_me,
+            "a reply to somebody else's message is not for me"
+        );
+        assert_eq!(
+            reply_2
+                .reply_to_preview
+                .as_ref()
+                .unwrap()
+                .text
+                .chars()
+                .count(),
+            crate::REPLY_PREVIEW_CHARS,
+            "a long parent is cut to the preview length"
+        );
+        assert!(row(&mine).reply_to_preview.is_none());
+
+        let first_reply = server.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::FirstReplyTo("filler-0".into()),
+                before: 0,
+                after: 0,
+                unread: None,
+            },
+        );
+        assert_eq!(ids(&first_reply), vec!["reply-2"]);
+
+        // Unread: with the divider at Bob's newest row nothing is past it; at my own opener's
+        // stamp all eight of Bob's rows are, and the first is filler-0 at index 1. My own row
+        // never counts. A far-future row is clamped to the ceiling, so it cannot count either.
+        let newest = base + 300;
+        let probe = |divider_ts: u64| MessagePageQuery {
+            anchor: PageAnchor::Tail,
+            before: 0,
+            after: 0,
+            unread: Some(crate::UnreadProbe {
+                divider_id: String::new(),
+                divider_ts,
+                now_ms: 1_000,
+            }),
+        };
+        // My own opener carries the (manual) clock's 1_000, which is the newest plausible stamp.
+        let none = server.message_page(GENERAL, &probe(newest)).unread.unwrap();
+        assert_eq!(
+            (none.count, none.first_index, none.ceiling_ts),
+            (0, None, newest)
+        );
+        let all = server
+            .message_page(GENERAL, &probe(base - 1))
+            .unread
+            .unwrap();
+        assert_eq!((all.count, all.first_index), (8, Some(1)));
+        post_as_at(&mut server, "future", "from a broken clock", u64::MAX / 2).await;
+        // Read from just under the newest real row, so the clamped row has somewhere to count.
+        let clamped = server
+            .message_page(GENERAL, &probe(newest - 1))
+            .unread
+            .unwrap();
+        assert_eq!(
+            (clamped.count, clamped.ceiling_ts),
+            (2, newest),
+            "an implausible timestamp is pulled down to the ceiling: it counts once, like the \
+             other row past the divider, and can never move the boundary into the future"
+        );
+        // The cursor is the message id, because a timestamp cannot separate two messages sent in
+        // the same millisecond and cannot order two senders' clocks at all. Both of those hid a
+        // real arrival while the divider was a timestamp comparison.
+        let same_ms = newest + 10;
+        post_as_at(&mut server, "same-ms-a", "first of two", same_ms).await;
+        post_as_at(&mut server, "same-ms-b", "second of two", same_ms).await;
+        // Written last, stamped earlier. Rows are ordered by their stamps now, so this one sits
+        // where its stamp says rather than where it was written, which is the whole point: it can
+        // no longer appear after a mark the reader set at a later moment.
+        post_as_at(&mut server, "backwards", "an older clock", newest + 5).await;
+        let by_id = |id: &str| MessagePageQuery {
+            anchor: PageAnchor::Tail,
+            before: 0,
+            after: 0,
+            unread: Some(crate::UnreadProbe {
+                divider_id: id.to_string(),
+                divider_ts: same_ms,
+                now_ms: u64::from(u32::MAX),
+            }),
+        };
+        let after_first = server
+            .message_page(GENERAL, &by_id("same-ms-a"))
+            .unread
+            .unwrap();
+        // Two: the second message of the millisecond, which a timestamp cursor could not have
+        // separated from the first, and the broken-clock row from earlier, which sorts last
+        // because that is what its stamp says.
+        assert_eq!(
+            after_first.count, 2,
+            "the second message of the millisecond is unread, which a timestamp could not say"
+        );
+        let after_second = server
+            .message_page(GENERAL, &by_id("same-ms-b"))
+            .unread
+            .unwrap();
+        assert_eq!(
+            after_second.count, 1,
+            "and after it only the broken-clock row is left"
+        );
+        let deleted_cursor = server
+            .message_page(GENERAL, &by_id("no-such-row"))
+            .unread
+            .unwrap();
+        assert_eq!(
+            deleted_cursor.count,
+            server
+                .message_page(GENERAL, &probe(same_ms))
+                .unread
+                .unwrap()
+                .count,
+            "a cursor that names no row falls back to the timestamp rule it replaced"
+        );
+
+        assert_eq!(server.pinned_messages(GENERAL).len(), 0);
+        server.set_pin(GENERAL, &mine, true).await.unwrap();
+        assert_eq!(server.pinned_messages(GENERAL)[0].id, mine);
+
+        async fn post_as_at(
+            server: &mut Server<MemNetwork, ChaCha20Rng>,
+            id: &str,
+            text: &str,
+            ts: u64,
+        ) {
+            let (id, text) = (id.to_string(), text.to_string());
+            server
+                .sync
+                .post(crate::DocType::Channel, GENERAL, move |d| {
+                    crate::append_message(d, &id, "bob", &text, ts, "")
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Where the time between launching and being able to read a message actually goes.
+    ///
+    /// The desktop's startup budget has never been broken down, so the hardening plan has been
+    /// trading in chunk sizes. This times the native half on one machine: the vault unlock
+    /// (Argon2id, deliberately slow), reading and unsealing a server, and rebuilding it from its
+    /// snapshot. Not a correctness test; run with
+    /// `cargo test -p catcoms-app --release --lib startup_probe -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn startup_probe() {
+        use crate::store::{ServerRecord, ServerStore};
+        use catcoms_rt::OsCryptoRng;
+        let clock = catcoms_rt::SystemClock;
+        let timed = |f: &mut dyn FnMut()| {
+            let start = clock.monotonic_ms();
+            f();
+            clock.monotonic_ms().saturating_sub(start)
+        };
+
+        for messages in [200usize, 5_000, 20_000] {
+            let hub = Hub::new();
+            let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+            server.open_channel(GENERAL).await.unwrap();
+            for i in 0..messages {
+                server
+                    .send_message(
+                        GENERAL,
+                        &format!("message {i} with a plausible amount of text"),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let snapshot = server.snapshot().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let mut rng = OsCryptoRng;
+
+            let mut first = None;
+            let create = timed(&mut || {
+                first = Some(
+                    ServerStore::open(dir.path(), b"a long enough passphrase", &mut rng).unwrap(),
+                )
+            });
+            let store = first.unwrap();
+            store.save_server(7, &snapshot, &mut rng).unwrap();
+            store
+                .save_registry(
+                    &[ServerRecord {
+                        id: 7,
+                        display_name: "alice".into(),
+                        invite: String::new(),
+                        is_dm: false,
+                    }],
+                    &mut rng,
+                )
+                .unwrap();
+            drop(store);
+
+            // The launch path: unlock the vault, read the registry, unseal and rebuild a server.
+            let mut reopened = None;
+            let unlock = timed(&mut || {
+                reopened = Some(
+                    ServerStore::open(dir.path(), b"a long enough passphrase", &mut rng).unwrap(),
+                )
+            });
+            let store = reopened.unwrap();
+            let mut registry = Vec::new();
+            let read_registry = timed(&mut || registry = store.load_registry().unwrap());
+            let mut sealed = None;
+            let read_server =
+                timed(&mut || sealed = Some(store.load_server(registry[0].id).unwrap()));
+            let sealed = sealed.unwrap();
+            let hub2 = Hub::new();
+            let mut restored = None;
+            let restore = timed(&mut || {
+                restored = Server::restore(
+                    &sealed,
+                    hub2.join(PeerId::from_u64(2)),
+                    ChaCha20Rng::seed_from_u64(1),
+                    Box::new(ManualClock::new(2_000)),
+                    "alice",
+                )
+                .ok()
+            });
+            let restored = restored.expect("the snapshot restores");
+            let open = timed(&mut || {
+                let _ = restored.messages(GENERAL);
+            });
+            println!(
+                "messages={messages} snapshot={} KiB | vault_create={create}ms vault_unlock={unlock}ms \
+                 registry={read_registry}ms read_server={read_server}ms restore={restore}ms first_read={open}ms",
+                snapshot.len() / 1024,
+            );
+        }
+    }
+
+    /// Timing probe for the per-tick costs that scale with history. Not a correctness test; run
+    /// with `cargo test -p catcoms-app --release --lib scale_probe -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn scale_probe() {
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_channel(GENERAL).await.unwrap();
+        for n in [1_000usize, 5_000, 20_000] {
+            let have = server.messages(GENERAL).len();
+            for i in have..n {
+                server
+                    .send_message(GENERAL, &format!("message number {i} with some body text"))
+                    .await
+                    .unwrap();
+            }
+            // Wall time through the sanctioned seam (the ambient gate forbids `Instant` here);
+            // millisecond resolution is enough for costs that are meant to be visible.
+            let clock = catcoms_rt::SystemClock;
+            let timed = |f: &mut dyn FnMut()| {
+                let start = clock.monotonic_ms();
+                f();
+                clock.monotonic_ms().saturating_sub(start)
+            };
+            // The last send left the cache current, so force the walk itself to be measured.
+            server.messages_cache.borrow_mut().clear();
+            let mut count = 0;
+            let walk = timed(&mut || count = server.messages(GENERAL).len());
+            let cached = timed(&mut || {
+                let _ = server.with_messages(GENERAL, |m| m.len());
+            });
+            let mut sigs = HashMap::new();
+            channel_delta(&server, GENERAL, &mut sigs);
+            let delta = timed(&mut || {
+                channel_delta(&server, GENERAL, &mut sigs);
+            });
+            let mut size = 0;
+            let snapshot = timed(&mut || size = server.snapshot().unwrap().len());
+            println!(
+                "n={n} walk+clone={walk}ms cached_read={cached}ms channel_delta={delta}ms snapshot={snapshot}ms ({} KiB) count={count}",
+                size / 1024,
+            );
+        }
     }
 
     /// Drain events until the next `ChannelUpdated` for `channel`, returning what it says moved.
@@ -5101,16 +6212,14 @@ mod tests {
             .await
             .expect("event timeout")
             .expect("actor closed");
-        assert_eq!(
-            ev.event,
-            AppEvent::ChannelUpdated {
-                channel: GENERAL,
-                change: ChannelChange {
-                    messages_appended: true,
-                    ..ChannelChange::default()
-                },
-            }
-        );
+        // The delta names the row that arrived, whose id is generated, so it is compared by shape.
+        let AppEvent::ChannelUpdated { channel, change } = &ev.event else {
+            panic!("expected a channel update, got {:?}", ev.event);
+        };
+        assert_eq!(*channel, GENERAL);
+        assert!(change.messages_appended);
+        assert_eq!(change.arrivals.len(), 1, "the message that was just sent");
+        assert!(!change.messages_changed && !change.topic && !change.jukebox);
 
         let msgs = actor.messages(GENERAL).await;
         assert_eq!(msgs.len(), 1);

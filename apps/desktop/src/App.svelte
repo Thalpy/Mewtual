@@ -30,10 +30,32 @@
     type MessageFrameMotion, type MessageFrameShape,
   } from "./message-frame";
   import {
-    CHAT_INITIAL_ROWS, CHAT_WINDOW_STEP, CoalescedAsyncRefresh, SanitizedMessageCache, initialChatWindow,
-    nearScrollBottom, reconcileChatWindow, revealNewer, revealOlder, windowAround,
-    type ChatWindow,
+    CHAT_INITIAL_ROWS, CHAT_WINDOW_STEP, CoalescedAsyncRefresh, SanitizedMessageCache, nearScrollBottom,
   } from "./chat-performance";
+  import {
+    PageAdmission, planJump, planRefresh, planRevealNewer, planRevealOlder, reanchorByIndex,
+    type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
+  } from "./message-paging";
+  import { ImageSrcCache } from "./image-src";
+  import { pastedMedia, pastedName } from "./clipboard-media";
+  import { dismissOnBackdrop } from "./overlay-dismiss";
+  import {
+    DEFAULT_PUSH_TO_TALK, bindableKey, keyLabel, micTransmitting, parsePushToTalk,
+    pushToTalkEvent, type PushToTalkSettings,
+  } from "./push-to-talk";
+  import {
+    clampToBounds, dragTo, parsePosition, startsDrag,
+    type DragBounds, type Point, type Size,
+  } from "./overlay-drag";
+  import {
+    DEFAULT_PEER_LEVEL, MAX_PEER_LEVEL, RemoteAudioRouter, effectivePeerGain, normalizePeerLevel,
+    peerGain, type PeerAudioKind,
+  } from "./call-audio";
+  import {
+    CorpusRevisions, findMatches, noSearchFilters, reactionCount, searchFilterCount, searchIsEmpty,
+    type SearchCorpusChannel, type SearchHitRef, type SearchMessage, type SearchResponse,
+    type SearchSpec,
+  } from "./search-index";
   import { chatScopeKey, reconcileActiveChannel, scopeHoldsConversation } from "./chatscope";
   import {
     WIKI_REVIEW_UNKNOWN,
@@ -193,7 +215,10 @@
     assistedJoinAction, joinReplyCandidateLabel, joinReplyIsExpired, joinReplyNeedsReplacement,
     withOrderedSwitchboardStatus,
   } from "./joinreply";
-  import { callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, type MappedPort } from "./callroutes";
+  import {
+    callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate,
+    shouldSignalHostCandidate, type MappedPort,
+  } from "./callroutes";
   import { JamEngine, jamSequenceAccepted, type JamPlaybackPatchSet } from "./jam-engine";
   import { JamPeerBudget } from "./jam-budget";
   import { JamFrameDecoder, toggleJamPeerMute, type JamFrameDecode } from "./jam-wire";
@@ -203,7 +228,7 @@
   import { JamClockProbeTracker, JamClockSync, JamMetronomeClock } from "./jam-clock";
   import { JamCallCuePlayer, JamClickPlayer } from "./jam-clicks";
   import {
-    applyJamRecorderConsent, captureJamRecorderLease, jamRecorderTimelineMs, JamTakeRecorder,
+    captureJamRecorderLease, jamRecorderTimelineMs, JamTakeRecorder,
     parseJamTakeJson, recordLeasedJamDrum, recordLeasedJamNoteOff, recordLeasedJamNoteOn,
     startJamRecorderTimeline, type JamRecorderLease, type JamRecorderTimeline,
   } from "./jam-recorder";
@@ -225,6 +250,13 @@
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
+  // One row of `get_message_tail`: the backend resolves "addressed to me" (an @-mention of my
+  // profile name, or a reply to my own message) against the WHOLE channel document, so a reply
+  // whose parent is older than the tail is still recognised without shipping the history.
+  type TailMsg = Msg & { targets_me: boolean };
+  // One row of `get_message_page`: the message plus what it needs from the rest of the channel
+  // (addressing, reply count, reply parent), resolved natively so the webview holds only a slice.
+  type PagedMsg = Msg & PagedRowContext;
   type InboxEntry = {
     server: number; server_name: string; is_dm: boolean;
     channel: string; message_id: string; author: string; author_name: string;
@@ -269,6 +301,11 @@
   // whose empty state makes a CLAIM ("No messages yet", "No matching members") must consult this:
   // an empty collection mid-switch means "not read yet", not "there is nothing".
   let groupLoading = $state(false);
+  // The same claim, narrowed to the chat pane: true only until this group's MESSAGES have been
+  // read. The panes are served by one actor a command at a time, so the message rows arrive long
+  // before the wiki, file and device reads that share the switch; holding the chat pane's empty
+  // state on all of them left "Loading messages..." on screen well after the messages were in hand.
+  let messagesLoading = $state(false);
   function beginViewSwitch(): number {
     return ++viewGeneration;
   }
@@ -325,6 +362,12 @@
   // Chosen before founding/joining so no newly opened server can render shared media under an
   // implicit policy. Specific-member trust starts empty until the roster is authenticated.
   let onboardingFileTrust = $state<FileTrustMode>("on-demand");
+  /** How the folded onboarding summary names each choice, so folding it hides no decision. */
+  const ONBOARDING_TRUST_LABELS: Record<FileTrustMode, string> = {
+    "on-demand": "on demand",
+    specific: "specific people",
+    everyone: "everyone here",
+  };
   let fileTrustPolicies = $state<FileTrustPolicies>({});
   // Roving-tabindex arrows for the start tabs: with two tabs, either arrow means "the other one".
   function startTabArrows(e: KeyboardEvent) {
@@ -344,6 +387,43 @@
   let showSettings = $state(false); // the personal/app Settings takeover
   let showServerSettings = $state(false); // the per-server Settings takeover
   let serverNameDraft = $state("");
+  // Names for a group being founded or joined, kept apart from `displayName` (who YOU are).
+  // One box for both was the whole bug: a server ended up named after whoever opened it.
+  let newServerName = $state("");
+  let joinServerName = $state("");
+  // This server's upload limit, and the band the owner may move it within. Read per server so
+  // the composer can refuse an over-large file with a sentence naming the real number instead of
+  // starting an upload that the native side rejects.
+  type FileSizeLimit = { limit: number; max: number; min: number };
+  let fileSizeLimit = $state<FileSizeLimit | null>(null);
+  let fileLimitDraftMib = $state(0); // the owner's editor, in whole MiB
+  async function refreshFileSizeLimit() {
+    const server = activeServerId;
+    if (server === null) { fileSizeLimit = null; return; }
+    try {
+      const next = await invoke<FileSizeLimit>("get_file_size_limit", { server });
+      if (activeServerId !== server) return; // switched while this was in flight
+      fileSizeLimit = next;
+      fileLimitDraftMib = Math.round(next.limit / (1024 * 1024));
+    } catch {
+      fileSizeLimit = null; // unknown: the native side is still the enforcer
+    }
+  }
+  async function saveFileSizeLimit() {
+    const server = activeServerId;
+    if (server === null || !fileSizeLimit) return;
+    busy = true;
+    try {
+      const bytes = Math.round(fileLimitDraftMib) * 1024 * 1024;
+      await invoke("set_file_size_limit", { server, bytes });
+      await refreshFileSizeLimit();
+      toast(`Uploads to this server are now capped at ${formatBytes(bytes)}`, "ok", 3500);
+    } catch (e) {
+      error = errorText(e);
+    } finally {
+      busy = false;
+    }
+  }
   // The settings takeovers are Discord-shaped: a sidebar of pages, one page shown at a
   // time. Page ids are stable route names; the catalogs below are the sidebars' contents.
   // `setSearch` filters BOTH sidebars by label (cleared on open, "/" focuses it).
@@ -521,7 +601,11 @@
     // target. It also empties `livery` on the way past and refills it a round-trip later, which is
     // why the editor draft is seeded from liveryLoaded rather than from `livery` directly.
     if (id !== null && id !== activeServerId) void switchServer(id);
-    serverNameDraft = cur?.name ?? "";
+    serverNameDraft = cur ? serverLabel(cur) : "";
+    // Seeded from the published name only; an unread livery seeds nothing, for the same reason
+    // the colour draft does not. Publishing an empty name would clear the group's name for
+    // everyone, so it must never be presented as though that were the current value.
+    sharedNameDraft = liveryLoaded ? livery.name : "";
     serverSettingsPage = page;
     setSearch = "";
     showServerSettings = true;
@@ -540,16 +624,70 @@
       void precheckInviteRoutes(targetServer);
     }
   }
+  /**
+   * Rename this server for myself alone: a local label that outranks whatever the owner
+   * publishes. The rail entry and the native record both take it, so the cross-server inbox
+   * agrees with what is on screen.
+   */
   async function renameServer() {
     const name = serverNameDraft.trim();
-    if (activeServerId === null || !cur || !name || name === cur.name) return;
+    const id = activeServerId;
+    if (id === null || !cur || !name || name === serverLabel(cur)) return;
     try {
-      await invoke("rename_server", { server: activeServerId, name });
+      await invoke("rename_server", { server: id, name });
       cur.name = name;
+      try { localStorage.setItem(localNameKey(id), name); } catch { /* the rail entry still has it */ }
+      railNameTick += 1;
+      applyServerLabels();
     } catch (e) {
       error = String(e);
     }
   }
+  /**
+   * Publish the group's name to every member (owner/admin). Distinct from renaming it for
+   * yourself: this is what the group is called for anyone who has not overridden it.
+   *
+   * Publishing also drops MY own override, because otherwise the person who just named the
+   * group would be the one member who could not see the name they chose.
+   */
+  async function publishServerName() {
+    const name = sharedNameDraft.trim();
+    const id = activeServerId;
+    if (id === null) return;
+    busy = true;
+    try {
+      await invoke("set_shared_server_name", { server: id, name });
+      try { localStorage.removeItem(localNameKey(id)); } catch { /* an override we cannot clear */ }
+      await refreshLivery();
+      await refreshServerIconFor(id);
+      railNameTick += 1;
+      applyServerLabels();
+      toast(name ? `This server is now called "${name}" for everyone` : "Published name cleared", "ok", 3000);
+    } catch (e) {
+      error = errorText(e);
+    } finally {
+      busy = false;
+    }
+  }
+  /** Drop my local override and go back to whatever the group publishes. */
+  function clearLocalServerName() {
+    const id = activeServerId;
+    if (id === null) return;
+    try { localStorage.removeItem(localNameKey(id)); } catch { /* ignore */ }
+    // `applyServerLabels` cannot undo this on its own: the entry's own name IS the override it
+    // settled on last time, so dropping the override has to name what replaces it explicitly.
+    const published = serverPublishedNames[id];
+    if (published && cur) {
+      cur.name = published;
+      void invoke("rename_server", { server: id, name: published }).catch(() => {});
+      servers = [...servers];
+    }
+    railNameTick += 1;
+    serverNameDraft = cur ? serverLabel(cur) : "";
+  }
+  // `serverLabel` reads localStorage, which no rune tracks; this makes a rename repaint the rail.
+  let railNameTick = $state(0);
+  let sharedNameDraft = $state("");
   let showFeedback = $state(false); // the Send-feedback overlay
   type FeedbackOverlayComponent = (typeof import("./FeedbackOverlay.svelte"))["default"];
   let FeedbackOverlay = $state<FeedbackOverlayComponent | null>(null);
@@ -662,12 +800,53 @@
   // UNTRUSTED (any member's client may have written the doc): sanitized on read, and only
   // ever able to recolor: preset id, accent, and an allow-list of colour tokens. Semantic
   // tokens (--ok/--warn/--danger) and layout are never livery-controllable.
-  type Livery = { preset: string; accent: string; tokens: Record<string, string>; icon: string; cursor: string };
-  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {}, icon: "", cursor: "" });
+  type Livery = { preset: string; accent: string; tokens: Record<string, string>; icon: string; cursor: string; name: string };
+  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {}, icon: "", cursor: "", name: "" });
   let livery = $state<Livery>(emptyLivery());
   // Rail icons for every (non-DM) server, fetched from each server's livery doc and kept
   // fresh by livery-changed events. Values are sanitized base64 (rendered as data: URLs).
   let serverIcons = $state<Record<number, string>>({});
+  // Each (non-DM) server's PUBLISHED name, read from the same livery doc as the icon. The group's
+  // own name, as opposed to the rail label, which is local and may be overridden per member.
+  let serverPublishedNames = $state<Record<number, string>>({});
+  // Local overrides, by server id: a member who has renamed a server for themselves keeps that
+  // name even when the owner publishes one. Renaming is what sets this; there is no other way in.
+  const localNameKey = (id: number) => `catcoms.server.localname.${id}`;
+  function loadLocalName(id: number): string {
+    try { return localStorage.getItem(localNameKey(id)) ?? ""; } catch { return ""; }
+  }
+  /**
+   * What to call a server in the rail, in order of authority: this member's own override, then
+   * the owner's published name, then whatever label the entry was created with.
+   *
+   * The last of those used to be the only one, and it defaulted to the display name of whoever
+   * was looking, so every group was named after its reader.
+   */
+  function serverLabel(entry: { id: number; name: string; isDm: boolean }): string {
+    void railNameTick; // a rename is a localStorage write, which no rune would otherwise see
+    if (entry.isDm) return entry.name; // a DM's label is the friend, and is never published
+    return loadLocalName(entry.id) || serverPublishedNames[entry.id] || entry.name;
+  }
+  /**
+   * Settle each rail entry's own `name` on the label that should be showing.
+   *
+   * Done here, once, rather than at the thirty-odd places that render a server's name: the rail,
+   * the crumbs, the cross-server inbox, the orbit view and the command palette all read
+   * `s.name`, and they should all agree. A local override wins, then the group's published name;
+   * an entry nobody has named either way keeps the label it was created with.
+   */
+  function applyServerLabels() {
+    let changed = false;
+    for (const s of servers) {
+      if (s.isDm) continue;
+      const label = serverLabel(s);
+      if (label && label !== s.name) {
+        s.name = label;
+        changed = true;
+      }
+    }
+    if (changed) servers = [...servers];
+  }
   let liveryDraft = $state<Livery>(emptyLivery()); // Server-settings editor draft
   // Whether `livery` holds an answer we actually read for the active server, as opposed to the
   // empty value a switch leaves behind. An empty livery is byte-for-byte the payload that REMOVES
@@ -681,7 +860,11 @@
   // the editor has this server's values in it, the buffer belongs to the user.
   function seedLiveryDraft(server: number) {
     if (!showServerSettings || liveryDraftFor === server) return;
-    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "" };
+    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "", name: "" };
+    // The published name is seeded on the same read, and only from one: opening the wrench
+    // mid-switch would otherwise leave the box empty and one Publish away from clearing the
+    // group's name for every member.
+    sharedNameDraft = livery.name;
     liveryDraftFor = server;
   }
   const LIVERY_TOKENS = [
@@ -717,6 +900,13 @@
     }
     if (typeof l.icon === "string" && ICON_B64.test(l.icon)) out.icon = l.icon;
     if (typeof l.cursor === "string" && ICON_B64.test(l.cursor) && l.cursor.length <= 24000) out.cursor = l.cursor;
+    // A published name is drawn as text in the rail, the crumbs and the cross-server inbox.
+    // The backend already bounds it and refuses control characters; this is the read-side half
+    // of the same rule, because any member's client may have written the document.
+    if (typeof l.name === "string") {
+      const name = l.name.replace(/\p{Cc}|\p{Cf}/gu, "").trim();
+      if (name && name.length <= 64) out.name = name;
+    }
     return out;
   }
 
@@ -831,6 +1021,10 @@
       const l = sanitizeLivery(await invoke<Livery>("get_livery", { server: id }));
       if (l.icon) serverIcons[id] = l.icon;
       else delete serverIcons[id];
+      // The name rides the same read: one round trip already fetches the whole livery doc.
+      if (l.name) serverPublishedNames[id] = l.name;
+      else delete serverPublishedNames[id];
+      applyServerLabels();
     } catch {
       /* unreachable server actor: keep whatever we had */
     }
@@ -1070,6 +1264,7 @@
     stopPlayback();
     releaseAll();
     passphrase = "";
+    revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
     sigilStrokes = [];
     sigilDrawing = [];
     sigilColors = Array(19).fill(0);
@@ -1243,6 +1438,9 @@
   // rune band derived from (session seed, word): it reshuffles as you type but leaks nothing
   //; not even the length (a per-character or tiled inscription would).
   let sigilShowWord = $state(false);
+  // Whether the passphrase field is showing its text. Session-only and defaults to hidden: it is
+  // for checking what you have typed, not a preference to persist onto a lock screen.
+  let revealPassphrase = $state(false);
   let sigilSeed = $state(1);
   let sigilSecret = $derived(encodeSigil(sigilStrokes, sigilColors, sigilEmojis, sigilWord));
   let sigilBits = $derived(sigilBitsOf(sigilStrokes, sigilColors, sigilEmojis, sigilWord));
@@ -2126,16 +2324,88 @@
   let copied = $state(false);
   let newChannel = $state("");
 
-  let messages = $state<Msg[]>([]);
-  // The actor remains the source of truth for the complete channel history. Only a bounded slice
-  // enters the DOM, which caps Svelte work, rich-media resolution, observers and layout cost in a
-  // long-running room. Sanitized HTML is cached in memory only and wiped at the lock boundary.
+  // Raw, not deep, state: the history is only ever replaced wholesale by a fresh actor snapshot,
+  // never mutated in place, so proxying every row (and every field of every row) bought nothing
+  // and cost a proxy plus per-field signals for the entire log on every refresh.
+  // The loaded slice of the active channel: one contiguous run of rows the actor handed back
+  // (see `docs/design-native-paging.md`). The actor remains the source of truth for the complete
+  // history; the webview never holds more than what is on screen plus a bounded margin, so a
+  // room's age no longer sets the cost of opening it or of every arrival in it.
+  let messages = $state.raw<PagedMsg[]>([]);
+  // Position of `messages[0]` in the whole channel, the channel's size, and the document version
+  // the slice was read at. Row indexes in the DOM (`data-mi`) stay absolute: `pageStart + i`.
+  let pageStart = $state(0);
+  let pageTotal = $state(0);
+  let pageVersion = $state(0);
+  // Whole-channel unread state measured natively against the frozen divider (see `dividerTs`).
+  let pageUnread = $state<UnreadSummary | null>(null);
+  let pageEnd = $derived(pageStart + messages.length);
+  let tailLoaded = $derived(pageEnd >= pageTotal);
+  // Sanitized HTML is cached in memory only and wiped at the lock boundary.
   const messageRenderCache = new SanitizedMessageCache();
-  let messageWindow = $state<ChatWindow>({ start: 0, end: 0 });
   let messageWindowScope = $state("");
   let chatStickToBottom = $state(true);
   let expandingMessageWindow = false;
-  let renderedMessages = $derived(messages.slice(messageWindow.start, messageWindow.end));
+  function currentSlice() {
+    return { start: pageStart, ids: messages.map((m) => m.id), tailLoaded };
+  }
+  function unreadProbe() {
+    return {
+      divider_id: dividerId || null,
+      divider_ts: Number.isFinite(dividerTs) ? dividerTs : null,
+      now_ms: Date.now(),
+    };
+  }
+  async function fetchPage(server: number, channel: string, request: PageRequest): Promise<MessagePage<PagedMsg>> {
+    return invoke<MessagePage<PagedMsg>>("get_message_page", {
+      server, channel, anchor: request.anchor, before: request.before, after: request.after, unread: unreadProbe(),
+    });
+  }
+  // A page whose id anchor vanished (deleted between reads) is re-read by index so the reader
+  // holds position; a page that still finds nothing is an empty channel.
+  async function fetchPageOrReanchor(server: number, channel: string, request: PageRequest, index: number) {
+    const page = await fetchPage(server, channel, request);
+    if (page.anchor_index !== null || page.total === 0 || request.anchor.kind === "index") return page;
+    return fetchPage(server, channel, reanchorByIndex(request, index));
+  }
+  /**
+   * Admission for page responses.
+   *
+   * Every path that can replace the loaded slice (open, refresh, reveal, jump, re-anchor) awaits
+   * a promise, and those promises settle in whatever order the actor and the bridge produce them.
+   * Checking only that the server and channel are unchanged lets a slow older response overwrite
+   * a newer one, which puts the reader back on stale rows: an arrival, an edit or a moved unread
+   * summary silently disappears until something else happens to refresh. The last request issued
+   * for the conversation is the only one whose answer may land.
+   */
+  const pageAdmission = new PageAdmission();
+  function beginPageRequest(): number {
+    return pageAdmission.begin();
+  }
+  /**
+   * Returns whether the page was admitted. Callers that do anything after this: scroll, flash a
+   * row, animate an arrival, refresh pins, settle the read mark, must stop when it says no.
+   * Those follow-ups all describe the rows this answer carried, so running them on rows that
+   * were refused points them at whatever the winning request put on screen instead.
+   */
+  function applyPage(page: MessagePage<PagedMsg>, token: number): boolean {
+    if (!pageAdmission.accepts(token)) return false; // superseded while it was in flight
+    messages = page.rows;
+    pageStart = page.rows.length ? page.start : 0;
+    pageTotal = page.total;
+    pageVersion = page.version;
+    pageUnread = page.unread;
+    return true;
+  }
+  function clearPage() {
+    // Leaving the conversation invalidates everything already asked for.
+    pageAdmission.invalidate();
+    messages = [];
+    pageStart = 0;
+    pageTotal = 0;
+    pageVersion = 0;
+    pageUnread = null;
+  }
   // Only rows inserted by a live update receive an arrival animation. A short-lived id set keeps
   // history loads and ordinary re-renders still, and also lets each sender choose their motion.
   let arrivalMessageIds = $state<Set<string>>(new Set());
@@ -2154,7 +2424,6 @@
   // attachment kind, reactions, reply/pin/edit state: plus a sort order, so the same pass answers
   // "the clip Dana posted last week" as well as "where did we say quorum". Filters stand on their
   // own: with an empty query the filters alone select the matches.
-  type SearchSort = "oldest" | "newest" | "author" | "reactions" | "replies";
   type SearchFilters = ReturnType<typeof noFilters>;
   // A hit is (channel, index in that channel's list, the message): the index drives the in-pane
   // highlight/scroll for the open channel, the id drives the jump when a hit lives elsewhere.
@@ -2162,33 +2431,7 @@
   const SEARCH_RESULT_CAP = 50; // rows rendered in the results list (stepping still covers them all)
   // Facets that select messages. `sort` and the two match modifiers are deliberately absent from
   // the "n filters" count: they shape the query/order, they don't narrow on their own.
-  const NON_FACETS = ["sort", "caseSensitive", "wholeWord"];
-  function noFilters() {
-    return {
-      channel: "", // "" = the open channel · "*" = every channel here · else a channel id
-      from: "", // author fingerprint ("" = anyone)
-      mentions: "", // a member the message @-mentions
-      after: "", // yyyy-mm-dd (inclusive, local day)
-      before: "", // yyyy-mm-dd (inclusive, local day)
-      hasImage: false,
-      hasVideo: false,
-      hasAudio: false,
-      hasFile: false, // a non-media attachment
-      hasLink: false,
-      isReply: false,
-      hasReplies: false,
-      isPinned: false,
-      isEdited: false,
-      mentionsMe: false,
-      fromMe: false,
-      reacted: false,
-      reactedByMe: false,
-      emoji: "", // a specific reaction emoji
-      caseSensitive: false,
-      wholeWord: false,
-      sort: "oldest" as SearchSort,
-    };
-  }
+  const noFilters = noSearchFilters;
   let showSearch = $state(false);
   let showSearchAdv = $state(false);
   let searchQuery = $state("");
@@ -2197,83 +2440,81 @@
   let filters = $state<SearchFilters>(noFilters());
   // cid → MIME, from the fileshare index, for classifying a message's `![alt](cid:…)` embeds.
   let fileMime = $derived.by(() => new Map(files.map((f) => [f.cid.toLowerCase(), f.mime] as const)));
-  const EMBED_RE = /!\[[^\]]*\]\(cid:([0-9a-fA-F]{1,64})\)/g;
-  // What a message carries. `safeMime` accepts only image/video/audio, so anything else: and any
-  // cid not in the index yet: reads as a plain attachment, matching how the embed resolver treats it.
-  function msgKinds(text: string) {
-    const k = { image: false, video: false, audio: false, file: false, link: false };
-    for (const m of text.matchAll(EMBED_RE)) {
-      const mime = safeMime(fileMime.get(m[1].toLowerCase()) ?? "");
-      if (mime.startsWith("image/")) k.image = true;
-      else if (mime.startsWith("video/")) k.video = true;
-      else if (mime.startsWith("audio/")) k.audio = true;
-      else k.file = true;
-    }
-    k.link = /\bhttps?:\/\/\S/i.test(text);
-    return k;
-  }
-  // A yyyy-mm-dd date input → a local-time bound (start of that day, or its last millisecond so
-  // "before" is inclusive). Returns null for an empty/half-typed value, which disables the bound.
-  function dayBound(s: string, end: boolean): number | null {
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
-    if (!m) return null;
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-    if (Number.isNaN(d.getTime())) return null;
-    if (end) d.setHours(23, 59, 59, 999);
-    return d.getTime();
-  }
   // How many facets are narrowing the result: drives the "Filters (n)" badge and lets an
   // empty query still search (filters alone are a valid search).
-  let filterCount = $derived(
-    Object.entries(filters).filter(([k, v]) => !NON_FACETS.includes(k) && v !== "" && v !== false).length
-  );
-  function reactionCount(m: Msg): number {
-    return m.reactions.reduce((n, r) => n + r.by.length, 0);
-  }
-  // The text predicate, honouring the case/whole-word modifiers. Null when there's no query, so
-  // the caller can tell "match everything" from "match nothing".
-  function textMatcher(raw: string): ((t: string) => boolean) | null {
-    const q = raw.trim();
-    if (!q) return null;
-    if (!filters.wholeWord) {
-      if (filters.caseSensitive) return (t) => t.includes(q);
-      const lower = q.toLowerCase();
-      return (t) => t.toLowerCase().includes(lower);
-    }
-    // `\b` misbehaves when the query starts/ends with punctuation, so bound on non-word-or-edge.
-    const esc = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`(?:^|\\W)${esc}(?:\\W|$)`, filters.caseSensitive ? "" : "i");
-    return (t) => re.test(t);
-  }
+  let filterCount = $derived(searchFilterCount(filters));
 
   // ---- corpus: which channels the search covers -------------------------------------------
-  // The open channel always reads the live `messages`; any other in-scope channel is fetched once
-  // into `chanMsgs` (a snapshot, dropped when the search closes) so search can span the server.
+  // Every in-scope channel, the open one included, is fetched once into `chanMsgs` (a whole-history
+  // snapshot, dropped when the search closes) so search can span the server. The open channel's
+  // live `messages` is only a slice now, so it cannot stand in for its history.
   let chanMsgs = $state<Record<string, Msg[]>>({});
   let scopeLoading = $state(false);
   let searchChannels = $derived.by(() => cur?.channels ?? []);
   function channelName(id: string): string {
     return searchChannels.find((c) => c.id === id)?.name ?? id;
   }
+  /**
+   * How many times each in-scope channel has been read into the corpus.
+   *
+   * The corpus is a snapshot, and a snapshot of a live conversation goes stale: a message edited
+   * to remove the word being searched for kept matching, and a message that arrived after the
+   * channel was first read never appeared. Counting the reads gives every reload a new identity
+   * even when the number of rows is unchanged, which a row count cannot do, and that identity is
+   * what tells the worker its copy is obsolete.
+   */
+  let chanMsgsRevision = $state<Record<string, number>>({});
+  // Which read of each channel is still wanted, so one overtaken mid-flight is discarded instead
+  // of stored as current. Deliberately outside `$state`: nothing renders from it.
+  const searchCorpusWanted = new CorpusRevisions();
+  // Channel to the revision of the read currently out for it, so an unchanged channel is not
+  // read twice at once while a changed one is read again promptly.
+  const searchReadsInFlight = new Map<string, number>();
+  /** Forget a channel's snapshot so the next `loadScope` reads it again. */
+  function invalidateSearchChannel(channel: string) {
+    if (!showSearch) return;
+    // Marked before the snapshot check, because a channel with no snapshot yet is the one case
+    // that matters most: its first read is outstanding and has just been overtaken.
+    searchCorpusWanted.invalidate(channel);
+    delete chanMsgs[channel];
+    void loadScope();
+  }
   async function loadScope() {
     const id = activeServerId;
     const s = cur;
     if (id === null || !s) return;
-    const want = filters.channel === "*" ? s.channels.map((c) => c.id) : filters.channel ? [filters.channel] : [];
-    const need = want.filter((c) => c !== s.active && !chanMsgs[c]);
+    const want = filters.channel === "*" ? s.channels.map((c) => c.id) : [filters.channel || s.active];
+    // Skip a channel already being read at the revision we would ask for; re-read one whose read
+    // in flight is for an older revision, because that answer is going to be thrown away.
+    const need = want.filter(
+      (c) => c && !chanMsgs[c] && searchReadsInFlight.get(c) !== searchCorpusWanted.issue(c)
+    );
     if (!need.length) return;
+    const issued = need.map((c) => [c, searchCorpusWanted.issue(c)] as const);
+    for (const [c, at] of issued) searchReadsInFlight.set(c, at);
     scopeLoading = true;
     try {
       const loaded = await Promise.all(
-        need.map((c) =>
-          invoke<Msg[]>("get_messages", { server: id, channel: c }).then((msgs) => [c, msgs] as const)
+        issued.map(([c, at]) =>
+          invoke<Msg[]>("get_messages", { server: id, channel: c }).then((msgs) => [c, msgs, at] as const)
         )
       );
-      if (activeServerId !== id) return; // server switched mid-fetch: drop the stale snapshot
-      for (const [c, msgs] of loaded) chanMsgs[c] = msgs;
+      // A server switch, or search closing, drops the answer: neither may repopulate a cache that
+      // was deliberately cleared.
+      if (activeServerId !== id || !showSearch) return;
+      for (const [c, msgs, at] of loaded) {
+        // The channel changed while this was being read, so these rows are already history. A
+        // reload for the newer revision is either running or queued by the same invalidation.
+        if (!searchCorpusWanted.accepts(c, at)) continue;
+        chanMsgs[c] = msgs;
+        chanMsgsRevision[c] = (chanMsgsRevision[c] ?? 0) + 1;
+      }
     } catch (e) {
       error = String(e);
     } finally {
+      for (const [c, at] of issued) {
+        if (searchReadsInFlight.get(c) === at) searchReadsInFlight.delete(c);
+      }
       scopeLoading = false;
     }
   }
@@ -2282,7 +2523,7 @@
     const ids = filters.channel === "*" ? searchChannels.map((c) => c.id) : [filters.channel || active];
     const out: SearchHit[] = [];
     for (const ch of ids) {
-      const list = ch === active ? messages : chanMsgs[ch];
+      const list = chanMsgs[ch];
       if (list) list.forEach((m, idx) => out.push({ ch, idx, m }));
     }
     return out;
@@ -2295,41 +2536,129 @@
     return n;
   });
 
-  let searchMatches = $derived.by(() => {
-    const match = textMatcher(searchQuery);
-    if (!match && !filterCount) return [] as SearchHit[];
-    const after = dayBound(filters.after, false);
-    const before = dayBound(filters.before, true);
-    const mentionMark = filters.mentions ? `@[${mentionName(nameOf(filters.mentions))}]` : "";
-    const wantKind = filters.hasImage || filters.hasVideo || filters.hasAudio || filters.hasFile || filters.hasLink;
+  // ---- running the scan --------------------------------------------------------------------
+  // Matching reads every message of every in-scope channel, which is the one piece of UI work
+  // sized by how much has been said. It runs in a worker (`search-worker.ts`) so a keystroke
+  // never waits for it; if the worker cannot start, the same pure function runs inline and the
+  // feature behaves exactly as it did before, jank included. Ordering stays here because it needs
+  // display names, and sorting the matches is cheap next to finding them.
+  let searchMatches = $state.raw<SearchHit[]>([]);
+  let searchWorker: Worker | null = null;
+  let searchWorkerCorpus = ""; // the corpus the worker holds, by `searchCorpusKey`
+  let searchQueryId = 0;
+  /** The corpus the in-flight query was issued against; its hits index into that one only. */
+  let searchQueryCorpus = "";
+  // What the worker's copy of the corpus must match. Named by which channels are in scope and
+  // which reading of each one they are, so an edit or a deletion that leaves the number of rows
+  // unchanged still re-sends the corpus. A row count could not tell those apart.
+  let searchCorpusKey = $derived(
+    searchCorpusChannels()
+      .map((c) => `${c.ch}:${chanMsgsRevision[c.ch] ?? 0}`)
+      .join("|"),
+  );
+  function searchSpec(): SearchSpec {
+    return {
+      query: searchQuery,
+      // Plain data, for the same reason the corpus is: this crosses to a worker.
+      filters: $state.snapshot(filters) as SearchFilters,
+      myFp,
+      myMentionName,
+      mentionMark: filters.mentions ? `@[${mentionName(nameOf(filters.mentions))}]` : "",
+      mimeByCid: Object.fromEntries(fileMime),
+      replyCounts: Object.fromEntries(corpusReplies),
+    };
+  }
+  function searchCorpusChannels(): SearchCorpusChannel[] {
+    const active = cur?.active ?? "";
+    const ids = filters.channel === "*" ? searchChannels.map((c) => c.id) : [filters.channel || active];
+    return ids
+      .filter((ch) => chanMsgs[ch])
+      .map((ch) => ({ ch, rows: chanMsgs[ch] as SearchMessage[] }));
+  }
+  /**
+   * The same corpus as plain data. Loaded histories are deep reactive state, and a proxy cannot
+   * cross to a worker: posting one fails with `DataCloneError` and search silently stops
+   * answering. Snapshotting costs one pass per corpus change, not one per keystroke.
+   */
+  function searchCorpusSnapshot(): SearchCorpusChannel[] {
+    return searchCorpusChannels().map((channel) => ({
+      ch: channel.ch,
+      rows: $state.snapshot(channel.rows) as SearchMessage[],
+    }));
+  }
+  function hitsFromRefs(refs: SearchHitRef[]): SearchHit[] {
     const out: SearchHit[] = [];
-    for (const h of searchCorpus) {
-      const m = h.m;
-      if (match && !match(m.text)) continue;
-      if (filters.from && m.author !== filters.from) continue;
-      if (filters.fromMe && m.author !== myFp) continue;
-      if (mentionMark && !m.text.includes(mentionMark)) continue;
-      if (after !== null && m.ts < after) continue;
-      if (before !== null && m.ts > before) continue;
-      if (filters.isReply && !m.reply_to) continue;
-      if (filters.hasReplies && !(m.id && corpusReplies.get(m.id))) continue;
-      if (filters.isPinned && !m.pinned) continue;
-      if (filters.isEdited && !m.edited) continue;
-      if (filters.mentionsMe && !mentionsMe(m.text)) continue;
-      if (filters.reacted && !m.reactions.length) continue;
-      if (filters.reactedByMe && !m.reactions.some((r) => r.by.includes(myFp))) continue;
-      if (filters.emoji && !m.reactions.some((r) => r.emoji === filters.emoji)) continue;
-      if (wantKind) {
-        const k = msgKinds(m.text);
-        if (filters.hasImage && !k.image) continue;
-        if (filters.hasVideo && !k.video) continue;
-        if (filters.hasAudio && !k.audio) continue;
-        if (filters.hasFile && !k.file) continue;
-        if (filters.hasLink && !k.link) continue;
-      }
-      out.push(h);
+    for (const ref of refs) {
+      const m = chanMsgs[ref.ch]?.[ref.idx];
+      if (m) out.push({ ch: ref.ch, idx: ref.idx, m });
     }
     return sortMatches(out);
+  }
+  function ensureSearchWorker(): Worker | null {
+    if (searchWorker) return searchWorker;
+    try {
+      const worker = new Worker(new URL("./search-worker.ts", import.meta.url), { type: "module" });
+      worker.onmessage = (event: MessageEvent<SearchResponse>) => {
+        // A late answer to a superseded query would overwrite a newer result with an older one,
+        // and an answer whose corpus has since been re-read indexes rows that may no longer be
+        // the ones it matched. The effect re-runs on both, so dropping the answer loses nothing.
+        if (event.data.id !== searchQueryId || searchQueryCorpus !== searchCorpusKey) return;
+        searchMatches = hitsFromRefs(event.data.hits);
+        settleSearchScroll();
+      };
+      worker.onerror = () => {
+        // Fall back for the rest of the session rather than leaving search dead.
+        worker.terminate();
+        searchWorker = null;
+        searchWorkerCorpus = "";
+        runSearchInline();
+      };
+      searchWorker = worker;
+      searchWorkerCorpus = "";
+      return worker;
+    } catch {
+      return null; // no worker support, or the page's policy refuses one: run inline
+    }
+  }
+  function runSearchInline() {
+    searchMatches = hitsFromRefs(findMatches(searchCorpusChannels(), searchSpec()));
+    settleSearchScroll();
+  }
+  function stopSearchWorker() {
+    searchWorker?.terminate();
+    searchWorker = null;
+    searchWorkerCorpus = "";
+  }
+  $effect(() => {
+    // Read every input here so the scan re-runs when any of them moves.
+    const spec = searchSpec();
+    const corpusKey = searchCorpusKey;
+    const open = showSearch;
+    untrack(() => {
+      if (!open) {
+        searchMatches = [];
+        return;
+      }
+      if (searchIsEmpty(spec)) {
+        searchMatches = [];
+        settleSearchScroll();
+        return;
+      }
+      const worker = ensureSearchWorker();
+      if (!worker) {
+        runSearchInline();
+        return;
+      }
+      if (searchWorkerCorpus !== corpusKey) {
+        worker.postMessage({ type: "corpus", corpus: searchCorpusSnapshot() });
+        searchWorkerCorpus = corpusKey;
+      }
+      searchQueryId += 1;
+      // Remembered with the query: a hit is a (channel, index) into the corpus that was scanned,
+      // so it may only be mapped back through the same one.
+      searchQueryCorpus = corpusKey;
+      worker.postMessage({ type: "query", id: searchQueryId, spec });
+    });
   });
   // Sorted by timestamp rather than corpus position: a multi-channel corpus is grouped by channel,
   // so "oldest first" has to interleave the channels to mean anything.
@@ -2435,21 +2764,31 @@
       renderMessage,
     );
   }
-  async function ensureMessageRendered(msgIdx: number) {
-    if (msgIdx >= messageWindow.start && msgIdx < messageWindow.end) return;
-    messageWindow = windowAround(msgIdx, messages.length, CHAT_INITIAL_ROWS);
+  // Make an absolute row index renderable: fetch a page around it when it is not loaded. The
+  // same shape `windowAround` used to slice out of the whole array, read from the actor instead.
+  // Reports whether the row is on screen now, so callers do not scroll to an index that a
+  // superseding request has already replaced with a different stretch of the conversation.
+  async function ensureMessageRendered(msgIdx: number): Promise<boolean> {
+    if (msgIdx >= pageStart && msgIdx < pageEnd) return true;
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (server === null || !channel) return false;
+    const token = beginPageRequest();
+    const page = await fetchPage(server, channel, planJump({ kind: "index", index: msgIdx }, CHAT_INITIAL_ROWS));
+    if (activeServerId !== server || cur?.active !== channel) return false;
+    if (!applyPage(page, token)) return false;
     await tick();
+    return true;
   }
   async function scrollToMatch(msgIdx: number) {
-    await ensureMessageRendered(msgIdx);
+    if (!(await ensureMessageRendered(msgIdx))) return;
     messagesEl?.querySelector(`[data-mi="${msgIdx}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
-  // Go to a hit, following it into another channel if that's where it lives. The channel we leave
-  // is snapshotted first so its hits don't blink out of the result list mid-switch.
+  // Go to a hit, following it into another channel if that's where it lives. Every channel in the
+  // corpus is already a snapshot, so the one we leave keeps its hits across the switch.
   async function goToHit(h: SearchHit, pos: number) {
     searchPos = pos;
     if (cur && h.ch !== cur.active) {
-      chanMsgs[cur.active] = messages;
       await switchTo(h.ch, true);
       if (h.m.id) jumpToMessageId(h.m.id);
       else void scrollToMatch(h.idx); // a legacy message has no id: its index still holds
@@ -2469,10 +2808,18 @@
   // Re-run from the top after any query/filter change (deriveds recompute on read, so the first
   // match below is already the new one). Only scrolls: refining a query never yanks you into
   // another channel; that's reserved for ↑/↓ and clicking a result.
-  function refilter() {
-    searchPos = 0;
+  // The scan is asynchronous now, so "jump to the first hit" is a request that the next result
+  // settles rather than something readable the moment the query changes.
+  let pendingSearchScroll = false;
+  function settleSearchScroll() {
+    if (!pendingSearchScroll) return;
+    pendingSearchScroll = false;
     const h = searchMatches[0];
     if (h && h.ch === (cur?.active ?? "")) void scrollToMatch(h.idx);
+  }
+  function refilter() {
+    searchPos = 0;
+    pendingSearchScroll = true;
   }
   function clearFilters() {
     Object.assign(filters, noFilters());
@@ -2483,6 +2830,8 @@
   function openSearch(advanced = false) {
     showSearch = true;
     if (advanced) showSearchAdv = true;
+    // The corpus is read on demand: the open channel's live rows are only a slice of it.
+    void loadScope();
     queueMicrotask(() => searchInput?.focus());
   }
   function closeSearch() {
@@ -2490,6 +2839,11 @@
     showSearchAdv = false;
     searchQuery = "";
     chanMsgs = {};
+    // Not reset: a channel read again in a later search must not reuse an identity the worker
+    // could still associate with the copy it is being handed now.
+    void chanMsgsRevision;
+    // The worker holds a copy of the corpus, so closing search drops it there too.
+    stopSearchWorker();
     clearFilters();
   }
   // The date shortcuts: "today" and the last n days, in the local calendar.
@@ -2579,6 +2933,8 @@
     return readMarks[key] ?? NO_READ_MARK;
   }
   let dividerTs = $state(Number.POSITIVE_INFINITY);
+  /** Id of the last message read here, frozen with `dividerTs`. See `captureDivider`. */
+  let dividerId = $state("");
   let uiStateSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let uiStateSaveChain: Promise<void> = Promise.resolve();
   // Server actions remain hidden until the sealed continuity snapshot (including
@@ -2684,12 +3040,18 @@
   function captureDivider() {
     const k = chanKey();
     dividerTs = k && readMarks[k] ? readMarks[k].ts : Number.POSITIVE_INFINITY;
+    // The id is the cursor and the timestamp only places the line: two messages can share a
+    // millisecond, and two senders' clocks agree about nothing. Frozen with the timestamp so the
+    // divider stays put while the channel is read.
+    dividerId = k && readMarks[k] ? readMarks[k].id : "";
   }
-  // The newest timestamp in the loaded conversation this machine is willing to believe. A message
+  // The newest timestamp in the conversation this machine is willing to believe. A message
   // timestamp is the SENDER's clock, so used raw as a cursor one broken clock (or one member
   // choosing the value) parks the read mark years ahead and every later message silently counts as
-  // already read. Recomputed only when the rows change, so it is stable while a channel is open.
-  let readTsCeiling = $derived(readCeiling(messages.map((m) => m.ts), Date.now()));
+  // already read. Measured natively over the WHOLE channel with every page (the same rule as
+  // `readCeiling`, against this machine's clock); the loaded slice is the fallback only when no
+  // page has answered yet.
+  let readTsCeiling = $derived(pageUnread ? pageUnread.ceiling_ts : readCeiling(messages.map((m) => m.ts), Date.now()));
   // A row's timestamp as read state may use it. Display still shows what the sender wrote.
   function readTs(m: Msg): number {
     return effectiveTs(m.ts, readTsCeiling);
@@ -2734,11 +3096,13 @@
     if (at >= 0) return messages.slice(at + 1).some((m) => m.author !== myFp);
     return messages.some((m) => m.author !== myFp && readTs(m) > mark.ts);
   }
-  // Index of the first message newer than the read boundary (-1 if all read).
+  // Absolute index of the first message newer than the read boundary (-1 if all read), and how
+  // many sit past it; the divider and the header jump both name it. Both come from the page's
+  // native summary, measured over the whole channel against the frozen `dividerTs`, so a reader
+  // holding one slice still sees the true count and can jump to a divider that is not loaded.
   // Own messages never count as unread: sending shouldn't raise a "New messages" divider.
-  let firstUnreadIdx = $derived(messages.findIndex((m) => effectiveTs(m.ts, readTsCeiling) > dividerTs && m.author !== myFp));
-  // How many messages sit past that boundary; the divider and the header jump both name it.
-  let unreadCount = $derived(firstUnreadIdx < 0 ? 0 : messages.slice(firstUnreadIdx).filter((m) => m.author !== myFp).length);
+  let firstUnreadIdx = $derived(pageUnread?.first_index ?? -1);
+  let unreadCount = $derived(pageUnread?.count ?? 0);
   // Is this row one of the unread ones? Own messages never count (you just sent them).
   const isUnread = (m: Msg) => firstUnreadIdx >= 0 && readTs(m) > dividerTs && m.author !== myFp;
 
@@ -2757,7 +3121,7 @@
   let messageFrameBreaks = $derived.by(() => {
     const breaks = new Set<number>();
     if (!CHAT_MESSAGE_FRAMES_ENABLED) return breaks;
-    if (firstUnreadIdx >= 0) breaks.add(firstUnreadIdx);
+    if (firstUnreadIdx >= pageStart) breaks.add(firstUnreadIdx - pageStart);
     for (let i = 1; i < messages.length; i++) {
       if (!sameDay(messages[i - 1].ts, messages[i].ts)) breaks.add(i);
     }
@@ -2806,6 +3170,15 @@
   }
   let profiles = $state<Record<string, Prof>>({});
   let files = $state<UiFile[]>([]);
+  // The file index by content address. Embeds, posters, cards and chips all resolve a cid to its
+  // listing, and a linear scan per lookup made rendering a message with several embeds cost
+  // O(embeds x files) in a group whose index only ever grows. First listing wins, exactly as
+  // `find` did.
+  let filesByCid = $derived.by(() => {
+    const index = new Map<string, UiFile>();
+    for (const file of files) if (!index.has(file.cid)) index.set(file.cid, file);
+    return index;
+  });
   // Whether ≥1 live peer previously proved it could serve authenticated catch-up (a conservative
   // availability hint refreshed with the file list). This is stricter than `onlineMembers`.
   let hasPeers = $state(false);
@@ -4542,18 +4915,39 @@
 
   async function revealOlderMessages() {
     const node = messagesEl;
-    if (!node || messageWindow.start <= 0 || expandingMessageWindow) return;
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (!node || pageStart <= 0 || expandingMessageWindow || server === null || !channel) return;
     expandingMessageWindow = true;
-    const previousHeight = node.scrollHeight;
-    const previousTop = node.scrollTop;
-    messageWindow = revealOlder(messageWindow, messages.length, CHAT_WINDOW_STEP);
-    await tick();
-    // Retain the reader's visual anchor after inserting rows above the viewport.
-    if (messagesEl === node) node.scrollTop = previousTop + node.scrollHeight - previousHeight;
-    expandingMessageWindow = false;
+    try {
+      const token = beginPageRequest();
+      const page = await fetchPageOrReanchor(server, channel, planRevealOlder(currentSlice(), CHAT_WINDOW_STEP), pageStart);
+      if (activeServerId !== server || cur?.active !== channel || !page.rows.length) return;
+      const previousHeight = node.scrollHeight;
+      const previousTop = node.scrollTop;
+      // A refused page left the list alone, so the height correction below would be measured
+      // against rows this call never inserted and would jump the reader somewhere arbitrary.
+      if (!applyPage(page, token)) return;
+      await tick();
+      // Retain the reader's visual anchor after inserting rows above the viewport.
+      if (messagesEl === node) node.scrollTop = previousTop + node.scrollHeight - previousHeight;
+    } finally {
+      expandingMessageWindow = false;
+    }
   }
-  function revealNewerMessages() {
-    messageWindow = revealNewer(messageWindow, messages.length, CHAT_WINDOW_STEP);
+  async function revealNewerMessages() {
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (tailLoaded || expandingMessageWindow || server === null || !channel) return;
+    expandingMessageWindow = true;
+    try {
+      const token = beginPageRequest();
+      const page = await fetchPageOrReanchor(server, channel, planRevealNewer(currentSlice(), CHAT_WINDOW_STEP), pageEnd - 1);
+      if (activeServerId !== server || cur?.active !== channel || !page.rows.length) return;
+      applyPage(page, token);
+    } finally {
+      expandingMessageWindow = false;
+    }
   }
   function onChatScroll() {
     const node = messagesEl;
@@ -4563,26 +4957,26 @@
     if (
       node.scrollTop < 80 &&
       node.scrollHeight > node.clientHeight + 40 &&
-      messageWindow.start > 0
+      pageStart > 0
     ) {
       void revealOlderMessages();
     }
-    if (nearScrollBottom(node.scrollTop, node.clientHeight, node.scrollHeight) && messageWindow.end < messages.length) {
-      revealNewerMessages();
+    if (nearScrollBottom(node.scrollTop, node.clientHeight, node.scrollHeight) && !tailLoaded) {
+      void revealNewerMessages();
       chatStickToBottom = false;
       return;
     }
     chatStickToBottom =
-      messageWindow.end >= messages.length &&
+      tailLoaded &&
       nearScrollBottom(node.scrollTop, node.clientHeight, node.scrollHeight);
   }
 
   $effect(() => {
     void messages;
-    void messageWindow;
+    void pageStart;
     if (!chatStickToBottom) return;
     tick().then(() => {
-      if (messagesEl && chatStickToBottom && messageWindow.end >= messages.length) {
+      if (messagesEl && chatStickToBottom && tailLoaded) {
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
     });
@@ -4769,7 +5163,7 @@
   // 200 MB file cannot be turned into a JS string by the act of rendering a message.
   function loadEmoji(code: string, cid: string) {
     if (activeServerId === null) return;
-    const file = files.find((candidate) => candidate.cid === cid);
+    const file = filesByCid.get(cid);
     if (!file || !mayAutoLoadSharedFile(file)) return;
     emojiUrls = { ...emojiUrls, [code]: sharedMediaUrl(cid, activeServerId) };
   }
@@ -4913,6 +5307,7 @@
       nativeVaultLock.reset();
       closeAfterContinuityError = false;
       passphrase = "";
+    revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
       sigilStrokes = [];
       sigilDrawing = [];
       sigilColors = Array(19).fill(0);
@@ -4945,6 +5340,8 @@
     mediaUrls = {};
     emojiUrls = {};
     storageHealthCache.clear();
+    imageSrcCache.clear(); // avatars and icons are member content; do not retain them behind lock
+    stopSearchWorker(); // likewise its copy of the searched history
     if (locked) return;
     // Lock wins over an in-progress secret change and drops every transient secret first.
     vaultChangeCurrent = "";
@@ -5037,6 +5434,7 @@
     uiStateLoadGeneration += 1;
     clearTimeout(uiStateSaveTimer);
     passphrase = "";
+    revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
     error = "";
     syncIntent = false;
     locked = true;
@@ -5051,9 +5449,20 @@
     error = "";
     const operationGeneration = viewGeneration;
     try {
-      const { value: r } = await invokeDebugged<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false });
+      // The group's name and your name in it are two different things. Naming the group is
+      // optional; left blank it is labelled after the person who founded it, which is at least
+      // a description of what it is rather than a second copy of your own name.
+      const serverName = newServerName.trim() || `${displayName}'s server`;
+      const { value: r } = await invokeDebugged<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false, serverName });
       if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
-      addServer(r, displayName);
+      addServer(r, serverName, displayName);
+      // Publish it as the group's own name, so everyone who joins sees what it is called instead
+      // of naming it themselves. Best-effort: a founded server with an unpublished name is still
+      // a working server, and the owner can publish it from Server settings.
+      void invoke("set_shared_server_name", { server: r.server, name: serverName })
+        .then(() => refreshServerIconFor(r.server))
+        .catch(() => {});
+      newServerName = "";
     } catch (e) {
       if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = errorText(e);
     } finally {
@@ -5083,15 +5492,24 @@
       // Do not let the click that first reveals the extra-member privacy boundary also cross it.
       if (assistedAction === "preview") return;
       joinAttemptPending = true;
+      // The native record carries the same label the rail shows, so the cross-server inbox names
+      // the group rather than naming the reader.
+      const label = joinServerName.trim() || "New server";
       const { value: r } = await invokeDebugged<Found>("join_server", {
         inviteHex: hex,
         displayName,
         isDm: false,
         allowSwitchboards: assistedAction === "switchboard",
+        serverName: label,
       });
       if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       if (turn) storeServerTurn(r.server, turn); // inherit the operator's shared TURN
-      addServer(r, displayName);
+      // An invite carries no group name yet, so this is the joiner's own label for it until the
+      // owner's published name arrives. What it must NOT be is the joiner's display name, which
+      // is what made every joined server appear in the rail under the name of the person
+      // reading it. Renaming lives in Server settings, Overview.
+      addServer(r, label, displayName);
+      joinServerName = "";
       joinInvite = "";
       joinPreview = null;
       joinPreviewCode = "";
@@ -5229,7 +5647,16 @@
     }
   }
 
-  function addServer(r: Found, name: string) {
+  /**
+   * Put a newly founded or joined group in the rail.
+   *
+   * `name` labels the RAIL and `profileName`, when given, is who you are inside it. They used to
+   * be the same string, because founding and joining had one text box between them: the group was
+   * therefore named after whoever was looking at it, and every server in the rail carried its
+   * owner's own display name. They are separate now, and a caller with nothing to say about the
+   * profile leaves it alone.
+   */
+  function addServer(r: Found, name: string, profileName: string = "") {
     const channels = r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }];
     servers = [
       ...servers,
@@ -5246,9 +5673,9 @@
     }
     showAdd = false;
     onboardingFileTrust = "on-demand";
-    // A server adopts the name as your profile (existing behaviour); a DM's label is the friend's
-    // name, so leave your profile alone.
-    if (!r.is_dm) pName = name;
+    // Your profile takes the name you gave for YOURSELF, never the group's. A DM has no profile
+    // name of its own to carry, so its caller passes none and this leaves the profile untouched.
+    if (profileName) pName = profileName;
     switchServer(r.server);
   }
 
@@ -5396,9 +5823,9 @@
     storageChecking = false;
     storageRepairing = false;
     storageRepairNote = "";
-    messages = [];
+    clearPage();
+    pinnedMsgs = [];
     messageRenderCache.clear();
-    messageWindow = { start: 0, end: 0 };
     messageWindowScope = "";
     chatStickToBottom = true;
     channelTopic = "";
@@ -5453,6 +5880,7 @@
     moderationMessages = [];
     moderationLoading = false;
     groupLoading = false; // a clear with no load behind it (no active group) is not "loading"
+    messagesLoading = false;
     // Livery is server branding: leaving it up paints the group you left over the one you opened.
     // followLiveryNow already drops to the default theme for DM-home and the inbox, so the brief
     // default between servers is that same transition rather than a new kind of flicker.
@@ -5514,6 +5942,7 @@
     // the panes render, synchronously, before the scope of trust changes.
     clearServerView();
     groupLoading = true;
+    messagesLoading = true;
     const s = servers.find((x) => x.id === id);
     // Nothing is cleared here. Arriving at a server is not reading its channels, and the rail's
     // badge is derived from the unread channel list rather than kept beside it, so opening one
@@ -5550,8 +5979,19 @@
     // `view = "chat"` and `roles = {}` above: withCorpus is false here, so the corpus is
     // structurally unreachable during a switch. Anything that later keeps the moderation surface
     // open ACROSS a switch must restore the explicit ordering rather than rely on that.
+    // The chat pane is released by its OWN read, not by the slowest one in this batch.
+    //
+    // These fifteen reads are issued together but answered by a single per-server actor, one
+    // command at a time, so the batch takes as long as all of them put together. Gating the chat
+    // pane on the whole batch meant "Loading messages..." stayed up while the wiki page list, the
+    // file index, the event list and the device list were fetched: the messages had been on hand
+    // for most of that wait, and the pane was lying about it. The other panes still make their
+    // claims ("No members to show") only once everything has landed.
+    const messages = refresh().then(() => {
+      if (viewCurrent(gen, id)) messagesLoading = false;
+    });
     await Promise.all([
-      refresh(),
+      messages,
       refreshMembers(),
       refreshProfiles(),
       refreshFiles(),
@@ -5566,9 +6006,11 @@
       refreshDevices(),
       refreshModeration(),
       refreshWikiPages(),
+      refreshFileSizeLimit(),
     ]);
     if (!viewCurrent(gen, id)) return; // moved on while this group was loading
     groupLoading = false;
+    messagesLoading = false; // already false unless the messages read itself failed
     syncProfileEditor();
     // The channel list is only certain now. Rebuilding here as well as at unlock is what makes the
     // badges right for a server whose directory was still a stub when the session started, and for
@@ -5669,9 +6111,11 @@
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
     // Channel-scoped content, dropped before the move rather than when the read returns: the
     // group's own state (roster, files, branding) is unchanged by a channel hop and stays put.
-    messages = [];
-    messageRenderCache.clear();
-    messageWindow = { start: 0, end: 0 };
+    clearPage();
+    pinnedMsgs = [];
+    // The render cache is keyed by (server, channel, id) and bounded, so it is deliberately kept
+    // across a channel hop: switching A -> B -> A re-mounts A's rows from cache instead of
+    // re-parsing and re-sanitizing every one of them. It is still wiped at the lock boundary.
     messageWindowScope = "";
     chatStickToBottom = true;
     channelTopic = "";
@@ -5735,24 +6179,26 @@
     try {
       const previousMessages = messages;
       const previous = new Set(previousMessages.map((message) => message.id));
-      const next = await invoke<Msg[]>("get_messages", { server, channel });
-      // A slow response from the conversation we just left must never populate the new one.
-      if (revision !== refreshRevision || activeServerId !== server || cur?.active !== channel) return;
       const nextScope = chatScopeKey(server, channel);
-      const nextWindow = reconcileChatWindow(
-        previousMessages,
-        next,
-        messageWindow,
-        chatStickToBottom,
-        messageWindowScope !== nextScope,
-      );
-      messages = next;
-      messageWindow = nextWindow;
+      // A fresh conversation starts at the tail. An open one re-reads what the reader holds: the
+      // newest rows when pinned to the bottom, otherwise the slice anchored at its first row so
+      // the top never moves under someone reading history.
+      const held = messageWindowScope === nextScope && previousMessages.length ? currentSlice() : null;
+      const token = beginPageRequest();
+      const page = await fetchPageOrReanchor(server, channel, planRefresh(held, chatStickToBottom, CHAT_INITIAL_ROWS, CHAT_WINDOW_STEP), pageStart);
+      // A slow response from the conversation we just left must never populate the new one, and
+      // `applyPage` refuses one that a later request has already superseded.
+      if (revision !== refreshRevision || activeServerId !== server || cur?.active !== channel) return;
+      // Everything below describes the rows this answer carried: which are new enough to animate,
+      // which pins belong beside them, what counts as read. A refused page put none of them on
+      // screen, so all of it would be said about somebody else's rows.
+      if (!applyPage(page, token)) return;
       messageWindowScope = nextScope;
+      void refreshPinned(server, channel);
       if (animateArrivals) {
         // Own posts already animate at optimistic insertion; excluding them prevents the
         // acknowledged, server-assigned id from replaying the entrance a second time.
-        markMessageArrivals(next.filter((message) => message.author !== myFp && !previous.has(message.id)).map((message) => message.id));
+        markMessageArrivals(page.rows.filter((message) => message.author !== myFp && !previous.has(message.id)).map((message) => message.id));
       }
       // Loading rows is not reading them. `settleReadState` decides which this was.
       settleReadState();
@@ -6003,9 +6449,19 @@
       ); // closed actor: ticks simply don't render
     }
   }
-  // Index of your most recent message in the log (-1 if none): the one message whose state is
-  // still plausibly in flight, and the receipt line's anchor.
-  let lastOwnIdx = $derived(messages.reduce((acc, m, i) => (m.author === myFp ? i : acc), -1));
+  // Index of your most recent message *in the loaded slice* (-1 if none).
+  let lastOwnIdx = $derived(messages.reduce((acc, m, i) => (m.author === myFp ? pageStart + i : acc), -1));
+  /**
+   * Is this row the one message of yours whose state is still plausibly in flight, and so the
+   * receipt line's anchor?
+   *
+   * Only answerable when the slice reaches the newest row. Reading history, the last message of
+   * yours on screen need not be the last you sent, and calling it the latest would present an old
+   * message with no receipt evidence as though it were still waiting to be delivered.
+   */
+  function isLatestOwn(mi: number): boolean {
+    return tailLoaded && mi === lastOwnIdx;
+  }
   // What is actually known about one of your messages. `delivered`/`reachable` are null when the
   // actor has reported nothing for it, which is deliberately distinct from reporting zero: the
   // absence of a measurement is not evidence that nobody is out there.
@@ -6017,7 +6473,7 @@
       reachable: d ? d.reachable : null,
       anyPeer: d ? d.any_peer : null,
       pending: m.id.startsWith("pending:"),
-      latest: mi === lastOwnIdx,
+      latest: isLatestOwn(mi),
     };
   }
   // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ held by
@@ -6034,7 +6490,7 @@
   }
   // The spelled-out receipt under your latest message. Same evidence as the gutter tick, in words.
   function deliveryReceipt(m: Msg, mi: number): { g: string; label: string; cls: string; tip: string } | null {
-    if (mi !== lastOwnIdx || !m.id || m.author !== myFp) return null;
+    if (!isLatestOwn(mi) || !m.id || m.author !== myFp) return null;
     const e = deliveryEvidence(m, mi);
     const verdict = deliveryVerdict(e);
     if (!verdict) return null;
@@ -6184,10 +6640,10 @@
   }
 
   async function exportStoredFile(cid: string) {
-    let listed = files.find((file) => file.cid === cid);
+    let listed = filesByCid.get(cid);
     if (!listed) {
       await refreshFiles();
-      listed = files.find((file) => file.cid === cid);
+      listed = filesByCid.get(cid);
     }
     if (!listed) {
       toast("That file is no longer listed in this server.", "warn", 5000);
@@ -7645,7 +8101,7 @@
   // menu carries the row's own actions (reply, edit, delete) below its target-specific ones.
   function rowActions(el: HTMLElement): MenuItem[] {
     const row = el.closest("li[data-mi]") as HTMLElement | null;
-    const m = row ? messages[Number(row.getAttribute("data-mi"))] : undefined;
+    const m = row ? messages[Number(row.getAttribute("data-mi")) - pageStart] : undefined;
     return m ? [{ divider: true }, ...messageMenu(m)] : [];
   }
 
@@ -7702,7 +8158,7 @@
         items.push({ label: "View image", icon: "⛶", onSelect: () => openLightbox(el) });
       }
       items.push({ label: "Properties", icon: "📄", onSelect: () => openFileRef(cid) });
-      const embedded = files.find((f) => f.cid === cid);
+      const embedded = filesByCid.get(cid);
       if (embedded) items.push({ label: "Download", icon: "↓", onSelect: () => downloadFile(embedded) });
       items.push({ label: "Copy address (CID)", icon: "#", onSelect: () => copyText(cid) });
       // An image can cover its whole message row, so keep the message actions reachable here:
@@ -8240,18 +8696,13 @@
     }
   }
 
-  // Sniff a stored image's format from its base64 prefix (the first magic bytes survive
-  // base64 alignment). Profiles store opaque bytes, so an animated GIF or WebP a member
-  // uploaded plays back as itself instead of being branded a JPEG.
+  // A stored image's data URL, memoized by its bytes (`image-src.ts`): the same avatars and icons
+  // are rendered by many rows, and rebuilding the URL per render made a profile update cost
+  // megabytes of transient strings. The format is sniffed from the base64 prefix, so an animated
+  // GIF or WebP a member uploaded plays back as itself instead of being branded a JPEG.
+  const imageSrcCache = new ImageSrcCache();
   function imgSrc(b64: string): string {
-    const mime = b64.startsWith("R0lGOD")
-      ? "image/gif"
-      : b64.startsWith("iVBOR")
-        ? "image/png"
-        : b64.startsWith("UklGR")
-          ? "image/webp"
-          : "image/jpeg";
-    return `data:${mime};base64,${b64}`;
+    return imageSrcCache.src(b64);
   }
   // A file's raw bytes as base64, no re-encode: keeps animation and alpha.
   async function fileToRawB64(file: File): Promise<string> {
@@ -8454,6 +8905,15 @@
   ): Promise<string> {
     if (activeServerId === null) throw new Error("no server selected");
     const server = activeServerId;
+    // Refuse an over-large file here, where the message can name the actual limit and the file.
+    // The native side enforces the same bound and is what actually decides; this exists so the
+    // answer is a sentence rather than a failed transfer row. An unknown limit defers entirely.
+    if (fileSizeLimit && file.size > fileSizeLimit.limit) {
+      throw new Error(
+        `${formatBytes(file.size)} is over this server's ${formatBytes(fileSizeLimit.limit)} limit`
+        + (canModerate ? ". You can raise it in Server settings, File Trust." : "."),
+      );
+    }
     const uploadId = crypto.randomUUID();
     const key = uploadKey(server, uploadId);
     const started = Date.now();
@@ -8588,21 +9048,28 @@
   // member's embed folder, then insert a `![name](cid:HEX)` marker into the draft for the
   // shared renderer to resolve inline. Non-media files are shared as plain attachments.
   async function embedFiles(target: "chat" | "status", fileList: FileList | null) {
-    if (!fileList || fileList.length === 0 || activeServerId === null) return;
+    if (!fileList) return;
+    await embedMedia(target, Array.from(fileList).map((file) => ({ file, name: file.name })));
+  }
+
+  // Embed media that already knows what it wants to be called. A picked or dropped file brings its
+  // own name; a pasted screenshot has no name of its own and is given one (see clipboard-media.ts).
+  async function embedMedia(target: "chat" | "status", items: { file: File; name: string }[]) {
+    if (items.length === 0 || activeServerId === null) return;
     uploading = true;
     try {
-      for (const file of Array.from(fileList)) {
-        const tid = toast(`Uploading ${file.name}…`, "info", 0);
+      for (const { file, name } of items) {
+        const tid = toast(`Uploading ${name}…`, "info", 0);
         try {
-          const cid = await addSharedFile(file, myEmbedFolder);
+          const cid = await addSharedFile(file, myEmbedFolder, name);
           // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
-          const alt = file.name.replace(/[[\]]/g, " ");
+          const alt = name.replace(/[[\]]/g, " ");
           const marker = `![${alt}](cid:${cid})`;
           if (target === "chat") draft = draft ? `${draft} ${marker}` : marker;
           else statusDraft = statusDraft ? `${statusDraft} ${marker}` : marker;
-          updateToast(tid, `Attached ${file.name}`, "ok");
+          updateToast(tid, `Attached ${name}`, "ok");
         } catch (e) {
-          updateToast(tid, `Upload of ${file.name} failed: ${e}`, "err", 9000);
+          updateToast(tid, `Upload of ${name} failed: ${e}`, "err", 9000);
         }
       }
       await refreshFiles();
@@ -8615,6 +9082,20 @@
     e.preventDefault();
     dragOver = false;
     embedFiles(target, e.dataTransfer?.files ?? null);
+  }
+
+  // Paste a screenshot or a media file straight into the composer, the same way dropping one in
+  // already worked. A paste carrying no media of ours is left entirely alone: preventing the
+  // default on those would swallow ordinary text pastes, and copying a region of a web page puts
+  // an HTML flavour on the clipboard beside the picture.
+  function onComposerPaste(target: "chat" | "status", e: ClipboardEvent) {
+    const media = pastedMedia(e.clipboardData?.files);
+    if (!media.length) return;
+    e.preventDefault();
+    // One instant for the whole paste, so a multi-image paste keeps its clipboard order in the
+    // folder listing instead of depending on how long each upload took to start.
+    const at = Date.now();
+    void embedMedia(target, media.map((file) => ({ file, name: pastedName(file, at) })));
   }
 
   // Only embeddable media types render inline; anything else is shown as a download chip.
@@ -8666,7 +9147,7 @@
     const server = activeServerId;
     for (const element of Array.from(document.querySelectorAll<HTMLElement>("[data-embed-cid][data-resolved]"))) {
       const cid = element.dataset.embedCid ?? "";
-      const file = files.find((candidate) => candidate.cid === cid);
+      const file = filesByCid.get(cid);
       if (!file || mayAutoLoadSharedFile(file, server)) continue;
       if (element instanceof HTMLMediaElement) {
         element.pause();
@@ -8688,7 +9169,7 @@
     }
     for (const image of Array.from(document.querySelectorAll<HTMLImageElement>("img.ref-card-thumb[data-thumb-cid]"))) {
       const cid = image.dataset.thumbCid ?? "";
-      const file = files.find((candidate) => candidate.cid === cid);
+      const file = filesByCid.get(cid);
       if (file && mayAutoLoadSharedFile(file, server)) continue;
       const card = image.closest<HTMLElement>(".ref-card");
       image.removeAttribute("src");
@@ -8697,7 +9178,7 @@
     }
     for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>("button.media-load-chip[data-load-cid]"))) {
       const cid = button.dataset.loadCid ?? "";
-      const file = files.find((candidate) => candidate.cid === cid);
+      const file = filesByCid.get(cid);
       if (!file || !mayAutoLoadSharedFile(file, server)) continue;
       const mime = safeMime(button.dataset.loadMime ?? file.mime);
       if (mime) button.replaceWith(buildMediaEl(mime, mediaUrl(server, cid), button.dataset.loadAlt ?? file.name, cid));
@@ -8794,18 +9275,20 @@
   let mediaUrls = $state<Record<string, string>>({});
   function preparedMedia(cid: string): string {
     if (activeServerId === null) return "";
-    const file = files.find((candidate) => candidate.cid === cid);
+    const file = filesByCid.get(cid);
     if (!file || !safeMime(file.mime) || !mayAutoLoadSharedFile(file, activeServerId)) return "";
     return mediaUrls[scopedMediaKey(activeServerId, cid)] ?? "";
   }
   function ensureMedia(cid: string) {
     if (!cid || activeServerId === null) return;
     const server = activeServerId;
-    const file = files.find((f) => f.cid === cid);
+    const file = filesByCid.get(cid);
     if (!file || !safeMime(file.mime) || !mayAutoLoadSharedFile(file)) return; // retried on index/policy update
     const key = scopedMediaKey(server, cid);
     if (mediaUrls[key]) return;
-    mediaUrls = { ...mediaUrls, [key]: sharedMediaUrl(cid, server) };
+    // In-place: the record is deep state, so a property write is reactive on its own, and the
+    // previous spread copied every resolved url again for each new embed.
+    mediaUrls[key] = sharedMediaUrl(cid, server);
   }
   $effect(() => {
     const wanted = [...events.map((e) => e.image), evImage].filter(Boolean);
@@ -8828,7 +9311,7 @@
         span.setAttribute("data-resolved", "1");
         continue;
       }
-      const file = files.find((f) => f.cid === cid);
+      const file = filesByCid.get(cid);
       if (!file) continue; // not in the index yet: retry when `files` updates
       span.setAttribute("data-resolved", "1");
       const mime = safeMime(file.mime);
@@ -8904,7 +9387,7 @@
   let lightboxZoom = $state(false); // false = fit the window, true = 1:1 and scrollable
   const lightboxFile = $derived.by(() => {
     const lb = lightbox;
-    return lb ? (files.find((f) => f.cid === lb.cid) ?? null) : null;
+    return lb ? (filesByCid.get(lb.cid) ?? null) : null;
   });
 
   function openLightbox(el: HTMLImageElement) {
@@ -8970,7 +9453,7 @@
   }
 
   function fileCardSpec(cid: string): CardSpec | null {
-    const f = files.find((x) => x.cid === cid);
+    const f = filesByCid.get(cid);
     if (!f) return null; // not in the index on this device: leave the chip, retry next pass
     const where = f.path ? ` in ${f.path}` : "";
     return {
@@ -9036,7 +9519,7 @@
 
   /** Hang an image on a card; a card whose picture cannot be fetched just reads as text. */
   function attachCardThumb(card: HTMLElement, cid: string, server: number) {
-    const file = files.find((f) => f.cid === cid);
+    const file = filesByCid.get(cid);
     const mime = safeMime(file?.mime ?? "");
     if (!file || !mime.startsWith("image/") || !mayAutoLoadSharedFile(file, server)) return;
     const img = document.createElement("img");
@@ -9543,39 +10026,63 @@
   // Index the loaded messages by id once per change, so reply-parent lookups (the quote on every
   // reply + the composer banner) are O(1) instead of a linear scan per render.
   let msgById = $derived(new Map(messages.map((m) => [m.id, m] as const)));
-  // Reply target: the id of the message the composer is replying to ("" = a plain message).
+  // The quote on a reply: the loaded parent when it is on screen, else the preview the page
+  // carried for it (resolved natively against the whole channel), else nothing.
+  function replyParent(m: PagedMsg): { author: string; text: string } | undefined {
+    return msgById.get(m.reply_to) ?? m.reply_to_preview ?? undefined;
+  }
+  // Reply target: the id of the message the composer is replying to ("" = a plain message). The
+  // row is kept beside the id so the banner survives the row paging off screen.
   let replyingTo = $state("");
-  let replyTarget = $derived(replyingTo ? msgById.get(replyingTo) : undefined);
+  let replyingToRow = $state<Msg | undefined>(undefined);
+  let replyTarget = $derived(replyingTo ? (msgById.get(replyingTo) ?? replyingToRow) : undefined);
   // Briefly flash a message you jumped to (e.g. from a reply quote), keyed by id so it survives
   // index shifts; cleared after the pulse.
   let flashId = $state("");
-  function jumpToMessageId(id: string) {
-    const idx = messages.findIndex((m) => m.id === id);
-    if (idx < 0) return; // parent not in the loaded list (deleted / scrolled out of history)
-    void scrollToMatch(idx);
+  // Land on a message by id: scroll when it is loaded, otherwise page around it first. A page
+  // that finds nothing means the message is gone (deleted, or never existed here).
+  async function jumpToMessageId(id: string) {
+    if (!id) return;
+    let idx = messages.findIndex((m) => m.id === id);
+    if (idx < 0) {
+      const server = activeServerId;
+      const channel = cur?.active;
+      if (server === null || !channel) return;
+      const token = beginPageRequest();
+      const page = await fetchPage(server, channel, planJump({ kind: "id", id }, CHAT_INITIAL_ROWS));
+      if (activeServerId !== server || cur?.active !== channel || page.anchor_index === null) return;
+      if (!applyPage(page, token)) return;
+      await tick();
+      idx = messages.findIndex((m) => m.id === id);
+      if (idx < 0) return;
+    }
+    void scrollToMatch(pageStart + idx);
     flashId = id;
     setTimeout(() => {
       if (flashId === id) flashId = "";
     }, 1300);
   }
-  // Reply counts per parent message id (for the "N replies" thread affordance).
-  let replyCounts = $derived.by(() => {
-    const m = new Map<string, number>();
-    for (const msg of messages) {
-      if (msg.reply_to) m.set(msg.reply_to, (m.get(msg.reply_to) ?? 0) + 1);
-    }
-    return m;
-  });
-  function jumpToFirstReply(parentId: string) {
+  async function jumpToFirstReply(parentId: string) {
     const first = messages.find((m) => m.reply_to === parentId);
-    if (first) jumpToMessageId(first.id);
+    if (first) return jumpToMessageId(first.id);
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (server === null || !channel) return;
+    const token = beginPageRequest();
+    const page = await fetchPage(server, channel, planJump({ kind: "first_reply_to", id: parentId }, CHAT_INITIAL_ROWS));
+    if (activeServerId !== server || cur?.active !== channel || page.anchor_index === null) return;
+    if (!applyPage(page, token)) return; // a newer request already replaced the slice
+    const target = messages[page.anchor_index - page.start];
+    if (target?.id) await jumpToMessageId(target.id);
   }
   function startReply(m: Msg) {
     replyingTo = m.id;
+    replyingToRow = m;
     composerEl?.focus();
   }
   function cancelReply() {
     replyingTo = "";
+    replyingToRow = undefined;
   }
   function msgSnippet(text: string, n = 70): string {
     return plainSummary(text, n);
@@ -9846,27 +10353,6 @@
   function mentionsMe(text: string): boolean {
     return !!myMentionName && text.includes(`@[${myMentionName}]`);
   }
-  // Does `msgs` contain a message newer than the channel's read mark that targets me (and isn't
-  // mine)? Used to flag a channel and to decide whether an arrival deserves a mention chime.
-  function targetsMe(channel: string, msgs: Msg[]): boolean {
-    // No active server means no read mark to measure against. The sole caller already requires
-    // server === activeServerId, and its documented fallback is an ordinary-message notification,
-    // which is what false gives it. The old key built `null:channel`, which said the same thing
-    // by accident rather than on purpose.
-    if (!myFp || activeServerId === null) return false;
-    const seen = readMarkOf(chatScopeKey(activeServerId, channel)).ts;
-    // Same clock ceiling the read marks use: a sender-chosen timestamp far in the future must not
-    // decide, either way, whether something addressed to me still counts as unseen.
-    const ceiling = readCeiling(msgs.map((m) => m.ts), Date.now());
-    const byId = new Map(msgs.map((m) => [m.id, m] as const));
-    return msgs.some(
-      (m) =>
-        effectiveTs(m.ts, ceiling) > seen &&
-        m.author !== myFp &&
-        (mentionsMe(m.text) || (!!m.reply_to && byId.get(m.reply_to)?.author === myFp)),
-    );
-  }
-
   // Cross-server inbox: the backend scans every server's channels for messages addressed to me.
   async function loadInbox() {
     if (locked) return;
@@ -10030,11 +10516,12 @@
       ? (servers.find((s) => s.id === callServer)?.name ?? callServerName)
       : "",
   );
-  // Which dock slot the voice chrome occupies. Two slots rather than free dragging: the dock is
-  // a fixed centred overlay, and a freely draggable surface near the top edge would fight the
-  // titlebar's own drag region for no real gain.
+  // Which dock slot the voice chrome occupies. The stage may also be dragged anywhere (see
+  // `stagePos`); the two docks remain, because "put it back" needs somewhere definite to go, and
+  // choosing a dock is how a dragged stage is returned to one.
   let callDockTop = $state(loadCallSetting("dock", "top") !== "bottom");
   function toggleDockSlot() {
+    resetStagePos(); // docking is the answer to "put it back", so it discards a dragged position
     callDockTop = !callDockTop;
     try {
       localStorage.setItem("catcoms.call.dock", callDockTop ? "top" : "bottom");
@@ -10274,8 +10761,12 @@
   const onDeviceChange = () => void refreshAudioDevices();
   async function applySink(fp: string) {
     if (!sinkSupported || !spkDev) return;
-    const el = document.getElementById(`call-audio-${fp}`) as SinkAudio | null;
-    try { await el?.setSinkId?.(spkDev); } catch { /* device vanished: stays on the default */ }
+    // One peer plays through an element per source (voice, share), and all of them follow the
+    // chosen output device.
+    for (const [key] of peerChains(fp)) {
+      const el = document.getElementById(`call-audio-${key}`) as SinkAudio | null;
+      try { await el?.setSinkId?.(spkDev); } catch { /* device vanished: stays on the default */ }
+    }
   }
   async function setSpkDevice(id: string) {
     spkDev = id;
@@ -10384,7 +10875,11 @@
     const stream = await ensureMic();
     if (!stream) return;
     callMuted = false;
-    for (const t of stream.getAudioTracks()) t.enabled = true;
+    // Through the gate, not straight to `true`: turning the microphone on under push to talk
+    // must leave it closed until the key is actually held.
+    for (const t of stream.getAudioTracks()) {
+      t.enabled = micTransmitting(pushToTalk, callMuted, pttHeld);
+    }
     for (const p of Object.values(callPeers)) {
       for (const t of stream.getTracks()) {
         try { p.micSender = p.pc.addTrack(t, stream); } catch { /* already added on this edge */ }
@@ -10394,34 +10889,181 @@
     micOn = true;
     pushInstState();
   }
-  function attachRemote(fp: string, stream: MediaStream) {
-    let el = document.getElementById(`call-audio-${fp}`) as HTMLAudioElement | null;
+  /**
+   * Play one of a peer's audio sources, through a gain of its own.
+   *
+   * A peer sends up to two things: their microphone, and the mixed audio of whatever they are
+   * sharing. They used to be merged into a single element, which made them a single slider, and
+   * that slider was the element's own `volume`: capped by the browser at unity, so a quiet friend
+   * could be turned down but never up. Each source now gets its own chain
+   * (`source -> gain -> destination -> element`), which separates the two AND lifts the ceiling,
+   * because gain is a plain multiplier. The element survives at the end of the chain because it
+   * is what `setSinkId` speaks to: routing a call to a chosen output device still works.
+   */
+  function attachRemote(fp: string, stream: MediaStream, kind: PeerAudioKind) {
+    const key = peerChainKey(fp, stream.id);
+    // One chain per SOURCE STREAM, not one per kind. A MediaStreamAudioSourceNode binds to the
+    // track its stream held when the node was made and does not follow later track changes, so a
+    // per-kind chain fed by an aggregate would go silent the moment a source was replaced. It also
+    // makes reclassification free: when a stream turns out to be a share after all, only the level
+    // the chain follows changes, and no part of the graph is rebuilt.
+    peerChainKinds.set(key, kind);
+    let el = document.getElementById(`call-audio-${key}`) as HTMLAudioElement | null;
     if (!el) {
       el = document.createElement("audio");
-      el.id = `call-audio-${fp}`;
+      el.id = `call-audio-${key}`;
       el.autoplay = true;
       document.body.appendChild(el);
     }
-    // A peer can send its microphone and one separately mixed screen-audio track. Feeding the
-    // latest arriving stream straight to the element would replace (and silence) the earlier one,
-    // so aggregate all of that peer's live audio tracks into one local playback stream.
-    let aggregate = remoteAudioStreams[fp];
-    if (!aggregate) {
-      aggregate = new MediaStream();
-      remoteAudioStreams[fp] = aggregate;
+    remoteAudioStreams[key] = stream;
+    const gain = ensurePeerGainNode(key, stream, el);
+    if (!gain) {
+      // No Web Audio in this runtime. Play the stream directly and accept the browser's ceiling:
+      // a call with a capped slider is worth far more than a silent one.
+      el.srcObject = stream;
+    } else {
+      el.muted = false; // silence is applied at the gain, so a lift restores the level that was set
     }
-    for (const track of stream.getAudioTracks()) {
-      if (aggregate.getTracks().some((candidate) => candidate.id === track.id)) continue;
-      aggregate.addTrack(track);
-      track.addEventListener("ended", () => aggregate?.removeTrack(track), { once: true });
+    applyPeerGain(fp, kind);
+    // Seed the sliders from what is stored, so the UI shows the trim already in force.
+    for (const seeded of ["voice", "share"] as PeerAudioKind[]) {
+      const level = peerLevelFor(fp, seeded);
+      if (seeded === "voice") {
+        if (peerVolumes[fp] !== level) peerVolumes = { ...peerVolumes, [fp]: level };
+      } else if (peerShareVolumes[fp] !== level) {
+        peerShareVolumes = { ...peerShareVolumes, [fp]: level };
+      }
     }
-    el.srcObject = aggregate;
-    el.muted = callDeafened || !!voiceMutedPeers[fp];
-    const v = loadPeerVol(fp);
-    el.volume = v;
-    if (peerVolumes[fp] !== v) peerVolumes = { ...peerVolumes, [fp]: v };
     void applySink(fp);
-    addAnalyser(fp, stream); // speaking detection taps the stream, never the element
+    // Speaking detection taps the VOICE stream only: a shared video with dialogue in it must not
+    // light somebody up as though they were talking.
+    if (kind === "voice") addAnalyser(fp, stream);
+  }
+  /** The identity of one playback chain: a peer and the stream it carries. */
+  function peerChainKey(fp: string, streamId: string): string {
+    return `${fp}--${streamId}`;
+  }
+  /** Every chain currently playing for one peer, as [key, kind]. */
+  function peerChains(fp: string): [string, PeerAudioKind][] {
+    const prefix = `${fp}--`;
+    return [...peerChainKinds.entries()].filter(([key]) => key.startsWith(prefix));
+  }
+  /**
+   * A stream turned out to be a share after the audio for it had already been placed. Only the
+   * level it follows changes, so this is a re-apply rather than a rebuild.
+   */
+  function regroupRemoteAudio(fp: string, streamId: string) {
+    const key = peerChainKey(fp, streamId);
+    if (!peerChainKinds.has(key)) return;
+    peerChainKinds.set(key, "share");
+    // The talking dot is driven by ONE analyser per peer, and this stream may have supplied it
+    // while it was believed to be their voice. Rebuild it from a stream that really is.
+    dropAnalyser(fp);
+    for (const [voiceKey, chainKind] of peerChains(fp)) {
+      const voiceStream = chainKind === "voice" ? remoteAudioStreams[voiceKey] : undefined;
+      if (voiceStream) {
+        addAnalyser(fp, voiceStream);
+        break;
+      }
+    }
+    applyPeerGain(fp, "voice");
+    applyPeerGain(fp, "share");
+    shareAudioTick += 1; // the share controls appear now that there is something to control
+  }
+  /**
+   * Build (or find) the gain chain for one source, returning null when this runtime has no Web
+   * Audio at all. The graph is `MediaStreamAudioSourceNode -> GainNode ->
+   * MediaStreamAudioDestinationNode`, and the element plays the destination.
+   */
+  function ensurePeerGainNode(key: string, stream: MediaStream, el: HTMLAudioElement): GainNode | null {
+    const existing = peerGainNodes.get(key);
+    if (existing) return existing.gain;
+    let context = callAudioContext;
+    try {
+      context ??= new AudioContext();
+      // A context created under autoplay policy can arrive suspended, and a suspended context
+      // produces silence rather than an error. Joining voice is itself a gesture, so this
+      // normally resolves immediately; the check is what makes it not matter when it does not.
+      if (context.state === "suspended") void context.resume();
+    } catch {
+      return null;
+    }
+    try {
+      const source = context.createMediaStreamSource(stream);
+      const gain = context.createGain();
+      const destination = context.createMediaStreamDestination();
+      source.connect(gain).connect(destination);
+      el.srcObject = destination.stream;
+      callAudioContext = context;
+      peerGainNodes.set(key, { source, gain, destination });
+      // Some WebView builds stop pumping a remote stream that is only consumed by a graph. A
+      // muted element holding the raw stream keeps the receiver alive and is never heard.
+      let keepalive = document.getElementById(`call-keepalive-${key}`) as HTMLAudioElement | null;
+      if (!keepalive) {
+        keepalive = document.createElement("audio");
+        keepalive.id = `call-keepalive-${key}`;
+        keepalive.autoplay = true;
+        document.body.appendChild(keepalive);
+      }
+      keepalive.muted = true;
+      keepalive.srcObject = stream;
+      return gain;
+    } catch (e) {
+      console.warn("voice: could not build a gain chain for this peer", { key, error: String(e) });
+      return null;
+    }
+  }
+  /** Push the current level, per-peer mute and deafen state into every chain of one kind. */
+  function applyPeerGain(fp: string, kind: PeerAudioKind) {
+    const value = effectivePeerGain(peerLevelFor(fp, kind), peerSilenced(fp, kind), callDeafened);
+    for (const [key, chainKind] of peerChains(fp)) {
+      if (chainKind !== kind) continue;
+      const node = peerGainNodes.get(key);
+      if (!node || !callAudioContext) {
+        const el = document.getElementById(`call-audio-${key}`) as HTMLAudioElement | null;
+        // The no-Web-Audio fallback keeps the browser's ceiling; nothing else can be done there.
+        if (el) {
+          el.volume = Math.min(1, value);
+          el.muted = value === 0;
+        }
+        continue;
+      }
+      try {
+        // A short ramp rather than a step: an abrupt gain change on a live stream clicks.
+        node.gain.gain.setTargetAtTime(value, callAudioContext.currentTime, 0.015);
+      } catch {
+        node.gain.gain.value = value;
+      }
+    }
+  }
+  /** Re-apply every chain: used by deafen, which is a statement about all of them at once. */
+  function applyAllPeerGains() {
+    for (const fp of Object.keys(callPeers)) {
+      applyPeerGain(fp, "voice");
+      applyPeerGain(fp, "share");
+    }
+  }
+  /** Whether this specific source is silenced for me alone. */
+  function peerSilenced(fp: string, kind: PeerAudioKind): boolean {
+    return kind === "voice" ? !!voiceMutedPeers[fp] : !!shareMutedPeers[fp];
+  }
+  /** Drop one peer's chains and the elements that played them. */
+  function releasePeerAudio(fp: string) {
+    for (const [key] of peerChains(fp)) {
+      const node = peerGainNodes.get(key);
+      if (node) {
+        try { node.source.disconnect(); } catch { /* already gone */ }
+        try { node.gain.disconnect(); } catch { /* already gone */ }
+        for (const track of node.destination.stream.getTracks()) track.stop();
+        peerGainNodes.delete(key);
+      }
+      document.getElementById(`call-audio-${key}`)?.remove();
+      document.getElementById(`call-keepalive-${key}`)?.remove();
+      delete remoteAudioStreams[key];
+      peerChainKinds.delete(key);
+    }
+    remoteAudioRouter.forget(fp);
+    shareAudioTick += 1;
   }
   // --- In-call instruments (the jam layer, jam:v2) --------------------------------------------
   // Notes are EVENTS, not audio: tiny JSON frames on a per-peer data channel, synthesized locally
@@ -10899,15 +11541,17 @@
     try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
     if (myPatchName === name) myPatchName = "CUSTOM"; // the sound keeps playing; only the label detaches
   }
-  // --- Takes: bounded ephemeral event-log recording (jam-recorder.ts owns every rule). Consent
-  // is honest-client coordination riding the state heartbeat (`rec` what I do, `rc` what I allow);
-  // the recorder starts only when EVERY participant's rc says yes, and an old build that cannot
-  // even display the banner never consents, so it can never be recorded by this client.
+  // --- Takes: bounded ephemeral event-log recording (jam-recorder.ts owns every rule).
+  //
+  // A take captures NOTE EVENTS, never audio: no microphone is involved, nothing anyone said is
+  // in it, and playing one back runs the same local synthesizer the room was already hearing. It
+  // used to need every participant to agree before it would start, which treated it as a recording
+  // of the room and made keeping the riff that just happened a negotiation. The `rec` heartbeat
+  // still says what this client is doing, so the room can always see that a take is rolling.
   let jamRec = $state<JamTakeRecorder | null>(null);
-  // Consent pauses retain this original time origin so resumed events cannot move backward.
+  // Membership pauses retain this original time origin so resumed events cannot move backward.
   let jamRecTimeline: JamRecorderTimeline = { startMs: null };
   let jamRecUi = $state<"off" | "arming" | "recording" | "paused">("off");
-  let jamRecConsent = $state(false); // my rc: sticky for this call until I toggle it
   let jamRecGaps = $state(0);
   let jamRecClock = $state(0); // seconds, for the banner; a 1s ticker while the recorder lives
   let jamRecTimer: ReturnType<typeof setInterval> | undefined;
@@ -10936,9 +11580,6 @@
     jamRecGaps = 0;
     jamRecClock = 0;
     jamRecTimeline = { startMs: null };
-    jamRecConsent = true; // arming a take is consenting to be on it
-    jamRec.setConsent(callSelfFp, true);
-    for (const fp of callParticipants) if (peerMeta[fp]?.rc) jamRec.setConsent(fp, true);
     clearInterval(jamRecTimer);
     jamRecTimer = setInterval(() => {
       if (jamRecUi === "recording") {
@@ -10956,7 +11597,7 @@
       if (jamRecUi !== "off") { jamRecUi = "off"; pushInstState(); }
       return;
     }
-    if (rec.state() === "arming" && rec.ready() && rec.start()) {
+    if (rec.state() === "arming" && rec.start()) {
       jamRecTimeline = startJamRecorderTimeline(jamRecTimeline, performance.now());
     }
     const s = rec.state();
@@ -10987,13 +11628,6 @@
       jamTakes = [...jamTakes, { id: jamTakeSeq, take: trimmed, gaps: jamRecGaps }];
     }
     jamRecUi = "off";
-    pushInstState();
-  }
-  function toggleJamConsent() {
-    jamRecConsent = !jamRecConsent;
-    // Our own consent is part of the recorder's gate, not merely a wire/UI flag. Withdrawal must
-    // stop append admission synchronously before any later local or remote event reaches it.
-    if (applyJamRecorderConsent(jamRec, callSelfFp, jamRecConsent)) syncJamRec();
     pushInstState();
   }
   function jamRecMembership() {
@@ -11368,7 +12002,7 @@
     try { localStorage.setItem("catcoms.call.receive-resolution", String(receiveResolutionMode)); } catch { /* optional */ }
     pushInstState();
     if (inCall && callServer !== null && callChannel) {
-      broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: jamRecConsent ? 1 : 0 });
+      broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: 1 });
     }
   }
 
@@ -11387,7 +12021,7 @@
         receiveHeight = next;
         pushInstState();
         if (inCall && callServer !== null && callChannel) {
-          broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: next, rec: myRecWire(), rc: jamRecConsent ? 1 : 0 });
+          broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: next, rec: myRecWire(), rc: 1 });
         }
       }, 180);
     };
@@ -11499,30 +12133,62 @@
     jamMode = mode;
     try { localStorage.setItem("catcoms.call.jammode", mode); } catch { /* ignore */ }
   }
-  // Per-peer voice volume (0..1), remembered per fingerprint.
+  // Per-peer levels as PERCENTAGES (0..250, unity at 100), remembered per fingerprint and kept
+  // separately for a peer's voice and for the audio of whatever they are sharing.
   let peerVolumes = $state<Record<string, number>>({});
-  function loadPeerVol(fp: string): number {
+  let peerShareVolumes = $state<Record<string, number>>({});
+  const peerLevelKey = (fp: string, kind: PeerAudioKind) =>
+    kind === "voice" ? `catcoms.call.level.${fp}` : `catcoms.call.sharelevel.${fp}`;
+  function loadPeerLevel(fp: string, kind: PeerAudioKind): number {
     try {
-      const raw = localStorage.getItem(`catcoms.call.vol.${fp}`);
-      if (raw === null) return 1;
-      const v = Number(raw);
-      return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1;
-    } catch { return 1; }
+      const raw = localStorage.getItem(peerLevelKey(fp, kind));
+      if (raw !== null) return normalizePeerLevel(raw);
+      if (kind === "share") return DEFAULT_PEER_LEVEL;
+      // One-time carry-over of the trims set before levels were percentages. The old key held a
+      // 0..1 element volume, so a stored 0.4 is 40%, not 0.4%. Read only; nothing writes it again.
+      const legacy = localStorage.getItem(`catcoms.call.vol.${fp}`);
+      if (legacy === null) return DEFAULT_PEER_LEVEL;
+      const fraction = Number(legacy);
+      return Number.isFinite(fraction) ? normalizePeerLevel(fraction * 100) : DEFAULT_PEER_LEVEL;
+    } catch {
+      return DEFAULT_PEER_LEVEL;
+    }
   }
-  function setPeerVolume(fp: string, v: number) {
-    peerVolumes = { ...peerVolumes, [fp]: v };
-    const el = document.getElementById(`call-audio-${fp}`) as HTMLAudioElement | null;
-    if (el) el.volume = v;
-    try { localStorage.setItem(`catcoms.call.vol.${fp}`, String(v)); } catch { /* ignore */ }
+  /** This peer's current level for one source: what the UI shows, falling back to what is stored. */
+  function peerLevelFor(fp: string, kind: PeerAudioKind): number {
+    const held = kind === "voice" ? peerVolumes[fp] : peerShareVolumes[fp];
+    return held ?? loadPeerLevel(fp, kind);
+  }
+  function setPeerVolume(fp: string, level: number) {
+    const value = normalizePeerLevel(level);
+    peerVolumes = { ...peerVolumes, [fp]: value };
+    applyPeerGain(fp, "voice");
+    try { localStorage.setItem(peerLevelKey(fp, "voice"), String(value)); } catch { /* ignore */ }
+  }
+  function setPeerShareVolume(fp: string, level: number) {
+    const value = normalizePeerLevel(level);
+    peerShareVolumes = { ...peerShareVolumes, [fp]: value };
+    applyPeerGain(fp, "share");
+    try { localStorage.setItem(peerLevelKey(fp, "share"), String(value)); } catch { /* ignore */ }
+  }
+  /** Silence one peer's shared audio without touching their voice, and the reverse. */
+  let shareMutedPeers = $state<Record<string, boolean>>({});
+  function toggleSharePeer(fp: string) {
+    shareMutedPeers = { ...shareMutedPeers, [fp]: !shareMutedPeers[fp] };
+    applyPeerGain(fp, "share");
+  }
+  /** Whether this peer is currently sending any shared audio for those controls to act on. */
+  function peerHasShareAudio(fp: string): boolean {
+    void shareAudioTick; // re-derives when a share starts or stops
+    return peerChains(fp).some(([key, kind]) =>
+      kind === "share" && !!remoteAudioStreams[key]?.getAudioTracks().length);
   }
   // Local per-peer voice mute: purely receive side (their <audio> element), so it needs no signal
   // and they are never told. Deafen still wins over it, hence the OR at every assignment.
   let voiceMutedPeers = $state<Record<string, boolean>>({});
   function toggleVoicePeer(fp: string) {
-    const muted = !voiceMutedPeers[fp];
-    voiceMutedPeers = { ...voiceMutedPeers, [fp]: muted };
-    const el = document.getElementById(`call-audio-${fp}`) as HTMLAudioElement | null;
-    if (el) el.muted = muted || callDeafened;
+    voiceMutedPeers = { ...voiceMutedPeers, [fp]: !voiceMutedPeers[fp] };
+    applyPeerGain(fp, "voice");
   }
   function toggleDeafen() {
     callDeafened = !callDeafened;
@@ -11532,10 +12198,9 @@
     // A digest may keep the take drain busy across a fast on→off cycle. Mark the whole interval
     // on both edges so attacks due inside it remain suppressed after reopen; note-offs still run.
     if (jamPlay) jamPlay.dropAttacksThroughMs = Math.max(jamPlay.dropAttacksThroughMs, jamPlayElapsed());
-    for (const fp of Object.keys(callPeers)) {
-      const el = document.getElementById(`call-audio-${fp}`) as HTMLAudioElement | null;
-      if (el) el.muted = callDeafened || !!voiceMutedPeers[fp];
-    }
+    // Deafen reaches the gains, not the elements: silence has to be applied where the level lives
+    // or lifting it would come back at whatever the level was, at the wrong moment or not at all.
+    applyAllPeerGains();
     if (jukeAudio) jukeAudio.muted = callDeafened; // the deck is part of "everyone", not an exception
     // Deafen is one hard room gate: it cancels lookahead clicks and releases every engine voice,
     // including local previews, so no retained tail can emerge when the master reopens.
@@ -11564,7 +12229,10 @@
       vid: myVid(),
       rx: receiveHeight,
       rec: myRecWire(),
-      rc: jamRecConsent ? 1 : 0,
+      // Still sent, always set. A take holds note events and no audio, so this client no longer
+      // gates on it; a peer running an older build does, and would refuse to keep its own take
+      // without it. Saying yes is what that build has to hear to behave the way this one does.
+      rc: 1,
     });
   }
   function pushInstState() {
@@ -11581,7 +12249,6 @@
       const sender = callPeers[fp]?.vidSender;
       if (sender) void capVideo(sender, "screen", fp);
     }
-    if (jamRec) { jamRec.setConsent(fp, after.rc); syncJamRec(); }
   }
   // One authenticated peer's frame. The decoder charges budgets BEFORE parsing; the engine then
   // re-checks the closed-over channel capability, so authority is never reconstructed from a
@@ -13902,7 +14569,7 @@
   // Files surface hands to relDay.
   function jukeExpiryDays(cid: string): number {
     if (!jukeShareInView) return -1;
-    const f = files.find((x) => x.cid === cid);
+    const f = filesByCid.get(cid);
     if (!f || !f.expires_known || f.expires === null || isPinned(cid)) return -1;
     const days = Math.ceil((f.expires - nowTick) / 86_400_000);
     return days <= 7 ? Math.max(0, days) : -1;
@@ -13931,7 +14598,21 @@
   let myVideo = $state<"" | "cam" | "screen">("");
   let localVideoStream = $state<MediaStream | null>(null); // the self-preview tile reads this
   let remoteStreams = $state<Record<string, MediaStream>>({}); // fp -> their video stream
+  // Keyed by `peerChainKey`: one peer has up to two of these, their voice and their share.
   const remoteAudioStreams: Record<string, MediaStream> = {};
+  // The receive-side mixer. One AudioContext for the whole call, one chain per playing source.
+  let callAudioContext: AudioContext | null = null;
+  const peerGainNodes = new Map<string, {
+    source: MediaStreamAudioSourceNode;
+    gain: GainNode;
+    destination: MediaStreamAudioDestinationNode;
+  }>();
+  /** Which level each chain follows. Keyed like `peerGainNodes`, by peer and source stream. */
+  const peerChainKinds = new Map<string, PeerAudioKind>();
+  const remoteAudioRouter = new RemoteAudioRouter();
+  // The chain map is a plain Map, so the share controls need a nudge to re-derive when a peer
+  // starts or stops sending shared audio.
+  let shareAudioTick = $state(0);
   type ScreenAudioCapture = {
     id: string;
     label: string;
@@ -13976,7 +14657,13 @@
     }
     if (!track || !screenAudioDestination) return;
     try {
-      peer.screenAudioSender = peer.pc.addTrack(track, screenAudioDestination.stream);
+      // Announced under the SCREEN's stream, not the mixer's own. The second argument to addTrack
+      // is only an identity (the msid), and using the one the screen video already rides makes
+      // this track knowable at the far end as "the share's sound" rather than as a second voice.
+      // Without it a receiver sees two anonymous audio tracks from one peer and has to lump them
+      // into a single element, which is why one slider used to move a friend's voice and their
+      // game at the same time. See `classifyRemoteAudio`.
+      peer.screenAudioSender = peer.pc.addTrack(track, camStream ?? screenAudioDestination.stream);
       void capScreenAudio(peer.screenAudioSender);
     } catch (e) {
       console.warn("voice: could not add mixed screen audio", { peer: peer.fp, error: String(e) });
@@ -14529,8 +15216,27 @@
   // queued must not seize the window from whoever is reading chat, so the dock shows it in place
   // and the expand button is the way up.
   let jukeScreen = $derived(deckSurface(jukeKind, !!jukeNow, focusOpen, jukeOpen));
+  // Watching ONE person, usually the one sharing a screen. A grid divides the window between
+  // everybody, which is the wrong answer when the thing worth seeing is somebody's screen and
+  // everything else is a face: soloing gives the whole window to one tile. Held as a fingerprint
+  // rather than a flag so it survives other people joining and leaving around it.
+  let focusSolo = $state("");
+  // A soloed peer who has left, or stopped being interesting, releases the view on their own.
+  let focusSoloActive = $derived(
+    focusSolo !== "" && (focusSolo === callSelfFp || callParticipants.includes(focusSolo)),
+  );
+  function toggleFocusSolo(fp: string) {
+    focusSolo = focusSolo === fp ? "" : fp;
+  }
+  /** Whoever is sharing a screen right now, self last: the natural thing to solo from a keystroke. */
+  let focusShareCandidates = $derived([
+    ...callParticipants.filter((fp) => (peerMeta[fp]?.vid ?? 0) === 2 && !!remoteStreams[fp]),
+    ...(myVideo === "screen" ? [callSelfFp] : []),
+  ]);
   // Self first, then peers: one tile per person, and nothing else on the grid.
-  let focusTiles = $derived([callSelfFp, ...callParticipants]);
+  let focusTiles = $derived(
+    focusSoloActive ? [focusSolo] : [callSelfFp, ...callParticipants],
+  );
   let focusCols = $derived(focusTiles.length <= 1 ? 1 : focusTiles.length <= 4 ? 2 : 3);
 
   async function negotiatePeer(peer: CallPeer) {
@@ -14658,6 +15364,20 @@
   // Reactive shadow of how many router-mapped routes this call holds, for the status line: a
   // plain Map mutation is invisible to $derived.
   let callMappedRoutes = $state(0);
+  // This machine's real LAN address, used only to recognise host candidates gathered on virtual
+  // adapters. Read once per call: it is the address every host candidate already carries, so
+  // holding it here publishes nothing, and a null simply disables the filter.
+  let defaultRouteIpv4 = $state<string | null>(null);
+  // How many candidates were held back this call. Surfaced in Connectivity rather than dropped
+  // silently, because a filter nobody can see is indistinguishable from a bug when a call fails.
+  let suppressedIceCandidates = $state(0);
+  async function refreshDefaultRoute() {
+    try {
+      defaultRouteIpv4 = await invoke<string | null>("default_route_address");
+    } catch {
+      defaultRouteIpv4 = null; // unknown route: signal everything, as before
+    }
+  }
 
   async function signalMappedCandidate(peer: CallPeer, c: RTCIceCandidate) {
     if (!mappableIcePort(c)) return;
@@ -14763,6 +15483,12 @@
     pc.onnegotiationneeded = () => void negotiatePeer(peer);
     pc.onicecandidate = (e) => {
       if (e.candidate) {
+        // A candidate on one of this machine's virtual adapters can never be reached from
+        // outside, and sending it costs the far end a connectivity check before ICE settles.
+        if (!shouldSignalHostCandidate(e.candidate, defaultRouteIpv4)) {
+          suppressedIceCandidates += 1;
+          return;
+        }
         void sendSignal(peer.server, fp, { callId: peer.channel, type: "ice", candidate: e.candidate.toJSON() });
         void signalMappedCandidate(peer, e.candidate);
       }
@@ -14777,10 +15503,15 @@
       const stream = e.streams[0];
       if (!stream) return;
       if (e.track.kind === "audio") {
-        attachRemote(fp, stream);
+        // A sender announces its shared audio under the same stream as its shared video, so the
+        // stream this arrived on says which of the two it is.
+        attachRemote(fp, stream, remoteAudioRouter.classify(fp, stream.id));
         return;
       }
       // Video: hand the stream to the tiles; clear it when the sender stops or removes the track.
+      // Learning that this stream carries video can also revise an answer already given for audio
+      // that arrived first, in which case that audio moves to the share chain.
+      if (remoteAudioRouter.noteVideo(fp, stream.id)) regroupRemoteAudio(fp, stream.id);
       remoteStreams = { ...remoteStreams, [fp]: stream };
       e.track.onended = () => dropRemoteVideo(fp, stream);
       stream.onremovetrack = () => {
@@ -14805,8 +15536,7 @@
       delete callPeers[fp];
     }
     delete waitingIce[fp];
-    document.getElementById(`call-audio-${fp}`)?.remove();
-    delete remoteAudioStreams[fp];
+    releasePeerAudio(fp);
     callParticipants = Object.keys(callPeers);
     const { [fp]: _drop, ...rest } = callPeerStates;
     callPeerStates = rest;
@@ -14827,9 +15557,6 @@
     delete jamSourceGateMuted[fp];
     delete jamClockSyncs[fp];
     delete jamProbes[fp];
-    // Consent is channel-fresh. A reconnecting peer must announce `rc` again before an existing
-    // take can resume; retaining a prior edge's consent would record before the new edge opted in.
-    applyJamRecorderConsent(jamRec, fp, false);
     if (jamMet?.anchorLeft(fp)) {
       // Dumb failover by design: the grid stops with its anchor; anyone can start a new one.
       jamMetUi = null;
@@ -15042,6 +15769,9 @@
     void refreshCallProfiles();
     void refreshCallFiles();
     callMuted = false;
+    // Read before the first candidate is gathered; a route learned late simply filters nothing.
+    suppressedIceCandidates = 0;
+    void refreshDefaultRoute();
     focusOpen = false;
     focusDismissed = false; // a new call earns a fresh chance to take the window
     voiceAlert = null;
@@ -15051,13 +15781,13 @@
     alertedRooms.delete(roomKey(server, channel));
     recordPresence(server, channel, callSelfFp);
     void refreshJukebox(); // the room's queue, whatever the DJ is currently on
-    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: jamRecConsent ? 1 : 0 }); // announce + trigger existing members to offer
+    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: 1 }); // announce + trigger existing members to offer
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
       if (callChannel && callServer !== null) {
         // vid rides the heartbeat for the same reason mic does: it is the only thing that repairs
         // a data-channel state message that never arrived, and the video tile is gated on it.
-        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: jamRecConsent ? 1 : 0 });
+        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: 1 });
         recordPresence(callServer, callChannel, callSelfFp); // keep my own presence fresh
         jukeTick(); // the DJ's re-announce (and the listener's DJ-left check) ride this tick
         sweepJamUi(); // engine hold watchdogs + the drawer's own 30s held-note honesty sweep
@@ -15102,7 +15832,16 @@
     localVideoStream = null;
     myVideo = "";
     remoteStreams = {};
+    focusSolo = ""; // whoever was being watched is not in a call any more
     for (const fp of Object.keys(callPeers)) removePeer(fp);
+    // Every chain went with its peer; the context they shared goes with the call.
+    remoteAudioRouter.clear();
+    peerChainKinds.clear();
+    if (callAudioContext) {
+      const context = callAudioContext;
+      callAudioContext = null;
+      void context.close().catch(() => { /* already closing */ });
+    }
     callHeld = [];
     remoteHeld = {};
     peerMeta = {};
@@ -15151,7 +15890,6 @@
     clearInterval(jamRecTimer);
     jamRecTimer = undefined;
     jamRecUi = "off";
-    jamRecConsent = false;
     jamRecGaps = 0;
     jamRecClock = 0;
     jamRecTimeline = { startMs: null };
@@ -15192,8 +15930,127 @@
   }
   function toggleMute() {
     callMuted = !callMuted;
-    if (localStream) for (const t of localStream.getAudioTracks()) t.enabled = !callMuted;
+    applyMicGate();
     pushInstState(); // peers show my mute state; tell them now rather than at the next ping
+  }
+  /**
+   * Put the microphone in the state the mute button and the talk key jointly ask for.
+   *
+   * One place, because there are now two things that can silence it and a track left enabled by
+   * whichever ran second is a live microphone the user believes is off.
+   */
+  function applyMicGate() {
+    const live = micTransmitting(pushToTalk, callMuted, pttHeld);
+    if (localStream) for (const t of localStream.getAudioTracks()) t.enabled = live;
+  }
+  // --- Push to talk -----------------------------------------------------------------------
+  // In-app only, and the settings page says so: a system-wide version needs a keyboard hook,
+  // because a global shortcut is exclusive and would take the key away from the game you are
+  // holding it in. See push-to-talk.ts.
+  // --- Dragging the voice stage ---------------------------------------------------------------
+  // Docked top or bottom and centred is fine until it covers what you are reading. A dragged
+  // position replaces the dock entirely; the dock button puts it back. Clamping lives in
+  // overlay-drag.ts, and is re-applied on resize so a smaller window cannot strand it.
+  const STAGE_POS_KEY = "catcoms.call.stagepos.v1";
+  const TITLEBAR_PX = 30; // --titlebar-h; the stage may never go under our own chrome
+  let stagePos = $state<Point | null>(loadStagePos());
+  let stageEl = $state<HTMLElement | null>(null);
+  // Reactive because the header's grabbing cursor reads it.
+  let stageDrag = $state<{ pointer: Point; origin: Point; id: number } | null>(null);
+  function loadStagePos(): Point | null {
+    try { return parsePosition(JSON.parse(localStorage.getItem(STAGE_POS_KEY) ?? "null")); }
+    catch { return null; }
+  }
+  function saveStagePos(next: Point | null) {
+    stagePos = next;
+    try {
+      if (next) localStorage.setItem(STAGE_POS_KEY, JSON.stringify(next));
+      else localStorage.removeItem(STAGE_POS_KEY);
+    } catch { /* the position still holds for this session */ }
+  }
+  function stageBounds(): DragBounds {
+    return { width: window.innerWidth, height: window.innerHeight, insetTop: TITLEBAR_PX };
+  }
+  function stageSize(): Size {
+    const r = stageEl?.getBoundingClientRect();
+    return { width: r?.width ?? 400, height: r?.height ?? 300 };
+  }
+  function onStagePointerDown(e: PointerEvent) {
+    // The header is also a row of controls: a press that landed on one is that control's.
+    const onControl = !!(e.target as HTMLElement | null)?.closest?.("button, input, a, select");
+    if (!startsDrag(e.button, onControl) || !stageEl) return;
+    const rect = stageEl.getBoundingClientRect();
+    stageDrag = { pointer: { x: e.clientX, y: e.clientY }, origin: { x: rect.left, y: rect.top }, id: e.pointerId };
+    // Capture so the drag survives the pointer outrunning the header, which it always does.
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* older webview */ }
+    e.preventDefault();
+  }
+  function onStagePointerMove(e: PointerEvent) {
+    if (!stageDrag || e.pointerId !== stageDrag.id) return;
+    saveStagePos(dragTo(stageDrag.origin, stageDrag.pointer, { x: e.clientX, y: e.clientY }, stageSize(), stageBounds()));
+  }
+  function onStagePointerUp(e: PointerEvent) {
+    if (!stageDrag || e.pointerId !== stageDrag.id) return;
+    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    stageDrag = null;
+  }
+  /** Put the stage back on its dock, discarding a dragged position. */
+  function resetStagePos() {
+    saveStagePos(null);
+  }
+  /** Pull a dragged stage back inside a window that just got smaller. */
+  function reclampStage() {
+    if (stagePos) saveStagePos(clampToBounds(stagePos, stageSize(), stageBounds()));
+  }
+  const PTT_KEY = "catcoms.call.ptt.v1";
+  let pushToTalk = $state<PushToTalkSettings>(loadPushToTalk());
+  let pttHeld = $state(false);
+  let pttCapturing = $state(false); // the settings page is waiting for the next keypress
+  function loadPushToTalk(): PushToTalkSettings {
+    try { return parsePushToTalk(JSON.parse(localStorage.getItem(PTT_KEY) ?? "null")); }
+    catch { return DEFAULT_PUSH_TO_TALK; }
+  }
+  function savePushToTalk(next: PushToTalkSettings) {
+    pushToTalk = parsePushToTalk(next);
+    try { localStorage.setItem(PTT_KEY, JSON.stringify(pushToTalk)); } catch { /* session only */ }
+    pttHeld = false; // a mode or key change starts from "not talking", never mid-press
+    applyMicGate();
+    pushInstState();
+  }
+  /** Whether a key event landed somewhere the user is typing, in which case it is a keystroke. */
+  function eventIsTyping(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el || !el.tagName) return false;
+    const tag = el.tagName.toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
+  }
+  function onPttKeyDown(e: KeyboardEvent) {
+    if (pttCapturing) {
+      // Binding: swallow the key entirely so setting Space does not also press a button.
+      e.preventDefault();
+      pttCapturing = false;
+      if (bindableKey(e.code)) savePushToTalk({ mode: "ptt", key: e.code });
+      return;
+    }
+    if (e.repeat) return; // auto-repeat is still one press
+    if (!pushToTalkEvent(pushToTalk, { code: e.code, typing: eventIsTyping(e.target), inCall })) return;
+    if (pttHeld) return;
+    pttHeld = true;
+    applyMicGate();
+    pushInstState();
+  }
+  function onPttKeyUp(e: KeyboardEvent) {
+    // Deliberately not gated on `typing`: a key pressed outside a field and released after focus
+    // moved into one must still close the microphone. Only the press is choosy.
+    if (!pttHeld || e.code !== pushToTalk.key) return;
+    releasePtt();
+  }
+  /** Close the talk gate. Also the answer to losing focus, where no keyup is ever delivered. */
+  function releasePtt() {
+    if (!pttHeld) return;
+    pttHeld = false;
+    applyMicGate();
+    pushInstState();
   }
   function joinActiveVoice() {
     if (activeServerId !== null && cur?.active) joinVoice(cur.active, activeServerId, activeName());
@@ -15239,7 +16096,6 @@
           const sender = callPeers[fromFp]?.vidSender;
           if (sender) capVideo(sender, "screen", fromFp);
         }
-        if (jamRec) { jamRec.setConsent(fromFp, after.rc); syncJamRec(); }
       }
       if (type === "voice-ping") {
         const peer = callPeers[fromFp];
@@ -15371,29 +16227,29 @@
     scheduleUiStateSave();
     sending = true;
     const pendingId = `pending:${Date.now()}:${pendingSendNonce++}`;
-    const previousMessages = messages;
-    const nextMessages = [...previousMessages, {
-      id: pendingId,
-      author: myFp,
-      text,
-      ts: Date.now(),
-      edited: 0,
-      reactions: [],
-      reply_to,
-      pinned: false,
-    }];
     const nextScope = chatScopeKey(server, channel);
     chatStickToBottom = true;
-    messages = nextMessages;
-    messageWindow = reconcileChatWindow(
-      previousMessages,
-      nextMessages,
-      messageWindow,
-      true,
-      messageWindowScope !== nextScope,
-    );
-    messageWindowScope = nextScope;
-    markMessageArrivals([pendingId]);
+    // The optimistic row belongs at the end of the log, which is only where the slice ends when
+    // the tail is loaded. Away from the tail the acknowledgement refresh lands there instead.
+    if (tailLoaded && messageWindowScope === nextScope) {
+      const parent = replyTarget;
+      messages = [...messages, {
+        id: pendingId,
+        author: myFp,
+        text,
+        ts: Date.now(),
+        edited: 0,
+        reactions: [],
+        reply_to,
+        pinned: false,
+        targets_me: false,
+        reply_count: 0,
+        reply_to_preview: parent ? { id: reply_to, author: parent.author, text: parent.text } : null,
+      }];
+      pageTotal += 1;
+      markMessageArrivals([pendingId]);
+    }
+    replyingToRow = undefined;
     await tick();
     try {
       // The one path instrumented end to end, and the pattern the rest adopt. The trace is
@@ -15408,8 +16264,9 @@
       if (activeServerId === server && cur?.active === channel) await refresh();
     } catch (e) {
       error = String(e);
-      if (activeServerId === server && cur?.active === channel) {
+      if (activeServerId === server && cur?.active === channel && messages.some((m) => m.id === pendingId)) {
         messages = messages.filter((m) => m.id !== pendingId);
+        pageTotal = Math.max(0, pageTotal - 1);
       }
       // Put the message back only if the user has not already started another one while the send
       // was in flight. A failed send should never silently eat their text.
@@ -15484,7 +16341,18 @@
 
   // Pinned messages (owner/admin pin/unpin; a panel surfaces them).
   let showPinned = $state(false);
-  let pinnedMsgs = $derived(messages.filter((m) => m.pinned));
+  // Pins are read by name (they are few and curated) rather than scanned out of a history the
+  // webview no longer holds. Refreshed with every page read of the channel.
+  let pinnedMsgs = $state.raw<Msg[]>([]);
+  async function refreshPinned(server: number, channel: string) {
+    try {
+      const pins = await invoke<Msg[]>("get_pinned_messages", { server, channel });
+      if (activeServerId !== server || cur?.active !== channel) return;
+      pinnedMsgs = pins;
+    } catch {
+      // A failed pin read leaves the previous list; the next channel refresh retries it.
+    }
+  }
   async function togglePin(m: Msg) {
     const ch = cur?.active;
     if (activeServerId === null || !ch || !m.id) return;
@@ -16067,16 +16935,17 @@
   // Receipts live for the unlocked UI session. Unlike the old feed-coupled set they are never
   // pruned just because a five-minute item aged out, so a replayed backend event cannot crawl or
   // ring a second time. lockScreen clears them because wiki/page ids can contain content names.
-  let tickerReceipts = $state<Set<string>>(new Set());
+  // Not reactive state: nothing renders from the receipt set, it is only consulted on the way in.
+  // It is mutated in place and bounded (see `acceptTickerReceipt`); the old copy-on-accept made
+  // every notification cost as much as every notification before it.
+  let tickerReceipts = new Set<string>();
   function pushTicker(kind: TickerKind, server: number, id: string, text: string, go: () => void): boolean {
     if (locked) return false; // nothing that names app content may reach a locked screen
     if (!text.trim()) return false;
-    const nextReceipts = acceptTickerReceipt(tickerReceipts, id);
-    if (!nextReceipts) return false;
+    if (!acceptTickerReceipt(tickerReceipts, id)) return false;
     const at = Date.now();
     const kept = tickerItems.filter((t) => at - t.at < TICKER_TTL);
     tickerItems = [...kept, { id, server, kind, text, at, go }].slice(-TICKER_MAX);
-    tickerReceipts = nextReceipts;
     return true;
   }
   function pruneTicker() {
@@ -16157,18 +17026,68 @@
     else playNotify(server);
   }
 
+  const NOTIFY_TAIL_ROWS = 64;
+  /**
+   * Read the named rows from the actor, wherever they sort.
+   *
+   * Deliberately not error-swallowing. An empty answer means those rows are genuinely gone, which
+   * the caller answers with silence; a failed lookup means it does not know, which is a different
+   * thing and is answered further out by keeping the sound and inventing no headline. Collapsing
+   * the two would let a locked vault or a closed server look exactly like a deleted message.
+   */
+  async function fetchArrivals(server: number, channel: string, ids: string[]): Promise<TailMsg[]> {
+    return await invoke<TailMsg[]>("get_messages_by_id", { server, channel, ids });
+  }
+
   async function notifyLatestChannelMessage(
     server: number,
     channel: string,
     mode: "message" | "mention" | "detect",
+    arrivals: string[] = [],
   ) {
     try {
-      const channelMessages = await invoke<Msg[]>("get_messages", { server, channel });
-      const latest = channelMessages[channelMessages.length - 1];
+      // A bounded tail, not the history: this runs for every arrival in every channel that is not
+      // on screen, so it must not scale with how long the room has existed. The rows are only for
+      // the headline; whether anything here is addressed to me is answered natively over the whole
+      // channel, past this device's read mark. A tail alone could not answer it: one catch-up or
+      // one busy minute can append more messages than the tail holds, and a mention followed by
+      // that many ordinary messages would drop out of the window and never ring.
+      // The id is the cursor; its timestamp is what remains of it when the message it names has
+      // been deleted. Without that, a channel read long ago looks unread from its first row, and
+      // an ancient mention rings on every arrival from then on.
+      const cursor = readMarkOf(chatScopeKey(server, channel));
+      const tail = await invoke<{ rows: TailMsg[]; addressed_after_cursor: boolean }>(
+        "get_message_tail",
+        { server, channel, limit: NOTIFY_TAIL_ROWS, afterId: cursor.id || null, afterTs: cursor.ts || null },
+      );
+      // The rows that arrived, read by id rather than looked for in the tail. Messages are ordered
+      // by the sender's timestamp, so one that was delayed, or written on a device whose clock is
+      // behind, sorts wherever its stamp says: it can be arbitrarily far from the end, which is
+      // exactly the case this exists for. Searching the tail for it found nothing and fell back to
+      // headlining the last row, which is a message the ticker has usually already announced.
+      const arrived = arrivals.length ? await fetchArrivals(server, channel, arrivals) : [];
+      if (arrivals.length && !arrived.length) {
+        // The lookup succeeded and those rows are not there: deleted between arriving and being
+        // read. Nothing to announce, silently, and announcing something else would be a lie about
+        // what happened. A lookup that *failed* never reaches here; it is caught below, where the
+        // sound is kept and no headline is invented.
+        return;
+      }
+      // A mention among the arrivals is the headline; otherwise the last of them. Keeping the
+      // headline and the classification on one row is what stops the ticker's text, its sound and
+      // its click target from describing three different messages.
+      const targeted = arrived.find((row) => row.targets_me && row.author !== myFp);
+      const latest = targeted ?? arrived[arrived.length - 1] ?? tail.rows[tail.rows.length - 1];
       let kind: "message" | "mention" = mode === "mention" ? "mention" : "message";
-      // Mention detection depends on the active server's identity/profile and read marks. If the
-      // user switches servers during this fetch, degrade to an ordinary message notification.
-      if (mode === "detect" && server === activeServerId && targetsMe(channel, channelMessages)) {
+      // Whether the row that arrived is addressed to me is a property of that row, not of where it
+      // sits: `addressed_after_cursor` answers over the rows past the read mark, and a message that
+      // sorts before that mark is not among them. A delayed mention was being announced as an
+      // ordinary message for that reason alone. The cursor scan still answers for an event that
+      // named no arrivals, and for mentions further back than this one.
+      const detected =
+        mode === "detect" && server === activeServerId &&
+        (latest?.targets_me === true ? latest.author !== myFp : tail.addressed_after_cursor);
+      if (detected) {
         if (!mentionChannels.has(channel)) mentionChannels = new Set(mentionChannels).add(channel);
         kind = "mention";
       }
@@ -16309,6 +17228,10 @@
     const w = window.innerWidth;
     const h = window.innerHeight;
     const shrank = (scrunchW > 0 && w < scrunchW) || (scrunchH > 0 && h < scrunchH);
+    // A dragged voice stage is placed against the old window; a smaller one can leave it wholly
+    // outside, with nothing left to grab. Pull it back on every resize, not only a shrink: a
+    // maximise followed by a restore is two resizes and only the second one strands it.
+    reclampStage();
     scrunchW = w;
     scrunchH = h;
     if (!shrank) return;
@@ -16677,6 +17600,7 @@
         messages_appended: boolean;
         messages_changed: boolean;
         topic: boolean;
+        arrivals?: string[];
         jukebox: boolean;
         __seq?: number;
         __trace?: string;
@@ -16703,6 +17627,12 @@
         // A new or edited message may be addressed to me → the cross-server inbox may have a new
         // entry (debounced). A queue or topic edit can never add one.
         if (change.messagesAppended || change.messagesChanged) scheduleInboxReload();
+        // An open search holds a snapshot of this channel. Anything that moves its rows makes that
+        // snapshot wrong in both directions: a new message would never be found, and a message
+        // edited to remove the word would go on matching.
+        if (server === activeServerId && (change.messagesAppended || change.messagesChanged)) {
+          invalidateSearchChannel(channel);
+        }
         // A DM got a message → its activity stats changed; keep the friends sorting fresh.
         if (change.messagesAppended && dmHome && servers.find((x) => x.id === server)?.isDm) refreshDmStats();
         // The room I'm listening in need not be the one I'm looking at.
@@ -16743,15 +17673,24 @@
             // headline THIS channel with ANOTHER one's text, and the ticker click would try to
             // land a foreign message id here and silently do nothing. Fetch our own rows in that
             // case, exactly as the non-active-channel branch below always does.
-            if (!scopeHoldsConversation(messageWindowScope, server, channel)) {
-              void notifyLatestChannelMessage(server, channel, "detect");
+            // Likewise when the reader is up in history: the slice does not end at the newest row.
+            if (!scopeHoldsConversation(messageWindowScope, server, channel) || !tailLoaded) {
+              void notifyLatestChannelMessage(server, channel, "detect", change.arrivals ?? []);
               return;
             }
-            const last = messages[messages.length - 1];
-            const forMe =
-              last &&
-              last.author !== myFp &&
-              (mentionsMe(last.text) || (!!last.reply_to && msgById.get(last.reply_to)?.author === myFp));
+            // Same rule as the fetched branch: describe what arrived, not what sorts last. Being
+            // at the end of the conversation does not mean the loaded page contains an arrival
+            // that sorted earlier, so anything this page cannot account for is read by id.
+            const arrived = change.arrivals.length
+              ? messages.filter((m) => change.arrivals.includes(m.id))
+              : [];
+            if (change.arrivals.length && arrived.length < change.arrivals.length) {
+              void notifyLatestChannelMessage(server, channel, "detect", change.arrivals);
+              return;
+            }
+            const targeted = arrived.find((m) => m.targets_me && m.author !== myFp);
+            const last = targeted ?? arrived[arrived.length - 1] ?? messages[messages.length - 1];
+            const forMe = last && last.author !== myFp && last.targets_me;
             notifyMessage(server, channel, last, forMe ? "mention" : "message");
           });
           return;
@@ -16765,13 +17704,13 @@
           if (server !== activeServerId) {
             // Another server: its profile identity is not loaded, so this is an ordinary-message
             // alert, but its own server sound override still applies.
-            void notifyLatestChannelMessage(server, channel, "message");
+            void notifyLatestChannelMessage(server, channel, "message", change.arrivals ?? []);
           } else if (mentionChannels.has(channel)) {
-            void notifyLatestChannelMessage(server, channel, "mention");
+            void notifyLatestChannelMessage(server, channel, "mention", change.arrivals ?? []);
           } else {
             // A non-active channel of the server I'm in: scan for a message aimed at me, then use
             // that same fetched row for the ticker so its click target and sound cannot diverge.
-            void notifyLatestChannelMessage(server, channel, "detect");
+            void notifyLatestChannelMessage(server, channel, "detect", change.arrivals ?? []);
           }
         }
         // Outside the guard on purpose. An arrival for a channel the catalog does not list falls
@@ -17007,6 +17946,13 @@
     // Global keyboard shortcuts: Escape closes the top-most overlay/menu; Ctrl/Cmd+1–5 switch
     // tabs; Ctrl/Cmd+K opens the quick switcher.
     const onKey = (e: KeyboardEvent) => {
+      // First, before any other binding can claim it: while the settings page is waiting for a
+      // key to bind, the next press IS the answer and must reach nothing else.
+      if (pttCapturing) {
+        onPttKeyDown(e);
+        return;
+      }
+      onPttKeyDown(e);
       if (!locked && !e.repeat) {
         const target = activeTextEffectTarget();
         const effect = target ? effectForKeybind(textEffectKeybinds, keybindFromEvent(e)) : "";
@@ -17194,6 +18140,7 @@
     };
     // Melody keys are held instruments, not triggers: the lift is what commits the note value.
     const onKeyUp = (e: KeyboardEvent) => {
+      onPttKeyUp(e); // the lift closes the microphone wherever the press happened to land
       const k = e.key.toLowerCase();
       if (k === "t") spaceTrayHeld = false; // the tray is held open, not toggled
       // Release by the pinned note, not by what sits at that key now: the register may have
@@ -17218,6 +18165,10 @@
       instKeyNotes.clear();
       instReleaseAll(); // a note stranded here keeps sounding in every other ear in the call
       spaceTrayHeld = false; // the keyup that would close it may land in another window
+      // Same reasoning, and it matters more: a talk key held as focus leaves would otherwise
+      // never see its keyup, and the microphone would stay open for the rest of the call.
+      releasePtt();
+      pttCapturing = false; // an abandoned binding prompt does not wait forever
     };
     // The thumb buttons walk the same history as the title bar's arrows. They arrive as buttons
     // 3 and 4; preventDefault stops the webview from acting on them as well.
@@ -17289,6 +18240,7 @@
       clearTimeout(updateTimer);
       clearInterval(pingTimer);
       subs.forEach((p) => p.then((un) => un()));
+      stopSearchWorker(); // it holds a copy of the corpus and outlives the component otherwise
       // Last, so anything the teardown above logs still has somewhere to go. Stopping restores the
       // console, removes both window listeners and sends whatever is still queued; without it a
       // remount leaves the old hooks live and every event gets recorded twice.
@@ -18830,16 +19782,13 @@
     {@const live = jamRecActive.some((r) => r.rec === 2)}
     <div class="jam-rec-banner" class:live>
       <span class="jam-rec-dot" class:armed={!live}></span>
+      <!-- The banner stays: a take is note events rather than audio, but the room still gets to
+           see that one is rolling and who is keeping it. -->
       <span class="jam-rec-text">
-        {live ? "REC" : "RECORD?"} · {jamRecActive.map((r) => (r.fp === "me" ? "you" : nameOf(r.fp))).join(", ")}
-        {live ? "" : "· starts when everyone allows it"}
+        {live ? "REC" : "READY"} · {jamRecActive.map((r) => (r.fp === "me" ? "you" : nameOf(r.fp))).join(", ")}
+        · notes, not audio
       </span>
       <span class="stage-spacer"></span>
-      {#if jamRecActive.some((r) => r.fp !== "me")}
-        <button class="ghost jam-save-btn" class:on={jamRecConsent} onclick={toggleJamConsent}
-          title={jamRecConsent ? "Withdraw consent; recorders including you pause" : "Allow recorders in this call to include your playing"}
-        >{jamRecConsent ? "ALLOWED" : "ALLOW"}</button>
-      {/if}
     </div>
   {/if}
 {/snippet}
@@ -19192,11 +20141,10 @@
                 <span class="jam-met-chip warn">{jamRecGaps} lost</span>
               {/if}
             {:else}
-              <button class="ghost jam-save-btn rec" onclick={jamRecArm} title="Ask the room to record; the take starts when everyone allows it">REC</button>
+              <button class="ghost jam-save-btn rec" onclick={jamRecArm} title="Keep this take: the note events everyone is already hearing, no audio">REC</button>
               <span class="jam-edit-note">a take is the note events, not audio · the whole room sees it</span>
             {/if}
             <span class="stage-spacer"></span>
-            <button class="ghost jam-legacy" class:on={jamRecConsent} onclick={toggleJamConsent} title="Whether recorders in this call may include your playing">{jamRecConsent ? "YOU ALLOW REC" : "ALLOW REC"}</button>
           </div>
           {#each jamTakes as t (t.id)}
             <div class="jam-take-row">
@@ -20021,14 +20969,27 @@
       {#if unlockMethod === "pass"}
         <label class="field">
           <span class="muted">Passphrase</span>
-          <!-- svelte-ignore a11y_autofocus -->
-          <input
-            type="password"
-            bind:value={passphrase}
-            onkeydown={(e) => e.key === "Enter" && passphrase && (changingVaultSecret ? submitVaultSecretChange() : gateSubmit())}
-            placeholder="passphrase"
-            autofocus
-          />
+          <div class="reveal-row">
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              type={revealPassphrase ? "text" : "password"}
+              bind:value={passphrase}
+              onkeydown={(e) => e.key === "Enter" && passphrase && (changingVaultSecret ? submitVaultSecretChange() : gateSubmit())}
+              placeholder="passphrase"
+              autofocus
+            />
+            <!-- Off by default, and never remembered: revealing is for checking a long
+                 passphrase you are part way through typing, not a setting to leave on. The
+                 sigil's magic word already had this; the passphrase did not. -->
+            <button
+              type="button"
+              class="ghost small reveal-btn"
+              aria-pressed={revealPassphrase}
+              title={revealPassphrase ? "Hide the passphrase" : "Show the passphrase"}
+              aria-label={revealPassphrase ? "Hide the passphrase" : "Show the passphrase"}
+              onclick={() => (revealPassphrase = !revealPassphrase)}
+            >{revealPassphrase ? "Hide" : "Show"}</button>
+          </div>
         </label>
       {:else if unlockMethod === "sigil"}
         <p class="muted small">
@@ -20329,7 +21290,17 @@
       <label class="field">
         <span class="muted">Display name</span>
         <input bind:value={displayName} placeholder="display name" />
+        <small class="muted">Who you are to the people in the group, not what the group is called.</small>
       </label>
+      <!-- Folded by default. It is a real choice and it is made before anything is founded or
+           joined, but it is three cards of prose sitting directly above the primary action, and
+           at the default window size it pushed "Join / Found a server" below the fold entirely.
+           The summary states the current answer, so folding it hides nothing. -->
+      <details class="start-trust">
+        <summary>
+          Shared media: <b>{ONBOARDING_TRUST_LABELS[onboardingFileTrust]}</b>
+          <span class="muted small">change</span>
+        </summary>
       <fieldset class="file-trust-onboarding">
         <legend>Before this server can fetch shared media automatically</legend>
         <label class:selected={onboardingFileTrust === "on-demand"}>
@@ -20346,6 +21317,7 @@
         </label>
         <p class="muted small">Files fetched into Mewtual stay encrypted in its vault. Opening or exporting content still hands untrusted bytes to a decoder or another app.</p>
       </fieldset>
+      </details>
       <div class="start-tabs" role="tablist" aria-label="Join or found a server">
         <button
           type="button"
@@ -20379,6 +21351,11 @@
           <p class="muted">
             Paste the invite you were sent: it carries everything your app needs to find the group.
           </p>
+          <label class="field">
+            <span class="muted">Name this group (optional)</span>
+            <input bind:value={joinServerName} placeholder="what you want to call it" />
+            <small class="muted">Your own label for the rail. An invite does not carry the group's name; you can change this later in Server settings.</small>
+          </label>
           <textarea
             class="invite-code"
             bind:value={joinInvite}
@@ -20455,6 +21432,11 @@
         </div>
       {:else}
         <div class="start-pane" role="tabpanel" id="start-panel-found" aria-labelledby="start-tab-found">
+          <label class="field">
+            <span class="muted">Server name</span>
+            <input bind:value={newServerName} placeholder="what this group is called" />
+            <small class="muted">The group's own name, separate from your display name above.</small>
+          </label>
           <div class="field">
             <span class="muted">Who is this server for?</span>
             <div class="mode-cards">
@@ -21216,16 +22198,17 @@
             ondragleave={() => (dragOver = false)}
             ondrop={(e) => onComposerDrop("chat", e)}
           >
-            {#if messageWindow.start > 0}
+            {#if pageStart > 0}
               <li class="message-window-edge">
                 <button class="ghost small" type="button" onclick={revealOlderMessages}>
-                  Load {Math.min(CHAT_WINDOW_STEP, messageWindow.start)} older messages
+                  Load {Math.min(CHAT_WINDOW_STEP, pageStart)} older messages
                 </button>
               </li>
             {/if}
-            {#each renderedMessages as m, visibleIndex (messageDomKey(m, messageWindow.start + visibleIndex))}
-              {@const mi = messageWindow.start + visibleIndex}
-              {@const newDay = visibleIndex === 0 || mi === 0 || !sameDay(messages[mi - 1].ts, m.ts)}
+            {#each messages as m, visibleIndex (messageDomKey(m, pageStart + visibleIndex))}
+              {@const mi = pageStart + visibleIndex}
+              {@const prev = visibleIndex > 0 ? messages[visibleIndex - 1] : undefined}
+              {@const newDay = !prev || !sameDay(prev.ts, m.ts)}
               {#if newDay}
                 <li class="day-divider" aria-hidden="true"><span>{dayLabel(m.ts)}</span></li>
               {/if}
@@ -21233,14 +22216,14 @@
                 <li class="unread-divider" aria-hidden="true"><span>new · {unreadCount} unread</span></li>
               {/if}
               {@const grouped =
-                mi > 0 &&
+                !!prev &&
                 mi !== firstUnreadIdx &&
                 !newDay &&
                 !m.reply_to &&
-                messages[mi - 1].author === m.author &&
-                m.ts - messages[mi - 1].ts < 300000}
+                prev.author === m.author &&
+                m.ts - prev.ts < 300000}
               {@const framePosition = CHAT_MESSAGE_FRAMES_ENABLED
-                ? messageFramePosition(messages, mi, messageFrameBreaks)
+                ? messageFramePosition(messages, visibleIndex, messageFrameBreaks)
                 : "single"}
               {@const bubble = bubbleStyle(m.author)}
               {@const messageFrame = CHAT_MESSAGE_FRAMES_ENABLED
@@ -21295,7 +22278,7 @@
                 <div class="m-body">
                 {@render frameLayers(messageFrame, !!bubble)}
                 {#if m.reply_to}
-                  {@const parent = msgById.get(m.reply_to)}
+                  {@const parent = replyParent(m)}
                   <button
                     class="reply-quote"
                     type="button"
@@ -21367,8 +22350,8 @@
                   {/if}
                   <span class="text">{@html renderedMessage(m)}{#if m.edited}<span class="edited-tag muted" title={"edited " + new Date(m.edited).toLocaleString()}> (edited)</span>{/if}</span>
                 {/if}
-                {#if m.id && replyCounts.get(m.id)}
-                  {@const n = replyCounts.get(m.id)}
+                {#if m.id && m.reply_count}
+                  {@const n = m.reply_count}
                   <button class="reply-count" type="button" title="Jump to the first reply" onclick={() => jumpToFirstReply(m.id)}>
                     💬 {n} {n === 1 ? "reply" : "replies"}
                   </button>
@@ -21419,12 +22402,12 @@
                 </div>
               </li>
             {:else}
-              <li class="muted">{groupLoading ? "Loading messages…" : "No messages yet: say hello."}</li>
+              <li class="muted">{messagesLoading ? "Loading messages…" : "No messages yet: say hello."}</li>
             {/each}
-            {#if messageWindow.end < messages.length}
+            {#if !tailLoaded}
               <li class="message-window-edge">
                 <button class="ghost small" type="button" onclick={revealNewerMessages}>
-                  Load {Math.min(CHAT_WINDOW_STEP, messages.length - messageWindow.end)} newer messages
+                  Load {Math.min(CHAT_WINDOW_STEP, pageTotal - pageEnd)} newer messages
                 </button>
               </li>
             {/if}
@@ -21515,6 +22498,7 @@
                   rows="1"
                   class="composer-input"
                   placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
+                  onpaste={(e) => onComposerPaste("chat", e)}
                   oninput={onComposerInput}
                   onselect={() => onTextEffectSelection("chat")}
                   onkeydown={onComposerKeydown}
@@ -22071,7 +23055,7 @@
                 />
               </label>
               {@render textEffectButton("announcement", "Announcement text effects")}
-              <textarea bind:this={announcementInputEl} bind:value={statusDraft} rows="1" onselect={() => onTextEffectSelection("announcement")} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Write an announcement…"}></textarea>
+              <textarea bind:this={announcementInputEl} bind:value={statusDraft} rows="1" onselect={() => onTextEffectSelection("announcement")} onpaste={(e) => onComposerPaste("status", e)} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Write an announcement…"}></textarea>
               <button type="submit" disabled={uploading}>Post</button>
             </form>
           {:else}
@@ -22636,8 +23620,27 @@
     {/if}
 
     {#if inCall && stageOpen && !focusOpen}
-      <div class="stage" class:top={callDockTop} class:away={callElsewhere}>
-        <header class="stage-head">
+      <!-- A dragged position replaces the dock outright: `floating` drops the centring transform
+           so left/top mean what they say. The dock button clears it. -->
+      <div
+        class="stage"
+        class:top={callDockTop}
+        class:away={callElsewhere}
+        class:floating={!!stagePos}
+        bind:this={stageEl}
+        style={stagePos ? `left:${stagePos.x}px;top:${stagePos.y}px` : ""}
+      >
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <header
+          class="stage-head"
+          class:dragging={!!stageDrag}
+          onpointerdown={onStagePointerDown}
+          onpointermove={onStagePointerMove}
+          onpointerup={onStagePointerUp}
+          onpointercancel={onStagePointerUp}
+          ondblclick={resetStagePos}
+          title={stagePos ? "Drag to move; double-click to put it back on its dock" : "Drag to move"}
+        >
           <span class="stage-live"></span>
           <span class="stage-label">VOICE</span>
           {@render callServerTag()}
@@ -22680,6 +23683,13 @@
             Media is end to end encrypted on every path; no relay or server can hear or decrypt it.
             A relayed leg passes through a TURN relay, which can see who is talking to whom, when,
             and from which IP address. A direct leg has nobody in the path at all.
+            {#if suppressedIceCandidates}
+              <br />
+              Held back {suppressedIceCandidates} local network address{suppressedIceCandidates === 1 ? "" : "es"}
+              on virtual adapters (VirtualBox, WSL or Hyper-V). Nobody outside this machine can
+              reach those, so sending them would only have made the other side wait while it tried
+              them. Your real network is unaffected, and nothing needs changing on your system.
+            {/if}
           </p>
         {/if}
 
@@ -22692,7 +23702,9 @@
           <ul class="stage-peers">
             {#each callParticipants as fp (fp)}
               {@const link = linkState(callPeerStates[fp] ?? "new")}
-              {@const vol = peerVolumes[fp] ?? 1}
+              {@const vol = peerVolumes[fp] ?? DEFAULT_PEER_LEVEL}
+              {@const shareVol = peerShareVolumes[fp] ?? DEFAULT_PEER_LEVEL}
+              {@const hasShare = peerHasShareAudio(fp)}
               <li class="stage-peer">
                 <div class="stage-row">
                   <span class="stage-av" class:talking={speaking[fp]}>{@render catEars(fp)}{@render callAvatarTag(fp)}</span>
@@ -22724,13 +23736,14 @@
                     class="stage-vol"
                     type="range"
                     min="0"
-                    max="1"
-                    step="0.05"
+                    max={MAX_PEER_LEVEL}
+                    step="5"
                     value={vol}
-                    aria-label={`Volume for ${nameOf(fp)}`}
+                    aria-label={`Voice volume for ${nameOf(fp)}`}
+                    title={`Their voice, for you only. Past 100% this amplifies what they sent.`}
                     oninput={(e) => setPeerVolume(fp, Number(e.currentTarget.value))}
                   />
-                  <span class="stage-pct">{Math.round(vol * 100)}%</span>
+                  <span class="stage-pct" class:boosted={vol > DEFAULT_PEER_LEVEL}>{vol}%</span>
                   <button
                     class="ghost stage-tog"
                     class:on={voiceMutedPeers[fp]}
@@ -22746,6 +23759,33 @@
                     onclick={() => toggleInstPeer(fp)}
                   >{@render icoNote()}</button>
                 </div>
+                <!-- A second trim, present only while they are actually sending shared audio.
+                     Their voice and their share are separate chains, so this balances one against
+                     the other: turn a game down without turning the person down. -->
+                {#if hasShare}
+                  <div class="stage-trim">
+                    <span class="stage-trim-ico" title="What they are sharing">{@render icoCam()}</span>
+                    <input
+                      class="stage-vol"
+                      type="range"
+                      min="0"
+                      max={MAX_PEER_LEVEL}
+                      step="5"
+                      value={shareVol}
+                      aria-label={`Shared audio volume for ${nameOf(fp)}`}
+                      title="The sound of what they are sharing, independent of their voice"
+                      oninput={(e) => setPeerShareVolume(fp, Number(e.currentTarget.value))}
+                    />
+                    <span class="stage-pct" class:boosted={shareVol > DEFAULT_PEER_LEVEL}>{shareVol}%</span>
+                    <button
+                      class="ghost stage-tog"
+                      class:on={shareMutedPeers[fp]}
+                      aria-pressed={!!shareMutedPeers[fp]}
+                      title={shareMutedPeers[fp] ? "Hear what they are sharing again" : "Mute their shared audio, keep their voice"}
+                      onclick={() => toggleSharePeer(fp)}
+                    >{@render icoSpeaker()}</button>
+                  </div>
+                {/if}
               </li>
             {/each}
           </ul>
@@ -22760,10 +23800,17 @@
             {@render micMeter()}
           </div>
           <div class="stage-acts">
+            <!-- Under push to talk the button still means mute, but the label has to say which
+                 of the two gates is currently closed, or a silent microphone looks like a bug. -->
             <button class="ghost stage-act" class:muted={callMuted} title={callMuted ? "Unmute" : "Mute your microphone"} onclick={toggleMute}>
               {#if callMuted}{@render icoMicOff()}{:else}{@render icoMic()}{/if}
               <span class="stage-act-lbl">{callMuted ? "Muted" : "Mute"}</span>
             </button>
+            {#if pushToTalk.mode === "ptt" && !callMuted}
+              <span class="stage-chip" class:struck={!pttHeld} title={`Push to talk: hold ${keyLabel(pushToTalk.key)} to speak`}>
+                {pttHeld ? "ON AIR" : `HOLD ${keyLabel(pushToTalk.key).toUpperCase()}`}
+              </span>
+            {/if}
             <button class="ghost stage-act" class:muted={callDeafened} title={callDeafened ? "Hear the room again" : "Deafen: stop hearing everyone"} onclick={toggleDeafen}>
               {@render icoSpeaker()}
               <span class="stage-act-lbl">{callDeafened ? "Deafened" : "Deafen"}</span>
@@ -22856,6 +23903,22 @@
               {linksUp}/{callParticipants.length} links up
             </span>
           {/if}
+          <!-- One click to the thing worth looking at, without hunting for the right tile. With
+               several shares running it cycles through them, so "the stream" is reachable even
+               when it is not the first one. -->
+          {#if focusSoloActive}
+            <button class="ghost focus-chip" title="Back to everyone" onclick={() => (focusSolo = "")}>
+              <span class="stage-label">SHOW ALL</span>
+            </button>
+          {:else if focusShareCandidates.length}
+            <button
+              class="ghost focus-chip"
+              title={focusShareCandidates.length > 1
+                ? `Watch one share only (${focusShareCandidates.length} are running)`
+                : "Watch the share only"}
+              onclick={() => (focusSolo = focusShareCandidates[0])}
+            >{@render icoScreen()}<span class="stage-label">WATCH SHARE</span></button>
+          {/if}
           <!-- Says what is actually true. The media key is derived but the frame layer that would
                use it is not implemented, so today's guarantee is DTLS-SRTP plus signalling that
                cannot be MITM'd, which is E2E but is not MLS-keyed media. -->
@@ -22897,7 +23960,7 @@
             {@const stream = me ? localVideoStream : remoteStreams[fp] ?? null}
             {@const held = me ? callHeld : remoteHeld[fp] ?? []}
             {@const micOff = me ? callMuted : !!peerMeta[fp]?.mic}
-            <div class="focus-tile" class:talking={speaking[me ? "me" : fp]}>
+            <div class="focus-tile" class:talking={speaking[me ? "me" : fp]} class:soloed={focusSoloActive}>
               {#if vid > 0 && stream}
                 <!-- Always muted: voice arrives on the per-peer <audio> elements, and a second
                      unmuted path here would double every voice in the room. -->
@@ -22912,6 +23975,17 @@
                 {#if held.length}<span class="focus-nm-note" title="Playing right now">{@render icoNote()}</span>{/if}
                 {#if vid === 2}<span class="focus-nm-share">SHARING</span>{/if}
               </span>
+              <!-- Watch one person only. Sits on the tile because the tile is what it is about,
+                   and the tile is the thing you are already looking at when you want this. -->
+              <button
+                class="focus-solo"
+                class:on={focusSoloActive}
+                aria-pressed={focusSoloActive}
+                title={focusSoloActive
+                  ? "Back to everyone"
+                  : `Watch only ${me ? "your own share" : nameOf(fp)}`}
+                onclick={() => toggleFocusSolo(fp)}
+              >{focusSoloActive ? "SHOW ALL" : "WATCH ONLY"}</button>
             </div>
           {/each}
         </div>
@@ -22962,7 +24036,7 @@
     -->
     {#if inCall && jukePickerOpen}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay juke-pick-over" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) jukePickerOpen = false; }}>
+      <div class="overlay juke-pick-over" role="presentation" use:dismissOnBackdrop={() => (jukePickerOpen = false)}>
         <div class="overlay-card juke-pick">
           <header class="overlay-head">
             <h2>Add from share</h2>
@@ -23099,7 +24173,7 @@
 
     {#if textEffectTarget && showTextEffectCatalog}
       {@const fxTarget = textEffectTarget}
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) { showTextEffectCatalog = false; textEffectTarget = null; } }}>
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={() => { showTextEffectCatalog = false; textEffectTarget = null; }}>
         <div class="overlay-card text-fx-catalog" role="dialog" aria-modal="true" aria-labelledby="text-fx-title">
           <header class="overlay-head">
             <div><span class="name-studio-label">TEXT EFFECTS // {textEffectTargetLabel(fxTarget).toUpperCase()}</span><h2 id="text-fx-title">Make the selected words act</h2></div>
@@ -23145,7 +24219,7 @@
       {@const fp = profileCard}
       {@const p = profiles[fp]}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) profileCard = null; }}>
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={() => (profileCard = null)}>
         <div class="overlay-card profile-card">
           <header class="overlay-head">
             <h2>Profile</h2>
@@ -23199,7 +24273,7 @@
     {#if verifyFor}
       {@const vfp = verifyFor}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) verifyFor = null; }}>
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={() => (verifyFor = null)}>
         <div class="overlay-card verify-card">
           <header class="overlay-head">
             <h2>Verify {nameOf(vfp)}</h2>
@@ -23235,7 +24309,7 @@
 
     {#if scanOpen}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeScan(null); }}>
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={() => closeScan(null)}>
         <div class="overlay-card scan-card">
           <header class="overlay-head">
             <h2>Scan a code</h2>
@@ -23252,7 +24326,9 @@
 
     {#if showLinkDevice}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeLinkDevice(); }}>
+      <!-- Holds a typed transport passphrase and a pasted grant, so a stray drag closing it
+           costs real work; the action requires the press to have started on the backdrop. -->
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={closeLinkDevice}>
         <div class="overlay-card">
           <header class="overlay-head">
             <h2>Link a device</h2>
@@ -24274,6 +25350,39 @@
               <div class="stx-crumb">SETTINGS // APP // VOICE &amp; CALLS</div>
               <h1>Voice &amp; Calls</h1>
               <section class="set-section">
+                <h3>Microphone</h3>
+                <div class="file-trust-modes">
+                  <button
+                    type="button"
+                    class:active={pushToTalk.mode === "open"}
+                    onclick={() => savePushToTalk({ ...pushToTalk, mode: "open" })}
+                  ><b>Open</b><small>Live whenever you are unmuted</small></button>
+                  <button
+                    type="button"
+                    class:active={pushToTalk.mode === "ptt"}
+                    disabled={!pushToTalk.key}
+                    title={pushToTalk.key ? "" : "Set a key first"}
+                    onclick={() => savePushToTalk({ ...pushToTalk, mode: "ptt" })}
+                  ><b>Push to talk</b><small>Live only while a key is held</small></button>
+                </div>
+                <div class="rename-row">
+                  <span class="muted small">Talk key</span>
+                  <button
+                    type="button"
+                    class="ghost small"
+                    class:on={pttCapturing}
+                    onclick={() => (pttCapturing = !pttCapturing)}
+                  >{pttCapturing ? "Press a key…" : keyLabel(pushToTalk.key)}</button>
+                  {#if pushToTalk.key}
+                    <button type="button" class="ghost small" onclick={() => savePushToTalk({ mode: "open", key: "" })}>Clear</button>
+                  {/if}
+                </div>
+                <p class="muted small">
+                  Push to talk works while Mewtual has focus. It deliberately does not register a
+                  system-wide shortcut: that would take the key away from whatever else you are
+                  holding it in, which for a key you press while playing something is the opposite
+                  of what you want. Muting still silences the microphone whatever the key is doing.
+                </p>
                 <h3>Devices</h3>
                 <p class="muted small">Microphone and output pickers live on the call stage (they swap live, mid-call) and are remembered here between calls.</p>
                 <p class="muted small">A MIDI keyboard for the call instrument is set up in Settings → Devices, along with a monitor for checking one that is not behaving.</p>
@@ -24693,13 +25802,61 @@
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // OVERVIEW</div>
               <h1>Overview</h1>
               <section class="set-section">
-              <p>{cur?.name ?? ":"} <span class="role-badge {myRole}">{myRole}</span></p>
+              <p>{cur ? serverLabel(cur) : ":"} <span class="role-badge {myRole}">{myRole}</span></p>
+              {#if canModerate && !cur?.isDm}
+                <h3>Name this server</h3>
+                <p class="muted small">Everyone sees this name unless they have renamed the server for themselves.</p>
+                <form class="rename-row" onsubmit={(e) => { e.preventDefault(); publishServerName(); }}>
+                  <input bind:value={sharedNameDraft} maxlength="64" placeholder="What this group is called" />
+                  <button class="ghost small" disabled={busy || !liveryLoaded || sharedNameDraft.trim() === livery.name}>Publish</button>
+                </form>
+                {#if !liveryLoaded}
+                  <p class="muted small">Still reading this server's published values; publishing is held until it lands so an empty box cannot clear the name for everyone.</p>
+                {:else if livery.name}
+                  <p class="muted small">Published as <b>{livery.name}</b>.</p>
+                {:else}
+                  <p class="muted small">No name published yet, so each member sees whatever they called it when they joined.</p>
+                {/if}
+              {/if}
+              <h3>Rename it for yourself</h3>
               <form class="rename-row" onsubmit={(e) => { e.preventDefault(); renameServer(); }}>
-                <input bind:value={serverNameDraft} placeholder="Server name" />
-                <button class="ghost small" disabled={!serverNameDraft.trim() || serverNameDraft.trim() === cur?.name}>Rename</button>
+                <input bind:value={serverNameDraft} maxlength="64" placeholder="Your own label" />
+                <button class="ghost small" disabled={!serverNameDraft.trim() || serverNameDraft.trim() === (cur ? serverLabel(cur) : "")}>Rename</button>
               </form>
-              <p class="muted small">The name is your own label for this server (not shared with other members).</p>
+              {#if activeServerId !== null && loadLocalName(activeServerId)}
+                <p class="muted small">
+                  You call this server <b>{loadLocalName(activeServerId)}</b>, which overrides the published name.
+                  <button type="button" class="ghost small" onclick={clearLocalServerName}>Use the published name</button>
+                </p>
+              {:else}
+                <p class="muted small">A private label, visible only to you. Nobody else is told.</p>
+              {/if}
               </section>
+              <!-- The icon IS shared, and it was only reachable under Livery, which reads as a
+                   theming page: the one thing everybody looks for when setting a server up was
+                   the one thing filed under decoration. It lives beside the name now. -->
+              {#if canModerate && !cur?.isDm}
+                <section class="set-section">
+                  <h3>Server icon</h3>
+                  <p class="muted small">Shared with every member and shown on their rail. Unlike the name, this one everybody sees.</p>
+                  <div class="avatar-row">
+                    {#if livery.icon}
+                      <img class="avatar lg" src={imgSrc(livery.icon)} alt="" />
+                    {:else}
+                      <span class="avatar lg fallback">{monogram(cur?.name ?? "")}</span>
+                    {/if}
+                    <label class="upload-btn">
+                      {livery.icon ? "Replace icon" : "Upload icon"}
+                      <input type="file" accept="image/png,image/jpeg,image/webp" onchange={(e) => loadServerIcon(e.currentTarget.files)} />
+                    </label>
+                    {#if livery.icon}
+                      <button type="button" class="ghost small" disabled={busy} onclick={() => setServerIcon("")}>Remove icon</button>
+                    {/if}
+                  </div>
+                  <p class="muted small">Colours, corners and the rest of the shared look live under Livery.</p>
+                  <button type="button" class="ghost small" onclick={() => (serverSettingsPage = "livery")}>Open Livery</button>
+                </section>
+              {/if}
             {:else if serverSettingsPage === "notifications"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // NOTIFICATIONS</div>
               <h1>Notifications</h1>
@@ -24776,6 +25933,46 @@
             {:else if serverSettingsPage === "filetrust"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // FILE TRUST</div>
               <h1>File Trust</h1>
+              <!-- The upload cap is a SERVER policy and the trust modes below are a LOCAL one.
+                   They share this page because both answer "what may files do here", but the
+                   wording has to keep saying which is which. -->
+              {#if fileSizeLimit}
+                <section class="set-section">
+                  <h3>Largest file members may share</h3>
+                  {#if canModerate && !cur?.isDm}
+                    <p class="muted small">
+                      Applies to everyone on this server. Raising it lets members commit each other
+                      to bigger downloads, so it is worth setting to what you actually need.
+                    </p>
+                    <form class="rename-row" onsubmit={(e) => { e.preventDefault(); saveFileSizeLimit(); }}>
+                      <input
+                        type="number"
+                        min={Math.ceil(fileSizeLimit.min / (1024 * 1024))}
+                        max={Math.floor(fileSizeLimit.max / (1024 * 1024))}
+                        step="1"
+                        bind:value={fileLimitDraftMib}
+                        aria-label="Largest file in MiB"
+                      />
+                      <span class="muted small">MiB</span>
+                      <button
+                        class="ghost small"
+                        disabled={busy || Math.round(fileLimitDraftMib) * 1024 * 1024 === fileSizeLimit.limit}
+                      >Apply</button>
+                    </form>
+                    <p class="muted small">
+                      Currently <b>{formatBytes(fileSizeLimit.limit)}</b>. Anything from
+                      {formatBytes(fileSizeLimit.min)} to {formatBytes(fileSizeLimit.max)}; the
+                      upper figure is the most the protocol can carry, not a preference.
+                      Lowering it does not withdraw files already shared.
+                    </p>
+                  {:else}
+                    <p class="muted small">
+                      This server accepts files up to <b>{formatBytes(fileSizeLimit.limit)}</b>.
+                      The owner sets this.
+                    </p>
+                  {/if}
+                </section>
+              {/if}
               <section class="set-section file-trust-settings">
                 <h3>Automatic fetch and decoding on this device</h3>
                 <p class="muted small">This is your local, vault-sealed choice. It does not endorse a member to anyone else and it never blocks an explicit Load, Play, Open, or Download click.</p>
@@ -25296,7 +26493,7 @@
 
     {#if lightbox}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="lightbox" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeLightbox(); }}>
+      <div class="lightbox" role="presentation" use:dismissOnBackdrop={closeLightbox}>
         <div class="lightbox-bar">
           <span class="lightbox-name" title={lightboxFile?.name ?? lightbox.alt}>
             {lightboxFile?.name || lightbox.alt || "image"}
@@ -25320,7 +26517,7 @@
           class="lightbox-stage"
           class:zoomed={lightboxZoom}
           role="presentation"
-          onclick={(e) => { if (e.target === e.currentTarget) closeLightbox(); }}
+          use:dismissOnBackdrop={closeLightbox}
         >
           <button
             class="lightbox-img"
@@ -25336,7 +26533,7 @@
 
     {#if fileInfo}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeFileInfo(); }}>
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={closeFileInfo}>
         <div class="overlay-card">
           <header class="overlay-head">
             <h2 class="file-info-title">📄 {fileInfo.name}</h2>
@@ -25554,7 +26751,7 @@
 
     {#if showQuickSwitch}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay qs-overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeQuickSwitch(); }}>
+      <div class="overlay qs-overlay" role="presentation" use:dismissOnBackdrop={closeQuickSwitch}>
         <div class="qs-card">
           <!-- svelte-ignore a11y_autofocus -->
           <input

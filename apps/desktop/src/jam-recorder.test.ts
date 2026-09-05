@@ -4,7 +4,6 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { JAM_SESSION_NONCE_HEX_CHARS, JAM_TAKE_COMMITMENT_DOMAIN, TAKE_ID_MAX_BYTES, TAKE_MAX_BYTES, type JamPatch } from "./jam-contract.ts";
 import {
-  applyJamRecorderConsent,
   captureJamRecorderLease,
   jamRecorderTimelineMs,
   jamParticipantCommitment,
@@ -36,34 +35,30 @@ function recorder() {
 }
 
 function start(rec: JamTakeRecorder) {
-  assert.equal(rec.setConsent(alice, true), true);
-  assert.equal(rec.setConsent(bob, true), true);
   assert.equal(rec.start(), true);
 }
 
-test("recording starts only with every participant's honest-client consent", () => {
+test("recording starts on request, because a take is note events and not audio", () => {
+  // It used to need every participant to agree first, which treated the take as a recording of the
+  // room. It captures the note events the jam layer already broadcasts to every ear, synthesized
+  // locally at each of them: no microphone is involved and no voice is in it.
   const rec = recorder();
-  assert.equal(rec.start(), false);
-  rec.setConsent(alice, true);
-  assert.equal(rec.start(), false);
-  rec.setConsent(bob, true);
-  assert.equal(rec.start(), true);
-  rec.setConsent(bob, false);
-  assert.equal(rec.state(), "arming");
+  assert.equal(rec.start(), true, "nobody has to be asked");
+  assert.equal(rec.state(), "recording");
+  assert.equal(
+    rec.recordNoteOn({ source: alice, sessionNonce: aliceSn, ms: 1, sequence: 1, note: 60, wave: "sine" }).ok,
+    true,
+  );
 });
 
-test("local consent withdrawal immediately closes the recorder event gate", () => {
+test("a stopped recorder stays stopped, and the gate still refuses events outside recording", () => {
   const rec = recorder();
-  start(rec);
-  assert.equal(applyJamRecorderConsent(rec, alice, false), true);
-  assert.equal(rec.state(), "arming");
+  rec.stop();
+  assert.equal(rec.start(), false, "a finished take is not restartable");
   assert.deepEqual(
     rec.recordNoteOn({ source: alice, sessionNonce: aliceSn, ms: 1, sequence: 1, note: 60, wave: "sine" }),
     { ok: false, reason: "not-recording" },
   );
-  assert.equal(applyJamRecorderConsent(rec, alice, true), true);
-  assert.equal(rec.state(), "arming", "re-allow still requires the normal sync/start transition");
-  assert.equal(rec.start(), true);
 });
 
 test("an async drum keeps receipt time and cannot cross into a replacement take", () => {
@@ -84,7 +79,7 @@ test("an async drum keeps receipt time and cannot cross into a replacement take"
   if (result?.ok) assert.equal(result.event.ms, 7);
 });
 
-test("an event received before consent cannot cross the recorder start boundary", () => {
+test("an event received before the recorder started cannot cross the start boundary", () => {
   const rec = recorder();
   const preConsentLease = captureJamRecorderLease(rec, 7.4);
   assert.equal(preConsentLease, null);
@@ -95,19 +90,19 @@ test("an event received before consent cannot cross the recorder start boundary"
   assert.equal(rec.snapshot().events.length, 0);
 });
 
-test("receipt leases cannot cross consent withdrawal and restart on the same recorder", () => {
+test("receipt leases cannot cross a membership pause and restart on the same recorder", () => {
   const rec = recorder();
   start(rec);
-  const beforeWithdrawal = captureJamRecorderLease(rec, 10);
-  rec.setConsent(bob, false);
-  const duringWithdrawal = captureJamRecorderLease(rec, 20);
-  rec.setConsent(bob, true);
+  const beforePause = captureJamRecorderLease(rec, 10);
+  rec.membershipChanged([alice]); // somebody left: this take's participant set no longer holds
+  const duringPause = captureJamRecorderLease(rec, 20);
+  rec.membershipChanged([alice, bob]);
   assert.equal(rec.start(), true);
 
-  assert.equal(recordLeasedJamNoteOn(rec, beforeWithdrawal, {
+  assert.equal(recordLeasedJamNoteOn(rec, beforePause, {
     source: alice, sessionNonce: aliceSn, sequence: 1, note: 60, wave: "sine",
   }), null);
-  assert.equal(recordLeasedJamDrum(rec, duringWithdrawal, {
+  assert.equal(recordLeasedJamDrum(rec, duringPause, {
     source: alice, sessionNonce: aliceSn, sequence: 2, pad: 0,
   }), null);
   assert.equal(rec.snapshot().events.length, 0);
@@ -138,21 +133,23 @@ test("remote musical frames capture gate and recorder admission before the outer
   assert.match(body, /recordLeasedJamDrum\(jamRec, admission\.recorderLease/);
 });
 
-test("a disconnected participant needs fresh consent before recording resumes", () => {
+test("a take whose participant set has changed does not silently keep rolling", () => {
+  // The membership rule survives the removal of consent, because it is about something else: a
+  // take names who is on it, and that claim has to stay true while it records.
   const rec = recorder();
   start(rec);
-
-  assert.equal(applyJamRecorderConsent(rec, bob, false), true);
   rec.membershipChanged([alice]);
+  assert.equal(rec.state(), "paused-membership");
+  assert.deepEqual(
+    rec.recordNoteOn({ source: alice, sessionNonce: aliceSn, ms: 1, sequence: 1, note: 60, wave: "sine" }),
+    { ok: false, reason: "not-recording" },
+    "a paused take admits nothing",
+  );
   rec.membershipChanged([alice, bob]);
-  assert.equal(rec.state(), "arming");
-  assert.equal(rec.start(), false, "restoring membership cannot revive the disconnected edge's consent");
-
-  assert.equal(applyJamRecorderConsent(rec, bob, true), true);
-  assert.equal(rec.start(), true, "a fresh consent announcement admits the replacement edge");
+  assert.equal(rec.state(), "recording", "restoring the exact set resumes the take it interrupted");
 });
 
-test("consent pause and resume retain a monotonic recorder timeline", () => {
+test("a membership pause and resume retain a monotonic recorder timeline", () => {
   const rec = recorder();
   start(rec);
   let timeline = startJamRecorderTimeline({ startMs: null }, 1_000);
@@ -160,9 +157,8 @@ test("consent pause and resume retain a monotonic recorder timeline", () => {
     source: alice, sessionNonce: aliceSn, ms: jamRecorderTimelineMs(timeline, 6_000), sequence: 1, pad: 0,
   }).ok, true);
 
-  rec.setConsent(bob, false);
-  rec.setConsent(bob, true);
-  assert.equal(rec.start(), true);
+  rec.membershipChanged([alice]);
+  rec.membershipChanged([alice, bob]);
   timeline = startJamRecorderTimeline(timeline, 6_100);
   assert.equal(timeline.startMs, 1_000, "resume must not reset the original recorder epoch");
   assert.equal(rec.recordDrum({
@@ -249,10 +245,8 @@ test("membership changes pause an active take but do not auto-start an armed one
   assert.equal(armed.state(), "arming");
 
   armed.membershipChanged([alice, bob, "carol"]);
-  armed.setConsent(alice, true);
-  armed.setConsent(bob, true);
   assert.equal(armed.state(), "paused-membership");
-  assert.equal(armed.start(), false, "a join before consent must prevent recording the stale set");
+  assert.equal(armed.start(), false, "a join must prevent recording the stale participant set");
   armed.membershipChanged([alice, bob]);
   assert.equal(armed.state(), "arming", "restoring an armed set still requires an explicit start");
 

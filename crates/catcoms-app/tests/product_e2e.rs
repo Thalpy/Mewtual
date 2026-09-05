@@ -37,8 +37,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catcoms_app::{
-    channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Profile, ReconnectPolicy, Server,
-    ServerActor, ServerNet, ServerStore, TracedEvent,
+    channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Livery, Profile, ReconnectPolicy,
+    Server, ServerActor, ServerNet, ServerStore, TracedEvent,
 };
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_rt::{Hub, ManualClock, PeerId};
@@ -58,6 +58,21 @@ fn general() -> u128 {
 /// a working one converges in milliseconds. A bound (rather than an open await) means a dead
 /// path *fails* the test instead of wedging CI.
 const WAIT: Duration = Duration::from_secs(60);
+
+/// Discovery ticks a roster is given to settle. Generous for the same reason as `WAIT`: a
+/// working path takes one or two, so only a broken one spends them all.
+const SETTLE_TICKS: usize = 12;
+
+/// Injected-clock time to advance between settle ticks. Comfortably past the sync layer's
+/// five-minute PEX failure backoff, so a peer backed off by a missed real-time deadline is
+/// eligible to be asked again on the next tick, exactly as it would be after a minute or two of
+/// the product's own ticks.
+const PEX_BACKOFF_STEP_MS: u64 = 360_000;
+
+/// Injected-clock time each polling step of [`until_ticking`] lets pass. Comfortably clears the
+/// sync layer's two-second request deadline within a few steps, without racing far enough ahead
+/// to trip the freshness horizons these tests also depend on.
+const TICK_STEP_MS: u64 = 300;
 
 /// A stand-in reachable address for a node's published peer record. Loopback and LAN addresses
 /// are stripped inside `publish_self_record`, so a record built from them would carry none and
@@ -118,6 +133,50 @@ impl Node {
     async fn discovery_pass(&self) {
         let _ = self.actor.drive_discovery().await;
         let _ = self.actor.member_count().await;
+    }
+
+    /// Tick discovery until this node's roster reports exactly `expected` online, and answer
+    /// with what it last saw either way.
+    ///
+    /// One pass is not the promise. A pass ends when the actor has handled the drive command,
+    /// which is neither when the connections it opened have been observed (the transport's
+    /// connect edge arrives on another arm of the actor's select loop) nor when a peer that was
+    /// not reachable during it becomes reachable. What the product promises is that the tick its
+    /// timer sends every minute converges, and that is what this asserts. Asserting after
+    /// exactly one pass instead was a scheduling assumption that held on an idle machine and
+    /// lost on a loaded one, leaving the founder's roster a member short.
+    ///
+    /// Advancing `clock` between attempts is what makes those later ticks mean anything, and is
+    /// the half this helper was missing when it still let the Linux runner fail. A PEX request is
+    /// bounded by a **real-time** deadline, but a peer that misses it is backed off on the
+    /// **injected** clock, for five minutes of it. On a loaded machine the deadline is missed;
+    /// with a `ManualClock` nobody advances, the backoff then never expires, `take_pex_targets`
+    /// stops offering that peer, and every further tick is a no-op against a roster that can
+    /// never fill. That is why waiting did not recover it and only more ticks did not either. In
+    /// the product a minute of real time passes between ticks and the backoff simply expires; the
+    /// tests have to say so out loud.
+    ///
+    /// The drain between attempts is load-bearing rather than tidiness: the actor's event
+    /// channel is bounded, so a test that only ever queries can fill it and stall the very actor
+    /// it is waiting on.
+    async fn settle_online(&mut self, clock: &ManualClock, expected: &[String]) -> Vec<String> {
+        let mut want = expected.to_vec();
+        want.sort();
+        let mut online = Vec::new();
+        for attempt in 0..SETTLE_TICKS {
+            if attempt > 0 {
+                let _ = drain(&mut self.events).await;
+                // Past any PEX backoff a missed deadline may have set.
+                clock.advance_ms(PEX_BACKOFF_STEP_MS);
+                self.discovery_pass().await;
+            }
+            online = self.actor.online_members().await;
+            online.sort();
+            if online == want {
+                break;
+            }
+        }
+        online
     }
 
     async fn shutdown(self) {
@@ -305,6 +364,40 @@ where
     .unwrap_or_else(|_| panic!("the product never converged: {label}"))
 }
 
+/// [`until`], with the injected clock advancing as it waits.
+///
+/// Some waits are only resolved by a deadline expiring. Two nodes can each be blocked on a
+/// request the other cannot answer while it is blocked, and what breaks that in the product is
+/// `CATCHUP_REQUEST_MS`: the request gives up, the task is re-queued, and the next tick succeeds.
+/// A `ManualClock` that nobody advances never reaches any deadline, so such a wait can only be
+/// resolved by work being *lost* somewhere, which is not a property to write tests against. Time
+/// passing is what actually happens; this says so.
+async fn until_ticking<F, Fut, T>(
+    label: &str,
+    clock: &ManualClock,
+    events: &mut Receiver<TracedEvent>,
+    mut probe: F,
+) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    timeout(WAIT, async {
+        loop {
+            // The probe is a command, and a wedged actor cannot answer one, so it is given a
+            // bound rather than awaited outright: waiting for it to return before letting time
+            // pass would mean time never passes in exactly the case the deadline is for.
+            if let Ok(Some(value)) = timeout(Duration::from_millis(50), probe()).await {
+                return value;
+            }
+            let _ = timeout(Duration::from_millis(20), events.recv()).await;
+            clock.advance_ms(TICK_STEP_MS);
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the product never converged: {label}"))
+}
+
 /// Wait for the first event matching `pred`. Fails (rather than hangs) if it never arrives.
 async fn wait_event(
     events: &mut Receiver<TracedEvent>,
@@ -474,11 +567,14 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
     bob.discovery_pass().await;
 
     assert_eq!(
-        alice.actor.online_members().await,
+        alice.settle_online(&clock, &[bob.fp.clone()]).await,
         vec![bob.fp.clone()],
         "Alice's roster shows Bob online"
     );
-    assert_eq!(bob.actor.online_members().await, vec![alice.fp.clone()]);
+    assert_eq!(
+        bob.settle_online(&clock, &[alice.fp.clone()]).await,
+        vec![alice.fp.clone()]
+    );
 
     // The UI does not poll `online_members`; it renders whatever `ConnectivityChanged` carries.
     // A build that filled the map but never emitted the event would still ship dark dots.
@@ -510,17 +606,22 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
     alice.discovery_pass().await;
     carol.discovery_pass().await;
 
-    let mut online = alice.actor.online_members().await;
-    online.sort();
     let mut expected = vec![bob.fp.clone(), carol.fp.clone()];
     expected.sort();
     assert_eq!(
-        online, expected,
+        alice.settle_online(&clock, &expected).await,
+        expected,
         "the founder sees both other members online"
     );
-    assert_eq!(
-        carol.actor.online_members().await,
-        vec![alice.fp.clone()],
+    // Containment, not equality. The claim being made is that the member who joined through Alice
+    // can see Alice; whether discovery has also introduced it to Bob by this point is a race this
+    // test has no reason to pin, and pinning it made an unrelated increase in recovery traffic
+    // look like a presence failure.
+    assert!(
+        carol
+            .settle_online(&clock, &[alice.fp.clone()])
+            .await
+            .contains(&alice.fp),
         "the newest member sees the peer it actually spoke to"
     );
 
@@ -612,9 +713,11 @@ async fn the_eclipse_advisory_stays_quiet_for_a_healthy_group() {
             );
         }
     }
+    let mut everyone: Vec<String> = others.iter().map(|m| m.fp.clone()).collect();
+    everyone.sort();
     assert_eq!(
-        alice.actor.online_members().await.len(),
-        3,
+        alice.settle_online(&clock, &everyone).await,
+        everyone,
         "the group really was healthy for the whole run, so the quiet means something"
     );
 
@@ -686,8 +789,13 @@ async fn a_channel_one_member_created_is_readable_by_a_member_who_opens_it_late(
     // that silently starts working at the next live message.
     alice.actor.open_channel(plans).await;
     alice.actor.catch_up_any(plans).await;
-    let texts: Vec<String> = until(
+    // Ticking, because both nodes can be waiting on each other here: Alice is blocked on the
+    // catch-up she just asked for while Bob's own tick is blocked on a request Alice cannot
+    // answer until she is done. What unwedges that in the product is the request deadline
+    // expiring, and a clock nobody advances never reaches it.
+    let texts: Vec<String> = until_ticking(
         "the late-opening member catches the backlog up",
+        &clock,
         &mut alice.events,
         || async {
             let msgs = alice.actor.messages(plans).await;
@@ -719,6 +827,111 @@ async fn a_channel_one_member_created_is_readable_by_a_member_who_opens_it_late(
         (bob.actor.channel_topic(plans).await == "what we are shipping").then_some(())
     })
     .await;
+
+    alice.shutdown().await;
+    bob.shutdown().await;
+}
+
+/// A member that talks while it is behind must not push what it says into the past.
+///
+/// Sending appends at the end of the list **as the sending replica currently sees it**. A member
+/// missing history therefore appends after the last row it knows about, not after the last row
+/// that exists, and when the missing history arrives the two are concurrent insertions that the
+/// merge orders by a rule which knows nothing about when anything was said. Reported from a real
+/// session as a day of messages sitting above two earlier days.
+///
+/// It was never only cosmetic. Every reader-facing decision took its meaning from that order: the
+/// page, the day dividers, the unread boundary, the row a notification describes. A delivered
+/// message could land above the read mark and be treated as already seen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_that_speaks_while_behind_does_not_bury_its_message_in_the_past() {
+    let plans = channel_id("plans");
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_700_000_000_000);
+    let mut alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
+    let invite = mint(&alice.actor, 7).await;
+    let mut bob = join_node(
+        &hub,
+        &clock,
+        test_transport_peer(2),
+        "bob",
+        2,
+        alice.peer,
+        &invite,
+    )
+    .await;
+    ready(&bob.actor).await;
+
+    // Alice writes two days of history that Bob has never seen: he has not opened the channel, so
+    // nothing of it reaches him.
+    alice.actor.open_channel(plans).await;
+    alice.actor.send_message(plans, "wednesday").await;
+    clock.advance_ms(24 * 60 * 60_000);
+    alice.actor.send_message(plans, "thursday").await;
+    until(
+        "Alice holds her own two days",
+        &mut alice.events,
+        || async { (alice.actor.messages(plans).await.len() == 2).then_some(()) },
+    )
+    .await;
+
+    // Bob opens the channel a day later and speaks before any of it has arrived. From where he is
+    // standing his message is the newest thing in the world; from the document's, it is concurrent
+    // with two days he has not seen.
+    clock.advance_ms(24 * 60 * 60_000);
+    bob.actor.open_channel(plans).await;
+    bob.actor.send_message(plans, "saturday").await;
+    until("Bob has said his piece", &mut bob.events, || async {
+        (bob.actor.messages(plans).await.len() == 1).then_some(())
+    })
+    .await;
+
+    // Now the history arrives.
+    bob.actor.catch_up(alice.peer, plans).await;
+    let texts: Vec<String> = until(
+        "Bob catches up the days he missed",
+        &mut bob.events,
+        || async {
+            let msgs = bob.actor.messages(plans).await;
+            eprintln!(
+                "MARK bob {:?}",
+                msgs.iter().map(|m| m.text.clone()).collect::<Vec<_>>()
+            );
+            (msgs.len() == 3).then(|| msgs.into_iter().map(|m| m.text).collect())
+        },
+    )
+    .await;
+    assert_eq!(
+        texts,
+        vec!["wednesday", "thursday", "saturday"],
+        "what Bob said last reads last, not above the days he had not yet seen"
+    );
+
+    // And both members read the same conversation, which is the property that makes it an order
+    // rather than one node's opinion.
+    until(
+        "Alice sees Bob's message too",
+        &mut alice.events,
+        || async { (alice.actor.messages(plans).await.len() == 3).then_some(()) },
+    )
+    .await;
+    let hers: Vec<String> = alice
+        .actor
+        .messages(plans)
+        .await
+        .into_iter()
+        .map(|m| m.text)
+        .collect();
+    assert_eq!(hers, texts, "both members render the same order");
+
+    // The row a notification would describe is Bob's message, not a row from Wednesday: the tail
+    // is where the newest thing is.
+    let tail = alice.actor.message_tail(plans, 1, String::new(), 0).await;
+    assert_eq!(
+        tail.rows.last().map(|(m, _)| m.text.as_str()),
+        Some("saturday"),
+        "the newest row is the one that arrived, so an arrival announces itself"
+    );
 
     alice.shutdown().await;
     bob.shutdown().await;
@@ -911,7 +1124,7 @@ async fn a_restarted_server_recovers_its_state_and_re_finds_its_peers_without_a_
     alice.discovery_pass().await;
     bob.discovery_pass().await;
     assert_eq!(
-        alice.actor.online_members().await,
+        alice.settle_online(&clock, &[bob.fp.clone()]).await,
         vec![bob.fp.clone()],
         "the session being persisted actually had a proven peer"
     );
@@ -1139,6 +1352,103 @@ async fn a_profile_change_on_one_node_reaches_the_other_members_roster() {
         .iter()
         .any(|m| m.fingerprint == alice.fp && !m.is_self));
     assert!(roster.iter().any(|m| m.fingerprint == bob.fp && m.is_self));
+
+    alice.shutdown().await;
+    bob.shutdown().await;
+}
+
+/// A server has a name of its own, and the member who joins it sees that name.
+///
+/// Before this, the rail label was purely local and defaulted to the display name of whoever was
+/// looking, so a joined server appeared to be named after the person reading it and two members
+/// of one group never saw the same name for it. The name now rides the livery document beside
+/// the icon, which is why the later halves matter as much as the first: publishing colours must
+/// not silently clear it, and naming the server must not clear the colours.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_published_server_name_reaches_a_joiner_and_survives_a_colour_publish() {
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_700_000_000_000);
+    let alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
+    let invite = mint(&alice.actor, 7).await;
+    let mut bob = join_node(
+        &hub,
+        &clock,
+        test_transport_peer(2),
+        "bob",
+        2,
+        alice.peer,
+        &invite,
+    )
+    .await;
+
+    alice
+        .actor
+        .set_server_name("The Cat Cafe".into())
+        .await
+        .expect("the owner may name the server");
+
+    let seen = until(
+        "the joiner learns what the group is actually called",
+        &mut bob.events,
+        || async {
+            let name = bob.actor.livery().await.name;
+            (name == "The Cat Cafe").then_some(name)
+        },
+    )
+    .await;
+    assert_eq!(seen, "The Cat Cafe");
+
+    // Publishing colours is a read-modify-write that must carry the name through untouched.
+    alice
+        .actor
+        .set_livery(Livery {
+            preset: "aurum".into(),
+            accent: "#e2a83d".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("the owner may publish colours");
+    let after = until(
+        "the colour publish reaches the joiner",
+        &mut bob.events,
+        || async {
+            let l = bob.actor.livery().await;
+            (l.preset == "aurum").then_some(l)
+        },
+    )
+    .await;
+    assert_eq!(
+        after.name, "The Cat Cafe",
+        "publishing colours must not clear the group's name"
+    );
+
+    // And the reverse: naming the server must not wipe the colours somebody just published.
+    alice
+        .actor
+        .set_server_name("Cat Cafe II".into())
+        .await
+        .expect("renaming is allowed");
+    let renamed = until("the rename reaches the joiner", &mut bob.events, || async {
+        let l = bob.actor.livery().await;
+        (l.name == "Cat Cafe II").then_some(l)
+    })
+    .await;
+    assert_eq!(
+        renamed.accent, "#e2a83d",
+        "naming the server must not clear its colours"
+    );
+
+    // A member is not an owner, and the UI hiding the control is not what enforces that.
+    let refused = bob.actor.set_server_name("Bob's Cafe".into()).await;
+    assert!(
+        refused.is_err(),
+        "an ordinary member cannot rename the group for everyone"
+    );
+    assert_eq!(
+        alice.actor.livery().await.name,
+        "Cat Cafe II",
+        "and the refusal changed nothing"
+    );
 
     alice.shutdown().await;
     bob.shutdown().await;

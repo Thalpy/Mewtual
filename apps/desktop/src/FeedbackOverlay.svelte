@@ -47,8 +47,17 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-<div class="overlay" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) onclose(); }}>
+<!--
+  This overlay deliberately does NOT close on a backdrop click, unlike the read-only ones.
+  It holds typed feedback that exists nowhere else, and closing throws it away: pressing inside
+  the textarea to select a sentence and releasing past the card's edge used to do exactly that,
+  because a click fires on the common ancestor of press and release. `dismissOnBackdrop` fixes
+  that misreading everywhere, but the report asked for something stronger here, and it is right:
+  the only ways out of a form with unsaved work in it should be deliberate ones. Escape counts;
+  a mouse gesture that strayed does not.
+-->
+<svelte:window onkeydown={(event) => { if (event.key === "Escape") onclose(); }} />
+<div class="overlay" role="presentation">
   <div class="overlay-card">
     <header class="overlay-head">
       <h2>💬 Send feedback</h2>

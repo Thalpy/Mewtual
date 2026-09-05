@@ -1,7 +1,7 @@
 {
   "name": "mewtual-desktop",
   "private": true,
-  "version": "0.3.0-alpha.13",
+  "version": "0.3.0-alpha.14",
   "type": "module",
   "scripts": {
     "dev": "vite",

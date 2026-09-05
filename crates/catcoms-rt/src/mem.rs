@@ -15,8 +15,9 @@ use tokio::sync::oneshot;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::transport::{
-    DialSubmission, MeshTransport, PeerId, ProtocolId, RequestCancellation, Responder, Topic,
-    TransportError, TransportEvent, MAX_PEER_DIAL_BATCH,
+    DialSubmission, MeshTransport, PeerConnectionSnapshot, PeerId, ProtocolId, RequestCancellation,
+    Responder, Topic, TransportError, TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT,
+    MAX_PEER_DIAL_BATCH,
 };
 
 #[derive(Debug, Default)]
@@ -52,6 +53,29 @@ impl Hub {
         }
     }
 
+    /// Every registered peer except `local`, as the transport's connected set.
+    ///
+    /// The in-memory transport has no dial step: a registered peer is reachable now, with no
+    /// connection to establish first, so "registered" and "connected" are the same statement.
+    /// Saying so matters because consumers gate work on this, and inheriting the empty default
+    /// would have made those gates read "nothing is connected" in every in-process test while
+    /// behaving completely differently over real sockets.
+    fn connected(&self, local: PeerId) -> Vec<PeerConnectionSnapshot> {
+        self.state
+            .lock()
+            .expect("hub mutex poisoned")
+            .inboxes
+            .keys()
+            .copied()
+            .filter(|peer| *peer != local)
+            .take(MAX_CONNECTED_PEER_SNAPSHOT)
+            .map(|peer| PeerConnectionSnapshot {
+                peer,
+                active: Vec::new(),
+            })
+            .collect()
+    }
+
     fn deliver(&self, peer: PeerId, event: TransportEvent) -> Result<(), TransportError> {
         let state = self.state.lock().expect("hub mutex poisoned");
         match state.inboxes.get(&peer) {
@@ -84,6 +108,10 @@ pub struct MemNetwork {
 impl MeshTransport for MemNetwork {
     fn local_peer(&self) -> PeerId {
         self.local
+    }
+
+    fn connection_snapshot(&self) -> Vec<PeerConnectionSnapshot> {
+        self.hub.connected(self.local)
     }
 
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {

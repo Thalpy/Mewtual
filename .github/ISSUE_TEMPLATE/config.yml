@@ -1,0 +1,12 @@
+# Blank issues stay enabled ON PURPOSE.
+#
+# Mewtual's in-app "Send feedback" builds a prefilled `/issues/new?labels=…&title=…&body=…`
+# URL and opens it in the browser (see `apps/desktop/src/feedback.ts`). Turning blank issues
+# off makes GitHub redirect that URL to the template chooser and discard everything it
+# carried, so the report the user typed in the app would be silently thrown away. The forms
+# below are for people filing from GitHub itself; the app keeps its own path.
+blank_issues_enabled: true
+contact_links:
+  - name: Security report
+    url: https://github.com/Thalpy/Mewtual/security/advisories/new
+    about: Report a vulnerability privately rather than in a public issue.

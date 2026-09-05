@@ -196,12 +196,20 @@ impl FileRef {
 const MANIFEST_TAG: u8 = 0xF1;
 
 /// Hard upper bound on the chunk count a manifest may declare: the product's real maximum
-/// (256 MiB files / 8 MiB chunks). This is a parse guard against a hostile count, so it must be
+/// (1 GiB files / 8 MiB chunks). This is a parse guard against a hostile count, so it must be
 /// the true maximum and not a comfortable margin above it; a manifest is authored by a member, and
 /// every extra chunk it is allowed to name is a chunk a reader will fetch, decrypt and write.
 /// Raising the product's file-size limit means raising this in step (`catcoms-app` static-asserts
 /// that its own `MAX_FILE_BYTES` still fits).
-pub const MAX_CHUNKS: u32 = 32;
+///
+/// Raised from 32 (256 MiB) on 2026-09-04, because 256 MiB was too small for what people
+/// actually share. What that costs is stated plainly: a member can now commit a downloader to
+/// four times as much fetch, decrypt and write work in one listing. Two things bound it. The
+/// work happens only for a file somebody chooses to download, and the default file-trust policy
+/// fetches nothing passively; and a server's own limit ([`catcoms_app::Server::set_file_size_limit`])
+/// is a separate, lower policy ceiling that an owner sets per server. This constant is only the
+/// point past which a manifest is malformed rather than merely against policy.
+pub const MAX_CHUNKS: u32 = 128;
 
 /// The largest single blob a **legacy** (pre-chunking) entry could name: one blob-fetch response.
 /// A legacy entry is one un-chunked `FileRef`, so it is the one shape allowed to exceed the chunk

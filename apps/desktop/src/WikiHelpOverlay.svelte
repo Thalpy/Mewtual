@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { dismissOnBackdrop } from "./overlay-dismiss";
+
   let { onclose } = $props<{ onclose: () => void }>();
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-<div class="overlay" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) onclose(); }}>
+<div class="overlay" role="presentation" use:dismissOnBackdrop={onclose}>
   <div class="overlay-card">
     <header class="overlay-head">
       <h2>Wiki formatting</h2>

@@ -29,7 +29,13 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   frameRate: 30,
   quality: "balanced",
   mbpsPerPeer: 6,
-  audioMode: "none",
+  // Sharing a screen silently is almost never what was meant: a video with no sound reads as
+  // broken rather than as a choice, and the fix (stop, change a setting, share again) costs the
+  // moment being shared. The selected surface's own audio is therefore the default, and turning it
+  // off is one explicit choice that then sticks (see `parseStreamSettings`). The Screen Capture
+  // API still requires a fresh, visible grant for every capture, so this defaults what is
+  // REQUESTED, never what is silently captured.
+  audioMode: "surface",
   audioLevel: DEFAULT_STREAM_AUDIO_LEVEL,
 };
 
@@ -71,9 +77,14 @@ export function parseStreamSettings(value: unknown): StreamSettings {
   const mbpsPerPeer = typeof rawMbps === "number" && Number.isFinite(rawMbps)
     ? Math.min(50, Math.max(0.5, rawMbps))
     : DEFAULT_STREAM_SETTINGS.mbpsPerPeer;
-  const audioMode = parsed.audioMode === "surface" || parsed.audioMode === "separate"
+  // "none" is a stored CHOICE and survives; an absent or unrecognised value is no choice at all
+  // and takes the default. Collapsing both onto "none" is what would make the new default
+  // unreachable for anyone who has ever opened the stream settings.
+  const audioMode = parsed.audioMode === "surface"
+    || parsed.audioMode === "separate"
+    || parsed.audioMode === "none"
     ? parsed.audioMode
-    : "none";
+    : DEFAULT_STREAM_SETTINGS.audioMode;
   const audioLevel = normalizeStreamAudioLevel(parsed.audioLevel);
   return { resolution, frameRate, quality, mbpsPerPeer, audioMode, audioLevel };
 }
@@ -323,21 +334,17 @@ export class PeerVideoBudgetController {
         // The selected track is attached only after the browser accepts the exact peer budget.
         await sender.replaceTrack(null);
       }
-      const parameters = sender.getParameters();
-      parameters.encodings = parameters.encodings?.length
-        ? parameters.encodings.map((encoding) => ({
-            ...encoding,
-            maxBitrate: plan.maxBitrate,
-            maxFramerate: settings.frameRate,
-            scaleResolutionDownBy: plan.scaleResolutionDownBy,
-          }))
-        : [{
-          maxBitrate: plan.maxBitrate,
-          maxFramerate: settings.frameRate,
-          scaleResolutionDownBy: plan.scaleResolutionDownBy,
-          }];
-      parameters.degradationPreference = degradationPreference(settings.quality);
-      await sender.setParameters(parameters);
+      try {
+        await sender.setParameters(budgetedParameters(sender.getParameters(), settings, plan));
+      } catch (refused) {
+        // A superseded request hands its failure to the outer handler rather than retrying or
+        // returning: the sender may still be attached with the parameters that were just
+        // rejected, and parking it is that handler's job. Retrying here would delay the park.
+        if (state.generation !== generation) throw refused;
+        // Otherwise read them again and try once more. See `budgetedParameters` for why the
+        // first write can be refused for a reason that has nothing to do with the budget.
+        await sender.setParameters(budgetedParameters(sender.getParameters(), settings, plan));
+      }
       if (state.generation !== generation) return { state: "stale", plan };
       if (attachAfterApply && sender.replaceTrack) {
         try {
@@ -398,6 +405,42 @@ export class PeerVideoBudgetController {
       };
     }
   }
+}
+
+/**
+ * Carry this budget on the parameters a sender just handed back.
+ *
+ * Mutates and returns that exact object rather than building one. `setParameters` refuses
+ * anything whose fields it owns have changed, so the snapshot from `getParameters()` is the only
+ * legal thing to send back, and a reconstructed object is rejected outright.
+ *
+ * Even the legal object goes stale. The first budget for a screen share is applied to a
+ * transceiver added moments earlier, so negotiation can complete during the write: the RTCP CNAME
+ * appears, and Chromium rejects it with "Attempted to set RtpParameters with modified RTCP
+ * parameters" (seen in the field, 2026-09-02). That is not the encoder refusing the budget, but it
+ * was treated as one, and because a screen cap parks its sender before applying, the share was
+ * left attached to nothing and silently sent no video at all. The caller therefore reads fresh
+ * parameters and calls this again; the second snapshot is post-negotiation and is accepted.
+ */
+export function budgetedParameters(
+  parameters: RTCRtpSendParameters,
+  settings: StreamSettings,
+  plan: PeerStreamPlan,
+): RTCRtpSendParameters {
+  parameters.encodings = parameters.encodings?.length
+    ? parameters.encodings.map((encoding) => ({
+        ...encoding,
+        maxBitrate: plan.maxBitrate,
+        maxFramerate: settings.frameRate,
+        scaleResolutionDownBy: plan.scaleResolutionDownBy,
+      }))
+    : [{
+      maxBitrate: plan.maxBitrate,
+      maxFramerate: settings.frameRate,
+      scaleResolutionDownBy: plan.scaleResolutionDownBy,
+      }];
+  parameters.degradationPreference = degradationPreference(settings.quality);
+  return parameters;
 }
 
 /** Map the UI quality choice onto the standard WebRTC encoder degradation policy. */

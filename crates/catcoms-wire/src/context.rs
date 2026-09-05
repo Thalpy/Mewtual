@@ -70,6 +70,16 @@ pub enum DocType {
     /// document from chat so warning evidence survives an edit/delete of the live message and a
     /// vote can never be mistaken for an authorization to mutate membership.
     Moderation = 14,
+    /// Per-channel index of bounded creative-studio objects. Object bodies live in
+    /// [`DocType::StudioObject`] documents; keeping the directory separate avoids making a
+    /// channel document's existing change notifications carry an unrelated schema.
+    StudioIndex = 15,
+    /// One score or flipnote edited through the creative-suite domain-operation contract.
+    StudioObject = 16,
+    /// Bounded doodle replies attached to one announcement post.
+    PostReplies = 17,
+    /// One deterministic bucket of the epoch-close logical-document registry.
+    DocRegistry = 18,
 }
 
 impl DocType {
@@ -95,6 +105,10 @@ impl DocType {
             12 => DocType::Devices,
             13 => DocType::ChannelIndex,
             14 => DocType::Moderation,
+            15 => DocType::StudioIndex,
+            16 => DocType::StudioObject,
+            17 => DocType::PostReplies,
+            18 => DocType::DocRegistry,
             _ => return None,
         })
     }
@@ -189,12 +203,16 @@ mod tests {
             DocType::Devices,
             DocType::ChannelIndex,
             DocType::Moderation,
+            DocType::StudioIndex,
+            DocType::StudioObject,
+            DocType::PostReplies,
+            DocType::DocRegistry,
         ] {
             assert_eq!(DocType::from_tag(dt.tag()), Some(dt));
         }
         // Unknown tags decode to None (stable: 0 and the first unused value).
         assert_eq!(DocType::from_tag(0), None);
-        assert_eq!(DocType::from_tag(15), None);
+        assert_eq!(DocType::from_tag(19), None);
     }
 
     #[test]

@@ -17,6 +17,7 @@ catcoms-storage = { path = "../catcoms-storage" }
 thiserror.workspace = true
 automerge = "0.10"
 blake3 = "1"
+sha2 = "0.10"
 
 [dev-dependencies]
 rand_chacha = "0.3"

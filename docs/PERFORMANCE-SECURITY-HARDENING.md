@@ -30,21 +30,100 @@ remains honest: 709 kB is still large, so `chunkSizeWarningLimit` has not been r
 | Event bursts/full snapshots | Multiple `channel-updated` events could race full `get_messages` payloads | Serialize/coalesce to one active refresh + one merged follow-up; reject stale scope/revision responses | Done; delta/native paging remains |
 | Cross-server inbox scans | Each channel event can scan every server/channel | Debounce, run during browser idle time with a deadline, cancel on lock/unmount | Done; incremental native index remains |
 | Large startup component | One very large Svelte component and eager optional libraries increase parse/initialization work | Real dynamic imports; move component markup, behavior and feature CSS together | Feedback + Wiki Help + QR done; more views queued |
-| Server-wide search | Builds an all-channel corpus and runs filters/sorts on the UI thread | Load on explicit search only; next move indexing/filtering to a worker and page results | Queued |
-| Full native history materialization | `read_messages` walks every Automerge list item and IPC serializes the full vector | Add an actor-owned paged/window query with total/anchors; preserve exact search/unread semantics | Queued; compatibility/security design required |
+| Server-wide search | Builds an all-channel corpus and runs filters/sorts on the UI thread | Load on explicit search only; the scan (the part that reads every message) moved to a worker (`search-index.ts` pure + `search-worker.ts`), with an inline fallback if a worker cannot start. Ordering stays on the main thread because it needs display names, and sorting matches is cheap next to finding them | Done (2026-09-03); paging the corpus itself is still queued |
+| Full native history materialization | `read_messages` walks every Automerge list item and IPC serializes the full vector | Walk with one sequential list/map cursor instead of an indexed lookup per row and field; cache the materialized list per channel under its document version (`Server::with_messages`) so one walk serves every read between two changes. Then an actor-owned page query around durable id anchors with per-row reply context and a whole-channel unread summary, so the webview holds one slice (`docs/design-native-paging.md`) | Cursor walk + version cache done (2026-09-03); native paging done on `perf-native-paging` (2026-09-03): `get_message_page` / `get_pinned_messages`, webview converted, `get_messages` kept only for search corpus and moderation timeline |
+| Per-event native projection sweep | Every network event (gossip frame, presence blip, receipt) re-materialized every open channel plus status, wiki, roles and Ed25519-verified moderation records to detect changes | Gate every projection on `Server::doc_version` (ops applied per document, O(1)) plus epoch/member-count for membership-derived ones. Delivery dirtying is left ungated on purpose: its one-second timer is also the wake that cancels a sync tick blocked in an outbound request (see INTERFACES § 10); gating it made `process_recovery_e2e` deadlock for the full request timeout | Done (2026-09-03) |
+| Actor blocks on outbound requests | A sync tick that awaits a catch-up/PEX response cannot serve the peer's inbound request; two members requesting each other at once wait for each other until a timeout. Only the `select!` cancellation from the delivery timer or a command broke it, which made an unrelated feature load-bearing | Bounded every outbound catch-up with `CATCHUP_REQUEST_MS` (2 s, on the injected clock): the tick returns, the inbound request is served, the catch-up is re-queued. More permissive than the ~1 s cancellation it replaces, and it let the delivery gating land. The real fix, serving inbound requests while an outbound one is in flight, needs the transport shareable rather than borrowed by the tick | Bounded 2026-09-03; the restructure is queued and needs adversarial review |
+| Catch-up carries the whole history | A reconnecting member re-received and re-verified every op of a document it mostly held, so every reconnect cost more than the last | `KIND_CATCHUP_SINCE`: the requester names its frontier plus its immediate ancestors, the server sends only what is behind its own and not behind that. Falls back to the full serve for a peer that does not know the kind | Done (2026-09-03); protocol-adjacent, so it wants the adversarial-review pass before release |
+| Background-channel arrival fetch | The ticker fetched a whole channel's history for every arrival in a channel not on screen, to read its last row and scan for mentions | `get_message_tail(limit)` with a native `targets_me` per row (reply parents resolved against the whole channel) | Done (2026-09-03) |
+| Frontend full-array reactivity | `messages` was deep `$state`, proxying every row and field on every refresh while eight deriveds walk the whole array | `$state.raw` (the array is only ever replaced wholesale); keep the sanitized-HTML cache across channel hops; in-place ticker receipt set (bounded) and media-url record instead of copy-per-add | Done (2026-09-03) |
 | Remote image embeds | Network, decode, memory and layout work; also discloses the viewer IP to the image host | Keep URL/referrer validation; add click-to-load or per-server trust and fixed intrinsic placeholders | Queued |
 | Voice/video/instruments | WebRTC peers, meters, rAF/timers and media decode are inherently expensive | Keep inactive code lazy, stop every track/timer on leave/lock, profile peer-count scaling | Queued |
 | Global timers/animated chrome | Presence, transfers, mascot, ticker and visual effects keep waking the webview | Pause hidden/locked work, consolidate clocks, respect motion-off | Queued |
 | Large settings/operations markup | Infrequent views still compile and initialize with chat | Extract Settings, Server Settings, Server Space, moderation/storage/connectivity, wiki help and recovery as typed lazy components | Queued in that order of coupling/risk |
 | CSS size/style invalidation | One 200+ kB global stylesheet is parsed up front and broad selectors can invalidate widely | Move feature CSS with extracted components; audit selectors before changing shared theme tokens | Queued |
-| Persistence/crypto work on mutations | Snapshots and integrity work can overlap UI-visible activity | Measure actor latency first; batch only where durability contracts permit; never weaken seals/hashes | Measurement queued |
+| Persistence/crypto work on mutations | Snapshots and integrity work can overlap UI-visible activity | Measure actor latency first; batch only where durability contracts permit; never weaken seals/hashes | Measured 2026-09-03 (release, one channel): full `Server::snapshot` is 2.7 ms / 393 KiB at 1k messages, 12 ms / 1.9 MiB at 5k, 47 ms / 7.6 MiB at 20k, and `persist_server` runs it (plus seal, full-file rewrite and fsync, inside the actor mailbox) after every send/edit/reaction. Not the dominant cost, but linear in history; a debounce would change the "persisted before reported" contract and needs its own decision. Addressed 2026-09-03 without touching that contract: `EncryptedDoc::snapshot` no longer re-encodes a document whose heads and op-log length have not moved (documents over 1 MiB are still re-encoded rather than duplicated in memory), and `persist_server` coalesces concurrent requests so a burst costs the writes it needs, with each request still returning only after a write whose snapshot was taken after its own change |
+| Per-render image URLs and file lookups | Every avatar, banner and icon rebuilt a base64 data URL on every render of every row showing it, and each embed resolved its content address by scanning the whole file index | Memoize the URL by its bytes (`image-src.ts`, bounded, cleared at lock); index the file list by content address once | Done (2026-09-03) |
 
 `manualChunks` is deliberately not the plan: without dynamic imports it mostly renames the same
 startup payload. Raising `chunkSizeWarningLimit` would only suppress the signal.
 
+### Adversarial review of the paging/search/persistence work (2026-09-03)
+
+An external review of the whole PR raised nine defects. Seven are fixed, each with a test that was
+first shown to fail against the old behaviour.
+
+| Finding | Verdict | Fix |
+|---|---|---|
+| Fixed catch-up deadline vs a 16 MiB legal response | Real | Serves capped at `MAX_CATCHUP_CHUNK`; an applying round queues the next, so a large gap converges over bounded exchanges |
+| Persistence not bound to the server incarnation | Real, introduced here | Lock moved to the numeric id so both incarnations serialize; write and completion counter both require the captured `instance` |
+| Out-of-order page responses roll the UI back | Real, introduced here | One `PageAdmission` token per request; leaving a conversation invalidates all |
+| Unread summary drops the message-id cursor | Real defect, **not** a regression: the divider and count were timestamp-based before this work too | `divider_id` added; position rule when the cursor names a row, timestamps only as the legacy fallback |
+| Delivery tick can call an old message the latest | Real, introduced here | `isLatestOwn` requires the tail to be loaded |
+| Search corpus goes stale while open | Partly introduced here (the open channel used to be live) | A channel is re-read when it changes; corpus keyed by read revision, not row count, so same-length edits invalidate |
+| 64-row notification tail is lossy in bursts | Real, introduced here | The actor answers `addressed_after_cursor` over the whole channel past the read mark |
+| Search still loads whole histories, unbounded result list | Real, **predates this work** | Not fixed here. A bounded native search is the right answer and is feature-sized; the one thing this work changed is that the open channel is now fetched rather than reused from memory |
+| Native work per update is still O(n) | Real, known | Not fixed here. Caching removed repeated walks per event, not the walk itself; incremental per-channel indexes are the fix |
+
+The review's scope criticism is accepted: this work should have been several changes.
+
+### Where startup time actually goes (2026-09-03)
+
+The plan had been trading in chunk sizes without ever measuring the budget they belong to. Two
+probes now exist, and they disagree with the assumption.
+
+**The webview.** Attributing the 1004 KiB production chunk to its sources by generated bytes (from
+the sourcemap, not source length, which flatters comment-heavy files): `App.svelte` is 506 KiB of
+it, and within that the script is 261, shared snippets 77, the main layout and views 107, the
+Settings overlay 21, Server Settings 23, Server Space 11. Everything else is small: `marked` 41,
+`dompurify` 29, `debug-console.ts` 23, `jam-engine.ts` 22.
+
+Loading that chunk in headless Edge against `vite preview` costs **7 ms of script execution** and
+about 75 ms of total task time to first paint. V8 pre-parses and compiles lazily, so a megabyte of
+bundle is not a megabyte of work. Extracting Settings and Server Settings, the plan's next step,
+moves 44 KiB of 1004: a fraction of a millisecond. It is worth doing for the file's readability and
+for keeping infrequent views out of the hot path, but it is not a startup fix, and this document
+should stop implying that it is. (The measurement stops at the boot-failure screen: the visual
+fixture is development-only by design, so a production bundle cannot be driven by it.)
+
+**The native side** (`startup_probe`, release, one server, this machine):
+
+| Messages in the server | snapshot | vault unlock | read + unseal | `Server::restore` | first channel read |
+|---|---|---|---|---|---|
+| 200 | 84 KiB | 16 ms | 0 ms | 2 ms | 1 ms |
+| 5,000 | 1.9 MiB | 15 ms | 3 ms | 26 ms | 18 ms |
+| 20,000 | 7.7 MiB | 18 ms | 12 ms | 151 ms | 94 ms |
+
+Argon2id is a flat ~20 ms and is meant to be slow. Everything else scales with history, and
+`restore` is the largest single cost at any realistic size: it is `AutoCommit::load` plus decoding
+and verifying every signed op in the log. That is per server, at every launch, so a member in
+several busy groups pays it several times over. This is a floor, too: it excludes actor spawn,
+which opens a dozen documents per server and subscribes their topics.
+
+So the startup work worth doing is on the restore path (a compacted or checkpointed snapshot, so a
+launch does not re-decode the whole history), not on the bundle.
+
+### Measured history scaling (2026-09-03)
+
+`cargo test -p catcoms-app --release --lib scale_probe -- --ignored --nocapture` fills one channel and
+times the native costs that grow with it. Before the cursor walk, one materialization of the channel
+(`Server::messages`, which the actor's change check also ran for every open channel on every network
+event) cost 34 ms at 1k messages, 194 ms at 5k and 823 ms at 20k: the reason a busy old room got slower
+to open and to keep up with. After the whole sequence (cursor walk, version cache, version-gated
+actor, snapshot cache) the same probe reads 3 / 18 / 75 ms for the walk, 0 ms for a cached read,
+and 0 / 1 / 2 ms for the actor's per-event change check, with the snapshot at 3 / 12 / 54 ms and
+now taken only when a document moved. The numbers below are from the first of those steps, kept
+because they are what the cursor walk alone bought.
+
+After that first change the walk (plus the clone `messages()` hands out) is
+2.8 ms / 17 ms / 72 ms, and the actor's change check between two changes, which now only hashes the
+cached list, is 0.08 ms / 0.38 ms / 1.6 ms instead of repeating the walk. The remaining per-arrival
+cost of a 20k-row channel is therefore one ~70 ms materialization plus the full-vector IPC to the
+webview, which is what native paging is for.
+
 ## Security review and command tracking
 
-The desktop exposes **100** custom Tauri commands. `src/tauri-command-security.ts` classifies every
+The desktop exposes **103** custom Tauri commands. `src/tauri-command-security.ts` classifies every
 one by boundary, and `tauri-command-security.test.ts` compares that ledger with both the Rust
 `generate_handler!` list and literal frontend invocations. A new, removed, duplicated, dynamically
 named or unclassified command fails the frontend suite.
@@ -82,8 +161,9 @@ implementation.
    behind the same dynamic boundary. Add typed props and explicit loading/error fallbacks.
 2. Extract Settings and Server Settings by page, preserving drafts across chunk loads and keeping
    every mutation in a typed native service wrapper.
-3. Design actor-owned paged history: stable message-id anchors, bounded limits, edits/deletes,
-   unread/search behavior, and legacy id-less rows. Review before changing the bridge contract.
+3. ~~Design actor-owned paged history: stable message-id anchors, bounded limits, edits/deletes,
+   unread/search behavior, and legacy id-less rows. Review before changing the bridge contract.~~
+   Done (`perf-native-paging`, `docs/design-native-paging.md`).
 4. Move server-wide search/filter/sort to an on-demand worker over paged data.
 5. Make remote media consent-aware and fixed-size before fetch; then profile voice/video and pause
    nonessential timers while hidden or locked.

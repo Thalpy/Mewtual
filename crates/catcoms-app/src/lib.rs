@@ -130,6 +130,160 @@ pub struct ChatMessage {
     pub pinned: bool,
 }
 
+/// One channel's message list materialized at one document version, plus the lookups every
+/// paged read needs and that would otherwise be rebuilt per read: position by id (page anchors,
+/// reply parents) and the number of replies each message has received. Built in one pass by
+/// [`MaterializedChannel::build`]; see `Server::messages_cache`.
+#[derive(Debug, Default)]
+struct MaterializedChannel {
+    /// The [`Server::doc_version`] these rows were read at; `u64::MAX` until the first read.
+    version: u64,
+    messages: Vec<ChatMessage>,
+    /// Position of each message with a non-empty id. Legacy id-less rows are not addressable.
+    by_id: HashMap<String, usize>,
+    /// How many messages name each id as their `reply_to`.
+    reply_counts: HashMap<String, u32>,
+}
+
+impl MaterializedChannel {
+    fn build(version: u64, messages: Vec<ChatMessage>) -> Self {
+        let mut by_id = HashMap::with_capacity(messages.len());
+        let mut reply_counts: HashMap<String, u32> = HashMap::new();
+        for (index, m) in messages.iter().enumerate() {
+            if !m.id.is_empty() {
+                // First occurrence wins: an id can only repeat through a malformed or replayed
+                // write, and the earlier row is the one every other member also saw first.
+                by_id.entry(m.id.clone()).or_insert(index);
+            }
+            if !m.reply_to.is_empty() {
+                *reply_counts.entry(m.reply_to.clone()).or_default() += 1;
+            }
+        }
+        Self {
+            version,
+            messages,
+            by_id,
+            reply_counts,
+        }
+    }
+}
+
+/// Where a paged read of a channel is centred. Ids are the durable anchor (they survive
+/// concurrent inserts, edits and deletes around them); an index is the fallback for a row that
+/// has no id or was deleted; the tail is where a fresh open starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageAnchor {
+    /// The newest row.
+    Tail,
+    /// The row with this message id.
+    Id(String),
+    /// The row at this position in the current order (clamped to the last row).
+    Index(u64),
+    /// The first row that replies to this message id (the "N replies" jump).
+    FirstReplyTo(String),
+}
+
+/// A bounded read: the anchor row, up to `before` rows above it and `after` rows below it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessagePageQuery {
+    pub anchor: PageAnchor,
+    pub before: usize,
+    pub after: usize,
+    /// When set, the page also carries an [`UnreadSummary`] measured against this boundary.
+    pub unread: Option<UnreadProbe>,
+}
+
+/// The read boundary a client wants unread state measured against, plus its own clock so the
+/// plausibility ceiling is computed the way the client's read marks are (see `readCeiling` in
+/// the desktop's `unread.ts`, whose rule this mirrors exactly).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadProbe {
+    /// Id of the newest message from somebody else that the client had read when it opened the
+    /// channel: **the cursor**. Empty for a read mark written before ids existed, or none at all.
+    ///
+    /// A timestamp cannot order two messages sent in the same millisecond, and it orders two
+    /// senders' clocks not at all, so a stamp alone can hide a real arrival: exactly the reasoning
+    /// the durable badge already follows (`unread.ts`). When this id names a row, everything after
+    /// that row is what has not been read.
+    pub divider_id: String,
+    /// Effective timestamp of that row; `u64::MAX` for "everything is read". Used to place the
+    /// divider, and as the whole rule only when `divider_id` names no current row.
+    pub divider_ts: u64,
+    /// The client's wall clock (epoch-millis).
+    pub now_ms: u64,
+}
+
+/// How far ahead of the client's clock a sender's timestamp may be and still be believed;
+/// the same five minutes as the desktop's `CLOCK_SKEW_GRACE_MS`.
+pub const CLOCK_SKEW_GRACE_MS: u64 = 5 * 60_000;
+
+/// Unread state for a whole channel, measured natively so a client holding one page of it can
+/// still place the divider and count what sits past it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UnreadSummary {
+    /// The newest timestamp in the channel within the clock grace: every row's timestamp is
+    /// pulled down to this before it is compared, so one broken or hostile clock cannot park the
+    /// boundary in the future.
+    pub ceiling_ts: u64,
+    /// Position of the first row from somebody else past the boundary, if any.
+    pub first_index: Option<u64>,
+    /// Rows from somebody else past the boundary.
+    pub count: u64,
+}
+
+/// One row of a paged read, with what the row needs from the rest of the channel resolved
+/// natively so the webview never has to hold the history to render it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PagedMessage {
+    pub message: ChatMessage,
+    /// An `@[my name]` mention or a reply to one of my messages (see [`Server::message_tail`]).
+    pub targets_me: bool,
+    /// How many messages reply to this one, across the whole channel.
+    pub reply_count: u32,
+    /// The parent this row replies to, when it can be found.
+    pub reply_to_preview: Option<ReplyPreview>,
+}
+
+/// Enough of a reply's parent to render the quote line: who wrote it and the start of its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyPreview {
+    pub id: String,
+    pub author: String,
+    /// The parent's text, cut to [`REPLY_PREVIEW_CHARS`] characters.
+    pub text: String,
+}
+
+/// Characters of a reply parent's text carried in a [`ReplyPreview`].
+pub const REPLY_PREVIEW_CHARS: usize = 200;
+
+/// The newest rows of a channel, plus what the rows outside them would have said about whether
+/// anything here is addressed to this member. See [`Server::message_tail`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MessageTail {
+    /// The newest rows, oldest first, each with whether it addresses me.
+    pub rows: Vec<(ChatMessage, bool)>,
+    /// Whether **any** message after the caller's cursor addresses me, carried or not.
+    pub addressed_after_cursor: bool,
+}
+
+/// The result of a paged read: a contiguous slice of the channel in its current order.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MessagePage {
+    /// The document version the rows were read at ([`Server::doc_version`]). Two pages at the
+    /// same version are slices of the same list and can be stitched by index.
+    pub version: u64,
+    /// Rows in the whole channel.
+    pub total: u64,
+    /// Position of `rows[0]` in the whole channel (meaningless when `rows` is empty).
+    pub start: u64,
+    /// Position the anchor resolved to; `None` when an id anchor names no current row, in which
+    /// case `rows` is empty and the caller chooses another anchor.
+    pub anchor_index: Option<u64>,
+    pub rows: Vec<PagedMessage>,
+    /// Present when the query carried an [`UnreadProbe`].
+    pub unread: Option<UnreadSummary>,
+}
+
 /// One emoji reaction on a message: the emoji plus the fingerprints of the members who reacted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reaction {
@@ -359,33 +513,183 @@ pub fn append_message(
     Ok(())
 }
 
+/// Whether one message is addressed to `me`: an `@[my name]` mention under the composer's own
+/// normalization, or a reply to something I wrote. My own messages never address me.
+fn addresses_me(
+    m: &ChatMessage,
+    me: &str,
+    marker: Option<&str>,
+    parent: Option<&ChatMessage>,
+) -> bool {
+    m.author != me
+        && (marker.is_some_and(|mk| m.text.contains(mk)) || parent.is_some_and(|p| p.author == me))
+}
+
+/// Unread state over a whole channel.
+///
+/// By position when the client's cursor names a row: everything after it that somebody else wrote
+/// has not been read, which needs no clock and cannot be fooled by two messages sharing a
+/// millisecond or by a sender whose clock ran backwards.
+///
+/// By timestamp only when there is no usable cursor, which is a read mark written before ids
+/// existed or one whose message has since been deleted. That path is the desktop's original rule:
+/// the ceiling is the newest timestamp no further ahead of `now` than the clock grace, every
+/// timestamp is clamped to it, and a row counts when its clamped stamp is past the divider.
+fn unread_summary(channel: &MaterializedChannel, me: &str, probe: &UnreadProbe) -> UnreadSummary {
+    let messages = &channel.messages;
+    let limit = probe.now_ms.saturating_add(CLOCK_SKEW_GRACE_MS);
+    let ceiling_ts = messages
+        .iter()
+        .map(|m| m.ts)
+        .filter(|ts| *ts <= limit)
+        .max()
+        .unwrap_or(0);
+    let mut summary = UnreadSummary {
+        ceiling_ts,
+        ..UnreadSummary::default()
+    };
+    let after = (!probe.divider_id.is_empty())
+        .then(|| channel.by_id.get(&probe.divider_id).copied())
+        .flatten();
+    for (index, m) in messages.iter().enumerate() {
+        if m.author == me {
+            continue; // own messages never make a channel unread
+        }
+        let unread = match after {
+            Some(cursor) => index > cursor,
+            None => m.ts.min(ceiling_ts) > probe.divider_ts,
+        };
+        if unread {
+            summary.count += 1;
+            summary.first_index.get_or_insert(index as u64);
+        }
+    }
+    summary
+}
+
 /// Materialize a channel document into the UI's ordered message list.
+///
+/// One sequential cursor over the list rather than an indexed `get` per element: an indexed
+/// lookup re-descends the op tree every time, which made this walk cost tens of microseconds per
+/// message and put a long channel's every read (and the actor's every change check) near a
+/// second. The cursor visits each element once.
 pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
+    use automerge::{ReadDoc as _, ValueRef};
     let mut out = Vec::new();
-    if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, MESSAGES) {
-        for i in 0..doc.length(&list) {
-            if let Ok(Some((Value::Object(ObjType::Map), msg))) = doc.get(&list, i) {
-                out.push(read_message(doc, &msg));
+    // Every conflicting list, not just the one that wins the key.
+    //
+    // The list is created lazily by whoever posts first. Two members who both post before either
+    // has seen the other's creation op each make one, and Automerge keeps both while `get` can
+    // only hand back one of them: the other member's messages are still in the document and
+    // simply cannot be reached. This is the same defect the status feed hit and moved to distinct
+    // root keys to avoid (see the note above `STATUS_POST_PREFIX`); channels never followed, and
+    // a member whose posts landed in the losing list watched them disappear.
+    //
+    // Reading all of them costs nothing when there is one, which is the ordinary case, and needs
+    // no change to what is written or stored. Writers keep using the list `get` returns, so they
+    // converge on a single one as soon as they have seen each other.
+    if let Ok(values) = doc.get_all(ROOT, MESSAGES) {
+        for (value, list) in values {
+            if !matches!(value, automerge::Value::Object(ObjType::List)) {
+                continue;
+            }
+            for item in doc.list_range(&list, ..) {
+                if matches!(item.value, ValueRef::Object(ObjType::Map)) {
+                    out.push(read_message(doc, &item.id()));
+                }
             }
         }
     }
+    // The list's own order is not the conversation's order, and using it as one put messages
+    // inside the past.
+    //
+    // A send appends at the end of the list *as the sending replica currently sees it*. A member
+    // that is behind therefore appends after the last row it knows about, not after the last row
+    // that exists; when the history it was missing arrives, the two are concurrent insertions and
+    // the merge orders them by its own rule, which knows nothing about when anything was said.
+    // What that looked like was a Saturday burst sitting above Wednesday and Thursday, and it was
+    // never only cosmetic: the paged read, the day dividers, the unread boundary, the tail a
+    // notification describes and the "latest own message" delivery anchor all take their meaning
+    // from this order, so a delivered message could land above the read mark and be treated as
+    // already seen.
+    //
+    // A **stable** sort on the timestamp alone. Ties therefore keep the order the list already
+    // had, which is the merge's own deterministic order, so every replica still agrees; and for
+    // the case that produces ties in practice, one person typing a burst faster than the clock
+    // ticks, that order is the order they were sent in. Adding the id as a tiebreak would replace
+    // that with alphabetical nonsense: a burst of three would come out first, third, second.
+    //
+    // Not a substitute for a proper causal ordering key. Two senders' clocks can still disagree,
+    // and a reply can still sort above its parent if they disagree badly enough. What this
+    // guarantees is that every member renders the same conversation in the same order, and that
+    // the order is the one the timestamps describe.
+    out.sort_by_key(|m| m.ts);
     out
 }
 
 /// Decode one message map. Both the legacy channel/status list and the conflict-free status
 /// layout below use exactly this inner schema; keeping one decoder prevents compatibility fixes
 /// from making the two representations render differently.
+///
+/// One pass over the map's keys serves every field and the flat reaction keys alike (the same
+/// cursor-not-lookup reasoning as [`read_messages`]). Field semantics are exactly those of
+/// [`str_field`] / [`int_field`]: a string field that is not a string reads as empty, an integer
+/// field that is not an `Int`/`Uint` reads as `0`, and `pinned` is "the key is present".
 fn read_message(doc: &AutoCommit, msg: &ObjId) -> ChatMessage {
-    ChatMessage {
-        id: str_field(doc, msg, MSG_ID),
-        author: str_field(doc, msg, AUTHOR),
-        text: str_field(doc, msg, TEXT),
-        ts: int_field(doc, msg, TS),
-        edited: int_field(doc, msg, EDITED),
-        reactions: read_reactions(doc, msg),
-        reply_to: str_field(doc, msg, REPLY_TO),
-        pinned: doc.get(msg, PINNED).ok().flatten().is_some(),
+    use automerge::{ReadDoc as _, ScalarValueRef, ValueRef};
+    fn str_of(value: &ValueRef<'_>) -> String {
+        match value {
+            ValueRef::Scalar(ScalarValueRef::Str(s)) => s.to_string(),
+            _ => String::new(),
+        }
     }
+    fn int_of(value: &ValueRef<'_>) -> u64 {
+        match value {
+            ValueRef::Scalar(ScalarValueRef::Int(i)) => *i as u64,
+            ValueRef::Scalar(ScalarValueRef::Uint(u)) => *u,
+            _ => 0,
+        }
+    }
+    let mut m = ChatMessage {
+        id: String::new(),
+        author: String::new(),
+        text: String::new(),
+        ts: 0,
+        edited: 0,
+        reactions: Vec::new(),
+        reply_to: String::new(),
+        pinned: false,
+    };
+    // Reactions are flat scalar keys *directly on the message map*, `"<emoji>\x1f<fingerprint>" =
+    // true` (see `toggle_reaction_in_doc`), beside the regular field keys (none of which contain
+    // the separator). A `BTreeMap` gives a stable emoji order, so the UI and the change-detector
+    // signature are deterministic. No reaction keys, no reactions.
+    let mut grouped: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for item in doc.map_range(msg, ..) {
+        match item.key.as_ref() {
+            MSG_ID => m.id = str_of(&item.value),
+            AUTHOR => m.author = str_of(&item.value),
+            TEXT => m.text = str_of(&item.value),
+            REPLY_TO => m.reply_to = str_of(&item.value),
+            TS => m.ts = int_of(&item.value),
+            EDITED => m.edited = int_of(&item.value),
+            PINNED => m.pinned = true,
+            key => {
+                if let Some((emoji, fp)) = key.split_once(REACTION_SEP) {
+                    grouped
+                        .entry(emoji.to_string())
+                        .or_default()
+                        .push(fp.to_string());
+                }
+            }
+        }
+    }
+    m.reactions = grouped
+        .into_iter()
+        .map(|(emoji, by)| Reaction { emoji, by })
+        .collect();
+    m
 }
 
 /// The separator between the emoji and the reactor fingerprint in a flat reaction key. ASCII Unit
@@ -398,28 +702,6 @@ const REACTION_SEP: char = '\u{1f}';
 /// feed. The length bound is a gossip budget: honest clients send a small fixed set.
 fn valid_reaction_emoji(emoji: &str) -> bool {
     !emoji.is_empty() && !emoji.contains(REACTION_SEP) && emoji.len() <= 64
-}
-
-/// Read a message map's reactions and group them by emoji. Reactions are stored as flat scalar keys
-/// *directly on the message map*; `"<emoji>\x1f<fingerprint>" = true` (see `toggle_reaction_in_doc`)
-///; alongside the regular field keys (`id`/`author`/…, none of which contain the separator, so they
-/// are skipped here). A `BTreeMap` gives a stable emoji order (so the UI and the change-detector
-/// signature are deterministic). No reaction keys → no reactions.
-fn read_reactions(doc: &AutoCommit, msg: &ObjId) -> Vec<Reaction> {
-    let mut grouped: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
-    for key in doc.keys(msg) {
-        if let Some((emoji, fp)) = key.split_once(REACTION_SEP) {
-            grouped
-                .entry(emoji.to_string())
-                .or_default()
-                .push(fp.to_string());
-        }
-    }
-    grouped
-        .into_iter()
-        .map(|(emoji, by)| Reaction { emoji, by })
-        .collect()
 }
 
 /// Toggle `fp`'s reaction `emoji` on the message with `id`: adds it if absent, removes it if
@@ -627,6 +909,62 @@ fn delete_message_in_doc(doc: &mut AutoCommit, id: &str) -> Result<bool, Automer
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod message_list_conflict_tests {
+    use super::*;
+    use automerge::AutoCommit;
+
+    /// Two members posting for the first time before either has seen the other create the list.
+    ///
+    /// Automerge keeps both lists and `get(ROOT, MESSAGES)` can only return one of them, so half
+    /// the conversation is still in the document and unreachable. It is the defect the status feed
+    /// hit and escaped by moving to distinct root keys; channels stayed on the shared list, and a
+    /// member whose posts landed in the losing one watched them disappear.
+    #[test]
+    fn messages_written_into_two_concurrently_created_lists_are_all_still_read() {
+        let mut alice = AutoCommit::new();
+        let mut bob = AutoCommit::new();
+        // Neither has seen the other, so each creates the list on its own first post.
+        append_message(&mut alice, "a1", "alice", "hers", 100, "").unwrap();
+        append_message(&mut bob, "b1", "bob", "his", 200, "").unwrap();
+        alice.merge(&mut bob).unwrap();
+
+        let texts: Vec<String> = read_messages(&alice).into_iter().map(|m| m.text).collect();
+        assert_eq!(
+            texts,
+            vec!["hers".to_string(), "his".to_string()],
+            "both first posts survive the merge, in the order their timestamps describe"
+        );
+
+        // And once they have seen each other, further posts go to one list and stay in order.
+        append_message(&mut alice, "a2", "alice", "after", 300, "").unwrap();
+        let texts: Vec<String> = read_messages(&alice).into_iter().map(|m| m.text).collect();
+        assert_eq!(texts, vec!["hers", "his", "after"]);
+    }
+
+    /// A member that speaks while behind appends at the end of what **it** can see, so its message
+    /// is concurrent with the history it has not received. The merge orders those two branches by
+    /// its own rule, which knows nothing about when anything was said.
+    #[test]
+    fn a_message_sent_while_behind_does_not_read_as_older_than_the_history_it_missed() {
+        let mut alice = AutoCommit::new();
+        append_message(&mut alice, "w", "alice", "wednesday", 100, "").unwrap();
+        // Bob's copy stops there: he has the first day and nothing after it.
+        let mut bob = alice.fork();
+        append_message(&mut alice, "t", "alice", "thursday", 200, "").unwrap();
+        // And he says something on the third, appending after the last row he can see.
+        append_message(&mut bob, "s", "bob", "saturday", 300, "").unwrap();
+
+        bob.merge(&mut alice).unwrap();
+        let texts: Vec<String> = read_messages(&bob).into_iter().map(|m| m.text).collect();
+        assert_eq!(
+            texts,
+            vec!["wednesday", "thursday", "saturday"],
+            "what was said last reads last, whatever order the merge put the branches in"
+        );
+    }
 }
 
 // --- the status feed's conflict-free post layout ----------------------------
@@ -1050,6 +1388,10 @@ const L_ICON: &str = "icon";
 /// The shared server cursor (base64 image bytes). Additive to the v1 schema in the same way
 /// as the icon: an older doc simply lacks the key, which reads as "no cursor".
 const L_CURSOR: &str = "cursor";
+/// The shared server **name**. Additive in the same way as the icon and cursor: an older doc
+/// lacks the key, which reads as "the owner has published no name" and leaves every member on
+/// whatever local label it already had.
+const L_NAME: &str = "name";
 
 /// Maximum length of a livery preset id (a short key like `nightshade`).
 pub const MAX_LIVERY_PRESET_BYTES: usize = 32;
@@ -1071,6 +1413,9 @@ pub const MAX_SERVER_ICON_BYTES: usize = 64 * 1024;
 /// tighter budget than the icon; and, like the icon, it rides *inline* (base64) in the livery
 /// document, so this also bounds what gossips.
 pub const MAX_SERVER_CURSOR_BYTES: usize = 16 * 1024;
+/// Maximum length of a published server name. Long enough for a real group name, short enough
+/// that it cannot be used to push prose through the rail or the cross-server inbox.
+pub const MAX_SERVER_NAME_BYTES: usize = 64;
 
 /// A server's published UI livery. Empty fields mean "no livery" / "no override"; every
 /// value is opaque to the backend and validated by the client on read.
@@ -1091,6 +1436,15 @@ pub struct Livery {
     /// this field and preserves whatever is stored. The two images are independent; setting
     /// one never disturbs the other.
     pub cursor: String,
+    /// The shared server name; empty = the owner has published none, and each member keeps
+    /// whatever local label it already had. Set/cleared only by [`Server::set_server_name`],
+    /// exactly like the two images: [`Server::set_livery`] preserves whatever is stored.
+    ///
+    /// This exists because a server had no name of its own at all. The rail label was purely
+    /// local and defaulted to the display name of whoever was looking, so every group appeared
+    /// to be named after its reader. A member may still relabel a server for themselves; this is
+    /// what the group is called when nobody has.
+    pub name: String,
 }
 
 /// Write the livery document (last-writer-wins on each field; the token map is replaced
@@ -1103,6 +1457,7 @@ fn write_livery(doc: &mut AutoCommit, l: &Livery) -> Result<(), AutomergeError> 
     doc.put(ROOT, L_ACCENT, l.accent.as_str())?;
     doc.put(ROOT, L_ICON, l.icon.as_str())?;
     doc.put(ROOT, L_CURSOR, l.cursor.as_str())?;
+    doc.put(ROOT, L_NAME, l.name.as_str())?;
     let tokens = doc.put_object(ROOT, L_TOKENS, ObjType::Map)?;
     for (k, v) in &l.tokens {
         doc.put(&tokens, k.as_str(), v.as_str())?;
@@ -1128,6 +1483,14 @@ fn write_server_cursor(doc: &mut AutoCommit, cursor: &str) -> Result<(), Automer
     Ok(())
 }
 
+/// Write **only** the shared server name (`""` clears it), leaving the colours and both images
+/// untouched; the same independence the two images already have from each other.
+fn write_server_name(doc: &mut AutoCommit, name: &str) -> Result<(), AutomergeError> {
+    doc.put(ROOT, L_V, LIVERY_VERSION)?;
+    doc.put(ROOT, L_NAME, name)?;
+    Ok(())
+}
+
 /// Materialize the livery document (a missing/foreign-shaped field reads as empty; so a
 /// doc written before the icon/cursor keys existed reads back with neither).
 fn read_livery(doc: &AutoCommit) -> Livery {
@@ -1144,6 +1507,7 @@ fn read_livery(doc: &AutoCommit) -> Livery {
         tokens,
         icon: str_field(doc, &ROOT, L_ICON),
         cursor: str_field(doc, &ROOT, L_CURSOR),
+        name: str_field(doc, &ROOT, L_NAME),
     }
 }
 
@@ -2156,6 +2520,19 @@ impl Role {
 }
 
 const FILES: &str = "files";
+
+/// The reserved root key holding per-server fileshare settings; today the owner's upload limit.
+///
+/// NUL-prefixed and holding a `Map`, exactly like the wiki's `\u{0}cfg`, for the same two
+/// reasons: the file index's own entries live in a `List` under [`FILES`], so this can never
+/// collide with one, and a peer that predates the setting merges the key through the CRDT
+/// without ever reading it. Such a peer keeps enforcing the compiled-in maximum, which is the
+/// safe direction to be wrong in: it refuses uploads the owner would have allowed, rather than
+/// admitting ones the owner forbade.
+const FILE_CFG_KEY: &str = "\u{0}cfg";
+/// The `\u{0}cfg` field: the largest file this server accepts, in bytes.
+const FCFG_MAX_FILE_BYTES: &str = "max_file_bytes";
+
 const F_NAME: &str = "name";
 const F_AUTHOR: &str = "author";
 // 10c: a virtual folder path for organisation (e.g. "", "docs", "embed/<fp>", "wiki/<page>",
@@ -2226,10 +2603,32 @@ impl FileExpiry {
     }
 }
 
-/// Maximum file size accepted by [`Server::add_file`]. Chunked transfer splits a file into
-/// [`CHUNK_BYTES`] pieces, so this is a whole-**file** cap (256 MiB), no longer the per-blob
-/// transport limit. (GB-scale + background/streaming download is a follow-up.)
-pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
+/// Hard maximum file size the protocol will carry. Chunked transfer splits a file into
+/// [`CHUNK_BYTES`] pieces, so this is a whole-**file** cap, no longer the per-blob transport
+/// limit.
+///
+/// This is the ceiling, not the policy. What a given server actually accepts is
+/// [`Server::file_size_limit`], which an owner sets per server and which can only ever be lower
+/// than this. Nothing may be uploaded past this one, because a manifest naming more than
+/// [`catcoms_storage::MAX_CHUNKS`] chunks does not parse.
+///
+/// Raised from 256 MiB on 2026-09-04. Transfers were already the right shape for it: an upload
+/// streams a slice at a time and seals a chunk at a time, and a download goes from the actor to
+/// disk one chunk at a time without the bytes ever entering the webview. Resumable/background
+/// transfer is still a follow-up, so a failed 1 GiB transfer restarts from zero.
+pub const MAX_FILE_BYTES: usize = 1024 * 1024 * 1024;
+
+/// What a server accepts before its owner says otherwise: the limit that applied everywhere
+/// before servers had one of their own, so an existing server behaves exactly as it did.
+///
+/// Deliberately well below [`MAX_FILE_BYTES`]. A member should not be able to commit everyone
+/// else to a gigabyte download because the owner never looked at the setting.
+pub const DEFAULT_FILE_SIZE_LIMIT: u64 = 256 * 1024 * 1024;
+
+/// The smallest limit an owner may set. Below this the fileshare stops being useful for the
+/// things it is used for (a screenshot, a short clip), and a limit of zero would read as a
+/// misconfiguration rather than a policy.
+pub const MIN_FILE_SIZE_LIMIT: u64 = 1024 * 1024;
 
 /// Maximum number of file-index rows this implementation publishes or materializes. A current
 /// malicious member can still append CRDT rows, but rows beyond this deterministic boundary do
@@ -2524,6 +2923,31 @@ fn file_entry_attestation_payload(
         push_attested_part(&mut out, part);
     }
     out
+}
+
+/// The largest file this server accepts, from the index doc's reserved config map.
+///
+/// Unions conflicting config maps, winner last, exactly like the wiki's review window. A value
+/// outside the permitted band is treated as unset rather than obeyed: the setting is written by
+/// an owner's client, and a junk one should fall back to the default rather than either opening
+/// the server up or closing it down by accident. An index written before the setting existed
+/// simply has no key, which reads as the default.
+fn read_file_size_limit(doc: &AutoCommit) -> u64 {
+    let mut limit = DEFAULT_FILE_SIZE_LIMIT;
+    for cfg in reserved_map_objs(doc, FILE_CFG_KEY) {
+        let v = int_field(doc, &cfg, FCFG_MAX_FILE_BYTES);
+        if (MIN_FILE_SIZE_LIMIT..=MAX_FILE_BYTES as u64).contains(&v) {
+            limit = v;
+        }
+    }
+    limit
+}
+
+/// Write the server's upload limit into the index doc's reserved config map.
+fn write_file_size_limit(doc: &mut AutoCommit, bytes: u64) -> Result<(), AutomergeError> {
+    let cfg = reserved_map_obj(doc, FILE_CFG_KEY)?;
+    doc.put(&cfg, FCFG_MAX_FILE_BYTES, bytes)?;
+    Ok(())
 }
 
 /// Append a file entry (name + author + folder path + encoded `FileRef` + circulation expiry)
@@ -2870,6 +3294,14 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// mapping is gone, so older messages report no delivery state at all rather than a wrong
     /// one. Only own messages are tracked; a peer's delivery is not ours to display.
     own_message_changes: HashMap<u128, VecDeque<(String, ChangeHash)>>,
+    /// Per channel, the last materialized message list together with the document version
+    /// ([`Server::doc_version`]) it was read at. Materializing a channel walks its whole automerge
+    /// document, and the actor, the unread projection, the inbox and every UI read all ask for the
+    /// same list between two changes; so the walk happens once per change rather than once per
+    /// ask. Interior mutability because every reader is `&self`; the cell is never borrowed
+    /// across a call that could re-enter it. Derived state; never persisted; a `RefCell` (not a
+    /// lock) because a `Server` is owned by exactly one actor task.
+    messages_cache: std::cell::RefCell<HashMap<u128, MaterializedChannel>>,
     /// Total order of delivery snapshots issued by this actor session. Queries and emitted events
     /// share it, so a delayed IPC query can never overwrite a newer event in the webview.
     delivery_snapshot_revision: u64,
@@ -2938,6 +3370,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
         })
@@ -2984,6 +3417,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
         })
@@ -3030,6 +3464,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
         })
@@ -3109,6 +3544,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 display_name: display_name.into(),
                 device_id,
                 own_message_changes: HashMap::new(),
+                messages_cache: std::cell::RefCell::new(HashMap::new()),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
             },
@@ -3159,6 +3595,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 display_name: display_name.into(),
                 device_id,
                 own_message_changes: HashMap::new(),
+                messages_cache: std::cell::RefCell::new(HashMap::new()),
                 delivery_snapshot_revision: 0,
                 devices_sig: None,
             },
@@ -3251,6 +3688,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
         })
@@ -3280,6 +3718,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            messages_cache: std::cell::RefCell::new(HashMap::new()),
             delivery_snapshot_revision: 0,
             devices_sig: None,
         })
@@ -3876,9 +4315,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         bytes: &[u8],
         progress: Option<&tokio::sync::mpsc::Sender<(usize, usize)>>,
     ) -> Result<Cid, AppError> {
-        if bytes.len() > MAX_FILE_BYTES {
+        // This server's own limit, not the protocol ceiling. `file_size_limit` can never answer
+        // above `MAX_FILE_BYTES`, so checking it alone still enforces both.
+        let limit = self.file_size_limit();
+        if bytes.len() as u64 > limit {
             return Err(AppError::Invalid(format!(
-                "file too large: {} bytes (max {MAX_FILE_BYTES})",
+                "file too large: {} bytes (this server's limit is {limit})",
                 bytes.len()
             )));
         }
@@ -4715,6 +5157,25 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.member_route_revision()
     }
 
+    /// Session-local revision of the explicit delivery-receipt evidence. A delivery snapshot can
+    /// change without any document changing (a peer's receipt arrives), so [`Self::doc_version`]
+    /// alone cannot decide when to re-derive one; this is the other half.
+    pub fn delivery_evidence_revision(&self) -> u64 {
+        self.sync.delivery_receipt_revision()
+    }
+
+    /// Session-monotonic version of one replicated document: the number of signed ops applied to
+    /// it so far (`0` for a document that is not open). Every path that changes a document's
+    /// content, local edit, live gossip, past-epoch replay and catch-up alike, appends exactly
+    /// one op to its log, and duplicates are dropped before they count; so an unchanged version
+    /// means an unchanged projection, and a consumer can skip re-materializing it. O(1).
+    pub fn doc_version(&self, doc_type: DocType, doc_id: u128) -> u64 {
+        self.sync
+            .doc(doc_type, doc_id)
+            .map(|d| d.op_count() as u64)
+            .unwrap_or(0)
+    }
+
     /// Every inbound join attempt this node served this session, newest first, with why each was
     /// refused (the **operator's** view; see [`JoinAttempt`]).
     ///
@@ -5510,6 +5971,43 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .unwrap_or_default()
     }
 
+    /// The largest file this server accepts, in bytes.
+    ///
+    /// Never above [`MAX_FILE_BYTES`], and [`DEFAULT_FILE_SIZE_LIMIT`] until an owner sets one,
+    /// including when the index document has not been opened yet: a limit that answered
+    /// "unlimited" while the doc was still loading would be the wrong way to be wrong.
+    pub fn file_size_limit(&self) -> u64 {
+        self.sync
+            .doc(DocType::FileIndex, FILE_INDEX_DOC)
+            .map(|d| read_file_size_limit(d.doc()))
+            .unwrap_or(DEFAULT_FILE_SIZE_LIMIT)
+    }
+
+    /// Set the largest file this server accepts. **Owner or admin only**, like the livery.
+    ///
+    /// Bounded at both ends: [`MIN_FILE_SIZE_LIMIT`] so the fileshare stays usable, and
+    /// [`MAX_FILE_BYTES`] because past that a manifest does not parse and the upload would fail
+    /// later and less clearly. Lowering it does not withdraw files already shared; it governs
+    /// what may be added next.
+    pub async fn set_file_size_limit(&mut self, bytes: u64) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can set the file size limit".into(),
+            ));
+        }
+        if !(MIN_FILE_SIZE_LIMIT..=MAX_FILE_BYTES as u64).contains(&bytes) {
+            return Err(AppError::Invalid(format!(
+                "file size limit must be between {MIN_FILE_SIZE_LIMIT} and {MAX_FILE_BYTES} bytes"
+            )));
+        }
+        self.sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                write_file_size_limit(d, bytes)
+            })
+            .await?;
+        Ok(())
+    }
+
     /// The server's wiki review window in days; `0` = edits publish immediately (the default).
     pub fn wiki_review_days(&self) -> u32 {
         self.sync
@@ -5830,16 +6328,50 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         self.sync
             .post(DocType::Livery, LIVERY_DOC, |d| {
-                // Read-modify-write inside the edit itself: take the images that are already in
+                // Read-modify-write inside the edit itself: take the values that are already in
                 // the document and write them back verbatim, so a colour publish is a no-op for
-                // the (comparatively huge) icon and the cursor alike.
+                // the (comparatively huge) icon, the cursor and the server's name alike.
                 let kept = Livery {
                     icon: str_field(d, &ROOT, L_ICON),
                     cursor: str_field(d, &ROOT, L_CURSOR),
+                    name: str_field(d, &ROOT, L_NAME),
                     ..livery
                 };
                 write_livery(d, &kept)
             })
+            .await?;
+        Ok(())
+    }
+
+    /// Set (or clear, with `""`) the shared **server name**, stored in the livery document
+    /// beside the icon and independent of it. **Owner or admin only**, like every other
+    /// published livery value.
+    ///
+    /// Clearing it does not rename anybody's rail: it means "the group publishes no name", and
+    /// each member falls back to the local label it already had.
+    pub async fn set_server_name(&mut self, name: String) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can set the server name".into(),
+            ));
+        }
+        let name = name.trim().to_string();
+        if name.len() > MAX_SERVER_NAME_BYTES {
+            return Err(AppError::Invalid(format!(
+                "server name too long: {} bytes (max {MAX_SERVER_NAME_BYTES})",
+                name.len()
+            )));
+        }
+        // A name is drawn in the rail, in crumbs and in the cross-server inbox. Control
+        // characters there are a rendering problem at best and a spoofing tool at worst, and the
+        // one thing no legitimate group name contains is a newline.
+        if name.chars().any(char::is_control) {
+            return Err(AppError::Invalid(
+                "a server name cannot contain control characters".into(),
+            ));
+        }
+        self.sync
+            .post(DocType::Livery, LIVERY_DOC, |d| write_server_name(d, &name))
             .await?;
         Ok(())
     }
@@ -6660,11 +7192,105 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// The current materialized messages in a channel (empty if it is not open).
+    ///
+    /// A clone of the cached list (see `messages_cache`); callers that only need to look use
+    /// [`Self::with_messages`] and pay nothing per row.
     pub fn messages(&self, channel: u128) -> Vec<ChatMessage> {
-        self.sync
-            .doc(DocType::Channel, channel)
-            .map(|d| read_messages(d.doc()))
-            .unwrap_or_default()
+        self.with_messages(channel, |msgs| msgs.to_vec())
+    }
+
+    /// Run `f` over the channel's current messages without copying them. The list is materialized
+    /// at most once per document version; every later call at the same version borrows it.
+    ///
+    /// `f` must not call back into a message read of this server (the cache is borrowed while it
+    /// runs); the projections that use this only read the slice they are handed.
+    pub fn with_messages<U>(&self, channel: u128, f: impl FnOnce(&[ChatMessage]) -> U) -> U {
+        self.with_channel(channel, |c| f(&c.messages))
+    }
+
+    /// As [`Self::with_messages`], with the by-id and reply-count lookups alongside the rows.
+    fn with_channel<U>(&self, channel: u128, f: impl FnOnce(&MaterializedChannel) -> U) -> U {
+        let Some(doc) = self.sync.doc(DocType::Channel, channel) else {
+            // Not open: nothing to cache, and a stale entry from before a re-open is unreachable
+            // since a document is never removed from the sync layer within a session.
+            return f(&MaterializedChannel {
+                version: 0,
+                ..MaterializedChannel::default()
+            });
+        };
+        let version = doc.op_count() as u64;
+        let mut cache = self.messages_cache.borrow_mut();
+        let entry = cache.entry(channel).or_insert_with(|| MaterializedChannel {
+            version: u64::MAX,
+            ..MaterializedChannel::default()
+        });
+        if entry.version != version {
+            *entry = MaterializedChannel::build(version, read_messages(doc.doc()));
+        }
+        f(entry)
+    }
+
+    /// A bounded, contiguous slice of a channel around an anchor (see [`MessagePageQuery`]), with
+    /// each row's cross-channel needs (mention/reply addressing, reply count, reply parent)
+    /// resolved here against the whole materialized list. This is what lets the webview hold only
+    /// the rows it shows: an id anchor survives concurrent inserts, edits and deletes around it,
+    /// and `version` tells a caller whether two pages describe the same list.
+    pub fn message_page(&self, channel: u128, query: &MessagePageQuery) -> MessagePage {
+        let me = self.my_fingerprint();
+        let marker = self.mention_marker();
+        self.with_channel(channel, |c| {
+            let total = c.messages.len();
+            let mut page = MessagePage {
+                version: c.version,
+                total: total as u64,
+                ..MessagePage::default()
+            };
+            if let Some(probe) = &query.unread {
+                page.unread = Some(unread_summary(c, &me, probe));
+            }
+            let anchor = match &query.anchor {
+                _ if total == 0 => None,
+                PageAnchor::Tail => Some(total - 1),
+                PageAnchor::Id(id) => c.by_id.get(id).copied(),
+                PageAnchor::Index(index) => Some((*index as usize).min(total - 1)),
+                PageAnchor::FirstReplyTo(id) => c.messages.iter().position(|m| &m.reply_to == id),
+            };
+            let Some(anchor) = anchor else {
+                return page;
+            };
+            let start = anchor.saturating_sub(query.before);
+            let end = anchor.saturating_add(query.after).min(total - 1);
+            page.anchor_index = Some(anchor as u64);
+            page.start = start as u64;
+            page.rows = c.messages[start..=end]
+                .iter()
+                .map(|m| {
+                    let parent = (!m.reply_to.is_empty())
+                        .then(|| c.by_id.get(&m.reply_to).map(|&i| &c.messages[i]))
+                        .flatten();
+                    let targets_me = addresses_me(m, &me, marker.as_deref(), parent);
+                    PagedMessage {
+                        message: m.clone(),
+                        targets_me,
+                        reply_count: c.reply_counts.get(&m.id).copied().unwrap_or(0),
+                        reply_to_preview: parent.map(|p| ReplyPreview {
+                            id: p.id.clone(),
+                            author: p.author.clone(),
+                            text: p.text.chars().take(REPLY_PREVIEW_CHARS).collect(),
+                        }),
+                    }
+                })
+                .collect();
+            page
+        })
+    }
+
+    /// Every pinned message in a channel, in log order. Pins are few and owner/admin-curated, so
+    /// this is the one whole-channel projection a paged client still asks for by name.
+    pub fn pinned_messages(&self, channel: u128) -> Vec<ChatMessage> {
+        self.with_messages(channel, |msgs| {
+            msgs.iter().filter(|m| m.pinned).cloned().collect()
+        })
     }
 
     /// One activity head per known channel: what the newest message is, and what the newest
@@ -6679,24 +7305,150 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.channels()
             .into_iter()
             .map(|c| {
-                let msgs = self.messages(c.id);
-                let mut head = ChannelHead {
-                    channel: c.id,
-                    count: msgs.len() as u64,
-                    ..ChannelHead::default()
-                };
-                for m in &msgs {
-                    head.latest_ts = head.latest_ts.max(m.ts);
-                    // `>=` so that among equal timestamps the last one materialized wins, which is
-                    // the same row the UI shows at the bottom of the log.
-                    if m.author != me && m.ts >= head.latest_incoming_ts {
-                        head.latest_incoming_ts = m.ts;
-                        head.latest_incoming_id = m.id.clone();
+                self.with_messages(c.id, |msgs| {
+                    let mut head = ChannelHead {
+                        channel: c.id,
+                        count: msgs.len() as u64,
+                        ..ChannelHead::default()
+                    };
+                    for m in msgs {
+                        head.latest_ts = head.latest_ts.max(m.ts);
+                        // `>=` so that among equal timestamps the last one materialized wins,
+                        // which is the same row the UI shows at the bottom of the log.
+                        if m.author != me && m.ts >= head.latest_incoming_ts {
+                            head.latest_incoming_ts = m.ts;
+                            head.latest_incoming_id = m.id.clone();
+                        }
                     }
-                }
-                head
+                    head
+                })
             })
             .collect()
+    }
+
+    /// The newest `limit` messages of a channel, oldest first, each paired with whether it is
+    /// addressed to me: an `@[my name]` mention (the composer's marker, under the same
+    /// normalization [`Self::inbox`] uses) or a reply to one of my own messages. The reply parent
+    /// is resolved against the whole channel, so a reply to something far older than the tail is
+    /// still recognised; only the rows shipped are bounded. My own messages are never "to me".
+    ///
+    /// This is what an arrival notification needs, and all it needs: the previous shape of that
+    /// path fetched the entire history of a channel nobody was looking at to read its last row.
+    ///
+    /// `after_id` and `after_ts` are the caller's cursor, normally the read mark for that
+    /// channel. [`MessageTail::addressed_after_cursor`] answers over **every** row past it, not
+    /// only the rows carried: a catch-up or a burst can append more messages than one tail holds,
+    /// and a mention followed by `limit` ordinary messages must still ring.
+    ///
+    /// The id is the cursor; `after_ts` is what is left of it once the message it named is gone.
+    /// Without it a deleted read mark reads as "nothing here has been read", so a channel read
+    /// years ago rings again for its oldest mention, and keeps ringing. Pass `0` only to mean
+    /// this member has genuinely read nothing here.
+    /// The named rows, wherever they sit, each with whether it addresses this member.
+    ///
+    /// Rows are ordered by their senders' timestamps, so a message that has just arrived is not
+    /// necessarily near the end: a delayed one, or one from a device whose clock is behind, can
+    /// sort arbitrarily far back. Looking for it in a bounded tail, or in whatever page the reader
+    /// happens to have loaded, therefore finds nothing and leaves the caller describing an
+    /// unrelated row. Ids are looked up against the whole materialized channel instead, which is
+    /// already in memory; ids that name nothing are simply absent from the answer, which is how a
+    /// caller learns a row was deleted before it could be read.
+    pub fn messages_by_id(&self, channel: u128, ids: &[String]) -> Vec<(ChatMessage, bool)> {
+        let me = self.my_fingerprint();
+        let marker = self.mention_marker();
+        self.with_channel(channel, |c| {
+            let mut out: Vec<(ChatMessage, bool)> = ids
+                .iter()
+                .filter_map(|id| c.by_id.get(id).map(|index| (*index, id)))
+                .map(|(index, _)| {
+                    let m = &c.messages[index];
+                    let parent = (!m.reply_to.is_empty())
+                        .then(|| c.by_id.get(&m.reply_to).map(|&i| &c.messages[i]))
+                        .flatten();
+                    (
+                        index,
+                        m.clone(),
+                        addresses_me(m, &me, marker.as_deref(), parent),
+                    )
+                })
+                // Answered in the order they read, so a caller that has to pick one can pick the
+                // last without having to think about the order it asked in.
+                .map(|(index, m, to_me)| (index, (m, to_me)))
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .into_values()
+                .collect();
+            out.shrink_to_fit();
+            out
+        })
+    }
+
+    pub fn message_tail(
+        &self,
+        channel: u128,
+        limit: usize,
+        after_id: &str,
+        after_ts: u64,
+    ) -> MessageTail {
+        let me = self.my_fingerprint();
+        let marker = self.mention_marker();
+        let rows = self
+            .message_page(
+                channel,
+                &MessagePageQuery {
+                    anchor: PageAnchor::Tail,
+                    before: limit.saturating_sub(1),
+                    after: 0,
+                    unread: None,
+                },
+            )
+            .rows
+            .into_iter()
+            .map(|row| (row.message, row.targets_me))
+            .collect();
+        let addressed_after_cursor = self.with_channel(channel, |c| {
+            // Where the cursor lands, in the three ways it can be known. The id is exact and is
+            // preferred whenever the message it names is still here. Rows are in document order,
+            // which is not sorted by time, so the timestamp fallback is a test applied per row
+            // rather than a place to start from.
+            let from = c.by_id.get(after_id).map(|cursor| cursor + 1);
+            let seen_before = |index: usize, m: &ChatMessage| match from {
+                Some(start) => index < start,
+                // The cursor's message is gone, deleted or never recorded. Its timestamp still
+                // says where the reader had got to, and a message at or before that was read.
+                None if after_ts > 0 => m.ts <= after_ts,
+                // Nothing read here at all, so nothing is accounted for. This is the only case
+                // where the whole channel counts, and it is the one where that is the answer.
+                None => false,
+            };
+            c.messages.iter().enumerate().any(|(index, m)| {
+                if seen_before(index, m) {
+                    return false;
+                }
+                let parent = (!m.reply_to.is_empty())
+                    .then(|| c.by_id.get(&m.reply_to).map(|&i| &c.messages[i]))
+                    .flatten();
+                addresses_me(m, &me, marker.as_deref(), parent)
+            })
+        });
+        MessageTail {
+            rows,
+            addressed_after_cursor,
+        }
+    }
+
+    /// The `@[Name]` marker the composer inserts for me, or `None` when I have no usable name.
+    /// Built from the SAME normalization the composer applies (desktop `mentionName`), so a name
+    /// with brackets/newlines/extra spaces or over the length cap is detected here exactly as it
+    /// was written; not silently missed.
+    fn mention_marker(&self) -> Option<String> {
+        let me = self.my_fingerprint();
+        let name = self
+            .profiles()
+            .get(&me)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let my_name = normalize_mention_name(&name);
+        (!my_name.is_empty()).then(|| format!("@[{my_name}]"))
     }
 
     /// Lightweight activity stats over a channel's messages; total count, first/last wall-clock
@@ -6733,41 +7485,38 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .into_iter()
             .map(|(fp, p)| (fp, p.name))
             .collect();
-        // Build the mention marker from the SAME normalization the composer applies when it inserts
-        // `@[Name]` (desktop `mentionName`), so a name with brackets/newlines/extra spaces or over
-        // the length cap is detected here exactly as it was written; not silently missed.
-        let my_name = normalize_mention_name(&names.get(&me).cloned().unwrap_or_default());
-        let marker = (!my_name.is_empty()).then(|| format!("@[{my_name}]"));
+        let marker = self.mention_marker();
 
         let mut out = Vec::new();
         for channel in self.sync.channel_ids() {
-            let msgs = self.messages(channel);
-            // message id -> author, to resolve a reply's parent within this channel.
-            let author_of: std::collections::HashMap<&str, &str> = msgs
-                .iter()
-                .filter(|m| !m.id.is_empty())
-                .map(|m| (m.id.as_str(), m.author.as_str()))
-                .collect();
-            for m in &msgs {
-                if m.author == me {
-                    continue; // never inbox my own messages
+            self.with_messages(channel, |msgs| {
+                // message id -> author, to resolve a reply's parent within this channel.
+                let author_of: std::collections::HashMap<&str, &str> = msgs
+                    .iter()
+                    .filter(|m| !m.id.is_empty())
+                    .map(|m| (m.id.as_str(), m.author.as_str()))
+                    .collect();
+                for m in msgs {
+                    if m.author == me {
+                        continue; // never inbox my own messages
+                    }
+                    let mention = marker.as_deref().is_some_and(|mk| m.text.contains(mk));
+                    let reply = !m.reply_to.is_empty()
+                        && author_of.get(m.reply_to.as_str()) == Some(&me.as_str());
+                    if mention || reply {
+                        out.push(InboxItem {
+                            channel,
+                            message_id: m.id.clone(),
+                            author: m.author.clone(),
+                            author_name: names.get(&m.author).cloned().unwrap_or_default(),
+                            text: m.text.clone(),
+                            ts: m.ts,
+                            mention,
+                            reply,
+                        });
+                    }
                 }
-                let mention = marker.as_deref().is_some_and(|mk| m.text.contains(mk));
-                let reply = !m.reply_to.is_empty()
-                    && author_of.get(m.reply_to.as_str()) == Some(&me.as_str());
-                if mention || reply {
-                    out.push(InboxItem {
-                        channel,
-                        message_id: m.id.clone(),
-                        author: m.author.clone(),
-                        author_name: names.get(&m.author).cloned().unwrap_or_default(),
-                        text: m.text.clone(),
-                        ts: m.ts,
-                        mention,
-                        reply,
-                    });
-                }
-            }
+            });
         }
         out.sort_by(|a, b| b.ts.cmp(&a.ts));
         out.truncate(limit);
@@ -7142,6 +7891,68 @@ mod tests {
     use rand_core::SeedableRng;
 
     const GENERAL: u128 = 1;
+
+    /// The cursor walk must see exactly what the indexed walk saw, for rows written locally AND
+    /// rows that arrived as another actor's change (the replication path is `load_incremental`,
+    /// which is where a cursor over the op set could diverge from an indexed lookup).
+    #[test]
+    fn cursor_materialization_matches_indexed_lookup_for_remote_changes() {
+        let mut alice = AutoCommit::new();
+        alice.set_actor(automerge::ActorId::from(vec![1u8; 32]));
+        append_message(&mut alice, "m1", "alice", "first", 10, "").unwrap();
+        alice.commit();
+        let first = alice.get_last_local_change().unwrap().raw_bytes().to_vec();
+
+        let mut bob = AutoCommit::new();
+        bob.set_actor(automerge::ActorId::from(vec![2u8; 32]));
+        bob.load_incremental(&first).unwrap();
+        append_message(&mut bob, "m2", "bob", "second", 11, "m1").unwrap();
+        toggle_reaction_in_doc(&mut bob, "m1", "👍", "bob").unwrap();
+        bob.commit();
+        let second = bob.get_last_local_change().unwrap().raw_bytes().to_vec();
+        alice.load_incremental(&second).unwrap();
+
+        // The reference: the indexed walk this crate used before the cursor.
+        fn indexed(doc: &AutoCommit) -> Vec<ChatMessage> {
+            let mut out = Vec::new();
+            if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, MESSAGES) {
+                for i in 0..doc.length(&list) {
+                    if let Ok(Some((Value::Object(ObjType::Map), msg))) = doc.get(&list, i) {
+                        let mut by = Vec::new();
+                        for key in doc.keys(&msg) {
+                            if let Some((emoji, fp)) = key.split_once(REACTION_SEP) {
+                                by.push((emoji.to_string(), fp.to_string()));
+                            }
+                        }
+                        out.push(ChatMessage {
+                            id: str_field(doc, &msg, MSG_ID),
+                            author: str_field(doc, &msg, AUTHOR),
+                            text: str_field(doc, &msg, TEXT),
+                            ts: int_field(doc, &msg, TS),
+                            edited: int_field(doc, &msg, EDITED),
+                            reactions: by
+                                .into_iter()
+                                .map(|(emoji, fp)| Reaction {
+                                    emoji,
+                                    by: vec![fp],
+                                })
+                                .collect(),
+                            reply_to: str_field(doc, &msg, REPLY_TO),
+                            pinned: doc.get(&msg, PINNED).ok().flatten().is_some(),
+                        });
+                    }
+                }
+            }
+            out
+        }
+        for doc in [&alice, &bob] {
+            let rows = read_messages(doc);
+            assert_eq!(rows, indexed(doc));
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].reactions.len(), 1, "the remote reaction is visible");
+            assert_eq!(rows[1].reply_to, "m1");
+        }
+    }
 
     /// Deterministic transport identities keep product-layer fixtures honest about the
     /// canonical `/p2p/<PeerId>` route binding enforced by steady-state discovery.
@@ -9237,6 +10048,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_server_owner_sets_its_upload_limit_within_the_protocol_ceiling() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        alice.open_roles().await.unwrap();
+
+        // Until an owner says otherwise a server accepts what it always accepted, so raising the
+        // protocol ceiling does not silently raise every existing server's limit with it.
+        assert_eq!(alice.file_size_limit(), DEFAULT_FILE_SIZE_LIMIT);
+        assert!(
+            DEFAULT_FILE_SIZE_LIMIT < MAX_FILE_BYTES as u64,
+            "the default has to leave headroom or the setting is pointless"
+        );
+
+        alice.set_file_size_limit(700 * 1024 * 1024).await.unwrap();
+        assert_eq!(alice.file_size_limit(), 700 * 1024 * 1024);
+
+        // An owner may go all the way to the ceiling, and not one byte past it: beyond that a
+        // manifest names more chunks than parse, so the upload would fail later and less clearly.
+        alice
+            .set_file_size_limit(MAX_FILE_BYTES as u64)
+            .await
+            .unwrap();
+        assert_eq!(alice.file_size_limit(), MAX_FILE_BYTES as u64);
+        assert!(matches!(
+            alice.set_file_size_limit(MAX_FILE_BYTES as u64 + 1).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.set_file_size_limit(MIN_FILE_SIZE_LIMIT - 1).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert_eq!(
+            alice.file_size_limit(),
+            MAX_FILE_BYTES as u64,
+            "a refused write leaves the setting alone"
+        );
+
+        // Lowering it governs what may be added next. A file over the CURRENT limit is refused
+        // even though the protocol could carry it.
+        alice
+            .set_file_size_limit(MIN_FILE_SIZE_LIMIT)
+            .await
+            .unwrap();
+        let too_big = vec![0u8; MIN_FILE_SIZE_LIMIT as usize + 1];
+        let refused = alice
+            .add_file("big.bin", "application/octet-stream", "", &too_big)
+            .await;
+        assert!(
+            matches!(refused, Err(AppError::Invalid(ref m)) if m.contains("this server's limit")),
+            "the refusal names the server's limit, not the protocol's: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_junk_or_out_of_band_stored_limit_reads_as_the_default() {
+        // The setting is written by an owner's client, so a value outside the band is either a
+        // bug or a hostile write. Neither may open the server up or close it down: both fall
+        // back to the default, which is also what an index written before the setting reads as.
+        let mut doc = AutoCommit::new();
+        assert_eq!(
+            read_file_size_limit(&doc),
+            DEFAULT_FILE_SIZE_LIMIT,
+            "an index with no config key at all"
+        );
+        write_file_size_limit(&mut doc, MAX_FILE_BYTES as u64 + 1).unwrap();
+        assert_eq!(read_file_size_limit(&doc), DEFAULT_FILE_SIZE_LIMIT);
+        write_file_size_limit(&mut doc, 0).unwrap();
+        assert_eq!(read_file_size_limit(&doc), DEFAULT_FILE_SIZE_LIMIT);
+        write_file_size_limit(&mut doc, 700 * 1024 * 1024).unwrap();
+        assert_eq!(
+            read_file_size_limit(&doc),
+            700 * 1024 * 1024,
+            "a legal one holds"
+        );
+    }
+
+    #[tokio::test]
     async fn a_server_livery_is_published_and_read_back() {
         let mut alice = founder();
         alice.open_livery().await.unwrap();
@@ -9249,6 +10137,7 @@ mod tests {
             tokens: HashMap::from([("--accent-hi".to_string(), "#ffe680".to_string())]),
             icon: String::new(),
             cursor: String::new(),
+            name: String::new(),
         };
         alice.set_livery(l.clone()).await.unwrap();
         assert_eq!(alice.livery(), l);
