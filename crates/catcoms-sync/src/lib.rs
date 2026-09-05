@@ -1025,12 +1025,22 @@ fn catchup_auth_transcript(
 /// the server reconstructs it from where the bytes actually arrived, so a relayed request simply
 /// fails to verify.
 ///
-/// Deliberately not every kind. Reciprocal forwarding exists to relay a request on somebody's
-/// behalf and re-authenticates the original bytes at the far end, and a delivery receipt is built
-/// once and sent to several targets; binding those to one transport peer would be wrong rather
-/// than safer.
+/// Only `KIND_CATCHUP_SINCE`, and only because it is new on this branch.
+///
+/// The transcript is what a signature is over, so adding a field to it changes what an older
+/// build computes and breaks both directions of a mixed pair. `KIND_PEX` and `KIND_COMMIT_CATCHUP`
+/// exist on the released build and must keep signing exactly what it signs; a commit catch-up
+/// that stops verifying is a member stuck at an old epoch, unable to open anything sealed under
+/// the new one, which is a missing-message failure rather than a discovery one. So they keep the
+/// released transcript, and instead stop being a way to *prove* anything about a transport peer:
+/// their answers still carry usable records, but only an exchange that is bound at both ends can
+/// establish that the endpoint answering is the member that signed.
+///
+/// Reciprocal forwarding is excluded for a different reason: it exists to relay a request on
+/// somebody's behalf and re-authenticates the original bytes at the far end. A delivery receipt is
+/// built once and sent to several targets. Binding either would be wrong rather than safer.
 fn kind_binds_requester_peer(kind: u8) -> bool {
-    matches!(kind, KIND_CATCHUP_SINCE | KIND_PEX | KIND_COMMIT_CATCHUP)
+    matches!(kind, KIND_CATCHUP_SINCE)
 }
 
 /// A **responder's** signature transcript over a served bundle (commit catch-up or
@@ -1928,6 +1938,16 @@ struct PairwiseReachability {
 struct ProvenMemberPeer {
     peer: PeerId,
     device: DeviceId,
+    /// Whether the exchange that produced this proof was bound at **both** ends: the request
+    /// carrying the peer it was sent from, and the answer carrying the peer that produced it.
+    ///
+    /// Only `KIND_CATCHUP_SINCE` is. The released build's PEX and commit-catch-up transcripts do
+    /// not bind the requester's peer and cannot start doing so without breaking every mixed pair,
+    /// so an endpoint can forward somebody's live request to a real member and hand back the
+    /// answer: valid, and no evidence at all about the endpoint. Those proofs are good enough to
+    /// prefer a source with, which is all they were ever used for, and not good enough to be the
+    /// population a document's search must hear from before concluding.
+    bound: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5422,17 +5442,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// to be a current member. Both mean its earlier answers describe a state that no longer
     /// applies, and the second means a source that was only opportunistic is now one this node
     /// must actually hear from.
+    /// Only forgets. Queueing the work is the caller's, and both callers already have a way to do
+    /// it that is paced: a reconnect runs its own document sweep, and a first proof fills the
+    /// backlog the drain takes a couple from per tick. Enqueueing here as well turned every
+    /// connection edge into a burst of catch-up requests, which is enough on a busy node to keep
+    /// the tick too full to serve anybody.
     fn forget_source_answers(&mut self, peer: PeerId) {
-        let mut reopened: Vec<(DocType, u128)> = Vec::new();
-        self.catchup_sources_checked.retain(|doc, (_, peers)| {
-            if peers.remove(&peer) {
-                reopened.push(*doc);
-            }
+        self.catchup_sources_checked.retain(|_, (_, peers)| {
+            peers.remove(&peer);
             !peers.is_empty()
         });
-        for (doc_type, doc_id) in reopened {
-            self.enqueue_doc_catchup(doc_type, doc_id);
-        }
     }
 
     /// The sources already asked at this document's current version. Empty once the version moves,
@@ -5618,6 +5637,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// verified against the current roster. Most-recent-wins, bounded by `max_known_peers`, and
     /// un-marked as failed so it is eligible again.
     fn promote_member_peer(&mut self, peer: PeerId, device: DeviceId) {
+        self.promote_member_peer_bound(peer, device, false)
+    }
+
+    /// [`Self::promote_member_peer`], recording whether the exchange behind it was bound at both
+    /// ends (see [`ProvenMemberPeer::bound`]). A proof never loses that standing to a later
+    /// unbound exchange with the same peer and device.
+    fn promote_member_peer_bound(&mut self, peer: PeerId, device: DeviceId, bound: bool) {
         // Keep the invariant local even though the production caller has already performed this
         // roster check. Tests and future call paths must not be able to mint operational proof for
         // a non-member by calling the cache helper directly.
@@ -5625,21 +5651,58 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         }
         // Newly proven changes what this peer is worth to a search: it was opportunistic, and is
-        // now a source the sweep must hear from. Any document whose search concluded while it was
-        // unproven concluded without it, so those go back on the queue.
-        if !self.member_peers.iter().any(|proof| proof.peer == peer) {
+        // now a source the sweep must hear from.
+        let newly_proven = !self
+            .member_peers
+            .iter()
+            .any(|proof| proof.peer == peer && proof.device == device);
+        if newly_proven {
+            // Any document whose search concluded while it was unproven concluded without it, so
+            // those go back on the queue.
             self.forget_source_answers(peer);
         }
         self.failed_catchup_peers.retain(|p| *p != peer);
-        if let Some(pos) = self
+        // One current transport binding per device, and one device per transport binding. The
+        // proof says this device answered at this peer; it says nothing about the device having
+        // only one peer, so deduplicating on the peer alone let a single roster device present
+        // itself from as many transport identities as it liked. Each alias was another mandatory
+        // source for every sweep, and enough of them evicted honest proofs from a bounded pool
+        // and then answered "nothing here" in chorus. Replacing both sides keeps ordinary
+        // transport-key rotation working while counting one member as one source.
+        let displaced: Vec<PeerId> = self
             .member_peers
             .iter()
-            .position(|proof| proof.peer == peer)
-        {
-            self.member_peers.remove(pos);
+            .filter(|proof| proof.device == device && proof.peer != peer)
+            .map(|proof| proof.peer)
+            .collect();
+        for old in displaced {
+            // Whatever the identity it is replacing had said about a document went with it.
+            self.forget_source_answers(old);
         }
+        // A binding that was proved at both ends is not given up to one that was not. Otherwise
+        // the unbound exchanges become a way to *take* a verified slot rather than merely to fill
+        // one: an endpoint that relayed a member's request could present the answer as its own and
+        // displace that member's real binding, and with it the member's place in every sweep.
+        if !bound
+            && self
+                .member_peers
+                .iter()
+                .any(|proof| proof.device == device && proof.bound && proof.peer != peer)
+        {
+            return;
+        }
+        let bound = bound
+            || self
+                .member_peers
+                .iter()
+                .any(|proof| proof.peer == peer && proof.device == device && proof.bound);
         self.member_peers
-            .push_back(ProvenMemberPeer { peer, device });
+            .retain(|proof| proof.peer != peer && proof.device != device);
+        self.member_peers.push_back(ProvenMemberPeer {
+            peer,
+            device,
+            bound,
+        });
         while self.member_peers.len() > self.config.max_known_peers {
             self.member_peers.pop_front();
         }
@@ -8127,9 +8190,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // exercises; `PeerDisconnected` still removes it, so the set cannot drift stale.
         self.connected_peers.insert(peer);
         let records = decode_pex_bundle(&bundle)?;
-        // A decoded PEX response is as request-bound and roster-signed as a catch-up response. It
-        // therefore proves this live transport peer answered as `responder` for the duration of
-        // this session, without making any of the descriptors it relays authoritative by proxy.
+        // Promoted, but not as a *bound* proof. This exchange is roster-signed and request-bound,
+        // yet its request does not carry the peer it was sent from, because that transcript is the
+        // one the released build signs and must keep signing. An endpoint can therefore forward
+        // somebody's live request to a real member and hand back the answer, so a valid response
+        // proves a member signed it rather than that this endpoint is that member. Good enough to
+        // prefer as a source, which is what this cache has always been for; not good enough to be
+        // an obligation a document's search waits on.
         self.promote_member_peer(peer, responder);
         let mut learned = 0;
         // The responder is one **effective** discovery root (a member that actually vouched for
@@ -10373,6 +10440,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             );
             return Err(SyncError::Malformed);
         }
+        // This is the one exchange bound at both ends: the request carries the peer it was sent
+        // from, and the answer carries the peer that produced it. A relay cannot obtain either, so
+        // a verified answer here is what establishes that this transport peer is this member, and
+        // is the proof the document sweep goes on to rely upon.
+        self.promote_member_peer_bound(peer, responder, true);
         match answer.split_first() {
             // A signed answer with no marker at all says nothing; treat it as unusable.
             None => Ok(None),
@@ -10897,6 +10969,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Decode before promotion so operational availability means this peer completed a
         // syntactically valid catch-up exchange, not merely that a current member signed junk.
         let records = decode_commit_bundle(&bundle)?;
+        // Unbound for the same reason as PEX: this request keeps the released transcript, which
+        // does not carry the peer it was sent from.
         self.promote_member_peer(peer, responder);
         let mut applied = 0;
         for record in records {
@@ -17183,6 +17257,55 @@ mod tests {
             }
         );
         assert_eq!(applied.unwrap(), 1);
+    }
+
+    /// One roster device is one source, however many transport identities it answers from.
+    ///
+    /// A binding says this device answered at this peer. It says nothing about the device having
+    /// only one peer, so deduplicating on the peer alone let a single modified member hold as many
+    /// entries as it had transport keys: each an extra obligation on every sweep, and enough of
+    /// them to evict honest proofs from a bounded pool and then answer "nothing here" in chorus.
+    /// A binding proved at both ends is also not given up to one that was not, or the unbound
+    /// exchanges become a way to take a verified slot rather than to fill one.
+    #[tokio::test]
+    async fn one_device_holds_one_source_slot_however_many_identities_it_uses() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let alice = members.pop().unwrap();
+        let alice_device = ids[0];
+
+        // The same device, arriving from a hundred different transport identities.
+        for n in 0..100u64 {
+            bob.promote_member_peer(PeerId::from_u64(1_000 + n), alice_device);
+        }
+        assert_eq!(
+            bob.member_peers
+                .iter()
+                .filter(|proof| proof.device == alice_device)
+                .count(),
+            1,
+            "a device is one source no matter how many endpoints it speaks from"
+        );
+        assert_eq!(
+            bob.member_peers.back().map(|proof| proof.peer),
+            Some(PeerId::from_u64(1_099)),
+            "and the newest binding is the one that stands, so key rotation still works"
+        );
+
+        // A binding proved at both ends survives an unbound claim on the same device.
+        let real = alice.local_peer();
+        bob.promote_member_peer_bound(real, alice_device, true);
+        bob.promote_member_peer(PeerId::from_u64(7_777), alice_device);
+        assert_eq!(
+            bob.member_peers
+                .iter()
+                .filter(|proof| proof.device == alice_device)
+                .map(|proof| proof.peer)
+                .collect::<Vec<_>>(),
+            vec![real],
+            "an exchange that proved less does not displace one that proved more"
+        );
     }
 
     /// A request that proves membership but not where it came from can be relayed: an endpoint

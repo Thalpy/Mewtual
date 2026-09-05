@@ -611,15 +611,21 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     change means holding its dependencies, so anything causally behind a named hash is already held.
     A hash the server does not know selects nothing. Members-only on exactly the same terms as
     `KIND_CATCHUP`.
-  - **The authenticated request binds the transport peer it is sent from**, for the three kinds
-    whose answers become operational proof about a peer: `KIND_CATCHUP_SINCE`, `KIND_PEX` and
-    `KIND_COMMIT_CATCHUP`. The requester's own peer id goes into the request transcript, and the
-    server rebuilds it from where the bytes actually arrived, so a request relayed verbatim by a
-    third endpoint fails to verify rather than being answered on that endpoint's behalf. Without
-    it, an endpoint could forward a member's live request to a real member, collect the answer
-    signed against it, and be promoted into `member_peers` as a "proven member path" while holding
-    no member's transport identity. Deliberately not every kind: reciprocal forwarding exists to
-    relay on somebody's behalf, and a delivery receipt is built once for several targets.
+  - **The authenticated request binds the transport peer it is sent from**, for
+    `KIND_CATCHUP_SINCE` and **only** for it. The requester's own peer id goes into the request
+    transcript, and the server rebuilds it from where the bytes actually arrived, so a request
+    relayed verbatim by a third endpoint fails to verify rather than being answered on that
+    endpoint's behalf. Without it, an endpoint could forward a member's live request to a real
+    member, collect the answer signed against it, and present that answer as evidence about
+    itself.
+    A transcript is what a signature is over, so adding a field to one changes what an older build
+    computes: `KIND_PEX` and `KIND_COMMIT_CATCHUP` exist on the released build and keep signing
+    exactly what it signs, or a mixed pair fails in both directions — and a commit catch-up that
+    stops verifying is a member stuck at an old epoch, unable to open anything sealed under the
+    new one. They instead stop being a way to *prove* anything about a transport peer: a proof from
+    them is recorded as unbound (see `ProvenMemberPeer::bound`), which is enough to prefer a source
+    and not enough to displace one that was proved at both ends. Reciprocal forwarding is excluded
+    for a different reason: it relays on somebody's behalf by design.
   - **The `KIND_CATCHUP_SINCE` response is responder-signed**, like commit catch-up, PEX and blob
     fetch: `bytes responder_pubkey ‖ bytes signature(64) ‖ bytes answer`, where `answer` is
     `[marker] ‖ op bundle` and the signature covers a transcript under
@@ -684,11 +690,21 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
       connected and saying nothing; the exception is a node with **no** proven source at all
       (a fresh join or restore), where nothing that answers has proved it was entitled to, so each
       connected candidate is asked once before the search can end.
-      A source's answers are forgotten when it **reconnects** and when it is **newly proven**, and
-      the documents whose search had concluded on the strength of them go back on the queue.
+      A source's answers are forgotten when it **reconnects** and when it is **newly proven**.
       Otherwise a peer could leave, write something, return, and be excluded from the very sweep
       its reconnect queued; and a peer that was only a candidate when it answered would keep that
-      answer after becoming a source the sweep must hear from.
+      answer after becoming a source the sweep must hear from. Forgetting only forgets: queueing
+      the work is left to `sweep_docs_on_reconnect`, which already declines to aim a whole-node
+      sweep at a peer that has not proved it can serve one.
+      **Known gap.** A node that restores with documents on disk and no proof cache does not sweep
+      on its first reconnect, and proving its first member does not sweep either, so a room that
+      stays quiet can remain as short as the restore left it. The same applies to a source that
+      quietly advances while staying connected and never changing standing. Closing both needs a
+      bounded periodic anti-entropy pass, spread across documents and peers; whole-node sweeps at
+      those moments were tried and aim catch-up requests at peers that cannot yet serve them.
+      One member device holds at most one proof, and one transport peer at most one device, so a
+      device cannot manufacture sweep obligations or evict honest proofs by answering from many
+      identities.
     - **A `1` that carried operations discharges only its own sender's claim.** Carrying content
       proves that peer had something to give, not that it knows what a different peer is still
       withholding, so it restarts the version sweep but leaves another peer's claim standing.
