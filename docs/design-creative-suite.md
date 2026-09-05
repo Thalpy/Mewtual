@@ -732,6 +732,32 @@ replay keys, rank and host attribution.
 
 ## 7. Phases and prerequisites
 
+**Implementation roadmap (2026-09-05; backend status, not a feature-completion percentage).**
+P1 is in progress. Tested building blocks are not yet a live shared Studio; the feature table
+below contains 25 creative slices with very different sizes, so counting commits or completed
+helpers would give a misleading percentage. The owner's frontend work proceeds separately.
+
+| Milestone | Current evidence | Still needed to close it |
+|---|---|---|
+| P1 protocol core | Implemented/tested: signed operations, closes, owner receipt/fault state, epoch gate, intent/recovery models | Connect persistence and transport; standalone models do not settle live documents |
+| P1 checkpoints and registry | Implemented/tested: deterministic seeds, isolated install/restart, typed bucket materialization and size preflight | Connect receipt-head discovery, catch-up and settlement |
+| P1 durable storage | Implemented/tested: recovery saves, peak-space accounting, bounded recovery-file inventory | Complete managed-file inventory, orphan cleanup, sole coordinator, multi-record settlement/restart transaction |
+| P1 network and application integration | Not connected | Cursor catch-up, keyed head/seed/record fetch, lifecycle orchestration, actor/bridge events and end-to-end restart/partition tests |
+| Creative backend contracts | Stable document tags exist; Studio-specific materializers are not implemented | C0 publication/identity work, C3a/C5a domain operations, score/flipnote schemas and export paths |
+| Usable collaborative Studio | Not connected end to end | Shared save/load, publication, claims, settlement/recovery actions and export integrated with the owner's UI |
+
+**UI work that can proceed now:** the canonical editor shell, local canvas tools, palette/theme
+adaptation, local layers, timeline and playback controls, and Art/Sound/Music panel layouts can
+be implemented against an in-memory projection. Claims, conflicts, fetching, storage refusal,
+settlement and recovery can be exercised as explicitly synthetic fixtures. These fixtures must
+not claim that real shared saves, owner receipts or Restore operations happened. `.pix`/`.pixa`
+I/O still needs its codec/export contract tests; local UI readiness is not protocol readiness.
+
+**Next backend order:** finish the P1 storage transaction and restart path; wire P1 discovery,
+catch-up and application lifecycle; then connect typed Studio documents (C5a) and score/flipnote
+behavior (C5b-c/C6). Independent C0 codec, publication and identity slices can proceed alongside
+that work. UI implementation remains with the owner throughout.
+
 **Platform prerequisites this suite depends on but does not own.**
 
 | Prereq | Delivers | Blocks |

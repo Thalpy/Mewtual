@@ -35,7 +35,13 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   adapter: 1984 MiB content + 16 MiB protocol + 48 MiB settlement inside 2 GiB, full old/new/temp
   peak accounting, document-pinned reserve, and fail-closed reservations after uncertain writes.
   Tests cover forgotten guards, exact physical/pool reconciliation, restart and cap refusals before
-  disk writes. Budgets require a complete trusted inventory; bootstrap, multi-record settlement,
+  disk writes. Recovery inventory discovery now scans canonical vault files without a registry,
+  verifies scope and physical pools, and accounts temporary siblings without reading/promoting them.
+  It holds exclusive store access across bounded steps; failures or parser panics poison the scan.
+  Unknown orphan ownership blocks per-server composition, not just the affected filename.
+  Follow-up coverage: native Windows reparse/junction refusal and forced enumeration-order
+  fixtures (current tests vary creation order; attribution itself occurs only after EOF).
+  Budgets still require every managed record type; multi-record settlement,
   cleanup and sole-writer wiring remain deferred. No guessed future deletion grants headroom, and
   the low-level unaccounted save is not a production admission path.
   Studio-specific materializers, settlement/storage transactions, keyed catch-up and receipt-head
@@ -44,6 +50,8 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   keys must bind the server, as registry keys already do, since the signed operation envelope does
   not separately bind a group id. The user owns UI implementation;
   the canonical HTML/PNG references are recorded in `design-creative-suite.md`.
+  That document's section 7 now tracks backend milestones and the local/fixture UI work that can
+  proceed independently. P1 is in progress; there is no end-to-end shared Studio yet.
 
 - **Phases 0 → 10 COMPLETE. The live work is the desktop client's real-time layer;
   group voice (phases 1–3 shipped; see [§ Voice](#voice-group-calls)).**

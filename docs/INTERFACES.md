@@ -915,6 +915,24 @@ invalidate accounting; matching lengths alone do not prove a matching pool split
 own the sole budget, exclude unaccounted writers, and provide complete inventory discovery before
 production use; this API alone neither enforces a vault-wide policy nor settles multiple records.
 
+`ServerStore::scan_epoch_recovery(&mut self)` returns an `EpochRecoveryScan` borrowing the store
+exclusively through all steps. `step()` visits at most 64 directory entries and authenticates at
+most one bounded recovery record; it returns count-only `RecoveryScanProgress`. EOF alone permits
+`finish()` to return `EpochRecoveryInventory`. Errors, exhausted rails and caught parser panics
+permanently poison a scan. The job caps all traversal at 131,072 entries (ignored legacy files
+included), recovery files plus temporaries at 65,536, and total authenticated bytes at that record
+count times the per-record sealed cap. It stores metadata only, not recovery bodies.
+
+Discovery verifies the sealed full server/group/type/key scope and its canonical filename without
+consulting the current server registry, so removed-server recovery is not omitted. Canonical
+staging siblings are observed, not promoted/deleted; their bodies are never read. Attribution uses
+verified destinations after EOF, independent of traversal order. `records_for_server(server,
+group)` returns **recovery-only** storage inputs and refuses if any orphan lacks a verified
+destination. Known temporary bytes are settlement scratch, even when empty; incompatible pinned
+documents or over-cap usage still refuse budget construction until cleanup. The completed view is
+not a write lease or a complete P1 inventory: the future coordinator must exclude intervening
+writes, inventory all other managed types and resolve orphan cleanup before production wiring.
+
 `get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
 the complete bounded `states` array. The webview accepts only a strictly newer revision for its
 current server/channel view, so a delayed query completion or event cannot replace fresher receipt

@@ -193,8 +193,18 @@ table with the commit that closed it.
   Accounted recovery saves compare the authenticated old record's full pool split and owner, not
   just length. The coordinator must own one budget per server and exclude unaccounted writers;
   fabricated/partial inventories or independent duplicate budgets are not an enforcement path.
-  Inventory discovery, cleanup and multi-record settlement remain unwired, so this is a tested
+  Complete managed-type inventory, cleanup and multi-record settlement remain unwired, so this is a tested
   admission primitive/adapter, not a claim that all current vault writes obey the Studio cap.
+- **Recovery inventory does not turn leftover files into authority.** An exclusive borrowing scan
+  authenticates canonical final records one at a time, bounds all directory traversal and retained
+  metadata, and never returns a completed result after an error or caught parser panic. Recovery
+  filename aliases are recognized case-insensitively and then rejected; symlinks/reparse points
+  and redirected scan parents are refused. Orphan temporaries are never parsed, promoted or
+  removed. Only an authenticated destination supplies ownership, and unresolved ownership blocks
+  per-server inventory composition rather than inventing attribution. Debug output omits scopes,
+  paths and content. Discovery covers the recovery namespace only, and its metadata becomes stale
+  if the future coordinator permits writes after the scan. A malicious local process concurrently
+  replacing filesystem paths is outside the mounted-store exclusion guarantee.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
   no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains

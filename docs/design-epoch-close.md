@@ -5,8 +5,9 @@ started. The current slice defines and tests operation envelopes, closes, receip
 crash journals, the persisted epoch gate, durable intent metadata, and bounded recovery slots.
 The checkpoint/registry slice adds deterministic raw seeds, receipt-bound checkpoint installation and
 vault restore, exact projection-size preflight, and the typed registry materializer. Recovery-slot
-transitions now also have a standalone vault-sealed store API with crash-safe replacement/retry. Studio
-materializers, settlement orchestration, sync discovery, storage admission and app/UI events
+transitions now also have a standalone vault-sealed store API with crash-safe replacement/retry,
+peak-space accounting and bounded recovery-file inventory discovery. Studio
+materializers, settlement orchestration, sync discovery, complete storage integration and app/UI events
 remain later slices and the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
 five remaining lifecycle corrections: adoption is folded into the first crash-safe receipt of
@@ -458,8 +459,17 @@ split, physical ciphertext length and document owner), reserves its full replace
 then commits. It is not the multi-record settlement transaction: a first/second recovery snapshot
 becomes retained immediately and can still be refused at the content cap. Supporting a settlement
 that frees other history requires the later transaction to hold those new bytes in reserve until
-the actual source deletion commits. Inventory discovery/bootstrap, temporary cleanup, and a sole
+the actual source deletion commits. Complete managed-type inventory/bootstrap, temporary cleanup, and a sole
 coordinator excluding the low-level unaccounted API remain required before production wiring.
+
+Recovery-namespace discovery is implemented as an exclusive borrowing scan, scheduled in steps of
+at most 64 directory entries and one bounded authenticated body. It stops at 131,072 visited names
+or 65,536 final/temporary records and never exposes partial results as complete. It reconstructs
+full scope from authenticated records, validates canonical names, and retains metadata only.
+Temporaries are never read/promoted/deleted: verified final destinations identify their ownership
+after the whole scan, while any unresolved orphan prevents per-server composition. Known temporary
+bytes count wholly as settlement scratch. This remains one inventory component, not the sole
+coordinator or permission to prune; all other P1 record types still need inventory integration.
 
 ## 13. Application events
 

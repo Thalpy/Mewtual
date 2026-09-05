@@ -24,11 +24,19 @@ use super::epoch_budget::{
 };
 use super::*;
 
+pub(super) mod inventory;
+
 // Scope <= 501 bytes, completion metadata <= 73 bytes, and length framing. This is a local
 // persistence format, independent of the protocol's signed records and Automerge encodings.
 const MAX_RECORD_BYTES: usize = MAX_RECOVERY_SLOTS_BYTES + 1024;
 const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 24 + 16;
 const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-recovery-store/v1";
+
+// Never derive Debug: authenticated plaintext contains private recovery projections.
+struct AuthenticatedRecoveryBytes {
+    plain: Zeroizing<Vec<u8>>,
+    physical_bytes: u64,
+}
 
 /// One requested recovery transition. Callers construct snapshots from a sealed epoch; this
 /// persistence boundary validates their generic schema, not the consumer's domain projection.
@@ -427,24 +435,33 @@ impl ServerStore {
         document: &LogicalDocument,
     ) -> Result<(EpochRecoveryState, Option<u64>), AppError> {
         let path = self.epoch_recovery_path(scope);
-        let metadata = match fs::symlink_metadata(&path) {
+        match self.read_epoch_recovery_plain(&path)? {
+            None => Ok((EpochRecoveryState::default(), None)),
+            Some(bytes) => Ok((
+                EpochRecoveryState::decode(&bytes.plain, scope, document)?,
+                Some(bytes.physical_bytes),
+            )),
+        }
+    }
+
+    // Shared bounded authentication path for addressed reads and inventory discovery. Absence
+    // is optional here; the scanner treats disappearance of an enumerated file as a failed scan.
+    fn read_epoch_recovery_plain(
+        &self,
+        path: &Path,
+    ) -> Result<Option<AuthenticatedRecoveryBytes>, AppError> {
+        let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((EpochRecoveryState::default(), None))
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(AppError::Io(error.to_string())),
         };
-        if !metadata.is_file() || metadata.len() > MAX_SEALED_BYTES as u64 {
+        if !inventory::regular_file(&metadata) || metadata.len() > MAX_SEALED_BYTES as u64 {
             return Err(invalid("recovery file is not a bounded regular file"));
         }
         // A length check alone is racy. Read through a fixed limit even if a file grows between
         // stat and open. The installation OS lock excludes other conforming process writers.
         let file = File::open(path).map_err(|e| AppError::Io(e.to_string()))?;
-        if !file
-            .metadata()
-            .map_err(|e| AppError::Io(e.to_string()))?
-            .is_file()
-        {
+        if !inventory::regular_file(&file.metadata().map_err(|e| AppError::Io(e.to_string()))?) {
             return Err(invalid("recovery file is not regular"));
         }
         let mut bytes = Vec::new();
@@ -455,10 +472,10 @@ impl ServerStore {
             return Err(invalid("recovery file exceeds its bound"));
         }
         let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &unframe(&bytes)?)?);
-        Ok((
-            EpochRecoveryState::decode(&plain, scope, document)?,
-            Some(bytes.len() as u64),
-        ))
+        Ok(Some(AuthenticatedRecoveryBytes {
+            plain,
+            physical_bytes: bytes.len() as u64,
+        }))
     }
 }
 
