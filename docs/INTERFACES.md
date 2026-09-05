@@ -875,10 +875,24 @@ impl ServerStore {
     fn verify_passphrase(&self, passphrase:&[u8]) -> Result<(),AppError>; // verify-only; no second mount
     fn save_ui_state(&self, json:&[u8], rng:&mut impl CryptoRngCore) -> Result<(),AppError>; // ≤1 MiB, vault-sealed + atomic
     fn load_ui_state(&self) -> Result<Vec<u8>,AppError>;
+    fn load_epoch_recovery(&self, server:u64, document:&LogicalDocument) -> Result<EpochRecoveryState,AppError>;
+    fn update_epoch_recovery(&mut self, server:u64, document:&LogicalDocument, action:EpochRecoveryAction,
+        clock:&dyn Clock, rng:&mut impl CryptoRngCore) -> Result<EpochRecoveryUpdate,AppError>;
     fn backup_source_dir(&self) -> &Path;
     fn change_passphrase(&self, current:&[u8], new:&[u8], rng:&mut impl CryptoRngCore) -> Result<(),AppError>;
 }
 ```
+
+`catcoms_app::store::{EpochRecoveryAction, EpochRecoveryState, EpochRecoveryUpdate}` persist P1's
+recovery slots, not settlement itself. Actions are `Stage(RecoverySnapshot)`,
+`Acknowledge { oldest_snapshot, staged_snapshot }`, and `AdvanceTime`. State exposes read-only
+`retained()`, `staged()` and `eviction_pending()`; the update returns that saved state and the
+`RecoveryTransition`. Full local-server/group/type/key scope is inside the sealed record as well
+as its domain-separated filename derivation. Exclusive mutable store access serializes reload,
+transition and replacement. Even idempotent retries re-save before returning, including exact
+acknowledgement retries after `CommittedButNotDurable`; stale acknowledgements cannot promote a
+newer warning. Reading alone never expires recovery. This internal prerequisite is not connected
+to the actor/bridge, shared storage admission, removal cleanup, or checkpoint pruning yet.
 
 `get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
 the complete bounded `states` array. The webview accepts only a strictly newer revision for its

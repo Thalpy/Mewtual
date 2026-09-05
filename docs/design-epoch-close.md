@@ -3,8 +3,9 @@
 Status: accepted design, revision 5; protocol-core implementation and adversarial testing have
 started. The current slice defines and tests operation envelopes, closes, receipts and their
 crash journals, the persisted epoch gate, durable intent metadata, and bounded recovery slots.
-The next backend slice adds deterministic raw seeds, receipt-bound checkpoint installation and
-vault restore, exact projection-size preflight, and the typed registry materializer. Studio
+The checkpoint/registry slice adds deterministic raw seeds, receipt-bound checkpoint installation and
+vault restore, exact projection-size preflight, and the typed registry materializer. Recovery-slot
+transitions now also have a standalone vault-sealed store API with crash-safe replacement/retry. Studio
 materializers, settlement orchestration, sync discovery, storage admission and app/UI events
 remain later slices and the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
@@ -271,6 +272,21 @@ Caps: 64 KiB per intent, 10,000 intents and 4 MiB per logical document, 64 MiB p
 20,000 markers per epoch (one for each operation admitted by the epoch maximum).
 
 ## 10. Recovery snapshots and the staged slot
+
+Implemented persistence prerequisite: `ServerStore::update_epoch_recovery` reloads and saves the
+complete slot record under exclusive mutable store access. It returns only after the existing
+file-sync/rename primitive succeeds (plus parent-directory sync on Unix). The sealed record binds
+local server id, full MLS group id, document type and logical key, and retains the last completed
+eviction pair so an acknowledgement can be retried after a post-rename flush failure. The original
+warning deadline survives reload and retries. Reads never evict. Encoders preflight the exact
+aggregate snapshot size before allocating; reads cap file bytes before unsealing.
+
+This API does **not** yet install/prune epochs or accept network requests. Its three slots are
+logical: atomic replacement temporarily duplicates ciphertext, and the existing writer can leave
+crash-orphan temporary siblings. Global admission/reserve accounting and cleanup must cover those
+bytes before integration. Records currently remain after server removal, like held blobs, until
+the retention lifecycle is wired. These are outstanding implementation tasks, not guarantees this
+standalone slice claims to have completed.
 
 A **recovery snapshot** is a typed materialization of content that lost a settlement, a repair
 or a succession rewind:

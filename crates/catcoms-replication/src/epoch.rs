@@ -2441,6 +2441,9 @@ impl RecoverySnapshot {
         {
             return Err(ReplError::EpochBound);
         }
+        // Charge the exact encoding before allocating it. Per-field caps alone could otherwise
+        // allocate hundreds of MiB of conflict values before noticing the aggregate 6 MiB cap.
+        self.check_encoded_size()?;
         let mut e = Encoder::new();
         e.put_u8(1);
         e.put_u16(self.doc_type.tag());
@@ -2496,6 +2499,34 @@ impl RecoverySnapshot {
             return Err(ReplError::EpochBound);
         }
         Ok(bytes)
+    }
+
+    /// Preflight fixed fields, length framing and variable payloads without constructing bytes.
+    fn check_encoded_size(&self) -> Result<(), ReplError> {
+        let mut remaining = MAX_RECOVERY_SNAPSHOT_BYTES;
+        let mut charge = |bytes: usize| -> Result<(), ReplError> {
+            remaining = remaining.checked_sub(bytes).ok_or(ReplError::EpochBound)?;
+            Ok(())
+        };
+        charge(1 + 2 + 4 + 8 + 1 + 1 + 4 + 4 * 4)?;
+        charge(self.logical_key.len())?;
+        charge(self.projection.len())?;
+        if self.base_close_record_hash.is_some() {
+            charge(36)?;
+        }
+        // A length-framed element id is 20 bytes; each hash/device id is 36 bytes.
+        charge(self.tombstones.len() * 92)?;
+        for element in &self.elements {
+            charge(93 + if element.predecessor.is_some() { 20 } else { 0 })?;
+        }
+        for conflict in &self.conflicts {
+            charge(5 + conflict.target.len())?;
+            for value in &conflict.values {
+                charge(76)?;
+                charge(value.value.len())?;
+            }
+        }
+        charge(self.applied_ops.len() * 36)
     }
 
     /// Strict decoding with count checks before allocation.
@@ -2764,6 +2795,15 @@ impl RecoverySlots {
         self.staged.as_ref().map(|staged| &staged.snapshot)
     }
 
+    /// Reconstruct the exact persisted warning without advancing time or mutating a slot.
+    /// A reopened store uses this to resurface the original ids and deadline, not restart grace.
+    pub fn eviction_pending(&self) -> Result<Option<RecoveryTransition>, ReplError> {
+        self.staged
+            .as_ref()
+            .map(|_| self.pending_transition())
+            .transpose()
+    }
+
     /// Canonical plaintext transition state; callers vault-seal before persistence.
     pub fn encode(&self) -> Result<Vec<u8>, ReplError> {
         if self.retained.len() > 2 || (self.staged.is_some() && self.retained.len() != 2) {
@@ -3011,5 +3051,54 @@ mod tests {
             vec![3, 2]
         );
         assert!(restored.staged().is_none());
+    }
+
+    #[test]
+    fn recovery_encoding_preflights_the_exact_aggregate_including_metadata() {
+        let mut snapshot = sample_snapshot(1);
+        snapshot.base_close_record_hash = Some([4; 32]);
+        snapshot.tombstones = vec![RecoveryTombstone {
+            element_id: [1; 16],
+            op_id: [2; 32],
+            author: DeviceId::from_bytes([3; 32]),
+        }];
+        snapshot.elements = vec![
+            RecoveryElement {
+                element_id: [5; 16],
+                predecessor: None,
+                op_id: [6; 32],
+                author: DeviceId::from_bytes([7; 32]),
+            },
+            RecoveryElement {
+                element_id: [8; 16],
+                predecessor: Some([5; 16]),
+                op_id: [9; 32],
+                author: DeviceId::from_bytes([10; 32]),
+            },
+        ];
+        snapshot.conflicts = vec![RecoveryConflict {
+            target: b"title".to_vec(),
+            values: vec![RecoveryConflictValue {
+                value: b"moon".to_vec(),
+                op_id: [11; 32],
+                author: DeviceId::from_bytes([12; 32]),
+            }],
+        }];
+        snapshot.applied_ops = vec![[13; 32]];
+        snapshot.projection.clear();
+        let overhead = snapshot.encode().unwrap().len();
+        snapshot
+            .projection
+            .resize(MAX_RECOVERY_SNAPSHOT_BYTES - overhead, 0);
+        assert_eq!(
+            snapshot.encode().unwrap().len(),
+            MAX_RECOVERY_SNAPSHOT_BYTES
+        );
+        snapshot.conflicts[0].values[0].value.push(0);
+        assert!(matches!(
+            snapshot.check_encoded_size(),
+            Err(ReplError::EpochBound)
+        ));
+        assert!(matches!(snapshot.encode(), Err(ReplError::EpochBound)));
     }
 }

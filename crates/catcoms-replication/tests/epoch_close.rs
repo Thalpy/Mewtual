@@ -663,7 +663,7 @@ fn gate_restore_preserves_admissions_across_an_owner_change() {
 }
 
 #[test]
-fn third_recovery_snapshot_is_crash_resumable_and_never_makes_four_physical_copies() {
+fn third_recovery_snapshot_is_crash_resumable_and_never_makes_four_logical_slots() {
     let mut slots = RecoverySlots::default();
     assert_eq!(
         slots.stage(snapshot(1), 100).unwrap(),

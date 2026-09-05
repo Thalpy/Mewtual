@@ -584,6 +584,7 @@ dependencies = [
  "catcoms-crypto",
  "catcoms-discovery",
  "catcoms-mls",
+ "catcoms-replication",
  "catcoms-rt",
  "catcoms-storage",
  "catcoms-sync",

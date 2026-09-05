@@ -173,6 +173,18 @@ table with the commit that closed it.
   current member can claim receipt without displaying content, so the UI says delivered/held and
   never read. Receipt traffic adds message-timing metadata to peers already participating in the
   encrypted group; it is not broadcast outside the group.
+- **Recovery persistence is scoped and crash-retryable, not settlement authority.** P1 recovery
+  records are vault-sealed and bind the local server id plus full group/type/logical-key scope;
+  moving valid ciphertext between record paths is rejected. Reads are capped on the opened file,
+  and a corrupt/oversized record is never replaced as if missing. Each exclusive store update
+  saves the complete slot state before returning; a post-rename directory-sync failure reports
+  committed-but-not-durable and exact completed-eviction ids permit a safe retry. Generic debug
+  formatting excludes recovery content. The seven-day warning uses persisted receiver wall time,
+  so local clock changes can affect its duration. There are three logical slots, not three physical
+  copies during replacement: temporary ciphertext and crash-orphan siblings still require shared
+  accounting/cleanup before network or settlement integration. Records currently remain after
+  server removal, like held blobs; their retention lifecycle is not yet wired. No success from this
+  standalone API authorizes pruning an epoch or claims a total Studio storage bound.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
   no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains

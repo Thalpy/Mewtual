@@ -10,6 +10,7 @@ catcoms-rt = { path = "../catcoms-rt" }
 catcoms-crypto = { path = "../catcoms-crypto" }
 catcoms-discovery = { path = "../catcoms-discovery" }
 catcoms-mls = { path = "../catcoms-mls" }
+catcoms-replication = { path = "../catcoms-replication" }
 catcoms-sync = { path = "../catcoms-sync" }
 catcoms-storage = { path = "../catcoms-storage" }
 catcoms-wire = { path = "../catcoms-wire" }

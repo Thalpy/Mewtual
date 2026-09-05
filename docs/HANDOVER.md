@@ -24,6 +24,13 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   Adversarial fixes add bounded raw-column parsing, inner-author roster checks, causal predecessor
   binding, and idempotent edits after concurrent bucket creation. Legacy v1 change framing stays
   compatible; P1 v2 rejects compressed changes before parsing.
+  The recovery-persistence slice adds scoped `ServerStore` load/stage/acknowledge/advance APIs:
+  one atomically replaced vault-sealed record retains the two versions, staged version and original
+  warning deadline. Exact completed-eviction metadata makes post-rename flush failures retryable.
+  Recovery encoding checks its aggregate 6 MiB cap before allocation. This API is not wired to
+  settlement or incoming traffic: shared storage admission, crash-orphan temp cleanup, and server
+  removal retention remain prerequisites. The three-slot limit is logical; replacement temporarily
+  duplicates ciphertext. Recovery records currently remain after leaving, like held blobs.
   Studio-specific materializers, settlement/storage transactions, keyed catch-up and receipt-head
   discovery, application events and Studio integration remain. Catch-up integration must distinguish
   new submissions from already-admitted history by removed authors; future Studio epoch-0 logical
