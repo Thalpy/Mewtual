@@ -185,6 +185,16 @@ table with the commit that closed it.
   accounting/cleanup before network or settlement integration. Records currently remain after
   server removal, like held blobs; their retention lifecycle is not yet wired. No success from this
   standalone API authorizes pruning an epoch or claims a total Studio storage bound.
+- **Storage admission relies on complete local inventory, not peer-supplied sizes.** The P1
+  accounting boundary caps permanent and peak old/new/scratch occupancy with both reserves inside
+  2 GiB. Staged bytes pin the reserve to their logical document. A reservation marks its budget
+  unready before exposing a guard: dropping or forgetting that guard cannot restore unproven free
+  space. Failed/uncertain I/O requires reconciliation, including all orphan temporary files.
+  Accounted recovery saves compare the authenticated old record's full pool split and owner, not
+  just length. The coordinator must own one budget per server and exclude unaccounted writers;
+  fabricated/partial inventories or independent duplicate budgets are not an enforcement path.
+  Inventory discovery, cleanup and multi-record settlement remain unwired, so this is a tested
+  admission primitive/adapter, not a claim that all current vault writes obey the Studio cap.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
   no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains

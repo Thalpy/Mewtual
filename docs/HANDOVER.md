@@ -31,6 +31,13 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   settlement or incoming traffic: shared storage admission, crash-orphan temp cleanup, and server
   removal retention remain prerequisites. The three-slot limit is logical; replacement temporarily
   duplicates ciphertext. Recovery records currently remain after leaving, like held blobs.
+  Storage admission now has a server-bound `EpochStorageBudget` plus an accounted recovery-save
+  adapter: 1984 MiB content + 16 MiB protocol + 48 MiB settlement inside 2 GiB, full old/new/temp
+  peak accounting, document-pinned reserve, and fail-closed reservations after uncertain writes.
+  Tests cover forgotten guards, exact physical/pool reconciliation, restart and cap refusals before
+  disk writes. Budgets require a complete trusted inventory; bootstrap, multi-record settlement,
+  cleanup and sole-writer wiring remain deferred. No guessed future deletion grants headroom, and
+  the low-level unaccounted save is not a production admission path.
   Studio-specific materializers, settlement/storage transactions, keyed catch-up and receipt-head
   discovery, application events and Studio integration remain. Catch-up integration must distinguish
   new submissions from already-admitted history by removed authors; future Studio epoch-0 logical

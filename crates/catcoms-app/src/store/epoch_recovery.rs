@@ -6,9 +6,10 @@
 //! and reload the record, so a stale view cannot overwrite a newer transition.
 //!
 //! This prerequisite is deliberately not wired to remote input, settlement pruning or UI yet.
-//! Before wiring, server-wide admission must account for these records and atomic-write temporary
-//! siblings; their per-record bound is not a server-wide quota. Like held blobs, these records
-//! currently remain after `remove_server`. Cleanup/retention must be integrated explicitly.
+//! The accounted save adapter requires a complete trusted EpochStorageBudget, including all
+//! temporary siblings. Inventory bootstrap and the multi-record settlement coordinator are not
+//! wired yet; the unaccounted primitive alone is not a server-wide quota. Like held blobs, these
+//! records currently remain after `remove_server`. Cleanup/retention must be integrated explicitly.
 
 use std::io::Read;
 
@@ -18,6 +19,9 @@ use catcoms_replication::{
 };
 use catcoms_rt::Clock;
 
+use super::epoch_budget::{
+    EpochStorageBudget, Footprint, Replacement, StorageRecord, StorageScope, WritePurpose,
+};
 use super::*;
 
 // Scope <= 501 bytes, completion metadata <= 73 bytes, and length framing. This is a local
@@ -73,6 +77,25 @@ impl std::fmt::Debug for EpochRecoveryState {
 }
 
 impl EpochRecoveryState {
+    fn footprint(&self, physical_bytes: u64) -> Result<Footprint, AppError> {
+        // The staged blob's length prefix and timestamp belong to the settlement reserve too.
+        // The slot-presence tag exists in both forms and remains ordinary record overhead.
+        let settlement = if let Some(staged) = self.slots.staged() {
+            let bytes = Zeroizing::new(staged.encode().map_err(invalid)?);
+            bytes.len() as u64 + 4 + 8
+        } else {
+            0
+        };
+        let content = physical_bytes
+            .checked_sub(settlement)
+            .ok_or_else(|| invalid("inconsistent staged length"))?;
+        Ok(Footprint {
+            content,
+            protocol: 0,
+            settlement,
+        })
+    }
+
     /// Newest-first materializations available to Restore/Export when those actions are wired.
     pub fn retained(&self) -> impl ExactSizeIterator<Item = &RecoverySnapshot> {
         self.slots.retained()
@@ -223,6 +246,112 @@ pub struct EpochRecoveryUpdate {
 }
 
 impl ServerStore {
+    /// Observe this document's authenticated physical record for inventory reconciliation. This
+    /// is ONE inventory entry, not a complete server inventory: the caller must also include all
+    /// other documents, protocol records, and temporary/orphan files before admitting any write.
+    pub fn epoch_recovery_inventory_record(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+    ) -> Result<Option<StorageRecord>, AppError> {
+        let scope = scope_bytes(server, document)?;
+        let (state, size) = self.read_epoch_recovery_record(&scope, document)?;
+        size.map(|size| {
+            state
+                .footprint(size)
+                .map(|footprint| recovery_record(&scope, footprint))
+        })
+        .transpose()
+    }
+
+    /// Accounted variant of `update_epoch_recovery`, for the future settlement coordinator. The
+    /// supplied non-cloneable budget must cover the COMPLETE local server inventory. Both the
+    /// old file's pool split and owner are verified before admission; no guessed future deletion
+    /// creates headroom. In particular a first/second retained recovery version can be refused at
+    /// the content cap even if a later multi-record settlement could free history.
+    ///
+    /// Any write error or abandoned reservation closes this budget until full reconciliation.
+    /// This does not bootstrap an inventory, prune content, or authorize checkpoint installation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_epoch_recovery_accounted(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        action: EpochRecoveryAction,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<EpochRecoveryUpdate, AppError> {
+        self.update_epoch_recovery_accounted_with_writer(
+            server,
+            document,
+            action,
+            clock,
+            rng,
+            budget,
+            atomic_write,
+        )
+    }
+
+    // Private writer injection exercises the same admission/commit order with exact disk failures.
+    #[allow(clippy::too_many_arguments)]
+    fn update_epoch_recovery_accounted_with_writer(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        action: EpochRecoveryAction,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+    ) -> Result<EpochRecoveryUpdate, AppError> {
+        let scope = scope_bytes(server, document)?;
+        let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
+        let (mut state, old_bytes) = match self.read_epoch_recovery_record(&scope, document) {
+            Ok(record) => record,
+            Err(error) => {
+                budget.invalidate();
+                return Err(error);
+            }
+        };
+        let id = *blake3::hash(&scope).as_bytes();
+        let observed = old_bytes
+            .map(|size| {
+                state
+                    .footprint(size)
+                    .map(|footprint| recovery_record(&scope, footprint))
+            })
+            .transpose()?;
+        budget
+            .verify_record(&storage_scope, id, observed)
+            .map_err(invalid)?;
+        let transition = state.apply(action, clock.now_ms())?;
+        let plain = state.encode(&scope, document)?;
+        // XChaCha20-Poly1305 adds a 24-byte nonce and a 16-byte tag. The full copy, not only
+        // positive growth over the old file, must fit while atomic_write prepares its sibling.
+        let record = recovery_record(&scope, state.footprint(plain.len() as u64 + 40)?);
+        let reservation = budget
+            .reserve(
+                &storage_scope,
+                Replacement {
+                    record,
+                    scratch_bytes: 0,
+                    purpose: WritePurpose::Settlement,
+                },
+            )
+            .map_err(invalid)?;
+        let sealed = match self.keys.db_key().and_then(|key| seal(&key, &plain, rng)) {
+            Ok(sealed) => sealed,
+            Err(error) => {
+                reservation.cancel_before_write();
+                return Err(error.into());
+            }
+        };
+        writer(&self.epoch_recovery_path(&scope), &frame(&sealed))?;
+        reservation.commit();
+        Ok(EpochRecoveryUpdate { transition, state })
+    }
+
     /// Load a bounded, authenticated recovery record. Absence alone means empty; corruption,
     /// a wrong scope, a non-regular file or a failed read is never treated as empty recovery.
     pub fn load_epoch_recovery(
@@ -234,7 +363,8 @@ impl ServerStore {
         self.read_epoch_recovery(&scope, document)
     }
 
-    /// Persist one recovery transition under exclusive store access. This writes even on a
+    /// Low-level, unaccounted persistence, retained for bootstrap/local tooling. Use
+    /// `update_epoch_recovery_accounted` when connecting this to P1 settlement. This writes even on a
     /// matching retry/no-op so a previous post-rename directory-flush failure can be repaired.
     ///
     /// On any error, do not install a checkpoint, prune history, or report successful eviction.
@@ -287,11 +417,20 @@ impl ServerStore {
         scope: &[u8],
         document: &LogicalDocument,
     ) -> Result<EpochRecoveryState, AppError> {
+        self.read_epoch_recovery_record(scope, document)
+            .map(|(state, _)| state)
+    }
+
+    fn read_epoch_recovery_record(
+        &self,
+        scope: &[u8],
+        document: &LogicalDocument,
+    ) -> Result<(EpochRecoveryState, Option<u64>), AppError> {
         let path = self.epoch_recovery_path(scope);
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(EpochRecoveryState::default())
+                return Ok((EpochRecoveryState::default(), None))
             }
             Err(error) => return Err(AppError::Io(error.to_string())),
         };
@@ -316,7 +455,19 @@ impl ServerStore {
             return Err(invalid("recovery file exceeds its bound"));
         }
         let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &unframe(&bytes)?)?);
-        EpochRecoveryState::decode(&plain, scope, document)
+        Ok((
+            EpochRecoveryState::decode(&plain, scope, document)?,
+            Some(bytes.len() as u64),
+        ))
+    }
+}
+
+fn recovery_record(scope: &[u8], footprint: Footprint) -> StorageRecord {
+    let id = *blake3::hash(scope).as_bytes();
+    StorageRecord {
+        id,
+        document: id,
+        footprint,
     }
 }
 
@@ -837,6 +988,306 @@ mod tests {
                 .retained()
                 .len(),
             0
+        );
+    }
+
+    // These fixtures contain exactly one recovery file and no other P1 artifacts. A real caller
+    // cannot replace complete inventory discovery with this one-document helper.
+    fn inventory_budget(store: &ServerStore) -> EpochStorageBudget {
+        EpochStorageBudget::from_inventory(
+            StorageScope::new(SERVER, &document().server_id).unwrap(),
+            store
+                .epoch_recovery_inventory_record(SERVER, &document())
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn accounted(
+        store: &mut ServerStore,
+        budget: &mut EpochStorageBudget,
+        action: EpochRecoveryAction,
+        now: u64,
+    ) -> EpochRecoveryUpdate {
+        store
+            .update_epoch_recovery_accounted(
+                SERVER,
+                &document(),
+                action,
+                &ManualClock::new(now),
+                &mut ChaCha20Rng::seed_from_u64(now),
+                budget,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn accounted_updates_charge_physical_bytes_and_keep_staged_reserve_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let mut budget = inventory_budget(&store);
+        let mut warning = RecoveryTransition::Unchanged;
+        for epoch in 1..=3 {
+            warning = accounted(
+                &mut store,
+                &mut budget,
+                EpochRecoveryAction::Stage(snapshot(epoch)),
+                epoch * 10,
+            )
+            .transition;
+            let record = store
+                .epoch_recovery_inventory_record(SERVER, &document())
+                .unwrap()
+                .unwrap();
+            assert_eq!(budget.usage(), record.footprint);
+            let physical =
+                fs::metadata(store.epoch_recovery_path(&scope_bytes(SERVER, &document()).unwrap()))
+                    .unwrap()
+                    .len();
+            assert_eq!(record.footprint.total().unwrap(), physical);
+            assert_eq!(record.footprint.settlement > 0, epoch == 3);
+        }
+        let held = budget.usage();
+        drop(store);
+        let mut store = open(root.path());
+        let mut budget = inventory_budget(&store);
+        assert_eq!(budget.usage(), held);
+        assert_eq!(
+            store
+                .load_epoch_recovery(SERVER, &document())
+                .unwrap()
+                .eviction_pending()
+                .unwrap(),
+            Some(warning)
+        );
+        let saved = accounted(&mut store, &mut budget, acknowledgement(warning), 31);
+        assert_eq!(epochs(&saved.state), vec![3, 2]);
+        assert_eq!(budget.usage().settlement, 0);
+        assert_eq!(
+            budget.usage(),
+            store
+                .epoch_recovery_inventory_record(SERVER, &document())
+                .unwrap()
+                .unwrap()
+                .footprint
+        );
+    }
+
+    #[test]
+    fn content_cap_refuses_before_writer_without_borrowing_future_history_deletions() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let filler = StorageRecord {
+            id: [9; 32],
+            document: [9; 32],
+            footprint: Footprint {
+                content: epoch_budget::CONTENT_ALLOWANCE_BYTES,
+                ..Footprint::default()
+            },
+        };
+        let mut budget = EpochStorageBudget::from_inventory(
+            StorageScope::new(SERVER, &document().server_id).unwrap(),
+            [filler],
+        )
+        .unwrap();
+        let mut writes = 0;
+        let result = store.update_epoch_recovery_accounted_with_writer(
+            SERVER,
+            &document(),
+            EpochRecoveryAction::Stage(snapshot(1)),
+            &ManualClock::new(10),
+            &mut ChaCha20Rng::seed_from_u64(10),
+            &mut budget,
+            |_, _| {
+                writes += 1;
+                Ok(())
+            },
+        );
+        assert!(result.unwrap_err().to_string().contains("storage limit"));
+        assert_eq!(writes, 0);
+        assert!(!budget.requires_reconciliation());
+        assert!(store
+            .epoch_recovery_inventory_record(SERVER, &document())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn accounted_save_failure_requires_actual_inventory_before_a_retry() {
+        for after_rename in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut store = open(root.path());
+            let mut budget = inventory_budget(&store);
+            let action = || EpochRecoveryAction::Stage(snapshot(1));
+            let result = store.update_epoch_recovery_accounted_with_writer(
+                SERVER,
+                &document(),
+                action(),
+                &ManualClock::new(10),
+                &mut ChaCha20Rng::seed_from_u64(10),
+                &mut budget,
+                |path, bytes| {
+                    if after_rename {
+                        atomic_write_with_hook_and_sync(
+                            path,
+                            bytes,
+                            |_, _| {},
+                            |_| Err(std::io::Error::other("injected flush failure")),
+                        )
+                    } else {
+                        Err(AppError::Io("injected write failure".into()))
+                    }
+                },
+            );
+            assert!(result.is_err());
+            assert!(budget.requires_reconciliation());
+            let mut retried_writes = 0;
+            assert!(store
+                .update_epoch_recovery_accounted_with_writer(
+                    SERVER,
+                    &document(),
+                    action(),
+                    &ManualClock::new(10),
+                    &mut ChaCha20Rng::seed_from_u64(10),
+                    &mut budget,
+                    |_, _| {
+                        retried_writes += 1;
+                        Ok(())
+                    }
+                )
+                .is_err());
+            assert_eq!(retried_writes, 0);
+            let record = store
+                .epoch_recovery_inventory_record(SERVER, &document())
+                .unwrap();
+            assert_eq!(record.is_some(), after_rename);
+            // The test has no orphan sibling; a production reconciliation must include it if
+            // present, or wait until a successful durable cleanup before releasing its bytes.
+            budget
+                .reconcile(
+                    &StorageScope::new(SERVER, &document().server_id).unwrap(),
+                    record,
+                )
+                .unwrap();
+            accounted(&mut store, &mut budget, action(), 10);
+            assert!(!budget.requires_reconciliation());
+            assert_eq!(
+                budget.usage(),
+                store
+                    .epoch_recovery_inventory_record(SERVER, &document())
+                    .unwrap()
+                    .unwrap()
+                    .footprint
+            );
+        }
+    }
+
+    #[test]
+    fn equal_length_but_wrong_pool_inventory_cannot_save_and_corrupt_reads_close_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        for epoch in 1..=3 {
+            stage(&mut store, epoch, epoch * 10);
+        }
+        let mut wrong = store
+            .epoch_recovery_inventory_record(SERVER, &document())
+            .unwrap()
+            .unwrap();
+        wrong.footprint.content += wrong.footprint.settlement;
+        wrong.footprint.settlement = 0;
+        let mut budget = EpochStorageBudget::from_inventory(
+            StorageScope::new(SERVER, &document().server_id).unwrap(),
+            [wrong],
+        )
+        .unwrap();
+        let mut writes = 0;
+        assert!(store
+            .update_epoch_recovery_accounted_with_writer(
+                SERVER,
+                &document(),
+                EpochRecoveryAction::AdvanceTime,
+                &ManualClock::new(40),
+                &mut ChaCha20Rng::seed_from_u64(10),
+                &mut budget,
+                |_, _| {
+                    writes += 1;
+                    Ok(())
+                }
+            )
+            .is_err());
+        assert_eq!(writes, 0);
+        assert!(budget.requires_reconciliation());
+        let mut budget = inventory_budget(&store);
+        let path = store.epoch_recovery_path(&scope_bytes(SERVER, &document()).unwrap());
+        fs::write(path, [0; 40]).unwrap();
+        assert!(store
+            .update_epoch_recovery_accounted(
+                SERVER,
+                &document(),
+                EpochRecoveryAction::AdvanceTime,
+                &ManualClock::new(40),
+                &mut ChaCha20Rng::seed_from_u64(10),
+                &mut budget
+            )
+            .is_err());
+        assert!(budget.requires_reconciliation());
+    }
+
+    #[test]
+    fn another_documents_staged_recovery_and_orphan_bytes_keep_their_reserve() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        for epoch in 1..=3 {
+            stage(&mut store, epoch, epoch * 10);
+        }
+        let mut budget = inventory_budget(&store);
+        let mut other_doc = document();
+        other_doc.logical_key = b"other-cat".to_vec();
+        let mut other_snapshot = snapshot(1);
+        other_snapshot.logical_key = other_doc.logical_key.clone();
+        let result = store.update_epoch_recovery_accounted(
+            SERVER,
+            &other_doc,
+            EpochRecoveryAction::Stage(other_snapshot),
+            &ManualClock::new(40),
+            &mut ChaCha20Rng::seed_from_u64(10),
+            &mut budget,
+        );
+        assert!(result.unwrap_err().to_string().contains("another document"));
+        let current = store
+            .epoch_recovery_inventory_record(SERVER, &document())
+            .unwrap()
+            .unwrap();
+        let orphan = StorageRecord {
+            id: [9; 32],
+            document: current.document,
+            footprint: Footprint {
+                settlement: epoch_budget::SETTLEMENT_RESERVE_BYTES - current.footprint.settlement,
+                ..Footprint::default()
+            },
+        };
+        budget
+            .reconcile(
+                &StorageScope::new(SERVER, &document().server_id).unwrap(),
+                [current, orphan],
+            )
+            .unwrap();
+        // Replacing even the same bytes needs another physical copy; no early orphan refund.
+        assert!(store
+            .update_epoch_recovery_accounted(
+                SERVER,
+                &document(),
+                EpochRecoveryAction::AdvanceTime,
+                &ManualClock::new(40),
+                &mut ChaCha20Rng::seed_from_u64(10),
+                &mut budget
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("storage limit"));
+        assert_eq!(
+            budget.usage().settlement,
+            epoch_budget::SETTLEMENT_RESERVE_BYTES
         );
     }
 

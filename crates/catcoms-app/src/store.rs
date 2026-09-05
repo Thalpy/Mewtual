@@ -30,6 +30,7 @@ use crate::AppError;
 
 mod epoch_recovery;
 pub use epoch_recovery::{EpochRecoveryAction, EpochRecoveryState, EpochRecoveryUpdate};
+pub mod epoch_budget;
 
 /// One persisted server in the registry: enough to relist it in the UI and reload its
 /// sealed snapshot. `invite` is the founder's own invite text (empty for a joiner).

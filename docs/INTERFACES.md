@@ -892,7 +892,28 @@ as its domain-separated filename derivation. Exclusive mutable store access seri
 transition and replacement. Even idempotent retries re-save before returning, including exact
 acknowledgement retries after `CommittedButNotDurable`; stale acknowledgements cannot promote a
 newer warning. Reading alone never expires recovery. This internal prerequisite is not connected
-to the actor/bridge, shared storage admission, removal cleanup, or checkpoint pruning yet.
+to the actor/bridge, inventory bootstrap, removal cleanup, or checkpoint pruning yet.
+
+`catcoms_app::store::epoch_budget` adds `StorageScope`, `Footprint`, `StorageRecord`,
+`Replacement`, `WritePurpose`, `EpochStorageBudget`, and `BudgetError`. A budget is constructed or
+reconciled from a **complete trusted local inventory**, including temporary/orphan records. Its
+1984 MiB content, 16 MiB protocol and 48 MiB settlement pools sum to 2 GiB. `reserve` verifies
+permanent and peak old+replacement+scratch occupancy without early deletion credit, marks the
+budget unready before returning an exclusive guard, and rejects another document while staged
+bytes pin the reserve. `commit` follows successful durable I/O; `cancel_before_write` is valid only
+before I/O. Dropped/forgotten guards or uncertain writes require reconciliation. There is a local
+65,536-record metadata rail; it does not alter replicated registry admission. Empty crash-orphan
+files consume a slot too. An over-rail inventory refuses reconciliation until bounded cleanup;
+discarding entries from accounting to fit the rail is not safe.
+
+`ServerStore::epoch_recovery_inventory_record(server, document)` returns **one** authenticated
+physical inventory entry, not a complete inventory. `update_epoch_recovery_accounted` takes the
+same arguments as the low-level save plus `&mut EpochStorageBudget`, verifies the old pool split
+and owner, reserves the entire replacement, saves, then commits counters. Failed reads/writes
+invalidate accounting; matching lengths alone do not prove a matching pool split. The existing
+`update_epoch_recovery` remains explicitly unaccounted for bootstrap/tooling. A coordinator must
+own the sole budget, exclude unaccounted writers, and provide complete inventory discovery before
+production use; this API alone neither enforces a vault-wide policy nor settles multiple records.
 
 `get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
 the complete bounded `states` array. The webview accepts only a strictly newer revision for its

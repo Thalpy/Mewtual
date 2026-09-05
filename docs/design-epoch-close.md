@@ -442,6 +442,25 @@ days), the peer refuses the content and shows "storage limit reached".
 plus the share; per server sustained 50 per second, burst 200, at most 16 documents with
 in-flight validation work; not relied on for correctness.
 
+Implemented admission prerequisite: `EpochStorageBudget` takes a complete trusted local inventory
+and splits the 2 GiB total into 1984 MiB ordinary content, 16 MiB protocol allowance, and 48 MiB
+settlement reserve. Its fixed-size inventory map has a local 65,536-record rail, counting empty
+crash-orphan files too. An over-rail inventory requires bounded cleanup before reconciliation,
+never truncation of accounting. Single-record
+replacement checks both final occupancy and the peak old inventory plus full replacement and
+scratch; no planned deletion is subtracted before I/O. Settlement copies may use the reserve,
+but ordinary writes may not. Held staged bytes pin that reserve to one document. A reservation
+sets the budget unready before returning; dropping or forgetting it requires complete inventory
+reconciliation. Successful I/O commits prevalidated counters; pre-I/O cancellation alone refunds.
+
+The accounted recovery adapter observes the actual authenticated old record (full content/staged
+split, physical ciphertext length and document owner), reserves its full replacement, saves and
+then commits. It is not the multi-record settlement transaction: a first/second recovery snapshot
+becomes retained immediately and can still be refused at the content cap. Supporting a settlement
+that frees other history requires the later transaction to hold those new bytes in reserve until
+the actual source deletion commits. Inventory discovery/bootstrap, temporary cleanup, and a sole
+coordinator excluding the low-level unaccounted API remain required before production wiring.
+
 ## 13. Application events
 
 `AppEvent::SettlementChanged { doc type tag, logical key, state }` on every change of a
