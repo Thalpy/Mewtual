@@ -4738,7 +4738,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Accepted cost: a freshly restored node has an empty `member_peers` and so does not sweep on
     /// its first reconnect. It proves a member on the first successful catch-up and sweeps after.
     fn sweep_docs_on_reconnect(&mut self, peer: PeerId) {
-        if !self.member_peers.iter().any(|proof| proof.peer == peer) {
+        if !self.peer_is_preferred_source(peer) {
             return;
         }
         for (doc_type, doc_id) in self.docs.keys().copied().collect::<Vec<_>>() {
@@ -5484,7 +5484,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let checked = self.sources_checked(doc_type, doc_id);
         let unchecked =
             |peer: &PeerId| self.connected_peers.contains(peer) && !checked.contains(peer);
-        if self.member_peers.iter().any(|proof| unchecked(&proof.peer)) {
+        if self
+            .member_peers
+            .iter()
+            .filter(|proof| proof.bound)
+            .any(|proof| unchecked(&proof.peer))
+        {
             return true;
         }
         // With no proven source at all, nothing that has answered has proved it was entitled to.
@@ -5493,8 +5498,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // the search on an unproven "I have nothing" would leave it empty with a source sitting
         // right there. Candidates are still only opportunistic, so each is asked once and the
         // search does end, rather than being held open by whoever stays connected.
-        if self.member_peers.is_empty() {
-            return self.known_peers.iter().any(unchecked);
+        if !self.member_peers.iter().any(|proof| proof.bound) {
+            return self
+                .member_peers
+                .iter()
+                .map(|proof| proof.peer)
+                .chain(self.known_peers.iter().copied())
+                .any(|peer| unchecked(&peer));
         }
         false
     }
@@ -5652,6 +5662,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         // Newly proven changes what this peer is worth to a search: it was opportunistic, and is
         // now a source the sweep must hear from.
+        // Decided before anything is touched. A binding proved at both ends is not given up to
+        // one that was not, on either axis: a different peer claiming this device, or a different
+        // device claiming this peer. Rejecting it *after* clearing the state it was going to
+        // replace was almost as good as accepting it, because an endpoint could then wipe the real
+        // binding's answers over and over with promotions that were each refused.
+        let conflicts_with_bound = self.member_peers.iter().any(|proof| {
+            proof.bound
+                && (proof.peer == peer || proof.device == device)
+                && !(proof.peer == peer && proof.device == device)
+        });
+        if !bound && conflicts_with_bound {
+            return;
+        }
         let newly_proven = !self
             .member_peers
             .iter()
@@ -5676,20 +5699,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .map(|proof| proof.peer)
             .collect();
         for old in displaced {
-            // Whatever the identity it is replacing had said about a document went with it.
+            // Whatever the identity it is replacing had said about a document went with it, and
+            // so does anything it had claimed to be still withholding: the same member is now
+            // reachable at a different endpoint, and a claim naming the old one would otherwise
+            // block the new one from finishing until it timed out.
             self.forget_source_answers(old);
-        }
-        // A binding that was proved at both ends is not given up to one that was not. Otherwise
-        // the unbound exchanges become a way to *take* a verified slot rather than merely to fill
-        // one: an endpoint that relayed a member's request could present the answer as its own and
-        // displace that member's real binding, and with it the member's place in every sweep.
-        if !bound
-            && self
-                .member_peers
+            let claimed: Vec<(DocType, u128)> = self
+                .catchup_continuations
                 .iter()
-                .any(|proof| proof.device == device && proof.bound && proof.peer != peer)
-        {
-            return;
+                .filter(|(_, (claimant, _))| *claimant == old)
+                .map(|(doc, _)| *doc)
+                .collect();
+            for (doc_type, doc_id) in claimed {
+                self.clear_catchup_continuation(doc_type, doc_id);
+                self.clear_sources_checked(doc_type, doc_id);
+                self.enqueue_doc_catchup(doc_type, doc_id);
+            }
         }
         let bound = bound
             || self
@@ -10591,7 +10616,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // all, and would once have been enough to retire the gap for good. Only a peer already
         // proven to be a current member discharges its part of the sweep this way; anyone else is
         // simply set aside and the search continues.
-        if self.peer_is_proven_member(peer) || self.member_peers.is_empty() {
+        if self.peer_is_proven_member(peer) || !self.member_peers.iter().any(|p| p.bound) {
             // A proven member's zero answer discharges its part of the search. An unproven one's
             // does not, except while there is nothing proven to prefer it to: there, each
             // candidate is asked once so the search still terminates.
@@ -10607,7 +10632,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Whether this transport peer has an authenticated current-member binding: it served a
     /// signed catch-up that verified against the roster, rather than merely being reachable.
     fn peer_is_proven_member(&self, peer: PeerId) -> bool {
+        self.peer_has_bound_member_proof(peer)
+    }
+
+    /// Whether this transport peer is worth **preferring** as a source: some member answered
+    /// there, whether or not the exchange proved the answer came from that endpoint.
+    fn peer_is_preferred_source(&self, peer: PeerId) -> bool {
         self.member_peers.iter().any(|proof| proof.peer == peer)
+    }
+
+    /// Whether this transport peer carries a proof from an exchange bound at both ends.
+    ///
+    /// The distinction is the whole point of recording it. An unbound answer says a member signed
+    /// something; it does not say the endpoint that handed it over is that member, because the
+    /// released transcripts it comes from can be relayed. So it may tip which source to try, and
+    /// it may not stand in for that member anywhere a transport identity is being trusted: not as
+    /// an obligation a document's search waits on, not as the thing that lets an unsigned empty
+    /// answer discharge one, and not as a member-bound path for repair or probing.
+    fn peer_has_bound_member_proof(&self, peer: PeerId) -> bool {
+        self.member_peers
+            .iter()
+            .any(|proof| proof.peer == peer && proof.bound)
     }
 
     /// Verify, apply and acknowledge a served bundle. Shared by both catch-up shapes, which
@@ -15913,7 +15958,10 @@ mod tests {
 
     fn prove_live_member(observer: &mut Member, peer: PeerId, device: DeviceId) {
         observer.note_peer_connected(peer);
-        observer.promote_member_peer(peer, device);
+        // Bound, because this stands for a peer that has proved itself at this endpoint, which is
+        // what every caller means by it. An unbound proof is the weaker thing a relayable exchange
+        // yields, and the tests that care about that distinction say so explicitly.
+        observer.promote_member_peer_bound(peer, device, true);
         assert!(observer.proven_member_path(device, peer));
     }
 
@@ -17257,6 +17305,104 @@ mod tests {
             }
         );
         assert_eq!(applied.unwrap(), 1);
+    }
+
+    /// What a relayable exchange proves, and what it does not.
+    ///
+    /// PEX and commit catch-up keep the released transcript, which does not carry the peer a
+    /// request was sent from, so an endpoint can forward somebody's live request to a real member
+    /// and hand back the answer. The proof that comes out of that names a member and an endpoint
+    /// that have nothing to do with each other. It may still tip which source to try first, since
+    /// that is all this cache was ever used for, and it must not be able to end a document's
+    /// search: as an obligation the search waits on, or as the standing that lets an unsigned
+    /// empty answer discharge one.
+    #[tokio::test]
+    async fn a_relayed_proof_can_suggest_a_source_but_not_speak_for_one() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let alice = members.pop().unwrap();
+        let (alice_peer, alice_device) = (alice.local_peer(), ids[0]);
+        let mallory_peer = PeerId::from_u64(4242);
+        bob.open_channel(DocType::Channel, 105).await.unwrap();
+        bob.note_peer_connected(alice_peer);
+        bob.note_peer_connected(mallory_peer);
+        bob.remember_peer(alice_peer);
+
+        // What laundering yields: Alice's device, Mallory's endpoint, nothing binding the two.
+        bob.promote_member_peer(mallory_peer, alice_device);
+        assert!(
+            bob.peer_is_preferred_source(mallory_peer),
+            "still worth trying, which is all this cache was ever for"
+        );
+        assert!(
+            !bob.peer_has_bound_member_proof(mallory_peer),
+            "but nothing here was proved about that endpoint"
+        );
+
+        // So Mallory cannot be the source a search waits on, and cannot discharge one either.
+        bob.note_source_checked(mallory_peer, DocType::Channel, 105);
+        assert!(
+            !bob.peer_is_proven_member(mallory_peer),
+            "an unsigned empty answer from here settles nothing"
+        );
+        assert!(
+            bob.unchecked_source_exists(DocType::Channel, 105),
+            "and Alice, who has not answered, is still someone to ask"
+        );
+
+        // Alice answering at her own endpoint is what a bound proof looks like; then the search
+        // does have somebody it must hear from, and it is her.
+        bob.promote_member_peer_bound(alice_peer, alice_device, true);
+        assert!(bob.peer_has_bound_member_proof(alice_peer));
+        assert!(bob.unchecked_source_exists(DocType::Channel, 105));
+        bob.note_source_checked(alice_peer, DocType::Channel, 105);
+        assert!(
+            !bob.unchecked_source_exists(DocType::Channel, 105),
+            "once the source that could be trusted has answered, the search is done"
+        );
+    }
+
+    /// A promotion that is going to be refused must not touch anything on its way to refusing.
+    #[tokio::test]
+    async fn a_refused_promotion_leaves_the_binding_it_could_not_take_untouched() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let alice = members.pop().unwrap();
+        let (alice_peer, alice_device) = (alice.local_peer(), ids[0]);
+        let mallory_peer = PeerId::from_u64(4242);
+        bob.open_channel(DocType::Channel, 106).await.unwrap();
+        bob.note_peer_connected(alice_peer);
+        bob.promote_member_peer_bound(alice_peer, alice_device, true);
+        bob.note_source_checked(alice_peer, DocType::Channel, 106);
+
+        // Refused, because an unbound claim cannot take a bound binding. The point of the test is
+        // what it does on the way there: clearing the state first and refusing afterwards left
+        // the refusal almost as useful to an attacker as acceptance, since the answers it was
+        // going to replace were gone either way, over and over.
+        bob.promote_member_peer(mallory_peer, alice_device);
+        assert!(
+            bob.sources_checked(DocType::Channel, 106)
+                .contains(&alice_peer),
+            "the real binding's answer is still on record"
+        );
+        assert!(
+            !bob.peer_is_preferred_source(mallory_peer),
+            "and the refused claim left nothing of itself behind"
+        );
+
+        // The other axis: a different device claiming a peer that is already bound.
+        bob.promote_member_peer(alice_peer, ids[1]);
+        assert_eq!(
+            bob.member_peers
+                .iter()
+                .filter(|proof| proof.peer == alice_peer)
+                .map(|proof| proof.device)
+                .collect::<Vec<_>>(),
+            vec![alice_device],
+            "a bound peer is not reassigned to another device by an unbound claim"
+        );
     }
 
     /// One roster device is one source, however many transport identities it answers from.

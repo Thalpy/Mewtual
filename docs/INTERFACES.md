@@ -623,9 +623,20 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     exactly what it signs, or a mixed pair fails in both directions — and a commit catch-up that
     stops verifying is a member stuck at an old epoch, unable to open anything sealed under the
     new one. They instead stop being a way to *prove* anything about a transport peer: a proof from
-    them is recorded as unbound (see `ProvenMemberPeer::bound`), which is enough to prefer a source
-    and not enough to displace one that was proved at both ends. Reciprocal forwarding is excluded
-    for a different reason: it relays on somebody's behalf by design.
+    them is recorded as unbound (see `ProvenMemberPeer::bound`). An unbound proof may **prefer** a
+    source and nothing else: it cannot be an obligation a document's search waits on, cannot let an
+    unsigned empty legacy answer discharge one, and cannot displace a binding proved at both ends
+    on either axis (the same device from another peer, or another device at the same peer). A
+    refusal is decided before anything is touched, so a claim that will be refused cannot clear the
+    state it was going to replace on the way to being refused; an accepted replacement carries the
+    displaced identity's continuation claim with it rather than leaving one naming an endpoint the
+    member no longer answers at. Reciprocal forwarding is excluded from binding for a different
+    reason: it relays on somebody's behalf by design.
+    **Not yet gated on `bound`:** `proven_member_path`, `has_proven_connected_member_peer` and the
+    reconnect sweep still accept an unbound proof, as they did before this work. PEX is how most
+    peers become proven at all, so requiring a bound proof there would leave a node with no member
+    path until a document catch-up happened; tightening it is its own change with its own behaviour
+    to re-establish, and is tracked with the periodic anti-entropy work.
   - **The `KIND_CATCHUP_SINCE` response is responder-signed**, like commit catch-up, PEX and blob
     fetch: `bytes responder_pubkey ‖ bytes signature(64) ‖ bytes answer`, where `answer` is
     `[marker] ‖ op bundle` and the signature covers a transcript under
