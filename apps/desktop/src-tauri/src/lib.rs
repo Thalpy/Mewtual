@@ -53,6 +53,7 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
 use zeroize::Zeroizing;
 
+mod creative_blobs;
 mod errors;
 mod tasks;
 use errors::{codes, AppError, ErrorCode};
@@ -15631,6 +15632,8 @@ pub fn run() {
             set_file_expiry,
             get_file_usage,
             get_wiki_pinned_cids,
+            creative_blobs::publish_pix,
+            creative_blobs::request_blob_bounded,
             post_status,
             get_statuses,
             edit_status,

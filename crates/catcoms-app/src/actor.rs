@@ -223,6 +223,20 @@ impl EventSink {
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
 pub enum AppCommand {
+    /// Store an immutable PIX blob; no Studio metadata is changed. Cancellation also owns the
+    /// native concurrency slot while the command is queued or executing.
+    PublishPix {
+        bytes: Vec<u8>,
+        cancellation: Option<RequestCancellation>,
+        reply: oneshot::Sender<Result<crate::creative::PublishedPix, String>>,
+    },
+    /// Fetch bounded, authenticated blob bytes, retaining cancellation through the transport.
+    RequestBlobBounded {
+        cid: Cid,
+        max_bytes: usize,
+        cancellation: Option<RequestCancellation>,
+        reply: oneshot::Sender<Result<Option<Vec<u8>>, String>>,
+    },
     /// Create (or idempotently open) a channel and publish it to the shared directory.
     CreateChannel {
         name: String,
@@ -1897,6 +1911,48 @@ impl ServerActor {
         {
             return Err("server stopped".into());
         }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Validate before enqueueing and return only the Server's real publication result.
+    pub async fn publish_pix(
+        &self,
+        bytes: Vec<u8>,
+        cancellation: Option<RequestCancellation>,
+    ) -> Result<crate::creative::PublishedPix, String> {
+        crate::creative::validate_pix(&bytes).map_err(|e| e.to_string())?;
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::PublishPix {
+                bytes,
+                cancellation,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Maximum-size read; exact length and format validation remain the reference consumer's job.
+    pub async fn request_blob_bounded(
+        &self,
+        cid: Cid,
+        max_bytes: usize,
+        cancellation: Option<RequestCancellation>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        if max_bytes > crate::creative::MAX_BOUNDED_BLOB_BYTES {
+            return Err("blob limit exceeds 9 MiB".into());
+        }
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::RequestBlobBounded {
+                cid,
+                max_bytes,
+                cancellation,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
@@ -3664,6 +3720,18 @@ where
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
                     }
+                    Some(AppCommand::PublishPix { bytes, cancellation, reply }) => {
+                        let res = if cancellation.as_ref().is_some_and(RequestCancellation::is_cancelled) || reply.is_closed() {
+                            Err("request cancelled".into())
+                        } else { server.publish_pix(&bytes).map_err(|e| e.to_string()) };
+                        let _ = reply.send(res);
+                    }
+                    Some(AppCommand::RequestBlobBounded { cid, max_bytes, cancellation, reply }) => {
+                        if !reply.is_closed() {
+                            let res = server.request_blob_bounded(&cid, max_bytes, cancellation).await.map_err(|e| e.to_string());
+                            let _ = reply.send(res);
+                        }
+                    }
                     Some(AppCommand::PublishUpload {
                         name,
                         mime,
@@ -5100,6 +5168,81 @@ mod tests {
     use tokio::time::timeout;
 
     const GENERAL: u128 = 1;
+
+    #[tokio::test]
+    async fn pix_publication_actor_returns_real_cid_and_rejects_failed_or_cancelled_calls() {
+        let hub = Hub::new();
+        let bytes = crate::creative::tests::golden();
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        assert!(server
+            .publish_pix(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("persistent"));
+        server.set_blob_store(Box::new(
+            catcoms_storage::SealingBlobStore::open(
+                dir.path(),
+                [7; 32],
+                ChaCha20Rng::seed_from_u64(3),
+            )
+            .unwrap(),
+        ));
+        let (actor, _events, handle) = spawn(server);
+        let published = actor.publish_pix(bytes.clone(), None).await.unwrap();
+        let cid = Cid::of(&bytes);
+        assert_eq!(published.cid, cid.to_hex());
+        assert_eq!(published.bytes, bytes.len());
+        assert_eq!(
+            actor
+                .request_blob_bounded(cid, bytes.len(), None)
+                .await
+                .unwrap()
+                .unwrap(),
+            bytes
+        );
+        assert!(actor
+            .request_blob_bounded(cid, bytes.len() - 1, None)
+            .await
+            .is_err());
+        assert!(actor
+            .publish_pix(vec![0; 64 * 1024 + 1], None)
+            .await
+            .is_err());
+        assert!(actor
+            .publish_pix(b"not pixels".to_vec(), None)
+            .await
+            .is_err());
+        let (signal, rx) = tokio::sync::watch::channel(true);
+        assert!(actor
+            .publish_pix(
+                bytes.clone(),
+                Some(RequestCancellation::new(rx.clone(), None))
+            )
+            .await
+            .is_err());
+        assert!(actor
+            .request_blob_bounded(cid, bytes.len(), Some(RequestCancellation::new(rx, None)))
+            .await
+            .is_err());
+        drop(signal);
+        assert!(
+            actor.files().await.is_empty(),
+            "blob publication does not invent a share entry"
+        );
+        actor.shutdown().await;
+        handle.await.unwrap();
+        assert!(actor
+            .publish_pix(bytes, None)
+            .await
+            .unwrap_err()
+            .contains("stopped"));
+        assert!(actor
+            .request_blob_bounded(cid, 64, None)
+            .await
+            .unwrap_err()
+            .contains("stopped"));
+    }
 
     /// A delta says which rows arrived, not which row sorts last.
     ///

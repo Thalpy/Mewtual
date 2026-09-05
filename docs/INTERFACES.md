@@ -440,6 +440,36 @@ checkpoint_registry_close(...) -> Result<(CheckpointSeed, ClosureStats)>; // ver
 
 ## 5. Storage & retention  *(catcoms-storage)*
 
+### Creative blob seam (C0c, independent of Studio/P1 metadata)
+
+- Native `publish_pix({server, bytesB64}) -> {cid, bytes}` calls
+  `ServerActor::publish_pix` / `Server::publish_pix`. Rust validates PIX1 (64 KiB encoded cap),
+  then `ChannelSync::publish_blob_bounded` stages, verifies, promotes and flushes before returning
+  the actual BLAKE3 address of the PIX bytes. This does **not** publish a Studio/file/chat record.
+  The caller publishes references only after success. A promoted orphan may remain after failure;
+  failures must not delete a held CID that another reference could use. Filesystem blobs are
+  file-synced, plus containing directories on Unix, matching the existing vault platform seam;
+  this is not a new cross-platform sudden-power-loss guarantee. Unix blob-directory creation
+  also flushes ancestor entries, including on a retry after failed creation. `publish_pix` refuses
+  a process-local memory store (including the production disk-attachment fallback).
+- Native `request_blob_bounded({server, cid, maxBytes}) -> {bytes_b64, bytes} | null` calls the
+  same-named actor/Server/sync methods. CID syntax is exactly 64 lowercase hex digits; `maxBytes`
+  is an integer in 0..9 MiB, normally the reference's declared byte length. Local reads check the
+  opened file's size before allocation (sealed frame overhead is 40 bytes). One selected peer is
+  asked if missing/corrupt; signed response framing, declared limit, current membership,
+  request-bound signature and CID all validate before storage. Refusals have no provider fallback.
+  Null is unavailable, errors reject. **Consumers must also require exact byte equality and decode
+  their format before rendering.** The transport still buffers its existing capped response;
+  the caller-specific network bound is post-transport, before blob body copy/hash/storage.
+- Both commands reuse the four native inline-download slots, lock cancellation and transport
+  accounting keepalives. Response conversion rechecks unlock generation and server incarnation.
+  Neither command triggers passive fetches, installs a UI cache, emits Studio updates, pins content,
+  defines expiry or provides aggregate storage admission. Those remain separate integration work.
+- `BlobStore::get_bounded(cid, max_bytes)` and `promote_staged_bounded(cid, max_bytes)` are required
+  store methods, not default fallbacks to unbounded reads. Ordinary fetched-blob `put` dedup also
+  checks an existing file using the incoming length. Legacy unbounded reads/promotions remain for
+  existing consumers; callers needing declared-size protection must use the bounded seam.
+
 ```rust
 pub struct Cid([u8;32]);  of(bytes)->Self; from_bytes/as_bytes/to_hex/from_hex;   // BLAKE3 over CIPHERTEXT
 pub struct FileRef { plaintext_cid, ciphertext_cid, wrapped_key:SealedBlob, size, mime }  encode()/decode();

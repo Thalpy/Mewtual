@@ -95,7 +95,9 @@ runs      pairs of (len1 u8, idx u8) until exactly W*H pixels are produced
 - Roles: 0 literal, 1 `bg`, 2 `fg`, 3 `accent`, 4 `muted`, 5..8 the fixed tones `t0..t3`.
   Any other role byte rejects. Every entry carries an RGB fallback. Duplicate entries reject.
 - A run is `len1 + 1` pixels (1..256) of palette index `idx`; `idx >= N` rejects. Runs are
-  maximal: a run followed by a run of the same index rejects.
+  maximal up to the 256-pixel wire limit: a run followed by a run of the same index rejects
+  unless the preceding run has length 256. For 512 pixels of index 1, the run bytes are
+  `ff 01 ff 01` (two full runs), never shorter adjacent runs.
 - Decode order: parse the fixed header; reject if `W*H > 65536`; allocate `W*H` bytes once;
   consume runs with bounds checks; reject on overshoot, undershoot, or trailing bytes.
 - Cap: 64 KiB measured on the encoded byte length, checked before any decode.
@@ -743,6 +745,7 @@ helpers would give a misleading percentage. The owner's frontend work proceeds s
 | P1 checkpoints and registry | Implemented/tested: deterministic seeds, isolated install/restart, typed bucket materialization and size preflight | Connect receipt-head discovery, catch-up and settlement |
 | P1 durable storage | Implemented/tested: recovery/owner receipt saves, local intent preparation with a vault-wide cap, peak-space accounting, bounded three-family inventory and unpublished-staging cleanup | Remaining managed-file types, sole coordinator, intent retirement and multi-record settlement/restart transaction |
 | P1 network and application integration | Not connected | Cursor catch-up, keyed head/seed/record fetch, lifecycle orchestration, actor/bridge events and end-to-end restart/partition tests |
+| C0c immutable blob seam | Native `publish_pix` and `request_blob_bounded` wired through actor and sync; PIX1 validator, bounded cache/dedup/response checks and tests | Owner's frontend invocation, creative reference enumeration/retention, profile result and consented-avatar work; C0c as a whole is not complete |
 | Creative backend contracts | Stable document tags exist; Studio-specific materializers are not implemented | C0 publication/identity work, C3a/C5a domain operations, score/flipnote schemas and export paths |
 | Usable collaborative Studio | Not connected end to end | Shared save/load, publication, claims, settlement/recovery actions and export integrated with the owner's UI |
 
@@ -753,10 +756,17 @@ settlement and recovery can be exercised as explicitly synthetic fixtures. These
 not claim that real shared saves, owner receipts or Restore operations happened. `.pix`/`.pixa`
 I/O still needs its codec/export contract tests; local UI readiness is not protocol readiness.
 
-**Next backend order:** finish the P1 storage transaction and restart path; wire P1 discovery,
+**Next backend order:** expose independent save/fetch primitives first (C0c blob seam now available),
+then finish the P1 storage transaction and restart path; wire P1 discovery,
 catch-up and application lifecycle; then connect typed Studio documents (C5a) and score/flipnote
 behavior (C5b-c/C6). Independent C0 codec, publication and identity slices can proceed alongside
 that work. UI implementation remains with the owner throughout.
+
+P1 reuses Automerge, signed encrypted operations, MLS membership and vault persistence. Existing
+snapshots reload retained history; they do not authorize throwing it away. P1 adds bounded history
+retirement with owner receipts, verified checkpoints and explicitly limited recovery. It applies
+to shared document metadata, not to editing uploaded image bytes, and is not a prerequisite for
+publishing or fetching an immutable PIX blob.
 
 **Platform prerequisites this suite depends on but does not own.**
 

@@ -8,6 +8,48 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Creative frontend dependency audit and C0c blob seam (2026-09-05).** UI remains owner-owned.
+  `publish_pix` and `request_blob_bounded` now reach Server/actor/Tauri via `creative.rs` and
+  `creative_blobs.rs`; see the exact IPC contract in INTERFACES section 5. The Rust PIX1 validator
+  matches the frontend format; storage checks include bounded sealed reads and dedup/promotion.
+  Focused coverage includes malformed/canonical pixels, exact/over limits, corrupt cached files,
+  reopen, authenticated network refusal before storage, cancellation and stale bridge completion.
+  PIX publication fails closed on the memory fallback after a failed disk-store attachment.
+  Review fixes also persist Unix blob-directory ancestry and cover post-promotion flush/retry,
+  invalid signatures, wrong CIDs, wrong request nonces and outsider responses. Low follow-up:
+  ancestor directory syncing currently requires read access to otherwise execute-only parents;
+  a future trusted vault-root durability boundary could narrow that requirement.
+  This saves an immutable blob, **not a flipnote/frame list**; the frontend still uses its local
+  placeholder map until the owner connects it. C0c also still needs the reference enumerator,
+  profile result and consented-avatar persistence work. No UI files were changed by this slice.
+
+  | Frontend dependency | Integrated now | Remaining |
+  |---|---|---|
+  | 1. PIX publication / bounded fetch | Storage -> sync -> Server -> actor -> native commands | Frontend invocation, exact record-length/format checks at consumption |
+  | 2. Creative pins / retention | Existing wiki pins and generic retention only | `creative_pinned_cids`, concurrent-reference enumeration and retention wiring; expiry GC is not live today |
+  | 3. Studio materializers | Tags 15/16 and fail-closed generic P1 paths | Rust StudioIndex/StudioObject domain validation/projection |
+  | 4. Studio preflight | Generic projection preflight and registry implementation | 999-frame/8 MiB/4096-sfx/64-patch Studio rules |
+  | 5. Studio commands | Actor infrastructure only | list/read/apply plus index variants through native bridge |
+  | 6. Studio/settlement events | Core settlement models only | AppEvent and bridge forwarding, no real UI updates yet |
+  | 7. Newcomer discovery | Registry/checkpoint/receipt-head primitives | Keyed network requests and catch-up coordinator |
+  | 8. Draw claims | Existing jam transport only | Shared admission, full-identity signal bridge, draw channel and claims |
+  | 9. Recovery actions | Vault stage/ack/advance APIs | Settlement wiring, typed Restore/copy/export and bridge commands |
+  | 10. `.pixa` and chat doodles | Existing fileshare machinery | Export codec/validator, attachment schema and publication/reference integration |
+
+  Roadmap: unlock independent blob I/O now, then finish the P1 coordinator/transaction/discovery
+  and typed Studio integration. P1 reuses replication and vault storage; its new job is safe,
+  bounded history retirement, not image-byte editing. Tested primitives are not completed features.
+
+  Verification: 15 new regression tests; focused storage `bounded_`, sync `bounded_blob`, app
+  `pix_` and native `creative_bridge` checks passed. Final `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests), and
+  `npm --prefix apps/desktop test` (1037 tests, invoked with npm.cmd on Windows) passed.
+  Root/native formatting, root clippy with `-D warnings`, native cargo check, the ambient-dependency
+  gate and diff checks passed. One intermediate native run failed the existing real-socket
+  `the_listen_port_prefers_the_seed_derived_home_port` test; isolated and full reruns passed without
+  changing it. Final adversarial re-review found no blocker/high/medium issue; the low portability
+  follow-up above remains. No frontend runtime changes or visual changes were made.
+
 - **P1 epoch-close backend work continues (2026-09-05).** Revision 5 of
   [`design-epoch-close.md`](design-epoch-close.md) is accepted. The first replication-core slice
   adds the four new stable document tags, backward-compatible v2 signed domain-operation

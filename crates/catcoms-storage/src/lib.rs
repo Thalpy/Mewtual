@@ -55,6 +55,9 @@ pub enum StorageError {
     /// Stored/received bytes do not match their content address.
     #[error("content id mismatch: data does not match its cid")]
     CidMismatch,
+    /// The plaintext (or its fixed-overhead sealed frame) exceeds the caller's limit.
+    #[error("blob exceeds declared size limit")]
+    BlobSizeLimit,
     /// A sealing/opening error (wrong key or tampered ciphertext).
     #[error(transparent)]
     Crypto(#[from] catcoms_crypto::KeystoreError),

@@ -444,6 +444,11 @@ const CALL_SIGNAL_REFILL_PER_SEC: u64 = 8;
 /// content address is re-verified on store (so a wrong blob is rejected regardless); this
 /// only bounds memory. Mirrors the 16 MiB catch-up ceiling.
 const MAX_BLOB_RESPONSE: usize = 16 * 1024 * 1024;
+
+/// Largest creative blob fetched whole (the `.pixa` envelope ceiling). A caller must also
+/// supply its record's smaller declared limit; this does not replace aggregate Studio caps.
+pub const MAX_BOUNDED_BLOB_BYTES: usize = 9 * 1024 * 1024;
+const SIGNED_BLOB_OVERHEAD: usize = 3 * 4 + 32 + 64;
 /// Per-requesting-**member** blob-serve budget over a fixed window; the anti-amplification rate
 /// limit (a 32-byte CID can elicit up to `MAX_BLOB_RESPONSE` + a signature). A **bytes** budget
 /// (not a per-blob interval) so a single legitimate download can pull many chunks back-to-back
@@ -1194,6 +1199,34 @@ fn encode_signed_commit_resp(
 
 /// A parsed signed commit-catch-up response: `(responder pubkey, signature, bundle)`.
 type SignedCommitResp = (Vec<u8>, [u8; 64], Vec<u8>);
+type BorrowedBlobResp<'a> = (&'a [u8], [u8; 64], &'a [u8]);
+
+/// Borrow the response body only after checking framing and size. The transport has already
+/// buffered its globally bounded frame; this limit is before body copies, hashing and storage,
+/// not a streaming/socket allocation limit. Keep generic commit decoding separate.
+fn decode_blob_response(bytes: &[u8], max_bytes: usize) -> Result<BorrowedBlobResp<'_>, SyncError> {
+    if bytes.len() > MAX_BLOB_RESPONSE
+        || bytes.len() > max_bytes.saturating_add(SIGNED_BLOB_OVERHEAD)
+    {
+        return Err(SyncError::Malformed);
+    }
+    let mut d = Decoder::new(bytes);
+    let pubkey = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+    if pubkey.len() != 32 {
+        return Err(SyncError::Malformed);
+    }
+    let signature = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let blob = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+    if blob.len() > max_bytes {
+        return Err(SyncError::Malformed);
+    }
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((pubkey, signature, blob))
+}
 
 /// Parse a signed commit-catch-up response into `(responder pubkey, signature, bundle)`.
 fn decode_signed_commit_resp(bytes: &[u8]) -> Result<SignedCommitResp, SyncError> {
@@ -4522,6 +4555,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// store (Phase 9h). Inject this right after construction, before any blob is added.
     pub fn set_blob_store(&mut self, blobs: Box<dyn BlobStore + Send>) {
         self.blobs = blobs;
+    }
+
+    /// Saved-content commands must not silently use the process-local attachment fallback.
+    pub fn has_persistent_blob_store(&self) -> bool {
+        self.blobs.is_persistent()
     }
 
     /// Encrypt a file under this group's stable file-wrap key (Phase 9h). Returns its
@@ -10754,6 +10792,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(self.blobs.promote_staged(cid)?)
     }
 
+    /// Stage, verify, promote and flush one immutable blob before its caller publishes any
+    /// reference. A failure may leave an unreferenced held blob, never a false successful CID.
+    pub fn publish_blob_bounded(&mut self, bytes: &[u8]) -> Result<Cid, SyncError> {
+        if bytes.len() > MAX_BOUNDED_BLOB_BYTES {
+            return Err(SyncError::Malformed);
+        }
+        let cid = self.blobs.put_staged(bytes)?;
+        if !self.blobs.promote_staged_bounded(&cid, bytes.len())? {
+            return Err(SyncError::Malformed);
+        }
+        if self.blobs.get_bounded(&cid, bytes.len())?.as_deref() != Some(bytes) {
+            return Err(SyncError::Malformed);
+        }
+        Ok(cid)
+    }
+
     /// Discard one staged blob. Cannot touch held content.
     pub fn drop_staged_blob(&mut self, cid: &Cid) -> Result<bool, SyncError> {
         Ok(self.blobs.drop_staged(cid)?)
@@ -10800,10 +10854,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: catcoms_rt::PeerId,
         cid: &Cid,
         cancellation: Option<RequestCancellation>,
+        max_bytes: Option<usize>,
     ) -> Result<(bool, Option<DeviceId>), SyncError> {
         // A filename alone is not availability: a corrupt record must fall through to the
         // authenticated fetch path, whose CID check plus BlobStore::put repairs it in place.
-        if matches!(self.blobs.get(cid), Ok(Some(_))) {
+        let held = match max_bytes {
+            Some(limit) => self.blobs.get_bounded(cid, limit),
+            None => self.blobs.get(cid),
+        };
+        if matches!(held, Err(catcoms_storage::StorageError::BlobSizeLimit)) {
+            return Err(catcoms_storage::StorageError::BlobSizeLimit.into());
+        }
+        if matches!(held, Ok(Some(_))) {
             return Ok((true, None));
         }
         let (req, auth) =
@@ -10828,14 +10890,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if resp.is_empty() {
             return Ok((false, None)); // the peer did not have this blob
         }
-        if resp.len() > MAX_BLOB_RESPONSE {
-            tracing::warn!(bytes = resp.len(), "oversized blob response dropped");
-            return Err(SyncError::Malformed);
-        }
-        let (responder_pubkey, signature, blob) = decode_signed_commit_resp(&resp)?;
+        let (responder_pubkey, signature, blob) = decode_blob_response(
+            &resp,
+            max_bytes.unwrap_or(MAX_BLOB_RESPONSE - SIGNED_BLOB_OVERHEAD),
+        )?;
         // The responder must be a current member, and the signature must bind this blob to
         // our exact request (key + ts + nonce + epoch).
-        let responder = DeviceId::from_public_key_bytes(&responder_pubkey);
+        let responder = DeviceId::from_public_key_bytes(responder_pubkey);
         if !self.group.contains_device(&responder) {
             return Err(SyncError::Malformed);
         }
@@ -10845,18 +10906,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             auth.ts,
             &auth.nonce,
             auth.epoch,
-            &blob,
+            blob,
         );
-        if !verify_with_public_bytes(&responder_pubkey, &transcript, &signature) {
+        if !verify_with_public_bytes(responder_pubkey, &transcript, &signature) {
             tracing::warn!("blob response signature invalid; dropped");
             return Err(SyncError::Malformed);
         }
         // Verify the served bytes hash to the address we asked for *before* storing them.
-        if Cid::of(&blob) != *cid {
+        if Cid::of(blob) != *cid {
             tracing::warn!("served blob content-address mismatch; dropped");
             return Err(SyncError::Malformed);
         }
-        self.blobs.put(&blob)?;
+        self.blobs.put(blob)?;
         Ok((true, Some(responder)))
     }
 
@@ -10865,7 +10926,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: catcoms_rt::PeerId,
         cid: &Cid,
     ) -> Result<(bool, Option<DeviceId>), SyncError> {
-        self.request_blob_tracked_cancellable(peer, cid, None).await
+        self.request_blob_tracked_cancellable(peer, cid, None, None)
+            .await
     }
 
     /// Fetch a blob by content address from `peer`; `Ok(true)` if now held (already-held or
@@ -10889,6 +10951,52 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some(peer) => self.request_blob(peer, cid).await,
             None => Ok(false),
         }
+    }
+
+    /// Read locally or ask one known peer, refusing over-declared data before copying/storing
+    /// it. No automatic fallback after a refusal. This is a maximum, not an exact-size promise:
+    /// record consumers must also check equality and validate their own format.
+    pub async fn request_blob_bounded(
+        &mut self,
+        cid: &Cid,
+        max_bytes: usize,
+        mut cancellation: Option<RequestCancellation>,
+    ) -> Result<Option<Vec<u8>>, SyncError> {
+        if max_bytes > MAX_BOUNDED_BLOB_BYTES {
+            return Err(SyncError::Malformed);
+        }
+        if cancellation
+            .as_ref()
+            .is_some_and(RequestCancellation::is_cancelled)
+        {
+            return Err(catcoms_rt::TransportError::Cancelled.into());
+        }
+        match self.blobs.get_bounded(cid, max_bytes) {
+            Ok(Some(bytes)) => return Ok(Some(bytes)),
+            Err(catcoms_storage::StorageError::BlobSizeLimit) => {
+                return Err(catcoms_storage::StorageError::BlobSizeLimit.into())
+            }
+            _ => {} // missing or corrupt: an authenticated response can repair this CID
+        }
+        let Some(peer) = self.pick_catchup_peer() else {
+            return Ok(None);
+        };
+        let fetch =
+            self.request_blob_tracked_cancellable(peer, cid, cancellation.clone(), Some(max_bytes));
+        let available = if let Some(cancel) = cancellation.as_mut() {
+            match futures::future::select(Box::pin(cancel.cancelled()), Box::pin(fetch)).await {
+                futures::future::Either::Left(_) => {
+                    return Err(catcoms_rt::TransportError::Cancelled.into())
+                }
+                futures::future::Either::Right((result, _)) => result?.0,
+            }
+        } else {
+            fetch.await?.0
+        };
+        if !available {
+            return Ok(None);
+        }
+        Ok(self.blobs.get_bounded(cid, max_bytes)?)
     }
 
     /// Like [`Self::request_blob_best`], but returns the **provider's fingerprint**; the signed
@@ -10924,7 +11032,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         match self.pick_catchup_peer() {
             Some(peer) => Ok(self
-                .request_blob_tracked_cancellable(peer, cid, Some(cancellation))
+                .request_blob_tracked_cancellable(peer, cid, Some(cancellation), None)
                 .await?
                 .1
                 .map(|device| roles::fingerprint(&device))),
@@ -21980,6 +22088,153 @@ mod tests {
         assert!(fetched.unwrap(), "Bob fetched the blob from a member");
         assert_eq!(bob.get_blob(&cid), Some(data));
         assert!(bob.has_blob(&cid), "and it is now held locally");
+    }
+
+    #[test]
+    fn bounded_blob_response_checks_framing_before_body_copy() {
+        let frame = encode_signed_commit_resp(&[1; 32], &[2; 64], b"pixels");
+        let (_, _, body) = decode_blob_response(&frame, 6).unwrap();
+        assert_eq!(body, b"pixels");
+        assert_eq!(
+            body.as_ptr(),
+            frame[SIGNED_BLOB_OVERHEAD..].as_ptr(),
+            "body is borrowed"
+        );
+        assert!(decode_blob_response(&frame, 5).is_err());
+        for len in 0..frame.len() {
+            assert!(decode_blob_response(&frame[..len], 6).is_err());
+        }
+        let mut trailing = frame.clone();
+        trailing.push(0);
+        assert!(decode_blob_response(&trailing, 100).is_err());
+        assert!(
+            decode_blob_response(&encode_signed_commit_resp(&[1; 31], &[2; 64], b"pixels"), 6)
+                .is_err()
+        );
+        let mut wrong_sig = Encoder::new();
+        wrong_sig.put_bytes(&[1; 32]).unwrap();
+        wrong_sig.put_bytes(&[2; 63]).unwrap();
+        wrong_sig.put_bytes(b"pixels").unwrap();
+        assert!(decode_blob_response(&wrong_sig.finish(), 6).is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_blob_fetch_rejects_before_storage_then_accepts_correct_limit() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut members = members.into_iter();
+        let mut alice = members.next().unwrap();
+        let mut bob = members.next().unwrap();
+        let peer = alice.local_peer();
+        let cid = alice.put_blob(b"pixels").unwrap();
+        let (result, _) = tokio::join!(
+            bob.request_blob_tracked_cancellable(peer, &cid, None, Some(5)),
+            alice.run_once()
+        );
+        assert!(result.is_err());
+        assert!(
+            !bob.has_blob(&cid),
+            "signed but oversized bytes never enter storage"
+        );
+        let (result, _) = tokio::join!(
+            bob.request_blob_tracked_cancellable(peer, &cid, None, Some(6)),
+            alice.run_once()
+        );
+        assert!(
+            result.unwrap().0,
+            "an incorrect earlier declaration does not blacklist a CID"
+        );
+        assert_eq!(
+            bob.request_blob_bounded(&cid, 6, None)
+                .await
+                .unwrap()
+                .unwrap(),
+            b"pixels"
+        );
+        assert!(
+            bob.request_blob_bounded(&cid, 5, None).await.is_err(),
+            "cache hits obey the bound too"
+        );
+        assert!(bob
+            .request_blob_bounded(&cid, MAX_BOUNDED_BLOB_BYTES + 1, None)
+            .await
+            .is_err());
+        let (tx, rx) = tokio::sync::watch::channel(true);
+        assert!(bob
+            .request_blob_bounded(&cid, 6, Some(RequestCancellation::new(rx, None)))
+            .await
+            .is_err());
+        drop(tx);
+    }
+
+    #[test]
+    fn bounded_blob_publication_returns_only_held_verified_bytes() {
+        let mut node = solo_node();
+        let cid = node.publish_blob_bounded(b"pixels").unwrap();
+        assert_eq!(cid, Cid::of(b"pixels"));
+        assert_eq!(node.get_blob(&cid).unwrap(), b"pixels");
+        assert_eq!(node.clear_staged_blobs().unwrap(), 0);
+        assert_eq!(node.publish_blob_bounded(b"pixels").unwrap(), cid);
+        assert!(node
+            .publish_blob_bounded(&vec![0; MAX_BOUNDED_BLOB_BYTES + 1])
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_blob_fetch_rejects_bad_signature_wrong_cid_and_request_replay() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut members = members.into_iter();
+        let alice = members.next().unwrap();
+        let mut bob = members.next().unwrap();
+        let peer = alice.local_peer();
+        let cid = Cid::of(b"pixels");
+        for fault in ["signature", "cid", "nonce", "outsider"] {
+            let (result, ()) = tokio::join!(
+                bob.request_blob_tracked_cancellable(peer, &cid, None, Some(6)),
+                async {
+                    let Some(TransportEvent::Request {
+                        data, responder, ..
+                    }) = alice.transport.next_event().await
+                    else {
+                        panic!("blob request must be next");
+                    };
+                    assert_eq!(data[0], KIND_BLOB_FETCH);
+                    let (_, requester, ts, mut nonce, epoch, _) =
+                        decode_authed_request(&data[1..]).unwrap();
+                    let blob = if fault == "cid" { b"wrong!" } else { b"pixels" };
+                    if fault == "nonce" {
+                        nonce[0] ^= 1;
+                    }
+                    let transcript = blob_fetch_resp_transcript(
+                        &alice.group.group_id(),
+                        &requester,
+                        ts,
+                        &nonce,
+                        epoch,
+                        blob,
+                    );
+                    let outsider = MlsDevice::generate().unwrap();
+                    let signer = if fault == "outsider" {
+                        &outsider
+                    } else {
+                        &alice.device
+                    };
+                    let mut sig = signer.sign(&transcript).unwrap();
+                    if fault == "signature" {
+                        sig[0] ^= 1;
+                    }
+                    responder.respond(Bytes::from(encode_signed_commit_resp(
+                        &signer.public_key_bytes(),
+                        &sig,
+                        blob,
+                    )));
+                }
+            );
+            assert!(result.is_err(), "{fault}");
+            assert!(
+                bob.blob_cids().is_empty(),
+                "{fault} must not store either CID"
+            );
+        }
     }
 
     #[tokio::test]

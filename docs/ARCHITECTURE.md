@@ -21,6 +21,13 @@ code was written), the honest residual risks, and the phased build plan.
 
 ## 2. Corrections from the adversarial review (must hold in the implementation)
 
+Creative immutable blobs are independent of the P1 document lifecycle. The C0c native seam uses
+the existing blob staging/store and authenticated fetch protocol, with PIX1 validation and bounded
+reads/response decoding added at the relevant boundaries. Publication returns a real CID only after
+promotion and flush; publishing a Studio reference remains a later operation. P1 does not replace
+Automerge or sync: it adds permission to retire their retained history into owner-receipted,
+verifiable checkpoints with bounded recovery. Existing snapshots alone do not provide that.
+
 The naive "one group, every device commits, replay old ciphertext to latecomers" design
 is broken. The load-bearing fixes:
 

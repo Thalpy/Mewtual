@@ -52,6 +52,7 @@ use catcoms_wire::DocType;
 use thiserror::Error;
 
 mod actor;
+pub mod creative;
 mod moderation;
 pub mod pairing;
 pub mod store;

@@ -11,6 +11,19 @@ table with the commit that closed it.
 
 ## Trust assumptions
 
+- **Creative blob size bounds are per operation, not retention or automatic-load authority.**
+  `publish_pix` validates the bounded PIX1 format and promotes verified bytes before returning a
+  referenceable CID. `request_blob_bounded` bounds local/sealed reads, response body copies and
+  storage by the caller's declaration (hard ceiling 9 MiB); the transport has already buffered its
+  existing globally capped frame. Network responses retain current-member, request-signature and
+  CID checks. Native calls share four inline slots with cancellation/transport keepalives and
+  suppress stale results after unlock-generation or server-incarnation changes. Consumers must
+  enforce exact record length, format and passive-fetch policy; no Studio auto-fetch is wired.
+  These primitives neither pin blobs nor enforce a disk quota. An orphan can remain after a failed
+  post-promotion flush; deleting a shared held CID to roll back would be unsafe. File flush plus
+  Unix directory flush matches the vault seam, not a universal power-loss guarantee. P1 storage
+  accounting and creative reference enumeration are not implied by this independent C0c seam.
+
 - **Cryptographic core holds against modified clients.** End-to-end message confidentiality,
   membership authentication, forward/post-compromise secrecy, the owner anchor, and admin-grant
   authenticity are enforced by MLS + signatures, not by client behavior. A modified client
