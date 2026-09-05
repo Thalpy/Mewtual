@@ -31,6 +31,7 @@ use crate::AppError;
 mod epoch_intents;
 mod epoch_owner;
 mod epoch_recovery;
+mod epoch_registry;
 pub use epoch_intents::{EpochIntentBudget, EpochIntentState, MAX_VAULT_INTENT_BYTES};
 pub use epoch_owner::EpochOwnerReceiptState;
 pub use epoch_recovery::cleanup::{
@@ -45,6 +46,7 @@ pub use epoch_recovery::inventory::{
     EpochStorageScanProgress, EpochStorageScanProgress as RecoveryScanProgress,
 };
 pub use epoch_recovery::{EpochRecoveryAction, EpochRecoveryState, EpochRecoveryUpdate};
+pub use epoch_registry::EpochRegistryState;
 pub mod epoch_budget;
 
 /// One persisted server in the registry: enough to relist it in the UI and reload its

@@ -102,7 +102,7 @@ impl EpochIntentBudget {
     /// orphan ownership.
     /// Recovery-only/two-family inventories cannot bootstrap this budget. No disk writes occur.
     pub fn from_inventory(inventory: &EpochStorageInventory) -> Result<Self, AppError> {
-        if inventory.coverage() != EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents {
+        if !inventory.coverage().includes_intents() {
             return Err(invalid("inventory does not cover intents"));
         }
         let mut records = BTreeMap::new();

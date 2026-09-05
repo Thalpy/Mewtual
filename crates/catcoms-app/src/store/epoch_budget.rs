@@ -56,7 +56,7 @@ impl std::fmt::Debug for StorageScope {
 pub struct Footprint {
     /// Retained user content and recovery versions.
     pub content: u64,
-    /// Receipts, closes, registry state and other protocol allowance consumers.
+    /// Receipts, closes and other protocol-only state. Peer-writable registry history is content.
     pub protocol: u64,
     /// Staged recovery and unsettled temporary bytes pinning one document's reserve.
     pub settlement: u64,

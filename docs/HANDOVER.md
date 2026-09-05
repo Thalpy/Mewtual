@@ -8,6 +8,47 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 durable registry ingress and sealing (2026-09-06).** `ServerStore` now has
+  `load_registry_epoch`, `ingest_registry_epoch` and `seal_registry_epoch`, returning only
+  detached read-only `EpochRegistryState`. They reload the checked raw seed/signed log/gate/book
+  and vault-save before returning admission or a seal. There is no arbitrary-save API. Seals
+  retain all source content; late operations persist only bounded quarantine hashes, not accepted
+  edits. Retry after uncertain rename authenticates and flushes identical bytes without a copy.
+  Failed writes, flushes or writer panics grant no success and require accounting reconciliation.
+
+  `scan_epoch_storage_with_registry` / `cleanup_epoch_storage_staging_with_registry` explicitly
+  cover recovery, owner journals, intents and registry records without widening older APIs.
+  Historical inventory shares the full restart validator but returns metadata only, so it needs
+  no current owner and cannot grant editing authority. Peer-writable registry history and seed
+  bytes charge ordinary content; only exact receipt growth charges protocol. This preserves room
+  to seal and journal the owner decision when content is full. Unpublished registry attempts
+  conservatively charge content and may require explicit cleanup before a fresh budget fits.
+
+  **Remaining:** local intent-to-edit publication and held-op resealing/serving; successor
+  installation and recovery-first multi-record settlement; fault/tenure orchestration;
+  receipt-head/seed discovery; the sole complete-budget coordinator and live ingress work/rate
+  limits; actor/Studio consumers. Each saved mutation currently rebuilds a bounded graph, so this
+  adapter is deliberately not automatically invoked by transport. This advances persistence,
+  not end-to-end P1 readiness. UI files remain user-owned and untouched.
+
+  Human/adversarial review target: `store/epoch_registry.rs` and its adjacent tests, the four-family
+  branches in `epoch_recovery/{inventory,cleanup}.rs`, and `registry_epoch.rs` historical inspection.
+  Try a failed write before/after rename, a failed duplicate flush, a valid receipt for missing
+  history, an indexed file disappearing, scope/inner-snapshot substitution, owner removal, a
+  content-full owner seal, and crash-orphan cleanup. Assert no accepted-op acknowledgement before
+  durability, no source retirement, no mutable authority from inventory, and exact physical pools.
+  Focused tests: 11 store regressions plus one core inspection/accounting regression pass.
+  `cargo test -p catcoms-app registry_store` and `cargo test -p catcoms-replication registry_`
+  pass. Final `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests), and
+  `npm.cmd --prefix apps/desktop test` (1037 tests) pass. `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` (Git Bash on Windows), and diff checks pass.
+  Adversarial design review corrected receipt headroom accounting; implementation review fixed
+  needless budget invalidation on expected missing history and added inner-snapshot corruption
+  coverage. Re-review reports no remaining actionable blocker/high/medium finding. No frontend
+  or native source was changed; visual validation and frontend build/static checks were not run.
+
 - **P1 registry restart coordinator (2026-09-05).** `catcoms_replication::registry_epoch::RegistryEpoch`
   privately owns the typed registry document, gate and receipt book. Its versioned, bounded
   restart unit carries the raw receipt-bound seed and signed log, not an independent Automerge
@@ -17,10 +58,11 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   verification and future share exemptions refresh from the verified group.
   Receipt admission retains the entire source log. Duplicate post-seal arrivals now reuse their
   quarantine slot; previously they could produce a gate snapshot that its decoder rejected.
-  This is an **in-memory coordinator and restart codec**, not an attached vault record or live
-  settlement path. Intent-before-edit and snapshot-before-publish ordering remain the caller's
-  responsibility. It cannot prune, finish settlement, acknowledge recovery, or select a successor
-  in place of its source. Storage inventory/accounting for this record, receipt/seed discovery,
+  At this stage it was an **in-memory coordinator and restart codec**; the 2026-09-06 slice above
+  adds its inbound/sealing vault adapter, not live settlement. Intent-before-edit and
+  snapshot-before-publish ordering remain the caller's responsibility. It cannot prune, finish
+  settlement, acknowledge recovery, or select a successor in place of its source. Storage
+  inventory/accounting for this record is now implemented above; receipt/seed discovery,
   recovery-first multi-record transactions, repair/adoption orchestration and Studio consumers remain.
   A different new-tenure receipt during Closing fails closed without replacing the saved seal;
   applying that rewind needs the deferred recovery worker. A checked held-op resealing/serving

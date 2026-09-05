@@ -444,6 +444,8 @@ pub struct RegistryEpoch; // private EncryptedDoc + EpochGate + ReceiptBook + op
   doc_id(); epoch(); phase(); op_count(); quarantined_len(); projection(); // detached/read-only
   snapshot() -> Result<Vec<u8>>; // raw seed + signed log + gate/book, bounded version 1
   restore(vault_authenticated_bytes, &ServerGroup, expected_bucket, actor) -> Result<Self>;
+  validate_vault_snapshot(vault_authenticated_bytes, server_id, bucket) -> Result<usize>;
+  storage_protocol_bytes() -> Result<usize>; // exact receipt-only bytes, not declared usage
 // Restore is local-only, not network authorization. Caller journals intent before edit and
 // atomically vault-persists the unit before publishing/acknowledging. No mutable handles escape;
 // no pruning, source replacement, fault repair or recovery acknowledgement API exists yet.
@@ -1049,7 +1051,7 @@ staging siblings; `EpochStorageScanProgress::intent_records` counts authenticate
 Namespace-specific bounds and `(kind, digest)` orphan attribution apply unchanged. Intent final
 AND temporary bytes charge content, never settlement. Saved ledgers are never cleanup targets.
 
-`EpochIntentBudget::from_inventory(&completed_inventory)` requires this three-family coverage,
+`EpochIntentBudget::from_inventory(&completed_inventory)` requires coverage including these three families,
 counts intent files across ALL servers in the vault, and includes unknown-owner temporaries.
 `reconcile` blocks the old budget on failure; `bytes()` is observed physical occupancy. The
 64 MiB cap (`MAX_VAULT_INTENT_BYTES`) includes sealing/framing and peak temporary copies, a
@@ -1064,6 +1066,55 @@ their metadata/admission and the sole complete per-server budget remain coordina
 
 This is a persist-before-edit prerequisite, not live editing or automatic replay. Retirement must
 be implemented with checkpoint/recovery persistence; no store/actor/network path invokes it yet.
+
+### Durable registry ingress and sealing (P1, not yet live-wired)
+
+`ServerStore` now exposes:
+
+```rust
+load_registry_epoch(server, &ServerGroup, bucket:u8, &MlsDevice)
+  -> Result<Option<EpochRegistryState>, AppError>;
+ingest_registry_epoch(server, &ServerGroup, bucket, &MlsDevice, &SealedOp, rng, &mut EpochStorageBudget)
+  -> Result<(Admission, EpochRegistryState), AppError>;
+seal_registry_epoch(server, &ServerGroup, bucket, &MlsDevice, Receipt, tenure_start, rng, &mut EpochStorageBudget)
+  -> Result<(ReceiptIngest, EpochRegistryState), AppError>;
+```
+
+`EpochRegistryState` exposes only `epoch`, `phase`, `op_count`, `quarantined_len` and a detached
+`projection`; no mutable document or arbitrary-save API escapes. Records are versioned,
+scope-bound, vault-sealed `.registry-epoch` files. Every mutation reloads and validates the full
+signed source under one exclusive store borrow, checks its exact accounting record, and saves
+before returning the outcome. Missing ingress may create epoch zero only. A receipt requires
+current owner/tenure and bucket verification before disk work; a normally absent source refuses
+without invalidating accounting, whereas loss of an inventoried source requires reconciliation.
+Sealing retains all source history; saved post-seal quarantine hashes are NOT accepted edits.
+
+Public receipt fields and ciphertext are capped before encoding/decryption. Changed state uses
+an accounted atomic replacement; identical encoded state instead syncs the unchanged authenticated
+file and parent. Failed writes, flushes or unwinds grant no success and poison accounting until
+reconciliation. A loaded state alone grants no acknowledgement after an uncertain rename. The
+existing durability model remains file sync plus Unix-only parent sync.
+
+Peer-writable history, seed and metadata charge ordinary content. Only exact receipt-book growth,
+the opening receipt and the optional gate receipt hash charge protocol allowance; an owner seal
+therefore remains admissible at the content ceiling if protocol/settlement headroom remains.
+`RegistryEpoch::validate_vault_snapshot` shares full restart validation but returns ONLY that
+computed receipt byte count. It requires authenticated local bytes, not a current owner, and
+grants neither an editable object nor network authority.
+
+`scan_epoch_storage_with_registry` and `cleanup_epoch_storage_staging_with_registry` opt into
+`EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry`. Older coverage stays unchanged.
+`EpochRecordKind::Registry` and progress `registry_records` identify this fourth family; cleanup
+keeps the same coverage through its rescan and also invalidates intent freshness tokens. Final
+records are never cleanup targets. Unpublished registry temporaries conservatively charge content
+regardless of their intended mutation; a receipt-copy orphan at the content ceiling may require
+explicit cleanup before reconciliation. Unresolved ownership still blocks server composition.
+
+These APIs require the caller's sole complete server budget; inventory is not a continuing write
+lease. They do not implement local intent-to-edit publication/resealing, successor installation,
+recovery-first settlement/pruning, receipt-head discovery, live ingress scheduling or actor/Studio
+wiring. Each mutation currently rebuilds a bounded saved graph; apply planned rate/work limits
+before live transport integration.
 
 `get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
 the complete bounded `states` array. The webview accepts only a strictly newer revision for its

@@ -78,6 +78,14 @@ impl ServerStore {
         self.cleanup_epoch_files(EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents)
     }
 
+    /// Include unpublished registry attempts, never retained source epochs or receipts. A
+    /// completed cleanup still requires a fresh inventory before accounting can be reconciled.
+    pub fn cleanup_epoch_storage_staging_with_registry(
+        &mut self,
+    ) -> Result<EpochStorageCleanup<'_>, AppError> {
+        self.cleanup_epoch_files(EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry)
+    }
+
     fn cleanup_epoch_files(
         &mut self,
         coverage: EpochInventoryCoverage,
@@ -132,7 +140,7 @@ impl<'a> EpochStorageCleanup<'a> {
         self.failed = true;
         // Invalidate all prior intent-budget/scan tokens BEFORE any possible unlink or panic.
         // Even an empty retry must complete syncing and rescan before spending again.
-        if self.coverage == EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents {
+        if self.coverage.includes_intents() {
             self.store.intent_generation = std::sync::Arc::new(());
         }
         let mut next = self.progress;

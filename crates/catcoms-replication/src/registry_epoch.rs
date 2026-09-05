@@ -49,11 +49,20 @@ pub struct RegistryEpoch {
 impl RegistryEpoch {
     /// Start the deterministic epoch-zero bucket. An empty bucket needs no owner receipt.
     pub fn new(group: &ServerGroup, bucket: u8, actor: DeviceId) -> Result<Self, ReplError> {
-        let logical = registry_document(&group.group_id(), bucket)?;
-        let id = epoch_zero_id(DocType::DocRegistry, &logical.logical_key);
         let owner = group
             .designated_committer()
             .ok_or(ReplError::EpochAuthority)?;
+        Self::new_scoped(&group.group_id(), bucket, actor, owner)
+    }
+
+    fn new_scoped(
+        server: &[u8],
+        bucket: u8,
+        actor: DeviceId,
+        owner: DeviceId,
+    ) -> Result<Self, ReplError> {
+        let logical = registry_document(server, bucket)?;
+        let id = epoch_zero_id(DocType::DocRegistry, &logical.logical_key);
         Ok(Self {
             doc: EncryptedDoc::new(DocType::DocRegistry, id, &actor),
             gate: EpochGate::new(logical.clone(), id, 0, owner),
@@ -77,27 +86,28 @@ impl RegistryEpoch {
         seed: &[u8],
     ) -> Result<Self, ReplError> {
         receipt.verify_current_owner(group, expected_tenure_start)?;
-        Self::checkpoint_from_vault(group, bucket, actor, receipt, seed)
+        let owner = group
+            .designated_committer()
+            .ok_or(ReplError::EpochAuthority)?;
+        Self::checkpoint_from_vault(&group.group_id(), bucket, actor, owner, receipt, seed)
     }
 
     // Only the public constructor (fresh authority) and authenticated-vault restore may enter.
     fn checkpoint_from_vault(
-        group: &ServerGroup,
+        server: &[u8],
         bucket: u8,
         actor: DeviceId,
+        owner: DeviceId,
         receipt: Receipt,
         seed: &[u8],
     ) -> Result<Self, ReplError> {
-        let logical = registry_document(&group.group_id(), bucket)?;
+        let logical = registry_document(server, bucket)?;
         if receipt.document != logical {
             return Err(ReplError::EpochScope);
         }
         let verified = receipt.restore_verified_from_vault()?;
         let checkpoint = RegistryProjection::verify_checkpoint(&verified, bucket, seed)?;
         let doc = EncryptedDoc::from_checkpoint(&checkpoint, &actor)?;
-        let owner = group
-            .designated_committer()
-            .ok_or(ReplError::EpochAuthority)?;
         let gate = EpochGate::new(
             logical.clone(),
             doc.doc_id(),
@@ -255,6 +265,60 @@ impl RegistryEpoch {
         bucket: u8,
         actor: DeviceId,
     ) -> Result<Self, ReplError> {
+        let owner = group
+            .designated_committer()
+            .ok_or(ReplError::EpochAuthority)?;
+        Self::restore_scoped(bytes, &group.group_id(), bucket, actor, owner)
+    }
+
+    /// Validate a locally authenticated vault snapshot for storage inventory, even after the
+    /// server or its former owner has left. Returns no editable object, receipt capability or
+    /// publication permission. Like restore, this MUST NOT authenticate network history.
+    /// The sole returned number is the recomputed receipt-only protocol footprint, not a
+    /// peer-supplied claim; subtract it from the actual encoded record length for content usage.
+    pub fn validate_vault_snapshot(
+        bytes: &[u8],
+        server: &[u8],
+        bucket: u8,
+    ) -> Result<usize, ReplError> {
+        // Inventory authors nothing. Fixed identities avoid ambient randomness and are never
+        // exposed: the reconstructed graph exists only to run the same full consistency checks.
+        let inert = DeviceId::from_bytes([0; 32]);
+        Self::restore_scoped(bytes, server, bucket, inert, inert)?.storage_protocol_bytes()
+    }
+
+    /// Actual snapshot bytes introduced by receipts, charged to the protocol allowance. All
+    /// peer-writable registry content, seeds, admission metadata and quarantine hashes charge
+    /// ordinary content instead. This keeps user writes from consuming receipt headroom, while
+    /// an owner seal at the content ceiling can still add its bounded protocol state.
+    pub fn storage_protocol_bytes(&self) -> Result<usize, ReplError> {
+        let book_growth = self
+            .receipts
+            .encode()?
+            .len()
+            .checked_sub(ReceiptBook::default().encode()?.len())
+            .ok_or(ReplError::Malformed)?;
+        let opening = self
+            .opening
+            .as_ref()
+            .map_or(0, |receipt| receipt.encode().len());
+        // EpochGate v1 adds a length-framed 32-byte hash after its existing option tag only in
+        // Closing/Settled. Pin this layout-dependent accounting against snapshot deltas in tests.
+        let gate_hash = if matches!(self.phase(), EpochPhase::Closing | EpochPhase::Settled) {
+            36
+        } else {
+            0
+        };
+        Ok(book_growth + opening + gate_hash)
+    }
+
+    fn restore_scoped(
+        bytes: &[u8],
+        server: &[u8],
+        bucket: u8,
+        actor: DeviceId,
+        owner: DeviceId,
+    ) -> Result<Self, ReplError> {
         if bytes.len() > MAX_REGISTRY_EPOCH_SNAPSHOT_BYTES {
             return Err(ReplError::EpochBound);
         }
@@ -288,9 +352,16 @@ impl RegistryEpoch {
             if !seed.is_empty() {
                 return Err(ReplError::Malformed);
             }
-            Self::new(group, bucket, actor)?
+            Self::new_scoped(server, bucket, actor, owner)?
         } else {
-            Self::checkpoint_from_vault(group, bucket, actor, Receipt::decode(opening)?, seed)?
+            Self::checkpoint_from_vault(
+                server,
+                bucket,
+                actor,
+                owner,
+                Receipt::decode(opening)?,
+                seed,
+            )?
         };
         gate.verify_scope(&result.logical, result.doc_id())?;
         if gate.epoch() != result.epoch() {
@@ -314,7 +385,7 @@ impl RegistryEpoch {
         }
         result.gate = gate;
         result.receipts = receipts;
-        result.refresh_owner(group)?;
+        result.gate.update_owner(owner);
         Ok(result)
     }
 }
@@ -334,6 +405,50 @@ mod tests {
     use crate::{AdmittedOperation, InheritedCheckpoint};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+
+    #[test]
+    fn registry_vault_inspection_reuses_scope_validation_and_exact_receipt_accounting() {
+        let mut f = Fixture::new();
+        let mut unit = f.empty();
+        f.edit(&mut unit, 1);
+        let original = unit.snapshot().unwrap();
+        assert_eq!(
+            RegistryEpoch::validate_vault_snapshot(&original, &f.group.group_id(), f.key.bucket())
+                .unwrap(),
+            0
+        );
+        assert!(
+            RegistryEpoch::validate_vault_snapshot(&original, b"wrong-group", f.key.bucket())
+                .is_err()
+        );
+        assert!(RegistryEpoch::validate_vault_snapshot(
+            &original,
+            &f.group.group_id(),
+            f.key.bucket().wrapping_add(1)
+        )
+        .is_err());
+        for close in [7, 8] {
+            unit.seal(f.receipt(&unit, close), &f.group, 0).unwrap();
+            let bytes = unit.snapshot().unwrap();
+            let protocol =
+                RegistryEpoch::validate_vault_snapshot(&bytes, &f.group.group_id(), f.key.bucket())
+                    .unwrap();
+            assert_eq!(
+                bytes.len() - protocol,
+                original.len(),
+                "seal/fault growth is protocol only"
+            );
+            assert_eq!(protocol, unit.storage_protocol_bytes().unwrap());
+            let mut malformed = bytes.clone();
+            malformed.push(0);
+            assert!(RegistryEpoch::validate_vault_snapshot(
+                &malformed,
+                &f.group.group_id(),
+                f.key.bucket()
+            )
+            .is_err());
+        }
+    }
 
     struct Fixture {
         owner: MlsDevice,

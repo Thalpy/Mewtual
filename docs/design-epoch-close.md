@@ -424,9 +424,10 @@ The implemented `RegistryEpoch` coordinator now keeps that typed document, gate,
 and opening receipt privately owned under one exclusive mutation interface. Its bounded local
 restart format stores the raw seed and signed operations, not a separate Automerge save; restore
 rebuilds the DAG, validates typed changes and matches complete gate metadata and receipt phase.
-Receipt admission only closes editing and retains the full source. It is not yet attached to
-vault inventory, live discovery or the recovery-first settlement transaction; its snapshot must
-be authenticated and atomically persisted before publishing. Successor construction leaves the
+Receipt admission only closes editing and retains the full source. The store now attaches it to
+vault persistence/inventory for inbound edits and receipt seals, returning outcomes only after
+the save/flush barrier. Live discovery, local intent-to-publication orchestration and the
+recovery-first settlement transaction remain unwired. Successor construction leaves the
 predecessor untouched and gives no authority to discard it.
 
 **Catch-up.** Requests carry up to 64 heads and an opaque provider cursor bound by HMAC to
@@ -441,10 +442,12 @@ commit. Never evictable: the open epoch, the current checkpoint and its predeces
 installed, receipts, repairs, closes, registry epochs, intents, the staged snapshot. A
 **settlement reserve** of 48 MiB covers one serialized settlement: the staged snapshot (6 MiB),
 a 2 MiB seed, a reconstruction copy and temporary files, conflict overflow; a 16 MiB allowance
-covers receipts, closes, seed metadata and registry epochs, so a settlement that would free
-space always lands. If the preflight fails and nothing safely evictable remains (retained
-snapshots past their warning, then receipted non-current epochs of documents not opened in 30
-days), the peer refuses the content and shows "storage limit reached".
+covers receipts, closes and protocol seed metadata. Peer-writable registry history, seed bodies
+and admission metadata charge ordinary content instead, so peers cannot exhaust receipt space.
+Only exact receipt growth in a registry record charges the protocol allowance. Settlement still
+requires sufficient protocol and reserve headroom. If the preflight fails and nothing safely
+evictable remains (retained snapshots past their warning, then receipted non-current epochs of
+documents not opened in 30 days), the peer refuses the content and shows "storage limit reached".
 
 | State | Bound |
 |---|---|
@@ -522,9 +525,9 @@ second copy. This repairs the post-rename durability boundary even when no copy 
 New writes charge full ordinary-content replacement peak, not the settlement reserve.
 
 `scan_epoch_storage_with_intents` and `cleanup_epoch_storage_staging_with_intents` opt into all
-three implemented families; earlier coverage stays unchanged. Intent temporaries charge content
+these three families; earlier coverage stays unchanged. Intent temporaries charge content
 and cleanup never removes final ledgers. The dedicated vault intent budget is constructed only
-from completed three-family inventory. Its 64 MiB cap conservatively counts physical final bytes,
+from completed inventory including all three families. Its 64 MiB cap conservatively counts physical final bytes,
 framing, all intent temporaries (even unresolved ones), and peak replacement copies. A private
 mounted-store generation invalidates older budgets and scan results before intent write/sync or
 cleanup attempts; failures require fresh inventory reconciliation. Per-document 10,000-intent /
@@ -532,6 +535,17 @@ cleanup attempts; failures require fresh inventory reconciliation. Per-document 
 the scanner's 65,536-record rail. This does not admit other managed families' metadata: the sole
 coordinator still must compose all storage types, validate domain semantics before preparation,
 replay only as the original author, and retire intents atomically with checkpoint/recovery state.
+
+The explicit `scan_epoch_storage_with_registry` and `cleanup_epoch_storage_staging_with_registry`
+now include the fourth implemented family, scope-bound vault `.registry-epoch` records. Inventory
+reuses full raw-seed/signed-log/gate/receipt validation, but returns metadata only and requires no
+present-time owner authorization. Inbound edits and seals reload under an exclusive store borrow;
+no arbitrary replacement API exists. Changed bytes reserve the full replacement peak, identical
+bytes use a sync-only retry, and no result escapes a failed write/flush. Seals keep the full source.
+Unpublished registry attempts conservatively charge ordinary content (including receipt-write
+attempts), so an orphan at the content ceiling may require explicit cleanup before reconciliation.
+This is still not a sole all-family coordinator or live transport path; graph rebuild work needs
+the specified ingress scheduling/rate limits when integrated.
 
 ## 13. Application events
 

@@ -1,4 +1,4 @@
-//! Shared bounded discovery of recovery, owner-journal and opt-in intent files, not all P1 storage.
+//! Shared bounded discovery of recovery, owner journals and opt-in intents/registry epochs.
 //!
 //! A scan borrows the mounted store exclusively across steps. It never repairs, promotes or
 //! removes a file. Bodies are authenticated one at a time and discarded; only bounded metadata
@@ -12,7 +12,7 @@ use crate::store::{epoch_intents, epoch_owner};
 use catcoms_wire::DocType;
 
 /// Explicit file-family coverage, carried unchanged through cleanup, scan and completed result.
-/// No variant includes blobs, epoch snapshots or other future P1 record families.
+/// No variant includes blobs, non-registry epoch snapshots or other future P1 record families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpochInventoryCoverage {
     /// Compatibility mode: existing recovery-only APIs never inspect/delete owner journals.
@@ -21,6 +21,17 @@ pub enum EpochInventoryCoverage {
     RecoveryAndOwnerReceipts,
     /// Explicit opt-in to local intent files as well; older APIs retain their narrower coverage.
     RecoveryOwnerReceiptsAndIntents,
+    /// Also covers durable registry epochs; earlier modes keep their exact narrower coverage.
+    RecoveryOwnerReceiptsIntentsAndRegistry,
+}
+
+impl EpochInventoryCoverage {
+    pub(in crate::store) fn includes_intents(self) -> bool {
+        matches!(
+            self,
+            Self::RecoveryOwnerReceiptsAndIntents | Self::RecoveryOwnerReceiptsIntentsAndRegistry
+        )
+    }
 }
 
 /// Physical record family; a digest alone must never identify a temporary's destination.
@@ -32,6 +43,8 @@ pub enum EpochRecordKind {
     OwnerReceipts,
     /// Device-local replay instructions, never inbound peer submissions.
     Intents,
+    /// Checked registry document/gate/receipt restart units.
+    Registry,
 }
 
 impl EpochRecordKind {
@@ -40,6 +53,7 @@ impl EpochRecordKind {
             Self::Recovery => ".recovery",
             Self::OwnerReceipts => ".owner-receipts",
             Self::Intents => ".intents",
+            Self::Registry => ".registry-epoch",
         }
     }
     fn domain(self) -> &'static [u8] {
@@ -47,6 +61,7 @@ impl EpochRecordKind {
             Self::Recovery => RECORD_DOMAIN,
             Self::OwnerReceipts => epoch_owner::RECORD_DOMAIN,
             Self::Intents => epoch_intents::RECORD_DOMAIN,
+            Self::Registry => super::super::epoch_registry::RECORD_DOMAIN,
         }
     }
     fn scope(self, server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {
@@ -54,6 +69,7 @@ impl EpochRecordKind {
             Self::Recovery => scope_bytes(server, document),
             Self::OwnerReceipts => epoch_owner::scope_bytes(server, document),
             Self::Intents => epoch_intents::scope_bytes(server, document),
+            Self::Registry => super::super::epoch_registry::scope_bytes(server, document),
         }
     }
     fn sealed_cap(self) -> usize {
@@ -61,6 +77,7 @@ impl EpochRecordKind {
             Self::Recovery => MAX_SEALED_BYTES,
             Self::OwnerReceipts => epoch_owner::MAX_SEALED_BYTES,
             Self::Intents => epoch_intents::MAX_SEALED_BYTES,
+            Self::Registry => super::super::epoch_registry::MAX_SEALED_BYTES,
         }
     }
 }
@@ -84,6 +101,8 @@ pub struct EpochStorageScanProgress {
     pub owner_receipt_records: usize,
     /// Authenticated local intent ledgers; zero unless coverage explicitly includes intents.
     pub intent_records: usize,
+    /// Authenticated checked registry epochs; zero unless coverage explicitly includes them.
+    pub registry_records: usize,
     /// Canonically named staging siblings, including empty or partial files.
     pub orphan_files: usize,
     /// Physical ciphertext bytes read and authenticated (no orphan bodies are read).
@@ -207,7 +226,8 @@ impl EpochStorageInventory {
 
     /// Inputs from the reported coverage for a future complete server inventory. Refuses if ANY orphan
     /// is unresolved: an unknown file might belong to this server, even when others do not.
-    /// Recovery/owner temporaries charge settlement scratch; intent temporaries charge content.
+    /// Recovery/owner temporaries charge settlement scratch; intent/registry temporaries charge
+    /// content conservatively (the latter might be peer ingress, never inferred from opaque bytes).
     /// This does not construct a budget: callers must still inventory every other managed type
     /// and exclude writes across composition. Multiple documents' orphans can pin conflicting
     /// reserves; cleanup must resolve that, never pretend the temporary bytes are absent.
@@ -245,6 +265,9 @@ impl EpochStorageInventory {
                     EpochRecordKind::Intents => {
                         b"catcoms/epoch-intent-temp-inventory/v1".as_slice()
                     }
+                    EpochRecordKind::Registry => {
+                        b"catcoms/epoch-registry-temp-inventory/v1".as_slice()
+                    }
                 })
                 .expect("constant fits");
                 e.put_bytes(orphan.name.as_bytes())
@@ -252,8 +275,13 @@ impl EpochStorageInventory {
                 result.push(StorageRecord {
                     id: *blake3::hash(&e.finish()).as_bytes(),
                     document: entry.record.document,
-                    // Intent writes never borrow settlement space, including after a crash.
-                    footprint: if orphan.kind() == EpochRecordKind::Intents {
+                    // An opaque registry attempt might be peer ingress, not receipt settlement.
+                    // Conservatively charge content until explicit cleanup; never parse or promote
+                    // a temporary to guess which allowance it should consume.
+                    footprint: if matches!(
+                        orphan.kind(),
+                        EpochRecordKind::Intents | EpochRecordKind::Registry
+                    ) {
                         Footprint {
                             content: orphan.bytes,
                             ..Footprint::default()
@@ -311,6 +339,11 @@ impl ServerStore {
     /// Still excludes epoch snapshots and other unimplemented P1 file families.
     pub fn scan_epoch_storage_with_intents(&mut self) -> Result<EpochStorageScan<'_>, AppError> {
         self.scan_epoch_files(EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents)
+    }
+
+    /// Four-family inventory, including checked registry epochs. Still not all P1/app storage.
+    pub fn scan_epoch_storage_with_registry(&mut self) -> Result<EpochStorageScan<'_>, AppError> {
+        self.scan_epoch_files(EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry)
     }
 
     pub(in crate::store) fn scan_epoch_files(
@@ -428,6 +461,9 @@ impl EpochStorageScan<'_> {
                         EpochRecordKind::Intents => {
                             self.store.read_epoch_intent_plain(&entry.path())
                         }
+                        EpochRecordKind::Registry => {
+                            self.store.read_epoch_registry_plain(&entry.path())
+                        }
                     }?
                     .ok_or_else(|| invalid("epoch record disappeared during inventory"))?;
                     self.progress.authenticated_bytes = self
@@ -457,6 +493,11 @@ impl EpochStorageScan<'_> {
                             epoch_intents::EpochIntentState::decode(&plain, scope, &document)?;
                             epoch_intents::storage_record(server, &document, scope, size)?
                         }
+                        EpochRecordKind::Registry => {
+                            super::super::epoch_registry::inventory_record(
+                                &plain, server, &document, scope, size,
+                            )?
+                        }
                     };
                     if self
                         .inventory
@@ -478,6 +519,7 @@ impl EpochStorageScan<'_> {
                         EpochRecordKind::Recovery => self.progress.recovery_records += 1,
                         EpochRecordKind::OwnerReceipts => self.progress.owner_receipt_records += 1,
                         EpochRecordKind::Intents => self.progress.intent_records += 1,
+                        EpochRecordKind::Registry => self.progress.registry_records += 1,
                     }
                     break;
                 }
@@ -566,9 +608,13 @@ pub(super) fn storage_name(
         EpochRecordKind::Recovery,
         EpochRecordKind::OwnerReceipts,
         EpochRecordKind::Intents,
+        EpochRecordKind::Registry,
     ] {
-        if family == EpochRecordKind::Intents
-            && coverage != EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents
+        if family == EpochRecordKind::Intents && !coverage.includes_intents() {
+            continue;
+        }
+        if family == EpochRecordKind::Registry
+            && coverage != EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry
         {
             continue;
         }

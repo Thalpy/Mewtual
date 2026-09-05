@@ -272,9 +272,21 @@ table with the commit that closed it.
   authority after succession, never authorizes a newly received old-owner receipt, and refreshes
   the current quota-exempt owner before admission. Repeated late hashes cannot consume extra
   quarantine slots or make a snapshot undecodable. The restart codec assumes authenticated local
-  vault bytes; it is not a wire authorization path or an attached storage record. Callers still
-  must persist intents and the whole unit before publication, and persist excluded recovery before
-  source retirement. No production discovery, pruning, repair or multi-record settlement is wired.
+  vault bytes; it is not a wire authorization path. The store now attaches scope-bound encrypted
+  registry records: inbound admission and receipt sealing reload/validate, reserve physical
+  replacement space and save before returning. Exact retries sync unchanged authenticated bytes;
+  failed writes/flushes require reconciliation and grant no acknowledgement. Receipt authority is
+  checked before disk access; expected missing history is a fetch prerequisite, not corruption.
+  Public ciphertext/receipt fields and physical records are capped before expensive processing.
+  Peer-writable registry history charges content, not reserved receipt space; only exact receipt
+  growth charges protocol, allowing a seal at the content cap while protocol/reserve space remains.
+  Four-family inventory validates historical raw snapshots without granting mutable authority;
+  cleanup removes only unpublished attempts, conservatively content-charged. This is not yet a
+  production all-family budget coordinator or live ingest path. Per-mutation graph reconstruction
+  is bounded but still requires ingress scheduling/rate limits before transport integration.
+  Callers must still persist local intents before authoring/publication and excluded recovery
+  before source retirement. No production discovery, pruning, repair or multi-record settlement
+  is wired. The existing file-sync/Unix-parent-sync durability and local-path threat boundary apply.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
   no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains

@@ -1,0 +1,432 @@
+//! Durable inbound registry epochs. Reload, gated mutation, accounting and atomic vault save
+//! share one exclusive store borrow. No caller can replace a saved epoch with an arbitrary view.
+//! Local authoring, successor selection, recovery settlement and pruning are separate work.
+
+use std::io::Read;
+
+use catcoms_mls::{MlsDevice, ServerGroup};
+use catcoms_replication::epoch::{MAX_RECEIPT_BYTES, MAX_SIGNED_EPOCH_OP_BYTES};
+use catcoms_replication::registry::{registry_document, RegistryProjection};
+use catcoms_replication::registry_epoch::{RegistryEpoch, MAX_REGISTRY_EPOCH_SNAPSHOT_BYTES};
+use catcoms_replication::{
+    Admission, EpochPhase, LogicalDocument, Receipt, ReceiptIngest, SealedOp,
+};
+
+use super::epoch_budget::{
+    EpochStorageBudget, Footprint, Replacement, StorageRecord, StorageScope, WritePurpose,
+};
+use super::epoch_recovery::inventory::{is_link, regular_file};
+use super::epoch_recovery::AuthenticatedEpochFileBytes;
+use super::*;
+
+pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-registry-store/v1";
+const MAX_RECORD_BYTES: usize = MAX_REGISTRY_EPOCH_SNAPSHOT_BYTES + 1024;
+pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
+// Every accepted inner op fits a 256-KiB padding bucket, plus the authenticated length footer
+// and AEAD tag. Bound the public struct before SealedOp::open can allocate plaintext.
+const MAX_INBOUND_CIPHERTEXT: usize = MAX_SIGNED_EPOCH_OP_BYTES + 4 + 16;
+
+/// Detached read-only persisted state. Debug deliberately excludes registry keys and content.
+pub struct EpochRegistryState {
+    unit: RegistryEpoch,
+}
+
+impl std::fmt::Debug for EpochRegistryState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EpochRegistryState")
+            .field("epoch", &self.epoch())
+            .field("phase", &self.phase())
+            .field("operations", &self.op_count())
+            .finish_non_exhaustive()
+    }
+}
+
+impl EpochRegistryState {
+    /// Concrete retained epoch, not evidence that settlement/pruning has completed.
+    pub fn epoch(&self) -> u64 {
+        self.unit.epoch()
+    }
+    /// Admission phase which was durably saved, except that a loaded state alone grants no ack.
+    pub fn phase(&self) -> EpochPhase {
+        self.unit.phase()
+    }
+    /// Full accepted source-log count; sealing never discards content.
+    pub fn op_count(&self) -> usize {
+        self.unit.op_count()
+    }
+    /// Distinct post-seal hashes retained without accepting their content.
+    pub fn quarantined_len(&self) -> usize {
+        self.unit.quarantined_len()
+    }
+    /// Detached typed projection for callers; no mutable gate/document/receipt book escapes.
+    pub fn projection(&self) -> Result<RegistryProjection, AppError> {
+        self.unit.projection().map_err(invalid)
+    }
+}
+
+impl ServerStore {
+    /// Read the checked, vault-authenticated current registry bucket, preserving historical
+    /// admission across owner changes. Only absent means None; corrupt state never resets.
+    pub fn load_registry_epoch(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+    ) -> Result<Option<EpochRegistryState>, AppError> {
+        let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        let scope = scope_bytes(server, &document)?;
+        self.read_registry_record(&scope)?
+            .map(|bytes| {
+                let (stored_bucket, snapshot) = decode_record(&bytes.plain, &scope, &document)?;
+                if stored_bucket != bucket {
+                    return Err(invalid("wrong bucket"));
+                }
+                Ok(EpochRegistryState {
+                    unit: RegistryEpoch::restore(snapshot, group, bucket, device.device_id())
+                        .map_err(invalid)?,
+                })
+            })
+            .transpose()
+    }
+
+    /// Admit one encrypted inbound op, then persist before returning its admission outcome.
+    /// A missing record can start epoch zero only; rotated IDs cannot create independent roots.
+    /// Duplicate/late retries still cross a durability barrier. Caller must inspect Admission:
+    /// a saved quarantine hash is not an accepted edit and must never earn an accepted-op ack.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ingest_registry_epoch(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        sealed: &SealedOp,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<(Admission, EpochRegistryState), AppError> {
+        if sealed.blob.ciphertext.len() > MAX_INBOUND_CIPHERTEXT {
+            return Err(invalid("inbound ciphertext exceeds registry bound"));
+        }
+        self.update_registry_with_io(
+            server,
+            group,
+            bucket,
+            device,
+            true,
+            WritePurpose::Ordinary,
+            rng,
+            budget,
+            |unit| unit.ingest(sealed, group, device).map_err(invalid),
+            atomic_write,
+            sync_registry,
+        )
+    }
+
+    /// Persist a current-owner receipt and its gate seal together, retaining the full source.
+    /// Missing source history must be fetched first. No recovery acknowledgement, source
+    /// replacement or pruning is performed. Externally observed tenure evidence is mandatory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn seal_registry_epoch(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        receipt: Receipt,
+        tenure_start: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<(ReceiptIngest, EpochRegistryState), AppError> {
+        // Receipt has public Vec fields; check before encoding or hashing them.
+        scope_bytes(server, &receipt.document)?;
+        if receipt.owner_public_key.len() != 32 || receipt.encode().len() > MAX_RECEIPT_BYTES {
+            return Err(invalid("receipt exceeds its bound"));
+        }
+        let receipt = Receipt::decode(&receipt.encode()).map_err(invalid)?;
+        if receipt.document != registry_document(&group.group_id(), bucket).map_err(invalid)? {
+            return Err(invalid("receipt names another registry bucket"));
+        }
+        // Reject outsider/stale authority before consulting disk or accounting. A syntactically
+        // valid receipt alone must not force an otherwise healthy inventory to reconcile.
+        receipt
+            .verify_current_owner(group, tenure_start)
+            .map_err(invalid)?;
+        self.update_registry_with_io(
+            server,
+            group,
+            bucket,
+            device,
+            false,
+            WritePurpose::Settlement,
+            rng,
+            budget,
+            |unit| unit.seal(receipt, group, tenure_start).map_err(invalid),
+            atomic_write,
+            sync_registry,
+        )
+    }
+
+    // Reload on every mutation: stale detached readers cannot overwrite newer operations. A
+    // failed save returns no updated state/outcome; after uncertain rename, a retry reloads the
+    // authentic final and must flush it again rather than mistake visibility for durability.
+    #[allow(clippy::too_many_arguments)]
+    fn update_registry_with_io<T>(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        allow_create: bool,
+        purpose: WritePurpose,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        apply: impl FnOnce(&mut RegistryEpoch) -> Result<T, AppError>,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+    ) -> Result<(T, EpochRegistryState), AppError> {
+        let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        let scope = scope_bytes(server, &document)?;
+        let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
+        let loaded = (|| {
+            let held = self.read_registry_record(&scope)?;
+            let unit = match &held {
+                Some(bytes) => {
+                    let (stored_bucket, snapshot) = decode_record(&bytes.plain, &scope, &document)?;
+                    if stored_bucket != bucket {
+                        return Err(invalid("wrong bucket"));
+                    }
+                    RegistryEpoch::restore(snapshot, group, bucket, device.device_id())
+                        .map_err(invalid)?
+                }
+                None => RegistryEpoch::new(group, bucket, device.device_id()).map_err(invalid)?,
+            };
+            Ok((held, unit))
+        })();
+        let (held, mut unit) = match loaded {
+            Ok(value) => value,
+            Err(error) => {
+                budget.invalidate();
+                return Err(error);
+            }
+        };
+        let observed = held
+            .as_ref()
+            .map(|bytes| {
+                storage_record(
+                    server,
+                    &document,
+                    &scope,
+                    bytes.physical_bytes,
+                    unit.storage_protocol_bytes().map_err(invalid)?,
+                )
+            })
+            .transpose()?;
+        budget
+            .verify_record(&storage_scope, *blake3::hash(&scope).as_bytes(), observed)
+            .map_err(invalid)?;
+        // Expected absence is a normal fetch prerequisite, not uncertain I/O. Verify inventory
+        // first so an indexed source disappearing still closes admission rather than resetting.
+        if held.is_none() && !allow_create {
+            return Err(invalid("registry source is missing; fetch before sealing"));
+        }
+        let outcome = apply(&mut unit)?;
+        let snapshot = Zeroizing::new(unit.snapshot().map_err(invalid)?);
+        let mut e = Encoder::new();
+        e.put_bytes(&scope).map_err(invalid)?;
+        e.put_u8(bucket);
+        e.put_bytes(&snapshot).map_err(invalid)?;
+        let plain = Zeroizing::new(e.finish());
+        let path = self.registry_epoch_path(&scope);
+        if held
+            .as_ref()
+            .is_some_and(|old| old.plain.as_slice() == plain.as_slice())
+        {
+            let record = observed.ok_or_else(|| invalid("unchanged record is absent"))?;
+            let reservation = budget
+                .reserve_sync(&storage_scope, record)
+                .map_err(invalid)?;
+            sync(&path, record.footprint.total().map_err(invalid)?)?;
+            reservation.commit();
+        } else {
+            let record = storage_record(
+                server,
+                &document,
+                &scope,
+                plain.len() as u64 + 40,
+                unit.storage_protocol_bytes().map_err(invalid)?,
+            )?;
+            let reservation = budget
+                .reserve(
+                    &storage_scope,
+                    Replacement {
+                        record,
+                        scratch_bytes: 0,
+                        purpose,
+                    },
+                )
+                .map_err(invalid)?;
+            let sealed = match self.keys.db_key().and_then(|key| seal(&key, &plain, rng)) {
+                Ok(value) => value,
+                Err(error) => {
+                    reservation.cancel_before_write();
+                    return Err(error.into());
+                }
+            };
+            writer(&path, &frame(&sealed))?;
+            reservation.commit();
+        }
+        Ok((outcome, EpochRegistryState { unit }))
+    }
+
+    fn registry_epoch_path(&self, scope: &[u8]) -> PathBuf {
+        self.dir
+            .join("servers")
+            .join(format!("{}.registry-epoch", blake3::hash(scope).to_hex()))
+    }
+
+    fn read_registry_record(
+        &self,
+        scope: &[u8],
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        let metadata = fs::symlink_metadata(self.dir.join("servers"))
+            .map_err(|e| AppError::Io(e.to_string()))?;
+        if !metadata.is_dir() || is_link(&metadata) {
+            return Err(invalid("parent is not a regular directory"));
+        }
+        self.read_epoch_registry_plain(&self.registry_epoch_path(scope))
+    }
+
+    pub(super) fn read_epoch_registry_plain(
+        &self,
+        path: &Path,
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(value) => value,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(AppError::Io(e.to_string())),
+        };
+        if !regular_file(&metadata) || metadata.len() > MAX_SEALED_BYTES as u64 {
+            return Err(invalid("file is not bounded and regular"));
+        }
+        let file = File::open(path).map_err(|e| AppError::Io(e.to_string()))?;
+        if !regular_file(&file.metadata().map_err(|e| AppError::Io(e.to_string()))?) {
+            return Err(invalid("opened file is not regular"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_SEALED_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| AppError::Io(e.to_string()))?;
+        if bytes.len() > MAX_SEALED_BYTES {
+            return Err(invalid("file exceeds its bound"));
+        }
+        Ok(Some(AuthenticatedEpochFileBytes {
+            plain: Zeroizing::new(unseal(&self.keys.db_key()?, &unframe(&bytes)?)?),
+            physical_bytes: bytes.len() as u64,
+        }))
+    }
+}
+
+/// Parse the wrapper first, then let the shared replication validator inspect the raw seed/log.
+fn decode_record<'a>(
+    bytes: &'a [u8],
+    scope: &[u8],
+    document: &LogicalDocument,
+) -> Result<(u8, &'a [u8]), AppError> {
+    if bytes.len() > MAX_RECORD_BYTES {
+        return Err(invalid("record exceeds its bound"));
+    }
+    let mut d = Decoder::new(bytes);
+    if d.get_bytes().map_err(invalid)? != scope {
+        return Err(invalid("wrong sealed scope"));
+    }
+    let bucket = d.get_u8().map_err(invalid)?;
+    if registry_document(&document.server_id, bucket).map_err(invalid)? != *document {
+        return Err(invalid("wrong logical bucket"));
+    }
+    let snapshot = d.get_bytes().map_err(invalid)?;
+    d.finish().map_err(invalid)?;
+    Ok((bucket, snapshot))
+}
+
+pub(super) fn inventory_record(
+    bytes: &[u8],
+    server: u64,
+    document: &LogicalDocument,
+    scope: &[u8],
+    size: u64,
+) -> Result<StorageRecord, AppError> {
+    let (bucket, snapshot) = decode_record(bytes, scope, document)?;
+    let protocol = RegistryEpoch::validate_vault_snapshot(snapshot, &document.server_id, bucket)
+        .map_err(invalid)?;
+    storage_record(server, document, scope, size, protocol)
+}
+
+pub(super) fn scope_bytes(server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {
+    if document.server_id.len() > 256
+        || document.logical_key.len() != 32
+        || document.doc_type != catcoms_wire::DocType::DocRegistry
+    {
+        return Err(invalid("invalid registry scope"));
+    }
+    LogicalDocument::new(
+        document.server_id.clone(),
+        document.doc_type,
+        document.logical_key.clone(),
+    )
+    .map_err(invalid)?;
+    let mut e = Encoder::new();
+    e.put_bytes(RECORD_DOMAIN).expect("constant fits");
+    e.put_u64(server);
+    e.put_bytes(&document.server_id).map_err(invalid)?;
+    e.put_u16(document.doc_type.tag());
+    e.put_bytes(&document.logical_key).map_err(invalid)?;
+    Ok(e.finish())
+}
+
+fn storage_record(
+    server: u64,
+    document: &LogicalDocument,
+    scope: &[u8],
+    bytes: u64,
+    protocol: usize,
+) -> Result<StorageRecord, AppError> {
+    let protocol = protocol as u64;
+    let content = bytes
+        .checked_sub(protocol)
+        .ok_or_else(|| invalid("invalid protocol footprint"))?;
+    Ok(StorageRecord {
+        id: *blake3::hash(scope).as_bytes(),
+        document: *blake3::hash(&super::epoch_recovery::scope_bytes(server, document)?).as_bytes(),
+        footprint: Footprint {
+            content,
+            protocol,
+            settlement: 0,
+        },
+    })
+}
+
+fn sync_registry(path: &Path, expected_bytes: u64) -> Result<(), AppError> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| AppError::Io(e.to_string()))?;
+    if !regular_file(&metadata) || metadata.len() != expected_bytes {
+        return Err(invalid("retry file changed"));
+    }
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| AppError::Io(e.to_string()))?;
+    let metadata = file.metadata().map_err(|e| AppError::Io(e.to_string()))?;
+    if !regular_file(&metadata) || metadata.len() != expected_bytes {
+        return Err(invalid("opened retry file changed"));
+    }
+    file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;
+    sync_directory(path.parent().ok_or_else(|| invalid("missing parent"))?)
+        .map_err(|e| AppError::Io(e.to_string()))
+}
+
+fn invalid(error: impl std::fmt::Display) -> AppError {
+    AppError::Invalid(format!("epoch registry: {error}"))
+}
+
+#[cfg(test)]
+mod tests;
