@@ -613,9 +613,15 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
         expected,
         "the founder sees both other members online"
     );
-    assert_eq!(
-        carol.settle_online(&clock, &[alice.fp.clone()]).await,
-        vec![alice.fp.clone()],
+    // Containment, not equality. The claim being made is that the member who joined through Alice
+    // can see Alice; whether discovery has also introduced it to Bob by this point is a race this
+    // test has no reason to pin, and pinning it made an unrelated increase in recovery traffic
+    // look like a presence failure.
+    assert!(
+        carol
+            .settle_online(&clock, &[alice.fp.clone()])
+            .await
+            .contains(&alice.fp),
         "the newest member sees the peer it actually spoke to"
     );
 

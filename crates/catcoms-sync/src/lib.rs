@@ -200,6 +200,18 @@ const MAX_CATCHUP_STALL_ENTRIES: usize = 256;
 /// blocked on the other's unanswerable request would re-pick each other every tick, neither ever
 /// free to serve. A cooldown says the thing that is actually true, about the pair it is true of,
 /// and expires on its own.
+/// Room reserved inside the response ceiling for what gets wrapped around a paged catch-up
+/// bundle: the marker byte, the responder's public key and its framing, the 64-byte signature and
+/// its framing, and the answer's own length prefix.
+///
+/// The ceiling is a limit on the frame that leaves this node, not on the bundle inside it. Sizing
+/// the bundle to the whole ceiling and then adding an envelope produced a response that was
+/// legal to build and impossible to send, so an operation large enough to sit near the limit
+/// would fail on the wire every time it was served instead of arriving.
+const SIGNED_ANSWER_OVERHEAD: usize = 256;
+/// The largest operation bundle a paged answer may carry, once its envelope is accounted for.
+const MAX_SIGNED_CATCHUP_BUNDLE: usize = MAX_CONTROL_RESPONSE - SIGNED_ANSWER_OVERHEAD;
+
 const CATCHUP_PEER_COOLDOWN_MS: u64 = 30_000;
 
 /// How long a peer's claim that a document has more to come is honoured, on the injected elapsed
@@ -975,6 +987,9 @@ fn join_transcript(
 /// requester's own key, a freshness timestamp, a **per-request nonce** (anti-replay,
 /// closing the same-millisecond-`ts` collision window), and the requester's **epoch**
 /// at request time (so a captured request cannot be replayed into a later state).
+// Every field is a separate thing being bound, and naming them individually is what makes the
+// binding readable at both the signing and the verifying end.
+#[allow(clippy::too_many_arguments)]
 fn catchup_auth_transcript(
     group_id: &[u8],
     kind: u8,
@@ -983,6 +998,7 @@ fn catchup_auth_transcript(
     timestamp_ms: u64,
     nonce: &[u8; 16],
     req_epoch: u64,
+    requester_peer: Option<&PeerId>,
 ) -> Vec<u8> {
     let mut e = Encoder::new();
     e.put_str(CATCHUP_AUTH_DOMAIN).expect("label fits");
@@ -993,7 +1009,28 @@ fn catchup_auth_transcript(
     e.put_u64(timestamp_ms);
     e.put_bytes(nonce).expect("16 fits");
     e.put_u64(req_epoch);
+    if let Some(peer) = requester_peer {
+        e.put_bytes(peer.as_bytes()).expect("peer id fits");
+    }
     e.finish()
+}
+
+/// Whether a request kind ties its signature to the transport peer it is sent from.
+///
+/// Without it, a request is valid wherever it turns up: an endpoint that receives one can forward
+/// the bytes verbatim to a real member, collect the answer that member signs for it, and hand it
+/// back, so a control decision made by one member is attributed to the transport peer that merely
+/// relayed it. That matters for exactly the exchanges whose answers become **operational proof**
+/// about a peer, which are the three here; the requester's own peer id is in the transcript and
+/// the server reconstructs it from where the bytes actually arrived, so a relayed request simply
+/// fails to verify.
+///
+/// Deliberately not every kind. Reciprocal forwarding exists to relay a request on somebody's
+/// behalf and re-authenticates the original bytes at the far end, and a delivery receipt is built
+/// once and sent to several targets; binding those to one transport peer would be wrong rather
+/// than safer.
+fn kind_binds_requester_peer(kind: u8) -> bool {
+    matches!(kind, KIND_CATCHUP_SINCE | KIND_PEX | KIND_COMMIT_CATCHUP)
 }
 
 /// A **responder's** signature transcript over a served bundle (commit catch-up or
@@ -1051,8 +1088,15 @@ fn doc_catchup_resp_transcript(
     request_ts_ms: u64,
     nonce: &[u8; 16],
     req_epoch: u64,
+    responder_peer: &PeerId,
     answer: &[u8],
 ) -> Vec<u8> {
+    // The responder's transport peer is folded into the answer being signed, so a reply cannot be
+    // attributed to an endpoint other than the one that produced it. The requester rebuilds it
+    // from the peer it actually contacted.
+    let mut bound = Vec::with_capacity(answer.len() + 32);
+    bound.extend_from_slice(responder_peer.as_bytes());
+    bound.extend_from_slice(answer);
     signed_resp_transcript(
         DOC_CATCHUP_RESP_DOMAIN,
         group_id,
@@ -1060,7 +1104,7 @@ fn doc_catchup_resp_transcript(
         request_ts_ms,
         nonce,
         req_epoch,
-        answer,
+        &bound,
     )
 }
 
@@ -4776,6 +4820,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Apply the aggregate connection edge before any optional path refinement.
     fn note_peer_connected(&mut self, peer: PeerId) {
+        // Whatever this peer told us about documents, it told us during a connection that has
+        // ended. It may have written or received anything while it was away, and its old answers
+        // are the reason the reconnect sweep would otherwise queue a document and then exclude
+        // the very peer whose return caused it to be queued.
+        self.forget_source_answers(peer);
         if !self.connected_peers.contains(&peer)
             && self.connected_peers.len() >= MAX_CONNECTED_PEER_SNAPSHOT
         {
@@ -5366,6 +5415,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.catchup_sources_checked.remove(&(doc_type, doc_id));
     }
 
+    /// Forget everything `peer` has said about any document's completeness, and re-open the
+    /// documents whose search had concluded on the strength of it.
+    ///
+    /// Called when a peer's standing changes: it has just reconnected, or it has just been proven
+    /// to be a current member. Both mean its earlier answers describe a state that no longer
+    /// applies, and the second means a source that was only opportunistic is now one this node
+    /// must actually hear from.
+    fn forget_source_answers(&mut self, peer: PeerId) {
+        let mut reopened: Vec<(DocType, u128)> = Vec::new();
+        self.catchup_sources_checked.retain(|doc, (_, peers)| {
+            if peers.remove(&peer) {
+                reopened.push(*doc);
+            }
+            !peers.is_empty()
+        });
+        for (doc_type, doc_id) in reopened {
+            self.enqueue_doc_catchup(doc_type, doc_id);
+        }
+    }
+
     /// The sources already asked at this document's current version. Empty once the version moves,
     /// because every earlier answer was about a state this node has passed.
     fn sources_checked(&self, doc_type: DocType, doc_id: u128) -> BTreeSet<PeerId> {
@@ -5394,10 +5463,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// by staying connected and saying nothing.
     fn unchecked_source_exists(&self, doc_type: DocType, doc_id: u128) -> bool {
         let checked = self.sources_checked(doc_type, doc_id);
-        self.member_peers
-            .iter()
-            .map(|proof| proof.peer)
-            .any(|peer| self.connected_peers.contains(&peer) && !checked.contains(&peer))
+        let unchecked =
+            |peer: &PeerId| self.connected_peers.contains(peer) && !checked.contains(peer);
+        if self.member_peers.iter().any(|proof| unchecked(&proof.peer)) {
+            return true;
+        }
+        // With no proven source at all, nothing that has answered has proved it was entitled to.
+        // A node that has just joined or restored is in exactly that state, and the peer holding
+        // the history is as likely to be the untried candidate as the one that answered; closing
+        // the search on an unproven "I have nothing" would leave it empty with a source sitting
+        // right there. Candidates are still only opportunistic, so each is asked once and the
+        // search does end, rather than being held open by whoever stays connected.
+        if self.member_peers.is_empty() {
+            return self.known_peers.iter().any(unchecked);
+        }
+        false
     }
 
     /// Record that `peer` said it is still withholding operations for this document.
@@ -5543,6 +5623,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // a non-member by calling the cache helper directly.
         if !self.group.contains_device(&device) {
             return;
+        }
+        // Newly proven changes what this peer is worth to a search: it was opportunistic, and is
+        // now a source the sweep must hear from. Any document whose search concluded while it was
+        // unproven concluded without it, so those go back on the queue.
+        if !self.member_peers.iter().any(|proof| proof.peer == peer) {
+            self.forget_source_answers(peer);
         }
         self.failed_catchup_peers.retain(|p| *p != peer);
         if let Some(pos) = self
@@ -5718,6 +5804,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let mut nonce = [0u8; 16];
         self.rng.fill_bytes(&mut nonce);
         let epoch = self.group.epoch();
+        let me = self.transport.local_peer();
         let transcript = catchup_auth_transcript(
             &self.group.group_id(),
             kind,
@@ -5726,6 +5813,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ts,
             &nonce,
             epoch,
+            kind_binds_requester_peer(kind).then_some(&me),
         );
         let signature = self.device.sign(&transcript)?;
         let mut out = vec![kind];
@@ -5745,6 +5833,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &mut self,
         kind: u8,
         data: &[u8],
+        from: PeerId,
     ) -> Option<(Vec<u8>, Vec<u8>, RequestAuth)> {
         let (inner, pubkey, ts, nonce, req_epoch, signature) = match decode_authed_request(data) {
             Ok(parts) => parts,
@@ -5767,6 +5856,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.stats.requests_rejected += 1;
             return None;
         }
+        // For the kinds that bind it, the requester's transport peer is rebuilt from where these
+        // bytes actually arrived, so a request relayed by a third endpoint fails to verify here
+        // rather than being answered on that endpoint's behalf.
         let transcript = catchup_auth_transcript(
             &self.group.group_id(),
             kind,
@@ -5775,6 +5867,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ts,
             &nonce,
             req_epoch,
+            kind_binds_requester_peer(kind).then_some(&from),
         );
         if !verify_with_public_bytes(&pubkey, &transcript, &signature) {
             tracing::warn!("catch-up request signature invalid; refused");
@@ -7473,9 +7566,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Accept one current member's explicit confirmation for an exact recent local message.
-    fn serve_delivery_receipt(&mut self, data: &[u8]) {
+    fn serve_delivery_receipt(&mut self, from: PeerId, data: &[u8]) {
         let Some((inner, requester_key, _)) =
-            self.authenticate_request(KIND_DELIVERY_RECEIPT, data)
+            self.authenticate_request(KIND_DELIVERY_RECEIPT, data, from)
         else {
             return;
         };
@@ -7605,8 +7698,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Serve an inbound `KIND_DM_INVITE`: authenticate the sender as a current member, then queue
     /// the invite as a pending friend request (deduped on the sender, bounded). Returns whether it
     /// was accepted so the sender can distinguish delivery from an empty rejection response.
-    fn serve_dm_invite(&mut self, data: &[u8]) -> bool {
-        let Some((invite, req_pubkey, _auth)) = self.authenticate_request(KIND_DM_INVITE, data)
+    fn serve_dm_invite(&mut self, from: PeerId, data: &[u8]) -> bool {
+        let Some((invite, req_pubkey, _auth)) =
+            self.authenticate_request(KIND_DM_INVITE, data, from)
         else {
             return false;
         };
@@ -7656,8 +7750,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Serve an inbound `KIND_CALL_SIGNAL`: authenticate the sender as a current member, then queue
     /// the (opaque) payload for the actor to drain + surface. NOT deduped (every ICE candidate must
     /// arrive); FIFO-bounded. Never replies data.
-    fn serve_call_signal(&mut self, data: &[u8]) {
-        let Some((payload, req_pubkey, _auth)) = self.authenticate_request(KIND_CALL_SIGNAL, data)
+    fn serve_call_signal(&mut self, from: PeerId, data: &[u8]) {
+        let Some((payload, req_pubkey, _auth)) =
+            self.authenticate_request(KIND_CALL_SIGNAL, data, from)
         else {
             return;
         };
@@ -8181,7 +8276,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// and enqueue a connected-only delivery. This handler never awaits the target.
     fn serve_reciprocal_forward(&mut self, from: PeerId, data: &[u8]) -> Vec<u8> {
         let Some((inner, requester_key, _)) =
-            self.authenticate_request(KIND_RECIPROCAL_FORWARD, data)
+            self.authenticate_request(KIND_RECIPROCAL_FORWARD, data, from)
         else {
             return Vec::new();
         };
@@ -8253,7 +8348,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Vec::new();
         };
         let Some((inner, requester_key, _)) =
-            self.authenticate_request(KIND_RECIPROCAL_FORWARD, original_auth)
+            self.authenticate_request(KIND_RECIPROCAL_FORWARD, original_auth, from)
         else {
             return Vec::new();
         };
@@ -8313,7 +8408,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// answer is an asynchronous authenticated push so this handler never owns the requester's
     /// actor wait.
     fn serve_indirect_probe(&mut self, from: PeerId, data: &[u8]) -> Vec<u8> {
-        let Some((inner, requester_key, _)) = self.authenticate_request(KIND_INDIRECT_PROBE, data)
+        let Some((inner, requester_key, _)) =
+            self.authenticate_request(KIND_INDIRECT_PROBE, data, from)
         else {
             return Vec::new();
         };
@@ -8357,7 +8453,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Consume a separately authenticated helper result only when it matches one exact pending
     /// attempt and the helper/target descriptors are still current.
     fn serve_indirect_result(&mut self, from: PeerId, data: &[u8]) -> Vec<u8> {
-        let Some((inner, helper_key, _)) = self.authenticate_request(KIND_INDIRECT_RESULT, data)
+        let Some((inner, helper_key, _)) =
+            self.authenticate_request(KIND_INDIRECT_RESULT, data, from)
         else {
             return Vec::new();
         };
@@ -9334,8 +9431,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Serve a PEX request: only to a proven current member (the membership-authed
     /// gate), rate-limited per requester, returning a responder-signed bundle of up to
     /// `MAX_PEX_ENTRIES` known member records bound to this request.
-    fn serve_pex(&mut self, _from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
-        let (_inner, req_pubkey, req_auth) = self.authenticate_request(KIND_PEX, data)?;
+    fn serve_pex(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
+        let (_inner, req_pubkey, req_auth) = self.authenticate_request(KIND_PEX, data, from)?;
         let requester = DeviceId::from_public_key_bytes(&req_pubkey);
         let now = self.clock.now_ms();
         if let Some(&last) = self.pex_served_at.get(&requester) {
@@ -9419,8 +9516,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Serve a freshly signed role offer only to a current member. The route set is copied from
     /// this device's current self-signed PEX record, so role discovery can never advertise a
     /// second, less-validated address source.
-    fn serve_switchboard_offer(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        let (_, requester_key, _) = self.authenticate_request(KIND_SWITCHBOARD_OFFER, data)?;
+    fn serve_switchboard_offer(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
+        let (_, requester_key, _) =
+            self.authenticate_request(KIND_SWITCHBOARD_OFFER, data, from)?;
         let requester = DeviceId::from_public_key_bytes(&requester_key);
         let now = self.clock.now_ms();
         if self
@@ -10265,6 +10363,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             req_auth.ts,
             &req_auth.nonce,
             req_auth.epoch,
+            &peer,
             &answer,
         );
         if !verify_with_public_bytes(&responder_pubkey, &transcript, &signature) {
@@ -10420,7 +10519,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // all, and would once have been enough to retire the gap for good. Only a peer already
         // proven to be a current member discharges its part of the sweep this way; anyone else is
         // simply set aside and the search continues.
-        if self.peer_is_proven_member(peer) {
+        if self.peer_is_proven_member(peer) || self.member_peers.is_empty() {
+            // A proven member's zero answer discharges its part of the search. An unproven one's
+            // does not, except while there is nothing proven to prefer it to: there, each
+            // candidate is asked once so the search still terminates.
             self.note_source_checked(peer, doc_type, doc_id);
         }
         self.cool_off_catchup_peer(peer, doc_type, doc_id);
@@ -11280,25 +11382,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Vec::new();
         }
         match data.split_first() {
-            Some((&KIND_CATCHUP, rest)) => self.serve_catchup(rest).unwrap_or_default(),
-            Some((&KIND_CATCHUP_SINCE, rest)) => self.serve_catchup_since(rest).unwrap_or_default(),
+            Some((&KIND_CATCHUP, rest)) => self.serve_catchup(from, rest).unwrap_or_default(),
+            Some((&KIND_CATCHUP_SINCE, rest)) => {
+                self.serve_catchup_since(from, rest).unwrap_or_default()
+            }
             Some((&KIND_JOIN, rest)) => self.serve_join(from, rest).unwrap_or_default(),
             Some((&KIND_COMMIT_CATCHUP, rest)) => {
-                self.serve_commit_catchup(rest).unwrap_or_default()
+                self.serve_commit_catchup(from, rest).unwrap_or_default()
             }
             Some((&KIND_PEX, rest)) => self.serve_pex(from, rest).unwrap_or_default(),
             Some((&KIND_SWITCHBOARD_OFFER, rest)) => {
-                self.serve_switchboard_offer(rest).unwrap_or_default()
+                self.serve_switchboard_offer(from, rest).unwrap_or_default()
             }
             Some((&KIND_RECIPROCAL_FORWARD, rest)) => self.serve_reciprocal_forward(from, rest),
             Some((&KIND_RECIPROCAL_DELIVERY, rest)) => self.serve_reciprocal_delivery(from, rest),
             Some((&KIND_INDIRECT_PROBE, rest)) => self.serve_indirect_probe(from, rest),
             Some((&KIND_INDIRECT_RESULT, rest)) => self.serve_indirect_result(from, rest),
             Some((&KIND_DELIVERY_RECEIPT, rest)) => {
-                self.serve_delivery_receipt(rest);
+                self.serve_delivery_receipt(from, rest);
                 Vec::new()
             }
-            Some((&KIND_BLOB_FETCH, rest)) => self.serve_blob_fetch(rest).unwrap_or_default(),
+            Some((&KIND_BLOB_FETCH, rest)) => self.serve_blob_fetch(from, rest).unwrap_or_default(),
             Some((&KIND_ADMIT_RESULT, rest)) => {
                 // Admin invites (Option C): the owner delivered a finalized admission; re-sign +
                 // relay the Welcome to the joiner. Empty ack response.
@@ -11308,7 +11412,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some((&KIND_DM_INVITE, rest)) => {
                 // A member delivered a DM (friend) invite. An explicit one-byte ack is the only
                 // result the sender treats as delivered.
-                if self.serve_dm_invite(rest) {
+                if self.serve_dm_invite(from, rest) {
                     vec![1]
                 } else {
                     Vec::new()
@@ -11316,7 +11420,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             Some((&KIND_CALL_SIGNAL, rest)) => {
                 // A member sent a call-signalling message; queue it for the actor to drain. Empty ack.
-                self.serve_call_signal(rest);
+                self.serve_call_signal(from, rest);
                 Vec::new()
             }
             Some((&KIND_DEVICE_ADD, rest)) => {
@@ -11365,8 +11469,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Serve a content-addressed blob; only to a proven current member, rate-limited per
     /// requester (blob is the strongest amplifier), signing the response bound to the
     /// requester's request. An empty response means not held (or rate-limited).
-    fn serve_blob_fetch(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        let (inner, req_pubkey, req_auth) = self.authenticate_request(KIND_BLOB_FETCH, data)?;
+    fn serve_blob_fetch(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
+        let (inner, req_pubkey, req_auth) =
+            self.authenticate_request(KIND_BLOB_FETCH, data, from)?;
         let requester = DeviceId::from_public_key_bytes(&req_pubkey);
         let now = self.clock.now_ms();
         let cid = decode_blob_fetch_req(&inner).ok()?;
@@ -11431,6 +11536,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             req_auth.ts,
             &req_auth.nonce,
             req_auth.epoch,
+            &self.transport.local_peer(),
             &answer,
         );
         let signature = self.device.sign(&transcript).ok()?;
@@ -11441,8 +11547,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         ))
     }
 
-    fn serve_catchup_since(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        let (inner, req_pubkey, req_auth) = self.authenticate_request(KIND_CATCHUP_SINCE, data)?;
+    fn serve_catchup_since(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
+        let (inner, req_pubkey, req_auth) =
+            self.authenticate_request(KIND_CATCHUP_SINCE, data, from)?;
         let (doc_type, doc_id, heads) = decode_catchup_since_req(&inner).ok()?;
         // A document this peer does not hold is answered, not left silent. An empty response is
         // the wire's way of saying "I do not know this request kind", and the requester's only
@@ -11464,7 +11571,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         match doc.export_catchup_since(&heads, &self.group, &self.device, &mut self.rng) {
             Ok(bundle) => {
                 let (prefix, served) =
-                    match size_capped_ops(&bundle, MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE) {
+                    match size_capped_ops(&bundle, MAX_CATCHUP_CHUNK, MAX_SIGNED_CATCHUP_BUNDLE) {
                         Ok(capped) => capped,
                         Err(e) => {
                             // Refusing is the honest answer: claiming to be done here would
@@ -11505,8 +11612,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    fn serve_catchup(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        let (inner, _pubkey, _auth) = self.authenticate_request(KIND_CATCHUP, data)?;
+    fn serve_catchup(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
+        let (inner, _pubkey, _auth) = self.authenticate_request(KIND_CATCHUP, data, from)?;
         let (doc_type, doc_id) = decode_catchup_req(&inner).ok()?;
         let doc = self.docs.get(&(doc_type, doc_id))?;
         match doc.export_catchup(&self.group, &self.device, &mut self.rng) {
@@ -11550,8 +11657,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Serve missed membership commits at or after `from_epoch` from the retained
     /// commit log, in epoch order; only to a proven current member (the records'
     /// framing reveals group id + member device ids, so this is members-only).
-    fn serve_commit_catchup(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        let (inner, req_pubkey, req_auth) = self.authenticate_request(KIND_COMMIT_CATCHUP, data)?;
+    fn serve_commit_catchup(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
+        let (inner, req_pubkey, req_auth) =
+            self.authenticate_request(KIND_COMMIT_CATCHUP, data, from)?;
         let from_epoch = decode_commit_catchup_req(&inner).ok()?;
         // Take a contiguous prefix from `from_epoch` that fits the byte budget.
         let mut records: Vec<CommitRecord> = Vec::new();
@@ -14344,7 +14452,7 @@ mod tests {
         let (request, _) = bsy
             .build_authed_request(KIND_DELIVERY_RECEIPT, &inner)
             .unwrap();
-        asy.serve_delivery_receipt(&request[1..]);
+        asy.serve_delivery_receipt(bsy.local_peer(), &request[1..]);
         assert_eq!(
             asy.peers_with_change(DocType::Channel, 42, change),
             vec![roles::fingerprint(&bob_id)]
@@ -15711,13 +15819,18 @@ mod tests {
     /// Tests that want to put particular bytes in front of a requester still have to be a member
     /// to be listened to, which is the point of the signature. What stays forgeable here is the
     /// content: the marker and the bundle are whatever the test chooses.
-    fn signed_catchup_answer(server: &mut Member, data: &[u8], answer: Vec<u8>) -> Vec<u8> {
+    fn signed_catchup_answer(
+        server: &mut Member,
+        from: PeerId,
+        data: &[u8],
+        answer: Vec<u8>,
+    ) -> Vec<u8> {
         // `data` is the whole request as it arrives, kind byte and all; the authenticator wants
         // what follows it, exactly as `handle_request` splits it.
         let (kind, rest) = data.split_first().expect("a request has a kind byte");
         assert_eq!(*kind, KIND_CATCHUP_SINCE, "this is the paging request");
         let (_, req_pubkey, req_auth) = server
-            .authenticate_request(KIND_CATCHUP_SINCE, rest)
+            .authenticate_request(KIND_CATCHUP_SINCE, rest, from)
             .expect("the request authenticates against this member");
         server
             .sign_doc_catchup_answer(&req_pubkey, &req_auth, answer)
@@ -16353,7 +16466,7 @@ mod tests {
                         panic!("the paging request is the next event");
                     };
                     responder.respond(Bytes::from(signed_catchup_answer(
-                        &mut alice, &data, hostile,
+                        &mut alice, bob_peer, &data, hostile,
                     )));
                 }
             );
@@ -16476,7 +16589,7 @@ mod tests {
                                 data, responder, ..
                             }) => {
                                 responder.respond(Bytes::from(signed_catchup_answer(
-                                    &mut alice, &data, hostile,
+                                    &mut alice, bob_peer, &data, hostile,
                                 )));
                                 return;
                             }
@@ -16795,7 +16908,9 @@ mod tests {
                 else {
                     panic!("the paging request is the next event");
                 };
-                responder.respond(Bytes::from(signed_catchup_answer(&mut alice, &data, more)));
+                responder.respond(Bytes::from(signed_catchup_answer(
+                    &mut alice, bob_peer, &data, more,
+                )));
             }
         );
         assert_eq!(
@@ -16816,7 +16931,9 @@ mod tests {
                 else {
                     panic!("the paging request is the next event");
                 };
-                responder.respond(Bytes::from(signed_catchup_answer(&mut carol, &data, done)));
+                responder.respond(Bytes::from(signed_catchup_answer(
+                    &mut carol, bob_peer, &data, done,
+                )));
             }
         );
         assert!(
@@ -16929,7 +17046,9 @@ mod tests {
                 else {
                     panic!("the paging request is the next event");
                 };
-                responder.respond(Bytes::from(signed_catchup_answer(&mut alice, &data, more)));
+                responder.respond(Bytes::from(signed_catchup_answer(
+                    &mut alice, bob_peer, &data, more,
+                )));
             }
         );
         assert_eq!(applied.unwrap(), 1);
@@ -17064,6 +17183,132 @@ mod tests {
             }
         );
         assert_eq!(applied.unwrap(), 1);
+    }
+
+    /// A request that proves membership but not where it came from can be relayed: an endpoint
+    /// that receives one forwards the bytes verbatim to a real member, collects the answer that
+    /// member signs against them, and hands it back. The control decision then belongs to the
+    /// relay, which is how a non-member becomes a "proven member path" without holding any
+    /// member's transport identity. The kinds whose answers become operational proof bind the
+    /// requester's transport peer, so a relayed request simply fails to verify at the far end.
+    #[tokio::test]
+    async fn a_relayed_request_does_not_verify_at_the_peer_it_was_forwarded_to() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        alice.open_channel(DocType::Channel, 103).await.unwrap();
+
+        let (req, _auth) = bob
+            .build_authed_request(
+                KIND_CATCHUP_SINCE,
+                &encode_catchup_since_req(DocType::Channel, 103, &[]),
+            )
+            .unwrap();
+
+        // Straight from Bob, Alice answers it.
+        let direct = alice.handle_request(bob_peer, &req);
+        assert!(
+            !direct.is_empty(),
+            "the request is valid when it arrives from the peer that signed it"
+        );
+
+        // The same bytes, arriving from Mallory's endpoint instead. Alice rebuilds the transcript
+        // from where they actually came, so the signature no longer matches and she serves
+        // nothing that Mallory could hand back as proof of her own standing.
+        let mallory_peer = PeerId::from_u64(4242);
+        let before = alice.stats().requests_rejected;
+        let relayed = alice.handle_request(mallory_peer, &req);
+        assert!(
+            relayed.is_empty(),
+            "a request forwarded by somebody else is not answered on their behalf"
+        );
+        assert_eq!(
+            alice.stats().requests_rejected,
+            before + 1,
+            "and it is counted as the refusal it is"
+        );
+    }
+
+    /// An answer describes the connection it was given on. A peer that goes away, writes
+    /// something and comes back has not answered about what it holds now, and the reconnect that
+    /// queues the document must not then exclude the very source whose return caused it.
+    #[tokio::test]
+    async fn a_reconnect_forgets_what_that_source_said_before_it_left() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        bob.open_channel(DocType::Channel, 101).await.unwrap();
+
+        // Alice answers about the state she was in, and is recorded as having answered.
+        bob.note_source_checked(alice_peer, DocType::Channel, 101);
+        assert!(
+            !bob.unchecked_source_exists(DocType::Channel, 101),
+            "with her answer in hand there is nobody left to ask"
+        );
+
+        // She leaves and comes back. What she said belonged to the connection that ended.
+        bob.note_peer_disconnected(alice_peer);
+        bob.note_peer_connected(alice_peer);
+        assert!(
+            bob.unchecked_source_exists(DocType::Channel, 101),
+            "a returning source owes this search a fresh answer"
+        );
+        assert!(
+            bob.catchup_queue.iter().any(|task| matches!(
+                task,
+                CatchupTask::Doc {
+                    doc_type: DocType::Channel,
+                    doc_id: 101
+                }
+            )),
+            "and the document the reconnect queued is not then excluded from asking her"
+        );
+    }
+
+    /// Before anything has proved itself, an unproven peer's "I have nothing" cannot be the end of
+    /// the search: a node that has just joined or restored knows no proven source at all, and the
+    /// peer holding the history is as likely to be the one not yet tried.
+    #[tokio::test]
+    async fn a_node_with_nothing_proven_keeps_looking_past_the_first_empty_answer() {
+        let (_hub, mut members, _ids) = build_members(3).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let carol = it.next().unwrap();
+        let (alice_peer, carol_peer) = (alice.local_peer(), carol.local_peer());
+        bob.open_channel(DocType::Channel, 102).await.unwrap();
+
+        // Deliberately no `prove_live_member`: both are connected candidates and nothing more,
+        // which is the state a fresh join or a restore starts in.
+        bob.note_peer_connected(alice_peer);
+        bob.note_peer_connected(carol_peer);
+        bob.remember_peer(alice_peer);
+        bob.remember_peer(carol_peer);
+        assert!(
+            bob.member_peers.is_empty(),
+            "the whole point of this schedule is that nothing has been proven yet"
+        );
+
+        // Carol answers first, with nothing.
+        bob.note_source_checked(carol_peer, DocType::Channel, 102);
+        assert!(
+            bob.unchecked_source_exists(DocType::Channel, 102),
+            "Alice has not been asked, and nothing so far was entitled to speak for her"
+        );
+
+        // Once Alice has answered too, the search does end: candidates are opportunistic, so one
+        // that stays connected and says nothing cannot hold it open.
+        bob.note_source_checked(alice_peer, DocType::Channel, 102);
+        assert!(!bob.unchecked_source_exists(DocType::Channel, 102));
     }
 
     /// The compatibility grammar is not a way around the search.
@@ -17337,8 +17582,12 @@ mod tests {
                 else {
                     panic!("the paging request is the next event");
                 };
-                let honest =
-                    signed_catchup_answer(&mut alice, &data, unsigned(CATCHUP_SINCE_UNDERSTOOD));
+                let honest = signed_catchup_answer(
+                    &mut alice,
+                    bob_peer,
+                    &data,
+                    unsigned(CATCHUP_SINCE_UNDERSTOOD),
+                );
                 let (pubkey, signature, mut answer) = decode_signed_commit_resp(&honest).unwrap();
                 answer[0] = CATCHUP_SINCE_MORE; // the marker, and nothing else, is swapped
                 responder.respond(Bytes::from(encode_signed_commit_resp(
@@ -17368,7 +17617,12 @@ mod tests {
                 else {
                     panic!("the paging request is the next event");
                 };
-                let answer = signed_catchup_answer(&mut alice, &data, unsigned(CATCHUP_SINCE_MORE));
+                let answer = signed_catchup_answer(
+                    &mut alice,
+                    bob_peer,
+                    &data,
+                    unsigned(CATCHUP_SINCE_MORE),
+                );
                 responder.respond(Bytes::from(answer));
             }
         );
@@ -17522,6 +17776,7 @@ mod tests {
                 };
                 responder.respond(Bytes::from(signed_catchup_answer(
                     &mut alice,
+                    bob_peer,
                     &data,
                     vec![99u8, 0, 0, 0, 0],
                 )));
@@ -17662,7 +17917,7 @@ mod tests {
                     panic!("catch-up request expected")
                 };
                 responder.respond(Bytes::from(signed_catchup_answer(
-                    &mut alice, &data, response,
+                    &mut alice, bob_peer, &data, response,
                 )));
             }
         );
@@ -17699,7 +17954,7 @@ mod tests {
         let (request, _) = node
             .build_authed_request(KIND_DELIVERY_RECEIPT, &inner)
             .unwrap();
-        node.serve_delivery_receipt(&request[1..]);
+        node.serve_delivery_receipt(node.local_peer(), &request[1..]);
         assert!(node.delivery_receipts.is_empty());
 
         for index in 0..(MAX_DELIVERY_RECEIPT_TARGETS + 5) {
@@ -21589,6 +21844,7 @@ mod tests {
             ts,
             &nonce,
             epoch,
+            Some(&PeerId::from_u64(99)),
         );
         let sig = mallory.sign(&transcript).unwrap();
         let body =

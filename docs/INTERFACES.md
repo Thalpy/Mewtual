@@ -611,11 +611,25 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     change means holding its dependencies, so anything causally behind a named hash is already held.
     A hash the server does not know selects nothing. Members-only on exactly the same terms as
     `KIND_CATCHUP`.
+  - **The authenticated request binds the transport peer it is sent from**, for the three kinds
+    whose answers become operational proof about a peer: `KIND_CATCHUP_SINCE`, `KIND_PEX` and
+    `KIND_COMMIT_CATCHUP`. The requester's own peer id goes into the request transcript, and the
+    server rebuilds it from where the bytes actually arrived, so a request relayed verbatim by a
+    third endpoint fails to verify rather than being answered on that endpoint's behalf. Without
+    it, an endpoint could forward a member's live request to a real member, collect the answer
+    signed against it, and be promoted into `member_peers` as a "proven member path" while holding
+    no member's transport identity. Deliberately not every kind: reciprocal forwarding exists to
+    relay on somebody's behalf, and a delivery receipt is built once for several targets.
   - **The `KIND_CATCHUP_SINCE` response is responder-signed**, like commit catch-up, PEX and blob
     fetch: `bytes responder_pubkey ‖ bytes signature(64) ‖ bytes answer`, where `answer` is
     `[marker] ‖ op bundle` and the signature covers a transcript under
-    `catcoms/doc-catchup-resp/v1` binding the group id, the **requester's** key, and the request's
-    timestamp, nonce and epoch. The requester rejects an answer whose signer is not a current
+    `catcoms/doc-catchup-resp/v1` binding the group id, the **requester's** key, the **responder's
+    transport peer**, and the request's timestamp, nonce and epoch. The requester rebuilds the
+    responder peer from the one it actually contacted, so an answer cannot be attributed to an
+    endpoint other than the one that produced it. The bundle inside is capped at
+    `MAX_SIGNED_CATCHUP_BUNDLE`, the response ceiling less the envelope, because the ceiling
+    limits the frame that leaves the node rather than the bundle within it: sizing the bundle to
+    the whole ceiling produced answers that were legal to build and impossible to send. The requester rejects an answer whose signer is not a current
     roster member, or whose signature does not verify against the request it actually sent. Sealed
     operations authenticate their own authors, but an **empty** bundle carries no such proof and
     the marker in front of it is durable control state: it can end a search, open a claim on a
@@ -667,7 +681,14 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
       to answer would find nobody outstanding). The picker excludes both cooling and
       already-checked sources from an attempt; only the second is a discharged obligation. Only
       **proven** members are owed to, so an unproven candidate cannot pin a sweep open by staying
-      connected and saying nothing.
+      connected and saying nothing; the exception is a node with **no** proven source at all
+      (a fresh join or restore), where nothing that answers has proved it was entitled to, so each
+      connected candidate is asked once before the search can end.
+      A source's answers are forgotten when it **reconnects** and when it is **newly proven**, and
+      the documents whose search had concluded on the strength of them go back on the queue.
+      Otherwise a peer could leave, write something, return, and be excluded from the very sweep
+      its reconnect queued; and a peer that was only a candidate when it answered would keep that
+      answer after becoming a source the sweep must hear from.
     - **A `1` that carried operations discharges only its own sender's claim.** Carrying content
       proves that peer had something to give, not that it knows what a different peer is still
       withholding, so it restarts the version sweep but leaves another peer's claim standing.
