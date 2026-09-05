@@ -1689,13 +1689,6 @@ impl OwnerReceiptJournal {
         {
             return Err(ReplError::EpochScope);
         }
-        if let Some(pending) = &self.in_flight {
-            return if pending.hash() == receipt.hash() {
-                Ok(())
-            } else {
-                Err(ReplError::ReceiptConflict)
-            };
-        }
         let selection = TenureSelection::from(&receipt);
         let changes_tenure = self
             .tenure
@@ -1708,6 +1701,18 @@ impl OwnerReceiptJournal {
                 }))
         {
             return Err(ReplError::ReceiptConflict);
+        }
+        // A previous tenure's unfinished publication must not strand a returning owner. Only
+        // an externally verified, strictly newer tenure may replace it, under the same durable
+        // persist-before-publish transition. Within a tenure the pending choice is irrevocable.
+        if !changes_tenure {
+            if let Some(pending) = &self.in_flight {
+                return if pending.hash() == receipt.hash() {
+                    Ok(())
+                } else {
+                    Err(ReplError::ReceiptConflict)
+                };
+            }
         }
         if !changes_tenure {
             if let Some(high_water) = &self.high_water {
@@ -1749,8 +1754,23 @@ impl OwnerReceiptJournal {
         self.in_flight.as_ref()
     }
 
+    /// Latest completed publication, retained as the constant-sized high-water decision.
+    /// This is historical local state, not proof that the signer is still the current owner.
+    pub fn published(&self) -> Option<&Receipt> {
+        self.high_water.as_ref()
+    }
+
     /// Mark the exact in-flight receipt published, advancing constant-sized high-water state.
+    /// An exact completed retry is inert, including when a later receipt is pending. The store
+    /// must still re-save on retry: its previous rename may have preceded a failed directory sync.
     pub fn mark_published(&mut self, receipt_hash: Hash32) -> Result<(), ReplError> {
+        if self
+            .high_water
+            .as_ref()
+            .is_some_and(|r| r.hash() == receipt_hash)
+        {
+            return Ok(());
+        }
         let pending = self.in_flight.take().ok_or(ReplError::ReceiptConflict)?;
         if pending.hash() != receipt_hash {
             self.in_flight = Some(pending);

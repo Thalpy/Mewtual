@@ -6,7 +6,9 @@ crash journals, the persisted epoch gate, durable intent metadata, and bounded r
 The checkpoint/registry slice adds deterministic raw seeds, receipt-bound checkpoint installation and
 vault restore, exact projection-size preflight, and the typed registry materializer. Recovery-slot
 transitions now also have a standalone vault-sealed store API with crash-safe replacement/retry,
-peak-space accounting, bounded recovery-file inventory discovery and explicit staging cleanup. Studio
+peak-space accounting, bounded recovery-file inventory discovery and explicit staging cleanup.
+Owner receipt decisions now have an accounted vault-backed prepare/completion adapter with exact
+crash retries; publication and owner-journal namespace discovery/cleanup are not wired yet. Studio
 materializers, settlement orchestration, sync discovery, complete storage integration and app/UI events
 remain later slices and the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
@@ -260,6 +262,15 @@ receipt hash b, selected receipt hash, repair sequence, owner public key, signat
 selects the entire conflicting receipt rather than one epoch so it also repairs differing inherited
 fields first observed on different receipt epochs. Applying it is held until the losing receipt's
 checkpoint, if held, is persisted as a recovery snapshot through the staged slot.
+
+Implementation note for owner issuance: `ServerStore::prepare_epoch_owner_receipt` now persists
+the bounded canonical owner journal before returning. `mark_epoch_owner_receipt_published` reloads
+and durably records completion; an exact completion retry cannot clear a later pending receipt.
+A verified strictly newer tenure can replace an unfinished old-tenure decision under the same
+write barrier, preventing a returning owner from being stranded. The scope-sealed record charges
+protocol bytes and shares recovery's logical-document reserve owner. This is not yet a publisher:
+the future coordinator must validate closure/seed before signing, re-save/reverify before sending,
+and integrate full namespace/orphan inventory and cleanup. Reads are historical only.
 
 ## 9. Intents and markers
 

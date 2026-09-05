@@ -435,7 +435,7 @@ fn filename_hash(text: &str) -> Result<[u8; 32], AppError> {
     Ok(hash)
 }
 
-pub(super) fn is_link(metadata: &fs::Metadata) -> bool {
+pub(in crate::store) fn is_link(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -448,7 +448,7 @@ pub(super) fn is_link(metadata: &fs::Metadata) -> bool {
     }
 }
 
-pub(super) fn regular_file(metadata: &fs::Metadata) -> bool {
+pub(in crate::store) fn regular_file(metadata: &fs::Metadata) -> bool {
     metadata.is_file() && !is_link(metadata)
 }
 

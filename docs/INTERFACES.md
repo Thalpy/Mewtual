@@ -946,6 +946,26 @@ means that traversal ended, not that directory iteration during deletion found e
 callers repeat cleanup if necessary and reconcile complete current inventories before refunding
 any budget. This standalone operation has no startup, actor/bridge or network invocation yet.
 
+`ServerStore::{load_epoch_owner_receipts, prepare_epoch_owner_receipt,
+mark_epoch_owner_receipt_published}` add the owner-local publication journal. Preparation takes a
+local server id, signed `Receipt`, current `ServerGroup`, externally observed tenure-start epoch,
+RNG and complete `EpochStorageBudget`; completion takes server/document, exact receipt hash, RNG
+and budget. Both reload and atomically replace under exclusive store access, returning
+`EpochOwnerReceiptState` only after save success. Its `pending()` and `published()` references are
+historical state, not current-authority capabilities. Exact completed retries preserve any newer
+pending decision and re-save; a strictly newer verified tenure can replace an older pending decision,
+but same-tenure conflicting choices reject. `OwnerReceiptJournal::published()` exposes the latest
+high-water receipt; the journal wire encoding is unchanged.
+
+The bounded sealed `.owner-receipts` record binds local server/group/type/key. Permanent bytes
+charge protocol allowance; replacement copies borrow the same logical-document settlement reserve
+as recovery records. `epoch_owner_receipt_inventory_record` observes one final file only. Full
+namespace/orphan inventory, cleanup, the sole coordinator and network publication remain deferred;
+the recovery-only scanner must not be used as this namespace's inventory. Before actual sending,
+the publisher must re-prepare/re-save the exact choice and recheck current owner, tenure and session.
+It must validate the close and deterministic seed before signing in the first place. File-sync and
+atomic replacement use the existing store primitive, with parent-directory durability on Unix only.
+
 `get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
 the complete bounded `states` array. The webview accepts only a strictly newer revision for its
 current server/channel view, so a delayed query completion or event cannot replace fresher receipt

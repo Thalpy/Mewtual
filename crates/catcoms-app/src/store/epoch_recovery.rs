@@ -489,7 +489,7 @@ fn recovery_record(scope: &[u8], footprint: Footprint) -> StorageRecord {
     }
 }
 
-fn scope_bytes(server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {
+pub(super) fn scope_bytes(server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {
     // LogicalDocument has public fields. Revalidate even when a caller bypassed its constructor.
     LogicalDocument::new(
         document.server_id.clone(),

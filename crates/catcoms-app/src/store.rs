@@ -28,7 +28,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::AppError;
 
+mod epoch_owner;
 mod epoch_recovery;
+pub use epoch_owner::EpochOwnerReceiptState;
 pub use epoch_recovery::cleanup::{EpochRecoveryCleanup, RecoveryCleanupProgress};
 pub use epoch_recovery::inventory::{
     EpochRecoveryInventory, EpochRecoveryScan, RecoveryInventoryEntry, RecoveryOrphan,

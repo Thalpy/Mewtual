@@ -217,6 +217,19 @@ table with the commit that closed it.
   guarantee, not a stronger Windows claim. A new inventory is mandatory after traversal because
   deletion can affect directory iteration. Observed deleted lengths are not promised reclaimed
   disk space. This API remains unwired to startup and network input.
+- **Owner receipt persistence is a publication prerequisite, not proof of current authority.**
+  A bounded vault-sealed journal binds the local server id and full group/type/key, retaining one
+  high-water receipt and one pending decision. Preparation checks the canonical receipt, current
+  owner signature and externally supplied tenure evidence, then charges peak replacement space
+  and saves before returning. Exact publication-completion retries preserve a newer pending choice;
+  a strictly later verified tenure may replace an unfinished old-tenure decision, never a conflicting
+  choice within the same tenure. Corruption does not reset the journal. Failed/uncertain writes and
+  caught writer panics block accounting until full reconciliation. Loading visible bytes alone
+  grants no publication authority: re-save and recheck current owner/tenure/session at send. The
+  future coordinator must validate closure/seed before signing and must discover/clean this separate
+  namespace before constructing production budgets. No actor, startup or network path invokes it
+  yet. Durability remains file-sync/atomic replacement plus Unix parent sync, not protection from
+  device failure or restoration of an older vault backup.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
   no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains

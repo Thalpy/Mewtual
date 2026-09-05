@@ -741,7 +741,7 @@ helpers would give a misleading percentage. The owner's frontend work proceeds s
 |---|---|---|
 | P1 protocol core | Implemented/tested: signed operations, closes, owner receipt/fault state, epoch gate, intent/recovery models | Connect persistence and transport; standalone models do not settle live documents |
 | P1 checkpoints and registry | Implemented/tested: deterministic seeds, isolated install/restart, typed bucket materialization and size preflight | Connect receipt-head discovery, catch-up and settlement |
-| P1 durable storage | Implemented/tested: recovery saves, peak-space accounting, bounded recovery-file inventory and unpublished-staging cleanup | Complete managed-file inventory/cleanup, sole coordinator, multi-record settlement/restart transaction |
+| P1 durable storage | Implemented/tested: recovery saves, owner receipt prepare/completion saves, peak-space accounting, bounded recovery-file inventory and unpublished-staging cleanup | Complete managed-file inventory/cleanup (including owner journals), sole coordinator, multi-record settlement/restart transaction |
 | P1 network and application integration | Not connected | Cursor catch-up, keyed head/seed/record fetch, lifecycle orchestration, actor/bridge events and end-to-end restart/partition tests |
 | Creative backend contracts | Stable document tags exist; Studio-specific materializers are not implemented | C0 publication/identity work, C3a/C5a domain operations, score/flipnote schemas and export paths |
 | Usable collaborative Studio | Not connected end to end | Shared save/load, publication, claims, settlement/recovery actions and export integrated with the owner's UI |

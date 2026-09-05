@@ -45,6 +45,15 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   Errors/panics can leave partial removals but yield no completion or accounting refund; an empty
   retry still runs the directory-sync step. Tests cover failure/restart/reconciliation/retry,
   no-destination first-write orphans and hardlinks. It is not automatically run on user vaults.
+  Owner receipt decisions now have an accounted vault-sealed prepare/mark-published adapter.
+  Every mutation reloads under exclusive store access and saves before returning, including exact
+  retries after post-rename flush failures. A returning owner can replace an unfinished older-tenure
+  decision only with a strictly newer verified tenure; same-tenure choices remain irrevocable.
+  Tests cover real MLS A-to-B-to-A tenure changes, restart, failed writes, stale completion,
+  malformed scopes and shared recovery/receipt reserve ownership. This is not a live publisher:
+  the coordinator still must validate the close/seed before signing and recheck authority at send.
+  The separate `.owner-receipts` namespace has addressed final-file accounting only; full discovery,
+  orphan cleanup and server-removal lifecycle are not yet wired for it. Recovery scans do not cover it.
   Follow-up coverage: native Windows reparse/junction refusal and forced enumeration-order
   fixtures (current tests vary creation order; attribution itself occurs only after EOF).
   Budgets still require every managed record type; multi-record settlement,
