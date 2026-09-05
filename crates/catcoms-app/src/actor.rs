@@ -33,6 +33,9 @@ use crate::{
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
 const DISCOVERY_DRAIN_MS: u64 = 500;
+/// Arrival ids one channel delta carries. A notification needs the rows that arrived, not all of
+/// them; a catch-up that lands a thousand messages says so with the flag and the count.
+const MAX_REPORTED_ARRIVALS: usize = 32;
 /// Minimum gap between delivery snapshots for one channel (ms, on the injected clock). Delivery
 /// evidence is derived by walking the channel document's change graph, so it is recomputed on a
 /// timer rather than on every inbound op; and the event only fires when the result actually
@@ -878,12 +881,21 @@ pub enum AppCommand {
 /// them renders. A single "it changed" signal is therefore ambiguous exactly where the UI needs
 /// certainty: only a genuine arrival may raise an unread badge, while an edit, a reaction or a
 /// queue add should refresh the view and nothing else.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChannelChange {
     /// At least one message id is present that was not there before: a real arrival. This is the
     /// only flag that may create unread state. Deliberately not inferred from the message count,
     /// which a concurrent append+delete batch (or a catch-up merge) can leave untouched.
     pub messages_appended: bool,
+    /// The ids that were not present last time, in the order they now read, capped at
+    /// [`MAX_REPORTED_ARRIVALS`].
+    ///
+    /// Rows are ordered by timestamp, so an arrival is not always the last row: a delayed message,
+    /// or one from a device whose clock is behind, lands wherever its stamp says. Anything that
+    /// wants to describe what arrived has to be told which rows those were; inferring it from the
+    /// end of the list describes whatever is newest, which after such an arrival is somebody
+    /// else's older message.
+    pub arrivals: Vec<String>,
     /// The rendered message list moved without an arrival: an edit, a delete, a reaction or a pin.
     pub messages_changed: bool,
     /// The channel topic changed.
@@ -4724,10 +4736,25 @@ where
     // A content signature (not just the count) so an EDIT; which doesn't change the count; is
     // detected too, both locally and when a peer's edit arrives. Cheap over a channel's message
     // list, which this actor already materializes on every sync tick.
+    let previous_ids = sigs.get(&channel).map(|sig| sig.ids.clone());
     let mut messages_hasher = std::collections::hash_map::DefaultHasher::new();
     let mut ids = std::collections::HashSet::new();
+    // The ids that were not here last time, in the order they now read. Rows are ordered by
+    // timestamp, so an arrival is not always the last row: a message can be delayed, or come from
+    // a device whose clock is behind, and land anywhere in the list. Naming them is the only way
+    // for anything downstream to describe what actually arrived rather than what happens to sit at
+    // the end. Bounded, because this only has to carry an announcement.
+    let mut arrivals: Vec<String> = Vec::new();
     server.with_messages(channel, |msgs| {
         for m in msgs {
+            if let Some(seen) = &previous_ids {
+                if !seen.contains(&hash_of(&m.id))
+                    && !m.id.is_empty()
+                    && arrivals.len() < MAX_REPORTED_ARRIVALS
+                {
+                    arrivals.push(m.id.clone());
+                }
+            }
             m.id.hash(&mut messages_hasher);
             m.text.hash(&mut messages_hasher);
             m.edited.hash(&mut messages_hasher);
@@ -4757,6 +4784,7 @@ where
     let appended = next.ids.iter().any(|id| !previous.ids.contains(id));
     let change = ChannelChange {
         messages_appended: appended,
+        arrivals,
         messages_changed: !appended && next.messages != previous.messages,
         topic: next.topic != previous.topic,
         jukebox: next.jukebox != previous.jukebox,
@@ -5036,6 +5064,59 @@ mod tests {
     use tokio::time::timeout;
 
     const GENERAL: u128 = 1;
+
+    /// A delta says which rows arrived, not which row sorts last.
+    ///
+    /// Rows are ordered by the sender's timestamp, so a message that was delayed, or written on a
+    /// device whose clock is behind, lands wherever its stamp says. Reading the end of the list to
+    /// find "the new one" then describes whatever is newest, which after such an arrival is a
+    /// message somebody has very likely already seen.
+    #[tokio::test]
+    async fn a_channel_delta_names_the_rows_that_arrived_not_the_newest_row() {
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_channel(GENERAL).await.unwrap();
+        async fn post_at(server: &mut Server<MemNetwork, ChaCha20Rng>, id: &str, ts: u64) {
+            let id = id.to_string();
+            server
+                .sync
+                .post(crate::DocType::Channel, GENERAL, move |d| {
+                    crate::append_message(d, &id, "bob", "text", ts, "")
+                })
+                .await
+                .unwrap();
+        }
+        let mut sigs = HashMap::new();
+
+        // First sight seeds the record and reports nothing.
+        post_at(&mut server, "newest", 2_000).await;
+        assert!(channel_delta(&server, GENERAL, &mut sigs).is_none());
+
+        // Now a message that was said earlier arrives. It sorts before the row already here, so
+        // the last row is unchanged and only the arrival list can say what happened.
+        post_at(&mut server, "delayed", 1_000).await;
+        let change = channel_delta(&server, GENERAL, &mut sigs).expect("an arrival is a change");
+        assert!(change.messages_appended);
+        assert_eq!(
+            change.arrivals,
+            vec!["delayed".to_string()],
+            "the row that arrived, not the row that sorts last"
+        );
+        let rows = server.with_messages(GENERAL, |m| {
+            m.iter().map(|m| m.id.clone()).collect::<Vec<_>>()
+        });
+        assert_eq!(
+            rows,
+            vec!["delayed".to_string(), "newest".to_string()],
+            "and it really did sort before the row that was already here"
+        );
+
+        // A pin re-renders the log without anything arriving, and names nothing.
+        server.set_pin(GENERAL, "newest", true).await.unwrap();
+        let change = channel_delta(&server, GENERAL, &mut sigs).expect("a pin is a change");
+        assert!(!change.messages_appended);
+        assert!(change.arrivals.is_empty());
+    }
 
     #[tokio::test]
     async fn cancellation_interrupts_an_actor_owned_chunk_future() {
@@ -6033,16 +6114,14 @@ mod tests {
             .await
             .expect("event timeout")
             .expect("actor closed");
-        assert_eq!(
-            ev.event,
-            AppEvent::ChannelUpdated {
-                channel: GENERAL,
-                change: ChannelChange {
-                    messages_appended: true,
-                    ..ChannelChange::default()
-                },
-            }
-        );
+        // The delta names the row that arrived, whose id is generated, so it is compared by shape.
+        let AppEvent::ChannelUpdated { channel, change } = &ev.event else {
+            panic!("expected a channel update, got {:?}", ev.event);
+        };
+        assert_eq!(*channel, GENERAL);
+        assert!(change.messages_appended);
+        assert_eq!(change.arrivals.len(), 1, "the message that was just sent");
+        assert!(!change.messages_changed && !change.topic && !change.jukebox);
 
         let msgs = actor.messages(GENERAL).await;
         assert_eq!(msgs.len(), 1);

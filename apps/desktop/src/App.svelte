@@ -17031,6 +17031,7 @@
     server: number,
     channel: string,
     mode: "message" | "mention" | "detect",
+    arrivals: string[] = [],
   ) {
     try {
       // A bounded tail, not the history: this runs for every arrival in every channel that is not
@@ -17047,7 +17048,15 @@
         "get_message_tail",
         { server, channel, limit: NOTIFY_TAIL_ROWS, afterId: cursor.id || null, afterTs: cursor.ts || null },
       );
-      const latest = tail.rows[tail.rows.length - 1];
+      // The row that arrived, not the row that sorts last. Messages are ordered by the sender's
+      // timestamp, so one that was delayed, or written on a device whose clock is behind, lands
+      // wherever its stamp says rather than at the end: headlining the last row then announced
+      // somebody else's older message, or nothing at all when that row had already been seen.
+      // The actor names what arrived; the tail is only where the text is read from.
+      const arrived = arrivals.length
+        ? tail.rows.filter((row) => arrivals.includes(row.id))
+        : [];
+      const latest = arrived[arrived.length - 1] ?? tail.rows[tail.rows.length - 1];
       let kind: "message" | "mention" = mode === "mention" ? "mention" : "message";
       // Mention detection depends on the active server's identity and profile, so if the user
       // switches servers during this fetch, degrade to an ordinary message notification.
@@ -17564,6 +17573,7 @@
         messages_appended: boolean;
         messages_changed: boolean;
         topic: boolean;
+        arrivals?: string[];
         jukebox: boolean;
         __seq?: number;
         __trace?: string;
@@ -17638,10 +17648,16 @@
             // case, exactly as the non-active-channel branch below always does.
             // Likewise when the reader is up in history: the slice does not end at the newest row.
             if (!scopeHoldsConversation(messageWindowScope, server, channel) || !tailLoaded) {
-              void notifyLatestChannelMessage(server, channel, "detect");
+              void notifyLatestChannelMessage(server, channel, "detect", change.arrivals ?? []);
               return;
             }
-            const last = messages[messages.length - 1];
+            // Same rule as the fetched branch: describe what arrived, not what sorts last. With
+            // rows in timestamp order the two are only the same message when the arrival is also
+            // the newest thing said, which a delayed or behind-the-clock sender breaks.
+            const arrived = change.arrivals.length
+              ? messages.filter((m) => change.arrivals.includes(m.id))
+              : [];
+            const last = arrived[arrived.length - 1] ?? messages[messages.length - 1];
             const forMe = last && last.author !== myFp && last.targets_me;
             notifyMessage(server, channel, last, forMe ? "mention" : "message");
           });
@@ -17656,13 +17672,13 @@
           if (server !== activeServerId) {
             // Another server: its profile identity is not loaded, so this is an ordinary-message
             // alert, but its own server sound override still applies.
-            void notifyLatestChannelMessage(server, channel, "message");
+            void notifyLatestChannelMessage(server, channel, "message", change.arrivals ?? []);
           } else if (mentionChannels.has(channel)) {
-            void notifyLatestChannelMessage(server, channel, "mention");
+            void notifyLatestChannelMessage(server, channel, "mention", change.arrivals ?? []);
           } else {
             // A non-active channel of the server I'm in: scan for a message aimed at me, then use
             // that same fetched row for the ticker so its click target and sound cannot diverge.
-            void notifyLatestChannelMessage(server, channel, "detect");
+            void notifyLatestChannelMessage(server, channel, "detect", change.arrivals ?? []);
           }
         }
         // Outside the guard on purpose. An arrival for a channel the catalog does not list falls

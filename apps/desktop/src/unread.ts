@@ -17,6 +17,10 @@ export type ChannelChange = {
   messagesChanged: boolean;
   topic: boolean;
   jukebox: boolean;
+  /** The ids that actually arrived, in the order they now read. Empty when nothing did, or when
+   * the payload predates this field. Rows are ordered by their sender timestamps, so an arrival
+   * is not always the last row and anything describing it has to be told which rows to use. */
+  arrivals: string[];
 };
 
 /**
@@ -34,13 +38,16 @@ export function readChannelChange(payload: unknown): ChannelChange {
     typeof p.topic === "boolean" ||
     typeof p.jukebox === "boolean";
   if (!known) {
-    return { messagesAppended: true, messagesChanged: true, topic: true, jukebox: true };
+    return { messagesAppended: true, messagesChanged: true, topic: true, jukebox: true, arrivals: [] };
   }
   return {
     messagesAppended: p.messages_appended === true,
     messagesChanged: p.messages_changed === true,
     topic: p.topic === true,
     jukebox: p.jukebox === true,
+    arrivals: Array.isArray(p.arrivals)
+      ? p.arrivals.filter((id): id is string => typeof id === "string" && id.length > 0)
+      : [],
   };
 }
 

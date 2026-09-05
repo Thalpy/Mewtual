@@ -1144,6 +1144,20 @@ things the CRDT does not do for us, both of which reached users:
   that produces ties, one person typing faster than the clock ticks, is the order they were sent
   in. Adding the id as a tiebreak would replace that with alphabetical order.
 
+**A `channel-updated` delta names the rows that arrived** (`arrivals`, capped at 32 ids, in the
+order they now read), because with rows in timestamp order an arrival is not always the last row:
+a delayed message, or one from a device whose clock is behind, lands wherever its stamp says.
+Anything describing an arrival reads those ids; taking the end of the list describes whatever is
+newest, which after such an arrival is a message the reader has very likely already seen.
+
+**Still open, and the reason this does not close the whole "buried message" report:** the unread
+summary decides by position, so a message that arrives with a timestamp below the read mark sorts
+before it and is counted as read. Before rows were ordered, a late arrival usually appended after
+the mark and was counted; ordering them made that case worse rather than better. Fixing it needs
+observation state — what this device had actually seen when the mark was set — rather than a
+better ordering, since a genuinely unseen message can legitimately belong earlier in the
+conversation. The `arrivals` ids above are the signal that work should build on.
+
 This is not a causal ordering key: two senders' clocks can still disagree, and a reply can still
 sort above its parent if they disagree badly enough. What it guarantees is that every member
 renders the same conversation in the same order, and that paging, day dividers, the unread

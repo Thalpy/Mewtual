@@ -1592,6 +1592,9 @@ struct ChannelEvt {
     /// queue, so an untyped event forced the UI to read a queue edit as an unread chat message.
     /// Only `messages_appended` may create unread state.
     messages_appended: bool,
+    /// The ids that actually arrived, in the order they now read. A row ordered by its timestamp
+    /// is not always the newest one, so a notification has to be told which rows to describe.
+    arrivals: Vec<String>,
     messages_changed: bool,
     topic: bool,
     jukebox: bool,
@@ -2038,6 +2041,7 @@ fn forward_events(
                             server,
                             channel: channel.to_string(),
                             messages_appended: change.messages_appended,
+                            arrivals: change.arrivals.clone(),
                             messages_changed: change.messages_changed,
                             topic: change.topic,
                             jukebox: change.jukebox,
