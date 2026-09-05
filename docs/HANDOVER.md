@@ -8,16 +8,28 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
-- **P1 epoch-close implementation has started (2026-09-03, uncommitted).** Revision 5 of
+- **P1 epoch-close backend work continues (2026-09-05).** Revision 5 of
   [`design-epoch-close.md`](design-epoch-close.md) is accepted. The first replication-core slice
   adds the four new stable document tags, backward-compatible v2 signed domain-operation
   envelopes, exact close validation, owner receipt/journal and peer fault state, a persisted
   server/document-bound `Open -> Closing -> Settled/Fault` gate, a vault-serializable bounded
   intent ledger, and the
   two-retained-plus-one-staged recovery transition. P1 types fail closed on the legacy edit/ingest
-  path and require a type-specific inbound change validator. This is **not end-to-end P1 yet**:
-  deterministic checkpoint materializers, settlement/storage transactions, keyed catch-up and
-  receipt-head discovery, registry projection, application events and Studio UI integration remain.
+  path and require a type-specific inbound change validator. This is **not end-to-end P1 yet**.
+  The checkpoint/registry slice now adds deterministic raw checkpoint seeds, receipt/hash/schema verification,
+  isolated checkpoint installation, seed-origin vault restore, per-edit/inbound projection
+  preflight, and the typed 256-bucket registry with stable 2048-pointer admission and tombstone
+  reclamation. Tests exercise real encrypted registry edits after checkpoint/restart, closed-head
+  projection excluding later work, malformed seeds/deltas, maximal bucket capacity and retirement.
+  Adversarial fixes add bounded raw-column parsing, inner-author roster checks, causal predecessor
+  binding, and idempotent edits after concurrent bucket creation. Legacy v1 change framing stays
+  compatible; P1 v2 rejects compressed changes before parsing.
+  Studio-specific materializers, settlement/storage transactions, keyed catch-up and receipt-head
+  discovery, application events and Studio integration remain. Catch-up integration must distinguish
+  new submissions from already-admitted history by removed authors; future Studio epoch-0 logical
+  keys must bind the server, as registry keys already do, since the signed operation envelope does
+  not separately bind a group id. The user owns UI implementation;
+  the canonical HTML/PNG references are recorded in `design-creative-suite.md`.
 
 - **Phases 0 → 10 COMPLETE. The live work is the desktop client's real-time layer;
   group voice (phases 1–3 shipped; see [§ Voice](#voice-group-calls)).**

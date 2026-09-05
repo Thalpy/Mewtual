@@ -400,6 +400,8 @@ pub struct EncryptedDoc;   // automerge doc + signed-op log
   export_catchup(&ServerGroup, &MlsDevice, rng) -> Result<Vec<SealedOp>>;   // re-sealed under current epoch
   import_catchup(&mut, &[SealedOp], &ServerGroup, &MlsDevice) -> Result<usize>;
   restore_for_actor(snapshot, &DeviceId) -> Result<EncryptedDoc>; // required before post-restart P1 edits
+  from_checkpoint(&VerifiedCheckpoint, &DeviceId) -> Result<EncryptedDoc>; // one receipt-authorized seed, empty user-op log
+  checkpoint_origin() -> Option<&CheckpointOrigin>; checkpoint_bytes() -> Result<Option<Vec<u8>>>;
   edit_domain_gated(&mut, &LogicalDocument, &EpochGate, ..., &DomainOp, edit) -> Result<(SealedOp,ChangeHash)>;
   ingest_domain_gated(&mut, &LogicalDocument, &EpochGate, &SealedOp, ...) -> Result<Admission>;
 
@@ -414,6 +416,24 @@ pub struct ReceiptBook;      // ingest_and_seal atomically updates receipt state
 pub struct EpochGate;        // server/document/id-bound Open -> Closing/Settled/Fault boundary
 pub struct IntentLedger;     // bounded vault-sealed local operations retained until receipted
 pub struct RecoverySlots;    // two retained typed snapshots + one crash-resumable staged slot
+pub struct CheckpointSeed;   // deterministic raw change candidate, at most 2 MiB; building gives no authority
+  build(&LogicalDocument, checkpoint_epoch, close_hash, typed_writer) -> Result<Self>;
+  verify(&VerifiedReceipt, raw_bytes, typed_validator) -> Result<VerifiedCheckpoint>;
+pub struct VerifiedCheckpoint; // opaque, immutable receipt/hash/schema-verified seed
+// P1 v2 raw changes are pre-scanned for bounded RLE/string/predecessor work; compressed changes
+// reject. New inbound P1 authors must match a current member's full signing key, not only its relay.
+pub struct CheckpointOrigin; // logical scope, epoch, close and seed hashes retained in vault snapshots
+// Both checked P1 paths preflight the prospective materialization before gate admission/state swap:
+EncryptedDoc::edit_domain_preflight_gated(..., typed_change_validator, projection_preflight);
+EncryptedDoc::ingest_domain_preflight_gated(..., typed_change_validator, projection_preflight);
+// catcoms_replication::registry (first typed consumer; no sync discovery or automatic settlement yet):
+pub struct PointerKey;        // type + bounded logical key; deterministic bucket()
+pub enum RegistryOp { Put { key:PointerKey, epoch:u64 }, Tombstone { key:PointerKey } }
+pub struct RegistryProjection; // admitted pointers, explicit overflow and tombstones
+  read(...); checkpoint(close_hash); verify_checkpoint(&VerifiedReceipt, bucket, raw_bytes);
+registry_document(server_id, bucket) -> Result<LogicalDocument>;
+edit_registry(..., &DomainOp) -> Result<SealedOp>; ingest_registry(...) -> Result<Admission>;
+checkpoint_registry_close(...) -> Result<(CheckpointSeed, ClosureStats)>; // verified named closure, source untouched
 ```
 
 ---

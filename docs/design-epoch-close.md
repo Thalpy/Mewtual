@@ -3,8 +3,10 @@
 Status: accepted design, revision 5; protocol-core implementation and adversarial testing have
 started. The current slice defines and tests operation envelopes, closes, receipts and their
 crash journals, the persisted epoch gate, durable intent metadata, and bounded recovery slots.
-Checkpoint materializers, settlement orchestration, sync discovery, storage admission and app/UI
-events remain later slices and the feature is not usable yet. Revision 4
+The next backend slice adds deterministic raw seeds, receipt-bound checkpoint installation and
+vault restore, exact projection-size preflight, and the typed registry materializer. Studio
+materializers, settlement orchestration, sync discovery, storage admission and app/UI events
+remain later slices and the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
 five remaining lifecycle corrections: adoption is folded into the first crash-safe receipt of
 each owner tenure (section 11); a newcomer reads old-owner heads provisionally and gets
@@ -117,6 +119,15 @@ in the editor, every signed operation counted in full. A **per-device share** of
 operations and 1 MiB per epoch applies to every device except the owner's. Reserved space per
 epoch: 2 MiB seed, 64 KiB closes, 16 KiB receipts. One complete signed operation is capped at
 256 KiB before admission; its canonical domain envelope remains capped at 64 KiB.
+P1 v2 deltas are raw Automerge kind-1 changes. Before Automerge parsing, the codec scans the
+raw column framing without expanding runs: at most 65,536 primitive actions (7 for registry
+operations), 1,048,576 expanded column cells, 262,144 predecessor references, and 16 MiB of
+expanded key strings per change. String lengths must fit their encoded column before allocation;
+value lengths must fit the raw-byte budget; unsupported or compressed column specs reject.
+These are parser-work limits, separate from the signed-operation count, wire bytes and typed
+schema limits. A newly admitted operation's inner signing key must be a current roster member;
+group sealing by a relay alone does not authorize the inner author. Already accepted history
+survives removal, while receipt-authorized historical closes and seeds use their separate paths.
 
 ## 6. Close records
 
@@ -184,6 +195,15 @@ any member may. Only `(doc id, change hash)` metadata is retained for checkpoint
 is unverified (4096 entries per server, no bodies). A seed above 1 MiB travels unpadded because
 the padding ceiling is 1 MiB; that disclosure must be added to `THREAT-MODEL.md` before
 implementation.
+
+The raw Automerge 0.10 change (chunk kind 1) is the seed wire representation. Compressed changes,
+document snapshots and bundles reject before parsing. Verification checks the receipt's complete
+change hash and checksum before decoding, then the actor, sequence, start op, dependencies,
+timestamp, message and consumer schema. The actor derivation treats the concrete u128 document id
+as its 16 big-endian bytes. A raw-byte golden vector pins the entire change. Installation returns
+a separate document whose user-operation log excludes the seed; its optional vault-snapshot
+extension retains the logical scope, checkpoint epoch, close hash and seed hash. Every accepted
+checkpoint edit descends from that seed. Existing seedless vault snapshots retain their encoding.
 
 **Retirement.** The checkpoint carries the canonical projection of the receipted heads plus
 bounded conflict data and nothing else. Markers are never carried. Tombstones are never carried
@@ -347,6 +367,26 @@ doc type tag, logical key)`, rooted at epoch 0 of `("registry", server id, b)`. 
 tombstone; stable admission of 2048 live pointers per bucket with previously admitted pointers
 keeping their slots; every seed carries the complete projection; warn at 3900 epochs,
 read-only at 4096 pending migration.
+
+Implementation format: the bucket logical key is `H("catcoms-registry-key:v1", server id, b)`
+with `b` framed as a u64. Target keys carry both their document type and logical-key bytes.
+The exact canonical bodies are `{"epoch":0,"key":"<lowercase hex>","t":"put_pointer","type":16}`
+and `{"key":"<lowercase hex>","t":"tombstone_pointer","type":16}`. The physical root uses
+`bucket`, `epoch`, `key`, `kind:"registry"`, `v:1`, and flat `p/<four-hex-tag>/<hex-key>` values
+for pointer epochs, `d/... = true` for tombstones and seed-only `s/... = true` for admitted slots.
+Flat keys avoid concurrent creation of competing nested maps. Only seed verification can introduce
+slot keys. A registry pointer number is a discovery hint: concurrent values choose the maximum,
+not an authority or history winner. This is specific to registry hints, not Studio scalar values.
+Target numbers span u64; the 4096 ceiling applies to the registry's own epoch. Tombstones win
+throughout an open epoch and retire at rotation. Overflow remains explicit in the materializer
+for settlement recovery; it is not silently included in an over-cap seed. Both local and inbound
+registry changes preflight the exact encoded next seed, with a fixed-size placeholder close hash.
+The maximal-key bucket fixture pins capacity and a repeated-rotation fixture pins retirement.
+Registry change validation also binds every predecessor operation id to the same root property
+at the change's causal heads. Immutable headers are only created when absent, preserving harmless
+equal-value conflicts from concurrent bucket creation. An already-applied put/tombstone may write
+only its new intent marker, but the requested value must already exist at those exact causal
+heads; a value held solely on another merged branch cannot justify the no-op.
 
 **Catch-up.** Requests carry up to 64 heads and an opaque provider cursor bound by HMAC to
 `(provider, requester, doc type, doc id, log generation, position, expiry 10 minutes)`; pages

@@ -173,6 +173,20 @@ table with the commit that closed it.
   current member can claim receipt without displaying content, so the UI says delivered/held and
   never read. Receipt traffic adds message-timing metadata to peers already participating in the
   encrypted group; it is not broadcast outside the group.
+- **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
+  2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
+  no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains
+  to be wired, but this disclosure is part of its accepted contract. Seed parsing rejects compressed
+  changes/document chunks before decode and checks the exact owner-receipted hash before loading
+  Automerge. Registry pointer epochs remain hints: a large number authorizes no seed or history.
+- **P1 bounds decoded changes as well as wire bytes.** Its v2 codec rejects compressed deltas
+  and scans raw RLE columns without expansion before Automerge parsing. Action, cell, predecessor
+  and expanded-string caps prevent small signed packets from declaring unbounded parser work.
+  New operations require the inner author's current roster key, so resealing with a member's group
+  key cannot mint shares for outsider identities. Registry validation binds predecessor ids to
+  their causal root property; an allowed header write cannot hide a seed's protected slot through
+  a cross-key predecessor. Typed Studio validators must provide equivalent semantic checks when
+  implemented; generic callbacks are not an authorization policy by themselves.
 - **Epoch-managed document operations above 1 MiB disclose their coarse size.** P1 bounds the
   domain envelope to 64 KiB and a whole signed operation to 256 KiB, so conforming creative and
   registry operations stay inside the existing sealed-op padding ladder. The generic legacy

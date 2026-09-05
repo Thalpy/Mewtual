@@ -10,6 +10,12 @@ staged per document with Restore, Copy and Export. This document keeps the studi
 contract: document types, roots, events, the closed domain-operation sets with stable element
 ids and merge rules, and the properties it requires of P1.
 
+UI reference (2026-09-05): the owner's `Main.html`, `Inspector.html`, `Timeline.html`,
+`Palette.html` and `Tools.html`, with matching PNGs, under
+`C:\Users\phaso\AppData\Local\Temp\claude\m--Git--local--CatComs\682d22fb-7c91-4ed4-9226-deea8738efd5\scratchpad\flipnote\preview`
+are the canonical visual design. UI implementation is owned by the user; backend work supplies
+the contracts and state needed by those surfaces.
+
 Builds on the jam layer (`docs/INTERFACES.md` section 12, `apps/desktop/src/jam-*.ts`), the
 livery palette (`design-livery.md`), the sealed blob store with its staging area, the fileshare
 and its `FileExpiry` semantics, the backend `Clock` seam, the authenticated call-signal push

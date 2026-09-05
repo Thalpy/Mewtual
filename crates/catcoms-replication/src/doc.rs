@@ -24,6 +24,7 @@ use crate::epoch::{
 };
 use crate::op::{SealedOp, SignedOp};
 use crate::ReplError;
+use crate::{CheckpointOrigin, VerifiedCheckpoint};
 
 /// Cap on how many changes one [`EncryptedDoc::holders_of`] query may ask about; each
 /// target takes one bit of the propagation mask the single DAG pass carries.
@@ -64,6 +65,9 @@ pub struct EncryptedDoc {
     /// documents (whose bytes are the ones worth not duplicating) are simply re-encoded.
     /// Derived state; never persisted.
     snapshot_cache: Option<(SnapshotKey, Vec<u8>)>,
+    /// Receipt-authorized seed identity; absent for epoch zero and legacy documents. Its raw
+    /// change is in Automerge, not the signed user-op log, and must survive vault restore.
+    checkpoint: Option<CheckpointOrigin>,
 }
 
 /// What a serialization of a document depends on: its automerge heads and its op-log length.
@@ -88,7 +92,66 @@ impl EncryptedDoc {
             change_authors: HashMap::new(),
             authors_indexed: 0,
             snapshot_cache: None,
+            checkpoint: None,
         }
+    }
+
+    /// Open a checkpoint only after receipt and typed projection verification. This creates a
+    /// separate DAG, rebinds the local writer, and leaves the source epoch untouched; settlement
+    /// must persist excluded content before replacing its own current-document pointer.
+    pub fn from_checkpoint(
+        checkpoint: &VerifiedCheckpoint,
+        actor: &DeviceId,
+    ) -> Result<Self, ReplError> {
+        let origin = checkpoint.origin();
+        let change = crate::checkpoint::validate_change(origin, checkpoint.bytes())?;
+        let mut result = Self::new(origin.document().doc_type, origin.doc_id(), actor);
+        result
+            .doc
+            .apply_changes([change])
+            .map_err(crate::checkpoint::am_error)?;
+        result.checkpoint = Some(origin.clone());
+        Ok(result)
+    }
+
+    /// The authenticated origin required to exclude the one seed from close accounting.
+    pub fn checkpoint_origin(&self) -> Option<&CheckpointOrigin> {
+        self.checkpoint.as_ref()
+    }
+
+    /// Serve the checkpoint's raw seed by hash without duplicating it in the user-op log.
+    pub fn checkpoint_bytes(&mut self) -> Result<Option<Vec<u8>>, ReplError> {
+        self.checkpoint
+            .as_ref()
+            .map(|origin| {
+                self.doc
+                    .get_change_by_hash(&ChangeHash(origin.seed_hash()))
+                    .map(|change| change.raw_bytes().to_vec())
+                    .ok_or(ReplError::Malformed)
+            })
+            .transpose()
+    }
+
+    /// Reconstruct only a previously verified closure, preserving the one checkpoint seed.
+    /// This is a read-only projection workspace and never inherits the source's excluded heads.
+    pub(crate) fn projection_for_closure(
+        &mut self,
+        operations: &[SignedOp],
+    ) -> Result<AutoCommit, ReplError> {
+        let mut projection = AutoCommit::new().with_actor(ActorId::from(vec![0; 32]));
+        if let Some(seed) = self.checkpoint_bytes()? {
+            projection
+                .apply_changes([Change::from_bytes(seed).map_err(|_| ReplError::Malformed)?])
+                .map_err(crate::checkpoint::am_error)?;
+        }
+        for op in operations {
+            projection
+                .apply_changes([
+                    Change::from_bytes(op.delta.clone()).map_err(|_| ReplError::Malformed)?
+                ])
+                .map_err(crate::checkpoint::am_error)?;
+        }
+        Ok(projection)
     }
 
     /// Borrow the underlying automerge document (for reads/projection).
@@ -178,6 +241,9 @@ impl EncryptedDoc {
         heads: &[[u8; 32]],
         unsigned_seed: Option<[u8; 32]>,
     ) -> Result<Vec<SignedOp>, ReplError> {
+        if unsigned_seed != self.checkpoint.as_ref().map(CheckpointOrigin::seed_hash) {
+            return Err(ReplError::EpochScope);
+        }
         // Walk the named closure explicitly. `AutoCommit::fork_at` would select the same graph but
         // deliberately creates a random actor id, which is both unnecessary for a read-only walk
         // and outside Mewtual's injected RNG seam.
@@ -378,6 +444,13 @@ impl EncryptedDoc {
             e.put_bytes(&op.encode())
                 .map_err(|_| ReplError::Malformed)?;
         }
+        // Legacy/epoch-zero snapshots remain byte-for-byte unchanged. The optional extension is
+        // local vault format only; new checkpoints cannot be interpreted as seedless snapshots.
+        if let Some(origin) = &self.checkpoint {
+            e.put_u8(1);
+            e.put_bytes(&origin.encode()?)
+                .map_err(|_| ReplError::Malformed)?;
+        }
         Ok(e.finish())
     }
 
@@ -397,6 +470,23 @@ impl EncryptedDoc {
             applied.insert(op.hash());
             log.push(op);
         }
+        let checkpoint = if d.is_empty() {
+            None
+        } else {
+            if d.get_u8().map_err(|_| ReplError::Malformed)? != 1 {
+                return Err(ReplError::Malformed);
+            }
+            let origin =
+                CheckpointOrigin::decode(d.get_bytes().map_err(|_| ReplError::Malformed)?)?;
+            if origin.document().doc_type != doc_type || origin.doc_id() != doc_id {
+                return Err(ReplError::EpochScope);
+            }
+            let seed = doc
+                .get_change_by_hash(&ChangeHash(origin.seed_hash()))
+                .ok_or(ReplError::Malformed)?;
+            crate::checkpoint::validate_change(&origin, seed.raw_bytes())?;
+            Some(origin)
+        };
         d.finish().map_err(|_| ReplError::Malformed)?;
         Ok(Self {
             doc_type,
@@ -407,6 +497,7 @@ impl EncryptedDoc {
             change_authors: HashMap::new(),
             authors_indexed: 0,
             snapshot_cache: None,
+            checkpoint,
         })
     }
 
@@ -495,6 +586,39 @@ impl EncryptedDoc {
         F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
         V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
     {
+        self.edit_domain_preflight_gated(
+            logical_document,
+            gate,
+            device,
+            group,
+            rng,
+            domain_op,
+            edit,
+            validate_change,
+            |_| Ok(()),
+        )
+    }
+
+    /// Typed P1 edit with a rollback-safe preflight of the entire prospective projection.
+    /// Consumers encode their exact next checkpoint here, before admission or publication.
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_domain_preflight_gated<F, V, P>(
+        &mut self,
+        logical_document: &LogicalDocument,
+        gate: &EpochGate,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        rng: &mut impl CryptoRngCore,
+        domain_op: &DomainOp,
+        edit: F,
+        validate_change: V,
+        preflight: P,
+    ) -> Result<(SealedOp, ChangeHash), ReplError>
+    where
+        F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
+        V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
+        P: FnOnce(&AutoCommit) -> Result<(), ReplError>,
+    {
         if logical_document.doc_type != self.doc_type
             || logical_document.server_id != group.group_id()
             || domain_op.doc_type != self.doc_type
@@ -503,6 +627,12 @@ impl EncryptedDoc {
             return Err(ReplError::EpochScope);
         }
         gate.verify_scope(logical_document, self.doc_id)?;
+        self.verify_checkpoint_scope(logical_document, gate)?;
+        if group.member_signature_key(&device.device_id()).as_deref()
+            != Some(device.public_key_bytes().as_slice())
+        {
+            return Err(ReplError::EpochAuthority);
+        }
         if self.has_domain_marker(&domain_op.id(&device.device_id()))? {
             return Err(ReplError::NoChange);
         }
@@ -517,6 +647,10 @@ impl EncryptedDoc {
         staged.commit();
         let change = staged.get_last_local_change().ok_or(ReplError::NoChange)?;
         validate_change(domain_op, &change)?;
+        if change.actor_id().to_bytes() != device.device_id().as_bytes() {
+            return Err(ReplError::EpochAuthority);
+        }
+        preflight(&staged)?;
         let change_hash = change.hash();
         let op = SignedOp::sign_domain(
             device,
@@ -560,28 +694,69 @@ impl EncryptedDoc {
     where
         V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
     {
+        self.ingest_domain_preflight_gated(
+            logical_document,
+            gate,
+            sealed,
+            group,
+            device,
+            validate_change,
+            |_| Ok(()),
+        )
+    }
+
+    /// Inbound counterpart of [`Self::edit_domain_preflight_gated`]; a remote change cannot bypass
+    /// the exact checkpoint-size and schema preflight used by the editor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ingest_domain_preflight_gated<V, P>(
+        &mut self,
+        logical_document: &LogicalDocument,
+        gate: &EpochGate,
+        sealed: &SealedOp,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        validate_change: V,
+        preflight: P,
+    ) -> Result<Admission, ReplError>
+    where
+        V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
+        P: FnOnce(&AutoCommit) -> Result<(), ReplError>,
+    {
         self.check_doc(sealed.doc_type, sealed.doc_id)?;
         if logical_document.server_id != group.group_id() {
             return Err(ReplError::EpochScope);
         }
         gate.verify_scope(logical_document, self.doc_id)?;
+        self.verify_checkpoint_scope(logical_document, gate)?;
         if sealed.epoch != group.epoch() {
             return Err(ReplError::EpochUnavailable(sealed.epoch));
         }
         let key = group.channel_secret(device, self.doc_type, self.doc_id)?;
         let op = sealed.open(&key)?;
-        self.apply_domain_gated(logical_document, gate, op, validate_change)
+        // Possession of the group sealing key authenticates the relay, not the inner author.
+        // New open-epoch content must come from an admitted device so identity churn cannot
+        // mint fresh per-device shares. Previously accepted history remains valid after removal;
+        // historical seed/close authorization is a separate receipt-bound path.
+        if !self.applied.contains(&op.hash())
+            && group.member_signature_key(&op.author_device).as_deref()
+                != Some(op.author_pubkey.as_slice())
+        {
+            return Err(ReplError::EpochAuthority);
+        }
+        self.apply_domain_gated(logical_document, gate, op, validate_change, preflight)
     }
 
-    fn apply_domain_gated<V>(
+    fn apply_domain_gated<V, P>(
         &mut self,
         logical_document: &LogicalDocument,
         gate: &EpochGate,
         op: SignedOp,
         validate_change: V,
+        preflight: P,
     ) -> Result<Admission, ReplError>
     where
         V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
+        P: FnOnce(&AutoCommit) -> Result<(), ReplError>,
     {
         self.check_doc(op.doc_type, op.doc_id)?;
         gate.verify_scope(logical_document, self.doc_id)?;
@@ -608,6 +783,18 @@ impl EncryptedDoc {
         if change.actor_id().to_bytes() != op.author_device.as_bytes() {
             return Err(ReplError::EpochAuthority);
         }
+        if self.checkpoint.is_some()
+            && (change.deps().is_empty()
+                || change
+                    .deps()
+                    .iter()
+                    .any(|hash| self.doc.get_change_by_hash(hash).is_none()))
+        {
+            // Every accepted checkpoint edit must descend from the seed. Known descendants
+            // preserve this inductively; an independent root or unavailable predecessor cannot
+            // enter the document while its semantic projection is being checked.
+            return Err(ReplError::EpochScope);
+        }
         validate_change(&domain_op, &change)?;
         // Loading an inbound change authors nothing locally, so preserve the existing actor and
         // avoid `fork()`'s ambient random actor generation.
@@ -626,6 +813,7 @@ impl EncryptedDoc {
         if !marker_is_one {
             return Err(ReplError::Malformed);
         }
+        preflight(&staged)?;
         let admission = gate.admit_inbound_and_commit(
             AdmittedOperation {
                 op_hash,
@@ -871,6 +1059,24 @@ impl EncryptedDoc {
     fn check_doc(&self, doc_type: DocType, doc_id: u128) -> Result<(), ReplError> {
         if doc_type != self.doc_type || doc_id != self.doc_id {
             return Err(ReplError::WrongDocument);
+        }
+        Ok(())
+    }
+
+    fn verify_checkpoint_scope(
+        &self,
+        logical: &LogicalDocument,
+        gate: &EpochGate,
+    ) -> Result<(), ReplError> {
+        if let Some(origin) = &self.checkpoint {
+            if origin.document() != logical || origin.epoch() != gate.epoch() {
+                return Err(ReplError::EpochScope);
+            }
+        } else if gate.epoch() != 0
+            || self.doc_id != crate::epoch_zero_id(logical.doc_type, &logical.logical_key)
+        {
+            // A caller cannot open an empty successor and author an independent unsigned root.
+            return Err(ReplError::EpochScope);
         }
         Ok(())
     }

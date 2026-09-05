@@ -72,7 +72,7 @@ fn is_epoch_managed_doc_type(doc_type: DocType) -> bool {
     )
 }
 
-fn hash_parts(domain: &str, parts: &[&[u8]]) -> Hash32 {
+pub(crate) fn hash_parts(domain: &str, parts: &[&[u8]]) -> Hash32 {
     let mut h = Sha256::new();
     for part in std::iter::once(domain.as_bytes()).chain(parts.iter().copied()) {
         let len = u32::try_from(part.len()).expect("P1 hash parts are protocol-bounded");
@@ -625,6 +625,10 @@ impl CloseRecord {
             || self.doc_type != logical_document.doc_type
             || encrypted_doc.doc_type() != self.doc_type
             || encrypted_doc.doc_id() != self.doc_id
+            || encrypted_doc
+                .checkpoint_origin()
+                .map_or(0, |origin| origin.epoch())
+                != self.closed_epoch
         {
             return Err(ReplError::EpochScope);
         }
@@ -812,6 +816,31 @@ pub struct VerifiedReceipt {
     closed_epoch: u64,
     close_record_hash: Hash32,
     receipt_hash: Hash32,
+    seed_change_hash: Hash32,
+}
+
+impl VerifiedReceipt {
+    /// Scope authenticated by owner/tenure verification. Existing verified state may be retained
+    /// after succession; a newly received receipt must still pass current-owner verification.
+    pub fn document(&self) -> &LogicalDocument {
+        &self.document
+    }
+    /// The one epoch closed by this receipt.
+    pub fn closed_epoch(&self) -> u64 {
+        self.closed_epoch
+    }
+    /// Exact close that derives the authorized checkpoint document id.
+    pub fn close_record_hash(&self) -> Hash32 {
+        self.close_record_hash
+    }
+    /// Exact Automerge change hash authorized as the checkpoint's only unsigned root.
+    pub fn seed_change_hash(&self) -> Hash32 {
+        self.seed_change_hash
+    }
+    /// Receipt identity used by the settlement journal.
+    pub fn receipt_hash(&self) -> Hash32 {
+        self.receipt_hash
+    }
 }
 
 /// Owner-signed choice that resolves one visible receipt-equivocation fault.
@@ -1085,6 +1114,7 @@ impl Receipt {
             closed_epoch: self.closed_epoch,
             close_record_hash: self.close_record_hash,
             receipt_hash: self.hash(),
+            seed_change_hash: self.seed_change_hash,
         })
     }
 
