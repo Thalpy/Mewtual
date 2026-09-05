@@ -205,6 +205,18 @@ table with the commit that closed it.
   paths and content. Discovery covers the recovery namespace only, and its metadata becomes stale
   if the future coordinator permits writes after the scan. A malicious local process concurrently
   replacing filesystem paths is outside the mounted-store exclusion guarantee.
+- **Recovery staging cleanup deletes unpublished attempts, never saved recovery versions.** Only
+  strict canonical temporary sibling names under the mounted store's fixed parent are eligible,
+  with regular/non-reparse checks and exclusive access for the whole bounded pass. No caller can
+  supply an arbitrary target path. A first-write orphan without a destination is also unpublished:
+  the writer consumes its staging name by rename before reporting success, and callers must keep
+  durable source history/intents until that success. Cleanup does not parse/promote those bytes,
+  delete logical staged snapshots, or authorize pruning. Errors and caught panics can leave
+  partial removals, but never a completed pass or accounting credit. Retry runs the directory
+  flush even when no siblings remain; this retains the existing Unix-only directory-durability
+  guarantee, not a stronger Windows claim. A new inventory is mandatory after traversal because
+  deletion can affect directory iteration. Observed deleted lengths are not promised reclaimed
+  disk space. This API remains unwired to startup and network input.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
   no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains

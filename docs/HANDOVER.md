@@ -28,7 +28,7 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   one atomically replaced vault-sealed record retains the two versions, staged version and original
   warning deadline. Exact completed-eviction metadata makes post-rename flush failures retryable.
   Recovery encoding checks its aggregate 6 MiB cap before allocation. This API is not wired to
-  settlement or incoming traffic: shared storage admission, crash-orphan temp cleanup, and server
+  settlement or incoming traffic: shared storage admission, crash-orphan cleanup wiring, and server
   removal retention remain prerequisites. The three-slot limit is logical; replacement temporarily
   duplicates ciphertext. Recovery records currently remain after leaving, like held blobs.
   Storage admission now has a server-bound `EpochStorageBudget` plus an accounted recovery-save
@@ -39,10 +39,16 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   verifies scope and physical pools, and accounts temporary siblings without reading/promoting them.
   It holds exclusive store access across bounded steps; failures or parser panics poison the scan.
   Unknown orphan ownership blocks per-server composition, not just the affected filename.
+  Explicit recovery-staging cleanup is now implemented: an exclusive bounded pass removes only
+  canonical unpublished siblings, preserves all logical recovery slots and legacy files, syncs
+  successful batches, then hands off to a fresh inventory without releasing the store borrow.
+  Errors/panics can leave partial removals but yield no completion or accounting refund; an empty
+  retry still runs the directory-sync step. Tests cover failure/restart/reconciliation/retry,
+  no-destination first-write orphans and hardlinks. It is not automatically run on user vaults.
   Follow-up coverage: native Windows reparse/junction refusal and forced enumeration-order
   fixtures (current tests vary creation order; attribution itself occurs only after EOF).
   Budgets still require every managed record type; multi-record settlement,
-  cleanup and sole-writer wiring remain deferred. No guessed future deletion grants headroom, and
+  complete managed-type cleanup and sole-writer wiring remain deferred. No guessed future deletion grants headroom, and
   the low-level unaccounted save is not a production admission path.
   Studio-specific materializers, settlement/storage transactions, keyed catch-up and receipt-head
   discovery, application events and Studio integration remain. Catch-up integration must distinguish

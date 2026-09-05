@@ -29,6 +29,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::AppError;
 
 mod epoch_recovery;
+pub use epoch_recovery::cleanup::{EpochRecoveryCleanup, RecoveryCleanupProgress};
 pub use epoch_recovery::inventory::{
     EpochRecoveryInventory, EpochRecoveryScan, RecoveryInventoryEntry, RecoveryOrphan,
     RecoveryScanProgress,

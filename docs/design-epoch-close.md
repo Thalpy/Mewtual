@@ -6,7 +6,7 @@ crash journals, the persisted epoch gate, durable intent metadata, and bounded r
 The checkpoint/registry slice adds deterministic raw seeds, receipt-bound checkpoint installation and
 vault restore, exact projection-size preflight, and the typed registry materializer. Recovery-slot
 transitions now also have a standalone vault-sealed store API with crash-safe replacement/retry,
-peak-space accounting and bounded recovery-file inventory discovery. Studio
+peak-space accounting, bounded recovery-file inventory discovery and explicit staging cleanup. Studio
 materializers, settlement orchestration, sync discovery, complete storage integration and app/UI events
 remain later slices and the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
@@ -470,6 +470,16 @@ Temporaries are never read/promoted/deleted: verified final destinations identif
 after the whole scan, while any unresolved orphan prevents per-server composition. Known temporary
 bytes count wholly as settlement scratch. This remains one inventory component, not the sole
 coordinator or permission to prune; all other P1 record types still need inventory integration.
+
+Explicit recovery-staging cleanup is now implemented as a separate borrowing job. It removes
+only canonical unpublished atomic-write siblings, never final recovery files or logical staged
+versions. Each successful batch (including an empty retry) runs the existing directory sync;
+failed batches may have partially removed siblings but expose no completion or budget refund.
+EOF transitions directly into a new inventory while retaining exclusive store access. A scan may
+still find missed orphans because deletion affects directory traversal; another bounded cleanup
+pass is permitted. Accounting is released only by reconciliation of complete current inventories,
+not by the cleanup's observed-byte counter. Source history/intents must survive until their final
+save succeeds. Startup/settlement wiring and cleanup of other managed types remain future work.
 
 ## 13. Application events
 

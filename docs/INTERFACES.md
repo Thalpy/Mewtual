@@ -933,6 +933,19 @@ documents or over-cap usage still refuse budget construction until cleanup. The 
 not a write lease or a complete P1 inventory: the future coordinator must exclude intervening
 writes, inventory all other managed types and resolve orphan cleanup before production wiring.
 
+`ServerStore::cleanup_epoch_recovery_staging(&mut self)` returns an exclusive
+`EpochRecoveryCleanup`. Its count-only `step()` result, `RecoveryCleanupProgress`, names visited
+entries, removed files and their **observed ciphertext bytes**, not filesystem free space. Each
+step visits at most 64 names, with the same 131,072-entry traversal rail as inventory, and removes
+only exact canonical recovery-write staging siblings. It does not read bodies or touch published
+recovery files, even corrupt ones; logical staged snapshots stay inside their final record.
+Failure/panic poisons completion and can leave partial deletions. Every successful batch/EOF,
+including an empty retry, runs the existing parent sync (Unix-only durability). A successful EOF
+means that traversal ended, not that directory iteration during deletion found every orphan.
+`into_inventory()` requires successful EOF and transfers the exclusive borrow to a fresh scan;
+callers repeat cleanup if necessary and reconcile complete current inventories before refunding
+any budget. This standalone operation has no startup, actor/bridge or network invocation yet.
+
 `get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
 the complete bounded `states` array. The webview accepts only a strictly newer revision for its
 current server/channel view, so a delayed query completion or event cannot replace fresher receipt

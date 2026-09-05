@@ -12,8 +12,8 @@ use catcoms_wire::DocType;
 
 // Count ignored legacy names too: a flat directory with hostile clutter must not make one step
 // scan indefinitely. These are local discovery rails, not replicated admission rules.
-const MAX_DIRECTORY_ENTRIES: usize = 2 * MAX_ACCOUNTED_RECORDS;
-const ENTRIES_PER_STEP: usize = 64;
+pub(super) const MAX_DIRECTORY_ENTRIES: usize = 2 * MAX_ACCOUNTED_RECORDS;
+pub(super) const ENTRIES_PER_STEP: usize = 64;
 // One authenticated body per step; its byte ceiling is the addressed reader's existing cap.
 // This also bounds aggregate authentication work, independently of caller scheduling.
 const MAX_AUTHENTICATED_BYTES: u64 = MAX_ACCOUNTED_RECORDS as u64 * MAX_SEALED_BYTES as u64;
@@ -386,12 +386,12 @@ fn decode_scope(scope: &[u8]) -> Result<(u64, LogicalDocument), AppError> {
     Ok((server, document))
 }
 
-enum RecoveryName {
+pub(super) enum RecoveryName {
     Final([u8; 32]),
     Temporary([u8; 32]),
 }
 
-fn recovery_name(name: &OsStr) -> Result<Option<RecoveryName>, AppError> {
+pub(super) fn recovery_name(name: &OsStr) -> Result<Option<RecoveryName>, AppError> {
     // Windows direct opens can resolve case aliases. Recognize the entire reserved family
     // case-insensitively on every OS, then refuse noncanonical spelling instead of omitting bytes.
     if !name
@@ -435,7 +435,7 @@ fn filename_hash(text: &str) -> Result<[u8; 32], AppError> {
     Ok(hash)
 }
 
-fn is_link(metadata: &fs::Metadata) -> bool {
+pub(super) fn is_link(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;

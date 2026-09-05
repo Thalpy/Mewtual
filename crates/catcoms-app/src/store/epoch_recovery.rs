@@ -24,6 +24,7 @@ use super::epoch_budget::{
 };
 use super::*;
 
+pub(super) mod cleanup;
 pub(super) mod inventory;
 
 // Scope <= 501 bytes, completion metadata <= 73 bytes, and length framing. This is a local
