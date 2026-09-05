@@ -202,7 +202,8 @@ table with the commit that closed it.
   and redirected scan parents are refused. Orphan temporaries are never parsed, promoted or
   removed. Only an authenticated destination supplies ownership, and unresolved ownership blocks
   per-server inventory composition rather than inventing attribution. Debug output omits scopes,
-  paths and content. Discovery covers the recovery namespace only, and its metadata becomes stale
+  paths and content. The recovery-only API covers that namespace only; the explicit combined API
+  also covers owner journals. Each result reports its fixed coverage, and its metadata becomes stale
   if the future coordinator permits writes after the scan. A malicious local process concurrently
   replacing filesystem paths is outside the mounted-store exclusion guarantee.
 - **Recovery staging cleanup deletes unpublished attempts, never saved recovery versions.** Only
@@ -227,7 +228,11 @@ table with the commit that closed it.
   caught writer panics block accounting until full reconciliation. Loading visible bytes alone
   grants no publication authority: re-save and recheck current owner/tenure/session at send. The
   future coordinator must validate closure/seed before signing and must discover/clean this separate
-  namespace before constructing production budgets. No actor, startup or network path invokes it
+  namespace before constructing production budgets. The combined storage inventory/cleanup now
+  covers that namespace alongside recovery. A temporary's ownership requires a verified destination
+  with both the same namespace and digest, and owner bodies keep their own small pre-read cap.
+  Cleanup can remove unpublished attempts only; saved pending/high-water decisions are never targets.
+  No actor, startup or network path invokes it
   yet. Durability remains file-sync/atomic replacement plus Unix parent sync, not protection from
   device failure or restoration of an older vault backup.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be

@@ -34,9 +34,9 @@ const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 24 + 16;
 const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-recovery-store/v1";
 
 // Never derive Debug: authenticated plaintext contains private recovery projections.
-struct AuthenticatedRecoveryBytes {
-    plain: Zeroizing<Vec<u8>>,
-    physical_bytes: u64,
+pub(super) struct AuthenticatedEpochFileBytes {
+    pub(super) plain: Zeroizing<Vec<u8>>,
+    pub(super) physical_bytes: u64,
 }
 
 /// One requested recovery transition. Callers construct snapshots from a sealed epoch; this
@@ -450,7 +450,7 @@ impl ServerStore {
     fn read_epoch_recovery_plain(
         &self,
         path: &Path,
-    ) -> Result<Option<AuthenticatedRecoveryBytes>, AppError> {
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -473,7 +473,7 @@ impl ServerStore {
             return Err(invalid("recovery file exceeds its bound"));
         }
         let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &unframe(&bytes)?)?);
-        Ok(Some(AuthenticatedRecoveryBytes {
+        Ok(Some(AuthenticatedEpochFileBytes {
             plain,
             physical_bytes: bytes.len() as u64,
         }))

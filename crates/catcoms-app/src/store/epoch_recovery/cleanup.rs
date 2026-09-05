@@ -1,4 +1,4 @@
-//! Cleanup of unpublished recovery-write temporaries, never logical recovery snapshots.
+//! Cleanup of unpublished record-write temporaries, never saved journals or recovery snapshots.
 //!
 //! `atomic_write` consumes a temporary name by rename before it reports success. Thus, while
 //! the mounted store is exclusively borrowed, a canonical staging sibling cannot be an active
@@ -6,15 +6,15 @@
 //! succeeds; this cleanup is NOT permission to discard those sources or a settlement journal.
 
 use super::inventory::{
-    is_link, recovery_name, regular_file, EpochRecoveryScan, RecoveryName, ENTRIES_PER_STEP,
-    MAX_DIRECTORY_ENTRIES,
+    invalid, is_link, regular_file, storage_name, EpochInventoryCoverage, EpochStorageScan,
+    RecoveryName, ENTRIES_PER_STEP, MAX_DIRECTORY_ENTRIES,
 };
 use super::*;
 
 /// Counts from successful batches only. File lengths are observed ciphertext lengths, NOT an
 /// estimate of filesystem free space (hard links, sparse files and storage allocation can differ).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RecoveryCleanupProgress {
+pub struct EpochStorageCleanupProgress {
     /// Includes ignored final records and legacy names; all traversal work is charged.
     pub visited_entries: usize,
     /// Canonical temporary names unlinked in batches whose directory-sync step succeeded.
@@ -29,19 +29,21 @@ pub struct RecoveryCleanupProgress {
 /// Exclusive, bounded cleanup pass. There is no caller-supplied path and no automatic cleanup
 /// on Drop. Cancellation/errors can leave partial removals; they never roll files back or refund
 /// accounting. A new pass must complete its directory sync, even if no siblings remain.
-pub struct EpochRecoveryCleanup<'a> {
+pub struct EpochStorageCleanup<'a> {
+    coverage: EpochInventoryCoverage,
     store: &'a mut ServerStore,
     directory: fs::ReadDir,
     parent: PathBuf,
-    progress: RecoveryCleanupProgress,
+    progress: EpochStorageCleanupProgress,
     failed: bool,
     entry_limit: usize,
 }
 
-impl std::fmt::Debug for EpochRecoveryCleanup<'_> {
+impl std::fmt::Debug for EpochStorageCleanup<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Do not expose local vault paths or private record identifiers in generic diagnostics.
-        f.debug_struct("EpochRecoveryCleanup")
+        f.debug_struct("EpochStorageCleanup")
+            .field("coverage", &self.coverage)
             .field("progress", &self.progress)
             .field("failed", &self.failed)
             .finish_non_exhaustive()
@@ -57,33 +59,52 @@ impl ServerStore {
     /// because a failed first publication can leave a sibling before any final file exists.
     /// The mutable borrow excludes store writers through every step; the mount guard excludes
     /// other conforming app processes. Malicious concurrent local path replacement is out of scope.
-    pub fn cleanup_epoch_recovery_staging(&mut self) -> Result<EpochRecoveryCleanup<'_>, AppError> {
+    pub fn cleanup_epoch_recovery_staging(&mut self) -> Result<EpochStorageCleanup<'_>, AppError> {
+        self.cleanup_epoch_files(EpochInventoryCoverage::RecoveryOnly)
+    }
+
+    /// Explicitly remove unpublished recovery AND owner-journal write attempts. Saved pending
+    /// owner decisions are final files and are never removed. This is not P2 retention or pruning.
+    /// Success alone neither reconciles a budget nor enables network publication.
+    pub fn cleanup_epoch_storage_staging(&mut self) -> Result<EpochStorageCleanup<'_>, AppError> {
+        self.cleanup_epoch_files(EpochInventoryCoverage::RecoveryAndOwnerReceipts)
+    }
+
+    fn cleanup_epoch_files(
+        &mut self,
+        coverage: EpochInventoryCoverage,
+    ) -> Result<EpochStorageCleanup<'_>, AppError> {
         let parent = self.dir.join("servers");
         let metadata = fs::symlink_metadata(&parent).map_err(|e| AppError::Io(e.to_string()))?;
         if !metadata.is_dir() || is_link(&metadata) {
             return Err(invalid(
-                "recovery cleanup parent is not a regular directory",
+                "epoch storage cleanup parent is not a regular directory",
             ));
         }
         let directory = fs::read_dir(&parent).map_err(|e| AppError::Io(e.to_string()))?;
-        Ok(EpochRecoveryCleanup {
+        Ok(EpochStorageCleanup {
+            coverage,
             store: self,
             directory,
             parent,
-            progress: RecoveryCleanupProgress::default(),
+            progress: EpochStorageCleanupProgress::default(),
             failed: false,
             entry_limit: MAX_DIRECTORY_ENTRIES,
         })
     }
 }
 
-impl<'a> EpochRecoveryCleanup<'a> {
+impl<'a> EpochStorageCleanup<'a> {
+    /// Families eligible for this pass. Fixed at creation and preserved by `into_inventory`.
+    pub fn coverage(&self) -> EpochInventoryCoverage {
+        self.coverage
+    }
     /// Visit at most 64 entries, then sync the parent before reporting success (Unix directory
     /// sync; the existing non-Unix primitive is a no-op). Even a zero-removal batch syncs, so a
     /// retry after an uncertain unlink cannot convert absence into unproven free-space credit.
     /// A failed/cancelled pass may already have removed some unpublished siblings. It never
     /// changes a budget: only complete, current inventory reconciliation can release charges.
-    pub fn step(&mut self) -> Result<RecoveryCleanupProgress, AppError> {
+    pub fn step(&mut self) -> Result<EpochStorageCleanupProgress, AppError> {
         self.step_with_io(|path| fs::remove_file(path), sync_directory)
     }
 
@@ -93,9 +114,9 @@ impl<'a> EpochRecoveryCleanup<'a> {
         &mut self,
         mut unlink: impl FnMut(&Path) -> std::io::Result<()>,
         mut sync: impl FnMut(&Path) -> std::io::Result<()>,
-    ) -> Result<RecoveryCleanupProgress, AppError> {
+    ) -> Result<EpochStorageCleanupProgress, AppError> {
         if self.failed {
-            return Err(invalid("recovery cleanup failed; start a new pass"));
+            return Err(invalid("epoch storage cleanup failed; start a new pass"));
         }
         if self.progress.complete {
             return Ok(self.progress);
@@ -110,9 +131,11 @@ impl<'a> EpochRecoveryCleanup<'a> {
             let entry = entry.map_err(|e| AppError::Io(e.to_string()))?;
             next.visited_entries += 1;
             if next.visited_entries > self.entry_limit {
-                return Err(invalid("recovery cleanup directory limit reached"));
+                return Err(invalid("epoch storage cleanup directory limit reached"));
             }
-            let Some(RecoveryName::Temporary(_)) = recovery_name(&entry.file_name())? else {
+            let Some((_, RecoveryName::Temporary(_))) =
+                storage_name(&entry.file_name(), self.coverage)?
+            else {
                 // Finals (including corrupt ones) and unrelated staging families are not ours
                 // to remove. The subsequent inventory, not cleanup, authenticates final records.
                 continue;
@@ -120,17 +143,19 @@ impl<'a> EpochRecoveryCleanup<'a> {
             let path = self.parent.join(entry.file_name());
             let metadata = fs::symlink_metadata(&path).map_err(|e| AppError::Io(e.to_string()))?;
             if !regular_file(&metadata) {
-                return Err(invalid("recovery cleanup candidate is not a regular file"));
+                return Err(invalid(
+                    "epoch storage cleanup candidate is not a regular file",
+                ));
             }
             // Check the counter before unlink. Even an artificial huge sparse-file length must
             // not overflow and leave a successful-looking wrapped counter after deletion.
             let removed_bytes = next
                 .removed_ciphertext_bytes
                 .checked_add(metadata.len())
-                .ok_or_else(|| invalid("recovery cleanup byte counter overflow"))?;
+                .ok_or_else(|| invalid("epoch storage cleanup byte counter overflow"))?;
             unlink(&path).map_err(|e| {
                 AppError::Io(format!(
-                    "recovery staging cleanup: {e}; earlier siblings may already be removed"
+                    "epoch staging cleanup: {e}; earlier siblings may already be removed"
                 ))
             })?;
             next.removed_files += 1;
@@ -147,11 +172,11 @@ impl<'a> EpochRecoveryCleanup<'a> {
     /// Start a fresh inventory without releasing exclusive store access. Cleanup EOF is not a
     /// claim that no orphan remains: callers must inspect this scan's completed result, repeat
     /// cleanup if necessary, and inventory other P1 types before composing a whole-server budget.
-    pub fn into_inventory(self) -> Result<EpochRecoveryScan<'a>, AppError> {
+    pub fn into_inventory(self) -> Result<EpochStorageScan<'a>, AppError> {
         if self.failed || !self.progress.complete {
-            return Err(invalid("recovery cleanup pass is incomplete"));
+            return Err(invalid("epoch storage cleanup pass is incomplete"));
         }
-        self.store.scan_epoch_recovery()
+        self.store.scan_epoch_files(self.coverage)
     }
 }
 
@@ -197,14 +222,14 @@ mod tests {
         store.epoch_recovery_path(&scope_bytes(7, &document()).unwrap())
     }
 
-    fn inventory(mut scan: EpochRecoveryScan<'_>) -> EpochRecoveryInventory {
+    fn inventory(mut scan: EpochStorageScan<'_>) -> EpochRecoveryInventory {
         while !scan.step().unwrap().complete {}
         scan.finish().unwrap()
     }
 
-    fn complete(store: &mut ServerStore) -> (RecoveryCleanupProgress, EpochRecoveryInventory) {
+    fn complete(store: &mut ServerStore) -> (EpochStorageCleanupProgress, EpochRecoveryInventory) {
         let mut job = store.cleanup_epoch_recovery_staging().unwrap();
-        let mut before = RecoveryCleanupProgress::default();
+        let mut before = EpochStorageCleanupProgress::default();
         loop {
             let after = job.step().unwrap();
             assert!(after.visited_entries - before.visited_entries <= ENTRIES_PER_STEP);
@@ -214,6 +239,58 @@ mod tests {
             }
         }
         (before, inventory(job.into_inventory().unwrap()))
+    }
+
+    #[test]
+    fn combined_cleanup_flush_failure_retries_at_eof_without_losing_coverage() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        for suffix in ["recovery", "owner-receipts"] {
+            let path = root
+                .path()
+                .join("servers")
+                .join(format!("{}.{suffix}", "ab".repeat(32)));
+            fs::write(staging_candidate(&path, 900), b"unpublished").unwrap();
+        }
+        let mut cleanup = store.cleanup_epoch_storage_staging().unwrap();
+        assert_eq!(
+            cleanup.coverage(),
+            EpochInventoryCoverage::RecoveryAndOwnerReceipts
+        );
+        let result = cleanup.step_with_io(
+            |path| fs::remove_file(path),
+            |_| Err(std::io::Error::other("flush failure")),
+        );
+        assert!(matches!(result, Err(AppError::CommittedButNotDurable(_))));
+        assert_eq!(cleanup.progress.removed_files, 0); // Failed batches report no success.
+        assert!(cleanup.into_inventory().is_err());
+        drop(store);
+        let mut store = open(root.path());
+        let mut cleanup = store.cleanup_epoch_storage_staging().unwrap();
+        let mut syncs = 0;
+        let done = cleanup
+            .step_with_io(
+                |path| fs::remove_file(path),
+                |_| {
+                    syncs += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(done.complete);
+        assert_eq!(done.removed_files, 0);
+        assert_eq!(syncs, 1); // An empty retry must still make earlier unlinks durable.
+        let scan = cleanup.into_inventory().unwrap();
+        assert_eq!(
+            scan.coverage(),
+            EpochInventoryCoverage::RecoveryAndOwnerReceipts
+        );
+        let result = inventory(scan);
+        assert_eq!(
+            result.coverage(),
+            EpochInventoryCoverage::RecoveryAndOwnerReceipts
+        );
+        assert_eq!(result.orphans().len(), 0);
     }
 
     #[test]

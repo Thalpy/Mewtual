@@ -959,12 +959,34 @@ high-water receipt; the journal wire encoding is unchanged.
 
 The bounded sealed `.owner-receipts` record binds local server/group/type/key. Permanent bytes
 charge protocol allowance; replacement copies borrow the same logical-document settlement reserve
-as recovery records. `epoch_owner_receipt_inventory_record` observes one final file only. Full
-namespace/orphan inventory, cleanup, the sole coordinator and network publication remain deferred;
-the recovery-only scanner must not be used as this namespace's inventory. Before actual sending,
+as recovery records. `epoch_owner_receipt_inventory_record` observes one final file only; the combined
+inventory below covers its namespace and orphan temporaries. The sole coordinator and network
+publication remain deferred; the recovery-only scanner still excludes owner files. Before actual sending,
 the publisher must re-prepare/re-save the exact choice and recheck current owner, tenure and session.
 It must validate the close and deterministic seed before signing in the first place. File-sync and
 atomic replacement use the existing store primitive, with parent-directory durability on Unix only.
+
+`scan_epoch_storage()` returns `EpochStorageScan`; `cleanup_epoch_storage_staging()` returns
+`EpochStorageCleanup`. These share the recovery engine and its unchanged aggregate traversal,
+metadata and per-step rails, but include both `.recovery` and `.owner-receipts` files. `coverage()`
+on cleanup, scan and completed `EpochStorageInventory` is fixed as
+`EpochInventoryCoverage::RecoveryAndOwnerReceipts`; the old recovery-only APIs return
+`RecoveryOnly`. The old recovery type names remain aliases of the common types. None means all P1
+storage or a continuing write lease. `EpochStorageScanProgress` retains `recovery_records` and adds
+`owner_receipt_records`; each step authenticates at most one body TOTAL. Each namespace uses its
+own bounded reader, scope domain and schema. `EpochStorageInventoryEntry::kind` and
+`EpochStorageOrphan::kind()` expose the physical family; orphan attribution keys on both that kind
+and digest. Owner final bytes charge protocol allowance; owner temporaries charge settlement
+scratch to their authenticated destination's shared logical-document owner. Unknown ownership in
+either covered family blocks per-server composition. Owner journals are historical vault state:
+inventory never requires current-owner authorization and never grants publication authority.
+
+Combined cleanup removes only canonical unpublished staging siblings, never saved pending/published
+journals or recovery slots. Failure can leave partial removals; empty retries still sync. Its
+`into_inventory()` keeps both exclusive access and coverage unchanged. Recovery-only APIs continue
+ignoring even malformed owner-only aliases (while charging traversal); combined APIs reject them.
+Other managed families, sole-writer admission, startup/actor/network integration and retention of
+saved records remain separate work. No cleanup operation is automatically invoked yet.
 
 `get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
 the complete bounded `states` array. The webview accepts only a strictly newer revision for its

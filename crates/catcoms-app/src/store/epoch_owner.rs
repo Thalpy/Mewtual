@@ -14,12 +14,13 @@ use super::epoch_budget::{
     EpochStorageBudget, Footprint, Replacement, StorageRecord, StorageScope, WritePurpose,
 };
 use super::epoch_recovery::inventory::{is_link, regular_file};
+use super::epoch_recovery::AuthenticatedEpochFileBytes;
 use super::*;
 
-const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-owner-store/v1";
+pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-owner-store/v1";
 // Full framed local/group/type/key scope plus length framing, separate from the signed wire.
 const MAX_RECORD_BYTES: usize = MAX_OWNER_RECEIPT_JOURNAL_BYTES + 1024;
-const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
+pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
 
 /// Historical, authenticated journal view. It is not a publication permit or pruning authority.
 /// The state has no mutation API: transitions must reload the current on-disk journal.
@@ -79,7 +80,11 @@ impl EpochOwnerReceiptState {
         Ok(Zeroizing::new(e.finish()))
     }
 
-    fn decode(bytes: &[u8], scope: &[u8], document: &LogicalDocument) -> Result<Self, AppError> {
+    pub(super) fn decode(
+        bytes: &[u8],
+        scope: &[u8],
+        document: &LogicalDocument,
+    ) -> Result<Self, AppError> {
         if bytes.len() > MAX_RECORD_BYTES {
             return Err(invalid("record exceeds its bound"));
         }
@@ -271,11 +276,24 @@ impl ServerStore {
             return Err(invalid("parent is not a regular directory"));
         }
         let path = self.epoch_owner_path(scope);
-        let metadata = match fs::symlink_metadata(&path) {
+        match self.read_epoch_owner_plain(&path)? {
+            None => Ok((EpochOwnerReceiptState::default(), None)),
+            Some(bytes) => Ok((
+                EpochOwnerReceiptState::decode(&bytes.plain, scope, document)?,
+                Some(bytes.physical_bytes),
+            )),
+        }
+    }
+
+    // Same bounded reader for addressed loads and discovery; inventory must not weaken this
+    // namespace's small cap or treat a disappeared enumerated record as an empty journal.
+    pub(super) fn read_epoch_owner_plain(
+        &self,
+        path: &Path,
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((EpochOwnerReceiptState::default(), None))
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(AppError::Io(e.to_string())),
         };
         if !regular_file(&metadata) || metadata.len() > MAX_SEALED_BYTES as u64 {
@@ -293,14 +311,14 @@ impl ServerStore {
             return Err(invalid("journal exceeds its bound"));
         }
         let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &unframe(&bytes)?)?);
-        Ok((
-            EpochOwnerReceiptState::decode(&plain, scope, document)?,
-            Some(bytes.len() as u64),
-        ))
+        Ok(Some(AuthenticatedEpochFileBytes {
+            plain,
+            physical_bytes: bytes.len() as u64,
+        }))
     }
 }
 
-fn scope_bytes(server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {
+pub(super) fn scope_bytes(server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {
     // Bound before cloning public fields. The constructor below is the schema authority.
     if document.server_id.len() > 256 || document.logical_key.len() > 192 {
         return Err(invalid("scope exceeds its bound"));
@@ -320,7 +338,7 @@ fn scope_bytes(server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppEr
     Ok(e.finish())
 }
 
-fn storage_record(
+pub(super) fn storage_record(
     server: u64,
     document: &LogicalDocument,
     scope: &[u8],
@@ -342,6 +360,9 @@ fn storage_record(
 fn invalid(error: impl std::fmt::Display) -> AppError {
     AppError::Invalid(format!("epoch owner receipt: {error}"))
 }
+
+#[cfg(test)]
+mod inventory_tests;
 
 #[cfg(test)]
 mod tests {

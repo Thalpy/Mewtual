@@ -52,8 +52,14 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   Tests cover real MLS A-to-B-to-A tenure changes, restart, failed writes, stale completion,
   malformed scopes and shared recovery/receipt reserve ownership. This is not a live publisher:
   the coordinator still must validate the close/seed before signing and recheck authority at send.
-  The separate `.owner-receipts` namespace has addressed final-file accounting only; full discovery,
-  orphan cleanup and server-removal lifecycle are not yet wired for it. Recovery scans do not cover it.
+  A combined `scan_epoch_storage` / `cleanup_epoch_storage_staging` now covers recovery files and
+  `.owner-receipts` journals under one exclusive store borrow. Coverage is explicit and survives
+  cleanup-to-scan handoff. Matching orphan destinations requires both namespace and digest; owner
+  bodies retain their own small cap and protocol-pool accounting. Mixed-family tests cover failed
+  writes, restart, cleanup, reconciliation and exact publication retry without touching saved choices.
+  Existing recovery-only APIs keep their scope and old type names as aliases. Neither path is
+  automatically invoked on user vaults; other managed types, server-removal lifecycle and the sole
+  production budget/coordinator still need integration.
   Follow-up coverage: native Windows reparse/junction refusal and forced enumeration-order
   fixtures (current tests vary creation order; attribution itself occurs only after EOF).
   Budgets still require every managed record type; multi-record settlement,

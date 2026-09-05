@@ -1,4 +1,4 @@
-//! Bounded discovery of the recovery namespace, not a complete P1 storage inventory.
+//! Shared bounded discovery of recovery and owner-journal files, not all P1 storage.
 //!
 //! A scan borrows the mounted store exclusively across steps. It never repairs, promotes or
 //! removes a file. Bodies are authenticated one at a time and discarded; only bounded metadata
@@ -8,7 +8,54 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::store::epoch_budget::MAX_ACCOUNTED_RECORDS;
+use crate::store::epoch_owner;
 use catcoms_wire::DocType;
+
+/// Explicit file-family coverage, carried unchanged through cleanup, scan and completed result.
+/// Neither variant includes blobs, epoch snapshots, intents or other future P1 record families.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpochInventoryCoverage {
+    /// Compatibility mode: existing recovery-only APIs never inspect/delete owner journals.
+    RecoveryOnly,
+    /// Both currently implemented standalone P1 store record families, under one store borrow.
+    RecoveryAndOwnerReceipts,
+}
+
+/// Physical record family; a digest alone must never identify a temporary's destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EpochRecordKind {
+    /// Retained/staged recovery snapshots.
+    Recovery,
+    /// Owner-local pending and published receipt decisions.
+    OwnerReceipts,
+}
+
+impl EpochRecordKind {
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Recovery => ".recovery",
+            Self::OwnerReceipts => ".owner-receipts",
+        }
+    }
+    fn domain(self) -> &'static [u8] {
+        match self {
+            Self::Recovery => RECORD_DOMAIN,
+            Self::OwnerReceipts => epoch_owner::RECORD_DOMAIN,
+        }
+    }
+    fn scope(self, server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {
+        match self {
+            Self::Recovery => scope_bytes(server, document),
+            Self::OwnerReceipts => epoch_owner::scope_bytes(server, document),
+        }
+    }
+    fn sealed_cap(self) -> usize {
+        match self {
+            Self::Recovery => MAX_SEALED_BYTES,
+            Self::OwnerReceipts => epoch_owner::MAX_SEALED_BYTES,
+        }
+    }
+}
 
 // Count ignored legacy names too: a flat directory with hostile clutter must not make one step
 // scan indefinitely. These are local discovery rails, not replicated admission rules.
@@ -20,11 +67,13 @@ const MAX_AUTHENTICATED_BYTES: u64 = MAX_ACCOUNTED_RECORDS as u64 * MAX_SEALED_B
 
 /// Counts only. Progress is not evidence that an incomplete inventory is safe to spend against.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RecoveryScanProgress {
-    /// Includes non-recovery entries skipped during traversal.
+pub struct EpochStorageScanProgress {
+    /// Includes entries outside this scan's coverage skipped during traversal.
     pub visited_entries: usize,
-    /// Successfully authenticated canonical final records.
+    /// Successfully authenticated canonical recovery final records (never owner journals).
     pub recovery_records: usize,
+    /// Successfully authenticated owner journals; always zero in recovery-only mode.
+    pub owner_receipt_records: usize,
     /// Canonically named staging siblings, including empty or partial files.
     pub orphan_files: usize,
     /// Physical ciphertext bytes read and authenticated (no orphan bodies are read).
@@ -33,8 +82,10 @@ pub struct RecoveryScanProgress {
     pub complete: bool,
 }
 
-/// Authenticated attribution and physical accounting for one final recovery file.
-pub struct RecoveryInventoryEntry {
+/// Authenticated attribution and physical accounting for one final record in this scan's coverage.
+pub struct EpochStorageInventoryEntry {
+    /// The authenticated physical namespace, not inferred from a matching digest alone.
+    pub kind: EpochRecordKind,
     /// Local server mount id inside the authenticated record.
     pub server: u64,
     /// Full group/type/key scope inside that record, independent of the current server registry.
@@ -43,22 +94,27 @@ pub struct RecoveryInventoryEntry {
     pub record: StorageRecord,
 }
 
-impl std::fmt::Debug for RecoveryInventoryEntry {
+impl std::fmt::Debug for EpochStorageInventoryEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RecoveryInventoryEntry")
+        f.debug_struct("EpochStorageInventoryEntry")
+            .field("kind", &self.kind)
             .field("footprint", &self.record.footprint)
             .finish_non_exhaustive()
     }
 }
 
 /// Observed staging metadata. Neither the filename nor the bytes authorize a promotion/deletion.
-pub struct RecoveryOrphan {
+pub struct EpochStorageOrphan {
     name: String,
-    destination: [u8; 32],
+    destination: (EpochRecordKind, [u8; 32]),
     bytes: u64,
 }
 
-impl RecoveryOrphan {
+impl EpochStorageOrphan {
+    /// Namespace whose canonical staging name was observed; this does not prove ownership.
+    pub fn kind(&self) -> EpochRecordKind {
+        self.destination.0
+    }
     /// Canonical basename, never an arbitrary path. A future cleanup operation must revalidate
     /// the actual file under exclusive store access, not act on a stale inventory result alone.
     pub fn name(&self) -> &str {
@@ -71,30 +127,32 @@ impl RecoveryOrphan {
     }
 }
 
-impl std::fmt::Debug for RecoveryOrphan {
+impl std::fmt::Debug for EpochStorageOrphan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RecoveryOrphan")
+        f.debug_struct("EpochStorageOrphan")
             .field("bytes", &self.bytes)
             .finish_non_exhaustive()
     }
 }
 
-/// Complete discovery of recovery files only. Other P1 files, blobs and legacy server snapshots
-/// are NOT inventoried here. After releasing the scan guard, writes can make this view stale.
+/// Complete discovery of only the families named by `coverage()`. Other P1 files, blobs and
+/// legacy server snapshots are NOT inventoried here. Releasing the scan can make this view stale.
 /// It deliberately has no public constructor, including `Default`; completion requires scan EOF.
 ///
 /// ```compile_fail
-/// use catcoms_app::store::EpochRecoveryInventory;
-/// let unverified_empty = EpochRecoveryInventory::default();
+/// use catcoms_app::store::EpochStorageInventory;
+/// let unverified_empty = EpochStorageInventory::default();
 /// ```
-pub struct EpochRecoveryInventory {
-    records: BTreeMap<[u8; 32], RecoveryInventoryEntry>,
-    orphans: BTreeMap<String, RecoveryOrphan>,
+pub struct EpochStorageInventory {
+    coverage: EpochInventoryCoverage,
+    records: BTreeMap<(EpochRecordKind, [u8; 32]), EpochStorageInventoryEntry>,
+    orphans: BTreeMap<String, EpochStorageOrphan>,
 }
 
-impl std::fmt::Debug for EpochRecoveryInventory {
+impl std::fmt::Debug for EpochStorageInventory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EpochRecoveryInventory")
+        f.debug_struct("EpochStorageInventory")
+            .field("coverage", &self.coverage)
             .field("records", &self.records.len())
             .field("orphans", &self.orphans.len())
             .field("unresolved_orphans", &self.unresolved_orphans())
@@ -102,21 +160,27 @@ impl std::fmt::Debug for EpochRecoveryInventory {
     }
 }
 
-impl EpochRecoveryInventory {
-    fn empty() -> Self {
+impl EpochStorageInventory {
+    fn empty(coverage: EpochInventoryCoverage) -> Self {
         Self {
+            coverage,
             records: BTreeMap::new(),
             orphans: BTreeMap::new(),
         }
     }
 
-    /// Authenticated final entries in deterministic storage-key order. No recovery content.
-    pub fn records(&self) -> impl ExactSizeIterator<Item = &RecoveryInventoryEntry> {
+    /// Exact families inventoried. This is not a complete-P1-storage attestation.
+    pub fn coverage(&self) -> EpochInventoryCoverage {
+        self.coverage
+    }
+
+    /// Authenticated final entries in namespace/storage-key order. No content or receipt bodies.
+    pub fn records(&self) -> impl ExactSizeIterator<Item = &EpochStorageInventoryEntry> {
         self.records.values()
     }
 
     /// Staging metadata in deterministic basename order, including unresolved ownership.
-    pub fn orphans(&self) -> impl ExactSizeIterator<Item = &RecoveryOrphan> {
+    pub fn orphans(&self) -> impl ExactSizeIterator<Item = &EpochStorageOrphan> {
         self.orphans.values()
     }
 
@@ -129,7 +193,7 @@ impl EpochRecoveryInventory {
             .count()
     }
 
-    /// Recovery-namespace inputs for a future complete server inventory. Refuses if ANY orphan
+    /// Inputs from the reported coverage for a future complete server inventory. Refuses if ANY orphan
     /// is unresolved: an unknown file might belong to this server, even when others do not.
     /// Known temporaries are charged wholly as settlement scratch to the verified destination.
     /// This does not construct a budget: callers must still inventory every other managed type
@@ -142,9 +206,9 @@ impl EpochRecoveryInventory {
     ) -> Result<Vec<StorageRecord>, AppError> {
         StorageScope::new(server, group).map_err(invalid)?;
         if self.unresolved_orphans() != 0 {
-            return Err(invalid("unresolved recovery staging ownership"));
+            return Err(invalid("unresolved epoch staging ownership"));
         }
-        let belongs = |entry: &RecoveryInventoryEntry| {
+        let belongs = |entry: &EpochStorageInventoryEntry| {
             entry.server == server && entry.document.server_id == group
         };
         let mut result: Vec<_> = self
@@ -157,8 +221,17 @@ impl EpochRecoveryInventory {
             let entry = &self.records[&orphan.destination];
             if belongs(entry) {
                 let mut e = Encoder::new();
-                e.put_bytes(b"catcoms/epoch-recovery-temp-inventory/v1")
-                    .expect("constant fits");
+                // Preserve recovery temporary ids. Owner names use a separate domain and the
+                // full basename, so identical textual digests cannot alias across namespaces.
+                e.put_bytes(match orphan.kind() {
+                    EpochRecordKind::Recovery => {
+                        b"catcoms/epoch-recovery-temp-inventory/v1".as_slice()
+                    }
+                    EpochRecordKind::OwnerReceipts => {
+                        b"catcoms/epoch-owner-temp-inventory/v1".as_slice()
+                    }
+                })
+                .expect("constant fits");
                 e.put_bytes(orphan.name.as_bytes())
                     .expect("bounded basename fits");
                 result.push(StorageRecord {
@@ -177,20 +250,20 @@ impl EpochRecoveryInventory {
 
 /// Exclusive, incrementally scheduled inventory job. Dropping it cancels discovery; neither
 /// cancellation nor error exposes a partial inventory. No store mutation is performed.
-pub struct EpochRecoveryScan<'a> {
+pub struct EpochStorageScan<'a> {
     store: &'a mut ServerStore,
     directory: fs::ReadDir,
-    inventory: EpochRecoveryInventory,
-    progress: RecoveryScanProgress,
+    inventory: EpochStorageInventory,
+    progress: EpochStorageScanProgress,
     failed: bool,
     entry_limit: usize,
     record_limit: usize,
     byte_limit: u64,
 }
 
-impl std::fmt::Debug for EpochRecoveryScan<'_> {
+impl std::fmt::Debug for EpochStorageScan<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EpochRecoveryScan")
+        f.debug_struct("EpochStorageScan")
             .field("progress", &self.progress)
             .field("failed", &self.failed)
             .finish_non_exhaustive()
@@ -201,20 +274,33 @@ impl ServerStore {
     /// Begin a nonrecursive scan of the reserved recovery filename family. The exclusive borrow
     /// lasts across ALL steps, excluding conforming writers; the mount lock excludes a second app
     /// process. A malicious local process replacing directories concurrently is out of scope.
-    pub fn scan_epoch_recovery(&mut self) -> Result<EpochRecoveryScan<'_>, AppError> {
+    pub fn scan_epoch_recovery(&mut self) -> Result<EpochStorageScan<'_>, AppError> {
+        self.scan_epoch_files(EpochInventoryCoverage::RecoveryOnly)
+    }
+
+    /// Discover recovery files AND owner journals under one uninterrupted exclusive borrow.
+    /// Other record families still need integration before this can bootstrap a production budget.
+    pub fn scan_epoch_storage(&mut self) -> Result<EpochStorageScan<'_>, AppError> {
+        self.scan_epoch_files(EpochInventoryCoverage::RecoveryAndOwnerReceipts)
+    }
+
+    pub(in crate::store) fn scan_epoch_files(
+        &mut self,
+        coverage: EpochInventoryCoverage,
+    ) -> Result<EpochStorageScan<'_>, AppError> {
         let path = self.dir.join("servers");
         let metadata = fs::symlink_metadata(&path).map_err(|e| AppError::Io(e.to_string()))?;
         if !metadata.is_dir() || is_link(&metadata) {
             return Err(invalid(
-                "recovery inventory parent is not a regular directory",
+                "epoch storage inventory parent is not a regular directory",
             ));
         }
         let directory = fs::read_dir(path).map_err(|e| AppError::Io(e.to_string()))?;
-        Ok(EpochRecoveryScan {
+        Ok(EpochStorageScan {
             store: self,
             directory,
-            inventory: EpochRecoveryInventory::empty(),
-            progress: RecoveryScanProgress::default(),
+            inventory: EpochStorageInventory::empty(coverage),
+            progress: EpochStorageScanProgress::default(),
             failed: false,
             entry_limit: MAX_DIRECTORY_ENTRIES,
             record_limit: MAX_ACCOUNTED_RECORDS,
@@ -223,20 +309,26 @@ impl ServerStore {
     }
 }
 
-impl EpochRecoveryScan<'_> {
+impl EpochStorageScan<'_> {
+    /// Fixed coverage for this job, including before it completes.
+    pub fn coverage(&self) -> EpochInventoryCoverage {
+        self.inventory.coverage
+    }
     /// Visit at most 64 directory entries and authenticate at most one bounded record. Schedule
     /// another step when `complete` is false. An error permanently poisons this scan, including
     /// errors caused by local corruption, disappearance, aliases or resource exhaustion.
-    pub fn step(&mut self) -> Result<RecoveryScanProgress, AppError> {
+    pub fn step(&mut self) -> Result<EpochStorageScanProgress, AppError> {
         self.guarded_step(Self::step_inner)
     }
 
     fn guarded_step(
         &mut self,
-        work: impl FnOnce(&mut Self) -> Result<RecoveryScanProgress, AppError>,
-    ) -> Result<RecoveryScanProgress, AppError> {
+        work: impl FnOnce(&mut Self) -> Result<EpochStorageScanProgress, AppError>,
+    ) -> Result<EpochStorageScanProgress, AppError> {
         if self.failed {
-            return Err(invalid("recovery inventory scan failed; restart required"));
+            return Err(invalid(
+                "epoch storage inventory scan failed; restart required",
+            ));
         }
         // Poison BEFORE traversing/parsing: even a caught parser panic must not let a caller
         // resume beyond the offending entry and declare an incomplete inventory complete.
@@ -248,7 +340,7 @@ impl EpochRecoveryScan<'_> {
         result
     }
 
-    fn step_inner(&mut self) -> Result<RecoveryScanProgress, AppError> {
+    fn step_inner(&mut self) -> Result<EpochStorageScanProgress, AppError> {
         if self.progress.complete {
             return Ok(self.progress);
         }
@@ -260,61 +352,82 @@ impl EpochRecoveryScan<'_> {
             let entry = entry.map_err(|e| AppError::Io(e.to_string()))?;
             self.progress.visited_entries += 1;
             if self.progress.visited_entries > self.entry_limit {
-                return Err(invalid("recovery inventory directory limit reached"));
+                return Err(invalid("epoch storage inventory directory limit reached"));
             }
             let name = entry.file_name();
-            let Some(kind) = recovery_name(&name)? else {
+            let Some((family, kind)) = storage_name(&name, self.coverage())? else {
                 continue;
             };
             if self.inventory.records.len() + self.inventory.orphans.len() >= self.record_limit {
-                return Err(invalid("recovery inventory record limit reached"));
+                return Err(invalid("epoch storage inventory record limit reached"));
             }
             let metadata =
                 fs::symlink_metadata(entry.path()).map_err(|e| AppError::Io(e.to_string()))?;
             if !regular_file(&metadata) {
-                return Err(invalid("recovery inventory entry is not a regular file"));
+                return Err(invalid(
+                    "epoch storage inventory entry is not a regular file",
+                ));
             }
             match kind {
                 RecoveryName::Final(hash) => {
+                    // Select the small owner-journal cap BEFORE any body read or decrypt. A
+                    // combined scan must not silently grant it recovery's much larger allowance.
+                    if metadata.len() > family.sealed_cap() as u64 {
+                        return Err(invalid("epoch inventory file exceeds its family bound"));
+                    }
                     // The shared reader independently caps the opened file. Include actual bytes
                     // in the aggregate check as well, in case the metadata changed before open.
                     let peak = self
                         .progress
                         .authenticated_bytes
                         .checked_add(metadata.len())
-                        .ok_or_else(|| invalid("recovery inventory byte limit reached"))?;
+                        .ok_or_else(|| invalid("epoch storage inventory byte limit reached"))?;
                     if peak > self.byte_limit {
-                        return Err(invalid("recovery inventory byte limit reached"));
+                        return Err(invalid("epoch storage inventory byte limit reached"));
                     }
-                    let AuthenticatedRecoveryBytes {
+                    let AuthenticatedEpochFileBytes {
                         plain,
                         physical_bytes: size,
-                    } = self
-                        .store
-                        .read_epoch_recovery_plain(&entry.path())?
-                        .ok_or_else(|| invalid("recovery record disappeared during inventory"))?;
+                    } = match family {
+                        EpochRecordKind::Recovery => {
+                            self.store.read_epoch_recovery_plain(&entry.path())
+                        }
+                        EpochRecordKind::OwnerReceipts => {
+                            self.store.read_epoch_owner_plain(&entry.path())
+                        }
+                    }?
+                    .ok_or_else(|| invalid("epoch record disappeared during inventory"))?;
                     self.progress.authenticated_bytes = self
                         .progress
                         .authenticated_bytes
                         .checked_add(size)
                         .filter(|bytes| *bytes <= self.byte_limit)
-                        .ok_or_else(|| invalid("recovery inventory byte limit reached"))?;
+                        .ok_or_else(|| invalid("epoch storage inventory byte limit reached"))?;
                     let mut d = Decoder::new(&plain);
                     let scope = d.get_bytes().map_err(invalid)?;
-                    let (server, document) = decode_scope(scope)?;
+                    let (server, document) = decode_record_scope(scope, family)?;
                     if blake3::hash(scope).as_bytes() != &hash {
                         return Err(invalid(
-                            "recovery filename does not match its authenticated scope",
+                            "epoch storage filename does not match its authenticated scope",
                         ));
                     }
-                    let state = EpochRecoveryState::decode(&plain, scope, &document)?;
-                    let record = recovery_record(scope, state.footprint(size)?);
+                    let record = match family {
+                        EpochRecordKind::Recovery => {
+                            let state = EpochRecoveryState::decode(&plain, scope, &document)?;
+                            recovery_record(scope, state.footprint(size)?)
+                        }
+                        EpochRecordKind::OwnerReceipts => {
+                            epoch_owner::EpochOwnerReceiptState::decode(&plain, scope, &document)?;
+                            epoch_owner::storage_record(server, &document, scope, size)?
+                        }
+                    };
                     if self
                         .inventory
                         .records
                         .insert(
-                            hash,
-                            RecoveryInventoryEntry {
+                            (family, hash),
+                            EpochStorageInventoryEntry {
+                                kind: family,
                                 server,
                                 document,
                                 record,
@@ -322,9 +435,12 @@ impl EpochRecoveryScan<'_> {
                         )
                         .is_some()
                     {
-                        return Err(invalid("duplicate recovery inventory entry"));
+                        return Err(invalid("duplicate epoch storage inventory entry"));
                     }
-                    self.progress.recovery_records += 1;
+                    match family {
+                        EpochRecordKind::Recovery => self.progress.recovery_records += 1,
+                        EpochRecordKind::OwnerReceipts => self.progress.owner_receipt_records += 1,
+                    }
                     break;
                 }
                 RecoveryName::Temporary(destination) => {
@@ -332,21 +448,21 @@ impl EpochRecoveryScan<'_> {
                     // through an authenticated destination, after the whole directory was seen.
                     let name = name
                         .into_string()
-                        .map_err(|_| invalid("non-UTF-8 recovery filename"))?;
+                        .map_err(|_| invalid("non-UTF-8 epoch filename"))?;
                     if self
                         .inventory
                         .orphans
                         .insert(
                             name.clone(),
-                            RecoveryOrphan {
+                            EpochStorageOrphan {
                                 name,
-                                destination,
+                                destination: (family, destination),
                                 bytes: metadata.len(),
                             },
                         )
                         .is_some()
                     {
-                        return Err(invalid("duplicate recovery staging entry"));
+                        return Err(invalid("duplicate epoch storage staging entry"));
                     }
                     self.progress.orphan_files += 1;
                 }
@@ -357,31 +473,39 @@ impl EpochRecoveryScan<'_> {
 
     /// Consume only a successful EOF result. A completed result is metadata, not a storage lease;
     /// future callers must keep the coordinator exclusive until the complete budget is installed.
-    pub fn finish(self) -> Result<EpochRecoveryInventory, AppError> {
+    pub fn finish(self) -> Result<EpochStorageInventory, AppError> {
         if self.failed || !self.progress.complete {
-            return Err(invalid("recovery inventory is incomplete"));
+            return Err(invalid("epoch storage inventory is incomplete"));
         }
         Ok(self.inventory)
     }
 }
 
+#[cfg(test)]
 fn decode_scope(scope: &[u8]) -> Result<(u64, LogicalDocument), AppError> {
+    decode_record_scope(scope, EpochRecordKind::Recovery)
+}
+
+fn decode_record_scope(
+    scope: &[u8],
+    family: EpochRecordKind,
+) -> Result<(u64, LogicalDocument), AppError> {
     if scope.len() > 501 {
-        return Err(invalid("recovery inventory scope exceeds its bound"));
+        return Err(invalid("epoch storage inventory scope exceeds its bound"));
     }
     let mut d = Decoder::new(scope);
-    if d.get_bytes().map_err(invalid)? != RECORD_DOMAIN {
-        return Err(invalid("unknown recovery inventory scope domain"));
+    if d.get_bytes().map_err(invalid)? != family.domain() {
+        return Err(invalid("unknown epoch storage inventory scope domain"));
     }
     let server = d.get_u64().map_err(invalid)?;
     let group = d.get_bytes().map_err(invalid)?;
     let kind = DocType::from_tag(d.get_u16().map_err(invalid)?)
-        .ok_or_else(|| invalid("unknown recovery inventory document type"))?;
+        .ok_or_else(|| invalid("unknown epoch storage inventory document type"))?;
     let key = d.get_bytes().map_err(invalid)?;
     d.finish().map_err(invalid)?;
     let document = LogicalDocument::new(group.to_vec(), kind, key.to_vec()).map_err(invalid)?;
-    if scope_bytes(server, &document)? != scope {
-        return Err(invalid("noncanonical recovery inventory scope"));
+    if family.scope(server, &document)? != scope {
+        return Err(invalid("noncanonical epoch storage inventory scope"));
     }
     Ok((server, document))
 }
@@ -391,25 +515,47 @@ pub(super) enum RecoveryName {
     Temporary([u8; 32]),
 }
 
-pub(super) fn recovery_name(name: &OsStr) -> Result<Option<RecoveryName>, AppError> {
+#[cfg(test)]
+fn recovery_name(name: &OsStr) -> Result<Option<RecoveryName>, AppError> {
+    record_name(name, EpochRecordKind::Recovery)
+}
+
+pub(super) fn storage_name(
+    name: &OsStr,
+    coverage: EpochInventoryCoverage,
+) -> Result<Option<(EpochRecordKind, RecoveryName)>, AppError> {
+    for family in [EpochRecordKind::Recovery, EpochRecordKind::OwnerReceipts] {
+        if family == EpochRecordKind::OwnerReceipts
+            && coverage == EpochInventoryCoverage::RecoveryOnly
+        {
+            continue;
+        }
+        if let Some(kind) = record_name(name, family)? {
+            return Ok(Some((family, kind)));
+        }
+    }
+    Ok(None)
+}
+
+fn record_name(name: &OsStr, family: EpochRecordKind) -> Result<Option<RecoveryName>, AppError> {
     // Windows direct opens can resolve case aliases. Recognize the entire reserved family
     // case-insensitively on every OS, then refuse noncanonical spelling instead of omitting bytes.
     if !name
         .to_string_lossy()
         .to_ascii_lowercase()
-        .contains(".recovery")
+        .contains(family.suffix())
     {
         return Ok(None);
     }
     let name = name
         .to_str()
-        .ok_or_else(|| invalid("non-UTF-8 recovery filename"))?;
-    if let Some(hash) = name.strip_suffix(".recovery") {
+        .ok_or_else(|| invalid("non-UTF-8 epoch filename"))?;
+    if let Some(hash) = name.strip_suffix(family.suffix()) {
         return Ok(Some(RecoveryName::Final(filename_hash(hash)?)));
     }
     if let Some((hash, tail)) = name
         .strip_prefix('.')
-        .and_then(|n| n.split_once(".recovery.mewtual-stage-"))
+        .and_then(|n| n.split_once(&format!("{}.mewtual-stage-", family.suffix())))
     {
         if let Some((pid, id)) = tail.strip_suffix(".tmp").and_then(|s| s.split_once('-')) {
             let canonical_u64 =
@@ -419,7 +565,7 @@ pub(super) fn recovery_name(name: &OsStr) -> Result<Option<RecoveryName>, AppErr
             }
         }
     }
-    Err(invalid("noncanonical recovery inventory filename"))
+    Err(invalid("noncanonical epoch storage inventory filename"))
 }
 
 fn filename_hash(text: &str) -> Result<[u8; 32], AppError> {
@@ -428,7 +574,7 @@ fn filename_hash(text: &str) -> Result<[u8; 32], AppError> {
             .bytes()
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
     {
-        return Err(invalid("noncanonical recovery inventory filename"));
+        return Err(invalid("noncanonical epoch storage inventory filename"));
     }
     let mut hash = [0; 32];
     hex::decode_to_slice(text, &mut hash).map_err(invalid)?;
@@ -450,6 +596,10 @@ pub(in crate::store) fn is_link(metadata: &fs::Metadata) -> bool {
 
 pub(in crate::store) fn regular_file(metadata: &fs::Metadata) -> bool {
     metadata.is_file() && !is_link(metadata)
+}
+
+pub(super) fn invalid(error: impl std::fmt::Display) -> AppError {
+    AppError::Invalid(format!("epoch storage: {error}"))
 }
 
 #[cfg(test)]
@@ -492,7 +642,7 @@ mod tests {
             .unwrap();
     }
 
-    fn collect(store: &mut ServerStore) -> Result<EpochRecoveryInventory, AppError> {
+    fn collect(store: &mut ServerStore) -> Result<EpochStorageInventory, AppError> {
         let mut scan = store.scan_epoch_recovery()?;
         loop {
             let before = scan.progress;
@@ -775,6 +925,40 @@ mod tests {
     }
 
     #[test]
+    fn combined_zero_byte_metadata_rail_and_parser_poison_cover_both_namespaces() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        for (id, suffix) in [
+            (0, "recovery"),
+            (1, "owner-receipts"),
+            (2, "owner-receipts"),
+        ] {
+            let path = root
+                .path()
+                .join("servers")
+                .join(format!("{}.{suffix}", "ab".repeat(32)));
+            fs::write(staging_candidate(&path, id), []).unwrap();
+        }
+        let mut scan = store.scan_epoch_storage().unwrap();
+        scan.record_limit = 2;
+        assert!(scan.step().is_err());
+        assert_eq!(scan.progress.orphan_files, 2);
+        scan.record_limit = 3;
+        assert!(scan.step().is_err());
+        assert!(scan.finish().is_err());
+        let mut scan = store.scan_epoch_storage().unwrap();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            scan.guarded_step(|_| panic!("combined parser panic"))
+        }))
+        .is_err());
+        assert!(scan.finish().is_err());
+        // Compatibility mode includes just one of the exact same directory's three orphans.
+        let legacy = collect(&mut store).unwrap();
+        assert_eq!(legacy.coverage(), EpochInventoryCoverage::RecoveryOnly);
+        assert_eq!(legacy.orphans().len(), 1);
+    }
+
+    #[test]
     fn filename_and_scope_grammars_are_exact_and_bounded() {
         let hash = "ab".repeat(32);
         assert!(matches!(
@@ -801,8 +985,33 @@ mod tests {
             assert!(recovery_name(OsStr::new(&name)).is_err(), "{name}");
         }
         assert!(recovery_name(OsStr::new("7.cache")).unwrap().is_none());
+        for bad in [
+            format!("{hash}.OWNER-RECEIPTS"),
+            format!(".{hash}.owner-receipts.mewtual-stage-01-1.tmp"),
+            format!(".{hash}.owner-receipts.mewtual-stage-1-+1.tmp"),
+            format!(".{hash}.owner-receipts.mewtual-stage-4294967296-1.tmp"),
+            format!(".{hash}.owner-receipts.mewtual-stage-1-18446744073709551616.tmp"),
+        ] {
+            assert!(storage_name(
+                OsStr::new(&bad),
+                EpochInventoryCoverage::RecoveryAndOwnerReceipts
+            )
+            .is_err());
+            assert!(
+                storage_name(OsStr::new(&bad), EpochInventoryCoverage::RecoveryOnly)
+                    .unwrap()
+                    .is_none()
+            );
+        }
         let doc = document(&[1; 256], &[2; 192]);
         let scope = scope_bytes(u64::MAX, &doc).unwrap();
+        let owner_scope = epoch_owner::scope_bytes(u64::MAX, &doc).unwrap();
+        assert_eq!(
+            decode_record_scope(&owner_scope, EpochRecordKind::OwnerReceipts).unwrap(),
+            (u64::MAX, doc.clone())
+        );
+        assert!(decode_record_scope(&scope, EpochRecordKind::OwnerReceipts).is_err());
+        assert!(decode_record_scope(&owner_scope, EpochRecordKind::Recovery).is_err());
         assert_eq!(decode_scope(&scope).unwrap(), (u64::MAX, doc));
         let mut trailing = scope.clone();
         trailing.push(0);

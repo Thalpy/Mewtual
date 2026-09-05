@@ -31,10 +31,16 @@ use crate::AppError;
 mod epoch_owner;
 mod epoch_recovery;
 pub use epoch_owner::EpochOwnerReceiptState;
-pub use epoch_recovery::cleanup::{EpochRecoveryCleanup, RecoveryCleanupProgress};
+pub use epoch_recovery::cleanup::{
+    EpochStorageCleanup, EpochStorageCleanup as EpochRecoveryCleanup, EpochStorageCleanupProgress,
+    EpochStorageCleanupProgress as RecoveryCleanupProgress,
+};
 pub use epoch_recovery::inventory::{
-    EpochRecoveryInventory, EpochRecoveryScan, RecoveryInventoryEntry, RecoveryOrphan,
-    RecoveryScanProgress,
+    EpochInventoryCoverage, EpochRecordKind, EpochStorageInventory,
+    EpochStorageInventory as EpochRecoveryInventory, EpochStorageInventoryEntry,
+    EpochStorageInventoryEntry as RecoveryInventoryEntry, EpochStorageOrphan,
+    EpochStorageOrphan as RecoveryOrphan, EpochStorageScan, EpochStorageScan as EpochRecoveryScan,
+    EpochStorageScanProgress, EpochStorageScanProgress as RecoveryScanProgress,
 };
 pub use epoch_recovery::{EpochRecoveryAction, EpochRecoveryState, EpochRecoveryUpdate};
 pub mod epoch_budget;

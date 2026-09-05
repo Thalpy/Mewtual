@@ -8,7 +8,8 @@ vault restore, exact projection-size preflight, and the typed registry materiali
 transitions now also have a standalone vault-sealed store API with crash-safe replacement/retry,
 peak-space accounting, bounded recovery-file inventory discovery and explicit staging cleanup.
 Owner receipt decisions now have an accounted vault-backed prepare/completion adapter with exact
-crash retries; publication and owner-journal namespace discovery/cleanup are not wired yet. Studio
+crash retries. A combined bounded inventory/cleanup covers owner journals and recovery files;
+publication, other managed-file families and production orchestration are not wired yet. Studio
 materializers, settlement orchestration, sync discovery, complete storage integration and app/UI events
 remain later slices and the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
@@ -270,7 +271,8 @@ A verified strictly newer tenure can replace an unfinished old-tenure decision u
 write barrier, preventing a returning owner from being stranded. The scope-sealed record charges
 protocol bytes and shares recovery's logical-document reserve owner. This is not yet a publisher:
 the future coordinator must validate closure/seed before signing, re-save/reverify before sending,
-and integrate full namespace/orphan inventory and cleanup. Reads are historical only.
+and integrate the combined namespace/orphan inventory and cleanup with the other managed types.
+Reads are historical only.
 
 ## 9. Intents and markers
 
@@ -491,6 +493,14 @@ still find missed orphans because deletion affects directory traversal; another 
 pass is permitted. Accounting is released only by reconciliation of complete current inventories,
 not by the cleanup's observed-byte counter. Source history/intents must survive until their final
 save succeeds. Startup/settlement wiring and cleanup of other managed types remain future work.
+
+`scan_epoch_storage` and `cleanup_epoch_storage_staging` now extend that same engine to the union
+of recovery and owner-journal files without relaxing aggregate rails. Coverage stays explicit and
+unchanged across cleanup, scan and completed metadata; old recovery-only APIs preserve their
+scope. Owner bodies use their small namespace-specific cap and schema; their saved bytes charge
+protocol allowance. Orphans require an authenticated destination of the SAME namespace, never a
+matching digest in another family. Combined cleanup removes only unpublished attempts, never
+saved pending/high-water decisions. This union is not all P1 storage or a production budget bootstrap.
 
 ## 13. Application events
 
