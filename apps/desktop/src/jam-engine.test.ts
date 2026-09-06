@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JAM_DRUM_DIGESTS_GLOBAL, JAM_DRUM_DIGESTS_PER_LANE, JAM_DRUM_PENDING_GLOBAL, JAM_DRUM_PENDING_PER_SOURCE, JAM_HELD_PER_PEER, JAM_LEGACY_SESSION_NONCE, JAM_REMOTE_HOLD_MAX_MS, JAM_SESSION_NONCE_HEX_CHARS, type JamPatch } from "./jam-contract.ts";
+import { JAM_DRUM_DIGESTS_GLOBAL, JAM_DRUM_DIGESTS_PER_LANE, JAM_DRUM_PENDING_GLOBAL, JAM_DRUM_PENDING_PER_SOURCE, JAM_HELD_PER_PEER, JAM_LEGACY_SESSION_NONCE, JAM_REMOTE_HOLD_MAX_MS, JAM_SESSION_NONCE_HEX_CHARS, JAM_VOICE_DECLICK_SECONDS, type JamPatch } from "./jam-contract.ts";
 import { drumSeed, JamEngine, type JamDrumSeedInput, type JamPlaybackPatchSet } from "./jam-engine.ts";
 import { jamPatchId } from "./jam-patch.ts";
 import { JamLatestTaskQueue } from "./jam-publication.ts";
@@ -142,6 +142,31 @@ test("validated immutable patches render through one receiver-owned room effect 
   for (const source of voiceSources) source.end();
   assert.equal(engine.snapshot().voices.length, 0);
   assert.ok(voiceSources.every((source) => source.disconnects > 0));
+});
+
+test("a release of zero is still a ramp, so a gate envelope cannot click", async () => {
+  // A patch may legally ask for a release of 0, and the OFF setting on the envelope stage writes
+  // exactly that. Taking a sustained waveform to silence in no time is a step discontinuity, which
+  // is a click, and it is loudest on the very settings someone reaches for wanting a hard gate.
+  const { fake, engine } = contextAndEngine();
+  const alice = engine.openSource("alice");
+  const gate: JamPatch = { ...patch, e: { a: 0, d: 0, s: 100, r: 0 } };
+  const id = await jamPatchId(gate);
+  assert.equal(await engine.installPatch(alice, sn, id, gate), "installed");
+  const gainsBefore = fake.nodes.filter((node) => node instanceof FakeGain).length;
+  assert.equal(engine.noteOn({ channel: alice, sequence: 1, note: 60, wave: "sine", patchId: id }).ok, true);
+  const voiceGains = fake.nodes.filter((node) => node instanceof FakeGain).slice(gainsBefore) as FakeGain[];
+
+  fake.currentTime = 2;
+  assert.equal(engine.noteOff({ channel: alice, sequence: 2, note: 60 }).ok, true);
+  // Exactly one gain is taken to zero by the release: the voice's own output.
+  const ramps = voiceGains.flatMap((g) => g.gain.events.filter(([kind, value, time]) =>
+    kind === "linear" && value === 0 && time >= 2));
+  assert.ok(ramps.length > 0, "the note-off ramps the voice to silence");
+  assert.ok(
+    ramps.every(([, , time]) => time >= 2 + JAM_VOICE_DECLICK_SECONDS),
+    `a zero release must still fall over at least ${JAM_VOICE_DECLICK_SECONDS}s, got ${JSON.stringify(ramps)}`,
+  );
 });
 
 test("four reconnect generations establish the same verified patch under one persistent budget", async () => {

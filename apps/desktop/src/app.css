@@ -16075,7 +16075,8 @@ button.jam-cog.live {
 .jam-stage-hd {
   display: flex;
   align-items: center;
-  gap: 6px;
+  flex-wrap: wrap; /* OFF + three filter types will not fit beside the name in a narrow card */
+  gap: 4px 6px;
   min-width: 0;
 }
 .jam-stage-nm {
@@ -16100,6 +16101,8 @@ button.jam-cog.live {
    stretches .jam-osc-w to fill its row, which a head must not do. */
 .jam-stage-modes {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 3px;
   flex: none;
   margin-left: auto;

@@ -227,7 +227,7 @@
     mayFetchJamPatch, parseJamPatchJson, validateJamPatch,
   } from "./jam-patch";
   import type { JamSourceChannel } from "./jam-channel";
-  import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_PATCH_EXT, JAM_PATCH_MIME, JAM_REMOTE_HOLD_MAX_MS, PATCH_OSC_WAVES, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
+  import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_PATCH_EXT, JAM_PATCH_MIME, JAM_REMOTE_HOLD_MAX_MS, PATCH_CUTOFF_MAX_HZ, PATCH_OSC_WAVES, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
   import { JamClockProbeTracker, JamClockSync, JamMetronomeClock } from "./jam-clock";
   import { JamCallCuePlayer, JamClickPlayer } from "./jam-clicks";
   import {
@@ -12316,24 +12316,6 @@
     clearTimeout(jamAnnTimer);
     jamAnnTimer = setTimeout(() => { void publishJamDraft(); }, 400);
   }
-  /**
-   * Open (or close) the patch editor, minting a patch to edit if there is not one yet.
-   *
-   * The button used to appear only once you were already on a patch, so the way to reach the
-   * knobs was to pick a preset first and then notice that a new control had appeared: the editor
-   * was hidden behind exactly the step someone who wants to build their own sound is not going to
-   * take. Starting from the plain wave you are already sending is the honest blank canvas, because
-   * `legacyJamPatch` is that wave as a one-oscillator recipe: nothing about the sound changes, it
-   * just acquires knobs. The label goes to CUSTOM for the same reason every other edit does.
-   */
-  function toggleJamEdit() {
-    if (!myPatch) {
-      selectJamPreset("CUSTOM", legacyJamPatch(myTimbre as LegacyWave));
-      jamEditOpen = true;
-      return;
-    }
-    jamEditOpen = !jamEditOpen;
-  }
   function selectJamPreset(name: string, patch: JamPatch) {
     myPatch = JSON.parse(JSON.stringify(patch)) as JamPatch;
     myPatchName = name;
@@ -12407,6 +12389,70 @@
     myPatch = next;
     myPatchName = "CUSTOM";
     if (jamOscOpen !== null && jamOscOpen >= next.o.length) jamOscOpen = next.o.length - 1;
+    jamPatchDirty();
+  }
+  // --- Stage bypass: an OFF for each shaping stage ----------------------------------------------
+  //
+  // "Off" is a VALUE here, never a flag. `jam-patch:v1` admits exactly six keys and rejects any
+  // patch carrying more, so an `enabled` bit would be a different format that every other build
+  // refuses outright. Each stage already has a setting that does nothing: a gate envelope, a
+  // filter wide open at the top of its range, silent sends. OFF writes that setting, and the lamp
+  // is DERIVED from the values rather than stored beside them, which buys two things for free: a
+  // patch loaded from the share lights the right lamps with no extra state to keep in step, and
+  // nudging any knob turns its stage back on, because the values simply stop being neutral.
+  const JAM_ENV_OFF = { a: 0, d: 0, s: 100, r: 0 } as const; // a gate: full while held, gone after
+  const JAM_FILTER_OFF = { m: 0, c: PATCH_CUTOFF_MAX_HZ, q: 0, e: 0 } as const; // lowpass above hearing
+  const JAM_SENDS_OFF = { c: 0, d: 0, r: 0 } as const; // nothing reaches the room's effects
+  // What a stage comes back as when it is switched on with nothing of its own to restore, which
+  // happens for a patch that arrived already bypassed.
+  const JAM_ENV_ON = { a: 12, d: 380, s: 45, r: 120 } as const;
+  const JAM_FILTER_ON = { m: 0, c: 2_400, q: 20, e: 0 } as const;
+  const JAM_SENDS_ON = { c: 0, d: 20, r: 30 } as const;
+  // What each stage held when it was switched off, so switching it back on returns the sound
+  // rather than a default. Editor state, not patch state: it is never announced or saved.
+  let jamStageStash = $state<{
+    e: JamPatch["e"] | null;
+    f: JamPatch["f"] | null;
+    x: JamPatch["x"] | null;
+  }>({ e: null, f: null, x: null });
+  const jamEnvOff = $derived(
+    !!myPatch && myPatch.e.a === 0 && myPatch.e.d === 0 && myPatch.e.s === 100 && myPatch.e.r === 0,
+  );
+  const jamFilterOff = $derived(
+    !!myPatch && myPatch.f.m === 0 && myPatch.f.c >= PATCH_CUTOFF_MAX_HZ && myPatch.f.q === 0 && myPatch.f.e === 0,
+  );
+  const jamSendsOff = $derived(!!myPatch && myPatch.x.c === 0 && myPatch.x.d === 0 && myPatch.x.r === 0);
+  function jamToggleStage(stage: "e" | "f" | "x") {
+    if (!myPatch) return;
+    const next = JSON.parse(JSON.stringify(myPatch)) as JamPatch;
+    const stash = jamStageStash;
+    if (stage === "e") {
+      if (jamEnvOff) {
+        next.e = { ...(stash.e ?? JAM_ENV_ON) };
+        jamStageStash = { ...stash, e: null };
+      } else {
+        jamStageStash = { ...stash, e: { ...myPatch.e } };
+        next.e = { ...JAM_ENV_OFF };
+      }
+    } else if (stage === "f") {
+      if (jamFilterOff) {
+        next.f = { ...(stash.f ?? JAM_FILTER_ON) };
+        jamStageStash = { ...stash, f: null };
+      } else {
+        jamStageStash = { ...stash, f: { ...myPatch.f } };
+        next.f = { ...JAM_FILTER_OFF };
+      }
+    } else {
+      if (jamSendsOff) {
+        next.x = { ...(stash.x ?? JAM_SENDS_ON) };
+        jamStageStash = { ...stash, x: null };
+      } else {
+        jamStageStash = { ...stash, x: { ...myPatch.x } };
+        next.x = { ...JAM_SENDS_OFF };
+      }
+    }
+    myPatch = next;
+    myPatchName = "CUSTOM";
     jamPatchDirty();
   }
   function setJamMode(mode: "keys" | "pads") {
@@ -20324,14 +20370,19 @@
           <span class="inst-wave-lbl">CUSTOM · {jamSaved.length + jamSharedPatches.length}</span>
         </button>
       {/if}
+      <!-- Always on the row, so the editor is discoverable, but dead on the four plain waves: those
+           four ARE the clean, unshaped sounds, and turning one into an editable patch the moment
+           EDIT was pressed quietly took that away. It also stuck, because a patch is remembered
+           across sessions and a wave is not. Pick a preset or a saved patch to get the knobs. -->
       <button
         class="ghost inst-wave jam-edit-btn"
         class:on={jamEditOpen}
         aria-pressed={jamEditOpen}
+        disabled={!myPatch}
         title={myPatch
           ? "Shape this patch. Every edit mints a new patch id; friends hear it within a beat."
-          : `Shape your sound. Opens the knobs on your ${myTimbre} wave, which is what you are already sending, so nothing changes until you turn one.`}
-        onclick={toggleJamEdit}
+          : "The four plain waves are not editable: they are the clean sounds. Pick a preset or a saved patch to get the knobs."}
+        onclick={() => (jamEditOpen = !jamEditOpen)}
       ><span class="inst-wave-lbl">EDIT</span></button>
       <span class="stage-spacer"></span>
       <button class="ghost small inst-oct-btn" title="Register down (z)" aria-label="Register down" onclick={() => setInstOctave(instOctave - 1)}>−</button>
@@ -20438,6 +20489,9 @@
               <div class="jam-stage-hd">
                 <span class="jam-stage-nm">envelope</span>
                 <span class="jam-stage-sub">loudness over time</span>
+                <div class="jam-stage-modes">
+                  <button class="ghost jam-osc-w" class:on={jamEnvOff} aria-pressed={jamEnvOff} title="No shaping: the note is at full volume the instant it is pressed and gone the instant it is let go, like an organ key. Turning any of these four knobs brings the envelope back." onclick={() => jamToggleStage("e")}>OFF</button>
+                </div>
               </div>
               <div class="jam-stage-body">
                 {@render jamScopeEnv(myPatch.e)}
@@ -20453,8 +20507,9 @@
               <div class="jam-stage-hd">
                 <span class="jam-stage-nm">filter</span>
                 <span class="jam-stage-sub">tone</span>
-                <div class="jam-stage-modes" role="group" aria-label="Filter type">
-                  <button class="ghost jam-osc-w" class:on={myPatch.f.m === 0} aria-pressed={myPatch.f.m === 0} title="Lowpass: keeps the lows and rolls off everything brighter than the cutoff. Warm and rounded; the classic synth tone." onclick={() => jamEditNum("f", "m", 0)}>LP</button>
+                <div class="jam-stage-modes" aria-label="Filter">
+                  <button class="ghost jam-osc-w" class:on={jamFilterOff} aria-pressed={jamFilterOff} title="No filtering: the tone passes through whole. Turning cut, res or env brings the filter back." onclick={() => jamToggleStage("f")}>OFF</button>
+                  <button class="ghost jam-osc-w" class:on={!jamFilterOff && myPatch.f.m === 0} aria-pressed={!jamFilterOff && myPatch.f.m === 0} title="Lowpass: keeps the lows and rolls off everything brighter than the cutoff. Warm and rounded; the classic synth tone." onclick={() => jamEditNum("f", "m", 0)}>LP</button>
                   <button class="ghost jam-osc-w" class:on={myPatch.f.m === 1} aria-pressed={myPatch.f.m === 1} title="Highpass: keeps the highs and rolls off everything below the cutoff. Thin and airy; it cuts through a busy room." onclick={() => jamEditNum("f", "m", 1)}>HP</button>
                   <button class="ghost jam-osc-w" class:on={myPatch.f.m === 2} aria-pressed={myPatch.f.m === 2} title="Bandpass: keeps only a band around the cutoff and rolls off both sides. Nasal and hollow, like a small speaker." onclick={() => jamEditNum("f", "m", 2)}>BP</button>
                 </div>
@@ -20490,6 +20545,9 @@
               <div class="jam-stage-hd">
                 <span class="jam-stage-nm">room sends</span>
                 <span class="jam-stage-sub">space</span>
+                <div class="jam-stage-modes">
+                  <button class="ghost jam-osc-w" class:on={jamSendsOff} aria-pressed={jamSendsOff} title="Dry: none of this sound reaches the room's chorus, echo or reverb. Turning any send back up brings it in." onclick={() => jamToggleStage("x")}>OFF</button>
+                </div>
               </div>
               <div class="jam-stage-body">
                 {@render jamScopeSends(myPatch.x)}

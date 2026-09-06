@@ -51,11 +51,20 @@ export const JAM_REMOTE_HOLD_MAX_MS = 30_000; // watchdog: a lost note-off may n
 // ceilings; none can bypass the per-source gates or master limiter.
 export const JAM_VOICE_PEAK_GAIN = 0.11;
 export const JAM_MASTER_GAIN = 0.72;
+// The shortest a voice may be taken to silence, whatever its release says. A patch may legally
+// ask for a release of 0, and cutting a sustained waveform mid-cycle is a step discontinuity: a
+// click, loudest on exactly the settings people reach for when they want a hard gate. Eight
+// milliseconds is under the threshold at which a tail is heard as a tail, and is never allowed to
+// outlast the watchdog window it is bounded by.
+export const JAM_VOICE_DECLICK_SECONDS = 0.008;
 export const JAM_FILTER_Q_MIN = 0.1;
 export const JAM_FILTER_Q_MAX = 18;
 export const JAM_FILTER_ENV_MAX_OCTAVES = 6;
 export const JAM_LFO_CUTOFF_MAX_OCTAVES = 4;
-export const JAM_EFFECT_SEND_MAX_GAIN = 0.5;
+// A send of 100 means all of this voice reaches that effect's input. It used to mean half, which
+// stacked with the effect's own wet return to put a maxed send 16 dB under the dry signal: the
+// knobs moved and nothing was audibly different, which is the same thing as not having them.
+export const JAM_EFFECT_SEND_MAX_GAIN = 1;
 export const JAM_FILTER_NYQUIST_RATIO = 0.45;
 export const JAM_LIMITER_THRESHOLD_DB = -12;
 export const JAM_LIMITER_KNEE_DB = 6;

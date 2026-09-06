@@ -32,6 +32,7 @@ import {
   TAKE_MAX_PATCHES,
   TAKE_ID_MAX_BYTES,
   TAKE_MAX_PARTICIPANTS,
+  JAM_VOICE_DECLICK_SECONDS,
   JAM_VOICE_PEAK_GAIN,
   PATCH_FILTER_MODES,
   PATCH_LFO_DESTS,
@@ -1269,7 +1270,11 @@ export class JamEngine {
         const now = this.context.currentTime;
         // A late note-off may shorten the watchdog tail, never cancel it and extend the hard stop.
         const remainingHardWindow = Math.max(0, stopAt - now);
-        const bounded = Math.max(0, Math.min(seconds, JAM_RELEASE_CAP_MS / 1_000, remainingHardWindow));
+        // The declick floor sits INSIDE the hard window rather than beside it: a release of 0 must
+        // still be a ramp (a step to silence on a sustained waveform is a click), but it may never
+        // buy a voice more time than the watchdog already granted it.
+        const ceiling = Math.min(JAM_RELEASE_CAP_MS / 1_000, remainingHardWindow);
+        const bounded = Math.max(0, Math.min(Math.max(seconds, JAM_VOICE_DECLICK_SECONDS), ceiling));
         holdAndCancel(input.output.gain, now);
         input.output.gain.linearRampToValueAtTime(0, now + bounded);
         for (const source of input.sources) stopSource(source, now + bounded + 0.005);
@@ -1346,9 +1351,13 @@ function createRoomGraph(ctx: AudioContext, destination: AudioNode): RoomGraph {
   limiter.release.value = JAM_LIMITER_RELEASE_SECONDS;
   dry.connect(master);
 
+  // Wet returns are set against a dry path of 1. Chorus is the one that has to come back nearly
+  // as loud as the dry signal, because the effect IS the interference between the two: a quiet
+  // copy of a note is just a quiet copy, and at the old 0.32 (0.16 after the send ceiling) a
+  // maxed chorus knob was 16 dB down and did nothing a person could hear.
   const chorusDelay = ctx.createDelay(0.05);
   nodes.push(chorusDelay);
-  const chorusWet = trackedGain(ctx, nodes, 0.32);
+  const chorusWet = trackedGain(ctx, nodes, 0.7);
   const chorusLfo = ctx.createOscillator();
   nodes.push(chorusLfo);
   sources.push(chorusLfo);
@@ -1359,16 +1368,22 @@ function createRoomGraph(ctx: AudioContext, destination: AudioNode): RoomGraph {
   chorus.connect(chorusDelay).connect(chorusWet).connect(master);
   chorusLfo.start();
 
+  // The echo's first repeat lands about 6 dB under the note that caused it, which is where a
+  // repeat reads as a deliberate echo rather than as a room artifact. The feedback is unchanged:
+  // it is what decides how many repeats there are, not how loud the first one is.
   const echo = ctx.createDelay(0.75);
   nodes.push(echo);
-  const echoWet = trackedGain(ctx, nodes, 0.28);
+  const echoWet = trackedGain(ctx, nodes, 0.5);
   const echoFeedback = trackedGain(ctx, nodes, 0.22);
   echo.delayTime.value = 0.28;
   delay.connect(echo);
   echo.connect(echoWet).connect(master);
   echo.connect(echoFeedback).connect(echo);
 
-  for (const [seconds, level] of [[0.071, 0.18], [0.113, 0.14], [0.173, 0.1]] as const) {
+  // Three early reflections, not a tail: this is a small room, and it is honest about being one.
+  // Levels raised together so a maxed reverb send sits about 3 dB under the dry note; the spacing
+  // and the count are unchanged, so the character is the same, only now loud enough to be one.
+  for (const [seconds, level] of [[0.071, 0.3], [0.113, 0.24], [0.173, 0.17]] as const) {
     const tap = ctx.createDelay(0.25);
     nodes.push(tap);
     const wet = trackedGain(ctx, nodes, level);
