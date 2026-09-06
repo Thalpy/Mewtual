@@ -1400,6 +1400,20 @@ things the CRDT does not do for us, both of which reached users:
   that produces ties, one person typing faster than the clock ticks, is the order they were sent
   in. Adding the id as a tiebreak would replace that with alphabetical order.
 
+**A send is stamped `max(now, newest_seen + 1)`** (`Server::next_message_ts`), not with the wall
+clock alone. Because the order above is the timestamp order, a device whose clock runs behind wrote
+straight into the past: what it said appeared above conversation that had already happened, and a
+reply sorted above its own parent. Reconnecting is where that became visible rather than subtle,
+since catch-up hands a returning member a block of history whose newest row is later than their own
+clock and everything they then say lands inside it. A Lamport-style step over the wall clock fixes
+causality without needing the clocks to agree: when they do agree it is exactly `now`, and when they
+do not, a message still sorts under everything its sender had already seen. It is **bounded** by
+`CLOCK_SKEW_GRACE_MS` past this device's own clock — the same grace the unread ceiling applies —
+so one member whose clock is far in the future cannot drag a group's whole timeline forward with no
+way back; past that bound the message sorts under the out-of-range row instead of chasing it. This
+is still not a causal ordering key: two members who both send while neither has seen the other order
+by their clocks alone.
+
 **A `channel-updated` delta names the rows that arrived** (`arrivals`, capped at 32 ids, in the
 order they now read), because with rows in timestamp order an arrival is not always the last row:
 a delayed message, or one from a device whose clock is behind, lands wherever its stamp says.
@@ -1738,3 +1752,15 @@ durable attribution is phase 6, one signature per participant over the domain
 all that participant's session lanes}`, which also exposes unrepaired gaps and prevents a
 commitment being replayed into another group.
 Phase 6 remains blocked until the native bridge exposes that stable group id.
+
+**`jam-patch:v1` in the share (`.jampatch`, `application/x-mewtual-jampatch`).** A patch announce
+tells the room how to render YOUR notes for the length of a call; it gives nobody a copy of the
+sound and nobody a way to play through it themselves, so passing a patch to a friend meant reading
+the knobs out loud. A patch can therefore be sealed into a server's share, through the same blob +
+expiry + sharing machinery as a take. The file is exactly the canonical `jam-patch:v1` JSON the
+wire announce carries and nothing else, so the ONE validator (`validateJamPatch`) admits both and a
+downloaded patch can never be a shape the synth has not already agreed to render; the name is the
+file's name, because a recipe has no identity of its own beyond its id. Ingress is bounded twice:
+the listed size is refused above `JAM_PATCH_FILE_MAX_BYTES` (4 KiB) before the whole-file fetch, and
+the transport string and its decoded length are refused again before `JSON.parse`. A loaded patch is
+kept in the same twelve-slot local library as a saved one and becomes the loader's own sound.

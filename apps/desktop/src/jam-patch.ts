@@ -1,5 +1,8 @@
 import {
+  JAM_PATCH_EXT,
+  JAM_PATCH_FILE_MAX_BYTES,
   JAM_PATCH_ID_HEX_CHARS,
+  JAM_PATCH_MIME,
   JAM_PATCH_VERSION,
   JAM_RENDERER_VERSION,
   PATCH_CUTOFF_MAX_HZ,
@@ -135,6 +138,46 @@ export function parseJamPatchJson(raw: string): PatchValidation {
   } catch {
     return invalid("patch is not valid JSON");
   }
+}
+
+/** Is this shared file a patch? By declared type, or by the extension when a mime was lost. */
+export function isJamPatchFile(name: string, mime: string): boolean {
+  return mime.trim() === JAM_PATCH_MIME || name.trim().toLowerCase().endsWith(JAM_PATCH_EXT);
+}
+
+/**
+ * A shared patch's name, taken from its file name.
+ *
+ * The tile row is narrow and the library is keyed by name, so this is both a trim and the key: a
+ * `.jampatch` whose stem is longer than a tile can show is cut, not rendered off the edge.
+ */
+export function jamPatchFileName(fileName: string, limit = 12): string {
+  const base = fileName.trim().replace(/^.*[\\/]/, "");
+  const stem = base.toLowerCase().endsWith(JAM_PATCH_EXT) ? base.slice(0, -JAM_PATCH_EXT.length) : base;
+  return stem.trim().slice(0, limit).toUpperCase() || "SHARED";
+}
+
+/**
+ * Refuse an oversized share before asking the bridge to hand its bytes over, and again after
+ * decoding them: an index entry's size is a claim by whoever wrote it, and the decoded length is
+ * the only one this side has actually measured. Same shape as the take deck's decoder, for the
+ * same reason: nothing that fails the contract's own bound reaches `JSON.parse`.
+ */
+export function mayFetchJamPatch(size: number): boolean {
+  return Number.isSafeInteger(size) && size >= 0 && size <= JAM_PATCH_FILE_MAX_BYTES;
+}
+
+export function decodeJamPatchBase64(
+  encoded: unknown,
+  decode: (value: string) => string = atob,
+): string | null {
+  // 4 base64 characters per 3 bytes, rounded up to the padded quantum.
+  const maxChars = Math.ceil(JAM_PATCH_FILE_MAX_BYTES / 3) * 4;
+  if (typeof encoded !== "string" || encoded.length > maxChars) return null;
+  let binary: string;
+  try { binary = decode(encoded); } catch { return null; }
+  if (binary.length > JAM_PATCH_FILE_MAX_BYTES) return null;
+  return new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0)));
 }
 
 function toHex(bytes: ArrayBuffer): string {

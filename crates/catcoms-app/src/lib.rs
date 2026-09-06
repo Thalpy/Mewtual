@@ -3808,6 +3808,39 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.send_reply(channel, text, "").await
     }
 
+    /// The timestamp a new message in `channel` is written with: never earlier than the newest
+    /// message this device has already seen there.
+    ///
+    /// The wall clock alone is not enough, because the log is **ordered by timestamp**
+    /// ([`read_messages`]) and no two members' clocks agree. A device running a few minutes behind
+    /// posts into the past: what it says appears above conversation that had already happened, so
+    /// a reply sorts above the thing it replied to and the sender has to scroll up to find their
+    /// own message. Reconnecting is where this becomes obvious rather than subtle, because
+    /// catch-up hands the returning member a block of history whose newest row is later than their
+    /// own clock, and everything they then say lands inside it.
+    ///
+    /// A Lamport-style step over the wall clock fixes the ordering without needing the clocks to
+    /// agree: a message is stamped `max(now, newest_seen + 1)`. When the clocks do agree this is
+    /// exactly `now` and nothing changes. When they do not, causality still reads correctly,
+    /// because anything this device has seen necessarily happened before what it says next.
+    ///
+    /// Bounded on purpose. A peer whose clock is far in the future would otherwise drag every
+    /// other member's stamps along with it, permanently: one bad clock, and a group's whole
+    /// timeline is years ahead with no way back. The step may therefore carry a stamp at most
+    /// [`CLOCK_SKEW_GRACE_MS`] past this device's own clock, the same grace the unread ceiling
+    /// already applies to a row it is asked to believe. Past that the message sorts under the
+    /// out-of-range row rather than chasing it, which is the same thing the reader sees today.
+    ///
+    /// Not a substitute for a proper causal ordering key, and it does not claim to be one: two
+    /// members who both send while neither has seen the other still order by their clocks alone.
+    fn next_message_ts(&self, channel: u128) -> u64 {
+        let now = self.sync.now_ms();
+        // The list is timestamp-ordered, so its last row carries the newest stamp.
+        let newest = self.with_messages(channel, |msgs| msgs.last().map_or(0, |m| m.ts));
+        let ceiling = now.saturating_add(CLOCK_SKEW_GRACE_MS);
+        now.max(newest.saturating_add(1).min(ceiling))
+    }
+
     /// Send a chat message that replies to `reply_to` (the parent message's id; empty for a plain
     /// message). The pointer is advisory display metadata; it doesn't affect ordering or delivery.
     pub async fn send_reply(
@@ -3817,7 +3850,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         reply_to: &str,
     ) -> Result<(), AppError> {
         let author = self.my_fingerprint();
-        let ts = self.sync.now_ms();
+        let ts = self.next_message_ts(channel);
         let id = self.sync.random_id();
         let reply_to = reply_to.to_string();
         let change = self
@@ -9134,6 +9167,57 @@ mod tests {
         // Editing/deleting an unknown (or not-your-own) message is refused.
         assert!(alice.edit_message(GENERAL, "deadbeef", "x").await.is_err());
         assert!(alice.delete_message(GENERAL, "deadbeef").await.is_err());
+    }
+
+    /// A send is never stamped before what this device has already seen, and the step is bounded.
+    ///
+    /// The log is ordered by timestamp, so a clock running behind wrote straight into the past:
+    /// what was said last appeared above conversation that had already happened, and a reply sorted
+    /// above its own parent. Nothing about it shows until two clocks disagree, which is why it was
+    /// a reconnect that made it visible.
+    #[tokio::test]
+    async fn a_send_is_never_stamped_before_what_this_device_has_already_seen() {
+        let hub = Hub::new();
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_on(&hub, PeerId::from_u64(1), &clock, 1);
+        alice.open_channel(GENERAL).await.unwrap();
+        alice.send_message(GENERAL, "first").await.unwrap();
+        assert_eq!(
+            alice.messages(GENERAL)[0].ts,
+            T0,
+            "an agreeing clock is used as it is"
+        );
+
+        // The clock is corrected backwards a minute: NTP, a suspended VM, a dual boot.
+        clock.set_wall_ms(T0 - 60_000);
+        alice.send_message(GENERAL, "second").await.unwrap();
+        let msgs = alice.messages(GENERAL);
+        assert_eq!(
+            msgs[1].text, "second",
+            "what was said last still reads last"
+        );
+        assert_eq!(
+            msgs[1].ts,
+            T0 + 1,
+            "stamped one past the row it followed, not into the past"
+        );
+
+        // Bounded, so a peer whose clock is far ahead cannot drag this device's stamps with it and
+        // leave the group's whole timeline permanently in the future.
+        clock.set_wall_ms(T0 + 30 * 86_400_000);
+        alice.send_message(GENERAL, "a month ahead").await.unwrap();
+        clock.set_wall_ms(T0);
+        alice.send_message(GENERAL, "corrected").await.unwrap();
+        let corrected = alice
+            .messages(GENERAL)
+            .into_iter()
+            .find(|m| m.text == "corrected")
+            .expect("the message is in the log");
+        assert_eq!(
+            corrected.ts,
+            T0 + CLOCK_SKEW_GRACE_MS,
+            "the step stops at the clock grace rather than chasing an out-of-range row"
+        );
     }
 
     #[tokio::test]

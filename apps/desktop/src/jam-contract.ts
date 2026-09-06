@@ -96,6 +96,18 @@ export const PATCH_LFO_RATE_MAX_CHZ = 1_200; // 12 Hz
 export const PATCH_LFO_DESTS = ["off", "cutoff", "pitch"] as const; // index = wire value
 export const PATCH_LFO_PITCH_DEPTH_CENTS = 25; // +/- at depth 100
 
+// --- jam-patch:v1 as a shared file -------------------------------------------------------------
+// A patch put into a server's encrypted share, so a room can trade sounds rather than each person
+// rebuilding one from the knobs. The file is exactly the canonical `jam-patch:v1` JSON the wire
+// announce carries and nothing else, so the ONE validator (`validateJamPatch`) admits both and a
+// downloaded patch can never be a shape the synth has not already agreed to render. Its name is
+// the file's name; a recipe carries no identity of its own beyond its id.
+export const JAM_PATCH_EXT = ".jampatch";
+export const JAM_PATCH_MIME = "application/x-mewtual-jampatch";
+// A three-oscillator patch canonicalizes to a few hundred bytes. The cap is generous against that
+// and still refuses to pull an arbitrarily large "patch" into the window before parsing it.
+export const JAM_PATCH_FILE_MAX_BYTES = 4_096;
+
 export interface JamOsc {
   w: number; // 0..3, index into PATCH_OSC_WAVES
   t: number; // transpose, semitones

@@ -7865,6 +7865,26 @@ button.stage-act:hover {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+/* The push-to-talk caption, under the mute label inside the same button. Struck through while the
+   key is up, because that is the state where the microphone is closed and the label alone would
+   read as an instruction rather than a status; lit while it is held, because "your voice is
+   leaving this machine right now" is the one thing here worth seeing from across the room. */
+.stage-ptt-cap {
+  font-family: var(--mono);
+  font-size: 0.5rem;
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  text-decoration: line-through;
+}
+.stage-ptt-cap.live {
+  color: var(--ok);
+  text-decoration: none;
+}
 /* Mute and deafen are states you must be able to spot from across the room. */
 button.stage-act.muted,
 button.stage-act.muted:hover {
@@ -15792,10 +15812,32 @@ button.jam-take-play.on {
   border-color: var(--accent);
   color: var(--accent-hi);
 }
-.jam-take-name {
+/* The take's name is typed in place: it reads as the label it is until it is focused, because a
+   row of boxed inputs would make the fold look like a form rather than a list of what was played. */
+input.jam-take-name {
   font-family: var(--mono);
   font-size: 0.64rem;
   color: var(--text);
+  white-space: nowrap;
+  width: 10.5rem;
+  min-width: 0;
+  padding: 1px 3px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+}
+input.jam-take-name:hover {
+  border-color: var(--border-soft);
+}
+input.jam-take-name:focus {
+  outline: none;
+  background: var(--bg-elev);
+  border-color: var(--accent);
+}
+.jam-take-meta {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  color: var(--muted);
   white-space: nowrap;
 }
 .jam-take-who {
@@ -15861,6 +15903,17 @@ button.jam-take-play.on {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+/* Breaks the wrapped tile row so what came off the share reads as a separate shelf from what is
+   kept on this device: the two are loaded from different places and have different lifetimes. */
+.jam-custom-sep {
+  flex-basis: 100%;
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-top: 2px;
 }
 /* Osc stack as layers: collapsed rows read like mixer channels; one unfolds at a time. */
 .jam-layer {
@@ -15978,4 +16031,137 @@ button.jam-cog.live {
 .stage,
 .focus-dock {
   scrollbar-gutter: stable;
+}
+
+/* --- Patch editor: the SHAPE stages ------------------------------------------------------------
+   One column of full-width bands. At the 284 to 444 px this drawer actually gets, the earlier
+   two-column auto-fit grid gave a section about 186 px, less than a row of four knobs, so every
+   section wrapped and the editor read as scraps. This supersedes both earlier .jam-edit
+   grid-template-columns rules (its padding still applies); the shape panel below picks its own
+   columns from its real width. */
+.jam-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.jam-edit-hd-sub {
+  text-transform: none;
+  letter-spacing: 0.02em;
+  color: var(--faint);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The four stages after the oscillators wear the layer card's frame, so the editor is one family
+   of cards: layers, then stages, in signal order. Two across only where a card can hold a row of
+   four knobs (the wider focus dock); the narrower stage dock gets one under another. */
+.jam-stages {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 6px;
+}
+.jam-stage {
+  container-type: inline-size; /* the scope decides tile-or-strip from the card's own width */
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 5px 9px 7px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-elev);
+}
+.jam-stage-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.jam-stage-nm {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.jam-stage-sub {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.56rem;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Mode buttons sit in the card head rather than on a row of their own; the osc-stack tile rule
+   stretches .jam-osc-w to fill its row, which a head must not do. */
+.jam-stage-modes {
+  display: flex;
+  gap: 3px;
+  flex: none;
+  margin-left: auto;
+}
+.jam-stage-modes .jam-osc-w {
+  flex: none;
+  padding: 1px 6px;
+}
+.jam-osc-w:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.jam-stage-body {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.jam-stage .jam-knobs {
+  gap: 4px 4px; /* four knobs beside a scope, or four in a 200px card, need the tighter pitch */
+}
+
+/* A scope per stage: not a meter, a sketch of the setting the knobs beside it describe, redrawn
+   from the patch on every edit. It takes the row's slack beside the knobs up to a cap, and the box
+   is stretched to whatever it gets, so strokes are pinned to screen pixels instead of fattening. */
+.jam-scope {
+  flex: 1 1 72px;
+  min-width: 72px;
+  max-width: 150px;
+  height: 32px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-0);
+}
+.jam-scope path {
+  vector-effect: non-scaling-stroke;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.jam-scope .jam-scope-grid { fill: none; stroke: var(--border); stroke-width: 1; }
+.jam-scope .jam-scope-trace { fill: none; stroke: var(--accent-hi); stroke-width: 1.5; }
+.jam-scope .jam-scope-fill { fill: var(--accent-dim); stroke: none; }
+.jam-scope .jam-scope-tail { fill: var(--accent-dim); stroke: none; }
+.jam-scope .jam-scope-mark { fill: none; stroke: var(--faint); stroke-width: 1; stroke-dasharray: 2 2; }
+.jam-scope .jam-scope-sweep { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 3 2; }
+.jam-scope .jam-scope-bar { fill: none; stroke: var(--accent-hi); stroke-width: 2.5; }
+.jam-scope .jam-scope-bar.soft { stroke: var(--accent); opacity: 0.6; }
+/* Without room for a scope beside four knobs (a 200px card, or a narrow dock) the scope becomes a
+   strip above them instead of forcing the knobs to wrap. */
+@container (max-width: 299px) {
+  .jam-scope {
+    flex-basis: 100%;
+    max-width: none;
+    height: 26px;
+  }
+}
+
+/* The knob's lit arc: rest position to tick. Drawn on the ring's own circle so it reads as the
+   ring filling rather than as a second ring around it. */
+.jam-knob-arc {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  opacity: 0.85;
 }

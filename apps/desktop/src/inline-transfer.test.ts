@@ -89,13 +89,17 @@ test("only whole-file READERS pull a shared file into the window", () => {
   //   - the text reader (bounded twice over);
   //   - the jukebox take deck, which must hand the bytes to the jam-take validator before a
   //     single event reaches Web Audio; a take is capped at 512 KiB by its own format.
-  // Two, named, and a third has to be argued for here rather than slipped past a pattern.
+  //   - loading a shared patch, which must hand the bytes to the jam-patch validator before the
+  //     synth is built from them; a patch is capped at JAM_PATCH_FILE_MAX_BYTES (4 KiB) by its
+  //     own format, checked against the listed size before the fetch and against the decoded
+  //     length after it, so this is the tightest-bounded of the three.
+  // Three, named, and a fourth has to be argued for here rather than slipped past a pattern.
   const sites = invokeSites("download_file");
   const total = sites.reduce((n, [, count]) => n + count, 0);
   assert.equal(
     total,
-    2,
-    `download_file should have exactly two callers (text reader, take deck), found: ${JSON.stringify(sites)}`,
+    3,
+    `download_file should have exactly three callers (text reader, take deck, patch loader), found: ${JSON.stringify(sites)}`,
   );
 });
 

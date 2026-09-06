@@ -86,8 +86,8 @@
   import { storageRepairNotice } from "./storage-local";
   import { disposeStreamAudioGraph } from "./stream-audio";
   import {
-    bufferIce, directionIdle, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState, videoSlotPlan,
-    VIDEO_BITRATE, type PeerState, type SlotDirection, type VideoKind,
+    bufferIce, directionIdle, hangupTargets, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState,
+    videoSlotPlan, VIDEO_BITRATE, type PeerState, type SlotDirection, type VideoKind,
   } from "./voice-signaling";
   import {
     DEFAULT_STREAM_SETTINGS, MAX_STREAM_AUDIO_SOURCES, PeerVideoBudgetController, captureResolutionKnownAfterConstraint,
@@ -222,9 +222,12 @@
   import { JamEngine, jamSequenceAccepted, type JamPlaybackPatchSet } from "./jam-engine";
   import { JamPeerBudget } from "./jam-budget";
   import { JamFrameDecoder, toggleJamPeerMute, type JamFrameDecode } from "./jam-wire";
-  import { jamPatchId, legacyJamPatch, validateJamPatch } from "./jam-patch";
+  import {
+    decodeJamPatchBase64, isJamPatchFile, jamPatchFileName, jamPatchId, legacyJamPatch,
+    mayFetchJamPatch, parseJamPatchJson, validateJamPatch,
+  } from "./jam-patch";
   import type { JamSourceChannel } from "./jam-channel";
-  import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_REMOTE_HOLD_MAX_MS, PATCH_OSC_WAVES, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
+  import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_PATCH_EXT, JAM_PATCH_MIME, JAM_REMOTE_HOLD_MAX_MS, PATCH_OSC_WAVES, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
   import { JamClockProbeTracker, JamClockSync, JamMetronomeClock } from "./jam-clock";
   import { JamCallCuePlayer, JamClickPlayer } from "./jam-clicks";
   import {
@@ -306,6 +309,34 @@
   // before the wiki, file and device reads that share the switch; holding the chat pane's empty
   // state on all of them left "Loading messages..." on screen well after the messages were in hand.
   let messagesLoading = $state(false);
+  // Which message read owns that flag. The newest one issued does, whatever generation asked for
+  // it, so an older read landing last cannot release a claim that is no longer its own, and a
+  // superseded read that never lands cannot hold one forever.
+  let messagesLoadToken = 0;
+  let messagesWatchdog: ReturnType<typeof setTimeout> | undefined;
+  const MESSAGES_STALL_MS = 12_000;
+  /**
+   * Re-ask for a channel's rows when the read that was supposed to fill the pane never answered.
+   *
+   * A bridge command that is dropped rather than refused never settles: no rows, no error, and a
+   * pane that says "Loading messages…" for the rest of the session. That is not hypothetical on a
+   * busy server, where the per-server actor answers one command at a time and a sync burst can sit
+   * in front of the read. One retry, and only while the same conversation is still on screen and
+   * still waiting: a slow answer that arrives in the meantime takes the token with it and this
+   * finds nothing to do.
+   */
+  function armMessagesWatchdog(token: number, gen: number, server: number, retriesLeft = 1) {
+    clearTimeout(messagesWatchdog);
+    if (retriesLeft <= 0) return;
+    messagesWatchdog = setTimeout(() => {
+      if (messagesLoadToken !== token || !messagesLoading || !viewCurrent(gen, server)) return;
+      const retryToken = ++messagesLoadToken;
+      void refresh().finally(() => {
+        if (messagesLoadToken === retryToken) messagesLoading = false;
+      });
+      armMessagesWatchdog(retryToken, gen, server, retriesLeft - 1);
+    }, MESSAGES_STALL_MS);
+  }
   function beginViewSwitch(): number {
     return ++viewGeneration;
   }
@@ -483,7 +514,7 @@
     | "news"
     | "quick"
     | "space"
-    | `surface:${"chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "moderation" | "storage" | "connectivity"}`
+    | `surface:${"chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "studio" | "moderation" | "storage" | "connectivity"}`
     | `settings:${string}`
     | `server:${string}`;
   type FeatureGuideItem = {
@@ -2868,6 +2899,7 @@
     { label: "Announcements", tab: "status" },
     { label: "Wiki", tab: "wiki" },
     { label: "Events", tab: "events" },
+    { label: "Studio", tab: "studio" },
     { label: "Transfers", tab: "downloads" },
   ];
   let quickItems = $derived.by(() => {
@@ -3494,7 +3526,7 @@
   });
 
   // The main pane shows one tab at a time.
-  type Tab = "chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "moderation" | "storage" | "connectivity";
+  type Tab = "chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "studio" | "moderation" | "storage" | "connectivity";
   let view = $state<Tab>("chat");
   type StorageHealth = {
     listed_files: number; referenced_chunks: number; verified_chunks: number;
@@ -4969,17 +5001,55 @@
     chatStickToBottom =
       tailLoaded &&
       nearScrollBottom(node.scrollTop, node.clientHeight, node.scrollHeight);
+    // Scrolling away from the bottom ends the settle loop in the same turn, so a reader who moves
+    // during the half-second after a message lands is not pulled back down by the next frame.
+    if (!chatStickToBottom) chatPinFramesLeft = 0;
   }
 
+  // Opening a channel has to land on the NEWEST message, and one scroll after one `tick()` is not
+  // enough to promise that. The rows are only the first thing the list gets: avatars, embedded
+  // media, emoji images and the reference cards are all resolved a frame or more later, and every
+  // one of them grows the list UNDER a scroll position that was correct when it was set. The
+  // reader was left looking at the middle of the history, or at the very top of it.
+  //
+  // So the pin is held rather than fired once: re-applied every frame for a short window, and
+  // re-armed by anything that lands late (a decoded image, a resolved embed). Growth below the
+  // viewport raises scrollHeight without moving scrollTop, which fires no scroll event, so this
+  // cannot fight the reader: the moment they actually scroll up, `onChatScroll` clears
+  // `chatStickToBottom` and the next frame of the loop stands down.
+  const CHAT_PIN_FRAMES = 30; // ~half a second of settling at 60Hz
+  let chatPinFramesLeft = 0;
+  let chatPinFrame = 0;
+  function pinChatToBottom(frames = CHAT_PIN_FRAMES) {
+    chatPinFramesLeft = Math.max(chatPinFramesLeft, frames);
+    // Pin once here as well as in the loop: `requestAnimationFrame` does not run while the window
+    // is hidden, and a chat opened behind a minimized window must still be at its newest row when
+    // the window comes back rather than waiting on a frame that never arrived.
+    if (messagesEl && chatStickToBottom && tailLoaded) messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (chatPinFrame) return;
+    const step = () => {
+      chatPinFrame = 0;
+      const node = messagesEl;
+      if (!node || !chatStickToBottom || !tailLoaded) {
+        chatPinFramesLeft = 0;
+        return;
+      }
+      node.scrollTop = node.scrollHeight;
+      chatPinFramesLeft -= 1;
+      if (chatPinFramesLeft > 0) chatPinFrame = requestAnimationFrame(step);
+    };
+    chatPinFrame = requestAnimationFrame(step);
+  }
+  // Images and media announce their own arrival, and they are the biggest late growth of all. The
+  // listener is a capture-phase one because `load` does not bubble.
+  function chatMediaSettled() {
+    if (chatStickToBottom) pinChatToBottom(4);
+  }
   $effect(() => {
     void messages;
     void pageStart;
     if (!chatStickToBottom) return;
-    tick().then(() => {
-      if (messagesEl && chatStickToBottom && tailLoaded) {
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-      }
-    });
+    tick().then(() => pinChatToBottom());
   });
 
   // Persist the rendezvous address as a reusable default (it's usually a stable infra node).
@@ -5038,6 +5108,9 @@
       resolveRemoteMedia(statusEl);
       resolveEmoji(statusEl);
       resolveRefCards(statusEl);
+      // Every one of those can add height to the log. Re-pin rather than leave the reader looking
+      // at whatever the newly inserted cards pushed the newest message past.
+      chatMediaSettled();
     });
   });
 
@@ -5881,6 +5954,7 @@
     moderationLoading = false;
     groupLoading = false; // a clear with no load behind it (no active group) is not "loading"
     messagesLoading = false;
+    clearTimeout(messagesWatchdog); // whatever it was going to re-ask for is not on screen any more
     // Livery is server branding: leaving it up paints the group you left over the one you opened.
     // followLiveryNow already drops to the default theme for DM-home and the inbox, so the brief
     // default between servers is that same transition rather than a new kind of flicker.
@@ -5987,10 +6061,23 @@
     // file index, the event list and the device list were fetched: the messages had been on hand
     // for most of that wait, and the pane was lying about it. The other panes still make their
     // claims ("No members to show") only once everything has landed.
-    const messages = refresh().then(() => {
-      if (viewCurrent(gen, id)) messagesLoading = false;
+    // The flag is owned by the NEWEST message read, not by the generation that issued it. Releasing
+    // it only when `viewCurrent` still held meant a read that was superseded while it was in flight
+    // released nothing, and if the switch that superseded it never got as far as issuing its own
+    // (an unlock, a server removed under it, a throw anywhere in the batch below), the chat pane
+    // was left claiming to be loading a conversation nobody was waiting for. `finally`, because a
+    // read that failed has also stopped loading.
+    const loadToken = ++messagesLoadToken;
+    const messages = refresh().finally(() => {
+      if (messagesLoadToken === loadToken) messagesLoading = false;
     });
-    await Promise.all([
+    armMessagesWatchdog(loadToken, gen, id);
+    // `allSettled`, not `all`. Each of these reads is responsible for its own failure and says so
+    // in its own pane; the batch exists only to know when the group has finished arriving. Under
+    // `all`, one rejection abandoned the rest of this function, and the panes it had not reached
+    // yet kept their loading claim for the rest of the session: a roster that never stopped saying
+    // "Loading members…" on a server that had plenty of them.
+    await Promise.allSettled([
       messages,
       refreshMembers(),
       refreshProfiles(),
@@ -7278,6 +7365,33 @@
       }
     }
     return items;
+  }
+
+  // The studio surface is a lazy chunk like Feedback and the debug console: its editor, codec
+  // and fixtures only load the first time the tab opens.
+  type StudioSurfaceComponent = (typeof import("./Studio.svelte"))["default"];
+  type StudioNavComponent = (typeof import("./StudioNav.svelte"))["default"];
+  let StudioSurface = $state<StudioSurfaceComponent | null>(null);
+  let StudioNav = $state<StudioNavComponent | null>(null);
+  let studioLoading = false;
+  async function loadStudio() {
+    if ((StudioSurface && StudioNav) || studioLoading) return;
+    studioLoading = true;
+    try {
+      const [s, n] = await Promise.all([import("./Studio.svelte"), import("./StudioNav.svelte")]);
+      StudioSurface = s.default;
+      StudioNav = n.default;
+    } catch (cause) {
+      toast(`The studio failed to load: ${String(cause)}`, "err");
+    } finally {
+      studioLoading = false;
+    }
+  }
+  $effect(() => {
+    if (view === "studio") void loadStudio();
+  });
+  function studioNotice(text: string, kind: "info" | "warn" | "error") {
+    toast(text, kind === "error" ? "err" : kind, kind === "info" ? 3500 : 5000);
   }
 
   function switchView(v: Tab) {
@@ -10731,6 +10845,54 @@
     const selfFp = callSelfFp;
     if (server !== null && selfFp) void broadcastOn(server, selfFp, msg);
   }
+  /**
+   * Say goodbye, on every route at once, before the room is torn down.
+   *
+   * Hanging up used to be one `bye` on the signalling path, addressed to whoever the server
+   * currently called online. That is the wrong set and the slow route. A peer you are talking to
+   * over a direct WebRTC edge does not have to be reachable over the mesh at that instant, and if
+   * they were not, they got no farewell at all: their end simply watched the ICE connection go to
+   * `disconnected` a few seconds later and drew LOST, which is the app's word for "this link died
+   * on its own". Leaving a call read as crashing out of one.
+   *
+   * So both routes are used, and the peer set is the union of the two things that mean "in this
+   * room with me": an open data channel, and a member the server says is online.
+   *
+   * - The **data channel** is instant and needs no round-trip: it is sent synchronously here, so
+   *   it goes out before the same call to `leaveVoice` closes the connections.
+   * - The **signalling path** is authenticated and durable, and reaches members who are in the
+   *   room but have no edge with me yet (a joiner still negotiating, someone the mesh routed
+   *   around). It needs the roster read, so it finishes after this function returns.
+   */
+  function announceHangup(server: number, selfFp: string, channel: string) {
+    const farewell = { callId: channel, type: "bye" };
+    const edges: string[] = [];
+    for (const [fp, peer] of Object.entries(callPeers)) {
+      edges.push(fp);
+      if (peer.dc?.readyState === "open") {
+        try { peer.dc.send(JSON.stringify({ t: "bye" })); } catch { /* edge already gone */ }
+      }
+    }
+    void (async () => {
+      // Peers with an edge are told whatever the roster read does, including nothing at all: an
+      // established edge is better evidence that someone is in this room than the online list is.
+      let members: string[] = [];
+      let online = new Set<string>();
+      try {
+        const [membersHere, onlineHere] = await Promise.all([
+          invoke<Member[]>("get_members", { server }),
+          invoke<string[]>("get_online_members", { server }),
+        ]);
+        members = membersHere.map((m) => m.fingerprint);
+        online = new Set(onlineHere);
+      } catch (e) {
+        console.warn("hangup could not read its server roster", { server, error: String(e) });
+      }
+      for (const fp of hangupTargets(edges, members, online, selfFp)) {
+        void sendSignal(server, fp, farewell);
+      }
+    })();
+  }
   // --- Audio devices ----------------------------------------------------------------------------
   // Which mic/speaker this install uses. Remembered locally (per machine, not per server), applied
   // when a call starts and hot-swappable mid-call via replaceTrack, so nothing ever renegotiates.
@@ -10822,20 +10984,16 @@
       }
     }
   }
-  async function ensureMic(
-    announce = true,
-    adopt = true,
-    joiningContext: { server: number; channel: string; callLease: number } | null = null,
-  ): Promise<MediaStream | null> {
+  async function ensureMic(announce = true, adopt = true): Promise<MediaStream | null> {
     if (localStream) return localStream;
     const lease = micCaptureSession.begin();
-    const server = joiningContext?.server ?? callServer;
-    const channel = joiningContext?.channel ?? callChannel;
-    const stillWanted = () => micCaptureSession.isCurrent(lease) && (
-      joiningContext
-        ? callLifecycleSession.isCurrent(joiningContext.callLease)
-        : inCall && callServer === server && callChannel === channel
-    );
+    const server = callServer;
+    const channel = callChannel;
+    // The room is entered before the microphone is asked for, so there is one rule for every
+    // caller: the answer is wanted only while this is still the same room. A prompt that resolves
+    // after the room was left fails this, and `acceptCapture` stops the tracks it returned.
+    const stillWanted = () =>
+      micCaptureSession.isCurrent(lease) && inCall && callServer === server && callChannel === channel;
     // Try the remembered input first; a device that has since vanished must not block the call.
     const tries: (MediaTrackConstraints | boolean)[] = micDev
       ? [{ deviceId: { exact: micDev } }, true]
@@ -10869,12 +11027,18 @@
    * Turn the microphone on for a room already joined. Adding a track raises negotiationneeded on
    * every existing peer, and the perfect-negotiation path already handles the renegotiation, so
    * this needs no signalling of its own.
+   *
+   * `explicit` separates the two callers. The dock's "No mic" button is a person asking for the
+   * microphone right now: a failure is worth saying out loud, and the request implies wanting to
+   * be heard, so it clears mute. Joining a room asks for it in the background instead, where a
+   * device that is missing or refused is an ordinary way to be in a room, and where the answer can
+   * arrive long enough after the join that the person may have muted themselves in between.
    */
-  async function enableMic() {
+  async function enableMic(explicit = true) {
     if (localStream || !inCall) return;
-    const stream = await ensureMic();
+    const stream = await ensureMic(explicit);
     if (!stream) return;
-    callMuted = false;
+    if (explicit) callMuted = false;
     // Through the gate, not straight to `true`: turning the microphone on under push to talk
     // must leave it closed until the key is actually held.
     for (const t of stream.getAudioTracks()) {
@@ -11484,7 +11648,13 @@
   }
   // --- Knobs: small-space value entry the pads screenshotted feedback asked for. Grab and drag
   // up/right to raise (Shift = fine), wheel steps, arrows step when focused. One drag at a time.
-  type JamKnobBinding = { label: string; value: number; min: number; max: number; disp: string; set: (v: number) => void };
+  // `hint` is what this knob does to the SOUND, shown on hover: the three-letter label under a
+  // 44px dial can only ever be an abbreviation, and a room full of them is why the editor read as
+  // a machine nobody had the manual for. `bipolar` says the rest position is the centre, so the
+  // lit arc grows out from twelve o'clock and a detune or a negative filter sweep shows which way
+  // it leans, not only how far. Optional PROPERTIES, which the TS strip is happy with; only
+  // optional parameters break the app at load.
+  type JamKnobBinding = { label: string; value: number; min: number; max: number; disp: string; hint?: string; bipolar?: boolean; set: (v: number) => void };
   let jamKnobDrag: { bind: JamKnobBinding; startX: number; startY: number; startVal: number } | null = null;
   function jamKnobDown(e: PointerEvent, bind: JamKnobBinding) {
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -11529,8 +11699,7 @@
     const checked = validateJamPatch(JSON.parse(JSON.stringify(myPatch)));
     if (!checked.ok) return;
     const name = (jamSaveName.trim() || `PATCH ${jamSaved.length + 1}`).slice(0, 12).toUpperCase();
-    jamSaved = [...jamSaved.filter((s) => s.name !== name), { name, patch: checked.patch }].slice(-12);
-    try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
+    jamKeepSaved(name, checked.patch);
     jamSaveName = "";
     myPatchName = name;
     jamCustomOpen = true; // show the tile it just became
@@ -11540,6 +11709,85 @@
     jamSaved = jamSaved.filter((s) => s.name !== name);
     try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
     if (myPatchName === name) myPatchName = "CUSTOM"; // the sound keeps playing; only the label detaches
+  }
+  function jamKeepSaved(name: string, patch: JamPatch) {
+    jamSaved = [...jamSaved.filter((s) => s.name !== name), { name, patch }].slice(-12);
+    try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
+  }
+  // --- Patches in the share: how a room trades sounds ------------------------------------------
+  //
+  // A patch announce already tells the room what YOUR notes should sound like, but it is a
+  // rendering instruction that lives for the length of the call: nobody can keep the sound, and
+  // nobody can play through it themselves. The only way to pass a patch to a friend was to read
+  // the knobs out loud.
+  //
+  // So a patch can be sealed into the server's own encrypted share, exactly as a take can. It is
+  // the same file path as everything else in the share (per-group encryption, the blob mesh,
+  // ordinary expiry), and the bytes are the canonical `jam-patch:v1` JSON the wire already
+  // carries, so the ONE validator admits it on the way back in.
+  let jamPatchBusy = $state(""); // the cid being fetched, or "share" while sealing
+  // The call's own server, whatever server is being viewed: the drawer belongs to the room.
+  let jamSharedPatches = $derived(callFiles.filter((f) => isJamPatchFile(f.name, f.mime)));
+  async function jamSharePatch() {
+    if (!myPatch || jamPatchBusy) return;
+    if (callServer === null) return;
+    if (activeServerId !== callServer) {
+      toast("Switch to the call's server first: the patch belongs in that share", "info", 6000);
+      return;
+    }
+    const checked = validateJamPatch(JSON.parse(JSON.stringify(myPatch)));
+    if (!checked.ok) {
+      toast(`That patch cannot be shared: ${checked.error}`, "err", 7000);
+      return;
+    }
+    // The name is the file's name, because a recipe has no identity beyond its id and a second
+    // copy of the name inside the bytes is one more thing that can disagree with the tile.
+    const stem = jamTakeSlug(jamSaveName.trim() || myPatchName || "patch");
+    const name = `${stem}${JAM_PATCH_EXT}`;
+    jamPatchBusy = "share";
+    const tid = toast(`Sealing ${name} into the share…`, "info", 0);
+    try {
+      // The canonical form, not the editor's object: the same bytes every id is taken over.
+      const payload = new File([checked.canonical], name, { type: JAM_PATCH_MIME });
+      await addSharedFile(payload, "", name, JAM_PATCH_MIME);
+      updateToast(tid, `${name} is in the share; anyone in this server can load it`, "ok");
+      void refreshFiles();
+      void refreshCallFiles();
+    } catch (e) {
+      updateToast(tid, `Could not share ${name}: ${errorText(e)}`, "err", 9000);
+    } finally {
+      jamPatchBusy = "";
+    }
+  }
+  async function jamLoadSharedPatch(file: UiFile) {
+    const server = callServer;
+    if (server === null || jamPatchBusy) return;
+    if (!mayFetchJamPatch(file.size)) {
+      toast(`${file.name} is too large to be a patch`, "err", 6000);
+      return;
+    }
+    jamPatchBusy = file.cid;
+    try {
+      const { value: base64 } = await invokeDebugged<string>("download_file", { server, cid: file.cid });
+      // The room may have moved on (or ended) during the fetch; a patch adopted into the next
+      // call would be a sound nobody there asked for.
+      if (callServer !== server) return;
+      const text = decodeJamPatchBase64(base64);
+      const checked = text === null ? null : parseJamPatchJson(text);
+      if (!checked || !checked.ok) {
+        toast(`${file.name} is not a patch this build can play`, "err", 7000);
+        return;
+      }
+      const name = jamPatchFileName(file.name);
+      jamKeepSaved(name, checked.patch);
+      selectJamPreset(name, checked.patch); // adopt it now: loading a sound means playing it
+      jamCustomOpen = true;
+      toast(`${name} loaded and kept on this device`, "ok", 5000);
+    } catch (e) {
+      toast(`Could not load ${file.name}: ${errorText(e)}`, "err", 8000);
+    } finally {
+      jamPatchBusy = "";
+    }
   }
   // --- Takes: bounded ephemeral event-log recording (jam-recorder.ts owns every rule).
   //
@@ -11555,7 +11803,24 @@
   let jamRecGaps = $state(0);
   let jamRecClock = $state(0); // seconds, for the banner; a 1s ticker while the recorder lives
   let jamRecTimer: ReturnType<typeof setInterval> | undefined;
-  let jamTakes = $state<{ id: number; take: JamTake; gaps: number }[]>([]); // ephemeral: dies with the call
+  // Ephemeral: dies with the call. The `name` is the take's own, editable in the row and used for
+  // both the shared `.jamtake` and the sheet-music file, because "take 01" is the same label in
+  // every call in every room: a share full of `take-01.jamtake` is a share nobody can navigate.
+  let jamTakes = $state<{ id: number; take: JamTake; gaps: number; name: string }[]>([]);
+  /** The default name for a kept take: the room it was played in, and the time it was played. */
+  function jamTakeDefaultName(): string {
+    const now = new Date();
+    const room = (callChannelName || "jam").trim().slice(0, 18);
+    return `${room} ${pad2(now.getHours())}${pad2(now.getMinutes())}`;
+  }
+  /** A take's name as a filename stem: lowercase, no separators, never empty. */
+  function jamTakeSlug(name: string): string {
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+    return slug || "jam-take";
+  }
+  function jamRenameTake(id: number, name: string) {
+    jamTakes = jamTakes.map((t) => (t.id === id ? { ...t, name: name.slice(0, 40) } : t));
+  }
   let jamTakeSeq = 0;
   let jamTakesOpen = $state(false); // the fold: recording is loud, the machinery is quiet
   // Recorder recipe lookup is capability-scoped directly into the engine's validated LRU. A
@@ -11625,7 +11890,7 @@
         ? { ...take, events: take.events.map((event) => ({ ...event, ms: event.ms - lead })) }
         : take;
       jamTakeSeq += 1;
-      jamTakes = [...jamTakes, { id: jamTakeSeq, take: trimmed, gaps: jamRecGaps }];
+      jamTakes = [...jamTakes, { id: jamTakeSeq, take: trimmed, gaps: jamRecGaps, name: jamTakeDefaultName() }];
     }
     jamRecUi = "off";
     pushInstState();
@@ -11853,12 +12118,13 @@
   }
   // Sheet music: the honest transcript (jam-sheet.ts states its own limits) rendered here and
   // saved by a command that only accepts this exporter's own output shape.
-  async function jamExportSheet(entry: { id: number; take: JamTake }) {
+  async function jamExportSheet(entry: { id: number; take: JamTake; name: string }) {
     const names = entry.take.parts.map((fp) => (fp === callSelfFp ? "you" : nameOf(fp)));
     const now = new Date();
-    const name = `mewtual-take-${pad2(entry.id)}-${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}.svg`;
+    const title = entry.name.trim() || `take ${pad2(entry.id)}`;
+    const name = `${jamTakeSlug(title)}-${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}.svg`;
     try {
-      const svg = jamTakeSheetSvg(entry.take, names, `take ${pad2(entry.id)} · ${callChannelName || "jam"}`);
+      const svg = jamTakeSheetSvg(entry.take, names, `${title} · ${callChannelName || "jam"}`);
       const saved = await invoke<{ path: string; displayed: boolean; warning?: string }>("save_jam_sheet", { name, svg });
       toast(saved.displayed ? "Sheet music saved to your Downloads folder" : `Sheet music saved to ${saved.path}`, saved.displayed ? "ok" : "info", 6000);
       if (saved.warning) toast(saved.warning, "info", 7000);
@@ -11869,13 +12135,13 @@
   // A .jamtake in the share is the take's JSON, sealed like any file and replayed by the jukebox
   // through everyone's own synth. The upload path is the ACTIVE server's, so the one guard is
   // that the user is looking at the call's server rather than silently sealing into another.
-  async function jamShareTake(entry: { id: number; take: JamTake }) {
+  async function jamShareTake(entry: { id: number; take: JamTake; name: string }) {
     if (callServer === null) return;
     if (activeServerId !== callServer) {
       toast("Switch to the call's server first: the take belongs in that share", "info", 6000);
       return;
     }
-    const name = `take-${pad2(entry.id)}${JAM_TAKE_EXT}`;
+    const name = `${jamTakeSlug(entry.name || `take ${pad2(entry.id)}`)}${JAM_TAKE_EXT}`;
     const tid = toast(`Sealing ${name} into the share…`, "info", 0);
     try {
       const payload = new File([JSON.stringify(entry.take)], name, { type: JAM_TAKE_MIME });
@@ -12049,6 +12315,24 @@
     try { localStorage.removeItem("catcoms.jam.patch"); } catch { /* ignore */ }
     clearTimeout(jamAnnTimer);
     jamAnnTimer = setTimeout(() => { void publishJamDraft(); }, 400);
+  }
+  /**
+   * Open (or close) the patch editor, minting a patch to edit if there is not one yet.
+   *
+   * The button used to appear only once you were already on a patch, so the way to reach the
+   * knobs was to pick a preset first and then notice that a new control had appeared: the editor
+   * was hidden behind exactly the step someone who wants to build their own sound is not going to
+   * take. Starting from the plain wave you are already sending is the honest blank canvas, because
+   * `legacyJamPatch` is that wave as a one-oscillator recipe: nothing about the sound changes, it
+   * just acquires knobs. The label goes to CUSTOM for the same reason every other edit does.
+   */
+  function toggleJamEdit() {
+    if (!myPatch) {
+      selectJamPreset("CUSTOM", legacyJamPatch(myTimbre as LegacyWave));
+      jamEditOpen = true;
+      return;
+    }
+    jamEditOpen = !jamEditOpen;
   }
   function selectJamPreset(name: string, patch: JamPatch) {
     myPatch = JSON.parse(JSON.stringify(patch)) as JamPatch;
@@ -12241,6 +12525,14 @@
     }
   }
   function handleInstState(fp: string, m: Record<string, unknown>) {
+    // A hangup over the edge itself. It arrives before the connection is closed, which is the
+    // whole point: without it this peer's departure is indistinguishable from their link failing,
+    // and the roster draws LOST over someone who simply left. Same handling as the signalled bye.
+    if (m.t === "bye") {
+      if (callServer !== null && callChannel) dropPresence(callServer, callChannel, fp);
+      removePeer(fp);
+      return;
+    }
     if (m.t !== "s") return; // unknown extension frames: paid for by the budget, then ignored
     const before = peerMeta[fp];
     const after = mergePeerState(before, m);
@@ -15744,17 +16036,20 @@
       error = "Couldn't identify this device on the voice room's server.";
       return;
     }
-    // A missing or refused microphone is no longer a reason not to join. The room is also where
-    // the jukebox and the instruments live, and neither needs one: the data channel carries the
-    // instruments and the deck rides the mesh, so a peer with no mic is a full participant in
-    // everything except talking. The dock offers the mic in place if one turns up later.
-    const joinedMic = await ensureMic(false, false, { server, channel, callLease: joinLease });
-    if (!callLifecycleSession.isCurrent(joinLease)) {
-      if (joinedMic) for (const track of joinedMic.getTracks()) track.stop();
-      return;
-    }
-    localStream = joinedMic;
-    micOn = joinedMic !== null;
+    // A missing or refused microphone is no longer a reason not to join, and waiting for one is no
+    // longer a reason not to be in the room yet. The room is also where the jukebox and the
+    // instruments live, and neither needs a microphone: the data channel carries the instruments
+    // and the deck rides the mesh, so a peer with no mic is a full participant in everything except
+    // talking. The dock offers the mic in place if one turns up later.
+    //
+    // `getUserMedia` has no timeout and is not cancellable. Immediately after a call is left its
+    // device is being torn down by the OS, and the next request for it can sit unanswered for a
+    // long time, or forever. Awaiting it here made joining the next room look BROKEN rather than
+    // slow: nothing was set, so the button did nothing, no error appeared, and the only visible
+    // fact was that leaving a call had cost the ability to join another one. So the room is entered
+    // first and the microphone attaches to it when (and if) the device answers.
+    localStream = null;
+    micOn = false;
     callServer = server;
     callSelfFp = selfFp;
     callChannel = channel;
@@ -15775,7 +16070,10 @@
     focusOpen = false;
     focusDismissed = false; // a new call earns a fresh chance to take the window
     voiceAlert = null;
-    if (localStream) addAnalyser("me", localStream);
+    // The room is live from here; the microphone joins it when the device answers. `enableMic`
+    // adds the track to every edge that already exists and renegotiates through the ordinary
+    // perfect-negotiation path, so an edge established before the mic arrived picks it up.
+    void enableMic(false);
     startMeters();
     navigator.mediaDevices?.addEventListener?.("devicechange", onDeviceChange);
     alertedRooms.delete(roomKey(server, channel));
@@ -15820,7 +16118,11 @@
     screenAudioCaptureSession.invalidate();
     micCaptureSession.invalidate();
     callLifecycleSession.invalidate();
-    if (callChannel) broadcast({ callId: callChannel, type: "bye" });
+    // First, and on every route: the room has to learn that this was a hangup, not a link that
+    // died. Sent before any teardown below, while the data channels are still open.
+    if (callChannel && callServer !== null && callSelfFp) {
+      announceHangup(callServer, callSelfFp, callChannel);
+    }
     releaseMappedCallPorts(); // give the router its ports back; the lease is bounded regardless
     instReleaseAll(); // lift my own notes (and tell peers) before the edges go down
     if (camStream) {
@@ -18113,8 +18415,8 @@
         return;
       }
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
-        const tabs: Tab[] = ["chat", "files", "status", "wiki", "profile", "downloads", "events"];
-        if (e.key >= "1" && e.key <= "7") {
+        const tabs: Tab[] = ["chat", "files", "status", "wiki", "profile", "downloads", "events", "studio"];
+        if (e.key >= "1" && e.key <= "8") {
           e.preventDefault();
           if (activeServerId !== null) switchView(tabs[Number(e.key) - 1]);
         } else if (e.key.toLowerCase() === "l") {
@@ -19739,22 +20041,37 @@
 {/snippet}
 
 <!--
-  The instrument drawer, shared by both call surfaces: the stage docks it under the self block,
-  the focus view docks it under the control bar. One copy so the two can never drift, and so a
-  note held while switching surfaces is still the same held note.
+  One patch knob.
+
+  The lit arc runs from the knob's rest position to the tick: the left stop for a plain range,
+  twelve o'clock for a bipolar one, so a detuned layer or a negative filter sweep shows WHICH way
+  it leans and not only how far. The tooltip leads with what the knob does to the sound, because
+  the label under it is only the abbreviation that fits in 44 pixels, and a panel of those is a
+  machine with no manual.
+
+  The hint's opening term is also the accessible name, so a screen reader says "attack" rather
+  than "atk". `aria-description` would be the right home for the rest of the sentence, but the
+  slider role does not support it and the DOM typings do not know it, so it stays in `title`.
 -->
 {#snippet jamKnob(bind: JamKnobBinding)}
   {@const deg = -135 + 270 * ((bind.value - bind.min) / (bind.max - bind.min || 1))}
+  {@const from = bind.bipolar ? 0 : -135}
+  {@const a = (deg * Math.PI) / 180}
+  {@const b = (from * Math.PI) / 180}
+  {@const arc = `M${(16 + 13 * Math.sin(b)).toFixed(2)} ${(16 - 13 * Math.cos(b)).toFixed(2)} A13 13 0 ${Math.abs(deg - from) > 180 ? 1 : 0} ${deg > from ? 1 : 0} ${(16 + 13 * Math.sin(a)).toFixed(2)} ${(16 - 13 * Math.cos(a)).toFixed(2)}`}
   <div
     class="jam-knob"
+    class:bipolar={bind.bipolar}
     role="slider"
     tabindex="0"
-    aria-label={bind.label}
+    aria-label={bind.hint ? bind.hint.split(":")[0] : bind.label}
     aria-valuemin={bind.min}
     aria-valuemax={bind.max}
     aria-valuenow={bind.value}
     aria-valuetext={bind.disp}
-    title={`${bind.label}: drag up or right (Shift for fine), scroll, or arrow keys`}
+    title={bind.hint
+      ? `${bind.hint}\nDrag up or right (Shift for fine), scroll, or use the arrow keys.`
+      : `${bind.label}: drag up or right (Shift for fine), scroll, or arrow keys`}
     onpointerdown={(e) => jamKnobDown(e, bind)}
     onpointermove={jamKnobMove}
     onpointerup={jamKnobUp}
@@ -19767,6 +20084,7 @@
   >
     <svg class="jam-knob-face" viewBox="0 0 32 32" aria-hidden="true">
       <circle cx="16" cy="16" r="13" class="jam-knob-ring" />
+      <path d={arc} class="jam-knob-arc" />
       <g style={`transform: rotate(${deg}deg); transform-origin: 16px 16px`}>
         <line x1="16" y1="16" x2="16" y2="5.5" class="jam-knob-tick" />
       </g>
@@ -19774,6 +20092,92 @@
     <span class="jam-knob-lbl">{bind.label}</span>
     <span class="jam-knob-val">{bind.disp}</span>
   </div>
+{/snippet}
+
+<!--
+  A scope per patch stage: not a meter, a sketch of the setting the knobs beside it describe,
+  redrawn from `myPatch` on every edit. Four sections of bare numbers are what made this editor
+  read as slapped together; a picture of the pluck, the dark filter or the slow wobble is what a
+  person actually holds in their head while turning a knob.
+
+  All four draw into the same `0 0 100 28` box with `preserveAspectRatio="none"`, so one trace
+  fills either a small tile beside the knobs or a full-width strip above them; the CSS pins stroke
+  widths to screen pixels so the stretch never fattens a line. They are proportional to the patch
+  bounds, not measurements of the running graph: the shape is honest, the axes are not calibrated.
+-->
+
+<!-- Loudness over time, from the four envelope values: attack up, decay down to the sustain shelf,
+     a fixed hold so the shelf is always visible, then the release. The dashed rule is the key-up. -->
+{#snippet jamScopeEnv(e: JamPatch["e"])}
+  {@const x1 = (e.a / 5000) * 30}
+  {@const x2 = x1 + (e.d / 5000) * 25}
+  {@const x3 = x2 + 18}
+  {@const x4 = x3 + (e.r / 8000) * 27}
+  {@const sy = 26 - (e.s / 100) * 20}
+  <svg class="jam-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+    <path class="jam-scope-grid" d="M0 26H100" />
+    <path class="jam-scope-fill" d={`M0 26 L${x1} 6 L${x2} ${sy} L${x3} ${sy} L${x4} 26 Z`} />
+    <path class="jam-scope-trace" d={`M0 26 L${x1} 6 L${x2} ${sy} L${x3} ${sy} L${x4} 26`} />
+    <path class="jam-scope-mark" d={`M${x3} ${sy} V26`} />
+  </svg>
+{/snippet}
+
+<!-- The filter's response over a log frequency axis (20 Hz to 18 kHz): a shoulder or a hump at the
+     cutoff, taller and narrower with resonance. The dashed run along the floor is how far each note
+     sweeps the cutoff, so a negative envelope amount visibly reaches the other way. -->
+{#snippet jamScopeFilter(f: JamPatch["f"])}
+  {@const xc = (Math.log2(Math.max(20, f.c) / 20) / Math.log2(900)) * 100}
+  {@const peak = 9 - (f.q / 100) * 18}
+  {@const hump = 12 - (f.q / 100) * 10}
+  {@const w = 24 - (f.q / 100) * 14}
+  {@const xe = Math.min(100, Math.max(0, xc + f.e * 0.61))}
+  {@const d = f.m === 1 ? `M100 9 L${xc + 6} 9 Q${xc} ${peak} ${xc - 3} 15 L${xc - 15} 26` : f.m === 2 ? `M${xc - w} 26 Q${xc} ${2 * hump - 26} ${xc + w} 26` : `M0 9 L${xc - 6} 9 Q${xc} ${peak} ${xc + 3} 15 L${xc + 15} 26`}
+  {@const close = f.m === 1 ? "L100 26" : f.m === 2 ? "" : "L0 26"}
+  <svg class="jam-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+    <path class="jam-scope-grid" d="M0 26H100" />
+    <path class="jam-scope-fill" d={`${d} ${close} Z`} />
+    <path class="jam-scope-trace" d={d} />
+    {#if f.e !== 0}
+      <path class="jam-scope-sweep" d={`M${xc} 27 H${xe}`} />
+    {/if}
+  </svg>
+{/snippet}
+
+<!-- The wobble itself: more cycles across the box as the rate rises, taller as the depth rises.
+     Off, or a depth of zero, draws flat, because that is exactly what the engine does with it. -->
+{#snippet jamScopeLfo(l: JamPatch["l"])}
+  {@const on = l.t !== 0 && l.d > 0}
+  {@const cycles = 1 + (l.r / 1200) * 6}
+  {@const amp = on ? 2 + (l.d / 100) * 10 : 0}
+  {@const d = Array.from({ length: 41 }, (_u, i) => `${i ? "L" : "M"}${(i * 2.5).toFixed(1)} ${(14 - amp * Math.sin((i / 40) * cycles * 2 * Math.PI)).toFixed(2)}`).join(" ")}
+  <svg class="jam-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+    <path class="jam-scope-grid" d="M0 14H100" />
+    <path class={on ? "jam-scope-trace" : "jam-scope-mark"} d={d} />
+  </svg>
+{/snippet}
+
+<!-- What the room's effects do to one note after it is struck: the dry hit, a chorus twin beside
+     it, the reverb's short tail behind it, and the echo's repeats spaced down the box. Heights are
+     scaled to stay visible rather than measured; the shape is what the knobs change. -->
+{#snippet jamScopeSends(x: JamPatch["x"])}
+  {@const c = x.c / 100}
+  {@const dl = x.d / 100}
+  {@const rv = x.r / 100}
+  <svg class="jam-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+    <path class="jam-scope-grid" d="M0 26H100" />
+    {#if rv > 0}
+      <path class="jam-scope-tail" d={`M7 26 L7 ${26 - 14 * rv} L${7 + 22 * (0.4 + 0.6 * rv)} 26 Z`} />
+    {/if}
+    <path class="jam-scope-bar" d="M6 26 V6" />
+    {#if c > 0}
+      <path class="jam-scope-bar soft" d={`M9.5 26 V${26 - 20 * c}`} />
+    {/if}
+    {#each [0.7, 0.35, 0.18] as k, n (n)}
+      {#if dl * k * 20 >= 0.5}
+        <path class="jam-scope-bar soft" d={`M${6 + 28 * (n + 1)} 26 V${26 - 20 * dl * k}`} />
+      {/if}
+    {/each}
+  </svg>
 {/snippet}
 
 <!-- The recording honesty surface: rendered by BOTH call surfaces, drawer open or not. -->
@@ -19906,36 +20310,36 @@
           <span class="inst-wave-lbl">{pr.name}</span>
         </button>
       {/each}
-      {#if jamSaved.length}
+      {#if jamSaved.length || jamSharedPatches.length}
         <button
           class="ghost inst-wave"
           class:on={jamCustomOpen || jamSaved.some((sv) => !!myPatch && myPatchName === sv.name)}
           aria-expanded={jamCustomOpen}
-          title="Your saved patches (they open downward, not off the edge of this row)"
+          title="Your saved patches and the ones shared with this server (they open downward, not off the edge of this row)"
           onclick={() => (jamCustomOpen = !jamCustomOpen)}
         >
           <svg class="inst-wv" viewBox="0 0 26 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M0 9 Q5 3 9 8 T17 6 T26 8" />
           </svg>
-          <span class="inst-wave-lbl">CUSTOM · {jamSaved.length}</span>
+          <span class="inst-wave-lbl">CUSTOM · {jamSaved.length + jamSharedPatches.length}</span>
         </button>
       {/if}
-      {#if myPatch}
-        <button
-          class="ghost inst-wave jam-edit-btn"
-          class:on={jamEditOpen}
-          aria-pressed={jamEditOpen}
-          title="Shape this patch. Every edit mints a new patch id; friends hear it within a beat."
-          onclick={() => (jamEditOpen = !jamEditOpen)}
-        ><span class="inst-wave-lbl">EDIT</span></button>
-      {/if}
+      <button
+        class="ghost inst-wave jam-edit-btn"
+        class:on={jamEditOpen}
+        aria-pressed={jamEditOpen}
+        title={myPatch
+          ? "Shape this patch. Every edit mints a new patch id; friends hear it within a beat."
+          : `Shape your sound. Opens the knobs on your ${myTimbre} wave, which is what you are already sending, so nothing changes until you turn one.`}
+        onclick={toggleJamEdit}
+      ><span class="inst-wave-lbl">EDIT</span></button>
       <span class="stage-spacer"></span>
       <button class="ghost small inst-oct-btn" title="Register down (z)" aria-label="Register down" onclick={() => setInstOctave(instOctave - 1)}>−</button>
       <span class="inst-oct">C{instOctave}–C{instOctave + 2}</span>
       <button class="ghost small inst-oct-btn" title="Register up (x)" aria-label="Register up" onclick={() => setInstOctave(instOctave + 1)}>＋</button>
     </div>
 
-    {#if jamCustomOpen && jamSaved.length}
+    {#if jamCustomOpen && (jamSaved.length || jamSharedPatches.length)}
       <div class="jam-custom">
         {#each jamSaved as sv (sv.name)}
           <div class="jam-custom-tile">
@@ -19954,6 +20358,29 @@
             <button class="ghost jam-tile-del" title={`Forget the saved patch ${sv.name} (the sound keeps playing until you switch)`} aria-label={`Delete saved patch ${sv.name}`} onclick={() => jamDeleteSaved(sv.name)}>✕</button>
           </div>
         {/each}
+        {#if jamSharedPatches.length}
+          <!-- Patches other people put in this server's share. Loading one fetches its bytes,
+               validates them through the same patch validator the wire uses, keeps it on this
+               device and plays through it straight away. -->
+          <span class="jam-custom-sep">from the share</span>
+          {#each jamSharedPatches as sp (sp.cid)}
+            {@const label = jamPatchFileName(sp.name)}
+            <div class="jam-custom-tile">
+              <button
+                class="ghost inst-wave"
+                class:on={!!myPatch && myPatchName === label}
+                disabled={!!jamPatchBusy}
+                title={`${sp.name} · shared by ${nameOf(sp.author)}. Load it: it is kept on this device and becomes your sound.`}
+                onclick={() => void jamLoadSharedPatch(sp)}
+              >
+                <svg class="inst-wv" viewBox="0 0 26 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M13 1.5v7" /><path d="M9.5 5.5 13 9l3.5-3.5" /><path d="M3 10.5h20" />
+                </svg>
+                <span class="inst-wave-lbl">{jamPatchBusy === sp.cid ? "…" : label}</span>
+              </button>
+            </div>
+          {/each}
+        {/if}
       </div>
     {/if}
 
@@ -19984,9 +20411,9 @@
                     {/if}
                   </div>
                   <div class="jam-knobs">
-                    {@render jamKnob({ label: "st", value: osc.t, min: -24, max: 24, disp: String(osc.t), set: (v) => jamEditOsc(i, "t", v) })}
-                    {@render jamKnob({ label: "ct", value: osc.c, min: -50, max: 50, disp: String(osc.c), set: (v) => jamEditOsc(i, "c", v) })}
-                    {@render jamKnob({ label: "lvl", value: osc.l, min: 0, max: 100, disp: String(osc.l), set: (v) => jamEditOsc(i, "l", v) })}
+                    {@render jamKnob({ label: "st", value: osc.t, min: -24, max: 24, disp: String(osc.t), bipolar: true, hint: "Transpose: shifts this layer by whole semitones. +12 is an octave up, -12 an octave down; +7 against another layer gives a fifth.", set: (v) => jamEditOsc(i, "t", v) })}
+                    {@render jamKnob({ label: "ct", value: osc.c, min: -50, max: 50, disp: String(osc.c), bipolar: true, hint: "Detune: nudges this layer slightly sharp or flat, in hundredths of a semitone. A few cents against another layer makes the sound thicker and slowly beating; 0 is dead in tune.", set: (v) => jamEditOsc(i, "c", v) })}
+                    {@render jamKnob({ label: "lvl", value: osc.l, min: 0, max: 100, disp: String(osc.l), hint: "Level: how loud this layer is in the mix against the others. 0 silences it without removing it.", set: (v) => jamEditOsc(i, "l", v) })}
                   </div>
                 </div>
               {/if}
@@ -19996,42 +20423,83 @@
             <button class="ghost jam-layer-add" title="Add an oscillator layer (3 max)" onclick={jamOscAdd}>＋ layer</button>
           {/if}
         </div>
-        <div class="jam-sect">
-          <div class="jam-edit-hd"><span>envelope</span></div>
-          <div class="jam-knobs">
-            {@render jamKnob({ label: "atk", value: myPatch.e.a, min: 0, max: 5000, disp: `${(myPatch.e.a / 1000).toFixed(1)}s`, set: (v) => jamEditNum("e", "a", v) })}
-            {@render jamKnob({ label: "dec", value: myPatch.e.d, min: 0, max: 5000, disp: `${(myPatch.e.d / 1000).toFixed(1)}s`, set: (v) => jamEditNum("e", "d", v) })}
-            {@render jamKnob({ label: "sus", value: myPatch.e.s, min: 0, max: 100, disp: String(myPatch.e.s), set: (v) => jamEditNum("e", "s", v) })}
-            {@render jamKnob({ label: "rel", value: myPatch.e.r, min: 0, max: 8000, disp: `${(myPatch.e.r / 1000).toFixed(1)}s`, set: (v) => jamEditNum("e", "r", v) })}
-          </div>
-          <div class="jam-edit-hd"><span>filter</span></div>
-          <div class="jam-osc">
-            <button class="ghost jam-osc-w" class:on={myPatch.f.m === 0} title="Lowpass" onclick={() => jamEditNum("f", "m", 0)}>LP</button>
-            <button class="ghost jam-osc-w" class:on={myPatch.f.m === 1} title="Highpass" onclick={() => jamEditNum("f", "m", 1)}>HP</button>
-            <button class="ghost jam-osc-w" class:on={myPatch.f.m === 2} title="Bandpass" onclick={() => jamEditNum("f", "m", 2)}>BP</button>
-          </div>
-          <div class="jam-knobs">
-            {@render jamKnob({ label: "cut", value: myPatch.f.c, min: 20, max: 18000, disp: myPatch.f.c >= 1000 ? `${(myPatch.f.c / 1000).toFixed(1)}k` : String(myPatch.f.c), set: (v) => jamEditNum("f", "c", v) })}
-            {@render jamKnob({ label: "res", value: myPatch.f.q, min: 0, max: 100, disp: String(myPatch.f.q), set: (v) => jamEditNum("f", "q", v) })}
-            {@render jamKnob({ label: "env", value: myPatch.f.e, min: -100, max: 100, disp: String(myPatch.f.e), set: (v) => jamEditNum("f", "e", v) })}
-          </div>
-        </div>
-        <div class="jam-sect">
-          <div class="jam-edit-hd"><span>lfo</span></div>
-          <div class="jam-osc">
-            <button class="ghost jam-osc-w" class:on={myPatch.l.t === 0} title="LFO off" onclick={() => jamEditNum("l", "t", 0)}>OFF</button>
-            <button class="ghost jam-osc-w" class:on={myPatch.l.t === 1} title="LFO wobbles the filter cutoff" onclick={() => jamEditNum("l", "t", 1)}>CUT</button>
-            <button class="ghost jam-osc-w" class:on={myPatch.l.t === 2} title="LFO wobbles the pitch (a bounded vibrato)" onclick={() => jamEditNum("l", "t", 2)}>PIT</button>
-          </div>
-          <div class="jam-knobs">
-            {@render jamKnob({ label: "rate", value: myPatch.l.r, min: 1, max: 1200, disp: `${(myPatch.l.r / 100).toFixed(2)}hz`, set: (v) => jamEditNum("l", "r", v) })}
-            {@render jamKnob({ label: "dep", value: myPatch.l.d, min: 0, max: 100, disp: String(myPatch.l.d), set: (v) => jamEditNum("l", "d", v) })}
-          </div>
-          <div class="jam-edit-hd"><span>room sends</span></div>
-          <div class="jam-knobs">
-            {@render jamKnob({ label: "cho", value: myPatch.x.c, min: 0, max: 100, disp: String(myPatch.x.c), set: (v) => jamEditNum("x", "c", v) })}
-            {@render jamKnob({ label: "del", value: myPatch.x.d, min: 0, max: 100, disp: String(myPatch.x.d), set: (v) => jamEditNum("x", "d", v) })}
-            {@render jamKnob({ label: "rev", value: myPatch.x.r, min: 0, max: 100, disp: String(myPatch.x.r), set: (v) => jamEditNum("x", "r", v) })}
+        <!-- The oscillators make the raw tone; everything below is what each note is put through,
+             in order. These four used to be bare headings dropped into the same auto-fit grid as
+             the osc stack, which at this drawer's real width gave each about 186 pixels: less than
+             one row of four knobs, so the envelope wrapped 3+1 and the filter and the sends ended
+             up stapled under whichever section came first. They now wear the layer card's own
+             frame, so the editor reads as one family of cards, and each carries a scope that
+             redraws the setting its knobs describe: you can see a pluck, a dark filter or a slow
+             wobble before you hear it. -->
+        <div class="jam-sect jam-shape">
+          <div class="jam-edit-hd"><span>shape</span><span class="jam-edit-hd-sub">· every note runs through these in order</span></div>
+          <div class="jam-stages">
+            <div class="jam-stage">
+              <div class="jam-stage-hd">
+                <span class="jam-stage-nm">envelope</span>
+                <span class="jam-stage-sub">loudness over time</span>
+              </div>
+              <div class="jam-stage-body">
+                {@render jamScopeEnv(myPatch.e)}
+                <div class="jam-knobs">
+                  {@render jamKnob({ label: "atk", value: myPatch.e.a, min: 0, max: 5000, disp: `${(myPatch.e.a / 1000).toFixed(1)}s`, hint: "Attack: how long a note takes to reach full volume. 0 is an instant pluck; a few seconds is a slow swell.", set: (v) => jamEditNum("e", "a", v) })}
+                  {@render jamKnob({ label: "dec", value: myPatch.e.d, min: 0, max: 5000, disp: `${(myPatch.e.d / 1000).toFixed(1)}s`, hint: "Decay: after the peak, how long the note takes to fall to the sustain level. Short is a snappy bite; long is a slow settle.", set: (v) => jamEditNum("e", "d", v) })}
+                  {@render jamKnob({ label: "sus", value: myPatch.e.s, min: 0, max: 100, disp: String(myPatch.e.s), hint: "Sustain: the volume a held note settles at, as a share of the peak. 100 holds at full; 0 fades out even while the key is down.", set: (v) => jamEditNum("e", "s", v) })}
+                  {@render jamKnob({ label: "rel", value: myPatch.e.r, min: 0, max: 8000, disp: `${(myPatch.e.r / 1000).toFixed(1)}s`, hint: "Release: how long the note takes to fade after the key is let go. 0 stops dead; high leaves a tail hanging.", set: (v) => jamEditNum("e", "r", v) })}
+                </div>
+              </div>
+            </div>
+            <div class="jam-stage">
+              <div class="jam-stage-hd">
+                <span class="jam-stage-nm">filter</span>
+                <span class="jam-stage-sub">tone</span>
+                <div class="jam-stage-modes" role="group" aria-label="Filter type">
+                  <button class="ghost jam-osc-w" class:on={myPatch.f.m === 0} aria-pressed={myPatch.f.m === 0} title="Lowpass: keeps the lows and rolls off everything brighter than the cutoff. Warm and rounded; the classic synth tone." onclick={() => jamEditNum("f", "m", 0)}>LP</button>
+                  <button class="ghost jam-osc-w" class:on={myPatch.f.m === 1} aria-pressed={myPatch.f.m === 1} title="Highpass: keeps the highs and rolls off everything below the cutoff. Thin and airy; it cuts through a busy room." onclick={() => jamEditNum("f", "m", 1)}>HP</button>
+                  <button class="ghost jam-osc-w" class:on={myPatch.f.m === 2} aria-pressed={myPatch.f.m === 2} title="Bandpass: keeps only a band around the cutoff and rolls off both sides. Nasal and hollow, like a small speaker." onclick={() => jamEditNum("f", "m", 2)}>BP</button>
+                </div>
+              </div>
+              <div class="jam-stage-body">
+                {@render jamScopeFilter(myPatch.f)}
+                <div class="jam-knobs">
+                  {@render jamKnob({ label: "cut", value: myPatch.f.c, min: 20, max: 18000, disp: myPatch.f.c >= 1000 ? `${(myPatch.f.c / 1000).toFixed(1)}k` : String(myPatch.f.c), hint: "Cutoff: where the filter starts to bite, in Hz. On lowpass, lower is darker; on highpass, higher is thinner; on bandpass it is the centre of the band.", set: (v) => jamEditNum("f", "c", v) })}
+                  {@render jamKnob({ label: "res", value: myPatch.f.q, min: 0, max: 100, disp: String(myPatch.f.q), hint: "Resonance: a peak right at the cutoff. 0 is smooth; high makes the cutoff ring and whistle, and any sweep of it turns squelchy.", set: (v) => jamEditNum("f", "q", v) })}
+                  {@render jamKnob({ label: "env", value: myPatch.f.e, min: -100, max: 100, disp: String(myPatch.f.e), bipolar: true, hint: "Envelope amount: how far each note sweeps the cutoff. Positive opens the filter on the attack and closes it through the decay (the classic wow); negative dips it instead; 0 holds it still. Full is six octaves.", set: (v) => jamEditNum("f", "e", v) })}
+                </div>
+              </div>
+            </div>
+            <div class="jam-stage">
+              <div class="jam-stage-hd">
+                <span class="jam-stage-nm">lfo</span>
+                <span class="jam-stage-sub">movement</span>
+                <div class="jam-stage-modes" role="group" aria-label="What the LFO moves">
+                  <button class="ghost jam-osc-w" class:on={myPatch.l.t === 0} aria-pressed={myPatch.l.t === 0} title="No wobble: the sound holds steady once the envelope has settled." onclick={() => jamEditNum("l", "t", 0)}>OFF</button>
+                  <button class="ghost jam-osc-w" class:on={myPatch.l.t === 1} aria-pressed={myPatch.l.t === 1} title="The wobble sweeps the filter cutoff up and down: slow for a wah, fast for a growl. Depth sets how far, up to four octaves." onclick={() => jamEditNum("l", "t", 1)}>CUT</button>
+                  <button class="ghost jam-osc-w" class:on={myPatch.l.t === 2} aria-pressed={myPatch.l.t === 2} title="The wobble bends the pitch up and down for a vibrato. Even at full depth it stays within a quarter of a semitone." onclick={() => jamEditNum("l", "t", 2)}>PIT</button>
+                </div>
+              </div>
+              <div class="jam-stage-body">
+                {@render jamScopeLfo(myPatch.l)}
+                <div class="jam-knobs">
+                  {@render jamKnob({ label: "rate", value: myPatch.l.r, min: 1, max: 1200, disp: `${(myPatch.l.r / 100).toFixed(2)}hz`, hint: "Rate: how fast the wobble cycles, in Hz. Under 1 is a slow drift, 5 to 7 is a vibrato, 12 is a buzz.", set: (v) => jamEditNum("l", "r", v) })}
+                  {@render jamKnob({ label: "dep", value: myPatch.l.d, min: 0, max: 100, disp: String(myPatch.l.d), hint: "Depth: how far the wobble reaches. 0 is none even with a target picked; 100 is the full sweep.", set: (v) => jamEditNum("l", "d", v) })}
+                </div>
+              </div>
+            </div>
+            <div class="jam-stage">
+              <div class="jam-stage-hd">
+                <span class="jam-stage-nm">room sends</span>
+                <span class="jam-stage-sub">space</span>
+              </div>
+              <div class="jam-stage-body">
+                {@render jamScopeSends(myPatch.x)}
+                <div class="jam-knobs">
+                  {@render jamKnob({ label: "cho", value: myPatch.x.c, min: 0, max: 100, disp: String(myPatch.x.c), hint: "Chorus send: how much of this sound goes to the room's shared chorus, which doubles it with a slowly drifting copy. Thicker and wider; 0 is dry.", set: (v) => jamEditNum("x", "c", v) })}
+                  {@render jamKnob({ label: "del", value: myPatch.x.d, min: 0, max: 100, disp: String(myPatch.x.d), hint: "Delay send: how much goes to the room's shared echo, a repeat about a quarter of a second later that trails off. 0 is dry.", set: (v) => jamEditNum("x", "d", v) })}
+                  {@render jamKnob({ label: "rev", value: myPatch.x.r, min: 0, max: 100, disp: String(myPatch.x.r), hint: "Reverb send: how much goes to the room's shared reverb, a small space that softens the edges. 0 is dry.", set: (v) => jamEditNum("x", "r", v) })}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
         <div class="jam-sect">
@@ -20039,8 +20507,14 @@
           <div class="jam-save">
             <input class="jam-save-name" type="text" maxlength="12" placeholder="patch name" bind:value={jamSaveName} />
             <button class="ghost jam-save-btn" title="Keep this patch as a tile on this device" onclick={jamSavePatch}>SAVE</button>
+            <button
+              class="ghost jam-save-btn"
+              disabled={!!jamPatchBusy || callServer === null}
+              title="Put this patch in the server's encrypted share, so anyone here can load and play through it"
+              onclick={() => void jamSharePatch()}
+            >{jamPatchBusy === "share" ? "SHARING…" : "SHARE"}</button>
           </div>
-          <div class="jam-edit-note">Saved patches live on this device only. Friends hear edits automatically; older builds hear your {myTimbre} wave.</div>
+          <div class="jam-edit-note">SAVE keeps the patch on this device. SHARE seals it into this server's share as a {JAM_PATCH_EXT}.</div>
         </div>
       </div>
     {/if}
@@ -20157,7 +20631,16 @@
                   <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.8 10.5 6 3 10.2z" fill="currentColor" /></svg>
                 </button>
               {/if}
-              <span class="jam-take-name">take {String(t.id).padStart(2, "0")} · {fmtTakeClock(takeDuration(t.take))} · {t.take.met.bpm}bpm</span>
+              <input
+                class="jam-take-name"
+                value={t.name}
+                maxlength="40"
+                spellcheck="false"
+                title="Name this jam: the name is what the saved sheet music and the shared .jamtake are called"
+                aria-label="Jam name"
+                oninput={(e) => jamRenameTake(t.id, e.currentTarget.value)}
+              />
+              <span class="jam-take-meta">{fmtTakeClock(takeDuration(t.take))} · {t.take.met.bpm}bpm</span>
               <span class="jam-take-who">{takePlayers(t.take)}</span>
               {#if t.gaps}<span class="jam-met-chip warn" title="Some events were lost in transit; the take has holes it does not hide">{t.gaps} lost</span>{/if}
               <span class="stage-spacer"></span>
@@ -20630,6 +21113,13 @@
   {:else if view === "downloads"}
     <h3><span>Transfers</span></h3>
     <button class="ghost small ctx-action" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
+  {:else if view === "studio"}
+    {#if StudioNav}
+      <StudioNav me={myFp} onopen={() => (view = "studio")} />
+    {:else}
+      <h3><span>Studio</span></h3>
+      <p class="muted small">Loading the studio…</p>
+    {/if}
   {:else if view === "events"}
     <h3><span>Upcoming</span></h3>
     {#each upcomingEvents.slice(0, 5) as e (e.id)}
@@ -21958,6 +22448,9 @@
               <span class="sb-ico">⧗</span>events
               {#if upcomingEvents.length}<span class="tab-count">{upcomingEvents.length}</span>{/if}
             </button>
+            <button type="button" class:active={view === "studio"} onclick={() => switchView("studio")} title="Flipnotes and scores made together (in-memory preview)">
+              <span class="sb-ico">◫</span>studio
+            </button>
             <button type="button" class:active={view === "downloads"} onclick={() => switchView("downloads")}>
               <span class="sb-ico">↓</span>transfers
               {#if activeTransfers}<span class="tab-count">{activeTransfers}</span>{/if}
@@ -22194,6 +22687,7 @@
             use:richClicks
             use:channelScan
             onscroll={onChatScroll}
+            onloadcapture={chatMediaSettled}
             ondragover={(e) => { e.preventDefault(); dragOver = true; }}
             ondragleave={() => (dragOver = false)}
             ondrop={(e) => onComposerDrop("chat", e)}
@@ -23344,6 +23838,13 @@
               {@render profilePreview()}
             </aside>
           </div>
+        {:else if view === "studio"}
+          {#if StudioSurface}
+            <StudioSurface me={myFp} nameOf={nameOf} colorOf={(fp) => profiles[fp]?.color || "var(--muted)"} onnotice={studioNotice} />
+          {:else}
+            <h2>Studio</h2>
+            <p class="muted">Loading the studio…</p>
+          {/if}
         {:else if view === "events"}
           <h2>Events</h2>
           <div class="events-tab tab-pane">
@@ -23612,7 +24113,7 @@
         {#if micOn}
           <button class="ghost small btn-ico stage-mute" class:muted={callMuted} title={callMuted ? "Unmute" : "Mute"} onclick={toggleMute}>{#if callMuted}{@render icoMicOff()} Muted{:else}{@render icoMic()} Mute{/if}</button>
         {:else}
-          <button class="ghost small btn-ico stage-mute nomic" title="You are in this room without a microphone: the jukebox and the instruments still work. Click to turn a mic on." onclick={enableMic}>{@render icoMicOff()} No mic</button>
+          <button class="ghost small btn-ico stage-mute nomic" title="You are in this room without a microphone: the jukebox and the instruments still work. Click to turn a mic on." onclick={() => void enableMic()}>{@render icoMicOff()} No mic</button>
         {/if}
         <button class="call-hangup btn-ico" title="Leave voice" onclick={leaveVoice}>{@render icoHangup()} Leave</button>
         <button class="ghost stage-chev" title="Open the voice stage" aria-label="Open the voice stage" onclick={() => (stageOpen = true)}>{#if callDockTop}{@render icoChevDown()}{:else}{@render icoChevUp()}{/if}</button>
@@ -23802,15 +24303,20 @@
           <div class="stage-acts">
             <!-- Under push to talk the button still means mute, but the label has to say which
                  of the two gates is currently closed, or a silent microphone looks like a bug. -->
+            <!-- The push-to-talk state is a CAPTION on the mute button, not a control beside it.
+                 As its own chip it took one of the six action cells, which pushed Leave onto a
+                 second row: a setting nobody can click was rearranging the controls people can.
+                 It belongs to mute in any case, because the two are the same question, which of
+                 the gates in front of the microphone is currently closed. -->
             <button class="ghost stage-act" class:muted={callMuted} title={callMuted ? "Unmute" : "Mute your microphone"} onclick={toggleMute}>
               {#if callMuted}{@render icoMicOff()}{:else}{@render icoMic()}{/if}
               <span class="stage-act-lbl">{callMuted ? "Muted" : "Mute"}</span>
+              {#if pushToTalk.mode === "ptt" && !callMuted}
+                <span class="stage-ptt-cap" class:live={pttHeld} title={`Push to talk: hold ${keyLabel(pushToTalk.key)} to speak`}>
+                  {pttHeld ? "ON AIR" : `HOLD ${keyLabel(pushToTalk.key).toUpperCase()}`}
+                </span>
+              {/if}
             </button>
-            {#if pushToTalk.mode === "ptt" && !callMuted}
-              <span class="stage-chip" class:struck={!pttHeld} title={`Push to talk: hold ${keyLabel(pushToTalk.key)} to speak`}>
-                {pttHeld ? "ON AIR" : `HOLD ${keyLabel(pushToTalk.key).toUpperCase()}`}
-              </span>
-            {/if}
             <button class="ghost stage-act" class:muted={callDeafened} title={callDeafened ? "Hear the room again" : "Deafen: stop hearing everyone"} onclick={toggleDeafen}>
               {@render icoSpeaker()}
               <span class="stage-act-lbl">{callDeafened ? "Deafened" : "Deafen"}</span>
@@ -23867,10 +24373,12 @@
         <!-- The deck sits between what you do and what you play: it is the room's, not yours. -->
         {@render jukeDock()}
 
-        <!-- The drawer itself is the shared instDrawer snippet; the fold strip below owns its state. -->
-        {#if instOpen}
-          {@render instDrawer()}
-        {/if}
+        <!-- The fold strip owns the drawer's state, and sits ABOVE what it opens. It used to be
+             rendered after the drawer, which put the control that says INSTRUMENTS below the whole
+             keyboard, the takes and the patch editor: the heading for a section you had to scroll
+             past the section to find, and the one strip that reads as a section header pointing at
+             nothing. Every other fold in the app (TAKES, the wiki contents) opens downward from its
+             own header, and this now does too. -->
         <div class="stage-fold">
           <button class="ghost stage-fold-btn" aria-expanded={instOpen} title={instOpen ? "Close the instruments" : "Open the instruments"} onclick={toggleInstDrawer}>
             {#if instOpen}{@render icoChevDown()}{:else}{@render icoChevUp()}{/if}
@@ -23882,6 +24390,9 @@
             <span class="stage-label">{instRxMuted ? "INST MUTED" : "HEARING ALL"}</span>
           </button>
         </div>
+        {#if instOpen}
+          {@render instDrawer()}
+        {/if}
       </div>
     {/if}
 
