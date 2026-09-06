@@ -3858,6 +3858,19 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     member_route_revision: u64,
     /// Recovery work to perform on the next async drain.
     catchup_queue: Vec<CatchupTask>,
+    /// Whether this process still owes its restored documents one whole-node catch-up sweep.
+    ///
+    /// Set by [`ChannelSync::restore`] when a snapshot brought documents back, and cleared by the
+    /// first peer that proves it can serve a document catch-up. Gossip replays nothing written
+    /// while this node was off, and `member_peers` holds only this session's proofs, so a restart
+    /// reaches its first connection unable to aim recovery anywhere; without this the sweep waited
+    /// on a second connection edge that a stable link never produces, and a room that stayed quiet
+    /// remained as short as the restore left it.
+    ///
+    /// One sweep per process, and only for a restored one. A node that founded or joined in this
+    /// session has nothing older than the session to recover, and sweeping there costs a tick that
+    /// discovery and presence are still using to converge.
+    first_proof_sweep_owed: bool,
     /// Authenticated acknowledgements waiting for a live route back to each op author. Entries
     /// are queued only after decrypting, signature-verifying and newly applying an op; bounded so
     /// an offline author cannot turn receipt retries into unbounded session state.
@@ -4181,6 +4194,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             manual_redial_last_ms: None,
             member_route_revision: 0,
             catchup_queue: Vec::new(),
+            first_proof_sweep_owed: false,
             delivery_receipt_outbox: VecDeque::new(),
             delivery_receipt_targets: VecDeque::new(),
             delivery_receipts: HashMap::new(),
@@ -4450,6 +4464,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             this.docs.insert((doc.doc_type(), doc.doc_id()), doc);
         }
         this.commit_log = commit_log;
+        // A snapshot's documents are as old as the process that wrote them, and nothing else will
+        // notice that. See `first_proof_sweep_owed`; discharged by the first member that proves
+        // it can serve a document catch-up.
+        this.first_proof_sweep_owed = !this.docs.is_empty();
         // Stamp every restored record as seen now. The stamps are transient (they are not in the
         // snapshot), and leaving them absent would make the whole restored map read as maximally
         // stale, so the first new record learned after a reload would evict a real member.
@@ -5834,20 +5852,28 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         while self.member_peers.len() > self.config.max_known_peers {
             self.member_peers.pop_front();
         }
-        if newly_proven {
-            // The obligation this proof creates, discharged now that the pool contains it.
+        if newly_proven && bound && self.first_proof_sweep_owed {
+            // The restore's outstanding sweep, discharged now that a source exists for it.
             //
-            // A restored node reaches its first connection with an empty pool, so
+            // A restored node reaches its first connection with an empty proof pool, so
             // [`Self::sweep_docs_on_reconnect`] correctly declines to aim member-only recovery at
             // a peer that has not shown it can serve one. The moment a peer does show it, the
             // sweep that connection could not run is the sweep that has to happen, or history
             // written while this node was away stays missing until something unrelated notices.
+            // Restoring, opening one channel and finding the rest still short is the shape of it.
             //
-            // Runs at most once per new (peer, device) binding, which is the same order as the
-            // reconnect sweep itself: the burst this file warns about came from enqueueing on
-            // every *connection* edge, before anything had been proven. The drain is bounded by
-            // what was queued when it started, so the work still leaves a couple of documents per
-            // tick rather than as one flood.
+            // **Only a bound proof.** That is exactly a peer that has served *this node* a
+            // document catch-up, which means its membership check ran and passed. The unbound
+            // proofs are PEX and commit catch-up, and a peer still mid-join answers both while
+            // being unable to serve a members-only document request: sweeping on those aimed
+            // recovery at the joiner, blocked this loop on a reply it could not give, and left
+            // the join it was racing unserved. That is the same deadlock
+            // `sweep_docs_on_reconnect`'s gate exists to prevent, reached one step later.
+            //
+            // **Only once, and only after a restore.** See `first_proof_sweep_owed`. Sweeping on
+            // every new binding put a whole node's documents in front of the discovery and
+            // presence work of a session that had nothing older than itself to recover.
+            self.first_proof_sweep_owed = false;
             self.sweep_docs_on_reconnect(peer);
         }
     }
@@ -16060,13 +16086,27 @@ mod tests {
     ///
     /// Both documents, from the proof alone, with no further transport event.
     #[tokio::test]
-    async fn a_first_member_proof_sweeps_the_docs_the_connection_declined() {
-        let (_hub, members, _ids) = build_members(2).await;
-        let mut alice = members.into_iter().next().unwrap();
+    async fn a_first_member_proof_sweeps_the_docs_a_restore_left_short() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        let alice = &mut members[0];
         alice.open_channel(DocType::Channel, 1).await.unwrap();
         alice.open_channel(DocType::Channel, 2).await.unwrap();
-        // Documents held, nothing proved: the state a restore starts in.
-        alice.member_peers.clear();
+        let snap = alice.snapshot().unwrap();
+
+        // The process comes back holding two channels and this session's empty proof pool.
+        let hub2 = Hub::new();
+        let mut alice = Member::restore(
+            &snap,
+            hub2.join(PeerId::from_u64(99)),
+            ChaCha20Rng::seed_from_u64(7),
+            Box::new(ManualClock::new(1_000)),
+        )
+        .unwrap();
+        assert!(
+            alice.first_proof_sweep_owed,
+            "a snapshot's documents are as old as the process that wrote them"
+        );
+        assert!(alice.member_peers.is_empty());
         alice.catchup_queue.clear();
 
         let queued_docs = |sync: &Member| -> BTreeSet<u128> {
@@ -16088,12 +16128,35 @@ mod tests {
             "the connection itself proves nothing, so it must not aim recovery anywhere"
         );
 
-        // The first roster-verified signed catch-up proves the peer. No second connection edge.
-        alice.promote_member_peer_bound(peer, alice.device.device_id(), true);
+        // An unbound proof is PEX or commit catch-up, and a peer still mid-join answers both
+        // while being unable to serve a members-only document request. Sweeping here aims
+        // recovery at the joiner and blocks this loop on a reply it cannot give, which is the
+        // deadlock the connection-time gate exists to prevent.
+        let joiner = PeerId::from_u64(9_997);
+        alice.note_peer_connected(joiner);
+        alice.promote_member_peer(joiner, ids[1]);
+        assert!(
+            queued_docs(&alice).is_empty(),
+            "an unbound proof says a member signed something, not that it can serve a catch-up"
+        );
+
+        // A bound proof is a peer that has served this node a document catch-up, so its
+        // membership check has run and passed. No second connection edge.
+        alice.promote_member_peer_bound(peer, ids[1], true);
         assert_eq!(
             queued_docs(&alice),
             BTreeSet::from([1, 2]),
-            "a first proof must queue every open document, not just the one being read"
+            "a first bound proof must queue every open document, not just the one being read"
+        );
+
+        // And it is owed once. A later binding is ordinary session traffic, and putting a whole
+        // node's documents in front of it costs the tick that discovery and presence need.
+        assert!(!alice.first_proof_sweep_owed);
+        alice.catchup_queue.clear();
+        alice.promote_member_peer_bound(PeerId::from_u64(9_996), ids[1], true);
+        assert!(
+            queued_docs(&alice).is_empty(),
+            "the restore's sweep is discharged, not repeated for every new source"
         );
     }
 

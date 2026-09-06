@@ -83,7 +83,14 @@ Implementations:
 - **`MemNetwork`** (tests): `let hub = Hub::new(); let net = hub.join(PeerId::from_u64(n));`
 - **`MeshService`** (prod, catcoms-net): `spawn(swarm)` / `new_memory(listen, dial)` /
   `new_tcp(...)`; `build_memory_swarm()` / `build_tcp_swarm()`. Maps `PeerId`↔libp2p
-  PeerId, hex-encodes topics, queues+retries publishes until a subscriber appears.
+  PeerId, hex-encodes topics, and holds a publication for a retry **only when the failure it got
+  can pass**: no subscriber yet, or every peer's send queue momentarily full. A message too large,
+  an unsignable one or a failed transform is reported and dropped rather than queued behind a
+  retry that cannot help it, and a duplicate is already published. Held payloads are retried both
+  on a `Subscribed` event and on `PENDING_PUBLISH_RETRY` (2 s), because a fully subscribed mesh
+  produces no further subscription events, and are bounded by `MAX_PENDING_PUBLISH` (256) and
+  `MAX_PENDING_PUBLISH_BYTES` (8 MiB), oldest dropped first. The queue is a bridge across a
+  transient failure, not durable storage: what matters past it is recovered by document catch-up.
   `request_connected` / `notify_connected` are deliberately narrow repair sends: the actor
   succeeds only when its current peer map and `Swarm::is_connected` both say
   the transport is live. Unlike ordinary `request_control`, it never consults `recent_peers` and
@@ -770,14 +777,27 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
       Otherwise a peer could leave, write something, return, and be excluded from the very sweep
       its reconnect queued; and a peer that was only a candidate when it answered would keep that
       answer after becoming a source the sweep must hear from. Forgetting only forgets: queueing
-      the work is left to `sweep_docs_on_reconnect`, which already declines to aim a whole-node
-      sweep at a peer that has not proved it can serve one.
-      **Known gap.** A node that restores with documents on disk and no proof cache does not sweep
-      on its first reconnect, and proving its first member does not sweep either, so a room that
-      stays quiet can remain as short as the restore left it. The same applies to a source that
-      quietly advances while staying connected and never changing standing. Closing both needs a
-      bounded periodic anti-entropy pass, spread across documents and peers; whole-node sweeps at
-      those moments were tried and aim catch-up requests at peers that cannot yet serve them.
+      the work is left to `sweep_docs_on_reconnect`, which declines to aim a whole-node sweep at a
+      peer that has not proved it can serve one.
+      **A restore also sweeps, once, on its first bound proof.** `member_peers` is session-local,
+      so a node that restores with documents on disk reaches its first connection with nothing
+      proven and correctly declines the sweep there; `restore` records the obligation
+      (`first_proof_sweep_owed`, set only when a snapshot brought documents back) and
+      `promote_member_peer_bound` discharges it. Without that, recovery depended on a further
+      connection edge that a stable link never produces, and a room that stayed quiet remained as
+      short as the restore left it for the whole session; restoring, opening one channel and
+      finding the rest still short is the user-visible shape.
+      Two conditions, both load-bearing. **Bound only**, because a bound proof is exactly a peer
+      that has served *this node* a document catch-up, so its membership check ran and passed:
+      PEX and commit catch-up promote unbound, a peer still mid-join answers both, and sweeping
+      on those aims members-only recovery at the joiner and blocks the loop on a reply it cannot
+      give; that is the connection-time deadlock reached one step later. **Once, and only after a
+      restore**, because a session that founded or joined has nothing older than itself to
+      recover, and a whole node's documents in front of its discovery and presence work costs
+      those the ticks they converge in.
+      **Known gap.** A source that quietly advances while staying connected and never changing
+      standing is still not re-swept. Closing that needs a bounded periodic anti-entropy pass,
+      spread across documents and peers.
       One member device holds at most one proof, and one transport peer at most one device, so a
       device cannot manufacture sweep obligations or evict honest proofs by answering from many
       identities.
@@ -836,6 +856,16 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome ‖ sealed_routing`). Not member-authed.
   - `2` KIND_COMMIT_CATCHUP; **authed** body wrapping `u64 from_epoch`; response is **responder-signed**:
     `bytes responder_pubkey ‖ bytes sig(64) ‖ bytes bundle`, sig over `"catcoms/catchup-resp/v1" ‖ group_id ‖ requester_pubkey ‖ u64 req_ts ‖ nonce(16) ‖ u64 req_epoch ‖ bundle`.
+    The drain judges the exchange by what it **established** (`CommitCatchupOutcome`), not by how
+    far the epoch moved: `Verified` (a current member signed a decodable bundle), `Empty` (no
+    bundle at all) or `Unanswered` (failed, timed out, oversized, undecodable, or not signed by a
+    current member). Only an answer can retire a task. A non-committer's proactive probe on
+    `PeerConnected` carries no proven gap and a restarted node has nothing buffered, so every
+    other term of "finished" is already true there; treating a timeout as a completion meant an
+    ordinary member that missed an epoch while offline discarded its own recovery on the way back.
+    `Empty` still counts as an answer, because it is exactly what an up-to-date member sends: the
+    wire does not distinguish "nothing from `from_epoch`" from "refused", and the variant is kept
+    separate so that conflation is visible where it is relied on.
   - `4` KIND_PEX (6e-3d-7); **authed** body (empty); response responder-signed like commit catch-up but under
     `"catcoms/pex-resp/v1"`; bundle = `u32 count(≤64) ‖ len-prefixed PeerDescriptor`s, each self-signed under `"catcoms/peer-record/v1"`.
   - `14` KIND_RECIPROCAL_FORWARD; authed exact requester/target descriptor references + random

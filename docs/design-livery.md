@@ -36,9 +36,24 @@ New `DocType::Livery` (next free discriminant in `catcoms-wire/src/context.rs` a
   preset: "aurum" | "nightshade" | "verdant" | "garnet" | "slate" | "",  // "" = default
   accent: "#rrggbb" | "",                    // optional accent override
   tokens: { "<allow-listed token>": "#rrggbb", ... },  // v1: may be empty/absent
-  icon: "<base64 image bytes>" | ""          // shared server icon; absent = "" = none
+  icon: "<base64 image bytes>" | "",         // shared server icon; absent = "" = none
+  cursor: "<base64 image bytes>" | "",       // shared cursor (≤16 KiB decoded); own command
+  name: "<text>" | "",                       // the group's published name; own command
+  banner: "<base64 image bytes>" | ""        // sidebar banner (≤96 KiB decoded); own command
 }
 ```
+
+- **`banner`** (2026-09-06) is the third image, with the same independent lifetime as the icon
+  and the cursor: its own command (`set_server_banner`, owner/admin), preserved untouched by
+  `set_livery`, cleared only with `""`. The UI cover-fits the upload into a 480×150 JPEG before
+  sharing it, and draws it across the top of the channel list (`.server-banner`) only while the
+  livery is followed, so the per-server opt-out hides it with the rest. It is rendered as an
+  image and never interpreted, like the icon.
+
+- **Founding publishes the look** (2026-09-06): the start surface's Found tab carries the same
+  livery panel as Server settings, Livery. `found` publishes the name, then the colours
+  (`set_livery`), then each chosen image, right after `found_server` returns; each is
+  best-effort, and a failure is a toast naming Server settings, Livery, never an error.
 
 - **`icon`** is an *additive* key (still `v: 1`; an older doc simply lacks it and reads as
   `""`). It carries the image **inline**; unlike a member avatar, which gossips a content

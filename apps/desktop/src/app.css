@@ -8993,6 +8993,16 @@ button.focus-leave:hover {
   align-items: center;
   gap: 8px;
 }
+/* One person's override: the name and identity on the left, the choice on the right. The
+   colour says what the choice does; the select says it in words. */
+.file-trust-person select {
+  margin-left: auto;
+  flex: none;
+  font-size: 0.78rem;
+  padding: 3px 6px;
+}
+.file-trust-person.always select { border-color: var(--ok-brd); color: var(--ok); }
+.file-trust-person.never select { border-color: var(--danger-brd); color: var(--danger); }
 
 @media (max-width: 760px) {
   .file-trust-onboarding,
@@ -16381,4 +16391,830 @@ button.jam-cog.live {
   stroke: var(--accent);
   stroke-width: 2;
   opacity: 0.85;
+}
+
+/* ============================================================
+   Start surface, widened (join / found). `.start` alone stays the
+   480px column the unlock and setup gates use; `.start-wide` is the
+   join/found surface, which uses the window: an identity band, two
+   wide path tabs, the chosen path owning the width, and the
+   secondary panels folded into a strip at the bottom.
+   ============================================================ */
+.start.start-wide {
+  max-width: 1240px;
+  padding: 1.25rem 1.75rem 1.5rem;
+  gap: 1rem;
+}
+/* The surface scrolls as a whole. Without this, a child that clips its own overflow (the tabs
+   grid) has a minimum height of zero as a flex item and gets squeezed to nothing whenever the
+   Found pane is taller than the window: the tabs were cut to two lines, then to one. */
+.start.start-wide > * { flex-shrink: 0; }
+/* Field labels on this surface are mono micro-labels, as in the mockup. */
+.start.start-wide .field > span.muted {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.start.start-wide .field > span.muted .faint { text-transform: none; letter-spacing: 0; }
+.st-identity {
+  display: grid;
+  grid-template-columns: auto minmax(220px, 420px) 1fr;
+  gap: 22px;
+  align-items: center;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.st-identity .brand {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  text-align: left;
+}
+.st-identity .brand-logo { width: 48px; height: 48px; }
+.st-identity .brand-name { font-size: 1.05rem; }
+.st-identity-side {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+/* The shared-media choice as a compact chip beside the back button, not the boxed <details>
+   the rest of the app draws. Opened, its fieldset drops below the whole band. */
+.st-identity-side .start-trust {
+  border: none;
+  padding: 0;
+  background: none;
+  width: auto;
+  position: relative;
+}
+.st-identity-side .start-trust > summary {
+  margin: 0;
+  gap: 0.6rem;
+  white-space: nowrap;
+}
+.st-identity-side .start-trust > summary > .muted { margin-left: 0; color: var(--accent-hi); }
+/* Opened: a dropdown under the chip, one segmented choice and one line. Anchored rather than
+   flowed, so the band keeps its height and the back button keeps its place. */
+.st-trust {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 5;
+  width: min(560px, 80vw);
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+.st-trust > legend {
+  float: left;
+  width: 100%;
+  padding: 0;
+  margin-bottom: 2px;
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.st-trust-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  overflow: hidden;
+  background: var(--panel);
+}
+.st-trust-seg label {
+  padding: 6px 12px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.st-trust-seg label + label { border-left: 1px solid var(--border-soft); }
+.st-trust-seg label.selected {
+  color: var(--text);
+  background: var(--accent-dim);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.st-trust-seg label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.st-trust-seg input { position: absolute; opacity: 0; pointer-events: none; }
+.st-trust > p { margin: 0; flex: 1 1 260px; }
+@media (max-width: 900px) {
+  .st-identity { grid-template-columns: 1fr 1fr; }
+  .st-identity-side { grid-column: 1 / -1; justify-content: flex-start; }
+}
+
+/* Helper lines under fields: whisper volume, as in the mockup. */
+.start.start-wide .field > small { color: var(--faint); font-size: 0.74rem; }
+.start.start-wide p.small,
+.start.start-wide .st-sect-head .why { font-size: 0.8rem; }
+
+/* The two path tabs, each carrying an icon and its one-line promise. Built on .start-tabs,
+   restated so the title reads in the UI face at full size rather than as a mono micro-label. */
+.st-paths button {
+  flex-direction: row;
+  align-items: center;
+  text-align: left;
+  padding: 12px 16px;
+  gap: 12px;
+}
+.st-path-ic {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  color: var(--muted);
+}
+.st-paths button[aria-selected="true"] .st-path-ic { color: var(--accent-hi); }
+.st-path-txt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.st-path-k {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  color: var(--faint);
+}
+.st-path-t {
+  font-family: var(--ui);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.st-paths .st-hint { font-size: 0.8rem; }
+
+/* Mono micro-labels inside the surface. */
+.st-join .k, .st-found .k, .st-card .k, .st-consent .k, .st-readout .k {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.st-consent .k.warn { color: var(--warn); }
+.faint { color: var(--faint); font-weight: 400; }
+
+/* --- Join: the invite on the left, the attempt on the right. --- */
+.st-join {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 0.95fr);
+  gap: 24px;
+  align-items: start;
+}
+.st-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+.st-invite { min-height: 110px; }
+.st-readout {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  font-size: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 8px 12px;
+  background: var(--bg-0);
+}
+.st-readout .v { color: var(--text-2); }
+.st-readout .v.ok { color: var(--ok); }
+.st-consent {
+  border: 1px solid var(--warn-brd);
+  background: var(--warn-dim);
+  border-radius: var(--r-lg);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.st-consent h3 { margin: 0; font-size: 0.92rem; }
+.st-consent .check-row { display: flex; gap: 8px; align-items: flex-start; font-size: 0.84rem; }
+.st-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.st-steps {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 0.84rem;
+  color: var(--text-2);
+  display: grid;
+  gap: 6px;
+}
+.st-steps b { color: var(--text); }
+
+/* The attempt: a diagram of the routes between you and the inviter, one row per route, and a
+   verdict once it settles. Route colours are semantic: accent = being tried, green = answered,
+   red = did not, a dotted hairline = deliberately skipped. */
+.st-attempt {
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  overflow: hidden;
+}
+.st-attempt-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.st-attempt-head h3 { margin: 0; font-size: 0.9rem; }
+.st-attempt-state {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.st-attempt-state[data-phase="dialling"] { color: var(--accent-hi); }
+.st-attempt-state[data-phase="failed"] { color: var(--danger); }
+.st-attempt-state[data-phase="connected"] { color: var(--ok); }
+.st-spin {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  animation: st-spin 0.8s linear infinite;
+}
+@keyframes st-spin { to { transform: rotate(360deg); } }
+.st-wire { background: var(--bg-0); }
+.st-wire svg { width: 100%; height: auto; display: block; }
+.st-route { fill: none; stroke: var(--border); stroke-width: 1.4; }
+.st-route.active { stroke: var(--accent); }
+.st-route.failed { stroke: var(--danger); stroke-dasharray: 3 4; }
+.st-route.ok { stroke: var(--ok); }
+.st-route.skipped { stroke: var(--border-soft); stroke-dasharray: 1 5; }
+.st-rl {
+  font-family: var(--mono);
+  font-size: 7.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  fill: var(--muted);
+}
+.st-rl.failed { fill: var(--danger); }
+.st-rl.ok { fill: var(--ok); }
+.st-rl.active { fill: var(--accent-hi); }
+.st-node { fill: var(--bg-elev); stroke: var(--border); stroke-width: 1.5; }
+.st-nl { font-family: var(--mono); font-size: 8px; fill: var(--text-2); }
+/* The packet rides the route being tried: offset-path is the arc's own path, set inline. */
+.st-pk {
+  fill: var(--accent);
+  offset-distance: 0%;
+  animation: st-travel 1.6s linear infinite;
+}
+@keyframes st-travel { to { offset-distance: 100%; } }
+.st-routes { display: flex; flex-direction: column; }
+.st-route-row {
+  display: grid;
+  grid-template-columns: 18px 170px 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 0.8rem;
+}
+.st-route-row .ic {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--faint);
+  display: grid;
+  place-items: center;
+  font-size: 0.6rem;
+  line-height: 1;
+}
+.st-route-row.active .ic { border-color: var(--accent); }
+.st-route-row.active .ic::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: st-blink 0.9s ease-in-out infinite;
+}
+@keyframes st-blink { 50% { opacity: 0.25; } }
+.st-route-row.failed .ic { border-color: var(--danger); color: var(--danger); }
+.st-route-row.failed .ic::after { content: "✕"; }
+.st-route-row.ok .ic { border-color: var(--ok); color: var(--ok); }
+.st-route-row.ok .ic::after { content: "✓"; }
+.st-route-row.skipped .ic { border-style: dashed; }
+.st-route-row .tg { font-family: var(--mono); font-size: 0.72rem; color: var(--text-2); }
+.st-route-row .why { color: var(--muted); }
+.st-route-row.failed .why { color: var(--text-2); }
+.st-verdict {
+  border-top: 1px solid var(--border-soft);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.st-verdict.fail { background: var(--danger-dim); }
+.st-verdict.wait { background: var(--warn-dim); }
+.st-verdict h3 { margin: 0; font-size: 0.92rem; }
+.st-verdict ol {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-2);
+  font-size: 0.83rem;
+  display: grid;
+  gap: 6px;
+}
+.st-verdict ol b { color: var(--text); }
+.st-reply {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+/* Motion off: the packet parks mid-route and nothing blinks; the colours carry the state. */
+:root[data-motion="off"] .st-pk { animation: none; offset-distance: 50%; }
+:root[data-motion="off"] .st-spin,
+:root[data-motion="off"] .st-route-row.active .ic::after { animation: none; }
+
+/* --- Found: name and look, then how people connect, then the fold and the footer. --- */
+.st-found { gap: 1.25rem; }
+.st-sect { display: flex; flex-direction: column; gap: 12px; }
+.st-sect-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.st-sect-head .k { color: var(--accent-hi); }
+.st-sect-head h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+.st-look {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 22px;
+  align-items: start;
+}
+.st-look-form { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+/* The palette tiles in one row here; the two-column grid is sized for the settings column. */
+.st-look-form .preset-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.st-look-form .preset-btn { padding: 6px 12px 6px 8px; }
+.st-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.st-icon-row { display: flex; gap: 12px; align-items: center; }
+.st-preview .stx-pcard { margin: 0; }
+.st-preview .stx-ph,
+.st-preview .stx-pnote { padding: 0; }
+/* Folds: one slim row until opened. The app's default <details> padding and child margins are
+   cleared so the row is the summary and nothing else. */
+.st-fold {
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  padding: 0;
+}
+.st-fold > * { margin-top: 0; }
+.st-fold > summary {
+  cursor: pointer;
+  padding: 9px 14px;
+  font-size: 0.86rem;
+  font-weight: 500;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  list-style: none;
+}
+.st-fold > summary::-webkit-details-marker { display: none; }
+.st-fold > summary::before { content: "▸"; color: var(--muted); font-size: 0.7rem; }
+.st-fold[open] > summary::before { content: "▾"; }
+.st-fold > summary .k { margin-left: auto; }
+.st-fold-body { border-top: 1px solid var(--border-soft); padding: 14px; }
+.st-adv { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.st-adv input { font-family: var(--mono); font-size: 0.8rem; }
+
+/* The two topology cards: a radio pair wearing card clothes, the diagram on top and the facts
+   below. The real radio is visually hidden (.mc-radio) so keyboard and screen-reader behaviour
+   stay native. */
+.st-topo { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.tcard {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  cursor: pointer;
+  overflow: hidden;
+  text-align: left;
+}
+.tcard:hover { border-color: var(--faint); }
+/* The real radio is visually hidden; the card is the label. */
+.tcard .mc-radio {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.tcard.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+.tcard:has(.mc-radio:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tc-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: start;
+  padding: 12px 14px 0;
+}
+.tc-head h3 { margin: 2px 0 0; font-size: 0.95rem; }
+.tc-pick {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--faint);
+  display: grid;
+  place-items: center;
+  margin-top: 4px;
+}
+.tcard.selected .tc-pick { border-color: var(--accent); }
+.tcard.selected .tc-pick::after {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.tc-diag {
+  height: 210px;
+  margin: 10px 14px 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  position: relative;
+  overflow: hidden;
+}
+.tc-diag canvas { width: 100%; height: 100%; display: block; }
+.tc-cap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 8px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.tc-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+}
+.tc-body p { margin: 0; font-size: 0.82rem; color: var(--text-2); line-height: 1.45; }
+.tc-facts {
+  display: grid;
+  grid-template-columns: 82px 1fr;
+  gap: 5px 12px;
+  margin: 0;
+  font-size: 0.79rem;
+}
+.tc-facts dt {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-top: 3px;
+}
+.tc-facts dd { margin: 0; color: var(--text-2); }
+.tc-facts dd b { color: var(--text); }
+.tc-facts .y { color: var(--ok); font-weight: 600; }
+.tc-facts .m { color: var(--warn); font-weight: 600; }
+.tc-foot {
+  border-top: 1px solid var(--border-soft);
+  padding: 9px 14px;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tc-foot .who { color: var(--text-2); }
+.st-node-req {
+  border: 1px solid color-mix(in oklab, var(--accent) 40%, var(--panel));
+  background: var(--accent-dim);
+  border-radius: var(--r-lg);
+  padding: 12px 14px;
+}
+.st-node-req input { font-family: var(--mono); font-size: 0.8rem; }
+.st-found-foot {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 16px;
+  align-items: center;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 14px;
+}
+.st-summary {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 0.84rem;
+  color: var(--text-2);
+}
+.st-summary .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px 3px 6px;
+  background: var(--bg-elev);
+  font-size: 0.8rem;
+}
+.st-summary .chip .sw { width: 12px; height: 12px; border-radius: 50%; }
+.st-summary .warnline { color: var(--warn); }
+
+/* --- The secondary strip: pairing, connection check, and the reply-apply box. --- */
+.st-secondary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 14px;
+}
+.st-secondary > details {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  background: color-mix(in oklab, var(--panel) 60%, var(--bg-0));
+  padding: 0;
+  min-width: 0;
+}
+.st-secondary > details > * { margin: 0 14px 10px; }
+.st-secondary > details > summary {
+  cursor: pointer;
+  margin: 0;
+  padding: 10px 14px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  list-style: none;
+  font-weight: 500;
+}
+.st-secondary > details > summary::-webkit-details-marker { display: none; }
+.st-secondary > details[open] > summary { border-bottom: 1px solid var(--border-soft); margin-bottom: 10px; }
+.st-sec-ic { width: 18px; height: 18px; color: var(--muted); flex: none; }
+.st-sec-txt { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.st-sec-txt .ttl { font-weight: 600; font-size: 0.88rem; }
+.st-sec-txt .sub { color: var(--muted); font-size: 0.78rem; }
+.st-secondary .k {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+/* The palette tiles here show both halves of a swatch: the floor and the accent. */
+.st-look-form .preset-sw {
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(135deg, var(--sw-bg) 50%, var(--sw-acc) 50%) !important;
+}
+
+@media (max-width: 1000px) {
+  .st-join, .st-look, .st-topo, .st-row2, .st-adv, .st-secondary { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
+   Livery panel: one piece of markup for the Found tab and Server
+   settings, Livery. Label column on the left, controls on the right.
+   ============================================================ */
+.lv-panel { display: flex; flex-direction: column; gap: 16px; }
+.lv-grp {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 6px 16px;
+  align-items: start;
+}
+.lv-k {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-top: 6px;
+}
+.lv-ctl { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+
+/* Tint rows: label, colour well, slider, percentage. The slider is drawn with the app's own
+   tokens rather than the browser's chrome: a hairline track, the accent filling it up to the
+   value (`--pct`, set inline), and a round accent thumb. */
+.lv-tint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.lv-tint.off { opacity: 0.45; }
+.lv-tint input:disabled { cursor: default; }
+
+/* The rocker: a track with a knob that slides to the accent when on. The real checkbox stays
+   in the tree for keyboard and screen readers; the track is what you see. */
+.lv-rocker {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 0.84rem;
+  user-select: none;
+}
+.lv-rocker input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.lv-rocker-track {
+  position: relative;
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  transition: background 0.15s, border-color 0.15s;
+  flex: none;
+}
+.lv-rocker-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.15s, background 0.15s;
+}
+.lv-rocker input:checked + .lv-rocker-track {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+.lv-rocker input:checked + .lv-rocker-track::after {
+  transform: translateX(16px);
+  background: var(--accent);
+}
+.lv-rocker input:focus-visible + .lv-rocker-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+:root[data-motion="off"] .lv-rocker-track,
+:root[data-motion="off"] .lv-rocker-track::after { transition: none; }
+.lv-tint .tint-lbl { width: 76px; flex: none; }
+.lv-tint > .muted:not(.tint-lbl) { flex: 1; }
+.lv-tint input[type="color"] {
+  width: 30px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--bg-elev);
+  cursor: pointer;
+  flex: none;
+}
+.lv-tint input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
+.lv-tint input[type="color"]::-webkit-color-swatch { border: none; border-radius: 2px; }
+.lv-pct {
+  width: 34px;
+  flex: none;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.lv-range {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  min-width: 100px;
+  max-width: 220px;
+  height: 18px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.lv-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--accent) var(--pct, 0%), var(--border) var(--pct, 0%));
+}
+.lv-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.lv-range::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+}
+.lv-range::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.lv-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.lv-range:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.banner-preview {
+  width: 160px;
+  height: 50px;
+  object-fit: cover;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  flex: none;
+}
+@media (max-width: 640px) {
+  .lv-grp { grid-template-columns: 1fr; }
+  .lv-k { padding-top: 0; }
+}
+
+/* The livery preview, in the Found tab's right column and in the settings aside. It carries the
+   draft's tokens inline, so `--ui` and the palette reach everything inside it. */
+.lv-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-family: var(--ui);
+}
+/* The banner in the preview's mini sidebar: bleeds to the sidebar's edges like the real one. */
+.stx-mini-side .mini-banner {
+  width: calc(100% + 10px);
+  height: 24px;
+  object-fit: cover;
+  margin: -6px -5px 2px;
+  display: block;
+  border-radius: 0;
+  background: none;
+}
+.lv-preview[data-livery-pattern="grid"] .stx-mini-chat,
+.lv-preview[data-livery-pattern="grid"] .stx-plog {
+  background-image:
+    repeating-linear-gradient(0deg, color-mix(in oklab, var(--accent) 4%, transparent) 0 1px, transparent 1px 12px),
+    repeating-linear-gradient(90deg, color-mix(in oklab, var(--accent) 4%, transparent) 0 1px, transparent 1px 12px);
+}
+.lv-preview[data-livery-pattern="diag"] .stx-mini-chat,
+.lv-preview[data-livery-pattern="diag"] .stx-plog {
+  background-image: repeating-linear-gradient(45deg, color-mix(in oklab, var(--accent) 3%, transparent) 0 1px, transparent 1px 10px);
+}
+.lv-preview[data-livery-pattern="dots"] .stx-mini-chat,
+.lv-preview[data-livery-pattern="dots"] .stx-plog {
+  background-image: radial-gradient(color-mix(in oklab, var(--accent) 7%, transparent) 1px, transparent 1.5px);
+  background-size: 12px 12px;
+}
+
+/* The published sidebar banner, across the top of the channel list. Bleeds to the sidebar's
+   edges (the sidebar has --panel-pad of padding) and stays a fixed height so a tall upload
+   cannot push the channels down. */
+.server-banner {
+  display: block;
+  width: calc(100% + 2 * var(--panel-pad));
+  height: 64px;
+  object-fit: cover;
+  margin: calc(-1 * var(--panel-pad)) calc(-1 * var(--panel-pad)) 0;
+  border-bottom: 1px solid var(--border-soft);
+  user-select: none;
+  -webkit-user-drag: none;
+  flex: none;
 }

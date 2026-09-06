@@ -1468,6 +1468,9 @@ const L_CURSOR: &str = "cursor";
 /// lacks the key, which reads as "the owner has published no name" and leaves every member on
 /// whatever local label it already had.
 const L_NAME: &str = "name";
+/// The shared **sidebar banner** (base64 image bytes), drawn across the top of the channel list.
+/// Additive like the icon, cursor and name: an older doc lacks the key and reads as "no banner".
+const L_BANNER: &str = "banner";
 
 /// Maximum length of a livery preset id (a short key like `nightshade`).
 pub const MAX_LIVERY_PRESET_BYTES: usize = 32;
@@ -1489,6 +1492,11 @@ pub const MAX_SERVER_ICON_BYTES: usize = 64 * 1024;
 /// tighter budget than the icon; and, like the icon, it rides *inline* (base64) in the livery
 /// document, so this also bounds what gossips.
 pub const MAX_SERVER_CURSOR_BYTES: usize = 16 * 1024;
+/// Maximum **decoded** size of a sidebar banner accepted by [`Server::set_server_banner`]. A
+/// banner is wider than an icon (the UI produces a small landscape JPEG), so it gets a little
+/// more room than the icon; like every image here it rides *inline* in the livery document, so
+/// this also bounds what gossips.
+pub const MAX_SERVER_BANNER_BYTES: usize = 96 * 1024;
 /// Maximum length of a published server name. Long enough for a real group name, short enough
 /// that it cannot be used to push prose through the rail or the cross-server inbox.
 pub const MAX_SERVER_NAME_BYTES: usize = 64;
@@ -1521,12 +1529,16 @@ pub struct Livery {
     /// to be named after its reader. A member may still relabel a server for themselves; this is
     /// what the group is called when nobody has.
     pub name: String,
+    /// The shared sidebar banner as base64 image bytes; empty = no banner. Set/cleared only by
+    /// [`Server::set_server_banner`], with the same independent lifetime as the icon and the
+    /// cursor: [`Server::set_livery`] preserves whatever is stored.
+    pub banner: String,
 }
 
 /// Write the livery document (last-writer-wins on each field; the token map is replaced
-/// wholesale so removing an override actually removes it). Writes **every** field, the icon
-/// and cursor included, so callers that must not disturb the stored images read them back
-/// into `l.icon`/`l.cursor` first (see [`Server::set_livery`]).
+/// wholesale so removing an override actually removes it). Writes **every** field, the images
+/// included, so callers that must not disturb the stored images read them back into
+/// `l.icon`/`l.cursor`/`l.banner` first (see [`Server::set_livery`]).
 fn write_livery(doc: &mut AutoCommit, l: &Livery) -> Result<(), AutomergeError> {
     doc.put(ROOT, L_V, LIVERY_VERSION)?;
     doc.put(ROOT, L_PRESET, l.preset.as_str())?;
@@ -1534,6 +1546,7 @@ fn write_livery(doc: &mut AutoCommit, l: &Livery) -> Result<(), AutomergeError> 
     doc.put(ROOT, L_ICON, l.icon.as_str())?;
     doc.put(ROOT, L_CURSOR, l.cursor.as_str())?;
     doc.put(ROOT, L_NAME, l.name.as_str())?;
+    doc.put(ROOT, L_BANNER, l.banner.as_str())?;
     let tokens = doc.put_object(ROOT, L_TOKENS, ObjType::Map)?;
     for (k, v) in &l.tokens {
         doc.put(&tokens, k.as_str(), v.as_str())?;
@@ -1567,6 +1580,14 @@ fn write_server_name(doc: &mut AutoCommit, name: &str) -> Result<(), AutomergeEr
     Ok(())
 }
 
+/// Write **only** the sidebar banner (`""` clears it), leaving everything else untouched; the
+/// third image with the same independent lifetime as the icon and the cursor.
+fn write_server_banner(doc: &mut AutoCommit, banner: &str) -> Result<(), AutomergeError> {
+    doc.put(ROOT, L_V, LIVERY_VERSION)?;
+    doc.put(ROOT, L_BANNER, banner)?;
+    Ok(())
+}
+
 /// Materialize the livery document (a missing/foreign-shaped field reads as empty; so a
 /// doc written before the icon/cursor keys existed reads back with neither).
 fn read_livery(doc: &AutoCommit) -> Livery {
@@ -1584,6 +1605,7 @@ fn read_livery(doc: &AutoCommit) -> Livery {
         icon: str_field(doc, &ROOT, L_ICON),
         cursor: str_field(doc, &ROOT, L_CURSOR),
         name: str_field(doc, &ROOT, L_NAME),
+        banner: str_field(doc, &ROOT, L_BANNER),
     }
 }
 
@@ -6508,6 +6530,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     icon: str_field(d, &ROOT, L_ICON),
                     cursor: str_field(d, &ROOT, L_CURSOR),
                     name: str_field(d, &ROOT, L_NAME),
+                    banner: str_field(d, &ROOT, L_BANNER),
                     ..livery
                 };
                 write_livery(d, &kept)
@@ -6600,6 +6623,35 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync
             .post(DocType::Livery, LIVERY_DOC, |d| {
                 write_server_cursor(d, &cursor)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Set (or clear, with `""`) the shared **sidebar banner**; base64 image bytes stored in
+    /// the livery document beside the icon and the cursor, with the same independent lifetime.
+    /// **Owner or admin only**. Rejects malformed base64 and anything over
+    /// [`MAX_SERVER_BANNER_BYTES`] decoded bytes.
+    pub async fn set_server_banner(&mut self, banner: String) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can set the server banner".into(),
+            ));
+        }
+        if !banner.is_empty() {
+            let bytes = B64
+                .decode(banner.as_bytes())
+                .map_err(|e| AppError::Invalid(format!("bad server banner: {e}")))?;
+            if bytes.len() > MAX_SERVER_BANNER_BYTES {
+                return Err(AppError::Invalid(format!(
+                    "server banner too large: {} bytes (max {MAX_SERVER_BANNER_BYTES})",
+                    bytes.len()
+                )));
+            }
+        }
+        self.sync
+            .post(DocType::Livery, LIVERY_DOC, |d| {
+                write_server_banner(d, &banner)
             })
             .await?;
         Ok(())
@@ -10520,6 +10572,7 @@ mod tests {
             icon: String::new(),
             cursor: String::new(),
             name: String::new(),
+            banner: String::new(),
         };
         alice.set_livery(l.clone()).await.unwrap();
         assert_eq!(alice.livery(), l);
@@ -10637,6 +10690,53 @@ mod tests {
             alice.livery(),
             Livery::default(),
             "no rejected cursor write landed"
+        );
+
+        // --- the sidebar banner (the third image, same independent lifetime) ---------
+        let banner = B64.encode([0xff, 0xd8, 0xff, 0xe0, 4, 5, 6]); // stand-in JPEG bytes
+        alice.set_server_banner(banner.clone()).await.unwrap();
+        assert_eq!(alice.livery().banner, banner, "the banner reads back");
+        alice.set_livery(l.clone()).await.unwrap();
+        assert_eq!(
+            alice.livery().banner,
+            banner,
+            "the banner survived a colour publish"
+        );
+        alice.set_livery(Livery::default()).await.unwrap();
+        assert_eq!(
+            alice.livery().banner,
+            banner,
+            "removing the livery keeps the banner"
+        );
+        alice.set_server_icon(icon.clone()).await.unwrap();
+        alice.set_server_cursor(cursor.clone()).await.unwrap();
+        let after = alice.livery();
+        assert_eq!(after.banner, banner, "the other images kept the banner");
+        assert_eq!(after.icon, icon);
+        assert_eq!(after.cursor, cursor);
+        alice.set_server_banner(String::new()).await.unwrap();
+        let after = alice.livery();
+        assert_eq!(after.banner, "", "`\"\"` clears the banner");
+        assert_eq!(after.icon, icon, "clearing the banner kept the icon");
+        assert_eq!(after.cursor, cursor, "clearing the banner kept the cursor");
+        alice.set_server_icon(String::new()).await.unwrap();
+        alice.set_server_cursor(String::new()).await.unwrap();
+        assert_eq!(alice.livery(), Livery::default());
+
+        // The banner has its own decoded-size cap, and rejects non-base64 like the others.
+        let too_big = B64.encode(vec![0u8; MAX_SERVER_BANNER_BYTES + 1]);
+        assert!(matches!(
+            alice.set_server_banner(too_big).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.set_server_banner("not base64!!".into()).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert_eq!(
+            alice.livery(),
+            Livery::default(),
+            "no rejected banner write landed"
         );
     }
 

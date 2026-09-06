@@ -302,7 +302,7 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
     case "get_roles":
       return server === 1 ? { [ME]: "owner", [JUNIPER]: "admin", [MOSS]: "member" } : {};
     case "get_livery":
-      return { preset: "", accent: "", tokens: {}, icon: "", cursor: "" };
+      return { preset: "", accent: "", tokens: {}, icon: "", cursor: "", name: "", banner: "" };
     case "get_channel_topic":
       return channel === "general" ? "A calm place to build and review Mewtual together" : "";
     case "get_delivery":

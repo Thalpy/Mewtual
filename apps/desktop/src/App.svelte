@@ -170,6 +170,7 @@
     reachabilityEventAffectsReport, reachabilitySummary,
     switchboardEventRefreshDecision, withOrderedConnectivity, withOrderedRefreshedInvite,
   } from "./joinlog";
+  import { joinAttemptView, type JoinStep } from "./joinroutes";
   import { diffLines, diffStats, type DiffLine } from "./linediff";
   import {
     buildModerationGraph, buildModerationTimeline, filterModerationTimeline, openKickCases,
@@ -181,9 +182,9 @@
     NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
   } from "./window-close";
   import {
-    DEFAULT_FILE_TRUST_POLICY, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
-    mayLoadJukeboxFile, scopedMediaKey, toggleTrustedAuthor,
-    type FileTrustMode, type FileTrustPolicies, type FileTrustPolicy,
+    DEFAULT_FILE_TRUST_POLICY, authorOverride, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
+    mayLoadJukeboxFile, scopedMediaKey, setAuthorOverride,
+    type FileAuthorOverride, type FileTrustMode, type FileTrustPolicies, type FileTrustPolicy,
   } from "./file-trust";
   import { acceptCapture, chooseMicrophoneSender, MediaCaptureSession } from "./media-capture";
   import {
@@ -409,11 +410,11 @@
   let startTab = $state<"join" | "found">("join"); // which start-surface tab is open; join is the common case
   // Chosen before founding/joining so no newly opened server can render shared media under an
   // implicit policy. Specific-member trust starts empty until the roster is authenticated.
-  let onboardingFileTrust = $state<FileTrustMode>("on-demand");
+  let onboardingFileTrust = $state<FileTrustMode>("media");
   /** How the folded onboarding summary names each choice, so folding it hides no decision. */
   const ONBOARDING_TRUST_LABELS: Record<FileTrustMode, string> = {
     "on-demand": "on demand",
-    specific: "specific people",
+    media: "media only",
     everyone: "everyone here",
   };
   let fileTrustPolicies = $state<FileTrustPolicies>({});
@@ -836,20 +837,21 @@
     }
   }
   let appearance = $state<Appearance>(loadAppearance());
+  // `sw` is the accent, `bg` the floor: the palette tiles draw both halves of a swatch.
   const PRESETS = [
-    { id: "", name: "Nightshade", sw: "#977df2" },
-    { id: "aurum", name: "Aurum", sw: "#e2a83d" },
-    { id: "verdant", name: "Verdant", sw: "#57c77a" },
-    { id: "garnet", name: "Garnet", sw: "#e0574b" },
-    { id: "slate", name: "Slate", sw: "#6ca0d8" },
+    { id: "", name: "Nightshade", sw: "#977df2", bg: "#131218" },
+    { id: "aurum", name: "Aurum", sw: "#e2a83d", bg: "#141109" },
+    { id: "verdant", name: "Verdant", sw: "#57c77a", bg: "#0f1512" },
+    { id: "garnet", name: "Garnet", sw: "#e0574b", bg: "#161012" },
+    { id: "slate", name: "Slate", sw: "#6ca0d8", bg: "#101318" },
   ];
   const ACCENT_CHOICES = ["#977df2", "#e2a83d", "#e0574b", "#57c77a", "#6ca0d8"];
   // Server livery (design-livery.md): the active server's published scheme. Every value is
   // UNTRUSTED (any member's client may have written the doc): sanitized on read, and only
   // ever able to recolor: preset id, accent, and an allow-list of colour tokens. Semantic
   // tokens (--ok/--warn/--danger) and layout are never livery-controllable.
-  type Livery = { preset: string; accent: string; tokens: Record<string, string>; icon: string; cursor: string; name: string };
-  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {}, icon: "", cursor: "", name: "" });
+  type Livery = { preset: string; accent: string; tokens: Record<string, string>; icon: string; cursor: string; name: string; banner: string };
+  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {}, icon: "", cursor: "", name: "", banner: "" });
   let livery = $state<Livery>(emptyLivery());
   // Rail icons for every (non-DM) server, fetched from each server's livery doc and kept
   // fresh by livery-changed events. Values are sanitized base64 (rendered as data: URLs).
@@ -909,7 +911,7 @@
   // the editor has this server's values in it, the buffer belongs to the user.
   function seedLiveryDraft(server: number) {
     if (!showServerSettings || liveryDraftFor === server) return;
-    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "", name: "" };
+    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "", name: "", banner: "" };
     // The published name is seeded on the same read, and only from one: opening the wrench
     // mid-switch would otherwise leave the box empty and one Publish away from clearing the
     // group's name for every member.
@@ -949,6 +951,9 @@
     }
     if (typeof l.icon === "string" && ICON_B64.test(l.icon)) out.icon = l.icon;
     if (typeof l.cursor === "string" && ICON_B64.test(l.cursor) && l.cursor.length <= 24000) out.cursor = l.cursor;
+    // The sidebar banner: base64 only, rendered as an image only, bounded a little above the
+    // icon (96 KiB decoded is about 131k base64 characters).
+    if (typeof l.banner === "string" && /^[A-Za-z0-9+/=]{0,132000}$/.test(l.banner)) out.banner = l.banner;
     // A published name is drawn as text in the rail, the crumbs and the cross-server inbox.
     // The backend already bounds it and refuses control characters; this is the read-side half
     // of the same rule, because any member's client may have written the document.
@@ -1102,11 +1107,101 @@
     const file = fileList?.[0];
     if (!file) return;
     try {
-      await setServerIcon(await fileToSquareJpegB64(file, 128));
+      const b64 = await fileToSquareJpegB64(file, 128);
+      // Founding: there is no server yet, so the image waits for `found` to publish it.
+      if (activeServerId === null || foundingHere) foundIcon = b64;
+      else await setServerIcon(b64);
     } catch (err) {
       error = String(err);
     }
   }
+  // The sidebar banner: a small landscape JPEG across the top of the channel list. Cover-fit
+  // into a fixed frame so the doc carries one bounded image whatever was uploaded.
+  async function fileToBannerJpegB64(file: File): Promise<string> {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve(null);
+        img.onerror = () => reject(new Error("could not load image"));
+        img.src = url;
+      });
+      const width = 480;
+      const height = 150;
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        const scale = Math.max(width / img.width, height / img.height);
+        const w = img.width * scale;
+        const h = img.height * scale;
+        ctx.drawImage(img, (width - w) / 2, (height - h) / 2, w, h);
+      }
+      return canvas.toDataURL("image/jpeg", 0.82).split(",")[1] ?? "";
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+  async function setServerBanner(banner: string) {
+    if (activeServerId === null) return;
+    try {
+      await invoke("set_server_banner", { server: activeServerId, banner });
+      await refreshLivery();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function loadServerBanner(fileList: FileList | null) {
+    const file = fileList?.[0];
+    if (!file) return;
+    try {
+      const b64 = await fileToBannerJpegB64(file);
+      if (activeServerId === null || foundingHere) foundBanner = b64;
+      else await setServerBanner(b64);
+    } catch (err) {
+      error = String(err);
+    }
+  }
+  // Images chosen while FOUNDING a server, before it exists. `found` publishes them right after
+  // `found_server` returns; until then the livery preview draws them from here. Kept apart from
+  // `livery` (the active server's published values) so a founding draft can never be mistaken
+  // for something already shared.
+  let foundIcon = $state("");
+  let foundBanner = $state("");
+  let foundCursor = $state("");
+  // True while the start surface's Found tab is the thing the livery panel is editing. The panel
+  // is one piece of markup shared with Server settings; this is how its upload handlers know
+  // whether to publish now or hold the image for `found`.
+  let foundingHere = $derived((servers.length === 0 || showAdd) && !showServerSettings);
+  function resetFoundingDraft() {
+    foundIcon = "";
+    foundBanner = "";
+    foundCursor = "";
+    liveryDraft = emptyLivery();
+    liveryDraftFor = null;
+  }
+  // Publish what was chosen while founding, right after `found_server` returns. Best-effort in
+  // the same sense as the name: a founded server whose look did not land is still a working
+  // server, so the failure is a toast that names where to put it right, never an error.
+  async function publishFoundingLivery(server: number, draft: Livery, icon: string, banner: string, cursor: string) {
+    const hasColours = !!(draft.preset || draft.accent || Object.keys(draft.tokens).length);
+    try {
+      if (hasColours) await invoke("set_livery", { server, preset: draft.preset, accent: draft.accent, tokens: draft.tokens });
+      if (icon) await invoke("set_server_icon", { server, icon });
+      if (banner) await invoke("set_server_banner", { server, banner });
+      if (cursor) await invoke("set_server_cursor", { server, cursor });
+      if (activeServerId === server) await refreshLivery();
+      await refreshServerIconFor(server);
+    } catch (e) {
+      toast(`The server is founded, but its look was not published: ${String(e)}. Set it in Server settings, Livery.`, "warn", 8000);
+    }
+  }
+  // A founding draft never inherits a settings draft, and never survives into the next founding:
+  // entering the start surface starts from the default look.
+  $effect(() => {
+    if (foundingHere) resetFoundingDraft();
+  });
   // Custom ground tint for a livery: two stops washed into Nightshade's grounds (floor
   // and rail toward the first, panels toward the second). The result is a plain #rrggbb
   // per token, so it rides the EXISTING colour allow-list: every client's read-side
@@ -1150,6 +1245,25 @@
     const tokens = { ...liveryDraft.tokens };
     for (const k of GROUND_KEYS) delete tokens[k];
     liveryDraft = { ...liveryDraft, tokens };
+  }
+  // The sliders are live: any intensity above zero tints the draft as you drag, and both at zero
+  // is no tint at all, so there is nothing to apply and nothing to forget to apply.
+  function syncTint() {
+    if (liveryTintBgS > 0 || liveryTintSideS > 0) applyTint();
+    else if (draftTinted) clearTint();
+  }
+  // The rocker. On brings the sliders to life at a visible strength if they were at zero; off
+  // clears the tint from the draft but keeps the slider positions for next time.
+  function setTintOn(on: boolean) {
+    if (on) {
+      if (liveryTintBgS === 0 && liveryTintSideS === 0) {
+        liveryTintBgS = 28;
+        liveryTintSideS = 28;
+      }
+      applyTint();
+    } else {
+      clearTint();
+    }
   }
   // The whole draft as inline custom properties for the Livery preview: colours, corners
   // and interface font, so every control previews before anything is published. The
@@ -1217,6 +1331,10 @@
       const b64 = await fileToCursorPngB64(file);
       if (!(await validateCursor(b64))) {
         error = "That image won't work as a cursor: it needs a visible (mostly opaque) shape.";
+        return;
+      }
+      if (activeServerId === null || foundingHere) {
+        foundCursor = b64;
         return;
       }
       await setServerCursor(b64);
@@ -2353,10 +2471,184 @@
   };
   let joinPreview = $state<InvitePreview | null>(null);
   let joinPreviewCode = $state("");
-  let joinSwitchboardConsent = $state(false);
+  // The member fallback is on by default: the consent card still names what the helping member
+  // learns (your IP address and timing), and unticking it is one click, but the common case is
+  // "I want in", and a join that fails for want of a box nobody noticed is the worse default.
+  let joinSwitchboardConsent = $state(true);
   type JoinReplyReady = { code: string; expires_at_ms: number; candidate_count: number };
   let joinReplyReady = $state<JoinReplyReady | null>(null);
   let joinAttemptPending = $state(false);
+  // The attempt as it runs: the bridge's step list so far (`join-progress`), and the error the
+  // command settled with. `joinAttemptView` folds them into the routes the start surface draws.
+  let joinSteps = $state<JoinStep[]>([]);
+  let joinError = $state("");
+  let joinView = $derived(
+    joinAttemptView({
+      steps: joinSteps,
+      pending: joinAttemptPending,
+      error: joinError,
+      fallbackOffered: (joinPreview?.switchboards ?? 0) > 0,
+      fallbackAllowed: joinSwitchboardConsent,
+    }),
+  );
+  // Whether the connection check fold on the start surface is open; the failure verdict's
+  // "open connection check" button sets it, since that is where the addresses live.
+  let startConnOpen = $state(false);
+  function resetJoinAttempt() {
+    joinPreview = null;
+    joinPreviewCode = "";
+    joinSwitchboardConsent = true;
+    joinSteps = [];
+    joinError = "";
+  }
+  // One arc per route in the join diagram: the rows fan out between "you" and "them", the first
+  // bowing highest. Returns the path and where its label sits (a hair above the curve's middle).
+  function routeArc(i: number, n: number): { d: string; ly: number } {
+    const cy = n <= 1 ? 80 : 18 + (i * 124) / (n - 1);
+    const mid = 0.25 * 80 + 0.75 * cy;
+    return { d: `M52 80 C 150 ${cy}, 270 ${cy}, 368 80`, ly: mid - 5 };
+  }
+  // The two topology diagrams on the Found tab: seven peers, drawn either as a full mesh or as
+  // spokes into a node, with packets travelling the edges. A Svelte action, so the canvas draws
+  // itself for as long as it is on screen and stops when the tab changes. Motion follows the
+  // viewer's preference: with motion off the frame is drawn once, a few packets in flight, and
+  // left alone.
+  function topoDiagram(canvas: HTMLCanvasElement, mode: string) {
+    const got = canvas.getContext("2d");
+    if (!got) return;
+    const ctx: CanvasRenderingContext2D = got;
+    const peers = 7;
+    let packets: { a: number; b: number; t: number; leg: number }[] = [];
+    let raf = 0;
+    let alive = true;
+    const still = () =>
+      appearance.motion === "off" ||
+      (typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches);
+    const token = (name: string, fallback: string) => getComputedStyle(canvas).getPropertyValue(name).trim() || fallback;
+    const pos = (i: number, w: number, h: number) => {
+      const a = (i / peers) * Math.PI * 2 - Math.PI / 2;
+      return { x: w / 2 + Math.cos(a) * (w * 0.36), y: h / 2 - 8 + Math.sin(a) * (h * 0.34) };
+    };
+    function frame() {
+      if (!alive) return;
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      if (!w || !h) {
+        raf = requestAnimationFrame(frame);
+        return;
+      }
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const accent = token("--accent", "#977df2");
+      const border = token("--border", "#3a3750");
+      const ok = token("--ok", "#5ec96e");
+      const bg = token("--bg-0", "#131218");
+      const elev = token("--bg-elev", "#232130");
+      const muted = token("--muted", "#8f8ba3");
+      const cx = w / 2;
+      const cy = h / 2 - 8;
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, w, h);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = border;
+      ctx.globalAlpha = 0.9;
+      if (mode === "mesh") {
+        for (let i = 0; i < peers; i++) {
+          for (let j = i + 1; j < peers; j++) {
+            const p1 = pos(i, w, h);
+            const p2 = pos(j, w, h);
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+          }
+        }
+      } else {
+        for (let k = 0; k < peers; k++) {
+          const pk = pos(k, w, h);
+          ctx.beginPath();
+          ctx.moveTo(pk.x, pk.y);
+          ctx.lineTo(cx, cy);
+          ctx.stroke();
+        }
+      }
+      ctx.globalAlpha = 1;
+      if (packets.length < 8 && Math.random() < 0.06) {
+        const a = Math.floor(Math.random() * peers);
+        let b = Math.floor(Math.random() * peers);
+        if (a === b) b = (b + 1) % peers;
+        packets.push({ a, b, t: 0, leg: 0 });
+      }
+      packets = packets.filter((p) => {
+        p.t += 0.014;
+        const from = mode === "mesh" || p.leg === 0 ? pos(p.a, w, h) : { x: cx, y: cy };
+        const to = mode === "mesh" ? pos(p.b, w, h) : p.leg === 0 ? { x: cx, y: cy } : pos(p.b, w, h);
+        const t = Math.min(p.t, 1);
+        ctx.beginPath();
+        ctx.arc(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t, 2.8, 0, Math.PI * 2);
+        ctx.fillStyle = accent;
+        ctx.fill();
+        if (t < 1) return true;
+        if (mode === "node" && p.leg === 0) {
+          p.leg = 1;
+          p.t = 0;
+          return true;
+        }
+        return false;
+      });
+      if (mode === "node") {
+        const r = 20;
+        ctx.beginPath();
+        for (let q = 0; q < 6; q++) {
+          const ang = (q / 6) * Math.PI * 2 - Math.PI / 2;
+          const hx = cx + Math.cos(ang) * r;
+          const hy = cy + Math.sin(ang) * r;
+          if (q) ctx.lineTo(hx, hy);
+          else ctx.moveTo(hx, hy);
+        }
+        ctx.closePath();
+        ctx.fillStyle = elev;
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+        ctx.fillStyle = muted;
+        ctx.font = "600 8px 'JetBrains Mono', Consolas, monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("NODE", cx, cy + 3);
+      }
+      for (let m = 0; m < peers; m++) {
+        const pm = pos(m, w, h);
+        ctx.beginPath();
+        ctx.arc(pm.x, pm.y, 9, 0, Math.PI * 2);
+        ctx.fillStyle = elev;
+        ctx.fill();
+        ctx.strokeStyle = border;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(pm.x, pm.y, 2.6, 0, Math.PI * 2);
+        ctx.fillStyle = ok;
+        ctx.fill();
+      }
+      if (!still()) raf = requestAnimationFrame(frame);
+    }
+    if (still()) {
+      // A still frame needs a few packets in flight to read as traffic at all.
+      for (let i = 0; i < 4; i++) packets.push({ a: i, b: (i + 3) % peers, t: (i + 1) / 5, leg: 0 });
+    }
+    frame();
+    return {
+      destroy() {
+        alive = false;
+        cancelAnimationFrame(raf);
+      },
+    };
+  }
   let joinReplyNow = $state(Date.now());
   let joinReplyExpired = $derived(
     joinReplyReady !== null && joinReplyIsExpired(joinReplyReady.expires_at_ms, joinReplyNow),
@@ -5578,6 +5870,11 @@
       void invoke("set_shared_server_name", { server: r.server, name: serverName })
         .then(() => refreshServerIconFor(r.server))
         .catch(() => toast("This group has no published name yet, so people who join will name it themselves. Publish one in Server settings, Overview.", "warn", 7000));
+      // The look chosen while founding: colours, then each image, published in turn. Taken off
+      // the draft first, because resetting it below must not race the publish.
+      const draft: Livery = { ...liveryDraft, tokens: { ...liveryDraft.tokens } };
+      void publishFoundingLivery(r.server, draft, foundIcon, foundBanner, foundCursor);
+      resetFoundingDraft();
       newServerName = "";
     } catch (e) {
       if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = errorText(e);
@@ -5590,6 +5887,8 @@
     busy = true;
     error = "";
     joinReplyReady = null;
+    joinSteps = [];
+    joinError = "";
     const operationGeneration = viewGeneration;
     try {
       const { hex, turn } = unwrapInvite(joinInvite);
@@ -5598,7 +5897,7 @@
         joinPreview = await invoke<InvitePreview>("preview_invite", { inviteHex: hex });
         if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
         joinPreviewCode = hex;
-        joinSwitchboardConsent = false;
+        joinSwitchboardConsent = true;
       }
       const assistedAction = assistedJoinAction(
         previewMatchesCode,
@@ -5627,14 +5926,14 @@
       addServer(r, label, displayName);
       joinServerName = "";
       joinInvite = "";
-      joinPreview = null;
-      joinPreviewCode = "";
-      joinSwitchboardConsent = false;
+      resetJoinAttempt();
       joinReplyReady = null;
     } catch (e) {
       if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       joinReplyReady = null;
-      error = String(e);
+      // The verdict panel carries the failure, in route terms; the bare error line under the
+      // surface would say the same thing twice.
+      joinError = String(e);
     } finally {
       joinAttemptPending = false;
       busy = false;
@@ -5792,7 +6091,7 @@
       // this newly joined group and must overwrite any orphaned policy rather than inherit it.
       fileTrustPolicies = {
         ...fileTrustPolicies,
-        [r.server]: { mode: onboardingFileTrust, trustedAuthors: [] },
+        [r.server]: { mode: onboardingFileTrust, trustedAuthors: [], blockedAuthors: [] },
       };
       void saveUiStateImmediately();
       // And read the livery once regardless: a published name that raised no `livery-changed`
@@ -5800,7 +6099,7 @@
       void refreshServerIconFor(r.server);
     }
     showAdd = false;
-    onboardingFileTrust = "on-demand";
+    onboardingFileTrust = "media";
     // Your profile takes the name you gave for YOURSELF, never the group's. A DM has no profile
     // name of its own to carry, so its caller passes none and this leaves the profile untouched.
     if (profileName) pName = profileName;
@@ -9279,7 +9578,10 @@
   }
 
   function mayAutoLoadSharedFile(file: UiFile, server: number | null = activeServerId): boolean {
-    return server !== null && mayAutoLoadFile(fileTrustFor(server), file.author_identity, file.author_verified);
+    // "Media" for the media-only mode is what the renderer would decode inline: a declared
+    // image, audio or video type the safe list admits. Anything else waits for a click.
+    const isMedia = safeMime(file.mime) !== "";
+    return server !== null && mayAutoLoadFile(fileTrustFor(server), file.author_identity, file.author_verified, isMedia);
   }
 
   function setFileTrustMode(mode: FileTrustMode) {
@@ -9293,12 +9595,12 @@
     void saveUiStateImmediately();
   }
 
-  function toggleTrustedFileAuthor(identity: string) {
+  function setFileAuthorOverride(identity: string, override: FileAuthorOverride) {
     if (activeServerId === null) return;
     const current = fileTrustFor(activeServerId);
     fileTrustPolicies = {
       ...fileTrustPolicies,
-      [activeServerId]: toggleTrustedAuthor(current, identity),
+      [activeServerId]: setAuthorOverride(current, identity, override),
     };
     revokePassiveMedia();
     void saveUiStateImmediately();
@@ -18713,6 +19015,13 @@
         joinReplyReady = e.payload;
         notice = "Send the connection reply back to the inviter now; keep this app open.";
       }),
+      listen<{ steps: JoinStep[] }>("join-progress", (e) => {
+        // The attempt's steps so far, a snapshot each time, so the start surface can show which
+        // route is being tried while the native command stays pending. Ignored outside an
+        // attempt: a late snapshot must not repaint a surface that has moved on.
+        if (locked || !joinAttemptPending) return;
+        joinSteps = e.payload.steps;
+      }),
       // These two used to arrive as a bare server id, which is a payload with nowhere to put the
       // stream's bookkeeping: they were the two event families whose gaps could never be detected.
       listen<{ server: number }>("reachability-changed", (e) => {
@@ -20273,6 +20582,209 @@
     <img class="brand-logo" src={logoUrl} alt="" draggable="false" />
     <span class="brand-name">Mewtual</span>
     {#if sub}<span class="brand-sub">{sub}</span>{/if}
+  </div>
+{/snippet}
+
+<!-- The livery panel, in three pieces shared by the Found tab and Server settings, Livery. Both
+     edit `liveryDraft`; the images differ by mode: while founding there is no server yet, so an
+     upload is held (`foundIcon` and friends) for `found` to publish, whereas in settings it is
+     published on the spot. -->
+{#snippet liveryPalette()}
+  <div class="preset-row">
+    {#each PRESETS as p (p.id)}
+      <button
+        type="button"
+        class="preset-btn"
+        class:active={liveryDraft.preset === p.id}
+        onclick={() => (liveryDraft = { ...liveryDraft, preset: p.id })}
+      >
+        <span class="preset-sw" style={`background:${p.sw};--sw-bg:${p.bg};--sw-acc:${p.sw}`}></span>{p.name}
+      </button>
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet liveryExtended(mode: string)}
+  {@const founding = mode === "found"}
+  {@const curBanner = founding ? foundBanner : livery.banner}
+  {@const curCursor = founding ? foundCursor : livery.cursor}
+  <div class="lv-grp">
+    <span class="lv-k">Sidebar banner</span>
+    <div class="lv-ctl">
+      <div class="avatar-row">
+        {#if curBanner}<img class="banner-preview" src={imgSrc(curBanner)} alt="" />{/if}
+        <label class="upload-btn">
+          {curBanner ? "Replace banner" : "Upload banner"}
+          <input type="file" accept="image/png,image/jpeg,image/webp" onchange={(e) => loadServerBanner(e.currentTarget.files)} />
+        </label>
+        {#if curBanner}
+          <button type="button" class="ghost small" disabled={busy} onclick={() => { if (founding) foundBanner = ""; else void setServerBanner(""); }}>Remove banner</button>
+        {/if}
+      </div>
+      <span class="muted small">A small image across the top of the channel list. Resized to a short landscape strip before it is shared; members who opt out of the livery do not see it.</span>
+    </div>
+  </div>
+  <div class="lv-grp">
+    <span class="lv-k">Accent</span>
+    <div class="lv-ctl">
+      <div class="accent-row">
+        {#each ACCENT_CHOICES as a (a)}
+          <button
+            type="button"
+            class="accent-sw"
+            class:active={liveryDraft.accent === a}
+            style={`background:${a}`}
+            aria-label={`Accent colour ${a}`}
+            title={a}
+            onclick={() => (liveryDraft = { ...liveryDraft, accent: liveryDraft.accent === a ? "" : a })}
+          ></button>
+        {/each}
+        <input
+          type="color"
+          class="accent-custom"
+          title="Custom accent colour"
+          aria-label="Custom accent colour"
+          value={liveryDraft.accent || "#977df2"}
+          oninput={(e) => (liveryDraft = { ...liveryDraft, accent: e.currentTarget.value })}
+        />
+        {#if liveryDraft.accent}
+          <button type="button" class="ghost small" onclick={() => (liveryDraft = { ...liveryDraft, accent: "" })}>Palette default</button>
+        {/if}
+      </div>
+      <span class="muted small">Optional. Overrides the palette's own accent for links, selection and this server's ring on the rail.</span>
+    </div>
+  </div>
+  <div class="lv-grp">
+    <span class="lv-k">Ground tint</span>
+    <div class="lv-ctl">
+      <label class="lv-rocker">
+        <input type="checkbox" role="switch" checked={draftTinted} onchange={(e) => setTintOn(e.currentTarget.checked)} />
+        <span class="lv-rocker-track" aria-hidden="true"></span>
+        <span>Tint the room in your own colour</span>
+      </label>
+      <div class="lv-tint" class:off={!draftTinted}>
+        <span class="muted small tint-lbl">Background</span>
+        <input type="color" value={liveryTintBgC} disabled={!draftTinted} aria-label="Background tint colour" oninput={(e) => { liveryTintBgC = e.currentTarget.value; syncTint(); }} />
+        <input type="range" class="lv-range" min="0" max="60" step="2" value={liveryTintBgS} disabled={!draftTinted} style={`--pct:${(liveryTintBgS / 60) * 100}%`} aria-label="Background tint intensity" oninput={(e) => { liveryTintBgS = +e.currentTarget.value; syncTint(); }} />
+        <span class="lv-pct">{liveryTintBgS}%</span>
+      </div>
+      <div class="lv-tint" class:off={!draftTinted}>
+        <span class="muted small tint-lbl">Sidebars</span>
+        <input type="color" value={liveryTintSideC} disabled={!draftTinted} aria-label="Sidebar tint colour" oninput={(e) => { liveryTintSideC = e.currentTarget.value; syncTint(); }} />
+        <input type="range" class="lv-range" min="0" max="60" step="2" value={liveryTintSideS} disabled={!draftTinted} style={`--pct:${(liveryTintSideS / 60) * 100}%`} aria-label="Sidebar tint intensity" oninput={(e) => { liveryTintSideS = +e.currentTarget.value; syncTint(); }} />
+        <span class="lv-pct">{liveryTintSideS}%</span>
+      </div>
+      <span class="muted small">Text colours are left alone, and green, gold and red keep their jobs.</span>
+    </div>
+  </div>
+  <div class="lv-grp">
+    <span class="lv-k">Corners</span>
+    <div class="lv-ctl">
+      <div class="cat-row">
+        {#each Object.keys(LIVERY_RADIUS) as rid (rid)}
+          <button
+            type="button"
+            class="preset-btn cat-tile"
+            class:active={(liveryDraft.tokens["radius"] ?? "soft") === rid}
+            onclick={() => setDraftToken("radius", rid === "soft" ? "" : rid)}
+          >{rid}</button>
+        {/each}
+      </div>
+    </div>
+  </div>
+  <div class="lv-grp">
+    <span class="lv-k">Typeface</span>
+    <div class="lv-ctl">
+      <div class="cat-row">
+        {#each Object.keys(LIVERY_FONTS) as fid (fid)}
+          <button
+            type="button"
+            class="preset-btn cat-tile"
+            class:active={(liveryDraft.tokens["font"] ?? "system") === fid}
+            style={`font-family:${LIVERY_FONTS[fid]}`}
+            onclick={() => setDraftToken("font", fid === "system" ? "" : fid)}
+          >{fid}</button>
+        {/each}
+      </div>
+    </div>
+  </div>
+  <div class="lv-grp">
+    <span class="lv-k">Pattern</span>
+    <div class="lv-ctl">
+      <div class="cat-row">
+        {#each LIVERY_PATTERNS as pid (pid)}
+          <button
+            type="button"
+            class="preset-btn cat-tile pat-{pid}"
+            class:active={(liveryDraft.tokens["pattern"] ?? "none") === pid}
+            onclick={() => setDraftToken("pattern", pid === "none" ? "" : pid)}
+          >{pid}</button>
+        {/each}
+      </div>
+      <span class="muted small">A faint texture behind the whole room.</span>
+    </div>
+  </div>
+  <div class="lv-grp">
+    <span class="lv-k">Cursor</span>
+    <div class="lv-ctl">
+      <div class="avatar-row">
+        {#if curCursor}<img class="cursor-preview" src={"data:image/png;base64," + curCursor} alt="" />{/if}
+        <label class="upload-btn">
+          {curCursor ? "Replace cursor" : "Upload cursor"}
+          <input type="file" accept="image/png,image/gif,image/webp" onchange={(e) => loadServerCursor(e.currentTarget.files)} />
+        </label>
+        {#if curCursor}
+          <button type="button" class="ghost small" disabled={busy} onclick={() => { if (founding) foundCursor = ""; else void setServerCursor(""); }}>Remove cursor</button>
+        {/if}
+      </div>
+      <span class="muted small">A small image members' pointers become while they are here. Part of the livery, so opting out removes it too.</span>
+    </div>
+  </div>
+{/snippet}
+
+{#snippet liveryPreview(mode: string)}
+  {@const founding = mode === "found"}
+  {@const pvIcon = founding ? foundIcon : livery.icon}
+  {@const pvBanner = founding ? foundBanner : livery.banner}
+  {@const draftPattern = liveryDraft.tokens["pattern"]}
+  <div
+    class="lv-preview"
+    data-preset={liveryDraft.preset || null}
+    data-livery-pattern={draftPattern && draftPattern !== "none" ? draftPattern : null}
+    style={liveryDraftVars()}
+  >
+    <div class="stx-ph"><i></i>AS MEMBERS SEE IT</div>
+    <div class="stx-pcard">
+      <div class="stx-pcap">CHROME</div>
+      <div class="stx-mini">
+        <div class="stx-mini-rail">
+          {#if pvIcon}<img class="mini-ico" src={imgSrc(pvIcon)} alt="" />{:else}<i class="on"></i>{/if}
+          <i></i><i></i>
+        </div>
+        <div class="stx-mini-side">
+          {#if pvBanner}<img class="mini-banner" src={imgSrc(pvBanner)} alt="" />{/if}
+          <i class="on" style="width:90%"></i><i style="width:70%"></i><i style="width:80%"></i><i style="width:55%"></i>
+        </div>
+        <div class="stx-mini-chat"><i class="nm"></i><i style="width:80%"></i><i style="width:60%"></i></div>
+      </div>
+    </div>
+    <div class="stx-pcard">
+      <div class="stx-pcap">MESSAGE</div>
+      {@render previewLog()}
+    </div>
+    <div class="stx-pcard">
+      <div class="stx-pcap">CONTROLS</div>
+      <div class="stx-pctl">
+        <button class="primary small" type="button">Send</button>
+        <button class="ghost small" type="button">Cancel</button>
+        <span class="stx-pdot"></span>
+      </div>
+    </div>
+    <p class="muted small stx-pnote">
+      {founding
+        ? "Published to everyone who joins, once the server is founded. Anyone can opt out in their own Appearance."
+        : "Rendered with your draft before you publish. Anyone can opt out in their own Appearance."}
+    </p>
   </div>
 {/snippet}
 
@@ -22314,49 +22826,60 @@
       <p class="muted small">Loading encrypted preferences before servers can fetch shared content.</p>
     </div>
   {:else if servers.length === 0 || showAdd}
-    <div class="start">
-      {@render brandMark(servers.length ? "" : "your vault is ready")}
-      {#if showAdd && servers.length}
-        <button class="ghost" onclick={() => (showAdd = false)}>← back</button>
-      {/if}
+    <!-- The start surface uses the window. It was a single 480px column stacking identity,
+         the trust choice, the tabs, the pane, pairing and diagnostics, which squeezed the one
+         real decision (how people connect) into two paragraphs each and pushed the primary
+         action below the fold. Now: an identity band, two wide path tabs, the chosen path owning
+         the width, and the secondary panels folded in a strip at the bottom. -->
+    <div class="start start-wide">
+      <div class="st-identity">
+        {@render brandMark(servers.length ? "" : "your vault is ready")}
+        <label class="field st-me">
+          <span class="muted">Display name</span>
+          <input bind:value={displayName} placeholder="display name" />
+          <small class="muted">Who you are to the people in a group, not what the group is called.</small>
+        </label>
+        <div class="st-identity-side">
+          <!-- Folded by default: the summary states the current answer, so folding it hides
+               nothing. Opened, it is one segmented choice and one line saying what it does. -->
+          <details class="start-trust">
+            <summary>
+              Shared media: <b>{ONBOARDING_TRUST_LABELS[onboardingFileTrust]}</b>
+              <span class="muted small">change</span>
+            </summary>
+            <fieldset class="st-trust">
+              <legend class="k">What this server may fetch without a click</legend>
+              <div class="st-trust-seg" role="radiogroup" aria-label="Shared media">
+                <label class:selected={onboardingFileTrust === "on-demand"}>
+                  <input type="radio" name="onboarding-file-trust" value="on-demand" bind:group={onboardingFileTrust} />On demand
+                </label>
+                <label class:selected={onboardingFileTrust === "media"}>
+                  <input type="radio" name="onboarding-file-trust" value="media" bind:group={onboardingFileTrust} />Media only
+                </label>
+                <label class:selected={onboardingFileTrust === "everyone"}>
+                  <input type="radio" name="onboarding-file-trust" value="everyone" bind:group={onboardingFileTrust} />Everyone here
+                </label>
+              </div>
+              <p class="muted small">
+                {#if onboardingFileTrust === "on-demand"}Nothing loads until you click it.
+                {:else if onboardingFileTrust === "media"}Pictures, audio and video load as they arrive. Other files wait for a click.
+                {:else}Every member's files load as they arrive. Links still need a click.{/if}
+                Always and never for individual people: Server settings, File trust.
+              </p>
+            </fieldset>
+          </details>
+          {#if showAdd && servers.length}
+            <button class="ghost" onclick={() => (showAdd = false)}>← back to my servers</button>
+          {/if}
+        </div>
+      </div>
       {#if syncIntent}
         <p class="muted">
           Vault created. Now hand the pairing code below to the device you already use: it
           shows the same code, you compare them, and it approves this one.
         </p>
       {/if}
-      <label class="field">
-        <span class="muted">Display name</span>
-        <input bind:value={displayName} placeholder="display name" />
-        <small class="muted">Who you are to the people in the group, not what the group is called.</small>
-      </label>
-      <!-- Folded by default. It is a real choice and it is made before anything is founded or
-           joined, but it is three cards of prose sitting directly above the primary action, and
-           at the default window size it pushed "Join / Found a server" below the fold entirely.
-           The summary states the current answer, so folding it hides nothing. -->
-      <details class="start-trust">
-        <summary>
-          Shared media: <b>{ONBOARDING_TRUST_LABELS[onboardingFileTrust]}</b>
-          <span class="muted small">change</span>
-        </summary>
-      <fieldset class="file-trust-onboarding">
-        <legend>Before this server can fetch shared media automatically</legend>
-        <label class:selected={onboardingFileTrust === "on-demand"}>
-          <input type="radio" name="onboarding-file-trust" value="on-demand" bind:group={onboardingFileTrust} />
-          <span><b>On demand</b><small>Fetch only after I press Load, Play, Open, or Download.</small></span>
-        </label>
-        <label class:selected={onboardingFileTrust === "specific"}>
-          <input type="radio" name="onboarding-file-trust" value="specific" bind:group={onboardingFileTrust} />
-          <span><b>Specific people</b><small>Start blocked; choose trusted members after the authenticated roster arrives.</small></span>
-        </label>
-        <label class:selected={onboardingFileTrust === "everyone"}>
-          <input type="radio" name="onboarding-file-trust" value="everyone" bind:group={onboardingFileTrust} />
-          <span><b>Everyone here</b><small>Allow every member's authenticated shared media to load automatically. External URLs still require a click.</small></span>
-        </label>
-        <p class="muted small">Files fetched into Mewtual stay encrypted in its vault. Opening or exporting content still hands untrusted bytes to a decoder or another app.</p>
-      </fieldset>
-      </details>
-      <div class="start-tabs" role="tablist" aria-label="Join or found a server">
+      <div class="start-tabs st-paths" role="tablist" aria-label="Join or found a server">
         <button
           type="button"
           role="tab"
@@ -22367,8 +22890,12 @@
           onclick={() => (startTab = "join")}
           onkeydown={startTabArrows}
         >
-          Join a server
-          <span class="st-hint">someone sent me an invite</span>
+          <svg class="st-path-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h11"/><path d="M11 8l4 4-4 4"/><rect x="15" y="4" width="6" height="16" rx="1.5"/></svg>
+          <span class="st-path-txt">
+            <span class="st-path-k">path a</span>
+            <span class="st-path-t">Join a server</span>
+            <span class="st-hint">Someone sent me an invite. I paste it and I'm in.</span>
+          </span>
         </button>
         <button
           type="button"
@@ -22380,197 +22907,377 @@
           onclick={() => (startTab = "found")}
           onkeydown={startTabArrows}
         >
-          Found a server
-          <span class="st-hint">I'm starting a new one</span>
+          <svg class="st-path-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v6"/><path d="M12 9l7 4v5l-7 3-7-3v-5z"/><path d="M5 13l7 3 7-3"/></svg>
+          <span class="st-path-txt">
+            <span class="st-path-k">path b</span>
+            <span class="st-path-t">Found a server</span>
+            <span class="st-hint">I'm starting a new one: I name it, dress it, and choose how people connect.</span>
+          </span>
         </button>
       </div>
       {#if startTab === "join"}
-        <div class="start-pane" role="tabpanel" id="start-panel-join" aria-labelledby="start-tab-join">
-          <p class="muted">
-            Paste the invite you were sent: it carries everything your app needs to find the group.
-          </p>
-          <label class="field">
-            <span class="muted">Name this group (optional)</span>
-            <input bind:value={joinServerName} placeholder="what you want to call it" />
-            <small class="muted">Your own label for the rail. An invite does not carry the group's name; you can change this later in Server settings.</small>
-          </label>
-          <textarea
-            class="invite-code"
-            bind:value={joinInvite}
-            oninput={() => {
-              joinPreview = null;
-              joinPreviewCode = "";
-              joinSwitchboardConsent = false;
-            }}
-            rows="3"
-            placeholder="paste invite here"
-          ></textarea>
-          {#if joinPreview?.switchboards}
-            <section class="repair-card switchboard-consent">
-              <div>
-                <h3>Direct first; member fallback only with your permission</h3>
+        <div class="start-pane st-join" role="tabpanel" id="start-panel-join" aria-labelledby="start-tab-join">
+          <div class="st-col">
+            <label class="field">
+              <span class="muted">Invite</span>
+              <textarea
+                class="invite-code st-invite"
+                bind:value={joinInvite}
+                oninput={resetJoinAttempt}
+                rows="4"
+                placeholder="paste the invite here, or scan its QR code"
+              ></textarea>
+              <small class="muted">Invites are single-use.</small>
+            </label>
+            {#if joinPreview}
+              <!-- What the invite says about itself, in kind terms: no address and no name. -->
+              <div class="st-readout">
+                <span class="k">signature</span><span class="v ok">valid · signed by the inviter's device</span>
+                <span class="k">expires</span><span class="v">{fmtTime(joinPreview.expires_at_ms)}</span>
+                <span class="k">routes</span>
+                <span class="v">
+                  {joinPreview.direct_routes} direct · {joinPreview.rendezvous_routes} via an introducer ·
+                  {joinPreview.switchboards} member switchboard{joinPreview.switchboards === 1 ? "" : "s"}
+                </span>
+              </div>
+            {/if}
+            {#if joinPreview?.switchboards}
+              <section class="st-consent">
+                <span class="k warn">this invite offers a fallback</span>
+                <h3>Direct first. Member fallback only if you allow it.</h3>
                 <p class="muted small">
-                  This signed invite offers {joinPreview.switchboards} standing switchboard{joinPreview.switchboards === 1 ? "" : "s"}.
-                  Mewtual will try the named inviter directly first. If that fails, a switchboard can
-                  forward the admission handshake and remain your first encrypted group connection.
-                  That member learns your IP address and connection timing and may carry encrypted
-                  catch-up traffic. It already has ordinary member access, but helping grants no
-                  additional content access, and it cannot admit you itself.
+                  Mewtual dials the inviter directly first. If that fails, one of the
+                  {joinPreview.switchboards} switchboard{joinPreview.switchboards === 1 ? "" : "s"} named in the invite can
+                  forward the admission handshake instead. That member learns your IP address and
+                  when you connected, and may carry encrypted catch-up traffic. Admission still goes
+                  through the inviter.
                 </p>
                 <label class="check-row">
                   <input type="checkbox" bind:checked={joinSwitchboardConsent} />
-                  Allow the signed member fallback after the direct attempt fails
+                  Allow the member fallback after the direct attempt fails
                 </label>
-                <p class="muted small">Leave this off to try direct routes only. You can retry with fallback later.</p>
-              </div>
-            </section>
-          {/if}
-          <div class="pc-actions">
-            <button onclick={join} disabled={busy || !joinInvite.trim()}>
-              {joinPreview?.switchboards
-                ? joinSwitchboardConsent
-                  ? "Join with fallback"
-                  : "Join directly"
-                : busy
-                  ? "Working…"
-                  : "Join"}
-            </button>
-            <button class="ghost" disabled={scanOpen} onclick={() => scanQr((t) => {
-              if (t) {
-                joinInvite = t;
-                joinPreview = null;
-                joinPreviewCode = "";
-                joinSwitchboardConsent = false;
-              }
-            })}>⛶ Scan invite QR</button>
-            <span class="aside muted small">invites are single-use and time-limited</span>
+              </section>
+            {/if}
+            <div class="pc-actions">
+              <button onclick={join} disabled={busy || !joinInvite.trim()}>
+                {busy
+                  ? "Dialling…"
+                  : joinPreview?.switchboards
+                    ? joinSwitchboardConsent
+                      ? "Join with fallback"
+                      : "Join directly"
+                    : "Join"}
+              </button>
+              <button class="ghost" disabled={scanOpen} onclick={() => scanQr((t) => {
+                if (t) {
+                  joinInvite = t;
+                  resetJoinAttempt();
+                }
+              })}>⛶ Scan invite QR</button>
+              {#if joinPreview?.switchboards && !joinAttemptPending && !joinSteps.length}
+                <span class="aside muted small">the first press read the invite; the next one joins</span>
+              {/if}
+            </div>
+            <label class="field">
+              <span class="muted">What I want to call it <span class="faint">(optional)</span></span>
+              <input bind:value={joinServerName} placeholder="a label for your rail" />
+              <small class="muted">An invite does not carry the group's name. If the group publishes one, it replaces this label.</small>
+            </label>
           </div>
-          {#if joinReplyReady && !joinReplyExpired}
-            <section class="repair-card reply-card">
-              <div>
-                <h3>Nobody answered: meet in the middle</h3>
-                <p class="muted small">
-                  Your invite is fine; the routes it carried did not answer. Send this reply code
-                  back to the person who invited you, in the same chat the invite arrived in. When
-                  they paste it, both apps dial at the same moment, which can open a path one-sided
-                  dialling cannot. A member whose app confirms a current live route to the named
-                  inviter can paste it instead. It offers {joinReplyCandidateLabel(joinReplyReady.candidate_count)};
-                  it dials rather than relays, so it cannot cross symmetric NAT/CGNAT on its own.
-                  It works for 60 seconds: keep both apps open.
-                </p>
-                <textarea class="invite-code" readonly rows="3" value={joinReplyReady.code}></textarea>
+          <div class="st-col">
+            <!-- The attempt, as it runs. `join_server` stays pending for as long as the dial, the
+                 reply window and the admission take; the routes below fill in from the bridge's
+                 `join-progress` snapshots, named by kind so no address or person is drawn. -->
+            <div class="st-attempt">
+              <div class="st-attempt-head">
+                <h3>Reaching the inviter</h3>
+                <span class="st-attempt-state" data-phase={joinView.phase}>
+                  {#if joinView.phase === "dialling"}<span class="st-spin"></span> dialling
+                  {:else if joinView.phase === "failed"}nobody answered
+                  {:else if joinView.phase === "connected"}connected
+                  {:else}waiting for Join{/if}
+                </span>
               </div>
-              <button class="ghost small" onclick={() => copyText(joinReplyReady?.code ?? "")}>Copy reply</button>
-            </section>
-          {:else if joinReplyReady}
-            <section class="repair-card reply-card">
-              <div><h3>Connection reply expired</h3><p class="muted small">Start the join again to mint a fresh 60-second route. The expired code is no longer copyable.</p></div>
-            </section>
-          {/if}
+              <div class="st-wire">
+                <svg viewBox="0 0 420 160" aria-hidden="true">
+                  {#each joinView.rows as r, i (r.kind)}
+                    {@const arc = routeArc(i, joinView.rows.length)}
+                    <path class="st-route {r.state}" d={arc.d} />
+                    <text class="st-rl {r.state}" x="210" y={arc.ly} text-anchor="middle">{r.label}</text>
+                    {#if r.state === "active"}
+                      <circle class="st-pk" r="3.2" style={`offset-path: path('${arc.d}')`} />
+                    {/if}
+                  {/each}
+                  {#if !joinView.rows.length}
+                    <path class="st-route" d="M52 80 C 150 80, 270 80, 368 80" />
+                    <text class="st-rl" x="210" y="72" text-anchor="middle">paste an invite and press Join</text>
+                  {/if}
+                  <circle class="st-node" cx="40" cy="80" r="13" /><text class="st-nl" x="40" y="83" text-anchor="middle">YOU</text>
+                  <circle class="st-node" cx="380" cy="80" r="13" /><text class="st-nl" x="380" y="83" text-anchor="middle">THEM</text>
+                </svg>
+              </div>
+              {#if joinView.rows.length}
+                <div class="st-routes">
+                  {#each joinView.rows as r (r.kind)}
+                    <div class="st-route-row {r.state}">
+                      <span class="ic" aria-hidden="true"></span>
+                      <span class="tg">{r.label}</span>
+                      <span class="why">{r.note || (r.state === "idle" ? "not tried yet" : "")}</span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+              {#if joinView.phase === "failed"}
+                <div class="st-verdict fail">
+                  <h3>{joinView.headline}</h3>
+                  {#if joinView.failedOn === "invite"}
+                    <p class="muted small">{joinError}</p>
+                  {:else if joinView.failedOn === "admission"}
+                    <p class="muted small">
+                      Only the serving node knows why. Ask the person who invited you to open
+                      Server settings → Join Log: the reason is recorded there, and deliberately not
+                      sent back to you.
+                    </p>
+                  {:else}
+                    <p class="muted small">
+                      Each route was tried in turn. The inviter's app is either closed, or on a
+                      network that cannot be reached from here without help. The addresses are in
+                      the connection check if you need them.
+                    </p>
+                    <ol>
+                      {#if joinReplyReady && !joinReplyExpired}
+                        <li>
+                          <b>Meet in the middle.</b> Send this reply code back in the same chat the
+                          invite came from. When they paste it, both apps dial at the same moment for
+                          60 seconds, which can open a path one-sided dialling cannot. It offers
+                          {joinReplyCandidateLabel(joinReplyReady.candidate_count)}. Keep this window open.
+                        </li>
+                      {/if}
+                      <li><b>Ask them to check their end.</b> If their app is open and shows nothing, your app never reached them.</li>
+                      {#if joinPreview?.switchboards && !joinSwitchboardConsent}
+                        <li><b>Allow the fallback and retry</b>, if you are happy for a member to see your IP address.</li>
+                      {:else}
+                        <li><b>Retry.</b> A person who was offline a minute ago may be back.</li>
+                      {/if}
+                    </ol>
+                  {/if}
+                  {#if joinReplyReady && !joinReplyExpired}
+                    <div class="st-reply">
+                      <textarea class="invite-code" readonly rows="2" value={joinReplyReady.code}></textarea>
+                      <button class="ghost small" onclick={() => copyText(joinReplyReady?.code ?? "")}>Copy reply</button>
+                    </div>
+                  {:else if joinReplyReady}
+                    <p class="muted small">The connection reply expired. Retry to mint a fresh 60-second one.</p>
+                  {/if}
+                  <div class="pc-actions">
+                    <button class="ghost small" disabled={busy || !joinInvite.trim()} onclick={join}>Retry</button>
+                    <button class="ghost small" onclick={() => (startConnOpen = true)}>Open connection check</button>
+                    <button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied!" : "Copy report"}</button>
+                  </div>
+                </div>
+              {:else if joinView.phase === "dialling" && joinReplyReady && !joinReplyExpired}
+                <!-- The reply window: the command is still pending, waiting for the inviter to dial
+                     back, so this is a wait rather than a verdict. -->
+                <div class="st-verdict wait">
+                  <h3>Nobody answered yet: meet in the middle</h3>
+                  <p class="muted small">
+                    Send this reply code back in the same chat the invite came from. When they paste
+                    it, both apps dial at the same moment. It offers
+                    {joinReplyCandidateLabel(joinReplyReady.candidate_count)} and works for 60 seconds:
+                    keep this window open.
+                  </p>
+                  <div class="st-reply">
+                    <textarea class="invite-code" readonly rows="2" value={joinReplyReady.code}></textarea>
+                    <button class="ghost small" onclick={() => copyText(joinReplyReady?.code ?? "")}>Copy reply</button>
+                  </div>
+                </div>
+              {/if}
+            </div>
+            <div class="st-card">
+              <span class="k">What happens when I press Join</span>
+              <ol class="st-steps">
+                <li><b>Your app reads the invite</b> and checks its signature and which routes it offers.</li>
+                <li><b>It dials the inviter</b>, one route at a time. Most joins finish here in a few seconds.</li>
+                <li><b>If nobody answers</b>, you get a 60-second reply code to send back, and a plain account of what failed.</li>
+                <li><b>The inviter's app admits you</b> under the group's rules. Refusals are logged on their side.</li>
+              </ol>
+            </div>
+          </div>
         </div>
       {:else}
-        <div class="start-pane" role="tabpanel" id="start-panel-found" aria-labelledby="start-tab-found">
-          <label class="field">
-            <span class="muted">Server name</span>
-            <input bind:value={newServerName} placeholder="what this group is called" />
-            <small class="muted">The group's own name, separate from your display name above.</small>
-          </label>
-          <div class="field">
-            <span class="muted">Who is this server for?</span>
-            <div class="mode-cards">
-              <label class="mode-card" class:selected={serverMode === "friends"}>
+        <div class="start-pane st-found" role="tabpanel" id="start-panel-found" aria-labelledby="start-tab-found">
+          <section class="st-sect">
+            <div class="st-sect-head">
+              <span class="k">1 · name and look</span>
+              <h2>What is this group called, and how should it look?</h2>
+              <span class="why muted small">Published to everyone who joins. All of it can be changed later in Server settings.</span>
+            </div>
+            <div class="st-look">
+              <div class="st-look-form">
+                <div class="st-row2">
+                  <label class="field">
+                    <span class="muted">Server name</span>
+                    <input bind:value={newServerName} placeholder="what this group is called" />
+                    <small class="muted">Left blank, it is labelled after you: "{displayName || "Your"}'s server".</small>
+                  </label>
+                  <div class="field">
+                    <span class="muted">Icon</span>
+                    <div class="st-icon-row">
+                      {#if foundIcon}
+                        <img class="avatar lg" src={imgSrc(foundIcon)} alt="" />
+                      {:else}
+                        <span class="avatar lg fallback">{monogram(newServerName.trim() || `${displayName}'s server`)}</span>
+                      {/if}
+                      <div class="pc-actions">
+                        <label class="upload-btn">
+                          {foundIcon ? "Replace image" : "Upload image"}
+                          <input type="file" accept="image/png,image/jpeg,image/webp" onchange={(e) => loadServerIcon(e.currentTarget.files)} />
+                        </label>
+                        {#if foundIcon}
+                          <button type="button" class="ghost small" onclick={() => (foundIcon = "")}>Use monogram</button>
+                        {/if}
+                      </div>
+                    </div>
+                    <small class="muted">Shown on everyone's rail. Resized before it is shared.</small>
+                  </div>
+                </div>
+                <div class="field">
+                  <span class="muted">Palette</span>
+                  {@render liveryPalette()}
+                </div>
+                <details class="st-fold">
+                  <summary>Customise the look <span class="k">banner · accent · tint · corners · type · pattern · cursor</span></summary>
+                  <div class="st-fold-body lv-panel">{@render liveryExtended("found")}</div>
+                </details>
+                <p class="muted small">Members can opt out of a server's livery in Settings → Appearance. Green, gold and red keep their jobs (presence, mentions, danger) under every palette.</p>
+              </div>
+              <div class="st-preview">{@render liveryPreview("found")}</div>
+            </div>
+          </section>
+          <section class="st-sect">
+            <div class="st-sect-head">
+              <span class="k">2 · how people connect</span>
+              <h2>Who carries the traffic?</h2>
+              <span class="why muted small">Neither is the safer one: they guard against different people.</span>
+            </div>
+            <div class="st-topo" role="radiogroup" aria-label="How people connect">
+              <label class="tcard" class:selected={serverMode === "friends"}>
                 <input type="radio" class="mc-radio" name="server-mode" value="friends" bind:group={serverMode} />
-                <span class="mc-pick">{serverMode === "friends" ? "◉" : "○"}</span>
-                <span class="mc-title">People I know</span>
-                <span class="mc-sub">friend circle</span>
-                <p>You connect to each other directly. Nothing to set up, nothing to run, no one in charge of the wires.</p>
-                <p class="mc-trade">Members may see each other's IP addresses, and bans depend on everyone's app playing fair.</p>
-                <span class="mc-foot">shields you from an operator · trusts your friends</span>
+                <div class="tc-head">
+                  <div><span class="k">peer to peer · no server</span><h3>Friend mesh</h3></div>
+                  <span class="tc-pick" aria-hidden="true"></span>
+                </div>
+                <div class="tc-diag">
+                  <canvas use:topoDiagram={"mesh"}></canvas>
+                  <div class="tc-cap">no server exists · the group is the truth</div>
+                </div>
+                <div class="tc-body">
+                  <p>Everyone connects to everyone. Each member's device keeps the encrypted history, so any one of them can catch the others up.</p>
+                  <dl class="tc-facts">
+                    <dt>Requires</dt><dd><b>Nothing.</b> No machine to run, no address to paste.</dd>
+                    <dt>Who sees</dt><dd>Members may see each other's IP addresses.</dd>
+                    <dt>Removal</dt><dd><span class="m">Cooperative.</span> A ban depends on every member's app playing fair.</dd>
+                    <dt>Offline</dt><dd>Catch-up waits until another member is online. Works on a LAN with no internet.</dd>
+                    <dt>Files</dt><dd>Circulate for a month, then expire unless pinned to a wiki page.</dd>
+                  </dl>
+                </div>
+                <div class="tc-foot"><span>best for</span><span class="who">friend circles · small crews</span></div>
               </label>
-              <label class="mode-card" class:selected={serverMode === "hosted"}>
+              <label class="tcard" class:selected={serverMode === "hosted"}>
                 <input type="radio" class="mc-radio" name="server-mode" value="hosted" bind:group={serverMode} />
-                <span class="mc-pick">{serverMode === "hosted" ? "◉" : "○"}</span>
-                <span class="mc-title">People I don't know</span>
-                <span class="mc-sub">hosted community</span>
-                <p>Everyone connects through a node you run. Removing someone takes effect instantly: the group changes its keys, and they're locked out of everything said afterwards.</p>
-                <p class="mc-trade">You, the operator, can see who is a member and who talks to whom, never what is said.</p>
-                <span class="mc-foot">removal that holds · trusts you</span>
+                <div class="tc-head">
+                  <div><span class="k">decentralised server · your node</span><h3>Community node</h3></div>
+                  <span class="tc-pick" aria-hidden="true"></span>
+                </div>
+                <div class="tc-diag">
+                  <canvas use:topoDiagram={"node"}></canvas>
+                  <div class="tc-cap">node forwards encrypted traffic · holds no group keys</div>
+                </div>
+                <div class="tc-body">
+                  <p>Everyone connects through an always-on machine you run. It relays traffic, keeps members' IP addresses from each other, and serves signed snapshots so catch-up works when nobody else is online.</p>
+                  <dl class="tc-facts">
+                    <dt>Requires</dt><dd><b>A node you operate.</b> A small always-on box running <span class="fp">catcomsctl relay</span>, and its address.</dd>
+                    <dt>Who sees</dt><dd>The operator sees who is a member, who talks to whom, when, and how much. Messages are encrypted before they reach the node.</dd>
+                    <dt>Removal</dt><dd><span class="y">Holds.</span> The group rotates keys and the node stops carrying the removed person's traffic.</dd>
+                    <dt>Offline</dt><dd>24/7 catch-up. Voice rooms larger than a mesh can carry.</dd>
+                    <dt>Lose it</dt><dd>Members still hold the history; the group keeps working between whoever is online.</dd>
+                  </dl>
+                </div>
+                <div class="tc-foot"><span>best for</span><span class="who">bigger communities · people you don't know</span></div>
               </label>
             </div>
-            <p class="muted small">Neither is the safer one: they guard against different people.</p>
-          </div>
-          {#if serverMode === "hosted"}
-            <label class="field">
-              <span class="muted small">
-                Your node's address: a hosted community runs through a small always-on machine you
-                operate. Set one up with <span class="fp">catcomsctl relay</span>; if you don't have
-                one yet, pick "People I know" instead.
-              </span>
-              <input bind:value={relay} placeholder="/dns4/your-host/udp/7220/quic-v1/p2p/12D3Koo…" />
-            </label>
-          {/if}
-          <details>
-            <summary>Advanced: connectivity</summary>
-            <label class="field">
-              <span class="muted small">
-                Known address (optional): if this machine already has a reachable address, a LAN IP
-                or a public host:port you've forwarded, paste it to skip discovery.
-              </span>
-              <input bind:value={advertise} placeholder="192.168.1.5 or example.net:7220" />
-            </label>
-            {#if serverMode === "friends"}
-              <label class="field">
-                <span class="muted small">
-                  Relay node (optional): a relay's address makes this server reachable over the
-                  internet with no port-forward.
-                </span>
-                <input bind:value={relay} placeholder="/ip4/…/udp/…/quic-v1/p2p/… (optional)" />
-              </label>
+            {#if serverMode === "hosted"}
+              <div class="st-node-req">
+                <label class="field">
+                  <span class="muted">Your node's address</span>
+                  <input bind:value={relay} placeholder="/dns4/your-host/udp/7220/quic-v1/p2p/12D3Koo…" />
+                  <small class="muted">
+                    Set a node up with <span class="fp">catcomsctl relay</span>; it prints this line.
+                    No node yet? Pick Friend mesh instead.
+                  </small>
+                </label>
+              </div>
             {/if}
-            <label class="field">
-              <span class="muted small">
-                Introducer node (optional): register at a rendezvous node so people can join with
-                <em>just the invite</em>, no address needed. Saved as your default.
-              </span>
-              <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
-            </label>
+          </section>
+          <details class="st-fold">
+            <summary>Advanced: connectivity <span class="k">optional</span></summary>
+            <div class="st-fold-body st-adv">
+              <label class="field">
+                <span class="muted">Known address</span>
+                <input bind:value={advertise} placeholder="192.168.1.5 or example.net:7220" />
+                <small class="muted">If this machine already has a reachable address, a LAN IP or a public host:port you've forwarded, paste it to skip discovery.</small>
+              </label>
+              <label class="field">
+                <span class="muted">Introducer node</span>
+                <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/…" />
+                <small class="muted">Register at a rendezvous node so people can join with <em>just the invite</em>, no address needed. Saved as your default.</small>
+              </label>
+              {#if serverMode === "friends"}
+                <label class="field">
+                  <span class="muted">Relay node</span>
+                  <input bind:value={relay} placeholder="/ip4/…/udp/…/quic-v1/p2p/…" />
+                  <small class="muted">A relay's address makes a mesh reachable over the internet with no port-forward. The relay carries encrypted traffic only.</small>
+                </label>
+              {/if}
+            </div>
           </details>
-          <div class="pc-actions">
-            <button onclick={found} disabled={busy}>
+          <div class="st-found-foot">
+            <div class="st-summary">
+              <span>Founding</span>
+              <span class="chip">
+                <span class="sw" style={`background:${liveryDraft.accent || PRESETS.find((p) => p.id === liveryDraft.preset)?.sw || "#977df2"}`}></span>
+                <b>{newServerName.trim() || `${displayName}'s server`}</b>
+              </span>
+              <span class="chip">
+                {PRESETS.find((p) => p.id === liveryDraft.preset)?.name ?? "Nightshade"}{liveryDraft.accent ? " · custom accent" : ""}{foundIcon ? " · icon" : ""}{foundBanner ? " · banner" : ""}{foundCursor ? " · cursor" : ""}
+              </span>
+              <span class="chip">{serverMode === "hosted" ? "community node" : "friend mesh"}</span>
+              {#if serverMode === "hosted" && !relay.trim()}
+                <span class="warnline">needs a node address before it can be founded</span>
+              {/if}
+            </div>
+            <button onclick={found} disabled={busy || (serverMode === "hosted" && !relay.trim())}>
               {busy ? "Working…" : "Found server"}
             </button>
-            <span class="aside muted small">most people never open Advanced</span>
           </div>
         </div>
       {/if}
-      <hr />
-      {#if servers.length && activeServerId !== null}
-        <details class="conn-panel reply-apply">
-          <summary>I received a connection reply</summary>
-          <p class="muted small">
-            Paste the reply from the person joining <b>{cur?.name ?? "the active server"}</b>.
-            Their app must still be waiting. If this device did not issue the invite, it acts only
-            as a handshake helper; the named inviter and normal MLS admission rules still decide.
-          </p>
-          <textarea class="invite-code" rows="3" bind:value={joinReplyInput} placeholder="paste mewtual-reply-v1 code"></textarea>
-          <div class="pc-actions">
-            <button class="ghost small" disabled={joinReplyApplying || !joinReplyInput.trim()} onclick={() => applyJoinReply(false)}>
-              {joinReplyApplying ? "Dialling…" : "Dial joiner"}
-            </button>
-            {#if joinReplyNeedsReplace}
-              <button class="ghost small danger-btn" disabled={joinReplyApplying} onclick={() => applyJoinReply(true)}>
-                Confirm different joiner
-              </button>
-            {/if}
-          </div>
-        </details>
-      {/if}
+      <!-- The secondary strip. An inviter pastes a joiner's connection reply in Server settings,
+           Invites, where the invite came from; it has no business on the join surface. -->
+      <div class="st-secondary">
       <details open={syncIntent}>
-        <summary>Link this device to another device you own</summary>
+        <summary>
+          <svg class="st-sec-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="12" height="9" rx="1.5"/><path d="M9 17v2M6 19h6"/><rect x="16" y="9" width="5" height="9" rx="1.5"/></svg>
+          <span class="st-sec-txt">
+            <span class="ttl">Link this device to another device you own</span>
+            <span class="sub">Your other device stays the master and approves this one with a code.</span>
+          </span>
+          <span class="k">pairing</span>
+        </summary>
         <p class="muted small">
-          Your other device stays the master: it will show a code and ask permission before
-          this device gets anything. Once approved, open the grant here and join its servers;
-          admission completes when each server's owner is online to serialize it safely.
+          Your other device will show a code and ask permission before this device gets anything.
+          Once approved, open the grant here and join its servers; admission completes when each
+          server's owner is online.
         </p>
         {#if !pairBlob}
           <button class="ghost" onclick={pairBegin}>Generate pairing code</button>
@@ -22614,8 +23321,15 @@
           {/if}
         {/if}
       </details>
-      <details class="conn-panel">
-        <summary>Connection check</summary>
+      <details class="conn-panel" bind:open={startConnOpen}>
+        <summary>
+          <svg class="st-sec-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>
+          <span class="st-sec-txt">
+            <span class="ttl">Connection check</span>
+            <span class="sub">{connectivity && connectivity.action ? "The last attempt, with the addresses it used." : "Nothing tried yet this session."}</span>
+          </span>
+          <span class="k">diagnostics</span>
+        </summary>
         <p class="muted small">
           What this app knows about reaching, and being reached by, other people. Open it when a
           server you founded cannot be joined, or when an invite you pasted times out.
@@ -22651,6 +23365,7 @@
           </p>
         {/if}
       </details>
+      </div>
       {#if error}<p class="muted" style="color:#ff6b6b">{error}</p>{/if}
     </div>
   {:else}
@@ -22931,6 +23646,11 @@
             {@render youPanel()}
           {/if}
         {:else}
+        {#if followLiveryNow && livery.banner}
+          <!-- The published sidebar banner: part of the livery, so the per-server opt-out hides
+               it with the rest. Rendered as an image only, like the icon. -->
+          <img class="server-banner" src={imgSrc(livery.banner)} alt="" draggable="false" />
+        {/if}
         <div class="server-head">
           <strong class="server-title" title={cur?.name}>{cur?.name ?? ""}</strong>
           <button class="ghost icon-btn" title="Server settings" onclick={() => openServerSettings()}>{@render icoWrench()}</button>
@@ -27099,25 +27819,30 @@
                   </div>
                 {/if}
                 <div class="file-trust-modes">
-                  <button type="button" class:active={fileTrustFor().mode === "on-demand"} onclick={() => setFileTrustMode("on-demand")}><b>On demand</b><small>Nothing passive</small></button>
-                  <button type="button" class:active={fileTrustFor().mode === "specific"} onclick={() => setFileTrustMode("specific")}><b>Specific people</b><small>Only selected origins</small></button>
-                  <button type="button" class:active={fileTrustFor().mode === "everyone"} onclick={() => setFileTrustMode("everyone")}><b>Everyone</b><small>All authenticated member media; external URLs stay click-only</small></button>
+                  <button type="button" class:active={fileTrustFor().mode === "on-demand"} onclick={() => setFileTrustMode("on-demand")}><b>On demand</b><small>Nothing loads until you click</small></button>
+                  <button type="button" class:active={fileTrustFor().mode === "media"} onclick={() => setFileTrustMode("media")}><b>Media only</b><small>Pictures, audio and video load; other files wait</small></button>
+                  <button type="button" class:active={fileTrustFor().mode === "everyone"} onclick={() => setFileTrustMode("everyone")}><b>Everyone</b><small>Every member's shared file; external URLs stay click-only</small></button>
                 </div>
-                {#if fileTrustFor().mode === "specific"}
-                  <div class="file-trust-members">
-                    {#each roster as member (member.identity)}
-                      <label>
-                        <input type="checkbox" checked={fileTrustFor().trustedAuthors.includes(member.identity)} onchange={() => toggleTrustedFileAuthor(member.identity)} />
-                        <span>
-                          {@render nameTag(member.fingerprint)}
-                          <small class="fp" title={`Full device identity: ${member.identity}`}>{member.identity}</small>
-                        </span>
-                      </label>
-                    {:else}
-                      <p class="muted small">No authenticated members are available to choose yet.</p>
-                    {/each}
-                  </div>
-                {/if}
+                <h3>People</h3>
+                <p class="muted small">An override for one person holds whatever the setting above says: <b>always</b> loads their attested files even on demand, <b>never</b> keeps them click-only even under everyone.</p>
+                <div class="file-trust-members">
+                  {#each roster as member (member.identity)}
+                    {@const override = authorOverride(fileTrustFor(), member.identity)}
+                    <label class="file-trust-person" class:always={override === "always"} class:never={override === "never"}>
+                      <span>
+                        {@render nameTag(member.fingerprint)}
+                        <small class="fp" title={`Full device identity: ${member.identity}`}>{member.identity}</small>
+                      </span>
+                      <select value={override} onchange={(e) => setFileAuthorOverride(member.identity, e.currentTarget.value as FileAuthorOverride)}>
+                        <option value="follow">Follow the setting</option>
+                        <option value="always">Always load</option>
+                        <option value="never">Never load</option>
+                      </select>
+                    </label>
+                  {:else}
+                    <p class="muted small">No authenticated members are available to choose yet.</p>
+                  {/each}
+                </div>
                 <p class="muted small"><b>At-rest protection:</b> fetched chunks are authenticated and encrypted as one vault copy. An explicit export creates a separate plaintext copy in Downloads. This policy does not sandbox a media decoder.</p>
               </section>
             {:else if serverSettingsPage === "livery"}
@@ -27145,120 +27870,12 @@
                     {/if}
                   </div>
                 </div>
-                <div class="preset-row">
-                  {#each PRESETS as p (p.id)}
-                    <button
-                      type="button"
-                      class="preset-btn"
-                      class:active={liveryDraft.preset === p.id}
-                      onclick={() => (liveryDraft = { ...liveryDraft, preset: p.id })}
-                    >
-                      <span class="preset-sw" style={`background:${p.sw}`}></span>{p.name}
-                    </button>
-                  {/each}
-                </div>
-                <div class="field" style="margin-top:8px">
-                  <span class="muted small">Accent (optional)</span>
-                  <div class="accent-row">
-                    {#each ACCENT_CHOICES as a (a)}
-                      <button
-                        type="button"
-                        class="accent-sw"
-                        class:active={liveryDraft.accent === a}
-                        style={`background:${a}`}
-                        aria-label={`Accent colour ${a}`}
-                        title={a}
-                        onclick={() => (liveryDraft = { ...liveryDraft, accent: liveryDraft.accent === a ? "" : a })}
-                      ></button>
-                    {/each}
-                    <input
-                      type="color"
-                      class="accent-custom"
-                      title="Custom accent colour"
-                      aria-label="Custom accent colour"
-                      value={liveryDraft.accent || "#977df2"}
-                      oninput={(e) => (liveryDraft = { ...liveryDraft, accent: e.currentTarget.value })}
-                    />
-                  </div>
-                </div>
-                <div class="field" style="margin-top:8px">
-                  <span class="muted small">Ground tint: wash the room in your own colours, background and sidebars separately.</span>
-                  <div class="grad-maker">
-                    <span class="muted small tint-lbl">Background</span>
-                    <input type="color" value={liveryTintBgC} aria-label="Background tint colour" oninput={(e) => { liveryTintBgC = e.currentTarget.value; if (draftTinted) applyTint(); }} />
-                    <input type="range" min="0" max="60" step="2" value={liveryTintBgS} aria-label="Background tint intensity" oninput={(e) => { liveryTintBgS = +e.currentTarget.value; if (draftTinted) applyTint(); }} />
-                    <span class="muted small">{liveryTintBgS}%</span>
-                  </div>
-                  <div class="grad-maker">
-                    <span class="muted small tint-lbl">Sidebars</span>
-                    <input type="color" value={liveryTintSideC} aria-label="Sidebar tint colour" oninput={(e) => { liveryTintSideC = e.currentTarget.value; if (draftTinted) applyTint(); }} />
-                    <input type="range" min="0" max="60" step="2" value={liveryTintSideS} aria-label="Sidebar tint intensity" oninput={(e) => { liveryTintSideS = +e.currentTarget.value; if (draftTinted) applyTint(); }} />
-                    <span class="muted small">{liveryTintSideS}%</span>
-                  </div>
-                  <div class="grad-maker">
-                    {#if draftTinted}
-                      <button type="button" class="ghost small" onclick={clearTint}>Clear tint</button>
-                    {:else}
-                      <button type="button" class="ghost small" onclick={applyTint}>Apply tint</button>
-                    {/if}
-                  </div>
-                  <span class="muted small">Intensity is how far the colour sinks in. A tint mixes into the default dark grounds and stands in for the preset's own, so the preview on the right is the truth: text tokens stay untouched, and green, gold and red keep their jobs.</span>
-                </div>
-                <div class="field" style="margin-top:8px">
-                  <span class="muted small">Corners</span>
-                  <div class="cat-row">
-                    {#each Object.keys(LIVERY_RADIUS) as rid (rid)}
-                      <button
-                        type="button"
-                        class="preset-btn cat-tile"
-                        class:active={(liveryDraft.tokens["radius"] ?? "soft") === rid}
-                        onclick={() => setDraftToken("radius", rid === "soft" ? "" : rid)}
-                      >{rid}</button>
-                    {/each}
-                  </div>
-                </div>
+                <!-- The same panel the Found tab uses, with every group open. -->
                 <div class="field">
-                  <span class="muted small">Interface font</span>
-                  <div class="cat-row">
-                    {#each Object.keys(LIVERY_FONTS) as fid (fid)}
-                      <button
-                        type="button"
-                        class="preset-btn cat-tile"
-                        class:active={(liveryDraft.tokens["font"] ?? "system") === fid}
-                        style={`font-family:${LIVERY_FONTS[fid]}`}
-                        onclick={() => setDraftToken("font", fid === "system" ? "" : fid)}
-                      >{fid}</button>
-                    {/each}
-                  </div>
+                  <span class="muted small">Palette: the base scheme. Everything below adjusts it.</span>
+                  {@render liveryPalette()}
                 </div>
-                <div class="field">
-                  <span class="muted small">Background pattern</span>
-                  <div class="cat-row">
-                    {#each LIVERY_PATTERNS as pid (pid)}
-                      <button
-                        type="button"
-                        class="preset-btn cat-tile pat-{pid}"
-                        class:active={(liveryDraft.tokens["pattern"] ?? "none") === pid}
-                        onclick={() => setDraftToken("pattern", pid === "none" ? "" : pid)}
-                      >{pid}</button>
-                    {/each}
-                  </div>
-                </div>
-                <div class="field">
-                  <span class="muted small">Custom cursor: a small image members' pointers become here (they can opt out of the whole livery)</span>
-                  <div class="avatar-row">
-                    {#if livery.cursor}
-                      <img class="cursor-preview" src={"data:image/png;base64," + livery.cursor} alt="" />
-                    {/if}
-                    <label class="upload-btn">
-                      {livery.cursor ? "Replace cursor" : "Upload cursor"}
-                      <input type="file" accept="image/png,image/gif,image/webp" onchange={(e) => loadServerCursor(e.currentTarget.files)} />
-                    </label>
-                    {#if livery.cursor}
-                      <button class="ghost small" disabled={busy} onclick={() => setServerCursor("")}>Remove cursor</button>
-                    {/if}
-                  </div>
-                </div>
+                <div class="lv-panel">{@render liveryExtended("settings")}</div>
                 <div class="invite-actions">
                   <button class="ghost small" disabled={busy} onclick={publishLivery}>Publish livery</button>
                   {#if liveryActive}
@@ -27564,38 +28181,8 @@
             {/if}
           </div>
           {#if serverSettingsPage === "livery"}
-            {@const draftPattern = liveryDraft.tokens["pattern"]}
-            <aside
-              class="stx-prev"
-              data-preset={liveryDraft.preset || null}
-              data-livery-pattern={draftPattern && draftPattern !== "none" ? draftPattern : null}
-              style={liveryDraftVars()}
-            >
-              <div class="stx-ph"><i></i>AS MEMBERS SEE IT</div>
-              <div class="stx-pcard">
-                <div class="stx-pcap">CHROME</div>
-                <div class="stx-mini">
-                  <div class="stx-mini-rail">
-                    {#if livery.icon}<img class="mini-ico" src={imgSrc(livery.icon)} alt="" />{:else}<i class="on"></i>{/if}
-                    <i></i><i></i>
-                  </div>
-                  <div class="stx-mini-side"><i class="on" style="width:90%"></i><i style="width:70%"></i><i style="width:80%"></i><i style="width:55%"></i></div>
-                  <div class="stx-mini-chat"><i class="nm"></i><i style="width:80%"></i><i style="width:60%"></i></div>
-                </div>
-              </div>
-              <div class="stx-pcard">
-                <div class="stx-pcap">MESSAGE</div>
-                {@render previewLog()}
-              </div>
-              <div class="stx-pcard">
-                <div class="stx-pcap">CONTROLS</div>
-                <div class="stx-pctl">
-                  <button class="primary small" type="button">Send</button>
-                  <button class="ghost small" type="button">Cancel</button>
-                  <span class="stx-pdot"></span>
-                </div>
-              </div>
-              <p class="muted small stx-pnote">Rendered with your draft before you publish. Anyone can opt out in their own Appearance.</p>
+            <aside class="stx-prev">
+              {@render liveryPreview("settings")}
             </aside>
           {/if}
           <button type="button" class="stx-esc" onclick={() => (showServerSettings = false)} title="Close (Esc)">

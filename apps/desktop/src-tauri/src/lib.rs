@@ -25,8 +25,8 @@ use catcoms_app::{
     Livery, PairingLedger, PairingSecrets, PerServerGrant, Profile, ReconnectPolicy,
     ReconnectRoute, Server, ServerActor, ServerNet, ServerRecord, ServerStore, StorageHealth,
     StorageSnapshot, CHUNK_BYTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES,
-    MAX_RECONNECT_ROUTES, MAX_RECONNECT_ROUTE_BYTES, MAX_SERVER_CURSOR_BYTES,
-    MAX_SERVER_ICON_BYTES,
+    MAX_RECONNECT_ROUTES, MAX_RECONNECT_ROUTE_BYTES, MAX_SERVER_BANNER_BYTES,
+    MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{
     parse_peer_dial_route, Candidate, DialEndpoint, DiscoveryPolicy, EndpointDialScheduler,
@@ -899,6 +899,29 @@ struct Connectivity {
     trace: String,
 }
 
+/// A join attempt's steps so far, as the `join-progress` event carries them.
+///
+/// `join_server` stays pending for as long as the dial, the reply window and the admission take,
+/// which can be well over a minute, and until now the only account of it arrived afterwards in
+/// `get_connectivity`. This is the same step list, sent as it grows, so the start surface can show
+/// which route is being tried and which ones have already failed while the person waits. It is a
+/// snapshot rather than a delta so a listener that missed one is never out of step.
+#[derive(Serialize, Clone)]
+struct JoinProgress {
+    steps: Vec<DiagStep>,
+}
+
+/// Send the attempt's steps so far to the webview. Best-effort: a webview that is not listening
+/// loses nothing, because the same steps land in `get_connectivity` when the attempt ends.
+fn emit_join_progress(app: &AppHandle, diag: &Connectivity) {
+    let _ = app.emit(
+        "join-progress",
+        JoinProgress {
+            steps: diag.steps.clone(),
+        },
+    );
+}
+
 #[derive(Serialize)]
 struct SwitchboardMember {
     fingerprint: String,
@@ -1188,6 +1211,9 @@ struct UiLivery {
     /// local label). Untrusted like everything else here: the backend bounds its length and
     /// refuses control characters, and the frontend renders it as text only.
     name: String,
+    /// The shared sidebar banner as base64 image bytes (empty = none). Untrusted exactly like
+    /// the icon: render it as an image only, never interpret it.
+    banner: String,
 }
 
 /// One member's custom badge as serialized to the frontend, keyed by fingerprint in
@@ -5799,6 +5825,7 @@ async fn join_server_inner(
             "standing member fallbacks were present but the joiner did not consent to contact them",
         ));
     }
+    emit_join_progress(app, diag);
 
     // A joiner gets its own per-server identity + stable port too: it is a full member afterwards,
     // so its peer record has to keep resolving across restarts exactly like the founder's.
@@ -5926,6 +5953,7 @@ async fn join_server_inner(
         let no_direct_route = addrs.is_empty();
         (mesh, inviter, Vec::new(), true, no_direct_route)
     };
+    emit_join_progress(app, diag);
 
     // Prepare the future member's own reachability *before* waiting on the one-way invite route.
     // On timeout this exact transport and stable identity stay alive for a 60-second two-way reply
@@ -5962,6 +5990,7 @@ async fn join_server_inner(
                     "none of the dialled addresses answered within 20s"
                 },
             ));
+            emit_join_progress(app, diag);
 
             // Direct-first is deliberate: member fallback reveals the joiner's IP/timing to an
             // additional group member and may spend their bandwidth. Only routes separately
@@ -6011,6 +6040,7 @@ async fn join_server_inner(
                         "none of the inviter-endorsed standing fallbacks answered within 15s",
                     )),
                 }
+                emit_join_progress(app, diag);
             }
 
             let mut candidates = external_addrs(&joiner_addrs);
@@ -6075,6 +6105,7 @@ async fn join_server_inner(
                     ready.candidate_count
                 ),
             ));
+                emit_join_progress(app, diag);
 
                 let remaining = reply.expires_at_ms.saturating_sub(SystemClock.now_ms());
                 join_contact = wait_for_reply_peer(
@@ -6105,6 +6136,7 @@ async fn join_server_inner(
             "connected to an existing member helper; it will forward only the admission handshake"
         };
         diag.steps.push(DiagStep::ok("connect", "", detail));
+        emit_join_progress(app, diag);
     }
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
@@ -6241,6 +6273,7 @@ async fn join_server_inner(
     }
     diag.steps
         .push(DiagStep::ok("join", "", "admitted to the group"));
+    emit_join_progress(app, diag);
     // A joiner has to subscribe the control topic like the founder does. Without this,
     // `control_subscribed` stays false, `desired_routing_topics()` omits the control topics, and
     // this member never receives another membership commit for as long as it runs: a third person
@@ -7109,13 +7142,40 @@ async fn set_livery(
             preset,
             accent,
             tokens,
-            // Ignored by `set_livery`, which reads all three back out of the document and
+            // Ignored by `set_livery`, which reads all four back out of the document and
             // writes them again unchanged. Publishing colours never touches them.
             icon: String::new(),
             cursor: String::new(),
             name: String::new(),
+            banner: String::new(),
         })
         .await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Set (or clear, with `""`) the shared sidebar banner (owner/admin only); re-seals the server.
+/// `banner` is base64-encoded image bytes, capped a little above the icon (it is a small
+/// landscape image, not artwork).
+#[tauri::command]
+async fn set_server_banner(
+    state: State<'_, AppState>,
+    server: u64,
+    banner: String,
+) -> Result<(), String> {
+    if !banner.is_empty() {
+        let bytes = B64
+            .decode(banner.as_bytes())
+            .map_err(|e| format!("bad server banner: {e}"))?;
+        if bytes.len() > MAX_SERVER_BANNER_BYTES {
+            return Err(format!(
+                "server banner too large: {} bytes (max {MAX_SERVER_BANNER_BYTES})",
+                bytes.len()
+            ));
+        }
+    }
+    let actor = actor_of(&state, server).await?;
+    actor.set_server_banner(banner).await?;
     persist_server(&state, server).await;
     Ok(())
 }
@@ -7182,6 +7242,7 @@ async fn get_livery(state: State<'_, AppState>, server: u64) -> Result<UiLivery,
         icon: l.icon,
         cursor: l.cursor,
         name: l.name,
+        banner: l.banner,
     })
 }
 
@@ -15646,6 +15707,7 @@ pub fn run() {
             set_livery,
             set_server_icon,
             set_server_cursor,
+            set_server_banner,
             get_livery,
             set_shared_server_name,
             get_file_size_limit,

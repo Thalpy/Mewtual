@@ -145,7 +145,7 @@ export const TAURI_COMMAND_GROUPS = {
       // The server's upload cap. Owner/admin natively, and bounded natively at both ends: the
       // page cannot set it above the protocol ceiling by sending a larger number.
       "set_file_size_limit",
-      "set_livery", "set_server_icon", "set_server_cursor", "set_member_badge",
+      "set_livery", "set_server_icon", "set_server_cursor", "set_server_banner", "set_member_badge",
       "delete_file", "set_file_expiry", "delete_event", "set_wiki_format", "delete_wiki_page",
       "rename_wiki_page", "set_wiki_review_days", "approve_wiki_edit", "reject_wiki_edit",
       "restore_wiki_page", "warn_message", "create_kick_case", "cast_kick_vote",

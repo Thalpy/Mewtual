@@ -57,8 +57,9 @@ test("file trust policies are vault continuity and fail closed when malformed", 
     },
   });
   assert.deepEqual(state.fileTrustPolicies, {
-    4: { mode: "specific", trustedAuthors: ["member-a", "member-b"] },
-    5: { mode: "on-demand", trustedAuthors: [] },
+    // The retired "specific" mode reads as on-demand with its people kept as always-overrides.
+    4: { mode: "on-demand", trustedAuthors: ["member-a", "member-b"], blockedAuthors: [] },
+    5: { mode: "on-demand", trustedAuthors: [], blockedAuthors: [] },
   });
 });
 
@@ -126,7 +127,7 @@ test("a valid legacy map is saved before its plaintext key is removed", () => {
   assert.deepEqual(plan.state.drafts, { room: "hello" });
   // The legacy key only ever held chat marks, so adopting it must not drop what sits beside them.
   assert.deepEqual(plan.state.statusCursors, { 3: { ts: 7, ids: [] } });
-  assert.deepEqual(plan.state.fileTrustPolicies, { 3: { mode: "everyone", trustedAuthors: [] } });
+  assert.deepEqual(plan.state.fileTrustPolicies, { 3: { mode: "everyone", trustedAuthors: [], blockedAuthors: [] } });
 });
 
 test("sealed state wins over stale legacy data and malformed legacy data is preserved", () => {
