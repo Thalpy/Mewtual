@@ -24,12 +24,23 @@ class FakeNode {
   disconnect() { this.disconnects += 1; this.connections = []; }
 }
 
+// The native start/stop state machine, enforced. A permissive fake accepted `stop()` before
+// `start()` and recorded a scheduled stop that a real browser would have refused with
+// InvalidStateError; `stopSource` swallows that throw, so every assertion about a voice's
+// audio-clock deadline passed while the deadline did not exist. A test double that is more
+// forgiving than the platform cannot establish scheduling behaviour.
 class FakeSource extends FakeNode {
   onended: (() => void) | null = null;
   starts: number[] = [];
   stops: number[] = [];
-  start(time = 0) { this.starts.push(time); }
-  stop(time = 0) { this.stops.push(time); }
+  start(time = 0) {
+    if (this.starts.length) throw new Error("cannot call start more than once");
+    this.starts.push(time);
+  }
+  stop(time = 0) {
+    if (!this.starts.length) throw new Error("cannot call stop without calling start first");
+    this.stops.push(time);
+  }
   end() { this.onended?.(); }
 }
 
@@ -156,6 +167,18 @@ test("a release of zero is still a ramp, so a gate envelope cannot click", async
   const gainsBefore = fake.nodes.filter((node) => node instanceof FakeGain).length;
   assert.equal(engine.noteOn({ channel: alice, sequence: 1, note: 60, wave: "sine", patchId: id }).ok, true);
   const voiceGains = fake.nodes.filter((node) => node instanceof FakeGain).slice(gainsBefore) as FakeGain[];
+
+  // The audio-clock watchdog that ends a voice whose note-off never arrived has to fade over the
+  // same floor. It used to schedule its sustain level and its zero endpoint at the same instant,
+  // so a lost note-off ended in a step even though releasing by hand did not.
+  const watchdogEnds = voiceGains.flatMap((g) => g.gain.events.filter(([kind, value, time]) =>
+    kind === "linear" && value === 0 && time > 2));
+  assert.ok(watchdogEnds.length > 0, "the watchdog schedules an end for the voice");
+  for (const [, , end] of watchdogEnds) {
+    const holds = voiceGains.flatMap((g) => g.gain.events.filter(([kind, , time]) =>
+      kind === "set" && time === end));
+    assert.equal(holds.length, 0, `the watchdog must not hold and end at the same instant (${end})`);
+  }
 
   fake.currentTime = 2;
   assert.equal(engine.noteOff({ channel: alice, sequence: 2, note: 60 }).ok, true);

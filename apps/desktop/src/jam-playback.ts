@@ -1,4 +1,7 @@
-import { JAM_KIT, JAM_RELEASE_CAP_MS, JAM_TAKE_CACHE_MAX, TAKE_MAX_BYTES, TAKE_PLAYBACK_EVENTS_PER_TICK, type JamTake, type JamTakeEvent } from "./jam-contract.ts";
+import { JAM_KIT, JAM_TAKE_CACHE_MAX, JAM_VOICE_DECLICK_SECONDS, TAKE_MAX_BYTES, TAKE_PLAYBACK_EVENTS_PER_TICK, type JamTake, type JamTakeEvent } from "./jam-contract.ts";
+// The renderer owns what a release actually costs; the transport must not keep a second opinion.
+// jam-engine does not import this module, so this direction adds no cycle.
+import { effectiveReleaseSeconds } from "./jam-engine.ts";
 import { legacyJamPatch } from "./jam-patch.ts";
 
 const TAKE_BASE64_MAX_CHARS = Math.ceil(TAKE_MAX_BYTES / 3) * 4;
@@ -220,8 +223,11 @@ export function takeReleaseTailMs(take: JamTake): number {
       tailMs = Math.max(tailMs, JAM_KIT[event.n]?.tailMs ?? 0);
     } else if (event.on === 1) {
       const patch = event.p === undefined ? legacyJamPatch(event.w) : take.patches[event.p];
-      if (patch) tailMs = Math.max(tailMs, Math.min(patch.e.r, JAM_RELEASE_CAP_MS));
+      if (patch) tailMs = Math.max(tailMs, effectiveReleaseSeconds(patch.e.r) * 1_000);
     }
   }
-  return tailMs;
+  // The renderer's own minimum, even for a take of nothing but zero-release notes: the transport
+  // must reserve the horizon the synth will actually use, or normal completion tears the graph
+  // down mid-fade and sounds exactly like an intentional hard cancel.
+  return take.events.length ? Math.max(tailMs, JAM_VOICE_DECLICK_SECONDS * 1_000) : tailMs;
 }

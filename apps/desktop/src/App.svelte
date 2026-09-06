@@ -57,6 +57,7 @@
     type SearchSpec,
   } from "./search-index";
   import { chatScopeKey, reconcileActiveChannel, scopeHoldsConversation } from "./chatscope";
+  import { resolveServerLabel, settleServerLabels } from "./serverlabel";
   import {
     WIKI_REVIEW_UNKNOWN,
     mayEditWikiStructure,
@@ -67,6 +68,12 @@
     unlockedScopeCurrent,
   } from "./viewscope";
   import { pastedImageUrl, safeRemoteUrl } from "./remote-media";
+  import {
+    EMBED_KEEPALIVE_MARGIN_PX, chatEmbedFor, chatEmbedLink, embedChipLabel, embedChipTitle,
+    embedKey, embedMayRender, type ChatEmbed,
+  } from "./chat-embeds";
+  import { spotifyEmbedHeight, spotifyEmbedUrl } from "./spotify";
+  import { youtubeEmbedUrl, youtubeRef } from "./youtube";
   import { scheduleNewsChime } from "./news-chime";
   import { acceptTickerReceipt, messageTickerId } from "./ticker";
   import {
@@ -99,11 +106,17 @@
     type StreamAudioMode, type StreamQuality, type StreamSettings,
   } from "./streaming";
   import {
-    deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, jukeClaimWins, mediaChoices,
+    deckAdvance, deckPosition, deckSurface, driftAction, entryAddress, entryKind, fetchPhase,
+    jukeClaimWins, mediaChoices,
     mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, queueChanged, queueDigest, resolveCallName,
-    stallChip, validJukeSeq, JAM_TAKE_EXT, JAM_TAKE_MIME, STALL_ANNOUNCE_MS,
+    stallChip, validJukeSeq, DRIFT_SEEK_S, JAM_TAKE_EXT, JAM_TAKE_MIME, JUKE_SOURCE_YOUTUBE,
+    STALL_ANNOUNCE_MS,
     type FetchPhase, type JukeEntry, type MediaFilter, type MediaKind,
   } from "./jukebox";
+  import {
+    readYouTubeMessage, youtubeBlocked, youtubePosition, youtubeReported, youtubeTransportPlan,
+    ytCommand, ytListen, YT_BUFFERING, YT_ENDED, YT_ORIGIN, YT_UNSTARTED,
+  } from "./youtube-deck";
   import {
     CLOCK_SKEW_GRACE_MS, NO_READ_MARK, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
     transitionApplied, transitionMismatch, unreadChannels, unreadDecision, unreadFromHeads,
@@ -226,6 +239,10 @@
     decodeJamPatchBase64, isJamPatchFile, jamPatchFileName, jamPatchId, legacyJamPatch,
     mayFetchJamPatch, parseJamPatchJson, validateJamPatch,
   } from "./jam-patch";
+  import {
+    EMPTY_STAGE_STASH, envOff, filterOff, sendsOff, setFilterMode, toggleStage, uniqueSavedName,
+    type JamEditorStep, type JamStage, type JamStageStash,
+  } from "./jam-editor";
   import type { JamSourceChannel } from "./jam-channel";
   import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_PATCH_EXT, JAM_PATCH_MIME, JAM_REMOTE_HOLD_MAX_MS, PATCH_CUTOFF_MAX_HZ, PATCH_OSC_WAVES, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
   import { JamClockProbeTracker, JamClockSync, JamMetronomeClock } from "./jam-clock";
@@ -856,7 +873,11 @@
   function serverLabel(entry: { id: number; name: string; isDm: boolean }): string {
     void railNameTick; // a rename is a localStorage write, which no rune would otherwise see
     if (entry.isDm) return entry.name; // a DM's label is the friend, and is never published
-    return loadLocalName(entry.id) || serverPublishedNames[entry.id] || entry.name;
+    return resolveServerLabel({
+      local: loadLocalName(entry.id),
+      published: serverPublishedNames[entry.id] ?? "",
+      created: entry.name,
+    });
   }
   /**
    * Settle each rail entry's own `name` on the label that should be showing.
@@ -867,15 +888,12 @@
    * an entry nobody has named either way keeps the label it was created with.
    */
   function applyServerLabels() {
-    let changed = false;
-    for (const s of servers) {
-      if (s.isDm) continue;
-      const label = serverLabel(s);
-      if (label && label !== s.name) {
-        s.name = label;
-        changed = true;
-      }
-    }
+    void railNameTick; // a rename is a localStorage write, which no rune would otherwise see
+    const changed = settleServerLabels(servers, (s) => ({
+      local: loadLocalName(s.id),
+      published: serverPublishedNames[s.id] ?? "",
+      created: s.name,
+    }));
     if (changed) servers = [...servers];
   }
   let liveryDraft = $state<Livery>(emptyLivery()); // Server-settings editor draft
@@ -1004,6 +1022,13 @@
       liveryCache.set(server, next);
       livery = next;
       liveryLoaded = true;
+      // The rail label rides this read too. Only `refreshServerIconFor` used to record the
+      // published name, so a group whose name never raised a `livery-changed` this session stayed
+      // under its placeholder however many times you opened it. Successful reads only: the catch
+      // below degrades to "no livery", which must not be read as "the group publishes no name".
+      if (next.name) serverPublishedNames[server] = next.name;
+      else delete serverPublishedNames[server];
+      applyServerLabels();
       seedLiveryDraft(server);
       // Deliberately not awaited. The cursor is decoration that arrives when it arrives, whereas
       // this function sits inside the switch barrier: validateCursor resolves an image with no
@@ -3196,10 +3221,6 @@
   let offlineRoster = $derived(filteredRoster.filter((m) => !deviceMap[m.fingerprint] && !memberOnline(m)));
   // Claimed paths connected here (self always counts), for the roster's diagnostic count.
   let onlineCount = $derived(roster.filter((m) => m.you || onlineMembers.has(m.fingerprint)).length);
-  // Compact mono abbreviation for a role badge in a narrow roster row (owner → OWN, admin → ADM).
-  function roleAbbr(role: string): string {
-    return role === "owner" ? "OWN" : role === "admin" ? "ADM" : role.slice(0, 3).toUpperCase();
-  }
   let profiles = $state<Record<string, Prof>>({});
   let files = $state<UiFile[]>([]);
   // The file index by content address. Embeds, posters, cards and chips all resolve a cid to its
@@ -3528,6 +3549,25 @@
   // The main pane shows one tab at a time.
   type Tab = "chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "studio" | "moderation" | "storage" | "connectivity";
   let view = $state<Tab>("chat");
+  // The member column can be folded away to give the conversation the width back. The toggle
+  // lives on the surface strip's right edge, over the column it controls, and the preference
+  // is remembered: someone who works without the roster should not have to re-hide it.
+  let membersOpen = $state(loadMembersOpen());
+  function loadMembersOpen(): boolean {
+    try {
+      return localStorage.getItem("catcoms.ui.members") !== "hidden";
+    } catch {
+      return true; // storage unavailable: the roster stays visible
+    }
+  }
+  function toggleMembers() {
+    membersOpen = !membersOpen;
+    try {
+      localStorage.setItem("catcoms.ui.members", membersOpen ? "shown" : "hidden");
+    } catch {
+      /* storage unavailable */
+    }
+  }
   type StorageHealth = {
     listed_files: number; referenced_chunks: number; verified_chunks: number;
     missing_chunks: number; unreadable_chunks: number; invalid_manifests: number;
@@ -5532,9 +5572,12 @@
       // Publish it as the group's own name, so everyone who joins sees what it is called instead
       // of naming it themselves. Best-effort: a founded server with an unpublished name is still
       // a working server, and the owner can publish it from Server settings.
+      // A silent failure here is invisible from the founder's side, because the founder's own
+      // rail is showing its local label either way: the group would simply have no name for
+      // everyone who joins it. Say so, and name where to put it right.
       void invoke("set_shared_server_name", { server: r.server, name: serverName })
         .then(() => refreshServerIconFor(r.server))
-        .catch(() => {});
+        .catch(() => toast("This group has no published name yet, so people who join will name it themselves. Publish one in Server settings, Overview.", "warn", 7000));
       newServerName = "";
     } catch (e) {
       if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = errorText(e);
@@ -5731,10 +5774,19 @@
    */
   function addServer(r: Found, name: string, profileName: string = "") {
     const channels = r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }];
-    servers = [
-      ...servers,
-      { id: r.server, name, channels, active: r.channel, unread: [], invite: "", isDm: r.is_dm },
-    ];
+    if (!r.is_dm) {
+      // A numeric native id can be reused after a leave + restart, so an override left behind by
+      // a server that used to hold this id would silently rename the one being added now. What
+      // the caller was told to call this group is authoritative for it.
+      try { localStorage.removeItem(localNameKey(r.server)); } catch { /* nothing to clear */ }
+    }
+    // Settle the label the same way every other entry settles it. `join_server` runs the livery
+    // catch-up before it returns, so the group's published name can already have landed in
+    // `serverPublishedNames` while this entry did not yet exist for `applyServerLabels` to reach:
+    // that is how a joined group kept its placeholder ("New server") until the next restart.
+    const entry = { id: r.server, name, channels, active: r.channel, unread: [], invite: "", isDm: r.is_dm };
+    entry.name = serverLabel(entry) || name;
+    servers = [...servers, entry];
     if (!r.is_dm) {
       // A numeric native id can be reused after a leave + restart. Onboarding is authoritative for
       // this newly joined group and must overwrite any orphaned policy rather than inherit it.
@@ -5743,6 +5795,9 @@
         [r.server]: { mode: onboardingFileTrust, trustedAuthors: [] },
       };
       void saveUiStateImmediately();
+      // And read the livery once regardless: a published name that raised no `livery-changed`
+      // this session (it arrived during the join's own catch-up) is otherwise never fetched.
+      void refreshServerIconFor(r.server);
     }
     showAdd = false;
     onboardingFileTrust = "on-demand";
@@ -9281,6 +9336,12 @@
         image.replaceWith(remoteImageLoadChip(url, image.alt || "Remote image"));
       }
     }
+    // A player card is a live third-party frame, not a decoded still: it keeps talking to Spotify
+    // or Google for as long as it is mounted. Tightening trust therefore has to unmount it rather
+    // than just stop starting new ones, and the clicks that loaded them do not survive that. The
+    // chips come back and the member can decide again under the policy they have just chosen.
+    embedGrants.clear();
+    reconcileAllEmbeds();
     for (const image of Array.from(document.querySelectorAll<HTMLImageElement>("img.ref-card-thumb[data-thumb-cid]"))) {
       const cid = image.dataset.thumbCid ?? "";
       const file = filesByCid.get(cid);
@@ -9466,6 +9527,131 @@
     return button;
   }
 
+  // --- third-party player cards in chat --------------------------------------------------------
+  //
+  // A Spotify or YouTube link that stands alone on its line can be opened out into that service's
+  // own embedded player. The frame is built here in code from a parsed id (see chat-embeds.ts),
+  // never from anything a member wrote, so the sanitizer boundary is unchanged: chat markup still
+  // cannot create a frame, and the only addresses these can ever reach are the two services'.
+  //
+  // Two gates, and the second is the one that is easy to get wrong. A card needs a click before it
+  // may load at all, in every trust mode, for the same reason a remote image does: the frame tells
+  // the service this device's address and what it is looking at, and it runs a third party's
+  // script in the window. Unlike an image it then KEEPS running, so the click cannot be the end of
+  // it: a card is mounted only while it is on screen in a visible window, and goes back to being
+  // an inert chip the moment it is not. Scrolling away, switching to another tab or channel (the
+  // pane stops intersecting), and minimising the window all unmount it.
+  //
+  // The consequence worth knowing: a card that scrolls off screen stops playing. It comes back on
+  // its own when scrolled to again, because the member already consented to this entity in this
+  // session, but it restarts rather than resuming; a cross-origin frame will not tell us where it
+  // had got to.
+
+  /** Entities whose chip has been clicked in this session. Never persisted, never a trust mode. */
+  const embedGrants = new Set<string>();
+  let embedWatcher: IntersectionObserver | null = null;
+
+  function embedFrame(embed: ChatEmbed): HTMLIFrameElement {
+    const frame = document.createElement("iframe");
+    const spotify = embed.provider === "spotify";
+    frame.src = spotify ? spotifyEmbedUrl(embed.ref) : youtubeEmbedUrl(embed.ref);
+    frame.className = `chat-embed ${embed.provider}-embed`;
+    frame.height = String(spotify ? spotifyEmbedHeight(embed.ref.kind) : 0);
+    frame.loading = "lazy";
+    // `origin`, not `no-referrer`. Both providers refuse to play for an embed that sends no
+    // referrer at all: YouTube answers with its "Video player configuration error, Error 153"
+    // card, which looks like a broken app and is really the player declining to be embedded by
+    // nobody. `origin` sends this app's origin and never a path, so what they learn is that a
+    // Mewtual window embedded them, not which channel or conversation it was in.
+    frame.referrerPolicy = "origin";
+    frame.allow = "encrypted-media; clipboard-write; picture-in-picture; fullscreen";
+    // allow-scripts and allow-same-origin are what these players need to run at all, and cost
+    // nothing here because the frame is a foreign origin either way. What is deliberately NOT
+    // granted is allow-top-navigation: a card cannot steer the window it sits in.
+    frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-popups allow-forms allow-presentation");
+    frame.title = spotify ? `Spotify ${embed.ref.kind}` : "YouTube video";
+    armEmbed(frame, embed);
+    return frame;
+  }
+
+  function embedChip(embed: ChatEmbed): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.className = `embed-chip media-load-chip chat-embed-chip ${embed.provider}-chip`;
+    button.textContent = embedChipLabel(embed);
+    button.title = embedChipTitle(embed);
+    button.onclick = () => {
+      embedGrants.add(embedKey(embed));
+      reconcileEmbed(button);
+    };
+    armEmbed(button, embed);
+    return button;
+  }
+
+  /**
+   * Put the entity on the element and start watching it.
+   *
+   * Both halves of a card carry the same canonical link, so whichever one is currently in the DOM
+   * can rebuild the other. It is re-parsed on the way back in rather than trusted (see
+   * `chatEmbedLink`), and `data-embed-onscreen` rides along so a swap does not lose what the
+   * observer had already established about where this card sits.
+   */
+  function armEmbed(el: HTMLElement, embed: ChatEmbed): void {
+    el.dataset.embedLink = chatEmbedLink(embed);
+    embedObserver().observe(el);
+  }
+
+  function embedObserver(): IntersectionObserver {
+    if (embedWatcher) return embedWatcher;
+    embedWatcher = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const el = entry.target as HTMLElement;
+          el.dataset.embedOnscreen = entry.isIntersecting ? "1" : "";
+          reconcileEmbed(el);
+        }
+      },
+      { rootMargin: `${EMBED_KEEPALIVE_MARGIN_PX}px` },
+    );
+    return embedWatcher;
+  }
+
+  /**
+   * Make the DOM agree with the rule: a frame when the card may render, a chip when it may not.
+   *
+   * Everything that can change the answer routes through here (the click, the observer, the
+   * window losing visibility, a trust change), so there is one place where a live frame can be
+   * created or destroyed and no path that can leave one running by forgetting a condition.
+   */
+  function reconcileEmbed(el: HTMLElement) {
+    const embed = chatEmbedFor(el.dataset.embedLink ?? "");
+    if (!embed) {
+      embedObserver().unobserve(el);
+      return;
+    }
+    const live = el.tagName === "IFRAME";
+    const want = embedMayRender({
+      granted: embedGrants.has(embedKey(embed)),
+      onScreen: el.dataset.embedOnscreen === "1",
+      windowVisible: typeof document === "undefined" || !document.hidden,
+    });
+    if (want === live) return;
+    const next = want ? embedFrame(embed) : embedChip(embed);
+    next.dataset.embedOnscreen = el.dataset.embedOnscreen ?? "";
+    embedObserver().unobserve(el);
+    // Dropping the address before the element leaves the document stops the load that is in
+    // flight, rather than leaving it to finish into a node nobody is holding any more.
+    if (live) el.removeAttribute("src");
+    el.replaceWith(next);
+  }
+
+  /** Re-decide every card at once: the window was hidden or shown, or trust was tightened. */
+  function reconcileAllEmbeds() {
+    if (typeof document === "undefined") return;
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>("[data-embed-link]"))) {
+      reconcileEmbed(el);
+    }
+  }
+
   // Resolve explicit remote-image markdown and bare direct image/Giphy links. The renderer emits
   // only inert placeholders; raw member HTML still cannot inject an image element.
   function resolveRemoteMedia(container: HTMLElement | undefined) {
@@ -9485,6 +9671,15 @@
     }
     for (const a of Array.from(container.querySelectorAll<HTMLAnchorElement>("a[href]:not([data-remote-checked])"))) {
       a.dataset.remoteChecked = "1";
+      // A Spotify or YouTube link on a line of its own opens out into a player; one written into
+      // a sentence is part of the prose and stays a link, exactly as an in-app reference chip
+      // does. A card is several hundred pixels tall, so unfurling it mid-paragraph would wreck
+      // the paragraph. It arrives as an inert chip either way: nothing is fetched until a click.
+      const embed = chatEmbedFor(a.href);
+      if (embed && standsAlone(a)) {
+        a.replaceWith(embedChip(embed));
+        continue;
+      }
       const url = pastedImageUrl(a.href);
       if (!url) continue;
       const allowed = mayAutoLoadRemoteUrl(fileTrustFor());
@@ -11698,7 +11893,11 @@
     if (!myPatch) return;
     const checked = validateJamPatch(JSON.parse(JSON.stringify(myPatch)));
     if (!checked.ok) return;
-    const name = (jamSaveName.trim() || `PATCH ${jamSaved.length + 1}`).slice(0, 12).toUpperCase();
+    // A typed name that already exists is an intentional overwrite; a generated one must never be.
+    // `PATCH ${length + 1}` was not a name, it was a collision waiting for a full library: at the
+    // twelve-entry cap every unnamed save was called PATCH 13 and replaced the last one.
+    const typed = jamSaveName.trim().slice(0, 12).toUpperCase();
+    const name = typed || jamUniqueSavedName("PATCH");
     jamKeepSaved(name, checked.patch);
     jamSaveName = "";
     myPatchName = name;
@@ -11714,6 +11913,7 @@
     jamSaved = [...jamSaved.filter((s) => s.name !== name), { name, patch }].slice(-12);
     try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
   }
+  const jamUniqueSavedName = (base: string) => uniqueSavedName(jamSaved.map((s) => s.name), base);
   // --- Patches in the share: how a room trades sounds ------------------------------------------
   //
   // A patch announce already tells the room what YOUR notes should sound like, but it is a
@@ -11766,19 +11966,39 @@
       toast(`${file.name} is too large to be a patch`, "err", 6000);
       return;
     }
+    // Three things this answer belongs to, captured before the await. The server alone was not
+    // one of them: leaving a room and joining another on the SAME server passed that check, and so
+    // did any newer selection or knob turn in the room you never left. A download that lands after
+    // either becomes the current sound and is persisted and published as the user's own, which is
+    // a stale request quietly winning an argument with a live one.
+    const callLease = activeCallLease;
+    const channel = callChannel;
+    const edit = jamPublicationGeneration.current();
     jamPatchBusy = file.cid;
     try {
       const { value: base64 } = await invokeDebugged<string>("download_file", { server, cid: file.cid });
-      // The room may have moved on (or ended) during the fetch; a patch adopted into the next
-      // call would be a sound nobody there asked for.
-      if (callServer !== server) return;
+      if (
+        !inCall || callServer !== server || callChannel !== channel ||
+        activeCallLease !== callLease || !callLifecycleSession.isCurrent(callLease)
+      ) return;
+      if (!jamPublicationGeneration.isCurrent(edit)) {
+        // Something newer is already the sound. Keeping the recipe without adopting it is the
+        // honest outcome: the download was asked for, and nothing on screen is overwritten.
+        const text = decodeJamPatchBase64(base64);
+        const late = text === null ? null : parseJamPatchJson(text);
+        if (late?.ok) {
+          jamKeepSaved(jamUniqueSavedName(jamPatchFileName(file.name)), late.patch);
+          toast(`${file.name} was saved but not selected: you changed your sound while it loaded`, "info", 7000);
+        }
+        return;
+      }
       const text = decodeJamPatchBase64(base64);
       const checked = text === null ? null : parseJamPatchJson(text);
       if (!checked || !checked.ok) {
         toast(`${file.name} is not a patch this build can play`, "err", 7000);
         return;
       }
-      const name = jamPatchFileName(file.name);
+      const name = jamUniqueSavedName(jamPatchFileName(file.name));
       jamKeepSaved(name, checked.patch);
       selectJamPreset(name, checked.patch); // adopt it now: loading a sound means playing it
       jamCustomOpen = true;
@@ -12309,6 +12529,7 @@
     myTimbre = w;
     myPatch = null;
     myPatchName = "";
+    jamResetStageStash(); // the stashes belonged to the recipe being dropped
     jamPublicationGeneration.advance();
     jamEditOpen = false;
     try { localStorage.setItem("catcoms.call.timbre", w); } catch { /* ignore */ }
@@ -12319,6 +12540,13 @@
   function selectJamPreset(name: string, patch: JamPatch) {
     myPatch = JSON.parse(JSON.stringify(patch)) as JamPatch;
     myPatchName = name;
+    // Adopting a whole recipe replaces every stage, so nothing that was stashed still belongs to
+    // anything on screen. Left standing, switching a stage off in one patch and then enabling that
+    // stage in a DIFFERENT patch restored the first patch's settings into the second, and the
+    // result was persisted and published as the user's own sound. The reset belongs here, at the
+    // selection boundary, and never in `jamPatchDirty`: clearing it on every edit would defeat the
+    // restore this exists for.
+    jamResetStageStash();
     jamPatchDirty();
   }
   function jamPatchDirty() {
@@ -12393,67 +12621,29 @@
   }
   // --- Stage bypass: an OFF for each shaping stage ----------------------------------------------
   //
-  // "Off" is a VALUE here, never a flag. `jam-patch:v1` admits exactly six keys and rejects any
-  // patch carrying more, so an `enabled` bit would be a different format that every other build
-  // refuses outright. Each stage already has a setting that does nothing: a gate envelope, a
-  // filter wide open at the top of its range, silent sends. OFF writes that setting, and the lamp
-  // is DERIVED from the values rather than stored beside them, which buys two things for free: a
-  // patch loaded from the share lights the right lamps with no extra state to keep in step, and
-  // nudging any knob turns its stage back on, because the values simply stop being neutral.
-  const JAM_ENV_OFF = { a: 0, d: 0, s: 100, r: 0 } as const; // a gate: full while held, gone after
-  const JAM_FILTER_OFF = { m: 0, c: PATCH_CUTOFF_MAX_HZ, q: 0, e: 0 } as const; // lowpass above hearing
-  const JAM_SENDS_OFF = { c: 0, d: 0, r: 0 } as const; // nothing reaches the room's effects
-  // What a stage comes back as when it is switched on with nothing of its own to restore, which
-  // happens for a patch that arrived already bypassed.
-  const JAM_ENV_ON = { a: 12, d: 380, s: 45, r: 120 } as const;
-  const JAM_FILTER_ON = { m: 0, c: 2_400, q: 20, e: 0 } as const;
-  const JAM_SENDS_ON = { c: 0, d: 20, r: 30 } as const;
-  // What each stage held when it was switched off, so switching it back on returns the sound
-  // rather than a default. Editor state, not patch state: it is never announced or saved.
-  let jamStageStash = $state<{
-    e: JamPatch["e"] | null;
-    f: JamPatch["f"] | null;
-    x: JamPatch["x"] | null;
-  }>({ e: null, f: null, x: null });
-  const jamEnvOff = $derived(
-    !!myPatch && myPatch.e.a === 0 && myPatch.e.d === 0 && myPatch.e.s === 100 && myPatch.e.r === 0,
-  );
-  const jamFilterOff = $derived(
-    !!myPatch && myPatch.f.m === 0 && myPatch.f.c >= PATCH_CUTOFF_MAX_HZ && myPatch.f.q === 0 && myPatch.f.e === 0,
-  );
-  const jamSendsOff = $derived(!!myPatch && myPatch.x.c === 0 && myPatch.x.d === 0 && myPatch.x.r === 0);
-  function jamToggleStage(stage: "e" | "f" | "x") {
-    if (!myPatch) return;
-    const next = JSON.parse(JSON.stringify(myPatch)) as JamPatch;
-    const stash = jamStageStash;
-    if (stage === "e") {
-      if (jamEnvOff) {
-        next.e = { ...(stash.e ?? JAM_ENV_ON) };
-        jamStageStash = { ...stash, e: null };
-      } else {
-        jamStageStash = { ...stash, e: { ...myPatch.e } };
-        next.e = { ...JAM_ENV_OFF };
-      }
-    } else if (stage === "f") {
-      if (jamFilterOff) {
-        next.f = { ...(stash.f ?? JAM_FILTER_ON) };
-        jamStageStash = { ...stash, f: null };
-      } else {
-        jamStageStash = { ...stash, f: { ...myPatch.f } };
-        next.f = { ...JAM_FILTER_OFF };
-      }
-    } else {
-      if (jamSendsOff) {
-        next.x = { ...(stash.x ?? JAM_SENDS_ON) };
-        jamStageStash = { ...stash, x: null };
-      } else {
-        jamStageStash = { ...stash, x: { ...myPatch.x } };
-        next.x = { ...JAM_SENDS_OFF };
-      }
-    }
-    myPatch = next;
+  // Every transition lives in jam-editor.ts as a pure function, so what a button does can be
+  // asserted without mounting anything. This is the binding layer: it holds the reactive state,
+  // marks the patch dirty and lets the announce pacing do the rest.
+  let jamStageStash = $state<JamStageStash>(EMPTY_STAGE_STASH);
+  const jamEnvOff = $derived(!!myPatch && envOff(myPatch));
+  const jamFilterOff = $derived(!!myPatch && filterOff(myPatch));
+  const jamSendsOff = $derived(!!myPatch && sendsOff(myPatch));
+  function jamResetStageStash() {
+    jamStageStash = EMPTY_STAGE_STASH;
+  }
+  function jamApplyEditorStep(step: JamEditorStep) {
+    jamStageStash = step.stash;
+    myPatch = step.patch;
     myPatchName = "CUSTOM";
     jamPatchDirty();
+  }
+  function jamSetFilterMode(mode: number) {
+    if (!myPatch) return;
+    jamApplyEditorStep(setFilterMode(myPatch, jamStageStash, mode));
+  }
+  function jamToggleStage(stage: JamStage) {
+    if (!myPatch) return;
+    jamApplyEditorStep(toggleStage(myPatch, jamStageStash, stage));
   }
   function setJamMode(mode: "keys" | "pads") {
     if (mode === jamMode) return;
@@ -12532,6 +12722,9 @@
     // or lifting it would come back at whatever the level was, at the wrong moment or not at all.
     applyAllPeerGains();
     if (jukeAudio) jukeAudio.muted = callDeafened; // the deck is part of "everyone", not an exception
+    // The video deck is part of it too, and its level lives inside its own document, so silence
+    // has to be sent rather than set.
+    if (jukeYt) jukeYtPost(ytCommand(callDeafened ? "mute" : "unMute"));
     // Deafen is one hard room gate: it cancels lookahead clicks and releases every engine voice,
     // including local previews, so no retained tail can emerge when the master reopens.
     if (callDeafened && synthCtx) {
@@ -14035,7 +14228,12 @@
   // the exception, and has to be: its own element is the position it announces, or a stall becomes
   // a place it says the room is and has never played.
   let jukeQueue = $state<JukeEntry[]>([]);
-  let jukeNow = $state<{ entry: string; cid: string; name: string; paused: boolean; dj: string } | null>(null); // dj: "" is me
+  // `link` is the linked-track half of the transport: a video id when the room is playing one,
+  // and "" for an ordinary shared file. It rides the frame rather than being looked up from the
+  // queue on arrival, because a listener can hear the transport before the channel document has
+  // caught up, and "the room is playing something I cannot identify yet" is exactly the state
+  // that used to leave a joiner silent until the next press.
+  let jukeNow = $state<{ entry: string; cid: string; link: string; name: string; paused: boolean; dj: string } | null>(null); // dj: "" is me
   let jukeStale = $state(false); // the DJ went quiet: the deck is frozen until someone presses
   let jukeDur = $state(0); // 0 until loadedmetadata knows
   let jukeVol = $state(loadJukeVol());
@@ -14075,7 +14273,17 @@
   // Audio or video, from the current track's name (a queue entry carries no mime) and the share's
   // declared type when the share is the one in view.
   let jukeKind = $derived<MediaKind>(
-    jukeNow ? mediaKind(jukeNow.name, callFiles.find((f) => f.cid === jukeNow?.cid)?.mime ?? "") : "other",
+    jukeNow
+      ? entryKind(
+          {
+            name: jukeNow.name,
+            cid: jukeNow.cid,
+            source: jukeNow.link ? JUKE_SOURCE_YOUTUBE : "",
+            link: jukeNow.link,
+          },
+          callFiles.find((f) => f.cid === jukeNow?.cid)?.mime ?? "",
+        )
+      : "other",
   );
   const JUKE_DJ_GONE_MS = 15000; // silence longer than three pings means the DJ walked away
 
@@ -14092,6 +14300,9 @@
     if (jamPlay?.deckCid) {
       for (const chan of jamPlay.chans) if (chan) jamEngine?.setSourceLevel(chan.source, jukeVol);
     }
+    // A linked video keeps its own volume inside its own document, so the slider has to be sent
+    // rather than set. Its scale is 0..100, not 0..1.
+    if (jukeYt) jukeYtPost(ytCommand("setVolume", [Math.round(jukeVol * 100)]));
     try { localStorage.setItem("catcoms.call.jukevol", String(jukeVol)); } catch { /* ignore */ }
   }
   // The one deck element, made on first play and appended like the per-peer call audio.
@@ -14161,16 +14372,21 @@
   function jukePos(): number {
     if (!jukeAdopted || !jukeNow) return 0;
     // A take has no element clock: ageing the adopted offset on the local clock is the position
-    // for EVERYONE, the DJ included (the scheduler runs on the same clock, so they agree).
+    // for EVERYONE, the DJ included (the scheduler runs on the same clock, so they agree). A
+    // linked video is the same shape of problem for a different reason: its clock lives in
+    // another document and arrives late, so the projection is the base answer and the player's
+    // own reading refines it when there is a fresh one.
     const takeOnDeck = jukeKind === "take";
-    return deckPosition({
-      isDj: takeOnDeck ? false : jukeIsDj(),
+    const videoOnDeck = jukeKind === "youtube";
+    const projected = deckPosition({
+      isDj: takeOnDeck || videoOnDeck ? false : jukeIsDj(),
       paused: jukeNow.paused,
       stale: jukeStale,
       off: jukeAdopted.off,
       since: performance.now() - jukeAdopted.at,
-      element: takeOnDeck ? null : jukeElOn(jukeNow.cid),
+      element: takeOnDeck || videoOnDeck ? null : jukeElOn(jukeNow.cid),
     });
+    return videoOnDeck ? youtubePosition(projected, jukeYtReport, performance.now()) : projected;
   }
   // Where a load should land. The DJ starts exactly where it pressed; a listener has to age that
   // offset by however long its own load took, or it starts behind the room.
@@ -14261,6 +14477,49 @@
       error = errorText(e);
     }
   }
+  // Queueing a video by link. Deliberately separate from `jukeAddTrack`: that one queues content
+  // the group holds and can serve, this one queues a claim that a video exists somewhere else.
+  // Nothing is contacted here, so the queue cannot say whether the link is any good; it is found
+  // out at play time, on each listener, after that listener has agreed to ask Google.
+  let jukeLinkDraft = $state("");
+  let jukeLinkError = $state("");
+  let jukeLinkBusy = $state(false);
+
+  async function jukeAddLink() {
+    const server = callServer;
+    const channel = callChannel;
+    if (server === null || !channel || jukeLinkBusy) return;
+    const video = youtubeRef(jukeLinkDraft);
+    if (!video) {
+      jukeLinkError = "that is not a YouTube link";
+      return;
+    }
+    jukeLinkBusy = true;
+    jukeLinkError = "";
+    try {
+      // The name is the queue's only human-readable handle on a linked track. Nothing here can
+      // fetch the real title without contacting Google on the whole room's behalf, so the member
+      // queueing it gets to write one, and the id is the honest fallback.
+      const name = jukeLinkName.trim() || `YouTube: ${video.id}`;
+      await invokeDebugged<string>("jukebox_add_link", {
+        server,
+        channel,
+        source: JUKE_SOURCE_YOUTUBE,
+        link: video.id,
+        name: name.slice(0, 200),
+      });
+      jukeFailed.delete(`${JUKE_SOURCE_YOUTUBE}:${video.id}`); // a re-add is also a retry
+      jukeLinkDraft = "";
+      jukeLinkName = "";
+      await refreshJukebox();
+    } catch (e) {
+      jukeLinkError = errorText(e);
+    } finally {
+      jukeLinkBusy = false;
+    }
+  }
+  let jukeLinkName = $state("");
+
   async function jukeRemoveTrack(id: string) {
     const server = callServer;
     const channel = callChannel;
@@ -14274,11 +14533,11 @@
   }
   // Claim the deck: my press outranks everything I have heard, and I apply it to myself on the same
   // path a receiver does, so the DJ is never a special case in the player.
-  function jukeSend(entry: string, cid: string, name: string, off: number, paused: boolean) {
+  function jukeSend(entry: string, cid: string, link: string, name: string, off: number, paused: boolean) {
     if (!inCall || !callChannel) return;
     jukeSeq = nextJukeSeq(jukeSeq, jukeAdopted?.seq ?? null);
-    jukeAdopt(jukeSeq, callSelfFp, entry, cid, name, off, paused);
-    broadcast({ callId: callChannel, type: "juke", seq: jukeSeq, entry, cid, name, off, paused });
+    jukeAdopt(jukeSeq, callSelfFp, entry, cid, link, name, off, paused);
+    broadcast({ callId: callChannel, type: "juke", seq: jukeSeq, entry, cid, link, name, off, paused });
   }
   /**
    * Tell one peer what is playing, right now.
@@ -14298,13 +14557,14 @@
       seq: jukeAdopted.seq,
       entry: jukeNow.entry,
       cid: jukeNow.cid,
+      link: jukeNow.link,
       name: jukeNow.name,
       off: jukePos(),
       paused: jukeNow.paused,
     });
   }
-  function jukeAdopt(seq: number, fromFp: string, entry: string, cid: string, name: string, off: number, paused: boolean) {
-    const same = jukeNow?.entry === entry && jukeNow?.cid === cid;
+  function jukeAdopt(seq: number, fromFp: string, entry: string, cid: string, link: string, name: string, off: number, paused: boolean) {
+    const same = jukeNow?.entry === entry && jukeNow?.cid === cid && jukeNow?.link === link;
     const sameDeckLease = same && jukeAdopted?.seq === seq && jukeAdopted.fromFp === fromFp;
     // A pause/resume, replacement DJ or different track owns a new continuation epoch. The load
     // coordinator cancels the old native chunk operation before releasing its active slot.
@@ -14317,12 +14577,18 @@
       jukeLocalFail = "";
       jukeTrustBlocked = "";
     }
-    jukeNow = entry || cid ? { entry, cid, name, paused, dj: fromFp === callSelfFp ? "" : fromFp } : null;
+    jukeNow = entry || cid || link
+      ? { entry, cid, link, name, paused, dj: fromFp === callSelfFp ? "" : fromFp }
+      : null;
     if (!jukeNow) {
       jukeDur = 0;
       jukeStop(); // entry "" is the DJ saying the queue ran out
       return;
     }
+    // Moving off a linked video takes its player down with it. A frame left mounted would go on
+    // talking to Google about a track the room has already left, which is the one thing the click
+    // that started it was not consent for.
+    if (!link && jukeYt) jukeYtPark();
     void jukeApply(same);
   }
   // Put the element where the adopted transport says it should be, fetching the blob first the one
@@ -14330,7 +14596,14 @@
   // newer press, so the track is rechecked after it.
   async function jukeApply(sameTrack: boolean) {
     const now = jukeNow;
-    if (!now || !now.cid) return;
+    if (!now) return;
+    // A linked video is not a file: there is nothing to look up in the share, nothing to fetch
+    // and no MIME to check, so it branches before all of that.
+    if (now.link) {
+      jukeApplyVideo(now);
+      return;
+    }
+    if (!now.cid) return;
     const cid = now.cid;
     const server = callServer;
     if (server === null) return;
@@ -14584,7 +14857,10 @@
   }
   function approveCurrentJukeboxTrack() {
     if (!jukeNow || callServer === null) return;
-    jukeExplicitApprovals.add(scopedMediaKey(callServer, jukeNow.cid));
+    // Keyed by the deck's address rather than by the content address, so the one approval path
+    // covers a linked video too. It is the only way a linked video ever plays: nothing about one
+    // is attested, so no trust mode can imply this click.
+    jukeExplicitApprovals.add(scopedMediaKey(callServer, jukeDeckAddress(jukeNow)));
     jukeTrustBlocked = "";
     void jukeApply(false);
   }
@@ -14614,6 +14890,13 @@
   /** The user's click, which is the one thing an autoplay policy is waiting for. */
   function jukeUnblock() {
     jukeWakeSynth(); // a blocked take deck is a suspended synth, not a refusing element
+    // A blocked video deck is a frame the webview would not let start. The click IS the gesture
+    // it was waiting for, so the command can go straight out; the player answers with its state
+    // and the chip clears itself.
+    if (jukeYt && jukeNow?.link) {
+      jukeYtPost(ytCommand("playVideo"));
+      return;
+    }
     const el = jukeAudio;
     if (!el) return;
     void jukeStart(el);
@@ -14673,8 +14956,160 @@
    * there is one element rather than one per surface: folding the dock or opening focus must never
    * restart the room's film. On teardown it goes back to the body, still playing, still audible.
    */
+  // --- the linked-video deck --------------------------------------------------------------------
+  //
+  // A third backend for the same transport, alongside the media element and the take synth. The
+  // room's shape does not change: nothing is sent between peers, the DJ says what is playing and
+  // where it is, and every listener runs its own player against that. What changes is that this
+  // player is a document belonging to Google, so it can only be spoken to (postMessage) and
+  // believed at arm's length. See `youtube-deck.ts` for why it is driven directly rather than
+  // through their API script, and for what is and is not trusted in a reply.
+  //
+  // The consent story is the important half. A linked track has no group attestation of any kind:
+  // nobody here holds it, nothing signed it, and playing it means THIS device asking Google for a
+  // video because somebody else in the room said so. So it is never automatic in any trust mode,
+  // exactly like a remote image, and the deck stops on it until this member says yes.
+
+  let jukeYt: HTMLIFrameElement | null = null;
+  let jukeYtLink = ""; // the video the frame currently holds, so a re-press does not rebuild it
+  let jukeYtState = $state(YT_UNSTARTED);
+  let jukeYtReport: { at: number; currentTime: number } | null = null;
+  let jukeYtHandshake: ReturnType<typeof setInterval> | undefined;
+
+  /** How the deck addresses whatever is on it: a content address, or a linked video. */
+  function jukeDeckAddress(now: { cid: string; link: string }): string {
+    return entryAddress({ cid: now.cid, source: now.link ? JUKE_SOURCE_YOUTUBE : "", link: now.link });
+  }
+
+  /** A linked video is click-only, always: there is no attestation a policy could act on. */
+  function mayPlayLinkedVideo(now: { cid: string; link: string }): boolean {
+    return (
+      callServer !== null &&
+      jukeExplicitApprovals.has(scopedMediaKey(callServer, jukeDeckAddress(now)))
+    );
+  }
+
+  function jukeYtPost(command: string) {
+    jukeYt?.contentWindow?.postMessage(command, YT_ORIGIN);
+  }
+
+  function jukeYtEl(link: string, start: number): HTMLIFrameElement {
+    if (jukeYt && jukeYtLink === link) return jukeYt;
+    jukeYtPark();
+    const frame = document.createElement("iframe");
+    frame.id = "jukebox-video";
+    frame.className = "juke-yt";
+    frame.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+    // As for a chat card: what is withheld is allow-top-navigation, so the player cannot steer
+    // the window it is embedded in.
+    frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-popups allow-presentation");
+    // See the chat card: `no-referrer` is what YouTube answers with Error 153, because a player
+    // embedded by nobody declines to configure itself. `origin` gives it the window's origin and
+    // never a path.
+    frame.referrerPolicy = "origin";
+    frame.src = youtubeEmbedUrl(
+      { id: link, start },
+      { controlled: true, origin: window.location.origin, start },
+    );
+    document.body.appendChild(frame);
+    jukeYt = frame;
+    jukeYtLink = link;
+    jukeYtState = YT_UNSTARTED;
+    jukeYtReport = null;
+    window.addEventListener("message", jukeYtMessage);
+    // The frame ignores anything that arrives before its own player is constructed, and there is
+    // no event announcing when that was. Repeating the handshake until it answers is cheaper than
+    // a protocol with no way to start; the first reply stops it.
+    clearInterval(jukeYtHandshake);
+    jukeYtHandshake = setInterval(() => jukeYtPost(ytListen()), 500);
+    jukeYtPost(ytListen());
+    return frame;
+  }
+
+  /** Take the player down. Nothing is left mounted: a parked frame is still a live connection. */
+  function jukeYtPark() {
+    clearInterval(jukeYtHandshake);
+    jukeYtHandshake = undefined;
+    window.removeEventListener("message", jukeYtMessage);
+    if (jukeYt) {
+      jukeYt.removeAttribute("src");
+      jukeYt.remove();
+    }
+    jukeYt = null;
+    jukeYtLink = "";
+    jukeYtState = YT_UNSTARTED;
+    jukeYtReport = null;
+  }
+
+  /**
+   * A message from the player frame.
+   *
+   * Both checks matter and neither is sufficient alone: the origin says it came from YouTube, and
+   * the source window says it came from OUR player rather than from some other frame served by
+   * the same origin. Everything past that is evidence, never instruction; the only thing a reply
+   * can move is this listener's own player.
+   */
+  function jukeYtMessage(e: MessageEvent) {
+    if (e.origin !== YT_ORIGIN || !jukeYt || e.source !== jukeYt.contentWindow) return;
+    const report = readYouTubeMessage(e.data);
+    if (!report) return;
+    // It is talking, so the handshake has landed and does not need repeating.
+    if (jukeYtHandshake !== undefined) {
+      clearInterval(jukeYtHandshake);
+      jukeYtHandshake = undefined;
+      jukeYtPost(ytCommand("setVolume", [Math.round(jukeVol * 100)]));
+      if (callDeafened) jukeYtPost(ytCommand("mute"));
+    }
+    if (report.duration !== undefined) jukeDur = report.duration;
+    if (report.currentTime !== undefined) {
+      jukeYtReport = { at: performance.now(), currentTime: report.currentTime };
+      jukeBuffering = false; // it is telling us where it is, so it is not stuck
+    }
+    if (report.state !== undefined) {
+      jukeYtState = report.state;
+      jukeBuffering = report.state === YT_BUFFERING;
+      // Only the DJ moves the room on, exactly as for a media element's `ended`.
+      if (report.state === YT_ENDED && inCall && jukeIsDj()) jukeAdvance(true);
+    }
+    const wants = !!jukeNow && !jukeNow.paused && !jukeStale;
+    jukeBlocked = youtubeBlocked(jukeYtState, wants);
+  }
+
+  /**
+   * Put the player where the room says it is.
+   *
+   * A fresh frame is loaded with the offset already in its address, which is both simpler and
+   * better than seeking after the fact: the player starts at the right place instead of starting
+   * at the top and jumping, and a listener joining an hour into a video does not briefly stream
+   * the beginning of it.
+   */
+  function jukeApplyVideo(now: { cid: string; link: string; name: string; paused: boolean }) {
+    if (!mayPlayLinkedVideo(now)) {
+      jukeTrustBlocked = "consent";
+      jukeYtPark();
+      return;
+    }
+    jukeTrustBlocked = "";
+    if (jamDeckPlaybackCid()) jamStopPlayback(); // the room left whatever the take deck held
+    const target = Math.max(0, jukePos());
+    if (!jukeYt || jukeYtLink !== now.link) {
+      jukeYtEl(now.link, Math.floor(target));
+      return; // it comes up at the right place, playing; the next ping corrects whatever it did
+    }
+    for (const command of youtubeTransportPlan({
+      target,
+      at: youtubeReported(jukeYtReport, performance.now()),
+      playing: !now.paused && !jukeStale,
+      state: jukeYtState,
+      seekAfter: DRIFT_SEEK_S,
+    })) {
+      jukeYtPost(command);
+    }
+  }
+
   function jukeHost(node: HTMLElement) {
-    const el = jukeEl();
+    // Whichever player is holding the current track: the one media element, or the video frame.
+    const el = jukeNow?.link ? jukeYtEl(jukeNow.link, 0) : jukeEl();
     node.appendChild(el);
     return {
       destroy() {
@@ -14682,18 +15117,20 @@
         // back) mounts the new host before the old one tears down, and a teardown that re-homed
         // unconditionally would snatch the element straight back out of the surface that had just
         // adopted it, leaving a black box behind.
-        if (jukeAudio === el && el.parentElement === node) document.body.appendChild(el);
+        if ((jukeAudio === el || jukeYt === el) && el.parentElement === node) {
+          document.body.appendChild(el);
+        }
       },
     };
   }
   /** The deck could not play what the DJ named: drop it, and move the room on if the deck is mine. */
-  function jukeFail(cid: string) {
-    const onDeck = jukeNow?.cid === cid;
+  function jukeFail(address: string) {
+    const onDeck = !!jukeNow && jukeDeckAddress(jukeNow) === address;
     const advance = onDeck && jukeIsDj();
-    // Read the order BEFORE blacklisting this cid, or the track we are leaving is already out of
-    // the list and "the one after it" would be the top of the queue again.
+    // Read the order BEFORE blacklisting this address, or the track we are leaving is already out
+    // of the list and "the one after it" would be the top of the queue again.
     const list = jukePlayable();
-    jukeFailed.add(cid);
+    jukeFailed.add(address);
     jukeFetch = null;
     // Nobody heard it, and whoever holds the file may come back: it stays on the queue.
     if (advance) {
@@ -14704,7 +15141,7 @@
     // the track through its own vault and network path, so one of them can lack a provider or fail
     // to decode while the rest carry on. Saying so is the difference between a broken jukebox and
     // a track this machine could not get.
-    if (onDeck) jukeLocalFail = jukeNow?.name || cid;
+    if (onDeck) jukeLocalFail = jukeNow?.name || address;
   }
   // Seek + play state on an element that may have just been handed a new src (currentTime only
   // takes once there is metadata, hence the second run from the loadedmetadata listener).
@@ -14726,6 +15163,7 @@
     // progress here so emptying/replacing the deck cannot strand a LOADING chip indefinitely.
     jukeFetch = null;
     if (jamDeckPlaybackCid()) jamStopPlayback(); // the take deck stops with the transport
+    jukeYtPark(); // and so does the video deck: an unmounted frame is the only stopped one
     const el = jukeAudio;
     if (!el) return;
     el.pause();
@@ -14745,19 +15183,19 @@
     const e = jukeQueue.find((x) => x.id === id);
     if (!e) return;
     jukeWakeSynth();
-    jukeFailed.delete(e.cid); // an explicit press is also a retry of a track that would not fetch
-    jukeSend(e.id, e.cid, e.name, 0, false);
+    jukeFailed.delete(entryAddress(e)); // an explicit press is also a retry of a track that would not fetch
+    jukeSend(e.id, e.cid, e.link ?? "", e.name, 0, false);
   }
   function jukeToggle() {
     if (!inCall) return;
     jukeWakeSynth();
-    if (!jukeNow || !jukeNow.cid) {
+    if (!jukeNow || !(jukeNow.cid || jukeNow.link)) {
       const first = jukePlayable()[0];
       if (first) jukePlayEntry(first.id);
       return;
     }
     // A press on a stale deck resumes it (and claims it) rather than pausing an already dead DJ.
-    jukeSend(jukeNow.entry, jukeNow.cid, jukeNow.name, jukePos(), jukeStale ? false : !jukeNow.paused);
+    jukeSend(jukeNow.entry, jukeNow.cid, jukeNow.link, jukeNow.name, jukePos(), jukeStale ? false : !jukeNow.paused);
   }
   /**
    * Move the room on to the next track.
@@ -14770,8 +15208,8 @@
    */
   function jukeAdvance(played: boolean, list = jukePlayable()) {
     const { next, drop } = deckAdvance(list, jukeNow?.entry ?? "", played);
-    if (next) jukeSend(next.id, next.cid, next.name, 0, false);
-    else jukeSend("", "", "", 0, true); // queue exhausted: everyone stops
+    if (next) jukeSend(next.id, next.cid, next.link ?? "", next.name, 0, false);
+    else jukeSend("", "", "", "", 0, true); // queue exhausted: everyone stops
     if (drop) void jukeRemoveTrack(drop);
   }
   function jukeSkip() {
@@ -14790,6 +15228,9 @@
     const seq = msg.seq;
     const entry = msg.entry;
     const cid = msg.cid;
+    // Absent on a frame from a build that predates linked tracks, which is a file transport and
+    // reads as no link at all rather than as a malformed frame.
+    const link = msg.link ?? "";
     const name = msg.name;
     const off = msg.off;
     const paused = msg.paused;
@@ -14799,13 +15240,20 @@
     if (!validJukeSeq(seq)) return;
     if (typeof entry !== "string" || entry.length > 200) return;
     if (typeof cid !== "string" || (cid !== "" && !/^[0-9a-f]{1,128}$/.test(cid))) return;
+    // A link is checked to the exact shape an address is built from, here at the edge, because
+    // this is peer input and the frame is the only place it is checked before a URL is made of
+    // it. A frame naming both a file and a video is refused outright rather than resolved in
+    // favour of one: the two say different things about who fetches what from where, and picking
+    // one would be this device deciding what a peer meant.
+    if (typeof link !== "string" || (link !== "" && !/^[A-Za-z0-9_-]{11}$/.test(link))) return;
+    if (link !== "" && cid !== "") return;
     if (typeof name !== "string") return;
     if (typeof off !== "number" || !Number.isFinite(off) || off < 0) return;
     if (typeof paused !== "boolean") return;
     // Newest press wins; a tie goes to the higher fingerprint so every machine agrees. A frame
     // that is not newer is still taken from the DJ we already follow: that is the re-announce.
     if (!jukeClaimWins(jukeAdopted, { seq, fromFp })) return;
-    jukeAdopt(seq, fromFp, entry, cid, name.slice(0, 200), off, paused);
+    jukeAdopt(seq, fromFp, entry, cid, link, name.slice(0, 200), off, paused);
   }
   // Rides the 5s presence ping rather than owning a timer: as DJ I re-announce the transport (same
   // seq, fresh offset) so late joiners catch up and drift gets corrected; as a listener I use the
@@ -14813,7 +15261,7 @@
   function jukeTick() {
     if (!inCall || !jukeAdopted || !jukeNow) return;
     if (jukeIsDj()) {
-      broadcast({ callId: callChannel, type: "juke", seq: jukeAdopted.seq, entry: jukeNow.entry, cid: jukeNow.cid, name: jukeNow.name, off: jukePos(), paused: jukeNow.paused });
+      broadcast({ callId: callChannel, type: "juke", seq: jukeAdopted.seq, entry: jukeNow.entry, cid: jukeNow.cid, link: jukeNow.link, name: jukeNow.name, off: jukePos(), paused: jukeNow.paused });
       return;
     }
     if (jukeNow.paused || jukeStale || performance.now() - jukeHeard <= JUKE_DJ_GONE_MS) return;
@@ -14870,14 +15318,23 @@
   // handles both), narrowed to the kind being asked for, each piece of content listed once. The
   // share can list one content address several times over (two folders, or a concurrent double
   // add), and to the deck those are all one track.
-  const JUKE_PICK_KINDS: { key: MediaFilter; label: string }[] = [
+  // YouTube is a tab rather than a filter, because it is not a view of the share at all: the
+  // other four narrow a list of files this server holds, and this one is a form for naming a
+  // video nobody here holds. It sits in the same strip because from the member's side the
+  // question is the same one ("what goes on the queue"), and the difference in where the track
+  // comes from is what the panel itself explains.
+  type JukePickTab = MediaFilter | "youtube";
+  const JUKE_PICK_KINDS: { key: JukePickTab; label: string }[] = [
     { key: "all", label: "ALL" },
     { key: "audio", label: "AUDIO" },
     { key: "video", label: "VIDEO" },
     { key: "take", label: "TAKES" },
+    { key: "youtube", label: "YOUTUBE" },
   ];
-  let jukePickKind = $state<MediaFilter>("all");
-  let jukePickFiles = $derived(mediaChoices(files, jukePickKind));
+  let jukePickKind = $state<JukePickTab>("all");
+  // The YouTube tab lists nothing from the share. The empty list keeps every share-derived
+  // expression below well defined rather than conditionally absent.
+  let jukePickFiles = $derived(jukePickKind === "youtube" ? [] : mediaChoices(files, jukePickKind));
   // Counts on the toggle, so an empty list is legible as "none of that kind" rather than as a
   // broken picker, and so switching to a kind that has nothing is a choice you can decline.
   let jukePickCounts = $derived({
@@ -18528,7 +18985,12 @@
     };
     // Minimised, or on another virtual desktop: the window can hold focus and still show nobody
     // anything, and read state must not treat that as having read the log.
-    const onVisibility = () => (documentVisible = document.visibilityState === "visible");
+    const onVisibility = () => {
+      documentVisible = document.visibilityState === "visible";
+      // A player card must not keep talking to Spotify or Google from a window nobody is looking
+      // at. The observer cannot see this: an occluded window still reports its rows as on screen.
+      reconcileAllEmbeds();
+    };
     document.addEventListener("visibilitychange", onVisibility);
     onVisibility();
     window.addEventListener("keydown", onKey);
@@ -19604,33 +20066,42 @@
   </div>
 {/snippet}
 
-<!-- One roster row in the member column (rendered under the online / offline group heads). -->
+<!--
+  One roster row in the member column (rendered under the online / offline group heads).
+  The whole row is the button, so anywhere in the strip opens the profile card. Standing
+  and identity are worn on the avatar rather than spelled out in text badges: a halo ring
+  marks you, a crown marks owner/admin. A 200px column has no room for word-shaped badges,
+  and the custom badge still reads in full on the profile card and in chat.
+-->
 {#snippet memberRow(m: Member, online: boolean)}
+  {@const role = roles[m.fingerprint] ?? "member"}
   <li
-    title={m.fingerprint}
+    title={`${nameOf(m.fingerprint)}\n${m.fingerprint}`}
     class:is-you={m.you}
     class="member-row"
     use:contextMenu={() => memberMenu(m)}
   >
-    <span class="presence" class:online title={presenceText(m.fingerprint, m.you)}>●</span>
     <button type="button" class="member-link" onclick={() => showProfile(m.fingerprint)}>
-      {@render avatarTag(m.fingerprint)}
-      {@render nameTag(m.fingerprint)}
+      <span class="presence" class:online title={presenceText(m.fingerprint, m.you)}>●</span>
+      <span class="member-face" class:is-you={m.you} title={m.you ? "This is you" : undefined}>
+        {@render avatarTag(m.fingerprint)}
+        {#if role === "owner" || role === "admin"}
+          <span class="role-crown {role}" title={role === "owner" ? "Server owner" : "Moderator"}>{@render icoCrown()}</span>
+        {/if}
+      </span>
+      <!-- Wrapper, not the styled name itself: the ellipsis clip lives out here so a name
+           effect's own overflow (the sparkle row, the wave's lift) still measures from the
+           name's box and is not shifted by the clip's breathing room. The wrapper carries the
+           member's colour too, because the browser paints the ellipsis in the clipping box's
+           colour: without it the "…" would break out of the name in plain text grey. -->
+      <span class="member-name" style={colorStyle(profiles[m.fingerprint]?.color ?? "")}>{@render nameTag(m.fingerprint)}</span>
+      {#if !m.you && verifiedFps.has(m.fingerprint)}
+        <span class="vf-check" title="You verified this member out of band">✓</span>
+      {/if}
+      {#if !m.you && !online && lastSeen[m.fingerprint]}
+        <span class="last-seen" title={presenceText(m.fingerprint, false)}>{relTime(nowTick - lastSeen[m.fingerprint])}</span>
+      {/if}
     </button>
-    {#if !m.you && verifiedFps.has(m.fingerprint)}
-      <span class="vf-check" title="You verified this member out of band">✓</span>
-    {/if}
-    {#if badges[m.fingerprint]}
-      {@const b = badges[m.fingerprint]}
-      <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""} title="Badge assigned by a server admin">{b.label}</span>
-    {/if}
-    {#if roles[m.fingerprint] && roles[m.fingerprint] !== "member"}
-      <span class="role-badge {roles[m.fingerprint]}" title={roles[m.fingerprint]}>{roleAbbr(roles[m.fingerprint])}</span>
-    {/if}
-    {#if m.you}<span class="you-badge">you</span>{/if}
-    {#if !m.you && !online && lastSeen[m.fingerprint]}
-      <span class="last-seen" title={presenceText(m.fingerprint, false)}>{relTime(nowTick - lastSeen[m.fingerprint])}</span>
-    {/if}
   </li>
 {/snippet}
 
@@ -20045,6 +20516,25 @@
 {#snippet icoChevDown()}
   <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M6 9.2 12 15.2l6-6" />
+  </svg>
+{/snippet}
+
+{#snippet icoChevLeft()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M15.2 6 9.2 12l6 6" />
+  </svg>
+{/snippet}
+
+{#snippet icoChevRight()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M9.2 6l6 6-6 6" />
+  </svg>
+{/snippet}
+
+<!-- Roster standing worn on the avatar: filled so it still reads at 11px over a photo. -->
+{#snippet icoCrown()}
+  <svg class="ico" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+    <path d="M3 8.2 7 12l5-7.4L17 12l4-3.8-1.7 10.2H4.7z" />
   </svg>
 {/snippet}
 
@@ -20509,9 +20999,9 @@
                 <span class="jam-stage-sub">tone</span>
                 <div class="jam-stage-modes" aria-label="Filter">
                   <button class="ghost jam-osc-w" class:on={jamFilterOff} aria-pressed={jamFilterOff} title="No filtering: the tone passes through whole. Turning cut, res or env brings the filter back." onclick={() => jamToggleStage("f")}>OFF</button>
-                  <button class="ghost jam-osc-w" class:on={!jamFilterOff && myPatch.f.m === 0} aria-pressed={!jamFilterOff && myPatch.f.m === 0} title="Lowpass: keeps the lows and rolls off everything brighter than the cutoff. Warm and rounded; the classic synth tone." onclick={() => jamEditNum("f", "m", 0)}>LP</button>
-                  <button class="ghost jam-osc-w" class:on={myPatch.f.m === 1} aria-pressed={myPatch.f.m === 1} title="Highpass: keeps the highs and rolls off everything below the cutoff. Thin and airy; it cuts through a busy room." onclick={() => jamEditNum("f", "m", 1)}>HP</button>
-                  <button class="ghost jam-osc-w" class:on={myPatch.f.m === 2} aria-pressed={myPatch.f.m === 2} title="Bandpass: keeps only a band around the cutoff and rolls off both sides. Nasal and hollow, like a small speaker." onclick={() => jamEditNum("f", "m", 2)}>BP</button>
+                  <button class="ghost jam-osc-w" class:on={!jamFilterOff && myPatch.f.m === 0} aria-pressed={!jamFilterOff && myPatch.f.m === 0} title="Lowpass: keeps the lows and rolls off everything brighter than the cutoff. Warm and rounded; the classic synth tone." onclick={() => jamSetFilterMode(0)}>LP</button>
+                  <button class="ghost jam-osc-w" class:on={!jamFilterOff && myPatch.f.m === 1} aria-pressed={!jamFilterOff && myPatch.f.m === 1} title="Highpass: keeps the highs and rolls off everything below the cutoff. Thin and airy; it cuts through a busy room." onclick={() => jamSetFilterMode(1)}>HP</button>
+                  <button class="ghost jam-osc-w" class:on={!jamFilterOff && myPatch.f.m === 2} aria-pressed={!jamFilterOff && myPatch.f.m === 2} title="Bandpass: keeps only a band around the cutoff and rolls off both sides. Nasal and hollow, like a small speaker." onclick={() => jamSetFilterMode(2)}>BP</button>
                 </div>
               </div>
               <div class="jam-stage-body">
@@ -22513,6 +23003,19 @@
               <span class="sb-ico">↓</span>transfers
               {#if activeTransfers}<span class="tab-count">{activeTransfers}</span>{/if}
             </button>
+            <!-- Pinned to the strip's right edge, directly over the column it folds away. Only
+                 where there is a roster to fold: a DM's two people need no member column. -->
+            {#if !cur.isDm}
+              <span class="sb-spacer"></span>
+              <button
+                type="button"
+                class="sb-members"
+                aria-expanded={membersOpen}
+                title={membersOpen ? "Hide the member list" : "Show the member list"}
+                aria-label={membersOpen ? "Hide the member list" : "Show the member list"}
+                onclick={toggleMembers}
+              >{#if membersOpen}{@render icoChevRight()}{:else}{@render icoChevLeft()}{/if}</button>
+            {/if}
           </nav>
         {/if}
         {#if view === "chat"}
@@ -24073,7 +24576,7 @@
         {/if}
       </section>
 
-      {#if !dmHome && cur && !cur.isDm}
+      {#if !dmHome && cur && !cur.isDm && membersOpen}
         <aside class="members-col" aria-label="Members">
           <h3><span>Members · {onlineCount}/{members} claimed here</span></h3>
           {#if roster.length > 6}
@@ -24613,7 +25116,9 @@
           </header>
           <div class="overlay-body">
             <!-- Audio and video are two different plans for the room (one plays in the background,
-                 the other asks everyone to watch), so the picker lets you ask for one of them. -->
+                 the other asks everyone to watch), so the picker lets you ask for one of them.
+                 YouTube is the odd tab out: it holds a form rather than a list, because there is
+                 no share to browse for something nobody here holds. -->
             <div class="juke-pick-tabs" role="tablist" aria-label="Kind of media">
               {#each JUKE_PICK_KINDS as k (k.key)}
                 <button
@@ -24621,11 +25126,52 @@
                   role="tab"
                   aria-selected={jukePickKind === k.key}
                   class:active={jukePickKind === k.key}
+                  class:link-tab={k.key === "youtube"}
                   onclick={() => (jukePickKind = k.key)}
-                >{k.label} <span class="juke-pick-n">{jukePickCounts[k.key]}</span></button>
+                >{k.label}{#if k.key !== "youtube"} <span class="juke-pick-n">{jukePickCounts[k.key]}</span>{/if}</button>
               {/each}
             </div>
-            {#if jukePickFiles.length === 0}
+            {#if jukePickKind === "youtube"}
+              <!-- Queueing a link is not queueing a file, and the panel says so rather than
+                   hiding it: nothing here is shared with the room, and every listener who plays it
+                   will be asking Google for it themselves, from their own address, after agreeing
+                   to. -->
+              <form
+                class="juke-link-add"
+                onsubmit={(e) => { e.preventDefault(); void jukeAddLink(); }}
+              >
+                <label class="juke-link-lbl" for="juke-link-url">Paste a YouTube link</label>
+                <div class="juke-link-row">
+                  <input
+                    id="juke-link-url"
+                    class="juke-link-url"
+                    type="text"
+                    placeholder="https://youtu.be/..."
+                    bind:value={jukeLinkDraft}
+                    oninput={() => (jukeLinkError = "")}
+                  />
+                  <input
+                    class="juke-link-nm"
+                    type="text"
+                    placeholder="name it (optional)"
+                    maxlength="200"
+                    bind:value={jukeLinkName}
+                  />
+                  <button type="submit" class="juke-link-go" disabled={!jukeLinkDraft.trim() || jukeLinkBusy}>
+                    {jukeLinkBusy ? "Adding" : "Queue"}
+                  </button>
+                </div>
+                {#if jukeLinkError}
+                  <p class="juke-link-err">{jukeLinkError}</p>
+                {:else}
+                  <p class="juke-link-note">
+                    Not shared through this server, so it does not use your fileshare and cannot
+                    expire out of it. Everyone who plays it fetches it from Google themselves, and
+                    each of them is asked before their own player loads.
+                  </p>
+                {/if}
+              </form>
+            {:else if jukePickFiles.length === 0}
               <p class="juke-pick-empty">
                 {jukePickKind === "all"
                   ? "no audio or video in this server's share yet: drop a file in chat or the Files surface to share it"

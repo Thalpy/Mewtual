@@ -1593,6 +1593,85 @@ const MAX_RECENT_PEERS: usize = 256;
 /// from would let one peer crowd out the rest of the map.
 const MAX_RECENT_PEER_ADDRS: usize = 4;
 
+/// Whether a failed publication is worth holding on to.
+///
+/// Only two failures describe a condition that passes on its own: nobody is subscribed to the
+/// topic yet, and every peer's send queue is momentarily full. The rest are properties of the
+/// message or of this node, and retrying them produces the same failure indefinitely.
+fn publish_failure_can_pass(error: &gossipsub::PublishError) -> bool {
+    matches!(
+        error,
+        gossipsub::PublishError::NoPeersSubscribedToTopic
+            | gossipsub::PublishError::AllQueuesFull(_)
+    )
+}
+
+/// How often a publication held back by a transient gossipsub failure is tried again.
+///
+/// A subscription event is the obvious moment to retry and is not a sufficient one: the failure
+/// that most often survives it is a full per-peer send queue, and a mesh that is already fully
+/// subscribed produces no further `Subscribed` events at all. Without a clock of its own, a
+/// payload could sit here until an unrelated peer happened to subscribe to something, while later
+/// publications went out ahead of it.
+const PENDING_PUBLISH_RETRY: Duration = Duration::from_secs(2);
+
+/// How many payloads may wait for a retry, and how many bytes they may hold between them.
+///
+/// The queue is a bridge across a transient failure, not durable storage: a message that matters
+/// past it is recovered by document catch-up, which asks a peer for what this node is missing.
+/// Both bounds are enforced oldest-first, so a persistently unpublishable topic cannot grow the
+/// transport's memory without limit.
+const MAX_PENDING_PUBLISH: usize = 256;
+const MAX_PENDING_PUBLISH_BYTES: usize = 8 * 1024 * 1024;
+
+/// Publications held for a retry, oldest first, bounded by both count and total bytes.
+#[derive(Debug, Default)]
+struct PendingPublish {
+    items: Vec<(Topic, Bytes)>,
+    /// The bytes `items` account for, so both bounds are enforced without rescanning.
+    bytes: usize,
+}
+
+impl PendingPublish {
+    fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Hold one payload, dropping the oldest until both bounds are satisfied. Anything dropped
+    /// here remains recoverable through document catch-up.
+    fn hold(&mut self, topic: Topic, data: Bytes) {
+        // A payload that cannot fit the bound under any circumstances is refused where it
+        // arrives. Admitting it first would evict every payload that *can* still go out, on its
+        // way to being evicted itself.
+        if data.len() > MAX_PENDING_PUBLISH_BYTES {
+            tracing::warn!(
+                bytes = data.len(),
+                topic = %hex::encode(topic.as_bytes()),
+                "publication too large to hold for a retry; dropped"
+            );
+            return;
+        }
+        self.bytes += data.len();
+        self.items.push((topic, data));
+        while self.items.len() > MAX_PENDING_PUBLISH || self.bytes > MAX_PENDING_PUBLISH_BYTES {
+            let (topic, dropped) = self.items.remove(0);
+            self.bytes -= dropped.len();
+            tracing::warn!(
+                bytes = dropped.len(),
+                held = self.items.len(),
+                topic = %hex::encode(topic.as_bytes()),
+                "pending publish queue is full; dropped the oldest payload"
+            );
+        }
+    }
+
+    /// Remove everything held, for a retry pass that re-holds whatever still cannot go out.
+    fn take(&mut self) -> Vec<(Topic, Bytes)> {
+        self.bytes = 0;
+        std::mem::take(&mut self.items)
+    }
+}
+
 /// A peer's last known transport identity, kept so a request can redial it after its connection
 /// dropped. See `Actor::recent_peers` for why the transport remembers this at all.
 #[derive(Debug, Clone)]
@@ -3260,7 +3339,9 @@ struct Actor {
     /// Request waiters plus accounting that must survive cancellation of the waiting future.
     /// The keepalive leaves only when libp2p reports this exact request responded/failed.
     pending_req: HashMap<OutboundRequestId, PendingRequest>,
-    pending_publish: Vec<(Topic, Bytes)>,
+    /// Publications a transient gossipsub failure held back, retried on a subscription and on
+    /// `PENDING_PUBLISH_RETRY`.
+    pending_publish: PendingPublish,
     /// Peers this node uses as **infrastructure**: rendezvous nodes it registers or discovers at,
     /// and relays it holds (or is opening) a circuit reservation on. Learned from the commands
     /// that name them; nothing else can tell an infra target from a member at dial time.
@@ -3358,6 +3439,11 @@ impl Actor {
 
     async fn run(mut self) {
         let mut inbound: InboundResponses = FuturesUnordered::new();
+        // Held publications need a clock of their own; see `PENDING_PUBLISH_RETRY`. The arm is
+        // disabled while nothing is held, so an idle transport never wakes for this, and the
+        // timer is re-armed after each pass rather than free-running.
+        let publish_retry = SystemClock.sleep(PENDING_PUBLISH_RETRY);
+        futures::pin_mut!(publish_retry);
         loop {
             tokio::select! {
                 maybe_cmd = self.cmd_rx.recv() => {
@@ -3392,6 +3478,10 @@ impl Actor {
                             "ignoring stale router-mapping worker event"
                         );
                     }
+                }
+                _ = &mut publish_retry, if !self.pending_publish.is_empty() => {
+                    publish_retry.set(SystemClock.sleep(PENDING_PUBLISH_RETRY));
+                    self.flush_pending_publish();
                 }
                 Some((channel, resp)) = inbound.next(), if !inbound.is_empty() => {
                     if let Some(bytes) = resp {
@@ -3805,20 +3895,7 @@ impl Actor {
                     .unsubscribe(&to_ident(&topic));
             }
             Command::Publish(topic, data) => {
-                let len = data.len();
-                if self
-                    .swarm
-                    .behaviour_mut()
-                    .gossipsub
-                    .publish(to_ident(&topic), data.to_vec())
-                    .is_err()
-                {
-                    // No subscribers known yet; retry when one appears.
-                    tracing::trace!(bytes = len, "publish queued (no subscribers yet)");
-                    self.pending_publish.push((topic, data));
-                } else {
-                    tracing::trace!(bytes = len, "published");
-                }
+                self.publish_or_hold(topic, data);
             }
             Command::Request {
                 peer,
@@ -4385,18 +4462,47 @@ impl Actor {
         }
     }
 
-    fn flush_pending_publish(&mut self) {
-        let pending = std::mem::take(&mut self.pending_publish);
-        for (topic, data) in pending {
-            if self
-                .swarm
-                .behaviour_mut()
-                .gossipsub
-                .publish(to_ident(&topic), data.to_vec())
-                .is_err()
-            {
-                self.pending_publish.push((topic, data));
+    /// Publish one payload, holding it for a retry only if the reason it failed can pass.
+    ///
+    /// Every failure used to be recorded as "no subscribers yet" and queued. That reading is
+    /// wrong in both directions: a message too large for the protocol, or one this node cannot
+    /// sign, waits forever for a subscription that would not help it, while the reason it
+    /// actually failed is discarded before anyone can act on it.
+    fn publish_or_hold(&mut self, topic: Topic, data: Bytes) {
+        let len = data.len();
+        match self
+            .swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(to_ident(&topic), data.to_vec())
+        {
+            Ok(_) => tracing::trace!(bytes = len, "published"),
+            // Already in this node's message cache, which is the mechanism that stops a payload
+            // going out twice. Holding it for a retry would only re-run that suppression.
+            Err(gossipsub::PublishError::Duplicate) => {
+                tracing::trace!(bytes = len, "publish suppressed as a duplicate")
             }
+            Err(error) if publish_failure_can_pass(&error) => {
+                tracing::debug!(bytes = len, %error, "publish held for retry");
+                self.pending_publish.hold(topic, data);
+            }
+            Err(error) => {
+                // Nothing about waiting makes an oversized message fit, a compression transform
+                // succeed, or a signing key work. Say so once, here, rather than leaving the
+                // payload in a queue that will never move.
+                tracing::warn!(
+                    bytes = len,
+                    %error,
+                    topic = %hex::encode(topic.as_bytes()),
+                    "publish failed permanently; dropped"
+                );
+            }
+        }
+    }
+
+    fn flush_pending_publish(&mut self) {
+        for (topic, data) in self.pending_publish.take() {
+            self.publish_or_hold(topic, data);
         }
     }
 
@@ -5068,7 +5174,7 @@ impl MeshService {
             recent_peers: HashMap::new(),
             recent_peer_order: VecDeque::new(),
             pending_req: HashMap::new(),
-            pending_publish: Vec::new(),
+            pending_publish: PendingPublish::default(),
             // A constructor target is locally protected from remote eviction, but it is not
             // necessarily infrastructure: the same path constructs a joiner's first dial to an
             // ordinary member. Only rendezvous/reservation commands may opt a peer into strict
@@ -6044,6 +6150,77 @@ mod tests {
         assert!(!valid_direct_peer_batch(peer, &[relay]));
         let unbound: Multiaddr = "/ip4/198.51.100.7/tcp/22487".parse().unwrap();
         assert!(!valid_direct_peer_batch(peer, &[unbound]));
+    }
+
+    /// A publication is held for the failures that pass and dropped for the ones that do not.
+    ///
+    /// Every failure used to be read as "no subscribers yet" and queued behind a retry that only
+    /// a `Subscribed` event could run. A message too large for the protocol therefore sat in that
+    /// queue forever, and the reason it actually failed was discarded before anything could act
+    /// on it, while the transport's own memory grew with each attempt.
+    #[test]
+    fn only_a_failure_that_can_pass_holds_a_publication() {
+        assert!(publish_failure_can_pass(
+            &gossipsub::PublishError::NoPeersSubscribedToTopic
+        ));
+        assert!(publish_failure_can_pass(
+            &gossipsub::PublishError::AllQueuesFull(3)
+        ));
+        // Waiting changes none of these, so holding the payload only hides the reason.
+        assert!(!publish_failure_can_pass(
+            &gossipsub::PublishError::MessageTooLarge
+        ));
+        assert!(!publish_failure_can_pass(
+            &gossipsub::PublishError::TransformFailed(std::io::Error::other("compression"))
+        ));
+        // Already published: the message cache suppressing a second copy is the mechanism
+        // working, not a delivery to retry.
+        assert!(!publish_failure_can_pass(
+            &gossipsub::PublishError::Duplicate
+        ));
+    }
+
+    /// The retry queue is bounded on both axes, oldest first, and survives being drained.
+    #[test]
+    fn the_pending_publish_queue_is_bounded_by_count_and_bytes() {
+        let topic = |n: usize| Topic::new(format!("topic-{n}").into_bytes());
+        let mut pending = PendingPublish::default();
+        assert!(pending.is_empty());
+
+        for n in 0..MAX_PENDING_PUBLISH + 4 {
+            pending.hold(topic(n), Bytes::from(vec![0u8; 8]));
+        }
+        assert_eq!(pending.items.len(), MAX_PENDING_PUBLISH);
+        assert_eq!(
+            pending.items[0].0.as_bytes(),
+            topic(4).as_bytes(),
+            "the four oldest payloads made room for the four newest"
+        );
+        assert_eq!(pending.bytes, MAX_PENDING_PUBLISH * 8);
+
+        // One payload that cannot ever be held must not evict the ones that can.
+        pending.hold(
+            topic(9_000),
+            Bytes::from(vec![0u8; MAX_PENDING_PUBLISH_BYTES + 1]),
+        );
+        assert_eq!(pending.items.len(), MAX_PENDING_PUBLISH);
+        assert_eq!(pending.bytes, MAX_PENDING_PUBLISH * 8);
+
+        // A large-but-holdable payload makes its own room, and the accounting follows it.
+        pending.hold(
+            topic(9_001),
+            Bytes::from(vec![0u8; MAX_PENDING_PUBLISH_BYTES]),
+        );
+        assert_eq!(pending.items.len(), 1);
+        assert_eq!(pending.bytes, MAX_PENDING_PUBLISH_BYTES);
+        assert_eq!(pending.items[0].0.as_bytes(), topic(9_001).as_bytes());
+
+        assert_eq!(pending.take().len(), 1);
+        assert!(pending.is_empty());
+        assert_eq!(
+            pending.bytes, 0,
+            "a drained queue must not keep charging for what it handed back"
+        );
     }
 
     #[tokio::test]

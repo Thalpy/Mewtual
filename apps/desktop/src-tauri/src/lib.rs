@@ -1231,6 +1231,12 @@ struct UiEvent {
 /// the queued file (downloaded through the same `download_file` path as any other embed),
 /// `added_ms` is epoch-millis, and `author` is the adder's device fingerprint, resolved to a
 /// display name via the profiles map exactly like a message author.
+///
+/// `source` and `link` are the linked-track half: an entry with an empty `source` is a shared
+/// file addressed by `cid` (every entry written before linked tracks existed reads this way), and
+/// `"youtube"` means the deck plays a video id from `link` through the embedded player instead,
+/// with no `cid` at all. The frontend re-validates `link` against the exact id shape before it
+/// builds an address from it.
 #[derive(Serialize, Clone)]
 struct UiJukeEntry {
     id: String,
@@ -1238,6 +1244,8 @@ struct UiJukeEntry {
     name: String,
     author: String,
     added_ms: u64,
+    source: String,
+    link: String,
 }
 
 /// A shared file as serialized to the frontend. `cid` is the hex content address used to
@@ -10943,6 +10951,44 @@ async fn jukebox_add(
     Ok(entry)
 }
 
+/// Queue a **linked** track (a video id on a third-party service) in a channel's jukebox. **Any
+/// member may**, like queueing a file; rejected when the source is not a known one, the link is
+/// not 1..=64 URL-safe base64 characters, the name is blank or over 200 UTF-8 bytes, or the queue
+/// already holds 64 entries. Replies with the new entry's id.
+///
+/// This command reaches no network and cannot: it stores a video id and nothing else. It does not
+/// know whether the video exists, and looking would mean this device contacting that service on a
+/// peer's behalf, which is the disclosure each listener gets to decide about separately at play
+/// time. A queued link is therefore a claim by whoever queued it, exactly like a track name.
+#[tauri::command]
+async fn jukebox_add_link(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    source: String,
+    link: String,
+    name: String,
+    trace: Option<String>,
+) -> Result<String, AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "jukebox_add_link",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    // As for a file add: the track's name is a user's words and never reaches the record. The
+    // video id does not either, since what a room chose to watch is not a diagnostic.
+    let entry = actor
+        .jukebox_add_link(id, source, link, name)
+        .await
+        .map_err(|e| op.fail(codes::JUKEBOX_ADD_REJECTED, e))?;
+    persist_server(&state, server).await;
+    op.succeeded("JUKEBOX.ADD.PERSISTED");
+    Ok(entry)
+}
+
 /// Remove a jukebox entry (by entry id) from a channel; any member, and idempotent.
 #[tauri::command]
 async fn jukebox_remove(
@@ -10988,6 +11034,8 @@ async fn get_jukebox(
             name: e.name,
             author: e.author,
             added_ms: e.added_ms,
+            source: e.source,
+            link: e.link,
         })
         .collect())
 }
@@ -15706,6 +15754,7 @@ pub fn run() {
             set_channel_topic,
             get_channel_topic,
             jukebox_add,
+            jukebox_add_link,
             jukebox_remove,
             get_jukebox,
             get_inbox,

@@ -120,7 +120,10 @@ export const TAURI_COMMAND_GROUPS = {
       "begin_inline_download", "download_file",
       "send_call_signal", "dismiss_dm_request", "create_event",
       "save_wiki_page", "send_message", "edit_message", "delete_message", "toggle_reaction",
-      "set_channel_topic", "jukebox_add", "jukebox_remove",
+      // `jukebox_add_link` queues a video id rather than a content address. It has the same
+      // authority as `jukebox_add` and reaches no network of its own: whether a listener ever
+      // fetches what it names is that listener's decision, taken locally at play time.
+      "set_channel_topic", "jukebox_add", "jukebox_add_link", "jukebox_remove",
       // The announcement feed's counterparts to the three above, and gated the same way. An edit
       // is author-only; a delete is the author's or a moderator's; a reaction is every member's,
       // because reading the feed is the one thing everyone does and reacting is how they answer.

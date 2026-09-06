@@ -283,6 +283,12 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   **Actual size** switches between fit-to-window and 1:1. **Right-click** an image for
   **Properties** (size, type, who shared it, where it's used), **Download**, its address, and
   the message's own actions.
+- **A Spotify or YouTube link on a line of its own** becomes a player card. It never loads by
+  itself: you get a chip naming the service, and clicking it is what contacts them. Because that
+  frame keeps talking to the service for as long as it is on screen, it unloads again when you
+  scroll away from it, switch to another tab, or minimise the window, and reloads when you come
+  back to it. A Spotify card usually plays a short preview: full tracks need that device to be
+  signed in to Spotify Premium. A link written inside a sentence stays an ordinary link.
 
 ---
 
@@ -493,9 +499,15 @@ type a `code`, choose its display size and upload an image. Then anyone types `:
   playback. Whoever pressed last is the DJ and
   everyone hears the same position; the deck's own play button starts the queue from the top, and
   a track comes off the queue once the room has heard it through. **Add from share** can be
-  narrowed to audio or video. A video plays on the deck's own screen in the voice stage, or full
-  size in the focus view; audio needs no picture and plays with the deck folded or the stage
-  collapsed.
+  narrowed to audio, video or takes. A video plays on the deck's own screen in the voice stage, or
+  full size in the focus view; audio needs no picture and plays with the deck folded or the stage
+  collapsed. The same panel's **YouTube** tab queues a video by link instead of from the share,
+  which works differently in one way worth knowing: nothing is shared through the server, so it
+  uses none of your fileshare and cannot expire out of it, and everyone who plays it fetches it
+  from Google themselves after being asked. The room still shares one transport, so play, pause
+  and skip move everybody together. Spotify cannot be queued, because its embedded player only
+  plays a short preview unless that device is signed in to Spotify Premium; a Spotify link posted
+  in chat becomes a player card instead.
 - A hardware **MIDI controller** is set up under **Settings → Devices → MIDI controllers**. That
   panel lists every input the system reports, says which ones are routed, shows the messages
   arriving in a live monitor, and carries step-by-step setup and troubleshooting help. Controllers

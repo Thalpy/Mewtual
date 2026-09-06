@@ -7,6 +7,9 @@ import {
   deckPosition,
   deckSurface,
   driftAction,
+  entryAddress,
+  entryKind,
+  isLinkedVideo,
   mediaChoices,
   fetchPhase,
   mediaKind,
@@ -289,6 +292,61 @@ const queue = [
   entry({ id: "a", cid: "c1", added_ms: 1 }),
   entry({ id: "c", cid: "c3", added_ms: 3 }),
 ];
+
+// A video linked from YouTube: no content address, because nothing here holds it.
+const linked = (over: Partial<JukeEntry> = {}): JukeEntry =>
+  entry({ cid: "", source: "youtube", link: "dQw4w9WgXcQ", ...over });
+
+test("a linked video and a shared file are told apart by what they carry", () => {
+  assert.equal(isLinkedVideo(linked()), true);
+  assert.equal(isLinkedVideo(entry()), false, "a file entry names no source");
+  // Half a linked entry is not a linked entry: both halves or neither.
+  assert.equal(isLinkedVideo({ source: "youtube", link: "" }), false);
+  assert.equal(isLinkedVideo({ source: "", link: "dQw4w9WgXcQ" }), false);
+  assert.equal(isLinkedVideo({ source: "vimeo", link: "dQw4w9WgXcQ" }), false, "an unknown source is not ours");
+
+  assert.equal(entryKind(linked()), "youtube");
+  assert.equal(entryKind(linked({ name: "song.mp3" })), "youtube", "the source decides, not the name");
+  assert.equal(entryKind(entry({ name: "song.mp3" })), "audio");
+  assert.equal(entryKind(entry({ name: "clip.mp4" })), "video");
+  assert.equal(entryKind(entry({ name: "jam.jamtake" })), "take");
+});
+
+test("one unplayable video does not take every other linked track with it", () => {
+  // The regression this pins: unplayable tracks are remembered by address so the deck does not
+  // stop on them twice, and every linked entry has the SAME empty cid. Keyed by cid, one dead
+  // video would have silently emptied the queue of all of them.
+  const mixed = [
+    linked({ id: "v1", link: "aaaaaaaaaaa", added_ms: 1 }),
+    linked({ id: "v2", link: "bbbbbbbbbbb", added_ms: 2 }),
+    entry({ id: "f1", cid: "c9", added_ms: 3 }),
+  ];
+  assert.deepEqual(playableQueue(mixed, new Set()).map((e) => e.id), ["v1", "v2", "f1"]);
+
+  const oneDead = playableQueue(mixed, new Set([entryAddress(linked({ link: "aaaaaaaaaaa" }))]));
+  assert.deepEqual(oneDead.map((e) => e.id), ["v2", "f1"], "only the video that actually failed is dropped");
+
+  // And the two namespaces cannot collide: a file whose cid happens to spell a video id is a
+  // different track from the video.
+  assert.notEqual(entryAddress(entry({ cid: "dQw4w9WgXcQ" })), entryAddress(linked()));
+  assert.equal(entryAddress(entry({ cid: "c1" })), "c1", "a file is still addressed by content");
+});
+
+test("a linked video claims a screen, because there is something to look at", () => {
+  assert.equal(deckSurface("youtube", true, true, true), "focus");
+  assert.equal(deckSurface("youtube", true, false, true), "dock");
+  assert.equal(deckSurface("youtube", true, false, false), "none", "a folded dock is one line");
+  assert.equal(deckSurface("youtube", false, true, true), "none", "nothing playing, nothing to show");
+});
+
+test("a linked video is corrected like audio, because easing is not on offer", () => {
+  // The embed exposes no usable playback-rate control, so the only correction available is a
+  // seek. Leaving small gaps alone is therefore the better of the two behaviours, not the worse.
+  assert.equal(driftAction(0.6, "youtube"), "hold", "a shared film would ease this out; this cannot");
+  assert.equal(driftAction(0.6, "video"), "nudge");
+  assert.equal(driftAction(3, "youtube"), "seek");
+  assert.equal(driftAction(-3, "youtube"), "seek");
+});
 
 test("the queue plays in the order it was built, with the id as the tiebreak", () => {
   assert.deepEqual(playableQueue(queue, new Set()).map((e) => e.id), ["a", "b", "c"]);

@@ -1343,6 +1343,44 @@ merge can leave the count untouched. First sight of a channel reports nothing, b
 fetches messages when it opens one. The bridge forwards the flags on the `channel-updated` payload
 (`messages_appended`, `messages_changed`, `topic`, `jukebox`).
 
+### The jukebox queue: two kinds of entry
+
+```rust
+pub struct JukeEntry {
+    pub id: String, pub cid: String, pub name: String,
+    pub author: String, pub added_ms: u64,
+    pub source: String, // "" = a shared file; "youtube" = a linked video
+    pub link: String,   // the provider's video id; empty for a file entry
+}
+impl Server {
+    // cid: 1..=128 lowercase hex, shape-checked only (the blob may still be in flight)
+    async fn jukebox_add(&mut self, channel: u128, cid: &str, name: &str) -> Result<String, AppError>;
+    // link: 1..=64 URL-safe base64 chars; reaches no network and checks no provider
+    async fn jukebox_add_link(&mut self, channel: u128, source: &str, link: &str, name: &str)
+        -> Result<String, AppError>;
+}
+```
+
+An entry names **exactly one** way of getting the track. A file entry is content the group holds,
+addressed by `cid` and served out of the vault; a linked entry names a video on a third party's
+service and has no `cid`, because nothing here holds it and each listener fetches it themselves.
+`source` and `link` are written only for a linked entry, so a file entry is byte-for-byte the
+document older builds wrote and their absence reads as "file".
+
+`read_jukebox` is the boundary, not the add call: a peer writes the channel document directly. It
+skips any entry that is not exactly one well-formed kind, which means an unknown `source`, a
+linked entry whose `link` is not the storable alphabet, and (deliberately) an entry carrying
+**both** a `cid` and a `link`. Resolving that last case either way would be this device deciding
+what a peer meant by two claims that disagree about who fetches what from where. Both kinds share
+the one `MAX_JUKEBOX_ENTRIES` cap.
+
+The link's **storage** check is an alphabet, not a format: URL-safe base64 within a length budget,
+which is what stops a link leaving the URL path segment it is written into. The exact eleven-character
+YouTube id shape is checked in the frontend (`youtube.ts`), next to the code that builds an address
+from it, so a change at the provider's end cannot make stored entries unreadable. The call-transport
+frame carries `link` alongside `cid` and re-validates it at the edge to the exact id shape, rejecting
+a frame that names both.
+
 The signature is recomputed only for a channel whose document **moved**. `Server::doc_version(doc_type,
 doc_id)` is the number of signed ops applied to a document this session (O(1); every content change,
 local or remote, live or caught up, is exactly one op, and duplicates never count), and the actor keeps
@@ -1616,9 +1654,18 @@ materially different interpretation is `mewtual-synth:v2`, never a silent change
 levels are normalized as a blend under a receiver-owned 0.11 voice peak (all-zero is silent);
 filter Q maps linearly to 0.1..18, filter-envelope amount to +/-6 octaves, cutoff LFO depth to up to
 0..4 octaves (further reduced when needed to keep the whole envelope/LFO sweep within 20 Hz and
-45% of sample rate), pitch LFO depth to 0..25 cents, and each effect send to 0..0.5 gain. The room master is
+45% of sample rate), pitch LFO depth to 0..25 cents, and each effect send to 0..1 gain (raised from 0..0.5 on
+2026-09-06: stacked with the effects' own wet returns, a maxed send arrived about 16 dB under the
+dry signal, so the knobs moved and nothing was audibly different). The room master is
 0.72 into a fixed compressor/limiter (-12 dB threshold, 6 dB knee, 12:1 ratio, 3 ms attack,
-250 ms release). The receiver also clamps filter frequency to 45% of its sample rate.
+250 ms release). The receiver also clamps filter frequency to 45% of its sample rate, and floors
+every release ramp at `JAM_VOICE_DECLICK_SECONDS` (8 ms), because a patch may legally ask for a
+release of 0 and cutting a sustained waveform mid-cycle is a step discontinuity. That floor is
+applied by one calculation (`effectiveReleaseSeconds`) shared by the note-off, the audio-clock
+watchdog and the take transport's end-of-log horizon; a floor only some paths honour is not one.
+These are **renderer** levels, not descriptor semantics: a patch id names a recipe, and
+`mewtual-synth:v1` has never promised identical audio across builds, so a peer on an older build
+hears the older amounts of the same recipe.
 Deafen disconnects the entire old room graph rather than merely zeroing its master, so buffered
 delay feedback cannot reappear after undeafening. Short call UI cues never create or resume a
 suspended context, are cancelled by Deafen and leave, overlap at most four voices globally, and

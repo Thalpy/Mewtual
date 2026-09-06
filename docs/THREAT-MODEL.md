@@ -434,6 +434,20 @@ table with the commit that closed it.
   trusted member.
   Third-party HTTP(S) images always require a click, even under everyone mode: they have no file
   attestation, disclose the client address, and may target loopback/private-network services.
+  **Third-party player frames** (Spotify and YouTube cards in chat, and YouTube tracks on the
+  jukebox deck) are the same class of exposure and are gated the same way, with one addition. Like
+  a remote image they carry no attestation, disclose the client address, and are click-only in
+  every trust mode; a queued video id is a claim by whoever queued it, and no device contacts the
+  provider on a peer's behalf to check it. Unlike an image they keep running once loaded, so the
+  click cannot be the end of the grant: a card is mounted only while it is on screen in a visible
+  window and reverts to an inert chip otherwise, and a deck frame is unmounted when the room
+  leaves the track. `frame-src` admits exactly `open.spotify.com` and `www.youtube-nocookie.com`;
+  no third-party **script** origin is admitted, so the YouTube deck drives its frame over
+  postMessage rather than loading the provider's API script into this document. A frame is
+  sandboxed without `allow-top-navigation`, and replies from it are evidence (position, player
+  state) that can move only the local player, never the room's transport. This narrows disclosure
+  to a deliberate act per member per entity; it does **not** make the provider's player benign,
+  and it does not conceal from the provider that this address watched that video at that time.
 - **A sealed local reconnect route is a narrow continuation of a completed direct join, not LAN
   discovery or durable presence.** After direct admission, the joining installation may seal at
   most two literal-IP TCP/QUIC routes to the named inviter that were actually used by an outbound

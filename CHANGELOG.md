@@ -4,6 +4,58 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Spotify and YouTube links in chat open out into player cards.** A link on a line of its own
+  becomes a chip naming the service, and clicking it is what contacts them; a link written inside a
+  sentence stays an ordinary link. Nothing loads on its own in any trust mode, because a player
+  frame has no file attestation and discloses this device's address to the service. Unlike a remote
+  image it also keeps running once loaded, so the click is not the end of the grant: a card exists
+  only while it is on screen in a visible window, and reverts to its chip when you scroll away,
+  switch tabs or minimise. The frame is built in code from a parsed id and never from a member's
+  text, so chat markup still cannot create one, and the share-tracking token on a Spotify link is
+  dropped rather than passed on.
+- **The jukebox can queue a YouTube video by link**, from its own tab beside Audio, Video and
+  Takes in **Add from share**. It plays on the deck's own screen like any
+  other video and follows the same shared transport, so play, pause, skip and seek still move the
+  whole room together. It differs from a queued file in the way that matters: nothing is shared
+  through the server, so each listener fetches it from Google themselves and each is asked before
+  their own player loads. A queued link is a claim by whoever queued it; no device checks it on a
+  peer's behalf, because checking would be the disclosure. Drift is corrected by seeking rather
+  than by the gentle rate easing a shared video gets, since the embedded player offers no usable
+  rate control.
+- Spotify is deliberately **not** a jukebox source. Its embedded player needs a Premium session
+  signed in to `open.spotify.com` in this webview plus a working Widevine decoder, neither of which
+  a desktop webview has, so it plays a preview of about thirty seconds or refuses outright. A room
+  cannot listen together to that, so Spotify stays a chat card.
+
+### Fixed
+
+- **The jukebox deck's player now fills its surface.** Four style rules, including both that size
+  the deck's picture, were written with Svelte's global escape hatch inside `app.css`. That file
+  is a plain stylesheet, so nothing compiled the syntax away: it reached the browser verbatim,
+  which discarded each rule as invalid and left the player at an element's default 300x150 in the
+  corner of a 16:9 box. Nothing warned, and the source read as correct. A source-hygiene test now
+  keeps that syntax out of standalone stylesheets.
+- **YouTube players no longer fail with "Error 153".** The frames were sent with a `no-referrer`
+  policy, and YouTube declines to configure a player embedded by nobody. They now send the app's
+  origin and never a path. The `origin` parameter is also omitted unless the window is served from
+  a web origin, since Tauri uses the custom scheme `tauri://localhost` on macOS and Linux and
+  naming that produced the same refusal there.
+
+### Security
+
+- `frame-src` now admits exactly `open.spotify.com` and `www.youtube-nocookie.com`, and nothing
+  else changed: no third-party **script** origin is allowed, so the jukebox drives its YouTube
+  frame over postMessage rather than loading the provider's API script into the app's document.
+  Frames are sandboxed without `allow-top-navigation`, and what a frame reports back (position,
+  player state) can move only the local player, never the room's transport.
+- A queue entry names exactly one source. The channel-document reader skips any entry carrying an
+  unknown source, a malformed link, or both a content address and a link, rather than picking one
+  of two claims that disagree; the call-transport frame applies the same rule at the wire edge.
+  Unplayable tracks are now remembered by deck address rather than by content address, so one dead
+  video no longer silently drops every other linked track from the queue.
+
 ## [0.3.0-alpha.9] - 2026-08-28
 
 ### Added

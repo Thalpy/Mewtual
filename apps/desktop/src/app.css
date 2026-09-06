@@ -1803,6 +1803,57 @@ button.attach:hover {
   background: var(--bg-elev);
 }
 
+/* --- third-party player cards in chat (see chat-embeds.ts) ---
+   A card only exists while it is on screen, so these two states swap back and forth as the log
+   scrolls. Both are laid out to the same width so the swap does not move the rows around it. */
+
+.chat-embed-chip,
+.chat-embed {
+  display: block;
+  width: 100%;
+  max-width: 480px;
+  margin: 0.35rem 0;
+}
+
+.chat-embed-chip {
+  text-align: left;
+}
+
+/* The provider dot: which service the click is about to reach, before reading the label. */
+.chat-embed-chip::before {
+  content: "";
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  margin-right: 0.45rem;
+  vertical-align: baseline;
+  background: var(--muted);
+}
+
+.spotify-chip::before {
+  background: #1db954;
+}
+
+.youtube-chip::before {
+  background: #ff0033;
+}
+
+.chat-embed {
+  border: 0;
+  border-radius: 12px;
+  background: var(--bg-0);
+  color-scheme: normal; /* the frame is a foreign document; do not force our scheme onto it */
+}
+
+/* Spotify names its own height per entity (a track is compact, a playlist needs its track list),
+   so the element's height attribute is left to do the work. A video has no intrinsic height to
+   give, so the box provides one and keeps the picture from letterboxing itself. */
+.youtube-embed {
+  aspect-ratio: 16 / 9;
+  height: auto;
+}
+
 /* --- Phase 10d: wiki overhaul --- */
 
 .wiki-help-btn {
@@ -4285,24 +4336,42 @@ button.primary:hover:not(:disabled) {
   border-color: var(--text);
 }
 
-/* The clickable avatar+name inside a roster row (unstyled button → opens the profile card). */
+/* The roster row IS the button: it carries the row's own padding so every pixel of the strip
+   opens the profile card, rather than only the avatar+name sliver. (Unstyled, no chrome.) */
+.members-col li.member-row:not(.companion) {
+  padding: 0;
+}
 .member-link {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 0.4rem;
   border: none;
   background: none;
-  padding: 0;
+  padding: var(--row-pad) 4px;
   margin: 0;
   cursor: pointer;
   color: inherit;
   font: inherit;
   min-width: 0;
+  width: 100%;
   flex: 1;
   text-align: left;
 }
-.member-link:hover {
+.member-link:hover .name {
   text-decoration: underline;
+}
+/* A name too long for a 200px column ends in an ellipsis rather than pushing the row's marks
+   off the edge; the whole name is on the row's tooltip. The vertical padding (cancelled by an
+   equal negative margin, so the row keeps its height) is headroom for name effects that draw
+   above the line: the mexican wave's lift, the sparkle row, fire's glow. */
+.member-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-block: 1em;
+  margin-block: -1em;
 }
 
 /* Custom profile surfaces become restrained operator-terminal frames in the content lane.
@@ -4649,7 +4718,7 @@ button.call-start {
 .call-avatars {
   display: flex;
 }
-.call-avatars :global(.avatar) {
+.call-avatars .avatar {
   margin-left: -6px;
   border: 2px solid var(--ok-dim);
 }
@@ -4971,6 +5040,22 @@ button.call-start {
   font-size: 0.72rem;
   font-weight: 700;
 }
+/* Member-column control, pinned to the strip's far right so it sits over the column it folds
+   away. It is chrome, not a surface, so it never takes the active underline. */
+.surface-bar .sb-spacer {
+  flex: 1;
+}
+.surface-bar .sb-members {
+  padding: 0.3rem 0.5rem;
+  color: var(--faint);
+}
+.surface-bar .sb-members:hover {
+  color: var(--text);
+}
+.surface-bar .sb-members .ico {
+  width: 14px;
+  height: 14px;
+}
 
 /* --- Contextual sidebar blocks (pages · folders · transfers) --- */
 /* The wiki help "?" sits past the h3's ruled line, on the section's right edge. */
@@ -5104,10 +5189,49 @@ button.you-panel:hover {
 }
 
 /* --- Member column: online / offline groups --- */
-/* The role badge sits on the row's right edge (abbreviated OWN / ADM in the markup). */
-.member-row .role-badge {
-  margin-left: auto;
+/* Standing is worn on the avatar, not spelled out beside it: a 200px column has no room for
+   word-shaped badges, and the marks stay legible while the name keeps the width. */
+.member-face {
+  position: relative;
+  display: inline-flex;
   flex: none;
+  line-height: 0;
+  /* Room for the halo on every row, ringed or not, so avatars stay in one column. */
+  margin-inline: 3px;
+}
+/* The halo: a ring held off the avatar by a panel-coloured gap, so it reads as a ring rather
+   than a border thickening the photo. */
+.member-face.is-you .avatar {
+  box-shadow:
+    0 0 0 1.5px var(--panel),
+    0 0 0 3px var(--accent);
+}
+.members-col li:hover .member-face.is-you .avatar {
+  box-shadow:
+    0 0 0 1.5px var(--bg-elev),
+    0 0 0 3px var(--accent);
+}
+/* The crown perches on the avatar's top-right corner: owner gold, moderator accent. Its own
+   dark outline keeps it readable over a bright avatar. */
+.role-crown {
+  position: absolute;
+  top: -4px;
+  right: -3px;
+  width: 11px;
+  height: 11px;
+  line-height: 0;
+  pointer-events: none;
+}
+.role-crown .ico {
+  width: 11px;
+  height: 11px;
+  filter: drop-shadow(0 0 1.5px rgba(0, 0, 0, 0.85));
+}
+.role-crown.owner {
+  color: var(--warn);
+}
+.role-crown.admin {
+  color: var(--accent-hi);
 }
 
 /* --- Quick switcher (Ctrl+K): channels · surfaces · servers · DMs --- */
@@ -9798,6 +9922,69 @@ button.juke-q:hover {
 }
 /* Kind toggle: the same tab idiom the insert panel uses, because it is the same gesture. The
    count rides each tab so an empty list reads as "none of that kind" and not as a broken picker. */
+/* The YouTube tab's panel: a form where the other tabs have a list, because there is no share to
+   browse for something nobody here holds. */
+.juke-link-add {
+  margin: 0;
+  padding: 0.25rem 0 0;
+}
+
+.juke-link-lbl {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+
+.juke-link-row {
+  display: flex;
+  gap: 0.35rem;
+  align-items: stretch;
+}
+
+.juke-link-url {
+  flex: 2 1 0;
+  min-width: 0;
+}
+
+.juke-link-nm {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.juke-link-go {
+  flex: 0 0 auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text-1);
+  padding: 0.25rem 0.7rem;
+  cursor: pointer;
+}
+
+.juke-link-go:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.juke-link-note,
+.juke-link-err {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.juke-link-note {
+  color: var(--muted);
+}
+
+.juke-link-err {
+  color: var(--danger);
+}
+
 .juke-pick-tabs {
   display: flex;
   align-items: center;
@@ -9833,6 +10020,15 @@ button.juke-q:hover {
   color: var(--accent);
 }
 
+/* The YouTube tab is separated from the four that browse this server's share, because what it
+   queues comes from somewhere else entirely. The rule is the boundary; the tab is not otherwise
+   special-cased, so it still reads as one of the strip. */
+.juke-pick-tabs button[role="tab"].link-tab {
+  margin-left: auto;
+  padding-left: 0.75rem;
+  border-left: 1px solid var(--border-soft);
+}
+
 /* The deck's own screen, for a film outside the focus view. Same shape as the focus band, sized
    to the dock: the picture is the point, so it takes the dock's full width. */
 .juke-screen {
@@ -9846,7 +10042,12 @@ button.juke-q:hover {
   aspect-ratio: 16 / 9;
   max-height: 34vh;
 }
-.juke-screen :global(video) {
+/* The deck's player, whichever kind it is. Plain descendant selectors on purpose: this file is a
+   standalone stylesheet (`main.ts` imports it), so Svelte's global escape hatch is never compiled
+   out of it and a browser discards the whole rule as invalid CSS. The deck element is re-parented
+   in here imperatively rather than rendered by a component, so an ordinary selector reaches it.
+   `source-hygiene.test.ts` keeps that syntax out of this file for good. */
+.juke-screen video {
   display: block;
   width: 100%;
   height: 100%;
@@ -14586,8 +14787,21 @@ button.juke-play.mini {
 
 /* Idle home. The element lives on the body between adopters so playback survives a surface
    change; it is only visible once a surface re-parents it. */
-body > #jukebox-media {
+body > #jukebox-media,
+body > #jukebox-video {
   display: none;
+}
+
+/* The linked-video deck fills whichever surface adopted it, exactly as the video element does.
+   It carries no border of its own: the surface already draws one, and the player paints its own
+   black behind the picture. */
+.juke-screen iframe.juke-yt,
+.focus-deck iframe.juke-yt {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #000;
 }
 
 /* Kind chip: video names itself in the queue and the folded row. Audio stays bare, because it is
@@ -14626,7 +14840,7 @@ body > #jukebox-media {
   flex: 1 1 auto;
   min-height: 120px;
 }
-.focus-deck :global(video) {
+.focus-deck video {
   display: block;
   width: 100%;
   height: 100%;

@@ -306,6 +306,15 @@ pub enum AppCommand {
         name: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Queue a linked track (a video id on a third-party service) in a channel's jukebox (any
+    /// member); replies with the entry id. Reaches no network: see [`Server::jukebox_add_link`].
+    JukeboxAddLink {
+        channel: u128,
+        source: String,
+        link: String,
+        name: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Remove a jukebox entry (by id) from a channel (any member).
     JukeboxRemove {
         channel: u128,
@@ -1228,6 +1237,34 @@ impl ServerActor {
             .send(AppCommand::JukeboxAdd {
                 channel,
                 cid,
+                name,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Queue a linked track in a channel's jukebox; replies with the entry id. Any member may;
+    /// see [`Server::jukebox_add_link`], which reaches no network and checks only the shape of
+    /// what it stores. A `ChannelUpdated` event follows.
+    pub async fn jukebox_add_link(
+        &self,
+        channel: u128,
+        source: String,
+        link: String,
+        name: String,
+    ) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::JukeboxAddLink {
+                channel,
+                source,
+                link,
                 name,
                 reply,
             })
@@ -3485,6 +3522,24 @@ where
                     }) => {
                         let res = server
                             .jukebox_add(channel, &cid, &name)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
+                            let _ = event_tx
+                                .send(AppEvent::ChannelUpdated { channel, change })
+                                .await;
+                        }
+                    }
+                    Some(AppCommand::JukeboxAddLink {
+                        channel,
+                        source,
+                        link,
+                        name,
+                        reply,
+                    }) => {
+                        let res = server
+                            .jukebox_add_link(channel, &source, &link, &name)
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);

@@ -7,8 +7,18 @@
  * below is about reconciling one local element against a shared clock.
  */
 
-/** What a queued file is, as far as the deck cares. */
-export type MediaKind = "audio" | "video" | "take" | "other";
+/**
+ * What a queued track is, as far as the deck cares.
+ *
+ * `youtube` is the odd one out and is worth naming as its own kind rather than folding into
+ * `video`: it is not served by the group, it is not read by a media element, and the drift
+ * correction a shared film gets is not available for it (the embed has no playback-rate control).
+ * Anywhere those differences matter, the difference is this word.
+ */
+export type MediaKind = "audio" | "video" | "take" | "youtube" | "other";
+
+/** The source marker a linked YouTube entry carries. Matches `JUKE_SOURCE_YOUTUBE` natively. */
+export const JUKE_SOURCE_YOUTUBE = "youtube";
 
 /** The jam-take export format: a validated event log the deck replays through the jam synth. */
 export const JAM_TAKE_EXT = ".jamtake";
@@ -133,7 +143,7 @@ export function deckSurface(
   focusOpen: boolean,
   dockOpen: boolean,
 ): DeckSurface {
-  if (!playing || kind !== "video") return "none";
+  if (!playing || (kind !== "video" && kind !== "youtube")) return "none";
   if (focusOpen) return "focus";
   return dockOpen ? "dock" : "none";
 }
@@ -151,6 +161,11 @@ export type DriftAction = "hold" | "nudge" | "seek";
  * already in sync, so a small video drift is eased out by playing slightly fast or slow instead,
  * and only a gap too large to ease is snapped. Audio keeps the old snap-or-nothing behaviour,
  * because a 300ms rate change is audible as a pitch bend where a 300ms seek is not.
+ *
+ * A linked YouTube video takes the audio rule despite being a video, and not by oversight: the
+ * embedded player exposes no usable playback-rate control, so there is no easing to do. The only
+ * correction available is a seek, which makes leaving small gaps alone the better of the two
+ * behaviours on offer rather than the worse one.
  */
 export function driftAction(drift: number, kind: MediaKind): DriftAction {
   const gap = Math.abs(drift);
@@ -171,14 +186,61 @@ export function nudgeRate(drift: number): number {
   return drift > 0 ? 1.05 : 0.95;
 }
 
-/** One entry in a channel's shared queue, as the backend hands it over. */
+/**
+ * One entry in a channel's shared queue, as the backend hands it over.
+ *
+ * An entry is one of two things. A **file** entry has a `cid` and an empty `source`: content the
+ * group holds, streamed to the deck out of the vault. A **linked** entry has `source` set and no
+ * `cid`: a video id on somebody else's service, which every listener fetches itself. The native
+ * reader refuses to hand over an entry that is both or neither, so exactly one of the two
+ * addressing fields is ever populated here.
+ */
 export type JukeEntry = {
   id: string;
   cid: string;
   name: string;
   author: string;
   added_ms: number;
+  /** `""` for a shared file (and for every entry written before linked tracks existed). */
+  source?: string;
+  /** The provider's video id, for a linked entry. */
+  link?: string;
 };
+
+/** Is this entry a video linked from YouTube rather than a file the group holds? */
+export function isLinkedVideo(entry: Pick<JukeEntry, "source" | "link">): boolean {
+  return entry.source === JUKE_SOURCE_YOUTUBE && !!entry.link;
+}
+
+/**
+ * How the deck addresses one track, whatever kind it is.
+ *
+ * This exists because a content address is not enough any more, and the failure it prevents is
+ * quiet. Tracks that could not be played are remembered so the deck does not stop on them again,
+ * and that set used to be keyed by `cid`. Every linked entry has the SAME empty `cid`, so one
+ * unplayable video would have taken every other linked track in the queue out with it, and the
+ * queue would simply have looked shorter than it was.
+ *
+ * The prefix is what keeps the two namespaces apart: a video id is not hex, but saying so relies
+ * on a third party's id format, and this does not have to.
+ */
+export function entryAddress(entry: Pick<JukeEntry, "cid" | "source" | "link">): string {
+  return isLinkedVideo(entry) ? `${JUKE_SOURCE_YOUTUBE}:${entry.link}` : entry.cid;
+}
+
+/**
+ * What the deck should treat a queue entry as.
+ *
+ * A linked entry says what it is outright; a file entry is classified from its name and declared
+ * type as before. `mime` is the share's declared type, when the share being viewed is the one the
+ * track came from.
+ */
+export function entryKind(
+  entry: Pick<JukeEntry, "name" | "cid" | "source" | "link">,
+  mime = "",
+): MediaKind {
+  return isLinkedVideo(entry) ? "youtube" : mediaKind(entry.name, mime);
+}
 
 /**
  * Did the queue actually change?
@@ -238,7 +300,7 @@ export function playableQueue(
 ): JukeEntry[] {
   return [...entries]
     .sort((a, b) => a.added_ms - b.added_ms || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    .filter((e) => !failed.has(e.cid));
+    .filter((e) => !failed.has(entryAddress(e)));
 }
 
 /**

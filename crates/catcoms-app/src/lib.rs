@@ -471,6 +471,8 @@ const JB_CID: &str = "cid";
 const JB_NAME: &str = "name";
 const JB_AUTHOR: &str = "author";
 const JB_ADDED: &str = "added_ms";
+const JB_SOURCE: &str = "source";
+const JB_LINK: &str = "link";
 
 /// Maximum length of a channel topic, in UTF-8 bytes. The topic lives in the channel
 /// document, so this bounds what every member replicates; the same reason the livery and
@@ -487,6 +489,23 @@ pub const MAX_JUKEBOX_NAME_BYTES: usize = 200;
 /// Maximum number of entries one channel's jukebox holds. The whole queue is replicated with
 /// every change, so this bounds what a full playlist costs each member.
 pub const MAX_JUKEBOX_ENTRIES: usize = 64;
+/// Maximum length of a linked track's provider id. A YouTube id is eleven characters; the budget
+/// is loose enough to outlive a change at a provider's end and tight enough that the field can
+/// never become a place to store something else.
+pub const MAX_JUKEBOX_LINK_CHARS: usize = 64;
+
+/// The source a queue entry names: where a listener's deck is supposed to get the track.
+///
+/// This is a small closed set on purpose. It decides which player a listener builds, so an
+/// unrecognised value must never be a track anyone tries to play: a queue entry is written by a
+/// peer, and the deck reading it has no way to check what a peer meant by a word it does not
+/// know. Anything not listed here reads as "not a playable track" and is skipped, exactly as an
+/// entry with no content address is.
+pub const JUKE_SOURCE_FILE: &str = "";
+/// A video played from YouTube's embedded player, by video id, rather than from a shared file.
+/// Unlike a file, nothing about it is content-addressed or held by the group: every listener
+/// fetches it from Google themselves, which is a disclosure their client gates locally.
+pub const JUKE_SOURCE_YOUTUBE: &str = "youtube";
 
 /// Append a `{id, author, text, ts}` message to a channel document (the canonical edit).
 pub fn append_message(
@@ -780,12 +799,19 @@ fn set_topic_in_doc(doc: &mut AutoCommit, topic: &str) -> Result<(), AutomergeEr
 /// blob has not arrived yet still lists fine; it just cannot play yet. The `author` is the
 /// adder's **device fingerprint**, resolved to a display name at render time like a message
 /// author.
+///
+/// An entry is one of two things, and `source` says which. A **file** entry is the original kind:
+/// content the group already holds, addressed by `cid`, served to the deck out of the vault. A
+/// **linked** entry names a video on somebody else's service by id in `link` and has no `cid` at
+/// all, because there is nothing to hold: each listener's own client fetches it, and whether it
+/// may is that client's decision, not the queue's. The two never mix, so a reader that only
+/// understands one of them cannot mistake the other for a track it can play.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JukeEntry {
     /// A stable per-entry id (random hex), minted like a message id; so a removal addresses
     /// exactly one entry under concurrent merges.
     pub id: String,
-    /// The lowercase hex content address of the queued file.
+    /// The lowercase hex content address of the queued file. Empty for a linked entry.
     pub cid: String,
     /// The display name shown in the queue (never empty in a stored entry).
     pub name: String,
@@ -793,6 +819,11 @@ pub struct JukeEntry {
     pub author: String,
     /// When the entry was queued, epoch-millis (the adder's injected clock).
     pub added_ms: u64,
+    /// Where the track comes from: [`JUKE_SOURCE_FILE`] (the default, and what every entry
+    /// written before linked tracks existed reads as) or [`JUKE_SOURCE_YOUTUBE`].
+    pub source: String,
+    /// The provider's id for a linked track. Empty for a file entry.
+    pub link: String,
 }
 
 /// Add one jukebox entry to a channel document, keyed by its id. The queue is a map at the
@@ -808,6 +839,13 @@ fn add_juke_entry_in_doc(doc: &mut AutoCommit, e: &JukeEntry) -> Result<(), Auto
     doc.put(&entry, JB_NAME, e.name.as_str())?;
     doc.put(&entry, JB_AUTHOR, e.author.as_str())?;
     doc.put(&entry, JB_ADDED, e.added_ms as i64)?;
+    // Written only for a linked entry, so a file entry is byte-for-byte the document an older
+    // build wrote and every member still replicates the same thing for the same playlist. The
+    // absent keys read back as [`JUKE_SOURCE_FILE`], which is what they mean.
+    if !e.source.is_empty() {
+        doc.put(&entry, JB_SOURCE, e.source.as_str())?;
+        doc.put(&entry, JB_LINK, e.link.as_str())?;
+    }
     Ok(())
 }
 
@@ -834,8 +872,23 @@ fn read_jukebox(doc: &AutoCommit) -> Vec<JukeEntry> {
             if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&queue, &id) {
                 let cid = juke_cid_field(doc, &entry, JB_CID);
                 let name = str_field(doc, &entry, JB_NAME);
-                if cid.is_empty() || name.is_empty() {
+                let source = str_field(doc, &entry, JB_SOURCE);
+                let link = str_field(doc, &entry, JB_LINK);
+                if name.is_empty() {
                     continue; // a cleared/malformed entry is not a playable track
+                }
+                // An entry has to name exactly one way of getting the track, and it has to be a
+                // way this build knows. A source nobody here understands is skipped rather than
+                // guessed at, and an entry carrying BOTH a content address and a link is skipped
+                // too: a reader that picked one of them would be picking which of two things a
+                // peer meant, and the two disagree about who fetches what from where.
+                let playable = match source.as_str() {
+                    JUKE_SOURCE_FILE => !cid.is_empty() && link.is_empty(),
+                    JUKE_SOURCE_YOUTUBE => cid.is_empty() && valid_juke_link(&link),
+                    _ => false,
+                };
+                if !playable {
+                    continue;
                 }
                 out.push(JukeEntry {
                     id,
@@ -843,6 +896,8 @@ fn read_jukebox(doc: &AutoCommit) -> Vec<JukeEntry> {
                     name,
                     author: str_field(doc, &entry, JB_AUTHOR),
                     added_ms: int_field(doc, &entry, JB_ADDED),
+                    source,
+                    link,
                 });
             }
         }
@@ -870,6 +925,26 @@ fn valid_juke_cid(cid: &str) -> bool {
     !cid.is_empty()
         && cid.len() <= MAX_JUKEBOX_CID_CHARS
         && cid.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Whether `link` is a storable provider id: 1..=[`MAX_JUKEBOX_LINK_CHARS`] characters of the
+/// URL-safe base64 alphabet.
+///
+/// The alphabet is the substance. A link ends up in a URL path on every listener's device, so
+/// what matters is that it cannot leave the segment it is written into: no slash, no dot, no
+/// query, nothing percent-encoded, so there is no escaping step for a client to get wrong.
+///
+/// It deliberately does NOT pin the eleven characters a YouTube id happens to be. This layer
+/// stores a queue; it is not the right place to encode a third party's current id format, and a
+/// change at their end should not turn every stored entry into an unreadable one. The client that
+/// builds the actual address checks the exact shape it needs (see `youtube.ts`), which is the
+/// check that has to be right and is next to the code that depends on it.
+fn valid_juke_link(link: &str) -> bool {
+    !link.is_empty()
+        && link.len() <= MAX_JUKEBOX_LINK_CHARS
+        && link
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// Edit the text of the message with `id` in a channel document, stamping `edited`. Returns
@@ -4079,6 +4154,55 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "a jukebox entry must name a file content address".into(),
             ));
         }
+        let name = self.check_juke_room(channel, name)?;
+        self.queue_juke_entry(channel, cid.to_string(), String::new(), String::new(), name)
+            .await
+    }
+
+    /// Queue a **linked** track: a video on somebody else's service, named by id rather than by
+    /// content address. Replies with the entry's fresh id. Any member may, exactly as for a file.
+    ///
+    /// What this does not do is worth stating, because the asymmetry with [`Server::jukebox_add`]
+    /// is the whole design. A file entry names content the group holds and can serve; a linked
+    /// entry names something no member has, and playing it means every listener fetching it from
+    /// a third party themselves. This call therefore reaches no network and checks nothing about
+    /// the video: it cannot say whether the id exists, and it must not, because finding out would
+    /// mean this device contacting that service on a peer's behalf. Whether a listener ever makes
+    /// that request is decided on the listener, at play time, by its own policy.
+    ///
+    /// Rejects a `source` that is not a known one, a `link` that is not
+    /// 1..=[`MAX_JUKEBOX_LINK_CHARS`] URL-safe base64 characters, a blank name or one over
+    /// [`MAX_JUKEBOX_NAME_BYTES`] UTF-8 bytes, and any add to a full queue.
+    pub async fn jukebox_add_link(
+        &mut self,
+        channel: u128,
+        source: &str,
+        link: &str,
+        name: &str,
+    ) -> Result<String, AppError> {
+        if source != JUKE_SOURCE_YOUTUBE {
+            return Err(AppError::Invalid(format!(
+                "unknown jukebox source: {source:?}"
+            )));
+        }
+        if !valid_juke_link(link) {
+            return Err(AppError::Invalid(
+                "a linked jukebox entry must name a video id".into(),
+            ));
+        }
+        let name = self.check_juke_room(channel, name)?;
+        self.queue_juke_entry(
+            channel,
+            String::new(),
+            source.to_string(),
+            link.to_string(),
+            name,
+        )
+        .await
+    }
+
+    /// The checks both kinds of add share: a usable name, and a queue with room left in it.
+    fn check_juke_room(&self, channel: u128, name: &str) -> Result<String, AppError> {
         let name = name.trim();
         if name.is_empty() {
             return Err(AppError::Invalid("a jukebox entry needs a name".into()));
@@ -4094,12 +4218,27 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "the jukebox is full (max {MAX_JUKEBOX_ENTRIES} entries)"
             )));
         }
+        Ok(name.to_string())
+    }
+
+    /// Mint the entry and post it. Both adds land here so one place decides what a stored entry
+    /// looks like, and neither can drift into writing a shape the reader will not accept.
+    async fn queue_juke_entry(
+        &mut self,
+        channel: u128,
+        cid: String,
+        source: String,
+        link: String,
+        name: String,
+    ) -> Result<String, AppError> {
         let entry = JukeEntry {
             id: self.sync.random_id(),
-            cid: cid.to_string(),
-            name: name.to_string(),
+            cid,
+            name,
             author: self.my_fingerprint(),
             added_ms: self.sync.now_ms(),
+            source,
+            link,
         };
         let id = entry.id.clone();
         self.sync
@@ -9067,6 +9206,164 @@ mod tests {
             clock.advance_ms(60_000);
         }
         assert!(!alice.observe_eclipse());
+    }
+
+    #[tokio::test]
+    async fn a_linked_jukebox_entry_names_a_video_and_never_a_file() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+
+        let id = alice
+            .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, "dQw4w9WgXcQ", "A Video")
+            .await
+            .unwrap();
+        let queue = alice.jukebox(GENERAL);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, id);
+        assert_eq!(queue[0].source, JUKE_SOURCE_YOUTUBE);
+        assert_eq!(queue[0].link, "dQw4w9WgXcQ");
+        assert_eq!(queue[0].name, "A Video");
+        assert_eq!(queue[0].author, alice.my_fingerprint());
+        assert_eq!(
+            queue[0].cid, "",
+            "nothing here holds it, so there is nothing to address"
+        );
+        // Queueing a link is not sending a message, exactly as queueing a file is not.
+        assert!(alice.messages(GENERAL).is_empty());
+
+        // Removal works the same way for either kind: the id is the address.
+        alice.jukebox_remove(GENERAL, &id).await.unwrap();
+        assert!(alice.jukebox(GENERAL).is_empty());
+
+        // A source nobody here understands is refused at the door rather than stored to confuse
+        // a reader later.
+        for source in ["", "vimeo", "YOUTUBE", "youtube "] {
+            assert!(
+                alice
+                    .jukebox_add_link(GENERAL, source, "dQw4w9WgXcQ", "V")
+                    .await
+                    .is_err(),
+                "source {source:?} is not one this build knows"
+            );
+        }
+        // A link ends up in a URL path on every listener's device. These are the ways out of a
+        // path segment, and the alphabet is what closes them.
+        for bad in [
+            "",
+            "has/slash",
+            "has.dot",
+            "has?query",
+            "has#frag",
+            "has%2f",
+        ] {
+            assert!(
+                alice
+                    .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, bad, "V")
+                    .await
+                    .is_err(),
+                "link {bad:?} could leave its path segment"
+            );
+        }
+        let long_link = "a".repeat(MAX_JUKEBOX_LINK_CHARS + 1);
+        assert!(alice
+            .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, &long_link, "V")
+            .await
+            .is_err());
+        // The name rules are the ones a file entry has, because they bound the same document.
+        assert!(alice
+            .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, "dQw4w9WgXcQ", "  ")
+            .await
+            .is_err());
+        let over = "n".repeat(MAX_JUKEBOX_NAME_BYTES + 1);
+        assert!(alice
+            .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, "dQw4w9WgXcQ", &over)
+            .await
+            .is_err());
+        assert!(alice.jukebox(GENERAL).is_empty(), "nothing was queued");
+
+        // Both kinds share one queue and one cap: a room cannot get more room by mixing them.
+        for i in 0..MAX_JUKEBOX_ENTRIES {
+            if i % 2 == 0 {
+                alice
+                    .jukebox_add(GENERAL, &format!("bee{i:x}"), &format!("File {i}"))
+                    .await
+                    .unwrap();
+            } else {
+                alice
+                    .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, &format!("vid{i:0>8}"), "V")
+                    .await
+                    .unwrap();
+            }
+        }
+        assert_eq!(alice.jukebox(GENERAL).len(), MAX_JUKEBOX_ENTRIES);
+        assert!(alice
+            .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, "dQw4w9WgXcQ", "V")
+            .await
+            .is_err());
+        assert_eq!(alice.jukebox(GENERAL).len(), MAX_JUKEBOX_ENTRIES);
+    }
+
+    #[tokio::test]
+    async fn a_queue_entry_that_claims_to_be_both_kinds_is_not_a_track() {
+        // A peer writes the channel document directly, so the reader is the boundary, not the
+        // add call. An entry naming BOTH a file and a video says two different things about who
+        // fetches what from where; resolving it in favour of either would be this device deciding
+        // what that peer meant, so it is not a playable track at all.
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        alice
+            .jukebox_add(GENERAL, "deadbeef", "Real Track")
+            .await
+            .unwrap();
+
+        let confused = JukeEntry {
+            id: "e_confused".into(),
+            cid: "deadbeef".into(),
+            name: "Both At Once".into(),
+            author: alice.my_fingerprint(),
+            added_ms: 1_000,
+            source: JUKE_SOURCE_YOUTUBE.into(),
+            link: "dQw4w9WgXcQ".into(),
+        };
+        // A source this build does not know, which is the other half of the same rule.
+        let unknown = JukeEntry {
+            id: "e_unknown".into(),
+            cid: String::new(),
+            name: "From The Future".into(),
+            author: alice.my_fingerprint(),
+            added_ms: 1_000,
+            source: "vimeo".into(),
+            link: "12345678".into(),
+        };
+        // A linked entry whose link is junk: stored shape is checked on the way out too.
+        let junk = JukeEntry {
+            id: "e_junk".into(),
+            cid: String::new(),
+            name: "Bad Link".into(),
+            author: alice.my_fingerprint(),
+            added_ms: 1_000,
+            source: JUKE_SOURCE_YOUTUBE.into(),
+            link: "../../etc/passwd".into(),
+        };
+        for entry in [confused, unknown, junk] {
+            let written = entry.clone();
+            alice
+                .sync
+                .post(DocType::Channel, GENERAL, move |d| {
+                    add_juke_entry_in_doc(d, &written)
+                })
+                .await
+                .unwrap();
+        }
+
+        let queue = alice.jukebox(GENERAL);
+        assert_eq!(
+            queue.len(),
+            1,
+            "only the well-formed entry is a track; got {:?}",
+            queue.iter().map(|e| &e.id).collect::<Vec<_>>()
+        );
+        assert_eq!(queue[0].cid, "deadbeef");
     }
 
     #[tokio::test]

@@ -968,6 +968,47 @@ enum CatchupTask {
     Doc { doc_type: DocType, doc_id: u128 },
 }
 
+/// What one commit catch-up exchange **established**, as distinct from how far this node happened
+/// to move while performing it.
+///
+/// The two are routinely different, and only some of them can retire recovery work. An up-to-date
+/// group answers a speculative probe with nothing, and the epoch does not move; a peer that never
+/// replied at all also leaves the epoch where it was. Collapsing both into "zero commits applied"
+/// is what let a timeout close a probe: an ordinary member that missed an epoch while offline
+/// retired its own recovery on the way back and stayed unable to read current traffic until
+/// something unrelated re-detected the gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitCatchupOutcome {
+    /// A current roster member signed a decodable bundle bound to this exact request.
+    Verified { applied: usize },
+    /// The peer returned no bundle. A member holding nothing from `from_epoch` answers exactly
+    /// this way, and so does one that refused the request: `serve_commit_catchup` sends empty
+    /// bytes for both, so the wire genuinely does not distinguish them. Counted as an
+    /// answer, because the alternative is to treat every honest up-to-date peer as a failure.
+    /// Kept as its own variant so the conflation is visible where it is relied on, and so the
+    /// day the response carries a signed empty bundle there is one place to split it.
+    Empty,
+    /// No answer at all: the request failed or passed its deadline, or what came back was
+    /// oversized, undecodable, or not signed by a current member. A fact about the peer and the
+    /// link, and evidence about the commit log in neither direction.
+    Unanswered,
+}
+
+impl CommitCatchupOutcome {
+    /// The commits actually applied; zero whenever nothing was established.
+    fn applied(self) -> usize {
+        match self {
+            Self::Verified { applied } => applied,
+            Self::Empty | Self::Unanswered => 0,
+        }
+    }
+
+    /// Whether the peer said anything this node may draw a conclusion from.
+    fn answered(self) -> bool {
+        !matches!(self, Self::Unanswered)
+    }
+}
+
 /// The transcript the admitter signs (and the joiner verifies) to authenticate a
 /// Welcome: binds the Welcome bytes to the specific invite (group + nonce).
 fn join_transcript(
@@ -4773,8 +4814,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// `Transport(Closed)`. `member_peers` is written only by `promote_member_peer`, off a
     /// roster-verified signed catch-up, so it means precisely "has proved it can answer".
     ///
-    /// Accepted cost: a freshly restored node has an empty `member_peers` and so does not sweep on
-    /// its first reconnect. It proves a member on the first successful catch-up and sweeps after.
+    /// A freshly restored node has an empty `member_peers` and so does not sweep on its first
+    /// reconnect. It proves a member on the first successful catch-up, and
+    /// [`Self::promote_member_peer_bound`] runs this sweep at that point instead. Leaving that
+    /// second half unwritten was the whole of the restart bug: the gate declined the connection,
+    /// nothing declined it again once the proof arrived, and a channel could stay short for the
+    /// rest of the session.
     fn sweep_docs_on_reconnect(&mut self, peer: PeerId) {
         if !self.peer_is_preferred_source(peer) {
             return;
@@ -5375,14 +5420,28 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     from_epoch, gap_at, ..
                 } => {
                     let before = self.group.epoch();
-                    let _ = self.do_commit_catchup(peer, from_epoch).await;
+                    let outcome = self
+                        .do_commit_catchup(peer, from_epoch)
+                        .await
+                        .unwrap_or(CommitCatchupOutcome::Unanswered);
                     let here = self.group.epoch();
                     // "Filled" has to be judged against the proven gap, not against whether
                     // the reply parsed: an empty bundle used to fall through both arms below,
                     // marking nothing, so the next op re-picked the same peer forever.
                     let progressed = here > before;
-                    let closed =
-                        self.pending_commits.is_empty() && gap_at.is_none_or(|gap| here >= gap);
+                    // A request nobody answered closes nothing. Every other term below is already
+                    // satisfied for an initial probe (nothing buffered, no gap yet proven), so a
+                    // timeout or an unsigned reply retired it exactly as a member's "you are up
+                    // to date" does, and the task was neither re-queued nor handed to another
+                    // source: an ordinary member that missed an epoch while offline discarded its
+                    // own recovery on the way back and stayed unable to decrypt current traffic
+                    // until an unrelated event re-detected the gap.
+                    //
+                    // An empty response still closes it, because that is also what an up-to-date
+                    // member sends; see [`CommitCatchupOutcome::Empty`] for what that costs.
+                    let closed = outcome.answered()
+                        && self.pending_commits.is_empty()
+                        && gap_at.is_none_or(|gap| here >= gap);
                     if closed {
                         if progressed {
                             // Progress made: clear the failed-peer set and stop chasing.
@@ -5398,6 +5457,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                             // that is the defect: a member that joined at the missed commit
                             // holds no commit log, and leaving it unmarked made the drain
                             // re-pick it, most-recently-seen, on every single op forever.
+                            //
+                            // An unanswered request lands here too, and is marked for the same
+                            // reason rather than because it proved anything: the task outlives
+                            // the attempt now, so without moving on the next drain would re-pick
+                            // the peer that just spent a whole tick's deadline saying nothing.
+                            // Any inbound traffic from it clears the mark again.
                             self.note_failed_catchup_peer(peer);
                         }
                         self.enqueue_commit_catchup_for(here, gap_at, None);
@@ -5480,11 +5545,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// to be a current member. Both mean its earlier answers describe a state that no longer
     /// applies, and the second means a source that was only opportunistic is now one this node
     /// must actually hear from.
-    /// Only forgets. Queueing the work is the caller's, and both callers already have a way to do
-    /// it that is paced: a reconnect runs its own document sweep, and a first proof fills the
-    /// backlog the drain takes a couple from per tick. Enqueueing here as well turned every
-    /// connection edge into a burst of catch-up requests, which is enough on a busy node to keep
-    /// the tick too full to serve anybody.
+    /// Only forgets. Queueing the work is the caller's, and both callers run the same paced sweep
+    /// straight afterwards: a reconnect sweeps for a peer already proven, and a first proof sweeps
+    /// for the peer that has just become one. Enqueueing here as well turned every connection
+    /// edge into a burst of catch-up requests, including for peers that had proved nothing, which
+    /// is enough on a busy node to keep the tick too full to serve anybody.
     fn forget_source_answers(&mut self, peer: PeerId) {
         self.catchup_sources_checked.retain(|_, (_, peers)| {
             peers.remove(&peer);
@@ -5768,6 +5833,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         });
         while self.member_peers.len() > self.config.max_known_peers {
             self.member_peers.pop_front();
+        }
+        if newly_proven {
+            // The obligation this proof creates, discharged now that the pool contains it.
+            //
+            // A restored node reaches its first connection with an empty pool, so
+            // [`Self::sweep_docs_on_reconnect`] correctly declines to aim member-only recovery at
+            // a peer that has not shown it can serve one. The moment a peer does show it, the
+            // sweep that connection could not run is the sweep that has to happen, or history
+            // written while this node was away stays missing until something unrelated notices.
+            //
+            // Runs at most once per new (peer, device) binding, which is the same order as the
+            // reconnect sweep itself: the burst this file warns about came from enqueueing on
+            // every *connection* edge, before anything had been proven. The drain is bounded by
+            // what was queued when it started, so the work still leaves a couple of documents per
+            // tick rather than as one flood.
+            self.sweep_docs_on_reconnect(peer);
         }
     }
 
@@ -11048,14 +11129,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: catcoms_rt::PeerId,
         from_epoch: u64,
     ) -> Result<usize, SyncError> {
-        self.do_commit_catchup(peer, from_epoch).await
+        Ok(self.do_commit_catchup(peer, from_epoch).await?.applied())
     }
 
+    /// [`Self::request_commit_catchup`], reporting what the exchange **established** rather than
+    /// only how far it moved this node. The drain needs the difference: an unanswered request and
+    /// a verified "you have everything" leave the epoch in exactly the same place.
     async fn do_commit_catchup(
         &mut self,
         peer: PeerId,
         from_epoch: u64,
-    ) -> Result<usize, SyncError> {
+    ) -> Result<CommitCatchupOutcome, SyncError> {
         let (req, req_auth) =
             self.build_authed_request(KIND_COMMIT_CATCHUP, &encode_commit_catchup_req(from_epoch))?;
         tracing::debug!(from_epoch, ?peer, "request commit catch-up");
@@ -11070,7 +11154,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         )
         .await?;
         if resp.is_empty() {
-            return Ok(0);
+            return Ok(CommitCatchupOutcome::Empty);
         }
         if resp.len() > MAX_CATCHUP_RESPONSE {
             tracing::warn!(
@@ -11109,14 +11193,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 ?peer,
                 "commit catch-up response from a non-member; demoted + rejected"
             );
-            return Ok(0);
+            return Ok(CommitCatchupOutcome::Unanswered);
         }
         if !verify_with_public_bytes(&responder_pubkey, &transcript, &signature) {
             tracing::warn!(
                 ?peer,
                 "commit catch-up response signature invalid; rejected"
             );
-            return Ok(0);
+            return Ok(CommitCatchupOutcome::Unanswered);
         }
         // A member signature authenticates the bytes but does not make malformed bytes usable.
         // Decode before promotion so operational availability means this peer completed a
@@ -11157,7 +11241,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             epoch = self.group.epoch(),
             "applied commit catch-up"
         );
-        Ok(applied)
+        Ok(CommitCatchupOutcome::Verified { applied })
     }
 
     /// Read a document's materialized state.
@@ -15965,6 +16049,54 @@ mod tests {
         );
     }
 
+    /// The other half of that gate: a first proof must run the sweep its connection declined.
+    ///
+    /// `member_peers` holds this session's proofs and nothing else, so a process that has just
+    /// restored reaches its first connection with an empty pool and correctly declines to aim
+    /// member-only recovery at a peer that has proved nothing. Recovery then depended on a
+    /// *second* connection edge that a stable link never produces, and every channel written to
+    /// while this node was away stayed short until something unrelated happened to notice: the
+    /// user-visible shape was "restart, and the chat stops filling in".
+    ///
+    /// Both documents, from the proof alone, with no further transport event.
+    #[tokio::test]
+    async fn a_first_member_proof_sweeps_the_docs_the_connection_declined() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut alice = members.into_iter().next().unwrap();
+        alice.open_channel(DocType::Channel, 1).await.unwrap();
+        alice.open_channel(DocType::Channel, 2).await.unwrap();
+        // Documents held, nothing proved: the state a restore starts in.
+        alice.member_peers.clear();
+        alice.catchup_queue.clear();
+
+        let queued_docs = |sync: &Member| -> BTreeSet<u128> {
+            sync.catchup_queue
+                .iter()
+                .filter_map(|task| match task {
+                    CatchupTask::Doc { doc_type, doc_id } if *doc_type == DocType::Channel => {
+                        Some(*doc_id)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let peer = PeerId::from_u64(9_998);
+        alice.note_peer_connected(peer);
+        assert!(
+            queued_docs(&alice).is_empty(),
+            "the connection itself proves nothing, so it must not aim recovery anywhere"
+        );
+
+        // The first roster-verified signed catch-up proves the peer. No second connection edge.
+        alice.promote_member_peer_bound(peer, alice.device.device_id(), true);
+        assert_eq!(
+            queued_docs(&alice),
+            BTreeSet::from([1, 2]),
+            "a first proof must queue every open document, not just the one being read"
+        );
+    }
+
     async fn build_members(n: u64) -> (std::sync::Arc<Hub>, Vec<Member>, Vec<DeviceId>) {
         assert!(n >= 1);
         let hub = Hub::new();
@@ -17014,6 +17146,77 @@ mod tests {
             "no source is eligible for this document while they are all cooling"
         );
         assert!(doc_queued(&bob), "and the gap is still owned");
+    }
+
+    /// A commit probe nobody answered is not a probe that found nothing.
+    ///
+    /// The proactive probe a non-committer sends on every connection carries no proven gap, and a
+    /// node that has just restarted has nothing buffered either, so every term of "this search is
+    /// finished" except the answer itself was already true. A timeout therefore retired the task
+    /// exactly as an up-to-date member's reply would, and nothing re-queued it or tried another
+    /// source: a member that missed an epoch while offline could come back, fail its one probe,
+    /// and stay unable to decrypt current traffic.
+    #[tokio::test]
+    async fn an_unanswered_commit_probe_is_not_a_finished_one() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let alice_peer = alice.local_peer();
+        assert!(
+            !bob.is_designated_committer(),
+            "the proactive probe is the non-committer's recovery path"
+        );
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+
+        let probing = |sync: &Member| {
+            sync.catchup_queue
+                .iter()
+                .any(|task| matches!(task, CatchupTask::Commits { gap_at: None, .. }))
+        };
+
+        bob.catchup_queue.clear();
+        bob.maybe_probe_for_missed_commits();
+        assert!(probing(&bob), "a reconnecting non-committer probes");
+
+        // Silence: a peer that accepted the request and never came back, which is what a timeout
+        // resolves to.
+        let (_, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            let Some(TransportEvent::Request { responder, .. }) =
+                alice.transport.next_event().await
+            else {
+                panic!("the drain's probe is the next event");
+            };
+            drop(responder);
+        });
+        assert!(
+            probing(&bob),
+            "nobody said this node is up to date, so the probe is still owed an answer"
+        );
+
+        // An answer does retire it, including the empty one an up-to-date member sends: without
+        // that, an ordinary connect would chase a gap that does not exist and mark every honest
+        // peer failed on the way. (The mark from the silent attempt clears the moment the peer is
+        // seen again; cleared here because this test never routes that traffic.)
+        bob.failed_catchup_peers.clear();
+        let (_, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            let Some(TransportEvent::Request {
+                from,
+                data,
+                responder,
+                ..
+            }) = alice.transport.next_event().await
+            else {
+                panic!("the drain's probe is the next event");
+            };
+            let response = alice.handle_request(from, &data);
+            responder.respond(Bytes::from(response));
+        });
+        assert!(
+            !probing(&bob),
+            "an answered probe must not be chased on every later tick"
+        );
     }
 
     /// A successful answer that carries nothing is not the same claim as a completed document,
