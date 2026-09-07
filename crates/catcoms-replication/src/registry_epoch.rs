@@ -23,6 +23,9 @@ use crate::{
     Receipt, ReceiptBook, ReceiptIngest, ReplError, SealedOp, SignedOp, MAX_CHECKPOINT_BYTES,
 };
 
+mod settlement;
+pub use settlement::RegistrySettlementPlan;
+
 /// Raw seed + signed content + gate + receipts, including bounded length framing. There is no
 /// second, potentially compressed Automerge save to trust or decompress during restore.
 pub const MAX_REGISTRY_EPOCH_SNAPSHOT_BYTES: usize = MAX_CHECKPOINT_BYTES

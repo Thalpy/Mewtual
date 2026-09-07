@@ -8,7 +8,9 @@ use std::io::Read;
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_replication::epoch::{MAX_RECEIPT_BYTES, MAX_SIGNED_EPOCH_OP_BYTES};
 use catcoms_replication::registry::{registry_document, RegistryOp, RegistryProjection};
-use catcoms_replication::registry_epoch::{RegistryEpoch, MAX_REGISTRY_EPOCH_SNAPSHOT_BYTES};
+use catcoms_replication::registry_epoch::{
+    RegistryEpoch, RegistrySettlementPlan, MAX_REGISTRY_EPOCH_SNAPSHOT_BYTES,
+};
 use catcoms_replication::{
     Admission, DomainOp, EpochPhase, LogicalDocument, Receipt, ReceiptIngest, SealedOp,
 };
@@ -66,6 +68,31 @@ impl EpochRegistryState {
 }
 
 impl ServerStore {
+    /// Rebuild an exact receipted registry checkpoint and its recovery inputs from the checked
+    /// vault unit. Read-only: no reserve is spent, recovery saved, intent retired or log pruned.
+    /// The returned plan is ephemeral, not an installation/durability permit. A future worker
+    /// must reload, compare its source version and recheck authority under the per-document gate
+    /// before persisting recovery and installing anything. Missing state is not an empty epoch.
+    pub fn plan_registry_settlement(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        close_bytes: &[u8],
+        expected_tenure_start: u64,
+    ) -> Result<RegistrySettlementPlan, AppError> {
+        // Reject oversized/malformed public input before reading or replaying the vault unit.
+        let close = catcoms_replication::CloseRecord::decode(close_bytes).map_err(invalid)?;
+        let mut state = self
+            .load_registry_epoch(server, group, bucket, device)?
+            .ok_or_else(|| invalid("registry settlement source is missing"))?;
+        state
+            .unit
+            .prepare_settlement(&close, group, expected_tenure_start)
+            .map_err(invalid)
+    }
+
     /// Journal one canonical local intent, then save its checked registry edit before returning
     /// ciphertext. Reuse the SAME nonce/envelope on retry; a held edit reseals the original signed
     /// bytes, even after newer edits arrive. Both intent and epoch cross their durability barriers.

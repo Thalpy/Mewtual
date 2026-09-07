@@ -296,6 +296,14 @@ table with the commit that closed it.
   Returned ciphertext is not a permanent send permit: live transport must still recheck session,
   server incarnation, membership, MLS epoch and Open at send. Automatic replay must use the intent's
   original author. Callers must still persist excluded recovery before source retirement.
+  Registry settlement preparation now checks the exact held current-owner receipt and named
+  dependency closure, rebuilds its canonical seed and verifies the expected hash. Its immutable
+  recovery inputs include excluded accepted operations with their verified authors, not replay
+  permission or late quarantined content. A whole-source fingerprint distinguishes peers with
+  identical receipts but different excluded work. Planning changes no durable state or quota-owner
+  metadata and grants no installation/prune authority: a future transaction must recheck source
+  and authority under the gate and persist bounded typed recovery first. Recovery capacity is
+  not implied by a successful plan, and stale-owner receipts fail preparation after succession.
   No production discovery, pruning, repair or multi-record settlement
   is wired. The existing file-sync/Unix-parent-sync durability and local-path threat boundary apply.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be

@@ -8,6 +8,47 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 receipt-bound registry settlement preparation (2026-09-07).** Rough implementation
+  estimate: **55%, with about +/-10 percentage points uncertainty**, for P1 backend work, not
+  the whole Creative Suite or end-to-end readiness. Core validation, journals, storage admission
+  and durable registry edits are implemented; settlement/recovery, discovery and live integration
+  remain substantial. UI remains user-owned and untouched.
+
+  `RegistryEpoch::prepare_settlement` and the read-only
+  `ServerStore::plan_registry_settlement` reload/check Closing state and its exact held current-owner
+  receipt, rebuild the selected dependency closure, verify the deterministic checkpoint, and
+  partition accepted operation ids into included/excluded recovery inputs. The full source
+  projection preserves overflow/tombstones. Excluded peer-authored operations retain attribution
+  but grant no replay authority. A whole-source fingerprint prevents conflating two peers with the
+  same receipt and different excluded edits. Source history, gate and durable bytes are unchanged.
+  No wire or persistence format changed; no UI, actor or transport was wired.
+
+  **Next:** typed registry recovery persistence plus crash-safe successor installation and intent
+  retirement. A plan is not an installation permit or a guarantee that recovery fits its cap:
+  that transaction must revalidate source/authority under the gate and persist recovery first.
+  Then receipt-head/seed/held-history discovery, the complete-budget coordinator, and actor/Studio
+  consumers. No source pruning or end-to-end settlement is claimed by this preparation slice.
+
+  Human/adversarial review target: `registry_epoch/settlement.rs` and its tests;
+  `store/epoch_registry.rs::plan_registry_settlement` and `tests/settlement.rs`. Seven core and one
+  store regression pass: real 2-MiB close threshold, exact successor dependencies, equal receipts
+  with differing excluded logs, malformed/missing closure, wrong seed, Fault/stale owner, removed
+  close author covered by a current receipt, peer tombstone attribution, quarantined content,
+  restart stability and corrupt vault rejection. Adversarial design, actual-diff and documentation
+  reviews report no remaining findings. The review's rotated-source coverage gap is fixed: an
+  epoch-1 plan preserves a seed-only inherited pointer, excludes late edits, survives restart and
+  produces an isolated epoch-2 seed. Final verification passes:
+  `cargo test -p catcoms-replication --lib registry_settlement` (7),
+  `cargo test -p catcoms-app registry_store_settlement_plan` (1),
+  `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190),
+  `npm.cmd --prefix apps/desktop test` (1132), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` (Git Bash on Windows), and `git diff --check`.
+  No frontend/native source was changed by this slice; frontend static/build checks and visual
+  validation were not run. Concurrent unrelated UI/release/documentation changes are excluded
+  from this slice and its commit.
+
 - **P1 durable local registry publication preparation (2026-09-07).**
   `ServerStore::edit_registry_epoch` connects the existing intent and registry adapters under one
   exclusive store borrow: canonical/type/scope/current-author validation, intent save/flush,

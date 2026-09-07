@@ -6,6 +6,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 mod local;
+mod settlement;
 
 const SERVER: u64 = 73;
 fn rng() -> ChaCha20Rng {

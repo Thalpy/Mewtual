@@ -450,6 +450,7 @@ pub struct RegistryEpoch; // private EncryptedDoc + EpochGate + ReceiptBook + op
   edit_or_reseal(&MlsDevice, &ServerGroup, rng, &DomainOp) -> Result<SealedOp>;
   ingest(&SealedOp, &ServerGroup, &MlsDevice) -> Result<Admission>;
   seal(Receipt, &ServerGroup, expected_tenure_start) -> Result<ReceiptIngest>; // retains full source
+  prepare_settlement(&CloseRecord, &ServerGroup, expected_tenure_start) -> Result<RegistrySettlementPlan>;
   doc_id(); epoch(); phase(); op_count(); quarantined_len(); projection(); // detached/read-only
   snapshot() -> Result<Vec<u8>>; // raw seed + signed log + gate/book, bounded version 1
   restore(vault_authenticated_bytes, &ServerGroup, expected_bucket, actor) -> Result<Self>;
@@ -458,6 +459,10 @@ pub struct RegistryEpoch; // private EncryptedDoc + EpochGate + ReceiptBook + op
 // Restore is local-only, not network authorization. Caller journals intent before edit and
 // atomically vault-persists the unit before publishing/acknowledging. No mutable handles escape;
 // no pruning, source replacement, fault repair or recovery acknowledgement API exists yet.
+pub struct RegistrySettlementPlan; // private, computation-only, content-redacted Debug
+  receipt(); checkpoint(); source_projection(); // immutable references
+  included_operation_ids(); excluded_operations(); // author-derived ids; no replay authority
+  source_version() -> [u8;32]; matches_source(&mut RegistryEpoch) -> Result<bool>;
 ```
 
 ---
@@ -1125,6 +1130,8 @@ ingest_registry_epoch(server, &ServerGroup, bucket, &MlsDevice, &SealedOp, rng, 
   -> Result<(Admission, EpochRegistryState), AppError>;
 seal_registry_epoch(server, &ServerGroup, bucket, &MlsDevice, Receipt, tenure_start, rng, &mut EpochStorageBudget)
   -> Result<(ReceiptIngest, EpochRegistryState), AppError>;
+plan_registry_settlement(server, &ServerGroup, bucket, &MlsDevice, close_bytes, tenure_start)
+  -> Result<RegistrySettlementPlan, AppError>;
 ```
 
 `EpochRegistryState` exposes only `epoch`, `phase`, `op_count`, `quarantined_len` and a detached
@@ -1135,6 +1142,24 @@ before returning the outcome. Missing ingress may create epoch zero only. A rece
 current owner/tenure and bucket verification before disk work; a normally absent source refuses
 without invalidating accounting, whereas loss of an inventoried source requires reconciliation.
 Sealing retains all source history; saved post-seal quarantine hashes are NOT accepted edits.
+
+Settlement preparation is read-only and accepts a canonical close of at most 4 KiB before disk
+work. It reloads the checked vault unit, requires Closing and the exact selected current-owner/
+tenure receipt, reconstructs only its dependency-complete closure and verifies the deterministic
+seed against the receipt's expected hash. Missing source/heads, malformed closes, another close
+from a current member, a wrong seed, stale authority and Fault all refuse without writes.
+The plan retains the full source projection (including overflow/tombstones), included operation
+ids and excluded accepted author-bound domain operations in canonical id order. Quarantined
+late bodies are not accepted source work. Excluded peer operations are recovery evidence, never
+permission to journal or replay as that peer. The plan's Debug excludes all content.
+
+`source_version` fingerprints the entire normalized local restart unit, not just its receipt:
+peers with the same receipt can have different excluded edits. It is serialization-version
+dependent and is not a wire id, currency proof or durability/installation permit. Future settlement
+must reload/revalidate authority and the source version under the document gate, preflight and
+persist typed recovery, then install. A plan does not guarantee the eventual recovery encoding
+fits its byte cap/reservation. This API does not replace a source, write recovery, retire intents,
+or finish settlement; the source remains Closing and fully retained.
 
 Local editing uses two ordered barriers under the exclusive store borrow: validate the canonical
 registry operation and current local author, save/flush its intent, then reload, apply and save/flush
