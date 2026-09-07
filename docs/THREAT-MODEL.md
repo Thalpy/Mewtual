@@ -511,8 +511,18 @@ table with the commit that closed it.
   range-bounded custom scheme but is still parsed by the platform WebView/media stack. The scheme
   emits a body only when a bounded container signature matches the exact allowlisted MIME; SVG,
   mismatch and unknown inputs receive a bodyless denial because an octet-stream body may still be
-  media-sniffed. Cached heads/chunks bind to the exact uniquely resolved current manifest rather
-  than only the member-claimed plaintext CID. Cache access and the synchronous URI-responder
+  media-sniffed. Cached heads/chunks bind to the complete sorted set of at most four compatible
+  encrypted manifests rather than only the member-claimed plaintext CID. Alternative encryptions
+  must agree on total size, MIME and ordered plaintext chunk CID/size/MIME; each alternative still
+  passes its own ciphertext CID, wrapped-key AEAD, plaintext CID and length checks. Any incompatible
+  claim or excess variant fails closed, and adding/removing a fallback invalidates the cache identity.
+  Whole-file downloads retain their final plaintext hash check. Upload reuse requires complete local
+  verification, not index presence. Before any decryption, reuse compares the index plan with the
+  actual upload's size and ordered chunk identities, preventing a tiny upload from triggering a
+  hostile repeated large-chunk plan. Re-upload publishes fresh ciphertext under fresh addresses;
+  replacement is limited to a fully signature-verified local-device row at the same name/path/CID.
+  Publication confirms local possession and index posting, never remote replication or retention.
+  Cache access and the synchronous URI-responder
   publication are generation-gated, so a disk/network read that finishes after explicit lock
   cannot refill plaintext caches, reveal a stale size, or publish its already-built body. Storage
   inventory separately authenticates every exact encoded chunk reference and joins verdicts to an

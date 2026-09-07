@@ -53,6 +53,7 @@ use thiserror::Error;
 
 mod actor;
 pub mod creative;
+mod file_resolution;
 mod moderation;
 pub mod pairing;
 pub mod registry_replay;
@@ -2866,7 +2867,7 @@ fn storage_ref_index(files: &[FileEntry]) -> StorageRefIndex {
 
 /// Index metadata that authorizes one inline-media representation.
 ///
-/// `manifest_version` binds every later range read to the exact chunk manifest that supplied the
+/// `manifest_version` binds every later range read to the complete compatible manifest set supplying the
 /// size and MIME. The plaintext CID is member-authored until a whole-file download verifies it,
 /// so it cannot safely serve as that version by itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2954,6 +2955,10 @@ pub struct StorageHealth {
     /// ciphertext-address and file-layer authentication in this scan. Plaintext CIDs are not used
     /// here: another member can claim the same CID while supplying a different wrapped key/ref.
     pub verified_manifest_versions: HashSet<[u8; 32]>,
+    /// Exact manifest digests admitted by the same bounded equivalence policy as downloads.
+    /// This is metadata compatibility, not possession; inventory must also require exact
+    /// membership in `verified_manifest_versions` before offering a local copy.
+    pub resolvable_manifest_versions: HashSet<[u8; 32]>,
     /// Bytes of verified encrypted file-chunk content (not filesystem allocation or unrelated
     /// avatar/banner blobs).
     pub verified_bytes: u64,
@@ -4447,9 +4452,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// The check is against this device's view of the index, so two devices adding the same
     /// bytes concurrently can still produce two entries; the same pre-existing situation
     /// [`delete_file`](Self::delete_file) already handles by unlisting every entry for a cid.
-    /// Reuse also means the listing inherits the *first* upload's declared mime, and that a
-    /// dedup against content this device has never downloaded adds a listing whose chunks are
-    /// held elsewhere (re-fetchable, like any other file this device does not hold locally).
+    /// Reuse requires a complete locally authenticated manifest, including whole-file hashing.
+    /// If only metadata or unreadable chunks remain, re-upload publishes a fresh attested repair
+    /// with the same plaintext chunk identities. Other uploaders' attestations stay unchanged.
+    /// Repeated repairs replace only a fully verified local-device row at the same name/path;
+    /// new rows receive a fresh deadline, while replacement preserves the existing deadline.
+    /// A conflicting MIME/chunk layout or over-cap variant set fails with an explicit error.
     ///
     /// **Circulation expiry**: every listing this creates is stamped
     /// `now + `[`FILE_EXPIRY_DEFAULT_MS`] (one month), adjustable afterwards per listing via
@@ -4501,8 +4509,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// As [`add_file`](Self::add_file), but reports completed local upload work as
     /// `(steps_done, steps_total)`. Each sealed/stored chunk is one step and publishing the file
-    /// index entry is the final step, so `done == total` means the file is actually visible to the
-    /// group rather than merely copied into local storage.
+    /// index entry is the final step. `done == total` means verified local possession and local
+    /// publication in the replicated index; it does not acknowledge any remote holder.
     pub async fn add_file_with_progress(
         &mut self,
         name: &str,
@@ -4543,6 +4551,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // Clock-injected (never ambient): the default one-month circulation deadline.
         let expires = FileExpiry::At(self.sync.now_ms().saturating_add(FILE_EXPIRY_DEFAULT_MS));
         let plaintext_cid = Cid::of(bytes);
+        let mut chunk_identities: Vec<_> = bytes
+            .chunks(CHUNK_BYTES)
+            .map(|chunk| (Cid::of(chunk), chunk.len() as u64))
+            .collect();
+        if chunk_identities.is_empty() {
+            chunk_identities.push((Cid::of(&[]), 0));
+        }
         let index_rows = self.file_index_row_count();
         // Dedup on the plaintext cid against the live index (a deleted entry is removed from the
         // list, so only still-shared files match; re-storing after a delete is harmless anyway).
@@ -4551,7 +4566,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .iter()
             .filter(|e| e.cid.as_slice() == plaintext_cid.as_bytes())
             .collect();
-        if let Some(twin) = twins.first() {
+        if let Some(twin) = file_resolution::reusable_upload_entry(
+            &listed,
+            &plaintext_cid,
+            bytes.len() as u64,
+            &chunk_identities,
+            |manifest| self.manifest_held_verified(manifest),
+        ) {
             if let Some(p) = progress {
                 let _ = p.send((0, 1)).await;
             }
@@ -4589,7 +4610,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
             return Ok(plaintext_cid);
         }
-        if index_rows >= MAX_FILE_ENTRIES {
+        if index_rows >= MAX_FILE_ENTRIES
+            && self
+                .owned_upload_slot(name, &folder, &plaintext_cid)
+                .is_none()
+        {
             return Err(AppError::Invalid(format!(
                 "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
             )));
@@ -4669,6 +4694,78 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.clear_staged_blobs().unwrap_or(0)
     }
 
+    /// Local possession means every exact reference opens and the concatenation has the claimed
+    /// identity. Keep only one plaintext chunk in memory; neither metadata nor `has_blob` proves
+    /// this. Publication currently pays this bounded local verification inside the actor.
+    fn manifest_held_verified(&self, manifest: &FileManifest) -> bool {
+        let mut address = catcoms_storage::CidHasher::new();
+        for chunk in &manifest.chunks {
+            let Some(ciphertext) = self.sync.get_blob(&chunk.ciphertext_cid) else {
+                return false;
+            };
+            let Ok(plaintext) = self.sync.open_file(&ciphertext, chunk) else {
+                return false;
+            };
+            address.update(&plaintext);
+        }
+        address.cid() == manifest.plaintext_cid
+    }
+
+    /// A repeat repair may update our own exact slot, never another device's signature. Matching
+    /// the short display fingerprint is insufficient: verify the full local key and attestation.
+    fn owned_upload_slot(&self, name: &str, folder: &str, cid: &Cid) -> Option<ObjId> {
+        let doc = self.sync.doc(DocType::FileIndex, FILE_INDEX_DOC)?.doc();
+        let (_, list) = doc.get(ROOT, FILES).ok()??;
+        let key = self.sync.my_public_key();
+        let author = self.my_fingerprint();
+        for index in 0..doc.length(&list).min(MAX_FILE_ENTRIES) {
+            let Some((Value::Object(ObjType::Map), row)) = doc.get(&list, index).ok()? else {
+                continue;
+            };
+            if bounded_file_string(doc, &row, F_NAME, MAX_FILE_NAME_BYTES).as_deref() != Some(name)
+                || bounded_file_string(doc, &row, F_PATH, MAX_FILE_PATH_BYTES).as_deref()
+                    != Some(folder)
+                || bounded_file_string(doc, &row, F_AUTHOR, MAX_FILE_AUTHOR_BYTES).as_deref()
+                    != Some(&author)
+                || bounded_file_bytes(doc, &row, F_SIGNER_KEY, 32).as_deref()
+                    != Some(key.as_slice())
+            {
+                continue;
+            }
+            let Some(reference) = bounded_file_bytes(doc, &row, F_REF, MAX_FILE_REF_BYTES) else {
+                continue;
+            };
+            if !FileManifest::decode_or_legacy(&reference)
+                .is_ok_and(|manifest| manifest.plaintext_cid == *cid)
+            {
+                continue;
+            }
+            let Some(signature) = bounded_file_bytes(doc, &row, F_SIGNATURE, 64) else {
+                continue;
+            };
+            if signature
+                .as_slice()
+                .try_into()
+                .is_ok_and(|signature: &[u8; 64]| {
+                    verify_with_public_bytes(
+                        &key,
+                        &file_entry_attestation_payload(
+                            &self.sync.group_id(),
+                            name,
+                            &author,
+                            folder,
+                            &reference,
+                        ),
+                        signature,
+                    )
+                })
+            {
+                return Some(row);
+            }
+        }
+        None
+    }
+
     /// Publish the file-index entry for an upload whose chunks are already sealed and stored,
     /// making it visible to the group. `plaintext_cid` is the address of the **whole** file (a
     /// streaming caller accumulates it with [`CidHasher`](catcoms_storage::CidHasher)) and becomes
@@ -4677,9 +4774,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Content dedup works the same way, with one difference forced by streaming: a streamed
     /// upload only learns its whole-file address after its last chunk, so the twin check lands
     /// *after* sealing rather than before it. When a twin is found the new listing reuses the
-    /// twin's ref (or is skipped entirely, for an identical name + folder) and the chunk blobs
-    /// this upload just wrote are garbage-collected, so a dedup still ends with exactly one sealed
-    /// copy of the content rather than a second, byte-different one.
+    /// twin's ref only after verifying its complete local copy. Otherwise the staged chunks are
+    /// retained and published as a compatible repair. Up to four encrypted variants are admitted;
+    /// MIME, total size and ordered plaintext chunk identities must agree. Publication verifies
+    /// locally, not through remote acknowledgements. Verification currently runs inside this actor
+    /// call with one plaintext chunk in memory; off-actor transfer scheduling remains future work.
     pub async fn publish_upload(
         &mut self,
         name: &str,
@@ -4716,40 +4815,53 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // Clock-injected (never ambient): the default one-month circulation deadline.
         let expires = FileExpiry::At(self.sync.now_ms().saturating_add(FILE_EXPIRY_DEFAULT_MS));
         let index_rows = self.file_index_row_count();
+        let manifest = FileManifest {
+            plaintext_cid,
+            total_size,
+            mime: mime.to_string(),
+            chunks,
+        };
+        if manifest.validate_layout().is_err() {
+            self.discard_upload_chunks(&manifest.chunks);
+            return Err(AppError::Invalid(
+                "the upload's chunk layout is invalid".into(),
+            ));
+        }
         let listed = self.files();
-        let twin = listed
+        let chunk_identities: Vec<_> = manifest
+            .chunks
             .iter()
-            .find(|e| e.cid.as_slice() == plaintext_cid.as_bytes())
-            .map(|e| {
-                (
-                    e.file_ref.clone(),
-                    listed
-                        .iter()
-                        .any(|o| o.cid == e.cid && o.name == name && o.path == folder),
-                )
-            });
-        if let Some((twin_ref, already_here)) = twin {
-            self.discard_upload_chunks(&chunks);
-            if already_here {
-                return Ok(plaintext_cid); // already shared under this exact name + folder
+            .map(|chunk| (chunk.plaintext_cid, chunk.size))
+            .collect();
+        if let Some(twin) = file_resolution::reusable_upload_entry(
+            &listed,
+            &plaintext_cid,
+            total_size,
+            &chunk_identities,
+            |manifest| self.manifest_held_verified(manifest),
+        ) {
+            // Only verified possession makes the fresh encrypted copy redundant.
+            self.discard_upload_chunks(&manifest.chunks);
+            if listed.iter().any(|entry| {
+                entry.cid == plaintext_cid.as_bytes() && entry.name == name && entry.path == folder
+            }) {
+                return Ok(plaintext_cid);
             }
             if index_rows >= MAX_FILE_ENTRIES {
                 return Err(AppError::Invalid(format!(
                     "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
                 )));
             }
-            // Same content, new name/folder: list it again against the SAME sealed blobs; but
-            // with its own fresh deadline, not the twin's.
             let (public_key, signature) =
-                self.file_entry_attestation(name, &author, &folder, &twin_ref)?;
+                self.file_entry_attestation(name, &author, &folder, &twin.file_ref)?;
             self.sync
-                .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                .post(DocType::FileIndex, FILE_INDEX_DOC, |doc| {
                     write_file_entry(
-                        d,
+                        doc,
                         name,
                         &author,
                         &folder,
-                        &twin_ref,
+                        &twin.file_ref,
                         expires,
                         Some((&public_key, &signature)),
                     )
@@ -4757,48 +4869,107 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 .await?;
             return Ok(plaintext_cid);
         }
-        if index_rows >= MAX_FILE_ENTRIES {
-            self.discard_upload_chunks(&chunks);
+        // Repair publishes a new reference; fresh ciphertext can never use the old address.
+        let replacement = self.owned_upload_slot(name, &folder, &plaintext_cid);
+        let replaced_chunks = replacement
+            .as_ref()
+            .and_then(|row| {
+                self.sync
+                    .doc(DocType::FileIndex, FILE_INDEX_DOC)
+                    .and_then(|doc| bounded_file_bytes(doc.doc(), row, F_REF, MAX_FILE_REF_BYTES))
+                    .and_then(|reference| FileManifest::decode_or_legacy(&reference).ok())
+            })
+            .map(|manifest| manifest.chunks)
+            .unwrap_or_default();
+        if replacement.is_none() && index_rows >= MAX_FILE_ENTRIES {
+            self.discard_upload_chunks(&manifest.chunks);
             return Err(AppError::Invalid(format!(
                 "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
             )));
         }
-        let manifest = FileManifest {
-            plaintext_cid,
-            total_size,
-            mime: mime.to_string(),
-            chunks,
-        };
-        // Never publish a listing this node's own reader would reject. A streamed upload assembles
-        // its chunks across many commands, so this is also where a caller that mis-sliced the file
-        // is caught, rather than every peer discovering it at download time.
-        manifest
-            .validate_layout()
-            .map_err(|_| AppError::Invalid("the upload's chunk layout is invalid".into()))?;
-        // Promote before posting, never after. The window between the two is the only one left in
-        // which a crash strands anything, and this ordering makes that window strand *orphans*
-        // (blobs nothing names, harmless) rather than a *published listing whose chunks are still
-        // in staging*, which the next startup sweep would delete out from under the only device
-        // that holds them.
+        if listed
+            .iter()
+            .any(|entry| entry.cid == plaintext_cid.as_bytes())
+        {
+            let Some(resolved) = file_resolution::resolve(&listed, &plaintext_cid) else {
+                self.discard_upload_chunks(&manifest.chunks);
+                return Err(AppError::Invalid(
+                    "conflicting file manifests prevent repair".into(),
+                ));
+            };
+            if !file_resolution::equivalent(&resolved.variants[0].1, &manifest) {
+                self.discard_upload_chunks(&manifest.chunks);
+                return Err(AppError::Invalid(
+                    "repair upload differs from the listed chunk layout or MIME".into(),
+                ));
+            }
+            // Other names may still reference an owned row's old manifest. Reserve a variant
+            // unless replacing this row really removes the last reference to that encryption.
+            let old_ref = replacement.as_ref().and_then(|row| {
+                self.sync
+                    .doc(DocType::FileIndex, FILE_INDEX_DOC)
+                    .and_then(|doc| bounded_file_bytes(doc.doc(), row, F_REF, MAX_FILE_REF_BYTES))
+            });
+            let removes_variant = old_ref.as_ref().is_some_and(|reference| {
+                listed
+                    .iter()
+                    .filter(|entry| &entry.file_ref == reference)
+                    .count()
+                    == 1
+            });
+            if resolved.variants.len() >= file_resolution::MAX_MANIFEST_VARIANTS && !removes_variant
+            {
+                self.discard_upload_chunks(&manifest.chunks);
+                return Err(AppError::Invalid(
+                    "too many encrypted variants to publish a repair".into(),
+                ));
+            }
+        }
+        // Promote before posting. A crash may leave orphans, never a successful listing that
+        // depends on staging a restart clears. Verify the supplied whole-file claim as well.
         for chunk in &manifest.chunks {
-            self.sync.promote_staged_blob(&chunk.ciphertext_cid)?;
+            if let Err(error) = self.sync.promote_staged_blob(&chunk.ciphertext_cid) {
+                self.discard_upload_chunks(&manifest.chunks);
+                return Err(error.into());
+            }
+        }
+        if !self.manifest_held_verified(&manifest) {
+            self.discard_upload_chunks(&manifest.chunks);
+            return Err(AppError::Invalid(
+                "upload chunks are unavailable or failed integrity verification".into(),
+            ));
         }
         let ref_bytes = manifest.encode();
         let (public_key, signature) =
             self.file_entry_attestation(name, &author, &folder, &ref_bytes)?;
-        self.sync
+        let posted = self
+            .sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                write_file_entry(
-                    d,
-                    name,
-                    &author,
-                    &folder,
-                    &ref_bytes,
-                    expires,
-                    Some((&public_key, &signature)),
-                )
+                if let Some(row) = &replacement {
+                    d.put(row, F_REF, ScalarValue::Bytes(ref_bytes.clone()))?;
+                    d.put(row, F_SIGNER_KEY, ScalarValue::Bytes(public_key.clone()))?;
+                    d.put(row, F_SIGNATURE, ScalarValue::Bytes(signature.to_vec()))?;
+                    // Existing per-listing expiry is deliberately preserved on repair.
+                    Ok(())
+                } else {
+                    write_file_entry(
+                        d,
+                        name,
+                        &author,
+                        &folder,
+                        &ref_bytes,
+                        expires,
+                        Some((&public_key, &signature)),
+                    )
+                }
             })
-            .await?;
+            .await;
+        if let Err(error) = posted {
+            self.discard_upload_chunks(&manifest.chunks);
+            return Err(error.into());
+        }
+        // Other names may still depend on the previous encryption; use the existing live-ref GC.
+        self.discard_upload_chunks(&replaced_chunks);
         Ok(plaintext_cid)
     }
 
@@ -4872,17 +5043,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         cid: &Cid,
         progress: Option<&tokio::sync::mpsc::Sender<(usize, usize, Option<String>)>>,
     ) -> Result<Vec<u8>, AppError> {
-        let Some(entry) = self
-            .files()
-            .into_iter()
-            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
-        else {
-            return Err(AppError::Invalid(
-                "no such file in this server's index".into(),
-            ));
-        };
-        let manifest = FileManifest::decode_or_legacy(&entry.file_ref)
-            .map_err(|_| AppError::Invalid("corrupt file reference".into()))?;
+        let resolved = file_resolution::resolve(&self.files(), cid).ok_or_else(|| {
+            AppError::Invalid("no unambiguous file manifest in this server's index".into())
+        })?;
+        let manifest = &resolved.variants[0].1;
         // `total_size` is attacker-controlled (a member authors the manifest); reject an absurd
         // value BEFORE pre-allocating, so a hostile listing can't OOM the downloader's actor.
         if manifest.total_size > MAX_FILE_BYTES as u64 {
@@ -4895,8 +5059,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             let _ = p.send((0, total, None)).await;
         }
         let mut out = Vec::with_capacity(manifest.total_size as usize);
-        for (i, chunk_ref) in manifest.chunks.iter().enumerate() {
-            let (chunk, provider) = self.fetch_and_open_chunk(chunk_ref, i).await?;
+        for i in 0..manifest.chunks.len() {
+            let (chunk, provider) = self.fetch_resolved_chunk(&resolved, i, None).await?;
             out.extend_from_slice(&chunk);
             if let Some(p) = progress {
                 let _ = p.send((i + 1, total, provider)).await;
@@ -4909,18 +5073,6 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         }
         Ok(out)
-    }
-
-    /// Fetch (if not readable) + decrypt one chunk, returning its plaintext bytes and the signed
-    /// provider that served it. The single exclusive-state need on the fetch path is `blobs.put`;
-    /// everything else is read-only. Shared by the all-in-one download and the per-chunk path.
-    async fn fetch_and_open_chunk(
-        &mut self,
-        chunk_ref: &FileRef,
-        idx: usize,
-    ) -> Result<(Vec<u8>, Option<String>), AppError> {
-        self.fetch_and_open_chunk_cancellable(chunk_ref, idx, None)
-            .await
     }
 
     /// Cancellable chunk path for bounded whole-file reads. Local blobs complete normally; a
@@ -4969,14 +5121,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// orchestrator fetches the chunks one per command (see [`Server::fetch_file_chunk`]) so the
     /// actor stays responsive between chunks instead of blocking for the whole download.
     pub fn file_download_plan(&self, cid: &Cid) -> Option<(usize, u64)> {
-        let entry = self
-            .files()
-            .into_iter()
-            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])?;
-        let manifest = FileManifest::decode_or_legacy(&entry.file_ref).ok()?;
-        if manifest.total_size > MAX_FILE_BYTES as u64 {
-            return None;
-        }
+        let resolved = file_resolution::resolve(&self.files(), cid)?;
+        let manifest = &resolved.variants[0].1;
         Some((manifest.chunks.len(), manifest.total_size))
     }
 
@@ -4992,37 +5138,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// too: a file every byte of which was already on this disk could still stall the deck. This
     /// touches no blob, no disk and no network.
     pub fn file_head(&self, cid: &Cid) -> Option<FileMediaHead> {
-        let (entry, manifest, manifest_version) = self.unique_media_entry(cid)?;
+        let resolved = file_resolution::resolve(&self.files(), cid)?;
+        let (entry, manifest) = &resolved.variants[0];
         Some(FileMediaHead {
             total_size: manifest.total_size,
-            mime: entry.mime,
-            manifest_version,
+            mime: entry.mime.clone(),
+            manifest_version: resolved.version,
         })
-    }
-
-    /// Resolve one CID to exactly one current chunk manifest.
-    ///
-    /// A replicated index may contain several legitimate names/paths for identical content, but
-    /// every such row must carry byte-identical `file_ref` bytes. A malicious member can otherwise
-    /// repeat a benign plaintext CID while naming different encrypted chunks; treating the CID as
-    /// the cache identity would authorize those replacement bytes under a stale MIME decision.
-    fn unique_media_entry(&self, cid: &Cid) -> Option<(FileEntry, FileManifest, [u8; 32])> {
-        let mut entries = self
-            .files()
-            .into_iter()
-            .filter(|entry| entry.cid.as_slice() == &cid.as_bytes()[..]);
-        let entry = entries.next()?;
-        let manifest_version = file_manifest_version(&entry.file_ref);
-        if entries.any(|candidate| file_manifest_version(&candidate.file_ref) != manifest_version) {
-            return None;
-        }
-        let manifest = FileManifest::decode_or_legacy(&entry.file_ref).ok()?;
-        // The same guard `read_file_range` applies: a member authors the manifest, so an absurd
-        // declared size must not become a `Content-Range` the player then chases.
-        if manifest.total_size > MAX_FILE_BYTES as u64 {
-            return None;
-        }
-        Some((entry, manifest, manifest_version))
     }
 
     /// Read a byte range of a listed file's plaintext.
@@ -5030,7 +5152,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// This is the media path: a player asks for the window it is about to show rather than the
     /// whole file, so playback can start on the first chunk and a seek costs one chunk instead of
     /// a re-download. It goes through exactly the same local-first fetch as a download
-    /// ([`Server::fetch_and_open_chunk`]), so a chunk already in the vault never touches the
+    /// ([`Server::fetch_file_chunk`]), so a chunk already in the vault never touches the
     /// network and a corrupt one is re-fetched, and every chunk is AEAD-opened before it is
     /// served. What it does *not* do is the whole-file content-address check a download ends
     /// with: that check needs every byte, and the point here is to not have every byte. Chunk
@@ -5043,16 +5165,17 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         start: u64,
         max_len: usize,
     ) -> Result<FileRange, AppError> {
-        let Some((entry, manifest, manifest_version)) = self.unique_media_entry(cid) else {
+        let Some(resolved) = file_resolution::resolve(&self.files(), cid) else {
             return Err(AppError::Invalid(
-                "no unique file manifest in this server's index".into(),
+                "no unambiguous file manifest in this server's index".into(),
             ));
         };
-        if manifest_version != expected_manifest_version {
+        if resolved.version != expected_manifest_version {
             return Err(AppError::Invalid(
                 "file manifest changed after media authorization".into(),
             ));
         }
+        let (entry, manifest) = &resolved.variants[0];
         let mime = entry.mime.clone();
         let total_size = manifest.total_size;
         if total_size > MAX_FILE_BYTES as u64 {
@@ -5060,7 +5183,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "file declares an implausible size".into(),
             ));
         }
-        if start >= total_size {
+        if start >= total_size || max_len == 0 {
             // A player probing past the end is normal, not an error; an empty tail says so.
             return Ok(FileRange {
                 bytes: Vec::new(),
@@ -5075,10 +5198,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let mut buf = Vec::with_capacity((end - start) as usize);
         let mut provider = None;
         for idx in first..=last {
-            let Some(chunk_ref) = manifest.chunks.get(idx).cloned() else {
-                return Err(AppError::Invalid(format!("chunk {idx} is out of range")));
-            };
-            let (chunk, from) = self.fetch_and_open_chunk(&chunk_ref, idx).await?;
+            let (chunk, from) = self.fetch_resolved_chunk(&resolved, idx, None).await?;
             // Every chunk but the last is exactly CHUNK_BYTES (`bytes.chunks(CHUNK_BYTES)` on the
             // way in), which is the whole basis for turning a byte offset into a chunk index
             // without reading everything before it. Check it rather than trust it: if the two ever
@@ -5126,37 +5246,26 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // Re-resolve the manifest each call (cheap vs. a chunk fetch). Deliberate: it keeps the
         // per-chunk path current with the index, so a file unlisted mid-download fails cleanly here
         // rather than serving from a stale manifest.
-        let Some(entry) = self
-            .files()
-            .into_iter()
-            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
-        else {
-            return Err(AppError::Invalid(
-                "no such file in this server's index".into(),
-            ));
-        };
-        let manifest = FileManifest::decode_or_legacy(&entry.file_ref)
-            .map_err(|_| AppError::Invalid("corrupt file reference".into()))?;
-        let Some(chunk_ref) = manifest.chunks.get(idx).cloned() else {
-            return Err(AppError::Invalid(format!("chunk {idx} is out of range")));
-        };
-        self.fetch_and_open_chunk_cancellable(&chunk_ref, idx, cancellation)
+        let resolved = file_resolution::resolve(&self.files(), cid).ok_or_else(|| {
+            AppError::Invalid("no unambiguous file manifest in this server's index".into())
+        })?;
+        self.fetch_resolved_chunk(&resolved, idx, cancellation)
             .await
     }
 
-    /// Whether this device already holds **all** of the file's chunk blobs locally; i.e. it can
-    /// be opened/previewed without a network fetch. (A listed file whose chunks aren't all held
-    /// yet is still downloadable from peers that have them.)
+    /// Cheap local presence hint across compatible encrypted variants. Every chunk must have at
+    /// least one locally present ciphertext. This does not authenticate its storage or file key;
+    /// actual reads and upload dedup verify before treating those bytes as usable.
     pub fn file_available(&self, cid: &Cid) -> bool {
-        let Some(entry) = self
-            .files()
-            .into_iter()
-            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
-        else {
+        let Some(resolved) = file_resolution::resolve(&self.files(), cid) else {
             return false;
         };
-        let (held, total) = self.chunk_holding(&entry);
-        held == total // vacuously true for a (degenerate) zero-chunk file, matching `all()`
+        (0..resolved.variants[0].1.chunks.len()).all(|idx| {
+            resolved
+                .variants
+                .iter()
+                .any(|(_, manifest)| self.sync.has_blob(&manifest.chunks[idx].ciphertext_cid))
+        })
     }
 
     /// How many of a listed file's chunks this device holds locally, as `(held, total)`. A pure
@@ -5281,6 +5390,23 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .then_some(manifest)
             })
             .collect();
+        let mut seen = HashSet::new();
+        for entry in files {
+            let Ok(raw) = entry.cid.as_slice().try_into() else {
+                continue;
+            };
+            let cid = Cid::from_bytes(raw);
+            if seen.insert(cid) {
+                if let Some(resolved) = file_resolution::resolve(files, &cid) {
+                    health.resolvable_manifest_versions.extend(
+                        resolved
+                            .variants
+                            .iter()
+                            .map(|(entry, _)| file_manifest_version(&entry.file_ref)),
+                    );
+                }
+            }
+        }
         health
     }
 
@@ -10326,6 +10452,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repaired_upload_survives_vault_reopen_with_manifest_and_attestation_intact() {
+        // Exercise both publication paths through the desktop's persistent blob-store seam.
+        // A renamed repair retains the unavailable old manifest; a same-name repair replaces
+        // our own signed row. Neither may rely on staging or in-memory decryption state.
+        for streamed in [false, true] {
+            for renamed in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let data = b"repair persisted across a complete vault close";
+                let (cid, snapshot, entries, version) = {
+                    let mut rng = ChaCha20Rng::seed_from_u64(71);
+                    let store =
+                        ServerStore::open(dir.path(), b"repair-test-secret", &mut rng).unwrap();
+                    let mut alice = founder();
+                    alice.set_blob_store(store.blob_store("repair-group").unwrap());
+                    alice.open_files().await.unwrap();
+                    let cid = stream_upload(&mut alice, "original.bin", "", data).await;
+                    let original_version = alice.file_head(&cid).unwrap().manifest_version;
+                    for blob in alice.sync.blob_cids() {
+                        alice.sync.delete_blob(&blob).unwrap();
+                    }
+                    let name = if renamed {
+                        "repair.bin"
+                    } else {
+                        "original.bin"
+                    };
+                    if streamed {
+                        stream_upload(&mut alice, name, "", data).await;
+                    } else {
+                        alice
+                            .add_file(name, "application/octet-stream", "", data)
+                            .await
+                            .unwrap();
+                    }
+                    let version = alice.file_head(&cid).unwrap().manifest_version;
+                    assert_ne!(version, original_version);
+                    let entries = alice.files();
+                    assert_eq!(entries.len(), if renamed { 2 } else { 1 });
+                    // A separate abandoned upload must be collected on restore without taking
+                    // any promoted repair bytes with it.
+                    alice
+                        .seal_upload_chunk(b"unfinished upload", "application/octet-stream")
+                        .unwrap();
+                    (cid, alice.snapshot().unwrap(), entries, version)
+                };
+
+                let mut rng = ChaCha20Rng::seed_from_u64(72);
+                let store = ServerStore::open(dir.path(), b"repair-test-secret", &mut rng).unwrap();
+                let hub = Hub::new();
+                let mut restored = Server::restore(
+                    &snapshot,
+                    hub.join(PeerId::from_u64(9)),
+                    ChaCha20Rng::seed_from_u64(73),
+                    Box::new(ManualClock::new(2_000)),
+                    "alice",
+                )
+                .unwrap();
+                restored.set_blob_store(store.blob_store("repair-group").unwrap());
+                assert_eq!(
+                    restored.clear_staged_uploads(),
+                    1,
+                    "startup sweeps only the abandoned upload"
+                );
+                assert_eq!(restored.clear_staged_uploads(), 0);
+                assert_eq!(
+                    restored.files(),
+                    entries,
+                    "exact manifest bytes and verified identities survive"
+                );
+                assert!(restored.files().iter().all(|entry| entry.author_verified));
+                assert_eq!(restored.file_head(&cid).unwrap().manifest_version, version);
+                assert!(restored.file_available(&cid));
+                assert_eq!(restored.download_file(&cid).await.unwrap(), data);
+                assert_eq!(
+                    restored
+                        .read_file_range(&cid, version, 0, data.len())
+                        .await
+                        .unwrap()
+                        .bytes,
+                    data
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn the_owner_removes_a_member_and_a_non_owner_cannot() {
         let hub = Hub::new();
         let alice_peer = PeerId::from_u64(1);
@@ -12712,6 +12923,466 @@ mod tests {
         assert_eq!(again, first);
         assert_eq!(alice.files().len(), 1, "no duplicate listing");
         assert_eq!(alice.sync().blob_cids().len(), blobs, "nothing new sealed");
+    }
+
+    #[tokio::test]
+    async fn reupload_repairs_missing_bytes_for_whole_and_streamed_uploads() {
+        for streamed in [false, true] {
+            for renamed in [false, true] {
+                let mut alice = founder();
+                alice.open_files().await.unwrap();
+                let data = b"obtained again outside the group";
+                let cid = stream_upload(&mut alice, "original.bin", "", data).await;
+                let original = alice.files().remove(0);
+                for chunk in chunk_cids(&alice, &cid, "") {
+                    alice.sync.delete_blob(&chunk).unwrap();
+                }
+                assert!(!alice.file_available(&cid));
+                let name = if renamed {
+                    "repair.bin"
+                } else {
+                    "original.bin"
+                };
+                if streamed {
+                    assert_eq!(stream_upload(&mut alice, name, "", data).await, cid);
+                } else {
+                    assert_eq!(
+                        alice
+                            .add_file(name, "application/octet-stream", "", data)
+                            .await
+                            .unwrap(),
+                        cid
+                    );
+                }
+                assert!(
+                    alice.file_available(&cid),
+                    "successful reupload must retain readable bytes"
+                );
+                let head = alice.file_head(&cid).expect("repair remains previewable");
+                assert_eq!(
+                    alice
+                        .read_file_range(&cid, head.manifest_version, 0, data.len())
+                        .await
+                        .unwrap()
+                        .bytes,
+                    data
+                );
+                assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+                if renamed {
+                    assert!(alice
+                        .files()
+                        .iter()
+                        .any(|entry| entry.file_ref == original.file_ref));
+                }
+                assert!(alice.files().iter().all(|entry| entry.author_verified));
+                assert_eq!(
+                    alice.clear_staged_uploads(),
+                    0,
+                    "repair bytes must survive startup cleanup"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn independent_identical_uploads_converge_without_breaking_previews() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob, alice_peer) = wiki_duo(&clock).await;
+        alice.open_files().await.unwrap();
+        bob.open_files().await.unwrap();
+        alice
+            .add_file("seed.txt", "text/plain", "", b"initialize shared list")
+            .await
+            .unwrap();
+        let (catchup, _) = tokio::join!(bob.request_files_catchup(alice_peer), alice.sync_once());
+        catchup.unwrap();
+        assert_eq!(
+            bob.files().len(),
+            1,
+            "both uploads start from the same shared list"
+        );
+        let data = b"\x89PNG\r\n\x1a\nindependently shared";
+        let cid = alice
+            .add_file("alice.png", "image/png", "alice", data)
+            .await
+            .unwrap();
+        bob.add_file("bob.png", "image/png", "bob", data)
+            .await
+            .unwrap();
+        let alice_ref = alice
+            .files()
+            .into_iter()
+            .find(|entry| entry.cid == cid.as_bytes())
+            .unwrap()
+            .file_ref;
+        let bob_ref = bob
+            .files()
+            .into_iter()
+            .find(|entry| entry.cid == cid.as_bytes())
+            .unwrap()
+            .file_ref;
+        assert_ne!(
+            alice_ref, bob_ref,
+            "fresh encryption must remain randomized"
+        );
+        drain_sync(&mut alice).await;
+        drain_sync(&mut bob).await;
+        tokio::select! {
+            result = alice.request_files_catchup(PeerId::from_u64(2)) => { result.unwrap(); }
+            _ = async { loop { bob.sync_once().await.unwrap(); } } => unreachable!(),
+        }
+        tokio::select! {
+            result = bob.request_files_catchup(alice_peer) => { result.unwrap(); }
+            _ = async { loop { alice.sync_once().await.unwrap(); } } => unreachable!(),
+        }
+        assert_eq!(alice.files().len(), 3);
+        assert_eq!(bob.files().len(), 3);
+        let head = alice
+            .file_head(&cid)
+            .expect("compatible encrypted variants resolve");
+        assert_eq!(
+            bob.file_head(&cid).unwrap().manifest_version,
+            head.manifest_version
+        );
+        // Neither peer runs its responder here: each must use its own authenticated copy.
+        for server in [&mut alice, &mut bob] {
+            assert_eq!(
+                server
+                    .read_file_range(&cid, head.manifest_version, 0, data.len())
+                    .await
+                    .unwrap()
+                    .bytes,
+                data
+            );
+            assert_eq!(server.download_file(&cid).await.unwrap(), data);
+        }
+        // Leave only the non-canonical encryption at the remote provider. This forces the
+        // missing canonical network attempt to fall through to a separately authenticated ref.
+        let canonical = file_resolution::resolve(&alice.files(), &cid)
+            .unwrap()
+            .variants[0]
+            .0
+            .file_ref
+            .clone();
+        let (requester, provider) = if canonical == alice_ref {
+            (&mut alice, &mut bob)
+        } else {
+            (&mut bob, &mut alice)
+        };
+        for blob in requester.sync.blob_cids() {
+            requester.sync.delete_blob(&blob).unwrap();
+        }
+        let (_cancel, cancellation) = tokio::sync::watch::channel(true);
+        assert!(requester
+            .fetch_file_chunk_cancellable(
+                &cid,
+                0,
+                Some(RequestCancellation::new(cancellation, None))
+            )
+            .await
+            .is_err());
+        assert!(
+            requester.sync.blob_cids().is_empty(),
+            "cancelled fallback stores nothing"
+        );
+        let provider_author = provider.my_fingerprint();
+        let (bytes, from) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::select! {
+                result = requester.fetch_file_chunk(&cid, 0) => result,
+                _ = async { loop { provider.sync_once().await.unwrap(); } } => unreachable!(),
+            }
+        })
+        .await
+        .expect("remote variant fallback is bounded")
+        .unwrap();
+        assert_eq!(bytes, data);
+        assert_eq!(from.as_deref(), Some(provider_author.as_str()));
+    }
+
+    #[tokio::test]
+    async fn reupload_repairs_remote_metadata_without_rewriting_its_author() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob, alice_peer) = wiki_duo(&clock).await;
+        alice.open_files().await.unwrap();
+        bob.open_files().await.unwrap();
+        let data = b"a copy obtained outside the unavailable group";
+        let cid = stream_upload(&mut alice, "shared.bin", "", data).await;
+        tokio::select! {
+            result = bob.request_files_catchup(alice_peer) => { result.unwrap(); }
+            _ = async { loop { alice.sync_once().await.unwrap(); } } => unreachable!(),
+        }
+        let original = bob.files().remove(0);
+        assert!(!bob.file_available(&cid));
+        drop(alice);
+        for _ in 0..6 {
+            // Repeated loss/repair must reuse Bob's signed slot, preserving Alice's identity.
+            for blob in bob.sync.blob_cids() {
+                bob.sync.delete_blob(&blob).unwrap();
+            }
+            stream_upload(&mut bob, "shared.bin", "", data).await;
+            assert_eq!(bob.files().len(), 2);
+            assert!(bob
+                .files()
+                .iter()
+                .any(|entry| entry.file_ref == original.file_ref
+                    && entry.author_identity == original.author_identity
+                    && entry.author_verified));
+            assert_eq!(bob.download_file(&cid).await.unwrap(), data);
+            let health = bob.storage_health();
+            assert_eq!(health.verified_manifest_versions.len(), 1);
+            assert_eq!(health.resolvable_manifest_versions.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn reupload_checks_keys_and_never_replaces_forged_local_ownership() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"present ciphertext with an unusable key";
+        let cid = stream_upload(&mut alice, "shared.bin", "", data).await;
+        let original = alice.files().remove(0);
+        let mut bad = FileManifest::decode_or_legacy(&original.file_ref).unwrap();
+        bad.chunks[0].wrapped_key.ciphertext[0] ^= 1;
+        // A modified peer changes only the reference; the copied local signature is now invalid.
+        let row = alice.owned_upload_slot("shared.bin", "", &cid).unwrap();
+        alice
+            .sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |doc| {
+                doc.put(&row, F_REF, ScalarValue::Bytes(bad.encode()))
+            })
+            .await
+            .unwrap();
+        assert!(
+            alice.file_available(&cid),
+            "existence alone is not verification"
+        );
+        assert!(!alice.manifest_held_verified(&bad));
+        stream_upload(&mut alice, "shared.bin", "", data).await;
+        assert_eq!(
+            alice.files().len(),
+            2,
+            "forged local ownership is never a replacement slot"
+        );
+        assert!(alice
+            .files()
+            .iter()
+            .any(|entry| entry.file_ref == bad.encode() && !entry.author_verified));
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn upload_publication_rejects_missing_or_misidentified_chunks() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"must actually be present";
+        let chunk = alice.seal_upload_chunk(data, "text/plain").unwrap();
+        alice.discard_upload_chunks(std::slice::from_ref(&chunk));
+        assert!(alice
+            .publish_upload(
+                "missing",
+                "text/plain",
+                "",
+                Cid::of(data),
+                data.len() as u64,
+                vec![chunk]
+            )
+            .await
+            .is_err());
+        let chunk = alice.seal_upload_chunk(data, "text/plain").unwrap();
+        assert!(alice
+            .publish_upload(
+                "wrong",
+                "text/plain",
+                "",
+                Cid::of(b"a different file"),
+                data.len() as u64,
+                vec![chunk]
+            )
+            .await
+            .is_err());
+        assert!(alice.files().is_empty());
+        assert!(alice.sync.blob_cids().is_empty());
+        assert_eq!(alice.clear_staged_uploads(), 0);
+    }
+
+    #[tokio::test]
+    async fn reupload_repairs_a_missing_tail_and_reclaims_replaced_orphans() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = vec![37; CHUNK_BYTES + 29];
+        let cid = stream_upload(&mut alice, "two.bin", "", &data).await;
+        let old = chunk_cids(&alice, &cid, "");
+        alice.sync.delete_blob(&old[1]).unwrap();
+        stream_upload(&mut alice, "two.bin", "", &data).await;
+        assert_eq!(alice.files().len(), 1);
+        assert_eq!(
+            alice.sync.blob_cids().len(),
+            2,
+            "old unreferenced head is reclaimed"
+        );
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn full_index_permits_owned_repair_but_rejects_new_repair_rows() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"repair without growing a full index";
+        let cid = stream_upload(&mut alice, "same.bin", "", data).await;
+        alice
+            .sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |doc| {
+                let (_, list) = doc.get(ROOT, FILES)?.unwrap();
+                for index in 1..MAX_FILE_ENTRIES {
+                    doc.insert_object(&list, index, ObjType::Map)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        for blob in alice.sync.blob_cids() {
+            alice.sync.delete_blob(&blob).unwrap();
+        }
+        alice
+            .add_file("same.bin", "application/octet-stream", "", data)
+            .await
+            .unwrap();
+        assert_eq!(alice.file_index_row_count(), MAX_FILE_ENTRIES);
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+        for blob in alice.sync.blob_cids() {
+            alice.sync.delete_blob(&blob).unwrap();
+        }
+        let chunk = alice
+            .seal_upload_chunk(data, "application/octet-stream")
+            .unwrap();
+        assert!(alice
+            .publish_upload(
+                "new.bin",
+                "application/octet-stream",
+                "",
+                cid,
+                data.len() as u64,
+                vec![chunk]
+            )
+            .await
+            .is_err());
+        assert_eq!(alice.clear_staged_uploads(), 0);
+        assert!(alice.sync.blob_cids().is_empty());
+        assert_eq!(alice.file_index_row_count(), MAX_FILE_ENTRIES);
+    }
+
+    #[tokio::test]
+    async fn manifest_resolution_binds_the_set_and_rejects_incompatible_or_excess_variants() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"same plaintext, independent encryptions";
+        let cid = stream_upload(&mut alice, "shared.bin", "", data).await;
+        let original = alice.files().remove(0);
+        let old_version = alice.file_head(&cid).unwrap().manifest_version;
+        let base = FileManifest::decode_or_legacy(&original.file_ref).unwrap();
+        let mut entries = vec![original.clone()];
+        for _ in 1..file_resolution::MAX_MANIFEST_VARIANTS {
+            let mut manifest = base.clone();
+            manifest.chunks = vec![alice
+                .seal_upload_chunk(data, "application/octet-stream")
+                .unwrap()];
+            let mut entry = original.clone();
+            entry.file_ref = manifest.encode();
+            entries.push(entry);
+        }
+        let resolved = file_resolution::resolve(&entries, &cid).unwrap();
+        assert_ne!(resolved.version, old_version);
+        entries.reverse();
+        assert_eq!(
+            file_resolution::resolve(&entries, &cid).unwrap().version,
+            resolved.version
+        );
+        let mut hostile = base.clone();
+        for change in 0..3 {
+            match change {
+                0 => hostile.chunks[0].plaintext_cid = Cid::of(b"substituted bytes"),
+                1 => {
+                    hostile = base.clone();
+                    hostile.mime = "image/png".into();
+                }
+                _ => {
+                    hostile = base.clone();
+                    hostile.chunks[0].mime = "image/png".into();
+                }
+            }
+            let mut entry = original.clone();
+            entry.file_ref = hostile.encode();
+            assert!(file_resolution::resolve(&[original.clone(), entry], &cid).is_none());
+        }
+        let mut fifth = original;
+        let mut manifest = base;
+        manifest.chunks = vec![alice
+            .seal_upload_chunk(data, "application/octet-stream")
+            .unwrap()];
+        fifth.file_ref = manifest.encode();
+        entries.push(fifth);
+        assert!(file_resolution::resolve(&entries, &cid).is_none());
+    }
+
+    #[tokio::test]
+    async fn upload_reuse_rejects_hostile_work_plans_before_verification() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"tiny upload";
+        let cid = stream_upload(&mut alice, "tiny.bin", "", data).await;
+        let entry = alice.files().remove(0);
+        let mut manifest = FileManifest::decode_or_legacy(&entry.file_ref).unwrap();
+        manifest.total_size = MAX_FILE_BYTES as u64;
+        let mut repeated = manifest.chunks[0].clone();
+        repeated.size = CHUNK_BYTES as u64;
+        manifest.chunks = vec![repeated; MAX_FILE_BYTES / CHUNK_BYTES];
+        let mut hostile = entry.clone();
+        hostile.file_ref = manifest.encode();
+        let mut attempts = 0;
+        assert!(file_resolution::reusable_upload_entry(
+            &[hostile],
+            &cid,
+            data.len() as u64,
+            &[(Cid::of(data), data.len() as u64)],
+            |_| {
+                attempts += 1;
+                true
+            }
+        )
+        .is_none());
+        assert_eq!(
+            attempts, 0,
+            "a tiny upload must never open a hostile large plan"
+        );
+
+        let mut wrong_chunk = FileManifest::decode_or_legacy(&entry.file_ref).unwrap();
+        wrong_chunk.chunks[0].plaintext_cid = Cid::of(b"same size, different chunk");
+        let mut hostile = entry.clone();
+        hostile.file_ref = wrong_chunk.encode();
+        assert!(file_resolution::reusable_upload_entry(
+            &[hostile],
+            &cid,
+            data.len() as u64,
+            &[(Cid::of(data), data.len() as u64)],
+            |_| {
+                attempts += 1;
+                true
+            }
+        )
+        .is_none());
+        assert_eq!(attempts, 0, "equal sizes do not establish chunk identity");
+        assert!(file_resolution::reusable_upload_entry(
+            &[entry],
+            &cid,
+            data.len() as u64,
+            &[(Cid::of(data), data.len() as u64)],
+            |_| {
+                attempts += 1;
+                true
+            }
+        )
+        .is_some());
+        assert_eq!(attempts, 1);
     }
 
     #[tokio::test]

@@ -46,6 +46,24 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   focused reruns include all final source changes. Frontend static/build/visual checks were not
   run for this backend-only slice. Concurrent upload/release work is not certified by this review.
 
+- **File re-upload and encrypted manifest variants (2026-09-07).** Upload dedup now verifies a
+  complete local copy before reusing metadata or discarding staged bytes. Missing/unreadable copies
+  receive a fresh attested repair; repeat repairs reuse only the current device's verified exact
+  listing. Downloads and previews resolve up to four compatible randomized encryptions, trying all
+  local variants before network waits. Whole-file and per-chunk integrity remain enforced; media
+  caches bind the entire current variant set. Storage selects an exact-verified compatible local
+  variant instead of hiding every duplicate encryption. Regression coverage includes both upload
+  paths, remote fallback, forged ownership, bounded verification, and repaired downloads/previews
+  after a complete vault close/reopen with abandoned-upload staging cleanup.
+  Remaining limits: no remote possession acknowledgement/retention promise or off-actor scheduling;
+  publication's complete local verification can occupy the actor for a whole file. Differing MIME
+  or legacy chunk layouts remain explicit conflicts. Concurrent *first* uploads into independently
+  created empty `ROOT/FILES` lists can still hide one CRDT list; the convergence regression starts
+  from an initialized shared list. Malicious incompatible/over-four variant claims can still deny
+  resolution. Older clients keep their prior conflicting-manifest behavior until upgraded; the
+  wire and persistence encodings are unchanged. These are not claims of universal image/transfer
+  reliability.
+
 - **P1 one-shot transport prerequisite (2026-09-07).** `MeshTransport::publish_once` now waits
   for one actual driver attempt instead of treating command enqueueing as publication. Production
   uses a separate command that cannot enter the legacy `pending_publish` ciphertext retry queue.
@@ -993,8 +1011,8 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   until all chunks are present. Inline media and exports compare an exact inert MIME allow-list with
   a bounded common-container signature. SVG, mismatches and unknown formats receive a bodyless
   inline-scheme denial (not an octet-stream body the WebView may sniff), while exports disclose
-  matched/mismatched/unrecognized evidence. Inline head/chunk caches are bound to the exact unique
-  current manifest rather than the member-claimed plaintext CID. This blocks simple
+  matched/mismatched/unrecognized evidence. Inline head/chunk caches are bound to the complete
+  current compatible manifest set rather than the member-claimed plaintext CID. This blocks simple
   type disguise but is not full bitstream validation or a decoder sandbox. Full
   trust-everyone/specific automatic
   **whole-share mirroring** remains deferred until the sealing store has a disk quota, otherwise a

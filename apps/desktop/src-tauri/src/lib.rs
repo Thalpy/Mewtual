@@ -1457,9 +1457,32 @@ fn build_storage_report(
     let mut ambiguous = HashSet::<String>::new();
     for file in files {
         match unique.entry(file.cid.clone()) {
-            std::collections::hash_map::Entry::Occupied(existing) => {
-                if existing.get().manifest_version != file.manifest_version {
-                    ambiguous.insert(file.cid);
+            std::collections::hash_map::Entry::Occupied(mut existing) => {
+                if existing.get().manifest_version != file.manifest_version
+                    && !(health
+                        .resolvable_manifest_versions
+                        .contains(&existing.get().manifest_version)
+                        && health
+                            .resolvable_manifest_versions
+                            .contains(&file.manifest_version))
+                {
+                    ambiguous.insert(file.cid.clone());
+                }
+                // Choose the exact variant authenticated in this same actor snapshot. A healthy
+                // repair may coexist with an unavailable original; never lend its key verdict to
+                // that original reference or to a conflicting plaintext claim.
+                let verified = |candidate: &UiFile| {
+                    candidate.total > 0
+                        && candidate.held == candidate.total
+                        && health
+                            .verified_manifest_versions
+                            .contains(&candidate.manifest_version)
+                };
+                if verified(&file)
+                    && (!verified(existing.get())
+                        || file.manifest_version < existing.get().manifest_version)
+                {
+                    existing.insert(file);
                 }
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
@@ -21313,6 +21336,28 @@ mod tests {
             unverified.local_files.is_empty(),
             "held-chunk existence alone must not admit a file into local inventory"
         );
+
+        for reversed in [false, true] {
+            let mut missing = file("unavailable-original", [3; 32]);
+            missing.held = 0;
+            let mut rows = vec![missing, file("verified-repair", [4; 32])];
+            if reversed {
+                rows.reverse();
+            }
+            let repaired = build_storage_report(
+                StorageHealth {
+                    verified_manifest_versions: HashSet::from([[4; 32]]),
+                    resolvable_manifest_versions: HashSet::from([[3; 32], [4; 32]]),
+                    ..StorageHealth::default()
+                },
+                rows,
+                &HashSet::new(),
+                3,
+            );
+            assert_eq!(repaired.local_files.len(), 1);
+            assert_eq!(repaired.local_files[0].name, "verified-repair");
+            assert_eq!(repaired.local_estimated_bytes, 20);
+        }
     }
 
     #[test]

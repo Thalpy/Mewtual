@@ -285,7 +285,13 @@ CID and file-layer key. One report per server is cached for the process session 
 deduplicated category/pin/largest-file inventory; category local-byte totals remain estimates, while
 the verified ciphertext total is exact. **Repair** is an explicit network action: it re-fetches only
 missing or unreadable content from authenticated members, re-runs verification, and replaces that
-cache. **Connectivity assistant**
+cache. Upload deduplication also requires complete locally authenticated possession, including
+whole-file hashing. A metadata-only re-upload retains fresh staged ciphertext and publishes an
+attested repair; only an exact verified local-device listing can be replaced. Other uploaders'
+attestations remain intact. Downloads and media share a bounded resolver for at most four encrypted
+manifests with identical ordered plaintext chunk identities, lengths and MIME fields. Media cache
+identity binds the complete sorted set; every alternative is independently authenticated before
+use, with local alternatives tried before any network wait. **Connectivity assistant**
 reports the live peer/path evidence already available to the node; it is diagnostic and never a
 proof that every remote member or future network path is reachable.
 

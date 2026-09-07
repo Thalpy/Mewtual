@@ -79,8 +79,11 @@ Both are now bounded by a chunk instead of by the file:
   its loop between chunks. `Server::publish_upload` writes the manifest at the end. Slices are
   offset-addressed and must arrive in order, exactly once, full-size until the file ends; a
   violation fails the upload, because the running whole-file address (`CidHasher`, streaming
-  BLAKE3) cannot be rewound. Dedup therefore lands *after* sealing, so `publish_upload` collects
-  the redundant chunks it just wrote (`discard_upload_chunks`, dedup-safe like `delete_file`'s GC).
+  BLAKE3) cannot be rewound. Dedup therefore lands *after* sealing. `publish_upload` collects
+  the staged chunks only after verifying a complete locally held twin. A metadata-only twin enters
+  repair: promote and verify the fresh ciphertext, then publish a compatible attested variant.
+  Only a fully verified local-device row at the same name/path/CID is replaceable; other signed
+  listings survive. The old chunks are collected only when no live listing references them.
 - **Download.** Already one chunk per actor command (`file_download_plan` + `fetch_file_chunk`).
   What remained was the saved-file path: `download_file` returned the whole file as base64 and the
   webview handed it straight back to `save_download`, crossing the bridge twice whole.
@@ -185,13 +188,15 @@ something that looks like the finished file.
   are unchanged; chunking is additive above them.
 - **Still one holder at a time:** multi-holder fan-out, a holder index, GB-scale files and
   resumable-across-restart transfers are follow-ups. 256 MiB covers typical photos/video/docs.
-- **Sealing is still on the async runtime:** a chunk's AEAD + blob write runs on the actor's
-  thread rather than `spawn_blocking`. At 8 MiB that is tens of milliseconds per chunk, which the
-  loop absorbs; it only matters if `CHUNK_BYTES` grows.
+- **Actor latency remains:** chunk sealing, local I/O and network waits still execute on the
+  actor. Publication now verifies complete local possession and the whole-file hash before reuse
+  or success, holding only one plaintext chunk at a time but potentially occupying the actor for
+  a whole file. Queue/provider/decrypt timing instrumentation and bounded off-actor transfer tasks
+  remain follow-ups; chunked calls do not establish that slow transfers are independent.
 - **The promote/post window (small, open).** A crash between promoting an upload's chunks and
   posting its index entry leaves those chunks held but unnamed. Unlike the pre-staging behaviour
-  this is a window of milliseconds rather than the whole upload, and it costs space rather than
-  correctness; closing it entirely needs the index post and the promotion to be one atomic step,
+  this window includes complete local verification after promotion; it costs space rather than
+  correctness. Closing it entirely needs the index post and the promotion to be one atomic step,
   which they cannot be while one is a CRDT operation and the other is a filesystem rename.
 
 ## Security

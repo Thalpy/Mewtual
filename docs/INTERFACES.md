@@ -1541,8 +1541,12 @@ vault-encrypted copy. Its final staging-file rename and reveal are authorized by
 generation that began the export; locking, then unlocking again, cannot revive the old operation.
 Chunk health is keyed by the exact encoded `FileRef`, and the inventory joins
 that verdict to the exact manifest in one actor snapshot; a reused ciphertext or plaintext CID
-cannot borrow another row's successful verification, and ambiguous same-CID manifests stay out of
-`local_files`. Authentication attempts are capped at four distinct exact references per ciphertext
+cannot borrow another row's successful verification. `StorageHealth.resolvable_manifest_versions`
+contains exact digests admitted by the shared bounded manifest resolver; this is compatibility
+metadata, not a possession verdict. Inventory selects a complete exact-verified local variant only
+when all differing same-CID manifests are compatible, so a healthy repair can appear in `local_files`
+alongside an unavailable original. Incompatible sets stay excluded. Authentication attempts are
+capped at four distinct exact references per ciphertext
 CID; a larger contradictory set fails that CID and every dependent manifest closed instead of
 multiplying large-blob decryption work. It performs at most one ordinary scan per server per
 unlocked UI session (the cache survives HMR but explicit lock clears it). Cache publication is
@@ -1555,8 +1559,15 @@ Media presented to the WebView uses an exact inert MIME allow-list and must have
 image/audio/video container signature in authenticated chunk zero; SVG, mismatches and unrecognized
 containers receive a bodyless scheme denial instead of relying on `application/octet-stream` or
 `nosniff`, because media elements may still sniff an opaque response. The validated head and each
-decrypted chunk cache are bound to an exact manifest digest, and every request re-resolves a unique
-current manifest before serving, so reusing a claimed plaintext CID cannot inherit a stale MIME.
+decrypted chunk cache are bound to the complete sorted set of current encrypted manifest digests
+(single-manifest identities retain their prior digest). Up to four variants may coexist only if
+total size, MIME and ordered plaintext chunk CID/size/MIME agree. Every request re-resolves this set,
+and each fallback is independently opened against its own exact reference, so a claimed plaintext
+CID cannot inherit a stale MIME decision. Downloads, plans and media share this resolution policy;
+all local alternatives are tried before bounded sequential provider attempts. Upload dedup requires
+complete verified local possession; otherwise publication retains fresh staged chunks and posts an
+attested repair. Only a verified local-device row at the same name/path/CID can be replaced, preserving
+its expiry. A new repair row has a fresh default expiry. No wire or persistence encoding changes.
 Every head/chunk cache access and URI-responder publication is bound to the initiating unlocked UI
 generation; explicit lock clears cached plaintext and a delayed actor read can publish only a
 bodyless denial afterward. Plaintext exports report `contentValidation` as `matched`, `mismatch`,

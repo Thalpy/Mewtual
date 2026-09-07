@@ -3322,7 +3322,7 @@ where
         if let Err(e) = server.open_files().await {
             tracing::warn!(error = %e, "open_files failed");
         }
-        let mut file_count = server.files().len();
+        let mut last_files = server.files();
         // …and the status feed.
         if let Err(e) = server.open_status().await {
             tracing::warn!(error = %e, "open_status failed");
@@ -3796,7 +3796,7 @@ where
                         // UI waiting behind an unrelated (and potentially back-pressured) event.
                         drop(progress);
                         let _ = reply.send(res);
-                        if files_changed(&server, &mut file_count) {
+                        if files_changed(&server, &mut last_files) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
@@ -3840,7 +3840,7 @@ where
                             .map(|cid| cid.to_hex())
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if files_changed(&server, &mut file_count) {
+                        if files_changed(&server, &mut last_files) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
@@ -3989,7 +3989,7 @@ where
                             Err(_) => Err("bad content address".to_string()),
                         };
                         let _ = reply.send(res);
-                        if files_changed(&server, &mut file_count) {
+                        if files_changed(&server, &mut last_files) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
@@ -4001,11 +4001,8 @@ where
                                 .map_err(|e| e.to_string()),
                             Err(_) => Err("bad content address".to_string()),
                         };
-                        let ok = res.is_ok();
                         let _ = reply.send(res);
-                        // The listing count is unchanged, so `files_changed` can't see this;
-                        // announce it directly so every surface repaints the new expiry.
-                        if ok {
+                        if files_changed(&server, &mut last_files) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
@@ -4026,7 +4023,7 @@ where
                         if let Err(e) = server.request_files_catchup(peer).await {
                             tracing::warn!(error = %e, "files catch-up failed");
                         }
-                        if files_changed(&server, &mut file_count) {
+                        if files_changed(&server, &mut last_files) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
@@ -4273,7 +4270,7 @@ where
                         let _ = reply.send(res);
                         // The limit lives in the file index document, so this is a file change
                         // as far as every reader is concerned.
-                        if files_changed(&server, &mut file_count) {
+                        if files_changed(&server, &mut last_files) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
@@ -4657,7 +4654,7 @@ where
                             &server,
                             crate::DocType::FileIndex,
                             crate::FILE_INDEX_DOC,
-                        ) && files_changed(&server, &mut file_count)
+                        ) && files_changed(&server, &mut last_files)
                         {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
@@ -5009,15 +5006,17 @@ where
     change.any().then_some(change)
 }
 
-/// Whether the shared file count changed since last seen (updating the record).
-fn files_changed<T, R>(server: &Server<T, R>, last: &mut usize) -> bool
+/// Compare the bounded materialized index, including references and verified uploader identity.
+/// Repair can replace a manifest without changing the row count; remote clients still need an
+/// update to invalidate stale availability, trust decisions and failed preview state.
+fn files_changed<T, R>(server: &Server<T, R>, last: &mut Vec<FileEntry>) -> bool
 where
     T: MeshTransport,
     R: CryptoRngCore,
 {
-    let n = server.files().len();
-    if *last != n {
-        *last = n;
+    let next = server.files();
+    if *last != next {
+        *last = next;
         true
     } else {
         false
@@ -7047,5 +7046,66 @@ mod tests {
         bob.shutdown().await;
         let _ = alice_handle.await;
         let _ = bob_handle.await;
+    }
+
+    #[tokio::test]
+    async fn same_row_repair_emits_one_file_update_and_noop_reupload_emits_none() {
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_files().await.unwrap();
+        let data = b"repair in place".to_vec();
+        let cid = server
+            .add_file("same.bin", "application/octet-stream", "", &data)
+            .await
+            .unwrap();
+        let mut snapshot = server.files();
+        for blob in server.sync.blob_cids() {
+            server.sync.delete_blob(&blob).unwrap();
+        }
+        let (actor, mut events, handle) = spawn(server);
+        actor
+            .add_file(
+                "same.bin".into(),
+                "application/octet-stream".into(),
+                "".into(),
+                data.clone(),
+            )
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if matches!(
+                    events.recv().await.map(|event| event.event),
+                    Some(AppEvent::FilesUpdated)
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("an in-place manifest repair must notify clients");
+        let repaired = actor.files().await;
+        assert_eq!(repaired.len(), snapshot.len());
+        assert_ne!(repaired[0].file_ref, snapshot[0].file_ref);
+        snapshot = repaired;
+        actor
+            .add_file(
+                "same.bin".into(),
+                "application/octet-stream".into(),
+                "".into(),
+                data,
+            )
+            .await
+            .unwrap();
+        assert_eq!(actor.files().await, snapshot);
+        assert!(actor.file_available(cid.as_bytes().to_vec()).await);
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event.event, AppEvent::FilesUpdated),
+                "no duplicate event on an unchanged index"
+            );
+        }
+        actor.shutdown().await;
+        handle.await.unwrap();
     }
 }
