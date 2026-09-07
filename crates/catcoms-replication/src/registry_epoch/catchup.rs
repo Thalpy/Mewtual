@@ -23,6 +23,40 @@ pub const MAX_REGISTRY_PAGE_BYTES: usize = 512 * 1024;
 const CURSOR_TTL_MS: u64 = 10 * 60 * 1000;
 const PAYLOAD_BYTES: usize = REGISTRY_CURSOR_BYTES - 32;
 
+/// Local checked starting frontier, never a peer-supplied checkpoint installation instruction.
+/// A wide frontier falls back to [] so all branches remain reachable through provider cursors.
+pub struct RegistryFrontier {
+    pub heads: Vec<[u8; 32]>,
+    pub seed: Option<[u8; 32]>,
+}
+impl std::fmt::Debug for RegistryFrontier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryFrontier")
+            .field("heads", &self.heads.len())
+            .field("checkpoint", &self.seed.is_some())
+            .finish_non_exhaustive()
+    }
+}
+impl RegistryEpoch {
+    /// Derive claims from an already verified registry unit. This does not claim that the local
+    /// state is globally current, and changes no accepted operation or durable snapshot.
+    pub fn catchup_frontier(&mut self) -> RegistryFrontier {
+        let mut heads = self.doc.heads();
+        heads.sort_unstable();
+        heads.dedup();
+        if heads.len() > MAX_REGISTRY_PAGE_HEADS {
+            heads.clear();
+        }
+        RegistryFrontier {
+            heads,
+            seed: self
+                .doc
+                .checkpoint_origin()
+                .map(|origin| origin.seed_hash()),
+        }
+    }
+}
+
 /// Opaque provider-local continuation. It contains no secret but Debug still hides private scope.
 /// Reminting the provider key invalidates all its cursors; it must not survive a runtime restart.
 pub struct RegistryPageCursor([u8; REGISTRY_CURSOR_BYTES]);

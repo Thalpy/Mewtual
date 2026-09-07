@@ -1528,6 +1528,38 @@ dropping or timing out the caller publishes cancellation but does not recycle a 
 permit. No retry, durable receive cursor, actor/native scheduler or receipt/seed discovery is
 provided by this exchange alone.
 
+### Durable registry receiver continuation (cooperative)
+
+`Server::begin_registry_receive(store, watch, peer, budget)` checks the exact runtime/watch,
+numeric server/bucket, physical vault mount and proven current provider device, then reserves
+one of four live receiver permits before I/O. It verifies/flushes the saved Open epoch against
+the sole complete storage budget. An absent deterministic epoch zero remains absent. The pass
+captures sorted saved heads (empty when there are more than 64) and the verified seed hash.
+
+`fetch_registry_receive_step(pass)` requests at most one page with no vault borrow or write.
+`persist_registry_receive_step(store, pass, budget)` validates the whole dependency-ordered page
+in a detached epoch and saves it through one accounted atomic replacement before advancing its
+cursor. An invalid middle op saves none of the page. Exact duplicates sync unchanged bytes;
+even a terminal-empty page verifies current Open/id, inventory and flushes held bytes. Uncertain
+writes pause with the same page/cursor retained; reconcile accounting before explicit `retry()`.
+MLS advance discards stale ciphertext into RestartRequired, without saving or advancing.
+
+States are Ready, PageReady, Paused, PrefixComplete, RestartRequired, CheckpointRequired,
+HistoricalAuthorizationRequired and Stopped. Only Paused is retryable; a pending page retries
+storage, otherwise network. Cancellation arms Paused before awaiting and never refunds work.
+Initial unknown heads can cause a single empty-head fallback on Restart, preserving the verified
+seed, provider, lifetime and attempts. Restart after any received page is held, not a reset loop.
+PrefixComplete describes one provider's frozen prefix, never currency, finality or delivery.
+
+Each pass holds at most one 512-KiB framed page and a private 81-byte cursor, with a fixed
+ten-minute receiver-monotonic lifetime. Request and persistence attempts each pace at one second
+and cap at 20001; received work caps at 20001 pages, 20000 operations and 16 MiB framed bytes,
+including duplicates. Authority/watch replacement stops retained passes but does not free their
+four-slot ownership until Drop. Current full requester/provider identities recheck before work
+and after network; persistence also rechecks physical mount and current MLS. Dropping/restarting
+loses traversal only: new passes derive saved heads, never trust a durable remote cursor. These
+are per-runtime/pass bounds, not the future actor's aggregate scheduling or UI-lock policy.
+
 ### Registry persistence and inventory constraints
 
 Public receipt fields and ciphertext are capped before encoding/decryption. Changed state uses
@@ -1555,8 +1587,8 @@ explicit cleanup before reconciliation. Unresolved ownership still blocks server
 
 These APIs require the caller's sole complete server budget; inventory is not a continuing write
 lease. Checked installation/retirement and single-intent replay are implemented at the store layer.
-The cooperative sender and opt-in receiver supply live gossip, not catch-up serving, receipt-head
-discovery, autonomous replay/drain scheduling or actor/Studio wiring. Each mutation rebuilds a
+The cooperative adapters supply live gossip and durable paged catch-up, not receipt-head/seed
+discovery, autonomous scheduling or actor/Studio wiring. Each mutation rebuilds a
 bounded saved graph (local editing also checks the source before journaling); the receiver applies
 the ingress rails above, while aggregate actor-owned scheduling remains to be integrated.
 

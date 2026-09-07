@@ -323,6 +323,9 @@ fn registry_page_rotated_source_requires_seed_and_never_transfers_it_implicitly(
     )
     .unwrap();
     f.edit(2);
+    let frontier = f.source.catchup_frontier();
+    assert_eq!(frontier.seed, Some(seed.change_hash()));
+    assert_eq!(frontier.heads, f.source.doc.heads());
     for claimed in [None, Some([0; 32])] {
         let request = RegistryPageRequest {
             requester: f.peer.device_id(),
@@ -440,6 +443,15 @@ fn registry_page_more_than_64_independent_heads_still_finishes_from_empty_fronti
         );
     }
     assert_eq!(f.source.doc.heads().len(), 65);
+    let before = f.source.snapshot().unwrap();
+    let frontier = f.source.catchup_frontier();
+    assert!(frontier.heads.is_empty());
+    assert!(frontier.seed.is_none());
+    assert_eq!(
+        f.source.snapshot().unwrap(),
+        before,
+        "frontier does not author history"
+    );
     let first = f.page(&[], None);
     let second = f.page(&[], Some(first.next.unwrap().as_bytes()));
     let third = f.page(&[], Some(second.next.unwrap().as_bytes()));

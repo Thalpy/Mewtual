@@ -8,6 +8,52 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 durable registry receiver continuation (2026-09-08).** The cooperative receiver now
+  derives heads/seed from checked durable state and retains at most one page in each of four
+  watch-bound passes. Fetching never borrows the vault; persistence validates the entire page
+  through the existing typed gate in a detached epoch, then advances only after one accounted
+  atomic write. Bad middle operations/dependencies save none of the page; duplicate and empty
+  terminal pages still verify inventory/current Open scope and flush held bytes. An uncertain
+  rename pauses at the same page/cursor until reconciliation and explicit retry. There is no
+  durable provider cursor or receiver-authored intent, network ack, finality or currency claim.
+
+  Passes pin full requester/provider identities, exact watch/runtime and physical mount. They
+  keep a fixed ten-minute receiver-clock lifetime, one-second request/persist pacing, bounded
+  attempts and aggregate input, including duplicates. Cancellation is retryable without refunds;
+  revoked handles retain their four-slot capacity until dropped. The adversarial review found
+  an honest divergent-head restart loop and a futile stale-MLS persistence retry. Both are fixed:
+  one initial empty-head fallback retains seed/provider/charged limits, and MLS advancement
+  discards unusable pending ciphertext into RestartRequired. Re-review found no remaining
+  implementation findings. The real membership-change fixture now explicitly subscribes to
+  control traffic before expecting the third member's commit; no membership check was weakened.
+
+  Focused verification: nine receiver tests (including actual joined-member divergent branches,
+  duplicate pages, cancellation, watch/mount replacement, source sealing and MLS advancement)
+  plus three atomic batch-save/crash/restart tests passed. Existing core page tests additionally
+  pin wide-frontier fallback and verified checkpoint-seed extraction without snapshot mutation.
+  Required verification passed on the combined worktree (including the separately committed
+  file-reliability slice, which this change does not modify):
+
+  - `cargo test -p catcoms-app registry_receiver_ --lib` (9 passed)
+  - `cargo test -p catcoms-app registry_page_batch --lib` (3 passed)
+  - `cargo test --all --all-features` (app 357 passed / 4 existing ignored, replication 66,
+    sync 181; remaining workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `git diff --check`
+
+  **Next:** keyed receipt-head/expected-seed discovery and runtime/coordinator ownership. The
+  adapters are intentionally cooperative, not an automatic actor/native worker. Maximum-epoch
+  source rebuild latency still needs measurement before automatic scheduling. UI is untouched;
+  [BACKEND-IMPLEMENTATION.md](BACKEND-IMPLEMENTATION.md) remains the completion checklist.
+  The next design check identified a prerequisite: sync currently tracks the current owner but
+  not the observed start of that tenure. Fresh owner head proofs must wait for durable observed
+  tenure tracking; a restored receipt's own tenure field is not independent evidence (A-B-A).
+
 - **Autonomous backend completion / P1 authenticated registry pages (2026-09-07).** The owner
   requested continued backend implementation, periodic verified pushes, adversarial reviews,
   and final Markdown UI integration guidelines. UI remains owner-owned; the canonical mockups

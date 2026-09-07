@@ -13,6 +13,9 @@ use catcoms_sync::RegistrySyncInstance;
 
 use crate::{AppError, Server, ServerStore};
 
+mod receive;
+pub use receive::{RegistryReceiveProgress, RegistryReceiveState, ServerRegistryReceive};
+
 /// One provider-local key tied to an exact Server, physical vault mount, captured local server
 /// id and registry bucket. No operation bodies or requester-specific sessions are retained.
 /// Drop on lifecycle replacement: this is not a native UI-unlock lease or a remote permission.

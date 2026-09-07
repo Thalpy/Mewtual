@@ -91,9 +91,14 @@ page requests into a bounded opt-in queue, and a mount/watch-bound app drain ser
 under independent requester and aggregate source-read limits. Both transport endpoints are bound
 in the exchange; a client needs a current bound-member proof before disclosing private identifiers.
 Its four outbound permits follow actual transport termination after caller cancellation. Replies
-are unadmitted claims, not currency or delivery evidence. Durable receiver continuation, automatic
-actor/native scheduling and checkpoint/head discovery remain; the network adapter does not move
-vault ownership into the sync layer or change the legacy document map.
+are unadmitted claims, not currency or delivery evidence. A bounded receiver now derives the
+frontier from checked durable state, fetches without borrowing the vault, and advances only after
+one accounted all-or-none page save. Independent unknown heads permit one empty-head fallback;
+verified seed, provider and charged limits stay fixed. Four watch-bound passes each retain at most
+one page and expire on the receiver's monotonic clock. Duplicate and terminal-empty pages still
+cross the storage/inventory barrier; a receipt seal or MLS advance cannot turn them into stale
+success. Automatic actor/native scheduling and checkpoint/head discovery remain; the adapters
+do not move vault ownership into sync or change the legacy document map.
 
 The naive "one group, every device commits, replay old ciphertext to latecomers" design
 is broken. The load-bearing fixes:

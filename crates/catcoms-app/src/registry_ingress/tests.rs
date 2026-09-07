@@ -9,6 +9,8 @@ use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod page_receive;
+
 const SERVER: u64 = 91;
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(835)
@@ -28,6 +30,7 @@ fn inventory(store: &mut ServerStore, group: &[u8]) -> (EpochStorageBudget, Epoc
 }
 
 struct Pair {
+    hub: Arc<Hub>,
     _alice_root: tempfile::TempDir,
     bob_root: tempfile::TempDir,
     alice: Server<MemNetwork, ChaCha20Rng>,
@@ -41,17 +44,19 @@ struct Pair {
     key: PointerKey,
     document: LogicalDocument,
     id: u128,
+    clock: ManualClock,
 }
 impl Pair {
     async fn new() -> Self {
         let hub = Hub::new();
         let alice_net = hub.join(PeerId::from_u64(1));
         let bob_net = hub.join(PeerId::from_u64(2));
+        let clock = ManualClock::new(1000);
         let mut alice = Server::found(
             alice_net,
             MlsDevice::generate().unwrap(),
             rng(),
-            Box::new(ManualClock::new(1000)),
+            Box::new(clock.clone()),
             "alice",
         )
         .unwrap();
@@ -63,7 +68,7 @@ impl Pair {
                 bob_net,
                 MlsDevice::generate().unwrap(),
                 rng(),
-                Box::new(ManualClock::new(1000)),
+                Box::new(clock.clone()),
                 "bob",
                 alice.local_peer(),
                 &invite
@@ -90,6 +95,8 @@ impl Pair {
             .unwrap();
         bob.flush_registry_subscriptions().await.unwrap();
         let mut pair = Self {
+            hub,
+            clock,
             _alice_root: alice_root,
             bob_root,
             alice,

@@ -21,8 +21,11 @@ The protocol/store foundations have substantially more coverage than the runtime
 - [x] Opt-in authenticated registry gossip with durable receive admission.
 - [x] Bounded durable registry operation pages with provider-local authenticated cursors.
 - [x] Authenticated registry page request/response with bounded cooperative source serving.
-- [ ] Durable receiver continuation (the current network test explicitly drives admission).
+- [x] Bounded receiver continuation that saves complete pages before advancing; joined-member
+      divergence, duplicate, cancellation, rotation and uncertain-storage regressions.
 - [ ] Keyed receipt-head and expected-seed discovery, including a newcomer after rotation.
+      Prerequisite: persist independently observed owner-tenure evidence; unknown tenure must
+      not authorize a fresh head proof by copying a restored receipt's claimed tenure.
 - [ ] Runtime ownership, scheduling, cancellation, vault lifecycle and complete storage accounting.
       Before automatic scheduling, measure maximum-epoch page-source rebuild time and set the
       cooperative work budget from that evidence; fixed memory/rate caps alone do not prove latency.

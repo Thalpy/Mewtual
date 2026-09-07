@@ -47,8 +47,9 @@ pub use epoch_recovery::inventory::{
 };
 pub use epoch_recovery::{EpochRecoveryAction, EpochRecoveryState, EpochRecoveryUpdate};
 pub use epoch_registry::{
-    EpochRegistryState, RegistryInstallOutcome, RegistryReplayHold, RegistryReplayOutcome,
-    RegistryReplayPass, RegistryReplayProgress, RegistryReplayStep, RegistryReplayTicket,
+    EpochRegistryState, RegistryInstallOutcome, RegistryPageAdmission, RegistryReplayHold,
+    RegistryReplayOutcome, RegistryReplayPass, RegistryReplayProgress, RegistryReplayStep,
+    RegistryReplayTicket,
 };
 pub mod epoch_budget;
 

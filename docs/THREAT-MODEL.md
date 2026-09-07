@@ -427,8 +427,24 @@ table with the commit that closed it.
   The client publishes cancellation on drop/ten-second timeout and keeps at most four transport
   requests charged until the driver terminates them. Requester cancellation may not suppress an
   already queued provider read; responder handoff proves no delivery. No source is mutated or
-  intent retired by paging. Runtime scheduling, durable receive cursors and receipt/seed discovery
-  remain separate integration requirements.
+  intent retired by paging. The receiver adapter below performs durable admission; runtime
+  scheduling and receipt/seed discovery remain separate integration requirements.
+- **Receiver continuation advances only over saved pages, not provider assertions.** Four
+  watch-bound passes per sync instance retain at most one 512-KiB page each, pinned to physical
+  mount, requester and proven provider full identities. A detached batch validates every op
+  through current author/DAG/projection/gate checks before one accounted atomic write. Invalid
+  dependencies or a bad middle op persist no prefix. Duplicate and terminal-empty answers still
+  verify inventory/current Open target and sync held bytes. A failed or uncertain save retains
+  the page and old cursor, invalidates uncertain accounting and requires explicit retry after
+  reconciliation. MLS advancement drops unusable pending ciphertext into a restart hold.
+  Network cancellation leaves charged Paused state; one-second request/write pacing, a fixed
+  ten-minute receiver-clock lifetime, 20001 request/write attempts and received-page ceiling,
+  20000 received operations and 16 MiB total framed input bound repeated/duplicate work per pass.
+  One initial empty-head fallback permits honest divergent edits without relaxing seed checks;
+  repeated Restart or a restart after accepting a page holds instead of refunding work. Revocation
+  stops work but retained handles keep their capacity until Drop. Saved progress survives restart;
+  provider cursors are volatile claims, never persisted security state. This is not fair scheduling,
+  proof of remote currency, owner finality, native lock enforcement or automatic runtime ownership.
 - **One-shot publication limits application retries, not gossip lifetime.** `publish_once` waits
   for the driver's single attempt and bypasses Mewtual's legacy ciphertext retry queue. Production
   owns at most 16 compact 512-KiB payloads with 64-byte topics awaiting/entering this path, with

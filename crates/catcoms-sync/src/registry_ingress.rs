@@ -26,6 +26,18 @@ impl fmt::Debug for RegistryWatch {
     }
 }
 
+impl RegistryWatch {
+    /// Internal lease copy for an accounted receiver pass; never mint a fresh watch generation.
+    pub(super) fn copy_binding(&self) -> Self {
+        Self {
+            bucket: self.bucket,
+            doc_id: self.doc_id,
+            generation: self.generation.clone(),
+            instance: self.instance.clone(),
+        }
+    }
+}
+
 pub(super) struct Watched {
     pub(super) doc_id: u128,
     pub(super) generation: Arc<()>,

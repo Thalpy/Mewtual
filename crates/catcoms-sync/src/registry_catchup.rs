@@ -42,6 +42,25 @@ pub(super) struct RegistryRequests {
     now: u64,
     // Weak slots follow the lifetime of transport-owned accounting, not the caller future.
     outbound: [std::sync::Weak<()>; 4],
+    receivers: [std::sync::Weak<()>; 4],
+}
+
+/// Accounted local receiver ownership tied to an exact watch. Dropping the token releases one
+/// of four page-retention slots; replacing the watch revokes authority without refunding a slot
+/// whose old pass still owns memory. Not a native unlock or remote-authority capability.
+pub struct RegistryReceivePermit {
+    watch: RegistryWatch,
+    _capacity: Arc<()>,
+}
+impl fmt::Debug for RegistryReceivePermit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RegistryReceivePermit { .. }")
+    }
+}
+impl RegistryReceivePermit {
+    pub fn doc_id(&self) -> u128 {
+        self.watch.doc_id
+    }
 }
 
 struct CancelOnDrop(tokio::sync::watch::Sender<bool>);
@@ -87,6 +106,44 @@ fn response_transcript(
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Reserve one bounded receiver pass before loading/retaining history. All watches share
+    /// four slots; this is separate from the transport-owned outbound request capacity.
+    pub fn begin_registry_receive(
+        &mut self,
+        watch: &RegistryWatch,
+    ) -> Result<RegistryReceivePermit, SyncError> {
+        if !self.registry_watch_is_current(watch) {
+            return Err(SyncError::NoSuchDoc);
+        }
+        let slot = self
+            .registry_pages
+            .receivers
+            .iter_mut()
+            .find(|slot| slot.strong_count() == 0)
+            .ok_or(SyncError::Malformed)?;
+        let capacity = Arc::new(());
+        *slot = Arc::downgrade(&capacity);
+        Ok(RegistryReceivePermit {
+            watch: watch.copy_binding(),
+            _capacity: capacity,
+        })
+    }
+
+    pub fn registry_receive_is_current(&self, permit: &RegistryReceivePermit) -> bool {
+        self.registry_watch_is_current(&permit.watch)
+    }
+
+    /// Current full identity proven for an endpoint, not an unverified address/roster hint.
+    /// A caller retaining a provider cursor must pin this value for the lifetime of its pass.
+    pub fn registry_page_peer_device(&self, peer: PeerId) -> Option<DeviceId> {
+        self.member_peers
+            .iter()
+            .find(|proof| {
+                proof.peer == peer && proof.bound && self.group.contains_device(&proof.device)
+            })
+            .map(|proof| proof.device)
+    }
+
     fn registry_page_member(&self, key: &[u8]) -> bool {
         self.group
             .member_signature_key(&DeviceId::from_public_key_bytes(key))
@@ -269,12 +326,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Registry identifiers/heads are private metadata. Do not send them to a candidate and
         // hope its reply proves membership afterward. Bootstrap a bound proof separately.
         let expected = self
-            .member_peers
-            .iter()
-            .find(|proof| {
-                proof.peer == peer && proof.bound && self.group.contains_device(&proof.device)
-            })
-            .map(|proof| proof.device)
+            .registry_page_peer_device(peer)
             .ok_or(SyncError::Unauthorized)?;
         let inner = encode_query(&query)?;
         let (request, auth) = self.build_authed_request(KIND_REGISTRY_PAGE, &inner)?;

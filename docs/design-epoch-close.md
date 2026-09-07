@@ -537,11 +537,13 @@ request and are MAC-bound with provider/requester and scope. Pages carry at most
 vault-authenticated history, checks membership/cursor bounds/MAC/expiry before source I/O and pins
 runtime/mount. Missing still-undelivered removed-author operations report that historical
 authorization is required; previously delivered cursor history need not block current-author
-descendants. No authority check on live ingestion is relaxed. This is not a network request kind,
-receiver paging driver or proof of remote currency. Network authentication/rate scheduling and
-receipt-head/seed/historical-authority discovery remain to be integrated; `INTERFACES.md` records
-the exact local contract. Rebuilds changing prefix bytes invalidate continuation, not arbitrary
-read-only reloads of byte-identical history.
+descendants. No authority check on live ingestion is relaxed. Kind 20 now provides authenticated,
+rate-limited network page exchange, and a bounded cooperative receiver saves complete pages before
+advancing continuation. It permits one initial empty-head fallback for divergent history while
+retaining the verified seed and all charged limits. This proves no remote currency; automatic
+runtime scheduling and receipt-head/seed/historical-authority discovery remain to be integrated.
+`INTERFACES.md` records the implemented contracts. Rebuilds changing prefix bytes invalidate
+continuation, not arbitrary read-only reloads of byte-identical history.
 
 **Storage.** Preflight admission under one accounting lock before any inbound record or local
 commit. Never evictable: the open epoch, the current checkpoint and its predecessor until

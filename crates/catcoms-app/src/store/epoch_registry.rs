@@ -32,6 +32,8 @@ const MAX_INBOUND_CIPHERTEXT: usize = MAX_SIGNED_EPOCH_OP_BYTES + 4 + 16;
 
 mod installation;
 mod pass;
+mod receive;
+pub use receive::RegistryPageAdmission;
 mod recovery;
 mod replay;
 pub use installation::RegistryInstallOutcome;
@@ -56,6 +58,12 @@ impl std::fmt::Debug for EpochRegistryState {
 }
 
 impl EpochRegistryState {
+    /// Starting claims computed only from the checked saved unit, not supplied by the renderer.
+    pub(crate) fn catchup_frontier(
+        &mut self,
+    ) -> catcoms_replication::registry_epoch::catchup::RegistryFrontier {
+        self.unit.catchup_frontier()
+    }
     /// Read-only page from the already authenticated/rebuilt unit. The Server adapter checks
     /// runtime/mount binding and request authority before loading this potentially large file.
     pub(crate) fn catchup_page(
