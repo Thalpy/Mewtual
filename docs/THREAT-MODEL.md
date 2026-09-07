@@ -374,8 +374,32 @@ table with the commit that closed it.
   the durable intent. Cancellation after driver admission cannot retract gossip/cache effects.
   This is a cooperative backend call, not live actor orchestration, a native lock lease, a bound
   on aggregate passes, a driver deadline or evidence that a remote receipt has already arrived.
-  Managed ingress/catch-up and automatic wakeup remain unwired. Cursor/result Debug redact scope
+  Managed catch-up and automatic wakeup remain unwired. Cursor/result Debug redact scope
   and content; the sync token is process-local and never persisted or transmitted.
+- **Registry gossip authentication is not saved admission.** Explicit concrete-epoch watches use
+  fresh sync/watch generations; their app handles also bind physical mount and captured local
+  server/bucket. Rewatch/unwatch discards old queued packets without refunding rate debt. Desired
+  watch installation is synchronous, and cancellation during subscription reconciliation retains
+  one uncertain topic for cleanup/retry rather than losing ownership. Both subscribe and unsubscribe
+  track their uncertain side effects before awaiting; same-topic rewatch cannot assume a cancelled
+  unsubscribe left the topic subscribed. Revocation requires only the exact sync/watch generation,
+  so a reopened mount cannot strand old watches; receive still requires its exact physical mount.
+  Traffic must match a watched blinded topic, current MLS epoch, canonical registry domain/bucket,
+  local current membership and a verified full current author. Registry-tagged bytes never fall
+  into generic ingest/catch-up.
+  Oversized frames reject before decode. A global pre-crypto 50/s, burst-200 rail bounds work across
+  identities; per verified author/document is 10/s, burst 50, with 4096 debt rows reclaimed only
+  when fully refilled. Monotonic arithmetic grants no wall-clock or watch-replacement credit.
+  This shared global rail permits denial of receive capacity by one sender; it is not fairness.
+  The queue owns at most 16 compact ciphertext vectors, each at most 256 KiB + 20 bytes, plus fixed
+  metadata. It keeps no transport backing allocation or decrypted body. The explicit one-packet
+  drain rechecks current watch/mount/instance/membership/MLS, then runs the existing typed gate and
+  durable store barrier under exclusive access. Only that result reports Accepted/Duplicate/
+  Quarantined/RejectedQuarantineFull; no legacy success statistic, network ack or receiver-authored
+  intent is created. Errors or unwind consume volatile input only, not saved history. Drops due to
+  quota, stale MLS, storage refusal or unknown watches require author retry or future catch-up.
+  Past/future MLS reception, catch-up/discovery and actor/native lifecycle ownership remain unwired.
+  Watches and rate debt are process-local, not restart-stable security policy or native lock leases.
 - **One-shot publication limits application retries, not gossip lifetime.** `publish_once` waits
   for the driver's single attempt and bypasses Mewtual's legacy ciphertext retry queue. Production
   owns at most 16 compact 512-KiB payloads with 64-byte topics awaiting/entering this path, with

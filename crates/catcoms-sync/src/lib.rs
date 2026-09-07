@@ -59,8 +59,10 @@ use catcoms_wire::{Decoder, DocType, Encoder};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+mod registry_ingress;
 mod registry_publication;
 mod roles;
+pub use registry_ingress::RegistryWatch;
 pub use registry_publication::RegistrySyncInstance;
 // Re-export the role-authority logic so the product/UI layer (catcoms-app) reuses this exact,
 // canonical implementation rather than keeping a second copy that could drift.
@@ -3745,6 +3747,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     transport: T,
     /// Process-local incarnation, freshly allocated by new/restore; never persisted or sent.
     registry_instance: RegistrySyncInstance,
+    registry_ingress: registry_ingress::RegistryIngress,
+    // A cancelled subscribe/unsubscribe may already have reached the transport. Reconcile this uncertain
+    // topic before calculating the next routing diff; never lose unsubscribe ownership.
+    routing_subscription_pending: Option<Topic>,
     group: ServerGroup,
     device: MlsDevice,
     rng: R,
@@ -4169,6 +4175,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let mut this = Self {
             transport,
             registry_instance: RegistrySyncInstance::new(),
+            registry_ingress: registry_ingress::RegistryIngress::default(),
+            routing_subscription_pending: None,
             group,
             device,
             rng,
@@ -5264,7 +5272,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // for the next one would leave the ex-member attached across the rotation.
                     self.drain_evictions().await;
                     self.resync_if_needed().await;
-                } else {
+                } else if !self.on_registry_gossip(&topic, &data) {
                     self.on_gossip(from, &data);
                 }
                 Ok(true)
@@ -6378,6 +6386,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     set.insert(t);
                 }
             }
+            for watch in self.registry_ingress.watches.values() {
+                if let Some(t) = self.channel_topic_for(DocType::DocRegistry, watch.doc_id, slot) {
+                    set.insert(t);
+                }
+            }
         }
         set
     }
@@ -6385,14 +6398,31 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Subscribe the routing topics that should now be subscribed and unsubscribe
     /// those that aged out of the window, so subscriptions track the current label.
     async fn resync_subscriptions(&mut self) -> Result<(), SyncError> {
+        // Keep the retry flag armed across errors AND cancellation. A transport can submit its
+        // command before its future resolves, so first establish the uncertain topic as unsubscribed.
+        self.needs_resync = true;
+        if let Some(topic) = self.routing_subscription_pending.clone() {
+            self.transport.unsubscribe(topic).await?;
+            self.routing_subscription_pending = None;
+        }
         let desired = self.desired_routing_topics();
-        for topic in desired.difference(&self.routing_subs) {
+        let additions: Vec<_> = desired.difference(&self.routing_subs).cloned().collect();
+        for topic in additions {
+            self.routing_subscription_pending = Some(topic.clone());
             self.transport.subscribe(topic.clone()).await?;
+            self.routing_subs.insert(topic);
+            self.routing_subscription_pending = None;
         }
-        for topic in self.routing_subs.difference(&desired) {
-            self.transport.unsubscribe(topic.clone()).await?;
+        let removals: Vec<_> = self.routing_subs.difference(&desired).cloned().collect();
+        for topic in removals {
+            // Do not leave a cancelled removal counted as subscribed: a same-topic rewatch could
+            // otherwise skip re-adding it forever. The uncertain token owns idempotent cleanup.
+            self.routing_subs.remove(&topic);
+            self.routing_subscription_pending = Some(topic.clone());
+            self.transport.unsubscribe(topic).await?;
+            self.routing_subscription_pending = None;
         }
-        self.routing_subs = desired;
+        self.needs_resync = false;
         Ok(())
     }
 
@@ -6431,7 +6461,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !self.needs_resync {
             return;
         }
-        self.needs_resync = false;
         if let Err(e) = self.resync_subscriptions().await {
             tracing::warn!(error = %e, "failed to resync subscriptions after rotation");
             self.needs_resync = true;

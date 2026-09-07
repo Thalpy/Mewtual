@@ -1368,8 +1368,63 @@ the packet from the checked store while retaining exclusive access. `RegistrySyn
 allocation identity, not equality of token contents, and is neither persisted nor sent.
 
 There is no autonomous worker, driver deadline, aggregate pass scheduler, native lock cancellation,
-managed live receive/catch-up or automatic wakeup yet. The existing gossip-size limit can refuse
+managed catch-up or automatic wakeup yet. The existing gossip-size limit can refuse
 an otherwise accepted P1 operation; this slice changes no transport limit or wire format.
+
+### Opt-in registry gossip receive (P1, not actor-owned yet)
+
+`Server::watch_registry_epoch(&ServerStore, server:u64, bucket:u8)` synchronously returns an opaque
+`ServerRegistryWatch`. It reads the checked local current epoch, falling back to deterministic epoch
+zero only for an absent record; it creates no file and proves no remote currency. The handle binds
+numeric server, physical mount, full group through the exact sync instance, bucket, concrete id and
+a fresh installation generation. There is one desired watch per bucket (at most 256). Rewatching
+even the same id clears its old queued packets and invalidates its old handle. Dropping a handle
+alone does not unsubscribe; use `unwatch_registry_epoch(&watch)` or replace it. Revocation needs
+only the exact sync/watch generation, not the old mount, so it still works after a vault reopen;
+only ingestion requires the physical mount to match.
+
+The next `sync_once` reconciles desired subscriptions before reading network events. Optional
+`flush_registry_subscriptions().await` performs reconciliation without waiting for an event.
+Current and retained routing-window topics are included without opening a generic document.
+Reconciliation tracks each successful subscription and one uncertain in-flight subscribe, undoing
+the latter on retry before recomputing desired topics. Unsubscribes likewise remove their local
+subscription claim and retain an uncertain topic before awaiting, so a same-topic rewatch after
+cancellation cannot remain silently unsubscribed. The retry flag remains armed across errors
+and cancellation, and revoked watches reject traffic immediately, even before unsubscribe finishes.
+This also fixes lost retry/cleanup ownership for interrupted ordinary routing subscriptions.
+
+`sync_once` intercepts registry-tagged frames before legacy ingestion. Encoded frames above
+256 KiB + 78 bytes reject before SealedOp decode; scope, current MLS epoch, AEAD, full current
+signed author, local membership, canonical domain/bucket and exact watched blinded topic must
+validate before enqueueing. A global pre-auth token bucket allows 50/s with burst 200, across ALL
+senders, before cryptographic work. Verified full-author + concrete-document rows allow 10/s with
+burst 50. At most 4096 rows exist, and only fully refilled rows are reclaimed; watch changes cannot
+reset debt. Refill uses injected monotonic time, saturating arithmetic and no wall-clock credit.
+The global ceiling also implies the design's per-device server ceiling but is intentionally stricter:
+one sender can exhaust it for everyone. It is a bounded-work rail, not a fairness guarantee.
+
+The inbox retains at most 16 compact SealedOps (16 x (256 KiB + 20) ciphertext bytes plus fixed
+metadata), never the transport Bytes backing allocation or decrypted bodies. Thus at most 16
+documents have queued/active validation work; the store drain itself is synchronous and serial.
+`receive_registry_step(&mut ServerStore, &watch, &mut EpochStorageBudget)` consumes at most one
+packet for the exact handle. It rechecks watch/mount/instance, current receiver/author and MLS
+before calling the existing durable `ingest_registry_epoch` with the captured server/bucket and
+actual group/device/RNG. It returns `Option<RegistryReceived { admission, state }>` only after the
+store's barrier. Accepted, Duplicate, Quarantined and RejectedQuarantineFull remain distinct. No
+network delivery receipt, local-author intent, or legacy accepted-op statistic is produced.
+Watch/result Debug redacts scope/content. Low-level `ChannelSync::{watch_registry,
+registry_watch_is_current, unwatch_registry, drain_registry_inbound}` are trusted local adapters,
+not independently authoritative store APIs. Only their app wrapper checks physical-mount binding.
+
+Errors/unwinds consume only the volatile packet and grant no acknowledgement; queue overflow,
+invalid/stale packets and unregistered traffic are dropped. Past/future MLS epochs do not enter
+legacy catch-up or past-key paths. Retrying the original author's saved operation or future managed
+catch-up must recover drops; neither is automatically scheduled yet. Watches/inboxes/rate debt are
+process-local and reset on sync restore; no wire or persistence format changes. Live actor/native
+store ownership, lifecycle cancellation, registry/receipt-head discovery and managed catch-up remain
+unimplemented. A rotated persisted epoch needs a newly installed watch, never a retargeted old handle.
+
+### Registry persistence and inventory constraints
 
 Public receipt fields and ciphertext are capped before encoding/decryption. Changed state uses
 an accounted atomic replacement; identical pre/post mutation snapshots instead sync the unchanged
@@ -1396,10 +1451,10 @@ explicit cleanup before reconciliation. Unresolved ownership still blocks server
 
 These APIs require the caller's sole complete server budget; inventory is not a continuing write
 lease. Checked installation/retirement and single-intent replay are implemented at the store layer.
-The cooperative sender supplies one-shot publication, not catch-up serving, receipt-head discovery,
-live replay/ingress scheduling or actor/Studio wiring. Each mutation rebuilds a bounded saved graph (local
-editing also checks the source before journaling); apply planned rate/work limits before live
-transport integration.
+The cooperative sender and opt-in receiver supply live gossip, not catch-up serving, receipt-head
+discovery, autonomous replay/drain scheduling or actor/Studio wiring. Each mutation rebuilds a
+bounded saved graph (local editing also checks the source before journaling); the receiver applies
+the ingress rails above, while aggregate actor-owned scheduling remains to be integrated.
 
 `get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
 the complete bounded `states` array. The webview accepts only a strictly newer revision for its

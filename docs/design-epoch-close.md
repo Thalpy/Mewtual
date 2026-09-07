@@ -332,7 +332,9 @@ and rejects a reopened vault, not a lock/incarnation send permit. Live consumers
 active passes/aggregate work and recheck lifecycle, membership, MLS epoch and Open before sending.
 
 The additive `MeshTransport::publish_once` prerequisite now waits for a driver attempt without
-entering Mewtual's legacy ciphertext retry queue. It is not yet consumed by this replay path.
+entering Mewtual's legacy ciphertext retry queue. The cooperative Server replay sender consumes
+it with exact sync-instance binding and fresh authority/Open checks before each dispatch. This
+is a callable backend path, not an autonomous actor-owned worker.
 Driver cancellation is effective only if observed before admission; normal gossip caches and
 handler queues can outlive an attempt, even after some error results. Local Submitted/Duplicate
 outcomes do not imply delivery or intent retirement. Retries still require fresh authority checks
@@ -631,8 +633,11 @@ no arbitrary replacement API exists. Changed bytes reserve the full replacement 
 bytes use a sync-only retry, and no result escapes a failed write/flush. Seals keep the full source.
 Unpublished registry attempts conservatively charge ordinary content (including receipt-write
 attempts), so an orphan at the content ceiling may require explicit cleanup before reconciliation.
-This is still not a sole all-family coordinator or live transport path; graph rebuild work needs
-the specified ingress scheduling/rate limits when integrated.
+The opt-in Server gossip receiver now connects actual network ticks to this durable admission
+path for explicitly watched registry epochs. Its compact inbox, authentication and rate rails
+are documented in `INTERFACES.md` under "Opt-in registry gossip receive". This is still not a
+sole all-family coordinator: actor-owned scheduling, lifecycle cancellation, managed catch-up
+and newcomer receipt-head/seed discovery remain unwired.
 
 Local `edit_registry_epoch` now performs canonical/scope/current-author and Open checks before
 journaling, including a full-envelope comparison against any retained operation with the same id.

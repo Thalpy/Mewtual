@@ -8,6 +8,46 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 opt-in registry gossip receiver (2026-09-07).** Actual network ticks now route watched
+  registry traffic into a bounded authenticated inbox, separate from generic Automerge documents.
+  The Server drain persists one packet through the existing typed gate/accounting/barrier. Tests
+  exchange an edit between two genuinely joined members using the prior replay sender and current
+  `sync_once`, then verify duplicate handling and durable state after a vault reopen. This is a
+  callable backend gossip path, not actor-owned or automatic desktop synchronization.
+
+  Watches bind sync instance, full group, physical mount, captured local server, bucket, concrete
+  epoch and fresh watch generation. Registering is synchronous; explicit flush or the next tick
+  reconciles subscriptions. Cancelled/failed subscribes and unsubscribes retain one uncertain topic
+  for cleanup and keep the retry flag armed. Rewatch/unwatch drops old queued work without resetting
+  rate debt.
+  Full current receiver/author, current MLS, canonical bucket/domain and exact watched topic are
+  checked before queueing and authority is rechecked before store I/O. The inbox has 16 compact
+  packets; pre-auth is globally 50/s burst 200, per full-author/document 10/s burst 50, with 4096
+  bounded limiter rows. The global rail can be exhausted by one sender; it does not promise fairness.
+  Queueing earns no accepted-op counter, delivery ack or finality. Failed/stale/over-cap input is
+  dropped without an ack; sender retry or future catch-up must recover it. Past/future MLS frames
+  have no managed recovery path yet. New persisted epochs require new watches.
+
+  **Next:** actor/native store and budget ownership, bounded replay/drain scheduling and lifecycle
+  cancellation; managed catch-up, registry/receipt-head/seed discovery; settlement-wide capacity
+  handling and Studio consumers. UI remains user-owned; release-workflow changes are excluded.
+  No wire or persistence format changed. The review found a cancelled-unsubscribe/rewatch race
+  (reproduced by a failing test, then fixed) and old-mount revocation being over-gated (fixed while
+  retaining exact generation checks). Read-only design/diff review and final re-review have no
+  remaining findings. Verification passed on the corrected code:
+
+  - `cargo test -p catcoms-app --lib registry_receive -- --nocapture` (3 tests)
+  - `cargo test -p catcoms-sync --lib registry_inbox -- --nocapture` (6 tests)
+  - `cargo test --all --all-features` (existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests)
+  - `npm.cmd --prefix apps/desktop test` (1,135 tests)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh` (Git Bash) and `git diff --check`
+
+  Frontend static/build/visual checks were not run for this backend-only slice. No UI or native
+  bridge source changed. Concurrent release work is not certified by this review.
+
 - **P1 cooperative registry sender (2026-09-07).** The Server adapter now connects saved-intent
   replay to driver-acknowledged one-shot publication. A cursor binds the exact sync instance at
   begin, rejecting same-device/group replacement; exclusive Server/store borrows span checked

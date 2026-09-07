@@ -47,7 +47,7 @@ binds that pass to the exact sync instance and holds exclusive sync/store borrow
 preparation through one-shot dispatch. Actual full local identity, MLS epoch and current blinded
 routing are checked before sending. Only Submitted advances; Duplicate, errors, cancellation and
 unwind preserve the saved id for a fresh reseal without resetting pacing. This is not an autonomous
-worker: aggregate scheduling, native lifecycle cancellation, receive/catch-up, settlement-wide
+worker: aggregate scheduling, native lifecycle cancellation, catch-up, settlement-wide
 capacity headroom and discovery remain to be integrated. No universal progress at full quota is
 claimed yet.
 
@@ -60,6 +60,22 @@ gossip caches/handler queues may retain bytes even after some refusal results; c
 and local submissions are never delivery proofs. The sender owns saved-id retries and known-state
 checks, not native UI-lock policy, driver deadlines or live actor wakeups. These additive seams do
 not change existing chat publication or wire/persistence formats.
+
+Managed registry gossip now has an opt-in receive path separate from the legacy document map.
+A synchronous watch captures the checked current concrete epoch (or deterministic epoch zero
+when absent), numeric server, physical vault mount and fresh sync/watch generation. Network ticks
+authenticate into a 16-packet queue; an explicit Server drain persists at most one packet through
+the existing typed gate and accounted store. Only the returned Admission describes the saved
+outcome; queuing is not acceptance, and no delivery receipt or legacy accepted-op counter is earned.
+Current local/full author membership, MLS scope, bucket and blinded topic are checked; delayed
+packets recheck authority at drain. Same-id watch replacement revokes old queued work. Current-MLS
+only reception and drop-on-cap/failure require author retry or future catch-up, not silent recovery.
+Global pre-auth and per-full-author/document limits bound work; the shared pre-auth allowance does
+not promise per-peer fairness. Subscription reconciliation retains a single uncertain topic across
+an interrupted subscribe/unsubscribe and establishes it as unsubscribed before retry, including
+after the same topic was rewatched. Revoking a watch needs only its exact generation, so an old
+mount can discard its own queued traffic without gaining permission to ingest. Desired
+watch installation itself never awaits. Actor/native ownership, discovery and catch-up remain next.
 
 The naive "one group, every device commits, replay old ciphertext to latecomers" design
 is broken. The load-bearing fixes:

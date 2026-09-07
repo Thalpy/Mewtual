@@ -398,6 +398,12 @@ pub struct ServerStore {
 }
 
 impl ServerStore {
+    /// Crate-private physical-mount identity for ephemeral registry receive handles. Not an
+    /// inventory freshness token or native unlock lease: explicit UI lock can retain this mount.
+    pub(crate) fn registry_mount(&self) -> std::sync::Arc<()> {
+        self.replay_mount.clone()
+    }
+
     /// Open (or initialize) the store at `dir`, unlocking the vault with `passphrase`. A
     /// wrong passphrase for an existing vault is an error (the DEK never decrypts), never a
     /// silent re-init that would orphan the existing sealed servers.
