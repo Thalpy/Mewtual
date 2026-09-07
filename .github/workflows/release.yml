@@ -7,6 +7,8 @@ permissions:
   contents: write
 
 jobs:
+  # This job owns the draft release: it runs the version checks, creates the release, and writes
+  # the body. The Linux job waits on it and only adds artifacts.
   windows:
     name: Build Windows installer
     runs-on: windows-latest
@@ -92,8 +94,12 @@ jobs:
             An alpha build of Mewtual.
 
             This experimental build has not received an independent security audit. Use it
-            only for testing with people you trust. The installer is unsigned, so Windows
+            only for testing with people you trust. The builds are unsigned, so Windows
             SmartScreen may display a warning.
+
+            Windows: run the `.exe` installer. Linux: the `.AppImage` runs as-is (`chmod +x`
+            it first) and is the only Linux build that can update itself; the `.deb` is for
+            Debian and Ubuntu and has to be replaced by hand.
 
             See CHANGELOG.md for what changed, and for known limitations.
           releaseDraft: true
@@ -105,3 +111,69 @@ jobs:
           # poll the maintainer's release feed and offer to overwrite itself with an official
           # binary. Paths are resolved from the working directory (apps/desktop).
           args: --bundles nsis --config src-tauri/tauri.official.conf.json
+
+  linux:
+    name: Build Linux bundles
+    # Waits on the Windows job rather than running beside it. tauri-action creates the draft
+    # release if the tag has none, so two jobs starting at once can race and produce two drafts
+    # for one version. Serialising costs wall-clock time and nothing else.
+    needs: windows
+    # Pinned rather than ubuntu-latest on purpose: an AppImage cannot run on a glibc older than
+    # the one it was built against, so building on the newest runner would silently drop every
+    # distro older than it. If GitHub retires this image the job fails at once, in its first
+    # seconds, and moving to a newer one is a one-line change that raises the minimum distro.
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.89.0
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+
+      # Same set CI installs for the Linux desktop job, and for the same reason: none of it is
+      # present on the runner, and the webkit and appindicator headers are what the Tauri build
+      # links against. patchelf is the AppImage bundler's dependency, not the app's.
+      - name: Install Linux Tauri build libraries
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      # The frontend tests and checks are not repeated here: the Windows job ran them against
+      # this same commit and this job does not start unless they passed.
+
+      # Adds the Linux artifacts to the draft the Windows job already created, found by tag.
+      # No releaseBody here: tauri-action leaves an existing release's body alone, and a second
+      # copy of that text would only drift from the one above.
+      - name: Build bundles and add them to the draft release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          tagName: v__VERSION__
+          releaseName: Mewtual v__VERSION__
+          releaseDraft: true
+          # Merges a linux-x86_64 entry into the latest.json the Windows job uploaded rather than
+          # replacing it: tauri-action reads the existing asset and combines the platform maps.
+          # Only the AppImage carries an updater artifact; a .deb install cannot self-update.
+          includeUpdaterJson: true
+          args: --bundles appimage,deb --config src-tauri/tauri.official.conf.json

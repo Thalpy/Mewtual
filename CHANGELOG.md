@@ -4,7 +4,14 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+## [0.3.0-alpha.16] - 2026-09-07
+
 ### Added
+
+- **Releases now carry Linux builds.** The release workflow adds an `.AppImage` and a `.deb`
+  alongside the Windows installer, signed with the same updater key and listed in the same
+  `latest.json`. The AppImage updates itself the way the Windows build does; a `.deb` install has
+  to be replaced by hand, because Tauri's updater has no format for it.
 
 - **Spotify and YouTube links in chat open out into player cards.** A link on a line of its own
   becomes a chip naming the service, and clicking it is what contacts them; a link written inside a

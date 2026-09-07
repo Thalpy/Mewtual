@@ -1546,7 +1546,7 @@ button.ghost:hover {
 }
 
 .profile-tab {
-  max-width: 420px;
+  max-width: 620px;
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
@@ -2368,7 +2368,10 @@ button.primary:hover:not(:disabled) {
   gap: 6px;
 }
 
-/* Right-click context menu */
+/* Right-click context menu: one shared instance, every surface. Tokens only, so presets and
+   livery repaint it; the terminal chrome adds brackets and a key legend. The box floats on the
+   panel colour like every other floating panel (.msg-actions, tooltips), one step below
+   --bg-elev, which is what a hovered row lifts to. */
 .ctx-backdrop {
   position: fixed;
   inset: 0;
@@ -2377,58 +2380,348 @@ button.primary:hover:not(:disabled) {
 .ctx-menu {
   position: fixed;
   z-index: 901;
-  min-width: 180px;
-  max-width: 280px;
+  min-width: 208px;
+  max-width: 300px;
+  box-sizing: border-box;
   padding: 4px;
-  background: var(--bg-elev);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px color-mix(in oklab, var(--accent) 10%, transparent);
+  font-size: 0.82rem;
+  color: var(--text);
   outline: none;
+  animation: ctx-in 80ms ease-out;
 }
-.ctx-item {
+@keyframes ctx-in {
+  from { opacity: 0; transform: translateY(-2px); }
+}
+:root[data-motion="off"] .ctx-menu {
+  animation: none;
+}
+.ctx-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  min-height: 30px;
+  box-sizing: border-box;
+  padding: 0 8px 4px;
+  margin-bottom: 3px;
+  border-bottom: 1px solid var(--border-soft);
+  min-width: 0;
+}
+.ctx-kind {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.ctx-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.76rem;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-head .avatar {
+  width: 18px;
+  height: 18px;
+  font-size: 0.6rem;
+  flex: none;
+}
+.ctx-info {
+  padding: 0 8px 4px;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-info.on {
+  color: var(--ok);
+}
+.ctx-sec {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px 2px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.ctx-sec::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-soft);
+}
+.ctx-row {
+  position: relative;
+}
+.ctx-item {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
   width: 100%;
-  padding: 7px 10px;
+  min-height: 26px;
+  box-sizing: border-box;
+  padding: 0 8px;
   border: none;
   border-radius: var(--r);
   background: transparent;
-  color: inherit;
+  color: var(--text);
   font: inherit;
+  font-size: 0.82rem;
+  font-weight: 400;
   text-align: left;
   cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-ico {
+  width: 14px;
+  height: 14px;
+  display: block;
+  color: var(--muted);
+}
+.ctx-ico svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.ctx-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-hint {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+}
+.ctx-chev {
+  width: 12px;
+  height: 12px;
+  color: var(--faint);
+}
+.ctx-menu.flip-x .ctx-chev {
+  transform: scaleX(-1);
 }
 .ctx-item:hover:not(:disabled),
-.ctx-item:focus-visible {
+.ctx-item:focus-visible,
+.ctx-item.open {
   background: var(--accent-dim);
+  color: var(--text);
   outline: none;
+}
+.ctx-item:hover:not(:disabled) .ctx-ico,
+.ctx-item:focus-visible .ctx-ico,
+.ctx-item.open .ctx-ico {
+  color: var(--accent-hi);
+}
+.ctx-item:focus-visible {
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .ctx-item:disabled {
   opacity: 0.4;
   cursor: default;
 }
+.ctx-item.on .ctx-ico {
+  color: var(--ok);
+}
 .ctx-item.danger {
+  color: var(--danger);
+}
+.ctx-item.danger .ctx-ico {
   color: var(--danger);
 }
 .ctx-item.danger:hover:not(:disabled),
 .ctx-item.danger:focus-visible {
   background: var(--danger-dim);
+  color: var(--danger);
 }
-.ctx-icon {
-  width: 1.1em;
-  text-align: center;
-  opacity: 0.85;
-  flex: none;
+.ctx-item.danger:hover:not(:disabled) .ctx-ico,
+.ctx-item.danger:focus-visible .ctx-ico {
+  color: var(--danger-hi);
 }
-.ctx-label {
-  flex: 1;
+.ctx-item.danger:focus-visible {
+  box-shadow: inset 2px 0 0 var(--danger);
 }
 .ctx-divider {
   height: 1px;
-  margin: 4px 6px;
+  margin: 3px 6px;
   background: var(--border);
+}
+/* A flyout lives inside its parent row: it overlaps the row by a few pixels so the eye reads
+   the two as one shape, and mirrors to the left when the menu itself had to. */
+.ctx-sub {
+  position: absolute;
+  top: -5px;
+  left: calc(100% + 2px);
+  min-width: 176px;
+  animation: none;
+}
+.ctx-menu.flip-x .ctx-sub {
+  left: auto;
+  right: calc(100% + 2px);
+}
+.ctx-menu.flip-y .ctx-sub {
+  top: auto;
+  bottom: -5px;
+}
+/* Confirm in place: the same box re-armed as a question. */
+.ctx-menu.confirm .ctx-head {
+  margin: -4px -4px 3px;
+  min-height: 40px;
+  padding: 0 10px;
+  border-radius: 7px 7px 0 0;
+  background: var(--danger-dim);
+  border-bottom: 1px solid var(--danger-brd);
+}
+.ctx-menu.confirm .ctx-kind {
+  color: var(--danger);
+}
+.ctx-menu.confirm .ctx-title {
+  color: var(--text);
+}
+/* Per-peer levels on the voice stage menu. */
+.ctx-slider {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 26px;
+  padding: 0 8px;
+}
+.ctx-slider input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.ctx-pct {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--faint);
+  min-width: 30px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* Recent reactions strip on a message, and the full picker it unfolds into. */
+.ctx-react {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px 3px;
+}
+.ctx-rx {
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: inherit;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.ctx-rx img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+.ctx-rx:hover,
+.ctx-rx:focus-visible {
+  background: var(--bg-elev);
+  color: var(--text);
+  outline: none;
+}
+.ctx-rx.on {
+  background: var(--accent-dim);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 40%, transparent);
+  color: var(--accent-hi);
+}
+.ctx-rx-more {
+  margin-left: auto;
+}
+.ctx-rx-more .ico {
+  width: 15px;
+  height: 15px;
+}
+.ctx-react-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  max-height: 176px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 4px;
+  margin-top: 1px;
+  border-top: 1px solid var(--border-soft);
+}
+/* Key legend: terminal chrome only; clean chrome drops it. */
+.ctx-foot {
+  display: none;
+  gap: 8px;
+  padding: 4px 8px 0;
+  margin-top: 2px;
+  border-top: 1px solid var(--border-soft);
+  font-family: var(--mono);
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.ctx-foot .sp {
+  flex: 1;
+}
+:root[data-density="compact"] .ctx-menu {
+  font-size: 0.78rem;
+}
+:root[data-density="compact"] .ctx-item {
+  min-height: 22px;
+}
+:root[data-chrome="terminal"] .ctx-menu {
+  border-radius: var(--r);
+}
+:root[data-chrome="terminal"] .ctx-item {
+  border-radius: 0;
+}
+:root[data-chrome="terminal"] .ctx-kind::before {
+  content: "▮ ";
+}
+:root[data-chrome="terminal"] .ctx-hint::before {
+  content: "[";
+}
+:root[data-chrome="terminal"] .ctx-hint::after {
+  content: "]";
+}
+:root[data-chrome="terminal"] .ctx-divider {
+  margin: 3px 0;
+  background: repeating-linear-gradient(90deg, var(--border) 0 4px, transparent 4px 7px);
+}
+:root[data-chrome="terminal"] .ctx-foot {
+  display: flex;
 }
 .roster li.is-you {
   background: rgba(255, 255, 255, 0.04);
@@ -4631,71 +4924,232 @@ button.primary:hover:not(:disabled) {
   animation-play-state: paused !important;
 }
 
-/* Live-only arrival classes are applied to newly inserted rows, never to loaded history. */
-.messages li.message-arrival.arrival-glide,
-.messages li.message-arrival.arrival-fly,
-.messages li.message-arrival.arrival-pop,
-.messages li.message-arrival.arrival-drift {
-  animation-duration: var(--message-arrival-duration, 480ms);
+/* ============================================================
+   Message arrivals. One keyframe set per motion serves both the live log (a newly inserted row
+   runs it once; loaded history never gets the class) and the profile editor's looping preview.
+   The motion occupies the first quarter of `--message-arrival-cycle` (four times the chosen
+   duration) and the rest is a hold at rest, so the preview reads "arrive, sit, repeat" while a
+   live row simply arrives and sits until its arrival class is dropped.
+
+   Every per-message value arrives as an inline custom property from messageFrameArrivalStyle():
+   x/y/scale for the movers, the entry clip for wipes, slat direction and grain for the masks,
+   the hinge origin for the swivels, and a signed `--message-arrival-dir` for anything that turns.
+   ============================================================ */
+/* Resting value 1 = fully revealed: anything that stops the animation (the fixture's freeze, a
+   paused preview, a stylesheet that zeroes animations) leaves the row visible, never masked. */
+@property --arr-p { syntax: "<number>"; inherits: false; initial-value: 1; }
+
+/* Two hosts for the animation. Reveals and the blackout run on the row itself (a mask, a clip or
+   a filter never changes the row's box). Anything that MOVES runs on the row's children (the
+   gutter and the body), with the row clipping at its own edge: a row spun or scaled as a whole
+   grows the scroller's height mid-flight and shoves the scrollbar, whereas its children moving
+   inside a clipped, unchanged box cannot be seen by the scroller at all. */
+.messages li.message-arrival > *,
+.messages li.message-arrival:is(.arrival-wipe, .arrival-split, .arrival-blinds, .arrival-checker, .arrival-bars, .arrival-wheel, .arrival-dissolve, .arrival-blackout),
+.frame-motion-preview.preview-arrival > li,
+.frame-motion-preview.preview-arrival:is(.arrival-wipe, .arrival-split, .arrival-blinds, .arrival-checker, .arrival-bars, .arrival-wheel, .arrival-dissolve, .arrival-blackout) {
+  animation-duration: var(--message-arrival-cycle, 1920ms);
   animation-timing-function: var(--message-arrival-ease, cubic-bezier(0.16, 0.84, 0.24, 1));
   animation-fill-mode: both;
+  transform-origin: var(--message-arrival-origin, center center);
 }
-.messages li.message-arrival.arrival-glide { animation-name: message-arrival-glide; }
-.messages li.message-arrival.arrival-fly { animation-name: message-arrival-fly; }
-.messages li.message-arrival.arrival-pop { animation-name: message-arrival-pop; }
-.messages li.message-arrival.arrival-drift { animation-name: message-arrival-drift; }
-@keyframes message-arrival-glide {
-  from { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 0), var(--message-arrival-y, 30px)); }
-  to { opacity: 1; transform: translateY(0); }
+.messages li.message-arrival,
+.frame-motion-preview.preview-arrival > li { overflow: clip; }
+/* A live row plays exactly the motion quarter and then holds its final keyframe as a finished,
+   filling animation: no longer "current", so nothing stays a stacking context once at rest, and
+   a popover opened from the row cannot slip under the next row. The preview loops. */
+.messages li.message-arrival > *,
+.messages li.message-arrival:is(.arrival-wipe, .arrival-split, .arrival-blinds, .arrival-checker, .arrival-bars, .arrival-wheel, .arrival-dissolve, .arrival-blackout) {
+  animation-iteration-count: 0.25;
+  animation-fill-mode: forwards;
 }
-@keyframes message-arrival-fly {
-  from { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 30px), var(--message-arrival-y, 0)); }
-  to { opacity: 1; transform: translate(0, 0); }
+.frame-motion-preview.preview-arrival > li,
+.frame-motion-preview.preview-arrival:is(.arrival-wipe, .arrival-split, .arrival-blinds, .arrival-checker, .arrival-bars, .arrival-wheel, .arrival-dissolve, .arrival-blackout) {
+  animation-iteration-count: infinite;
 }
-@keyframes message-arrival-pop {
-  from { opacity: var(--message-arrival-opacity, 0.12); transform: scale(var(--message-arrival-scale, 0.95)); }
-  to { opacity: 1; transform: scale(1); }
-}
-@keyframes message-arrival-drift {
-  from { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 30px), var(--message-arrival-y, -10px)); }
-  to { opacity: 1; transform: translate(0, 0); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .messages li.message-arrival { animation: none !important; }
-}
+/* A row sliding in from beyond the lane must not grow the lane a scrollbar for half a second. */
+.messages { overflow-x: hidden; }
 
-/* The profile editor loops its draft arrival so the choice remains visible after the sub-second
-   real animation has finished. This is preview-only: live message rows still animate once. */
-.frame-motion-preview.preview-arrival {
-  transform-origin: center left;
-}
-.frame-motion-preview.preview-arrival.arrival-glide {
-  animation: frame-preview-glide var(--message-arrival-cycle, 1920ms) var(--message-arrival-ease, ease-out) infinite;
-}
-.frame-motion-preview.preview-arrival.arrival-fly {
-  animation: frame-preview-fly var(--message-arrival-cycle, 1920ms) var(--message-arrival-ease, ease-out) infinite;
-}
-.frame-motion-preview.preview-arrival.arrival-pop {
-  animation: frame-preview-pop var(--message-arrival-cycle, 1920ms) var(--message-arrival-ease, ease-out) infinite;
-}
-.frame-motion-preview.preview-arrival.arrival-drift {
-  animation: frame-preview-drift var(--message-arrival-cycle, 1920ms) var(--message-arrival-ease, ease-out) infinite;
-}
-@keyframes frame-preview-glide {
+/* quiet */
+.messages li.message-arrival.arrival-glide > *, .frame-motion-preview.preview-arrival.arrival-glide > li { animation-name: message-arrival-glide; }
+.messages li.message-arrival.arrival-fly > *, .frame-motion-preview.preview-arrival.arrival-fly > li { animation-name: message-arrival-fly; }
+.messages li.message-arrival.arrival-pop > *, .frame-motion-preview.preview-arrival.arrival-pop > li { animation-name: message-arrival-pop; }
+.messages li.message-arrival.arrival-drift > *, .frame-motion-preview.preview-arrival.arrival-drift > li { animation-name: message-arrival-drift; }
+@keyframes message-arrival-glide {
   0% { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 0), var(--message-arrival-y, 30px)); }
   25%, 100% { opacity: 1; transform: translate(0, 0); }
 }
-@keyframes frame-preview-fly {
+@keyframes message-arrival-fly {
   0% { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 30px), var(--message-arrival-y, 0)); }
   25%, 100% { opacity: 1; transform: translate(0, 0); }
 }
-@keyframes frame-preview-pop {
+@keyframes message-arrival-pop {
   0% { opacity: var(--message-arrival-opacity, 0.12); transform: scale(var(--message-arrival-scale, 0.95)); }
   25%, 100% { opacity: 1; transform: scale(1); }
 }
-@keyframes frame-preview-drift {
+@keyframes message-arrival-drift {
   0% { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 30px), var(--message-arrival-y, -10px)); }
   25%, 100% { opacity: 1; transform: translate(0, 0); }
+}
+
+/* wipes and reveals: the row is fully painted and a clip or mask uncovers it. The masks are
+   driven by one registered progress number so they share a single keyframe set. */
+.messages li.message-arrival.arrival-wipe, .frame-motion-preview.preview-arrival.arrival-wipe,
+.messages li.message-arrival.arrival-split, .frame-motion-preview.preview-arrival.arrival-split { animation-name: message-arrival-clip; }
+@keyframes message-arrival-clip {
+  0% { clip-path: var(--message-arrival-clip-from, inset(0 100% 0 0)); }
+  25%, 100% { clip-path: inset(0 0 0 0); }
+}
+.messages li.message-arrival:is(.arrival-blinds, .arrival-checker, .arrival-bars, .arrival-wheel, .arrival-dissolve),
+.frame-motion-preview.preview-arrival:is(.arrival-blinds, .arrival-checker, .arrival-bars, .arrival-wheel, .arrival-dissolve) {
+  animation-name: message-arrival-progress;
+  --arr-g: var(--message-arrival-grain, 18px);
+}
+@keyframes message-arrival-progress {
+  0% { --arr-p: 0; }
+  25%, 100% { --arr-p: 1; }
+}
+.messages li.message-arrival.arrival-blinds, .frame-motion-preview.preview-arrival.arrival-blinds {
+  mask-image: repeating-linear-gradient(
+    var(--message-arrival-blind-dir, to bottom),
+    #000 0 calc(var(--arr-p) * var(--arr-g)),
+    transparent calc(var(--arr-p) * var(--arr-g)) var(--arr-g)
+  );
+}
+/* Two tiled quadrant masks, offset by half a tile: the first fills its cells in the opening
+   third, the second in the middle third, and both close their gaps in the last. */
+.messages li.message-arrival.arrival-checker, .frame-motion-preview.preview-arrival.arrival-checker {
+  --arr-c1: calc(100% - clamp(0%, var(--arr-p) * 150%, 50%) - clamp(0%, (var(--arr-p) - 0.6667) * 150%, 50%));
+  --arr-c2: calc(100% - clamp(0%, (var(--arr-p) - 0.3333) * 150%, 50%) - clamp(0%, (var(--arr-p) - 0.6667) * 150%, 50%));
+  mask-image:
+    conic-gradient(from 90deg at var(--arr-c1) var(--arr-c1), #000 25%, transparent 0),
+    conic-gradient(from 90deg at var(--arr-c2) var(--arr-c2), #000 25%, transparent 0);
+  mask-size: calc(var(--arr-g) * 2) calc(var(--arr-g) * 2), calc(var(--arr-g) * 2) calc(var(--arr-g) * 2);
+  mask-position: 0 0, var(--arr-g) var(--arr-g);
+  mask-repeat: repeat;
+}
+/* Three bar periods resolving at three speeds read as random; they all complete by the hold. */
+.messages li.message-arrival.arrival-bars, .frame-motion-preview.preview-arrival.arrival-bars {
+  --arr-b1: calc(var(--arr-g) * 0.4);
+  --arr-b2: calc(var(--arr-g) * 0.7);
+  --arr-b3: var(--arr-g);
+  mask-image:
+    repeating-linear-gradient(to bottom, #000 0 clamp(0px, var(--arr-p) * 1.1 * var(--arr-b1), var(--arr-b1)), transparent 0 var(--arr-b1)),
+    repeating-linear-gradient(to bottom, #000 0 clamp(0px, var(--arr-p) * 1.6 * var(--arr-b2), var(--arr-b2)), transparent 0 var(--arr-b2)),
+    repeating-linear-gradient(to bottom, #000 0 clamp(0px, var(--arr-p) * 1.3 * var(--arr-b3), var(--arr-b3)), transparent 0 var(--arr-b3));
+}
+.messages li.message-arrival.arrival-wheel, .frame-motion-preview.preview-arrival.arrival-wheel {
+  mask-image: conic-gradient(
+    from calc(180deg - var(--message-arrival-dir, 1) * 180deg - (0.5 - var(--message-arrival-dir, 1) * 0.5) * var(--arr-p) * 360deg),
+    #000 calc(var(--arr-p) * 360deg),
+    transparent 0
+  );
+}
+.messages li.message-arrival.arrival-dissolve, .frame-motion-preview.preview-arrival.arrival-dissolve {
+  --arr-d1: calc(var(--arr-p) * var(--arr-g) * 0.75);
+  --arr-d2: calc(min(1, var(--arr-p) * 1.3) * var(--arr-g) * 1.2);
+  mask-image:
+    radial-gradient(circle, #000 var(--arr-d1), transparent calc(var(--arr-d1) + 0.6px)),
+    radial-gradient(circle, #000 var(--arr-d2), transparent calc(var(--arr-d2) + 0.6px));
+  mask-size: var(--arr-g) var(--arr-g), calc(var(--arr-g) * 1.6) calc(var(--arr-g) * 1.6);
+  mask-position: 0 0, calc(var(--arr-g) * 0.6) calc(var(--arr-g) * 0.7);
+  mask-repeat: repeat;
+}
+
+/* ceremony */
+.messages li.message-arrival.arrival-blackout, .frame-motion-preview.preview-arrival.arrival-blackout { animation-name: message-arrival-blackout; }
+@keyframes message-arrival-blackout {
+  0% { opacity: 0; filter: brightness(0); }
+  10% { opacity: 1; filter: brightness(0); }
+  25%, 100% { opacity: 1; filter: brightness(1); }
+}
+.messages li.message-arrival.arrival-newsflash > *, .frame-motion-preview.preview-arrival.arrival-newsflash > li {
+  animation-name: message-arrival-newsflash;
+  animation-timing-function: cubic-bezier(0.18, 0.9, 0.2, 1.08);
+}
+@keyframes message-arrival-newsflash {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: rotate(calc(var(--message-arrival-spin, 540deg) * -1 * var(--message-arrival-dir, 1))) scale(0); }
+  25%, 100% { opacity: 1; transform: none; }
+}
+.messages li.message-arrival.arrival-swivel > *, .frame-motion-preview.preview-arrival.arrival-swivel > li { animation-name: message-arrival-swivel; }
+@keyframes message-arrival-swivel {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: perspective(600px) rotateY(calc(84deg * var(--message-arrival-dir, 1))); }
+  25%, 100% { opacity: 1; transform: none; }
+}
+.messages li.message-arrival.arrival-flip > *, .frame-motion-preview.preview-arrival.arrival-flip > li { animation-name: message-arrival-flip; }
+@keyframes message-arrival-flip {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: perspective(600px) rotateX(calc(-90deg * var(--message-arrival-dir, 1))); }
+  25%, 100% { opacity: 1; transform: none; }
+}
+.messages li.message-arrival.arrival-spiral > *, .frame-motion-preview.preview-arrival.arrival-spiral > li { animation-name: message-arrival-spiral; }
+@keyframes message-arrival-spiral {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 70px), var(--message-arrival-y, -30px)) rotate(calc(200deg * var(--message-arrival-dir, 1))) scale(0.15); }
+  11% { opacity: 1; transform: translate(calc(var(--message-arrival-x, 70px) * -0.35), calc(var(--message-arrival-y, -30px) * -0.6)) rotate(calc(80deg * var(--message-arrival-dir, 1))) scale(0.55); }
+  25%, 100% { opacity: 1; transform: none; }
+}
+.messages li.message-arrival.arrival-crawl > *, .frame-motion-preview.preview-arrival.arrival-crawl > li { animation-name: message-arrival-crawl; }
+@keyframes message-arrival-crawl {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: perspective(300px) rotateX(48deg) translateY(var(--message-arrival-y, 50px)) scale(0.75); }
+  25%, 100% { opacity: 1; transform: none; }
+}
+
+/* physical */
+.messages li.message-arrival.arrival-bounce > *, .frame-motion-preview.preview-arrival.arrival-bounce > li {
+  animation-name: message-arrival-bounce;
+  animation-timing-function: ease-out;
+}
+@keyframes message-arrival-bounce {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: translateY(var(--message-arrival-y, -36px)); }
+  9% { opacity: 1; transform: none; }
+  14% { transform: translateY(calc(var(--message-arrival-y, -36px) * 0.33)); }
+  19% { transform: none; }
+  22% { transform: translateY(calc(var(--message-arrival-y, -36px) * 0.11)); }
+  25%, 100% { transform: none; }
+}
+.messages li.message-arrival.arrival-boomerang > *, .frame-motion-preview.preview-arrival.arrival-boomerang > li { animation-name: message-arrival-boomerang; }
+@keyframes message-arrival-boomerang {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: translateX(var(--message-arrival-x, 90px)); }
+  11% { opacity: 1; transform: translateX(calc(var(--message-arrival-x, 90px) * -0.18)); }
+  19% { transform: translateX(calc(var(--message-arrival-x, 90px) * 0.08)); }
+  25%, 100% { transform: none; }
+}
+.messages li.message-arrival.arrival-slam > *, .frame-motion-preview.preview-arrival.arrival-slam > li {
+  animation-name: message-arrival-slam;
+  animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
+}
+@keyframes message-arrival-slam {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: scale(var(--message-arrival-zoom, 2.2)); }
+  8% { opacity: 1; transform: scale(1); }
+  10% { transform: translate(-3px, 2px); }
+  12% { transform: translate(3px, -2px); }
+  14% { transform: translate(-2px, 1px); }
+  16%, 100% { transform: none; }
+}
+.messages li.message-arrival.arrival-quake > *, .frame-motion-preview.preview-arrival.arrival-quake > li {
+  animation-name: message-arrival-quake;
+  animation-timing-function: linear;
+}
+@keyframes message-arrival-quake {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: none; }
+  4% { opacity: 1; transform: translate(calc(var(--message-arrival-shake, 5px) * -1), calc(var(--message-arrival-shake, 5px) * 0.5)); }
+  8% { transform: translate(var(--message-arrival-shake, 5px), calc(var(--message-arrival-shake, 5px) * -0.7)); }
+  12% { transform: translate(calc(var(--message-arrival-shake, 5px) * -0.8), calc(var(--message-arrival-shake, 5px) * 0.5)); }
+  16% { transform: translate(calc(var(--message-arrival-shake, 5px) * 0.7), calc(var(--message-arrival-shake, 5px) * 0.25)); }
+  20% { transform: translate(calc(var(--message-arrival-shake, 5px) * -0.5), calc(var(--message-arrival-shake, 5px) * -0.25)); }
+  24% { transform: translate(calc(var(--message-arrival-shake, 5px) * 0.25), calc(var(--message-arrival-shake, 5px) * 0.25)); }
+  28%, 100% { transform: none; }
+}
+
+/* The renderer already resolves arrivals to Still under reduced motion and the Appearance motion
+   switch; this is the belt for a class that slipped through, so a mask never hides a row. */
+@media (prefers-reduced-motion: reduce) {
+  .messages li.message-arrival,
+  .messages li.message-arrival > * {
+    animation: none !important;
+    mask-image: none !important;
+    clip-path: none !important;
+    filter: none !important;
+  }
 }
 .name-preview-paused .frame-motion-preview {
   animation-play-state: paused !important;
@@ -14404,7 +14858,9 @@ button.fx-order {
 .text-fx-selection-bar {
   --fx-room: 400px;
   position: fixed;
-  z-index: 1200;
+  /* Under the context menu (901): a right-click on the selection opens over this bar, and
+     the bar used to paint through the menu's rows. Still above every dialog and overlay. */
+  z-index: 899;
   transform: translate(-50%, -100%);
   display: flex;
   flex-direction: column;
@@ -17140,7 +17596,8 @@ button.jam-cog.live {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
-.lv-range {
+.lv-range,
+.profile-tab input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
   flex: 1;
@@ -17151,12 +17608,14 @@ button.jam-cog.live {
   background: transparent;
   cursor: pointer;
 }
-.lv-range::-webkit-slider-runnable-track {
+.lv-range::-webkit-slider-runnable-track,
+.profile-tab input[type="range"]::-webkit-slider-runnable-track {
   height: 4px;
   border-radius: 999px;
   background: linear-gradient(to right, var(--accent) var(--pct, 0%), var(--border) var(--pct, 0%));
 }
-.lv-range::-webkit-slider-thumb {
+.lv-range::-webkit-slider-thumb,
+.profile-tab input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
   width: 14px;
@@ -17167,17 +17626,20 @@ button.jam-cog.live {
   border: 2px solid var(--panel);
   box-shadow: 0 0 0 1px var(--accent);
 }
-.lv-range::-moz-range-track {
+.lv-range::-moz-range-track,
+.profile-tab input[type="range"]::-moz-range-track {
   height: 4px;
   border-radius: 999px;
   background: var(--border);
 }
-.lv-range::-moz-range-progress {
+.lv-range::-moz-range-progress,
+.profile-tab input[type="range"]::-moz-range-progress {
   height: 4px;
   border-radius: 999px;
   background: var(--accent);
 }
-.lv-range::-moz-range-thumb {
+.lv-range::-moz-range-thumb,
+.profile-tab input[type="range"]::-moz-range-thumb {
   width: 14px;
   height: 14px;
   border-radius: 50%;
@@ -17185,7 +17647,189 @@ button.jam-cog.live {
   border: 2px solid var(--panel);
   box-shadow: 0 0 0 1px var(--accent);
 }
-.lv-range:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.lv-range:focus-visible,
+.profile-tab input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+/* ============================================================
+   Profile editor: one tab strip over four rooms (Identity, Name style, Frame, Arrival), a
+   sticky save bar, and controls drawn with the app's own tokens rather than the browser's.
+   ============================================================ */
+.profile-tab input[type="range"] { width: 100%; max-width: none; min-width: 0; }
+.profile-tab input[type="range"]:disabled { opacity: 0.4; cursor: default; }
+.profile-tab .fx-option.dim { opacity: 0.55; }
+.pf-k {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pf-k small {
+  font-family: var(--ui);
+  font-size: 0.74rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--faint);
+}
+.ptabs {
+  display: flex;
+  gap: 2px;
+  margin: 0 0 4px;
+  border-bottom: 1px solid var(--border);
+}
+button.ptab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 -1px;
+  padding: 8px 12px 9px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+button.ptab:hover { color: var(--text-2); background: transparent; }
+button.ptab.on { color: var(--text); border-bottom-color: var(--accent); }
+button.ptab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ptab .dirty,
+.psave .dirty {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+  flex: none;
+}
+.ppanel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+/* Sticks to the bottom of whichever scroller hosts the editor (the settings column, or the
+   profile surface's own pane), so Save is never three studios away. */
+.psave {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  padding: 10px 0 8px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-0);
+}
+.psave .status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+button.ptog {
+  padding: 4px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-2);
+  font-size: 0.76rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+button.ptog i { font-style: italic; margin-right: 2px; }
+button.ptog:hover { border-color: var(--accent-hi); background: var(--bg-elev); }
+button.ptog.on { border-color: var(--accent); background: var(--accent-dim); color: var(--text); }
+/* Tiles carry effects that reach above the glyph (sparkles, flames): room for them, and a clip
+   at the tile's own edge rather than a spill over the neighbour's border. */
+.ns-tile {
+  height: auto;
+  min-height: 38px;
+  padding: 10px 10px 5px;
+  border-width: 1px;
+  overflow: hidden;
+}
+.ns-tile.active { background: var(--accent-dim); }
+.name-recipe { min-height: 38px; padding: 7px 8px; }
+.name-studio-label { font-size: 0.62rem; color: var(--muted); }
+.motion-catalog { display: grid; gap: 10px; }
+.motion-group .name-studio-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.motion-group .name-studio-label small {
+  font-family: var(--ui);
+  font-size: 0.72rem;
+  letter-spacing: 0;
+  color: var(--faint);
+}
+.frame-motion-grid { grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); }
+.frame-motion-tile { min-height: 50px; background: var(--panel); }
+.frame-motion-tile.active { background: var(--accent-dim); }
+/* Identity library tiles: avatar, the styled name, the label underneath, delete in the corner. */
+.id-lib {
+  padding: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  background: color-mix(in oklab, var(--panel) 72%, transparent);
+}
+.id-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  gap: 6px;
+}
+.id-tile { position: relative; min-width: 0; }
+button.id-pick {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 26px 6px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--panel);
+  color: var(--text);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+}
+button.id-pick:hover { border-color: var(--accent-hi); background: var(--bg-elev); }
+button.id-pick .avatar { width: 28px; height: 28px; flex: none; }
+.id-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.id-text .name {
+  font-size: 0.86rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.id-text small {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.id-tile .recipe-delete { top: 50%; transform: translateY(-50%); }
 .banner-preview {
   width: 160px;
   height: 50px;

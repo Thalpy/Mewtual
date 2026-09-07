@@ -318,7 +318,11 @@ portable executable can be built with `npm run tauri build -- --no-bundle`; it i
 </details>
 
 <details>
-<summary><strong>Linux packages (deb / AppImage), experimental</strong></summary>
+<summary><strong>Linux packages (deb / AppImage)</strong></summary>
+
+Alpha releases ship both of these, so building them by hand is only needed to run your own
+changes. The `.AppImage` from a release updates itself; the `.deb` does not, because Tauri's
+updater has no format for it.
 
 Tauri links against WebKitGTK/GTK3 at build time, so this has to run on an actual Linux environment
 (native, a VM, or WSL2) rather than being cross-compiled from a Windows host. Install the
@@ -349,7 +353,7 @@ apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
 ```
 
 As with a Windows source build, the result has no auto-update wiring: `tauri.official.conf.json`'s
-updater endpoint and key are only merged in by the Windows `release.yml` workflow. CI runs the
+updater endpoint and key are only merged in by the `release.yml` workflow. CI runs the
 frontend suite/check/build and the separate Tauri test/check workspace against Ubuntu's WebKitGTK
 development libraries. That proves the Linux build surface, not graphical portal, PipeWire or
 hardware-codec behaviour; see [Linux testing](docs/LINUX-TESTING.md) for the Docker lanes and the
@@ -361,14 +365,15 @@ real-desktop media boundary.
 <summary><strong>Publish a GitHub alpha (maintainers)</strong></summary>
 
 The manual **Release desktop alpha** workflow in `.github/workflows/release.yml` runs the frontend
-checks, builds the Windows installer with the updater config merged in, and creates a **draft**
-GitHub release:
+checks, builds the Windows installer and the Linux `.AppImage` and `.deb` with the updater config
+merged in, and collects them into a single **draft** GitHub release:
 
 1. Commit and push the release version and changelog to `main`.
 2. Open the repository's **Actions** tab on GitHub.
 3. Select **Release desktop alpha**, then **Run workflow**.
-4. When it succeeds, open **Releases**, review the generated draft and installer, confirm
-   **Set as the latest release** is ticked and **Set as a pre-release** is **not**, then publish.
+4. When it succeeds, open **Releases**, review the generated draft and its bundles, confirm the
+   `latest.json` lists both `windows-x86_64` and `linux-x86_64`, confirm **Set as the latest
+   release** is ticked and **Set as a pre-release** is **not**, then publish.
 
 A release marked pre-release (or left as a draft) is invisible to every installed copy, because
 GitHub's `latest` pointer skips both: the in-app update check silently finds nothing. The version

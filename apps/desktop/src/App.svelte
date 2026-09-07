@@ -23,11 +23,11 @@
   } from "./text-effect-keybinds";
   import {
     CHAT_MESSAGE_FRAMES_ENABLED, DEFAULT_MESSAGE_FRAME, defaultMessageFrameLayer, encodeMessageFrame,
-    messageFrameArrivalStyle, messageFrameLayerStyle,
+    messageFrameArrivalStyle, messageFrameLayerStyle, messageFrameMotionTraits,
     messageFramePosition, messageFrameScanGeometry, messageFrameStyle, parseMessageFrame, visibleMessageFrameMotion,
     visibleMessageFrameStyle, type MessageFrame, type MessageFrameArrival,
     type MessageFrameEasing, type MessageFrameEffectId, type MessageFrameEffectOptions,
-    type MessageFrameMotion, type MessageFrameShape,
+    type MessageFrameMotion, type MessageFrameMotionFamily, type MessageFrameMotionTraits, type MessageFrameShape,
   } from "./message-frame";
   import {
     CHAT_INITIAL_ROWS, CHAT_WINDOW_STEP, CoalescedAsyncRefresh, SanitizedMessageCache, nearScrollBottom,
@@ -38,6 +38,9 @@
   } from "./message-paging";
   import { ImageSrcCache } from "./image-src";
   import { pastedMedia, pastedName } from "./clipboard-media";
+  import {
+    confirmQuestion, confirmVerb, parseTally, placeMenu, tallyReaction, topReactions, typeaheadIndex,
+  } from "./context-menu";
   import { dismissOnBackdrop } from "./overlay-dismiss";
   import {
     DEFAULT_PUSH_TO_TALK, bindableKey, keyLabel, micTransmitting, parsePushToTalk,
@@ -2761,11 +2764,12 @@
   function markMessageArrivals(ids: string[]) {
     if (!ids.length) return;
     arrivalMessageIds = new Set([...arrivalMessageIds, ...ids]);
+    // Outlives the longest arrival (1200ms): dropping the class mid-flight snaps the row to rest.
     setTimeout(() => {
       const next = new Set(arrivalMessageIds);
       for (const id of ids) next.delete(id);
       arrivalMessageIds = next;
-    }, 900);
+    }, 1500);
   }
   let messagesEl = $state<HTMLUListElement | undefined>(undefined);
   // In-channel message search (Ctrl+F): match indices into the loaded messages + the current one.
@@ -3683,13 +3687,74 @@
   let newEmojiSize = $state(0); // 0 = default inline size; else a pixel size up to the sticker max
   let showEmoji = $state(false);
 
-  // Right-click context menu (one shared instance). `onSelect` returning true keeps the menu
-  // open (used to swap in a confirm prompt for destructive actions).
+  // Right-click context menu (one shared instance). Rows are verbs; the head names what was hit.
+  // `onSelect` returning true keeps the menu open (a confirm prompt swaps itself in, a toggle
+  // rebuilds its rows). `hint` is shown on the row and, when it is a single letter, fires the row
+  // while the menu is open: only bindings that really exist belong there. `sub` is a one-level
+  // flyout; `react` is the recent-reactions strip; `slider` a per-peer level.
   type MenuItem =
     | { divider: true }
-    | { label: string; icon?: string; danger?: boolean; disabled?: boolean; onSelect: () => unknown };
-  let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+    | { section: string }
+    | { head: true; kind: string; title: string; fp?: string; info?: string; online?: boolean }
+    | { react: Msg }
+    | { slider: true; icon: string; label: string; value: number; max: number; onInput: (v: number) => void }
+    | {
+        label: string; icon?: string; hint?: string; danger?: boolean; disabled?: boolean; on?: boolean;
+        sub?: MenuItem[]; onSelect?: () => unknown;
+      };
+  type MenuRow = Exclude<Extract<MenuItem, { label: string }>, { slider: true }>;
+  const isMenuRow = (item: MenuItem | undefined): item is MenuRow => !!item && "label" in item && !("slider" in item);
+  let menu = $state<{ x: number; y: number; items: MenuItem[]; confirm?: boolean } | null>(null);
   let menuEl = $state<HTMLElement | undefined>();
+  let menuSub = $state(-1); // index of the top-level row whose flyout is open
+  let menuReactOpen = $state(false); // the reactions strip unfolded into the full picker
+  let menuField: HTMLInputElement | HTMLTextAreaElement | null = null; // the text field a menu opened on
+  // Menu icons: 16-grid stroke paths on currentColor, so they recolour with the palette. Emoji
+  // glyphs used to sit here; they ignored the theme and rendered differently on every machine.
+  const MENU_ICONS: Record<string, string> = {
+    reply: '<path d="M6 4L2.5 7.5 6 11"/><path d="M2.5 7.5H10a3.5 3.5 0 010 7"/>',
+    cat: '<path d="M3 6.5l-1-4 3.5 2M13 6.5l1-4-3.5 2"/><path d="M3 6.5a5 5 0 0110 0v2a5 5 0 01-10 0z"/><circle cx="6" cy="8" r="0.6" fill="currentColor"/><circle cx="10" cy="8" r="0.6" fill="currentColor"/><path d="M6.5 10.5c1 .8 2 .8 3 0"/>',
+    quote: '<path d="M3.5 11V7.5a2.5 2.5 0 012.5-2.5"/><path d="M9.5 11V7.5A2.5 2.5 0 0112 5"/><path d="M3.5 9h2.5v2H3.5zM9.5 9H12v2H9.5z"/>',
+    copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5a1 1 0 00-1-1h-6a1 1 0 00-1 1v6a1 1 0 001 1h2"/>',
+    link: '<path d="M6.5 9.5l3-3"/><path d="M7 4.5l1.2-1.2a2.5 2.5 0 013.5 3.5L10.5 8"/><path d="M9 11.5l-1.2 1.2a2.5 2.5 0 01-3.5-3.5L5.5 8"/>',
+    pin: '<path d="M9.5 2.5l4 4-3 1-2.5 2.5.5 3-6-6 3 .5L8 5z"/><path d="M6 10l-3.5 3.5"/>',
+    edit: '<path d="M3 13l1-4 7-7 3 3-7 7-4 1z"/><path d="M9.5 3.5l3 3"/>',
+    trash: '<path d="M3 4.5h10"/><path d="M6.5 4.5v-1a1 1 0 011-1h1a1 1 0 011 1v1"/><path d="M4.5 4.5l.6 8a1 1 0 001 .9h3.8a1 1 0 001-.9l.6-8"/>',
+    hash: '<path d="M6 2.5l-1 11M11 2.5l-1 11M3 6h10M3 10h10"/>',
+    verify: '<path d="M8 2l4.5 1.8v3.6c0 3-2 5.2-4.5 6.1C5.5 12.6 3.5 10.4 3.5 7.4V3.8z"/><path d="M6 8l1.5 1.5L10.5 6.5"/>',
+    user: '<circle cx="8" cy="5.5" r="2.5"/><path d="M3 13.5c.6-2.5 2.5-4 5-4s4.4 1.5 5 4"/>',
+    dm: '<rect x="2" y="3.5" width="12" height="9" rx="1.5"/><path d="M2.5 4.5L8 9l5.5-4.5"/>',
+    crown: '<path d="M2.5 11.5l1-7 3 3L8 3.5l1.5 4 3-3 1 7z"/><path d="M3.5 13.5h9"/>',
+    x: '<circle cx="8" cy="8" r="5.5"/><path d="M6 6l4 4M10 6l-4 4"/>',
+    eye: '<path d="M1.5 8s2.5-4 6.5-4 6.5 4 6.5 4-2.5 4-6.5 4-6.5-4-6.5-4z"/><circle cx="8" cy="8" r="2"/>',
+    search: '<circle cx="7" cy="7" r="4"/><path d="M10 10l3.5 3.5"/>',
+    cut: '<circle cx="4.5" cy="4.5" r="2"/><circle cx="4.5" cy="11.5" r="2"/><path d="M6 6l7.5 6.5M6 10l7.5-6.5"/>',
+    paste: '<rect x="3.5" y="3.5" width="9" height="10" rx="1.5"/><path d="M6 3.5V2.5h4v1"/><path d="M6 8h4M6 10.5h3"/>',
+    selall: '<rect x="2.5" y="2.5" width="11" height="11" rx="1.5" stroke-dasharray="2 2"/><rect x="5.5" y="5.5" width="5" height="5"/>',
+    ext: '<path d="M9 2.5h4.5V7"/><path d="M13.5 2.5L7 9"/><path d="M11.5 9v3.5a1 1 0 01-1 1h-7a1 1 0 01-1-1v-7a1 1 0 011-1H7"/>',
+    spark: '<path d="M8 2l1.3 3.7L13 7l-3.7 1.3L8 12l-1.3-3.7L3 7l3.7-1.3z"/>',
+    down: '<path d="M8 2.5v8M5 7.5l3 3 3-3"/><path d="M3 13.5h10"/>',
+    img: '<rect x="2.5" y="3.5" width="11" height="9" rx="1.5"/><circle cx="6" cy="7" r="1.2"/><path d="M13 11l-3-3-4 4"/>',
+    info: '<circle cx="8" cy="8" r="5.5"/><path d="M8 7v4M8 5.2v.1"/>',
+    at: '<circle cx="8" cy="8" r="2.5"/><path d="M10.5 8v1a1.5 1.5 0 003 0V8a5.5 5.5 0 10-2.2 4.4"/>',
+    gear: '<circle cx="8" cy="8" r="2"/><path d="M8 2v1.5M8 12.5V14M2 8h1.5M12.5 8H14M3.8 3.8l1 1M11.2 11.2l1 1M3.8 12.2l1-1M11.2 4.8l1-1"/>',
+    leave: '<path d="M6 2.5H3.5v11H6"/><path d="M9 5l3 3-3 3M12 8H6"/>',
+    orbit: '<circle cx="8" cy="8" r="2.5"/><ellipse cx="8" cy="8" rx="6.5" ry="2.5" transform="rotate(-30 8 8)"/>',
+    up: '<path d="M8 13V3.5M4.5 7L8 3.5 11.5 7"/>',
+    vol: '<path d="M2.5 6h2.5l3.5-3v10L5 10H2.5z"/><path d="M10.5 5.5a3.5 3.5 0 010 5M12.5 3.5a6 6 0 010 9"/>',
+    micoff: '<rect x="6" y="2" width="4" height="7" rx="2"/><path d="M3.5 7.5a4.5 4.5 0 009 0M8 12v2"/><path d="M3 3l10 10"/>',
+    piano: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M6 3v6M10 3v6"/>',
+    fp: '<path d="M4 9a4 4 0 018 0v1M6 9a2 2 0 014 0v3M8 9v4"/><path d="M3.5 5.5A5.5 5.5 0 0112.5 5"/>',
+    tray: '<path d="M2.5 9.5v2a1 1 0 001 1h9a1 1 0 001-1v-2"/><path d="M8 2.5v7M5.5 7l2.5 2.5L10.5 7"/>',
+    focus: '<circle cx="8" cy="8" r="2.5"/><path d="M8 2v2M8 12v2M2 8h2M12 8h2"/>',
+  };
+  function menuIconSvg(key: string | undefined): string {
+    const body = key ? MENU_ICONS[key] : undefined;
+    return body
+      ? `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`
+      : "";
+  }
+  const shortFp = (fp: string) => `${fp.slice(0, 4)}·${fp.slice(4, 8)}`;
   let composerEl = $state<HTMLTextAreaElement | undefined>();
   let editMessageEl = $state<HTMLTextAreaElement | undefined>();
   let announcementInputEl = $state<HTMLTextAreaElement | undefined>();
@@ -4394,7 +4459,170 @@
     { id: "fly", label: "Fly in", description: "Sweep in from the side", glyph: "→" },
     { id: "pop", label: "Pop", description: "A quick soft-scale arrival", glyph: "◇" },
     { id: "drift", label: "Drift", description: "Float diagonally into place", glyph: "↗" },
+    { id: "wipe", label: "Wipe", description: "Uncovered from one side to the other", glyph: "▐" },
+    { id: "split", label: "Split", description: "Opens from the centre line outward", glyph: "═" },
+    { id: "blinds", label: "Blinds", description: "Slats widen until the row is whole", glyph: "≡" },
+    { id: "checker", label: "Checker", description: "Alternate tiles land first, then the gaps fill", glyph: "▚" },
+    { id: "bars", label: "Bars", description: "Uneven bars resolve at different speeds", glyph: "▤" },
+    { id: "wheel", label: "Wheel", description: "A clock hand sweeps the row into view", glyph: "◔" },
+    { id: "dissolve", label: "Dissolve", description: "Speckles bloom until they cover the row", glyph: "⁘" },
+    { id: "blackout", label: "Blackout", description: "Arrives dark, then the lights come up", glyph: "◐" },
+    { id: "newsflash", label: "Newsflash", description: "Spins in from nothing, 1998 style", glyph: "✶" },
+    { id: "swivel", label: "Swivel", description: "Hinges open from one edge in perspective", glyph: "◫" },
+    { id: "flip", label: "Flip", description: "Falls forward like a split-flap board", glyph: "⊟" },
+    { id: "spiral", label: "Spiral", description: "Corkscrews in from a corner", glyph: "@" },
+    { id: "crawl", label: "Crawl", description: "Rises from below, tilted back into the distance", glyph: "⟰" },
+    { id: "bounce", label: "Bounce", description: "Drops in and settles on the second bounce", glyph: "⤓" },
+    { id: "boomerang", label: "Boomerang", description: "Flies past its spot and comes back", glyph: "↩" },
+    { id: "slam", label: "Slam", description: "Stamps down from huge with a short rattle", glyph: "◉" },
+    { id: "quake", label: "Earthquake", description: "Rattles into place", glyph: "≋" },
   ];
+  const MOTION_FAMILIES: { id: MessageFrameMotionFamily; label: string; hint: string }[] = [
+    { id: "quiet", label: "QUIET", hint: "a nudge and a fade" },
+    { id: "reveal", label: "WIPES & REVEALS", hint: "the row is uncovered in place" },
+    { id: "ceremony", label: "CEREMONY", hint: "the row makes an entrance" },
+    { id: "physical", label: "PHYSICAL", hint: "the row has mass" },
+  ];
+  // The one 4..80 slider means something different per family; the readout says what.
+  const DISTANCE_LABELS: Record<MessageFrameMotionTraits["distance"], string> = {
+    travel: "Travel", depth: "Depth", grain: "Grain", amplitude: "Amplitude", spin: "Spin", none: "Travel",
+  };
+  function arrivalDistanceReadout(kind: MessageFrameMotionTraits["distance"], d: number): string {
+    if (kind === "grain") return `${Math.max(6, Math.round(d * 0.6))}px`;
+    if (kind === "amplitude") return `${Math.max(1, Math.round(d / 6))}px`;
+    if (kind === "spin") return `${Math.round(180 + d * 12)}°`;
+    if (kind === "depth") return `${d}`;
+    if (kind === "none") return "n/a";
+    return `${d}px`;
+  }
+  function arrivalIsDefault(a: MessageFrameArrival): boolean {
+    const d = DEFAULT_MESSAGE_FRAME.arrival;
+    return a.duration === d.duration && a.distance === d.distance && a.fade === d.fade && a.direction === d.direction && a.easing === d.easing;
+  }
+  function resetArrival() {
+    updateFrame({ motion: "none", arrival: { ...DEFAULT_MESSAGE_FRAME.arrival } });
+  }
+
+  // The profile editor is one draft behind four tabs. Frame only appears while chat frames are
+  // switched on; a tab with unsaved changes carries a dot and the save bar names it.
+  type ProfileTabId = "identity" | "name" | "frame" | "arrival";
+  const PROFILE_TABS: { id: ProfileTabId; label: string }[] = [
+    { id: "identity", label: "Identity" },
+    { id: "name", label: "Name style" },
+    { id: "frame", label: "Frame" },
+    { id: "arrival", label: "Arrival" },
+  ];
+  let profileTab = $state<ProfileTabId>("identity");
+  let profileDirty = $derived.by(() => {
+    const me = profiles[myFp];
+    const savedFrame = parseMessageFrame(me?.bubble ?? "");
+    const frameKey = (f: MessageFrame) => JSON.stringify([f.surface, f.opacity, f.edge, f.shape, f.effects]);
+    const arrivalKey = (f: MessageFrame) => JSON.stringify([f.motion, f.arrival]);
+    // Mirrors syncProfileEditor, which keeps the draft's own value wherever the saved one is empty.
+    const identity = me
+      ? pName.trim() !== (me.name || pName).trim() || pColor !== (me.color || pColor) ||
+        pDescription.trim() !== (me.description ?? "").trim() || pAvatar !== (me.avatar || "") || pBanner !== (me.banner || "")
+      : !!(pAvatar || pBanner || pDescription.trim());
+    const name = me ? pFont !== (me.font || pFont) || pEffect !== (me.effect || pEffect) : pEffect !== "none";
+    const frame = frameKey(pFrame) !== frameKey(savedFrame);
+    const arrival = arrivalKey(pFrame) !== arrivalKey(savedFrame);
+    return { identity, name, frame, arrival, any: identity || name || frame || arrival };
+  });
+  const dirtyTabLabels = () => PROFILE_TABS.filter((t) => profileDirty[t.id]).map((t) => t.label).join(", ");
+  function discardProfileDraft() {
+    pAvatar = "";
+    pBanner = "";
+    pDescription = "";
+    pEffect = "none";
+    pEffects = [];
+    pBubble = "";
+    syncProfileEditor(); // restores every saved value; a never-saved profile just goes back to blank
+  }
+  // Centre a moving arrival on the message itself, not on the lane. The row's children (gutter
+  // and body) each carry the animation, so both receive the SAME absolute point as their origin:
+  // the pair then turns as one piece around the content's centre (or hinges on its edge for a
+  // swivel or flip) instead of each part spinning about its own box, and a short message's spin
+  // stays as small as the message. Measured with the animation switched off for the read, since
+  // the first keyframe (scale 0, rotated) would otherwise be what gets measured.
+  function arrivalOrigin(node: HTMLElement, motion: MessageFrameMotion) {
+    const apply = (current: MessageFrameMotion) => {
+      const traits = messageFrameMotionTraits(current);
+      if (current === "none" || current === "blackout" || traits.family === "reveal") return;
+      const body = node.querySelector<HTMLElement>(":scope > .m-body");
+      if (!body) return;
+      const parts = [...node.children].filter((child): child is HTMLElement => child instanceof HTMLElement);
+      for (const part of parts) part.style.animationName = "none";
+      // The message is its text plus the name above it, not the full-width lines they sit on: a
+      // Range over the text gives the ink's extent, and the union with the name box is the
+      // visual message. Anything without a text (an attachment-only row) falls back to the body.
+      let box: DOMRect | null = null;
+      const union = (r: DOMRect) => {
+        if (r.width <= 0 || r.height <= 0) return;
+        box = box
+          ? new DOMRect(Math.min(box.left, r.left), Math.min(box.top, r.top), Math.max(box.right, r.right) - Math.min(box.left, r.left), Math.max(box.bottom, r.bottom) - Math.min(box.top, r.top))
+          : r;
+      };
+      const text = body.querySelector<HTMLElement>(":scope > .text");
+      if (text) {
+        const range = document.createRange();
+        range.selectNodeContents(text);
+        union(range.getBoundingClientRect());
+      }
+      const name = body.querySelector<HTMLElement>(".author .author-link");
+      if (name) union(name.getBoundingClientRect());
+      if (!box) box = body.getBoundingClientRect();
+      box = box as DOMRect;
+      const mode = getComputedStyle(node).getPropertyValue("--message-arrival-origin").trim();
+      const cx = mode === "left center" ? box.left : mode === "right center" ? box.right : box.left + box.width / 2;
+      const cy = mode === "top center" ? box.top : mode === "bottom center" ? box.bottom : box.top + box.height / 2;
+      for (const part of parts) {
+        const r = part.getBoundingClientRect();
+        part.style.transformOrigin = `${Math.round(cx - r.left)}px ${Math.round(cy - r.top)}px`;
+        part.style.animationName = ""; // hand the animation back; it starts fresh with this origin
+      }
+    };
+    apply(motion);
+    return {
+      update(next: MessageFrameMotion) {
+        apply(next);
+      },
+    };
+  }
+  // Fills the accent track of every range in the editor up to its value: the styled slider
+  // paints from `--pct`, which the browser does not supply. Watches for sliders that appear
+  // later (an effect's settings unfold) and repaints on the key (Reset buttons move values
+  // without an input event).
+  function rangeFills(node: HTMLElement, key: string) {
+    const paint = (r: HTMLInputElement) => {
+      const min = Number(r.min || 0);
+      const max = Number(r.max || 100);
+      const pct = max > min ? ((Number(r.value) - min) / (max - min)) * 100 : 0;
+      r.style.setProperty("--pct", `${Math.max(0, Math.min(100, pct))}%`);
+    };
+    const paintAll = () => {
+      for (const r of node.querySelectorAll<HTMLInputElement>('input[type="range"]')) paint(r);
+    };
+    const onInput = (e: Event) => {
+      const t = e.target;
+      if (t instanceof HTMLInputElement && t.type === "range") paint(t);
+    };
+    node.addEventListener("input", onInput);
+    const observer = new MutationObserver(() => paintAll());
+    observer.observe(node, { childList: true, subtree: true });
+    paintAll();
+    let last = key;
+    return {
+      update(next: string) {
+        if (next === last) return;
+        last = next;
+        queueMicrotask(paintAll);
+      },
+      destroy() {
+        observer.disconnect();
+        node.removeEventListener("input", onInput);
+      },
+    };
+  }
   const FRAME_EASINGS: { id: MessageFrameEasing; label: string; description: string }[] = [
     { id: "soft", label: "Soft", description: "Gentle terminal easing" },
     { id: "snappy", label: "Snappy", description: "Fast response with a firm stop" },
@@ -4737,6 +4965,86 @@
 
   function deleteNameRecipe(id: string) {
     persistNameRecipes(savedNameRecipes.filter((recipe) => recipe.id !== id));
+  }
+
+  // The identity library: whole profile drafts (avatar, banner, name and its style, bio, arrival)
+  // saved on this device under a label, so a look made once can be loaded on any server. Same
+  // shape as the name recipes, kept local: nothing here is published until Save profile.
+  type SavedIdentity = {
+    id: string; label: string; savedAt: number;
+    name: string; color: string; font: string; effect: string; description: string; bubble: string; avatar: string; banner: string;
+  };
+  const IDENTITY_KEY = "catcoms.identities.v1";
+  const IDENTITY_MAX = 10; // avatars and banners are inline base64; ten keeps well under the storage quota
+  const B64_RE = /^[A-Za-z0-9+/=]*$/;
+  function loadIdentities(): SavedIdentity[] {
+    try {
+      const raw = JSON.parse(localStorage.getItem(IDENTITY_KEY) ?? "[]");
+      if (!Array.isArray(raw)) return [];
+      return raw.slice(0, IDENTITY_MAX).flatMap((value): SavedIdentity[] => {
+        if (!value || typeof value !== "object") return [];
+        const r = value as Partial<SavedIdentity>;
+        if (typeof r.label !== "string" || typeof r.name !== "string" || typeof r.color !== "string" || typeof r.effect !== "string") return [];
+        if (!/^#[0-9a-fA-F]{6}$/.test(r.color) || r.effect.length > 4096) return [];
+        const effects = decodeNameEffects(r.effect);
+        if (r.effect !== "none" && !effects.length) return [];
+        const avatar = typeof r.avatar === "string" && r.avatar.length <= 100_000 && B64_RE.test(r.avatar) ? r.avatar : "";
+        const banner = typeof r.banner === "string" && r.banner.length <= 360_000 && B64_RE.test(r.banner) ? r.banner : "";
+        return [{
+          id: typeof r.id === "string" ? r.id : crypto.randomUUID(),
+          label: r.label.slice(0, 32),
+          savedAt: typeof r.savedAt === "number" ? r.savedAt : 0,
+          name: r.name.slice(0, 64),
+          color: r.color.toLowerCase(),
+          font: typeof r.font === "string" && NAME_FONT_IDS.has(r.font) ? r.font : "system",
+          effect: encodeNameEffects(effects),
+          description: typeof r.description === "string" ? r.description.slice(0, 280) : "",
+          bubble: encodeMessageFrame(parseMessageFrame(typeof r.bubble === "string" ? r.bubble : "")),
+          avatar,
+          banner,
+        }];
+      });
+    } catch {
+      return [];
+    }
+  }
+  let savedIdentities = $state<SavedIdentity[]>(loadIdentities());
+  let identityLabelDraft = $state("");
+  let identityLibraryError = $state("");
+  function persistIdentities(next: SavedIdentity[]) {
+    savedIdentities = next.slice(-IDENTITY_MAX);
+    try {
+      localStorage.setItem(IDENTITY_KEY, JSON.stringify(savedIdentities));
+      identityLibraryError = "";
+    } catch {
+      // Quota, most likely: a few large banners fill it. The list still works for this session.
+      identityLibraryError = "This device's local storage is full, so that identity is kept for this session only. Remove one with a large avatar or banner to make room.";
+    }
+  }
+  function saveIdentity() {
+    const label = (identityLabelDraft.trim() || pName.trim()).slice(0, 32);
+    if (!label) return;
+    // Saving under an existing label replaces it: "update my work look" rather than a twin.
+    persistIdentities([...savedIdentities.filter((ident) => ident.label !== label), {
+      id: crypto.randomUUID(), label, savedAt: Date.now(),
+      name: pName, color: pColor, font: pFont, effect: pEffect, description: pDescription, bubble: pBubble, avatar: pAvatar, banner: pBanner,
+    }]);
+    identityLabelDraft = "";
+  }
+  function applyIdentity(ident: SavedIdentity) {
+    rememberNameStyle(`identity:${ident.id}`);
+    pName = ident.name;
+    pColor = ident.color;
+    pFont = ident.font;
+    pEffect = ident.effect;
+    pEffects = decodeNameEffects(ident.effect);
+    pDescription = ident.description;
+    pBubble = ident.bubble;
+    pAvatar = ident.avatar;
+    pBanner = ident.banner;
+  }
+  function deleteIdentity(id: string) {
+    persistIdentities(savedIdentities.filter((ident) => ident.id !== id));
   }
 
   const pick = <T,>(items: readonly T[]): T => items[Math.floor(Math.random() * items.length)];
@@ -6767,11 +7075,15 @@
       if (!applyPage(page, token)) return;
       messageWindowScope = nextScope;
       void refreshPinned(server, channel);
-      if (animateArrivals) {
-        // Own posts already animate at optimistic insertion; excluding them prevents the
-        // acknowledged, server-assigned id from replaying the entrance a second time.
-        markMessageArrivals(page.rows.filter((message) => message.author !== myFp && !previous.has(message.id)).map((message) => message.id));
-      }
+      // Peers' rows animate only when the caller says this refresh answers a live update (a reload
+      // of history stays still). An own post animated at optimistic insertion, but the
+      // acknowledgement swaps that pending row for the server-assigned id within a few frames and
+      // would cut the entrance short, so the mark carries over to the new id for as long as the
+      // pending mark is still live; past that window the acknowledged row simply appears at rest.
+      const ownStillArriving = previousMessages.some((message) => message.id.startsWith("pending:") && arrivalMessageIds.has(message.id));
+      markMessageArrivals(page.rows
+        .filter((message) => !previous.has(message.id) && (message.author === myFp ? ownStillArriving : animateArrivals))
+        .map((message) => message.id));
       // Loading rows is not reading them. `settleReadState` decides which this was.
       settleReadState();
     } catch (e) {
@@ -7828,22 +8140,25 @@
   // The ⋯ menu on an announcement card. Every entry here is also gated natively; this decides what
   // is worth offering, and a role read arriving late can only ever hide an action, never allow one.
   function statusMenu(s: Msg): MenuItem[] {
-    const items: MenuItem[] = [{ label: "Copy text", icon: "⧉", onSelect: () => copyText(s.text) }];
+    const items: MenuItem[] = [
+      { head: true, kind: "announcement", title: `${nameOf(s.author)} · ${fmtTime(s.ts)}`, fp: s.author },
+      { label: "Copy text", icon: "copy", onSelect: () => copyText(s.text) },
+    ];
     if (s.id) {
-      items.push({ label: "Copy link", icon: "🔗", onSelect: () => copyText(statusMarker(s.text, s.id)) });
-      items.push({ label: "React…", icon: "☺", onSelect: () => (statusReactionPickerFor = s.id) });
+      items.push({ label: "Copy link", icon: "link", onSelect: () => copyText(statusMarker(s.text, s.id)) });
+      items.push({ label: "React…", icon: "cat", onSelect: () => (statusReactionPickerFor = s.id) });
       if (canModerate) {
-        items.push({ label: s.pinned ? "Unpin" : "Pin to the top", icon: "📌", onSelect: () => toggleStatusPin(s) });
+        items.push({ label: s.pinned ? "Unpin" : "Pin to the top", icon: "pin", hint: "mod", onSelect: () => toggleStatusPin(s) });
       }
       if (s.author === myFp) {
         items.push({ divider: true });
-        items.push({ label: "Edit", icon: "✎", onSelect: () => startStatusEdit(s) });
+        items.push({ label: "Edit", icon: "edit", onSelect: () => startStatusEdit(s) });
       }
       if (s.author === myFp || canModerate) {
         if (s.author !== myFp) items.push({ divider: true });
         items.push({
           label: "Delete",
-          icon: "🗑",
+          icon: "trash",
           danger: true,
           onSelect: () => confirmInMenu("Delete this announcement?", () => deleteStatus(s)),
         });
@@ -8433,7 +8748,52 @@
     if (items.length === 0) return;
     e.preventDefault();
     e.stopPropagation();
+    menuSub = -1;
+    menuReactOpen = false;
+    menuTypeahead = "";
+    clearTimeout(menuSubTimer);
     menu = { x: e.clientX, y: e.clientY, items };
+  }
+  /** Keep the menu open but rebuild its rows (a toggle just changed what they should say). */
+  function refreshMenu(build: () => MenuItem[]): true {
+    if (menu) menu = { ...menu, items: build() };
+    return true;
+  }
+  function pickMenuItem(item: MenuRow, depth: number, row: number) {
+    if (item.sub && depth === 0) {
+      if (menuSub === row) menuSub = -1;
+      else void openMenuSub(row);
+      return;
+    }
+    const keep = item.onSelect?.();
+    if (keep !== true) menu = null;
+  }
+  async function openMenuSub(row: number) {
+    clearTimeout(menuSubTimer);
+    menuSub = row;
+    await tick();
+    (menuEl?.querySelector(".ctx-sub .ctx-item:not([disabled])") as HTMLElement | null)?.focus();
+  }
+  // Hovering a row with a flyout opens it after a beat; hovering any other top-level row closes
+  // it after the same beat, so a diagonal move into the flyout does not slam it shut.
+  // Where the pointer last was over the log, so R / E can find the row beneath it. Cleared when
+  // the pointer leaves the log; resolved through elementFromPoint at key time, so anything that
+  // has since covered the log (a takeover, the stage) wins over a stale row.
+  let logPointer: { x: number; y: number } | null = null;
+  function messageUnderPointer(): Msg | undefined {
+    if (!logPointer || !messagesEl) return undefined;
+    const row = document.elementFromPoint(logPointer.x, logPointer.y)?.closest("li[data-mi]") as HTMLElement | null;
+    if (!row || !messagesEl.contains(row)) return undefined;
+    return messages[Number(row.getAttribute("data-mi")) - pageStart];
+  }
+  let menuSubTimer: ReturnType<typeof setTimeout> | undefined;
+  function hoverMenuRow(depth: number, row: number, hasSub: boolean) {
+    if (depth !== 0) return;
+    clearTimeout(menuSubTimer);
+    menuSubTimer = setTimeout(() => {
+      if (hasSub) menuSub = row;
+      else if (menuSub !== -1) menuSub = -1;
+    }, 120);
   }
 
   // Svelte action: open a context menu on right-click, with items built fresh at click time
@@ -8444,7 +8804,13 @@
       // An inline embed and a link card each build their own menu in handleRichContext, which is
       // delegated on the container above this node. Let the event bubble there instead of opening
       // (and stopping at) the row's menu; that handler folds this row's items in below its own.
-      if ((e.target as HTMLElement | null)?.closest("[data-embed-cid],.ref-card")) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("[data-embed-cid],.ref-card")) return;
+      // Selected text and web links get their own menus from the window fallback, which folds
+      // this row's verbs in underneath as "Message". Claiming the click here would hide them.
+      if (target?.closest("a[href]")) return;
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed && sel.rangeCount > 0 && sel.getRangeAt(0).intersectsNode(node) && sel.toString().trim()) return;
       openMenu(e, make());
     };
     node.addEventListener("contextmenu", h);
@@ -8458,30 +8824,81 @@
     };
   }
 
-  // Keep the menu on-screen + focus it once rendered (clamp against the viewport).
+  // Place the menu once rendered and whenever it changes shape (a flyout, the reactions grid).
+  // The corner stays on the pointer; near an edge the box mirrors to the other side of it rather
+  // than sliding over it, and a flyout mirrors with it (the flip-x class).
   $effect(() => {
     if (!menu || !menuEl) return;
-    const w = menuEl.offsetWidth;
-    const h = menuEl.offsetHeight;
-    const x = Math.max(4, Math.min(menu.x, window.innerWidth - w - 8));
-    const y = Math.max(4, Math.min(menu.y, window.innerHeight - h - 8));
-    menuEl.style.left = `${x}px`;
-    menuEl.style.top = `${y}px`;
-    menuEl.focus();
+    void menuSub;
+    void menuReactOpen;
+    const p = placeMenu(menu.x, menu.y, menuEl.offsetWidth, menuEl.offsetHeight, window.innerWidth, window.innerHeight);
+    menuEl.style.left = `${p.left}px`;
+    menuEl.style.top = `${p.top}px`;
+    menuEl.classList.toggle("flip-x", p.flipX);
+    menuEl.classList.toggle("flip-y", p.flipY);
+    if (menuSub < 0 && !menuEl.contains(document.activeElement)) menuEl.focus();
   });
 
+  // Keys inside the menu: arrows and Home/End walk the rows of whichever level has focus, Right
+  // opens a flyout and Left (or Escape) closes it, a bare letter fires the row wearing it as its
+  // hint, and otherwise letters type-ahead against the labels (one letter repeated cycles).
+  let menuTypeahead = "";
+  let menuTypeaheadAt = 0;
   function onMenuKey(e: KeyboardEvent) {
-    if (!menuEl) return;
-    const items = Array.from(menuEl.querySelectorAll<HTMLButtonElement>(".ctx-item:not([disabled])"));
-    if (items.length === 0) return;
-    const idx = items.indexOf(document.activeElement as HTMLButtonElement);
-    if (e.key === "ArrowDown") {
+    if (!menuEl || !menu) return;
+    const active = document.activeElement as HTMLElement | null;
+    const subEl = active?.closest(".ctx-sub") as HTMLElement | null;
+    const scope = subEl ?? menuEl;
+    const items = Array.from(scope.querySelectorAll<HTMLButtonElement>(":scope > .ctx-row > .ctx-item:not([disabled])"));
+    const idx = items.indexOf(active as HTMLButtonElement);
+    const focusAt = (i: number) => items[((i % items.length) + items.length) % items.length]?.focus();
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      items[(idx + 1) % items.length]?.focus();
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      items[(idx - 1 + items.length) % items.length]?.focus();
+      if (items.length) focusAt(idx + (e.key === "ArrowDown" ? 1 : -1));
+      return;
     }
+    if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      if (items.length) focusAt(e.key === "Home" ? 0 : items.length - 1);
+      return;
+    }
+    if (e.key === "ArrowRight" && !subEl) {
+      const row = Number(active?.getAttribute("data-row") ?? -1);
+      const item = row >= 0 ? menu.items[row] : undefined;
+      if (isMenuRow(item) && item.sub) {
+        e.preventDefault();
+        void openMenuSub(row);
+      }
+      return;
+    }
+    if ((e.key === "ArrowLeft" || e.key === "Escape") && subEl) {
+      e.preventDefault();
+      e.stopPropagation(); // the window handler would close the whole menu on Escape
+      const row = menuSub;
+      menuSub = -1;
+      void tick().then(() => (menuEl?.querySelector(`[data-row="${row}"]`) as HTMLElement | null)?.focus());
+      return;
+    }
+    if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey || e.key === " ") return;
+    e.preventDefault();
+    const k = e.key.toLowerCase();
+    const now = Date.now();
+    if (now - menuTypeaheadAt > 600) menuTypeahead = "";
+    menuTypeaheadAt = now;
+    // A bare accelerator fires its row; once you have started typing a label, letters only ever
+    // extend that prefix ("d" then "e" reaches Delete even though "e" alone is React).
+    if (!menuTypeahead) {
+      const hit = items.find((b) => (b.getAttribute("data-hint") ?? "").toLowerCase() === k);
+      if (hit) {
+        hit.click();
+        return;
+      }
+    }
+    menuTypeahead += k;
+    const labels = items.map((b) => b.querySelector(".ctx-label")?.textContent ?? "");
+    const uniform = /^(.)\1*$/.test(menuTypeahead);
+    const i = typeaheadIndex(labels, uniform ? menuTypeahead[0] : menuTypeahead, uniform ? idx : -1);
+    if (i >= 0) items[i].focus();
   }
 
   async function copyText(text: string) {
@@ -8504,16 +8921,23 @@
     }
   }
 
-  // Re-arm the open menu as a confirm/cancel prompt for a destructive action.
+  // Re-arm the open menu as a confirm prompt for a destructive action: the same box, a danger
+  // header asking the question, focus on the verb, Escape (or "Keep it") backing out.
   function confirmInMenu(label: string, action: () => void) {
     if (!menu) return true;
+    menuSub = -1;
+    menuReactOpen = false;
+    const verb = confirmVerb(label);
     menu = {
       ...menu,
+      confirm: true,
       items: [
-        { label, icon: "⚠", danger: true, onSelect: action },
-        { label: "Cancel", onSelect: () => {} },
+        { head: true, kind: "confirm", title: confirmQuestion(label) },
+        { label: verb, icon: verb === "Leave" ? "leave" : verb === "Remove" ? "x" : "trash", danger: true, hint: "⏎", onSelect: action },
+        { label: "Keep it", icon: "reply", hint: "esc", onSelect: () => {} },
       ],
     };
+    void tick().then(() => (menuEl?.querySelector(".ctx-item.danger") as HTMLElement | null)?.focus());
     return true; // keep the menu open to show the confirm
   }
 
@@ -8556,30 +8980,28 @@
 
   function messageMenu(m: Msg): MenuItem[] {
     const items: MenuItem[] = [
-      { label: "Copy text", icon: "⧉", onSelect: () => copyText(m.text) },
-      { label: "Quote in reply", icon: "❝", onSelect: () => appendToDraft(`> ${nameOf(m.author)}: ${m.text}`) },
-      { divider: true },
-      { label: "Copy sender fingerprint", icon: "#", onSelect: () => copyText(m.author) },
+      { head: true, kind: "message", title: `${nameOf(m.author)} · ${fmtTime(m.ts)}`, fp: m.author },
     ];
+    // Legacy rows without an id can be quoted and copied but not addressed.
     if (m.id) {
-      const top: MenuItem[] = [
-        { label: "Reply", icon: "↰", onSelect: () => startReply(m) },
-        { label: "React…", icon: "☺", onSelect: () => (reactionPickerFor = m.id) },
-      ];
-      // Owner/admin can pin/unpin any message (not in DMs).
-      if (canModerate && !cur?.isDm) {
-        top.push({ label: m.pinned ? "Unpin" : "Pin message", icon: "📌", onSelect: () => togglePin(m) });
-      }
-      top.push({ divider: true });
-      items.splice(0, 0, ...top);
+      items.push({ react: m });
+      items.push({ label: "Reply", icon: "reply", hint: "R", onSelect: () => startReply(m) });
     }
-    // Edit / delete your own messages (legacy ones without an id can't be targeted).
+    items.push({ label: "Quote in reply", icon: "quote", onSelect: () => appendToDraft(`> ${nameOf(m.author)}: ${m.text}`) });
+    items.push({ divider: true }, { section: "share" });
+    items.push({ label: "Copy text", icon: "copy", onSelect: () => copyText(m.text) });
+    items.push({ label: "Copy sender fingerprint", icon: "fp", onSelect: () => copyText(m.author) });
+    // Owner/admin can pin/unpin any message (not in DMs).
+    if (m.id && canModerate && !cur?.isDm) {
+      items.push({ divider: true });
+      items.push({ label: m.pinned ? "Unpin message" : "Pin message", icon: "pin", hint: "mod", onSelect: () => togglePin(m) });
+    }
     if (m.author === myFp && m.id) {
       items.push({ divider: true });
-      items.push({ label: "Edit", icon: "✎", onSelect: () => startEdit(m) });
+      items.push({ label: "Edit", icon: "edit", onSelect: () => startEdit(m) });
       items.push({
         label: "Delete",
-        icon: "🗑",
+        icon: "trash",
         danger: true,
         onSelect: () => confirmInMenu("Delete this message?", () => deleteMessage(m)),
       });
@@ -8587,8 +9009,8 @@
       // Owner/admin moderation: remove another member's message (not in DMs).
       items.push({ divider: true });
       items.push({
-        label: "Delete (moderator)",
-        icon: "🗑",
+        label: "Delete as moderator",
+        icon: "trash",
         danger: true,
         onSelect: () => confirmInMenu(`Delete ${nameOf(m.author)}'s message?`, () => deleteMessage(m)),
       });
@@ -8600,56 +9022,71 @@
     const isOnline = m.you || onlineMembers.has(m.fingerprint);
     const items: MenuItem[] = [
       {
-        label: presenceText(m.fingerprint, m.you),
-        icon: isOnline ? "●" : "○",
-        disabled: true,
-        onSelect: () => {},
+        head: true,
+        kind: m.you ? "you" : "member",
+        title: nameOf(m.fingerprint),
+        fp: m.fingerprint,
+        info: `${isOnline ? "●" : "○"} ${presenceText(m.fingerprint, m.you)} · ${shortFp(m.fingerprint)}`,
+        online: isOnline,
       },
-      { divider: true },
-      { label: "Copy fingerprint", icon: "#", onSelect: () => copyText(m.fingerprint) },
+      { label: "Profile card", icon: "user", onSelect: () => showProfile(m.fingerprint) },
     ];
+    // Add a friend in-band (only for an online member of a server: not in a DM, not yourself).
+    if (!m.you && !cur?.isDm && isOnline) {
+      items.push({ label: "Message", icon: "dm", onSelect: () => startDmWithMember(m.fingerprint) });
+    }
+    if (!m.you) items.push({ label: "Mention in composer", icon: "at", onSelect: () => mentionInComposer(m.fingerprint) });
+    items.push({ divider: true }, { section: "trust" });
     if (!m.you) {
       items.push({
         label: verifiedFps.has(m.fingerprint) ? "Verified: review…" : "Verify identity…",
-        icon: "✓",
+        icon: "verify",
+        on: verifiedFps.has(m.fingerprint),
         onSelect: () => (verifyFor = m.fingerprint),
       });
     }
-    // Add a friend in-band (only for an online member of a server: not in a DM, not yourself).
-    if (!m.you && !cur?.isDm && isOnline) {
-      items.push({ divider: true });
-      items.push({ label: "Add friend (DM)", icon: "👋", onSelect: () => startDmWithMember(m.fingerprint) });
-    }
+    items.push({ label: "Copy fingerprint", icon: "fp", onSelect: () => copyText(m.fingerprint) });
     const r = roles[m.fingerprint] ?? "member";
     if (myRole === "owner" && !m.you && r !== "owner") {
-      items.push({ divider: true });
-      items.push(
-        r === "admin"
-          ? { label: "Demote from admin", icon: "▾", onSelect: () => setAdmin(m.fingerprint, false) }
-          : { label: "Make admin", icon: "▴", onSelect: () => setAdmin(m.fingerprint, true) },
-      );
+      items.push({ divider: true }, { section: "server · owner" });
+      items.push({
+        label: "Roles",
+        icon: "crown",
+        sub: [
+          r === "admin"
+            ? { label: "Demote from admin", icon: "crown", onSelect: () => setAdmin(m.fingerprint, false) }
+            : { label: "Make admin", icon: "crown", onSelect: () => setAdmin(m.fingerprint, true) },
+        ],
+      });
       items.push({
         label: "Remove from server",
-        icon: "⨯",
+        icon: "x",
         danger: true,
         onSelect: () => confirmInMenu(`Remove ${nameOf(m.fingerprint)}`, () => removeMember(m.fingerprint)),
       });
     }
     return items;
   }
+  function mentionInComposer(fp: string) {
+    insertTarget = "chat";
+    view = "chat";
+    insertAtCaret(`@[${mentionName(nameOf(fp))}] `);
+  }
 
   function fileMenu(f: UiFile): MenuItem[] {
     const items: MenuItem[] = [
-      { label: "Open details", icon: "ⓘ", onSelect: () => openFileInfo(f) },
-      { label: "Download", icon: "↓", onSelect: () => downloadFile(f) },
-      { label: "Post to chat", icon: "➦", onSelect: () => appendToDraft(`![${f.name}](cid:${f.cid})`) },
+      { head: true, kind: "file", title: f.name },
+      { label: "Open details", icon: "info", onSelect: () => openFileInfo(f) },
+      { label: "Download", icon: "down", onSelect: () => downloadFile(f) },
+      { label: "Post to chat", icon: "reply", onSelect: () => appendToDraft(`![${f.name}](cid:${f.cid})`) },
       { divider: true },
-      { label: "Copy address (CID)", icon: "#", onSelect: () => copyText(f.cid) },
+      { label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(f.cid) },
     ];
     if (myRole === "owner" || myRole === "admin") {
+      items.push({ divider: true });
       items.push({
         label: "Delete file",
-        icon: "🗑",
+        icon: "trash",
         danger: true,
         onSelect: () => confirmInMenu(`Delete ${f.name}`, () => removeFile(f)),
       });
@@ -8659,34 +9096,286 @@
 
   function wikiPageMenu(p: string): MenuItem[] {
     return [
-      { label: "Open page", icon: "⊞", onSelect: () => openWikiPage(p) },
-      { label: "Post link to chat", icon: "➦", onSelect: () => appendToDraft(`[[${p}]]`) },
-      { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[[${p}]]`) },
+      { head: true, kind: "wiki", title: p },
+      { label: "Open page", icon: "ext", onSelect: () => openWikiPage(p) },
+      { label: "Post link to chat", icon: "reply", onSelect: () => appendToDraft(`[[${p}]]`) },
+      { label: "Copy link", icon: "link", onSelect: () => copyText(`[[${p}]]`) },
+      { divider: true },
       {
         label: "Rename page…",
-        icon: "✎",
+        icon: "edit",
         onSelect: () => void openWikiPage(p).then(() => startWikiRename()),
       },
       {
         label: "Delete page…",
-        icon: "✕",
+        icon: "trash",
+        danger: true,
         onSelect: () => void openWikiPage(p).then(() => armWikiDelete()), // confirmed in the page header
       },
     ];
   }
 
   function serverMenu(s: ServerState): MenuItem[] {
-    const items: MenuItem[] = [];
-    if (s.invite) items.push({ label: "Copy invite", icon: "⧉", onSelect: () => void copyFreshInvite(s.id) });
-    items.push({ label: "Server settings", icon: "⚙", onSelect: () => void openServerSettings(s.id) });
+    const items: MenuItem[] = [{ head: true, kind: s.isDm ? "dm" : "server", title: s.name }];
+    if (s.invite) items.push({ label: "Copy invite", icon: "link", onSelect: () => void copyFreshInvite(s.id) });
+    items.push({
+      label: "Mark all read",
+      icon: "eye",
+      disabled: s.unread.length === 0,
+      onSelect: () => { for (const c of [...s.unread]) clearChannelIndicators(s.id, c); },
+    });
+    items.push({ label: "Server space", icon: "orbit", hint: "Ctrl+O", onSelect: () => toggleSpace() });
+    items.push({ label: "Server settings", icon: "gear", onSelect: () => void openServerSettings(s.id) });
     items.push({ divider: true });
     items.push({
       label: "Leave server",
-      icon: "⤴",
+      icon: "leave",
       danger: true,
       onSelect: () => confirmInMenu(`Leave ${s.name}`, () => leaveServer(s.id)),
     });
     return items;
+  }
+
+  // A sidebar channel row. Channels are a frontend list keyed by name, so there is no backend
+  // read cursor to set here: "mark as read" clears the badge, which is what the row shows.
+  function channelMenu(c: Channel): MenuItem[] {
+    const sv = activeServerId;
+    if (sv === null || !cur) return [];
+    const unread = cur.unread.includes(c.id) || mentionChannels.has(c.id);
+    const vn = roomMembers(sv, c.id).length;
+    return [
+      { head: true, kind: "channel", title: `#${c.name}${unread ? " · unread" : ""}` },
+      { label: "Mark as read", icon: "eye", disabled: !unread, onSelect: () => clearChannelIndicators(sv, c.id) },
+      { label: "Search in channel", icon: "search", onSelect: () => void searchInChannel(c.id) },
+      { divider: true },
+      { label: "Edit topic…", icon: "edit", onSelect: () => void editTopicOf(c.id) },
+      { label: vn ? `Join voice · ${vn} in` : "Start voice here", icon: "vol", onSelect: () => void joinVoice(c.id, sv, c.name) },
+    ];
+  }
+  async function editTopicOf(id: string) {
+    if (cur?.active !== id) await switchTo(id);
+    view = "chat";
+    await tick();
+    topicDraft = channelTopic;
+    editingTopic = true;
+  }
+  async function searchInChannel(id: string) {
+    if (cur?.active !== id) await switchTo(id);
+    view = "chat";
+    openSearch();
+  }
+
+  // Empty space in the log: the open channel itself.
+  function logSurfaceMenu(): MenuItem[] {
+    const ch = cur?.active;
+    if (activeServerId === null || !cur || !ch) return [];
+    const name = cur.channels.find((c) => c.id === ch)?.name ?? "channel";
+    return [
+      { head: true, kind: `#${name}`, title: unreadCount > 0 ? `${unreadCount} unread` : "all read" },
+      {
+        label: "Jump to first unread",
+        icon: "up",
+        disabled: firstUnreadIdx < 0,
+        onSelect: () => void scrollToMatch(firstUnreadIdx),
+      },
+      { label: "Search here", icon: "search", hint: "Ctrl+F", onSelect: () => openSearch() },
+    ];
+  }
+
+  // A peer row on the voice stage: their two levels (for you only), the two mutes, and who they
+  // are. Toggles keep the menu open and rebuild it so the row says what it now does.
+  function peerMenu(fp: string): MenuItem[] {
+    const again = () => refreshMenu(() => peerMenu(fp));
+    return [
+      { head: true, kind: "in call", title: `${nameOf(fp)}${speaking[fp] ? " · speaking" : ""}`, fp },
+      {
+        slider: true, icon: "vol", label: `Voice volume for ${nameOf(fp)}`,
+        value: peerLevelFor(fp, "voice"), max: MAX_PEER_LEVEL,
+        onInput: (v) => { setPeerVolume(fp, v); again(); },
+      },
+      {
+        slider: true, icon: "piano", label: `Instrument volume for ${nameOf(fp)}`,
+        value: peerInstLevelFor(fp), max: 100,
+        onInput: (v) => { setPeerInstLevel(fp, v); again(); },
+      },
+      { divider: true },
+      {
+        label: voiceMutedPeers[fp] ? "Hear their voice again" : "Mute their voice",
+        icon: "micoff", on: !!voiceMutedPeers[fp],
+        onSelect: () => { toggleVoicePeer(fp); return again(); },
+      },
+      {
+        label: instPeerEffectivelyMuted(fp) ? "Hear their instrument again" : "Mute their instrument",
+        icon: "piano", on: instPeerEffectivelyMuted(fp),
+        onSelect: () => { toggleInstPeer(fp); return again(); },
+      },
+      { divider: true },
+      { label: "Profile card", icon: "user", onSelect: () => showProfile(fp) },
+      { label: "Copy fingerprint", icon: "fp", onSelect: () => copyText(fp) },
+    ];
+  }
+
+  // A text field: the four edit verbs the WebView's own menu used to provide, plus what the chat
+  // composer can do with a selection. A password field never offers to copy itself out.
+  const TEXT_INPUT_TYPES = new Set(["text", "search", "url", "email", "tel", "password", "number"]);
+  function textFieldMenu(el: HTMLInputElement | HTMLTextAreaElement): MenuItem[] {
+    menuField = el;
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? 0;
+    const hasSel = end > start;
+    const secret = el instanceof HTMLInputElement && el.type === "password";
+    const frozen = el.readOnly || el.disabled;
+    const isComposer = el === composerEl;
+    const channel = cur?.channels.find((c) => c.id === cur?.active)?.name;
+    const title = hasSel
+      ? `${end - start} selected`
+      : isComposer && channel ? `#${channel}` : el.getAttribute("aria-label") || el.placeholder || "text";
+    const items: MenuItem[] = [
+      { head: true, kind: isComposer ? "composer" : secret ? "secret" : "text", title },
+      { label: "Cut", icon: "cut", hint: "Ctrl+X", disabled: !hasSel || frozen || secret, onSelect: () => void fieldCut() },
+      { label: "Copy", icon: "copy", hint: "Ctrl+C", disabled: !hasSel || secret, onSelect: () => void fieldCopy() },
+      { label: "Paste", icon: "paste", hint: "Ctrl+V", disabled: frozen, onSelect: () => void fieldPaste() },
+      { label: "Select all", icon: "selall", hint: "Ctrl+A", onSelect: () => fieldSelectAll() },
+    ];
+    if (isComposer) {
+      items.push({ divider: true });
+      items.push({ label: "Text effect on selection", icon: "spark", disabled: !hasSel, onSelect: () => openTextEffectCatalog("chat") });
+      items.push({
+        label: "Insert",
+        icon: "img",
+        sub: [
+          { label: "Emoji", icon: "cat", onSelect: () => { showInsert = false; showEmoji = true; } },
+          { label: "Link or embed", icon: "link", onSelect: () => void toggleInsert("chat") },
+        ],
+      });
+    }
+    return items;
+  }
+  function fieldRestore(): HTMLInputElement | HTMLTextAreaElement | null {
+    const el = menuField;
+    if (!el || !el.isConnected) return null;
+    el.focus();
+    return el;
+  }
+  function fieldSelected(el: HTMLInputElement | HTMLTextAreaElement): string {
+    return el.value.slice(el.selectionStart ?? 0, el.selectionEnd ?? 0);
+  }
+  // setRangeText does not fire input, and every field here is a bind:value: the event is what
+  // hands the new text back to the state the field mirrors.
+  function fieldReplaceSelection(el: HTMLInputElement | HTMLTextAreaElement, text: string) {
+    el.setRangeText(text, el.selectionStart ?? 0, el.selectionEnd ?? 0, "end");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  async function fieldCut() {
+    const el = fieldRestore();
+    if (!el) return;
+    const t = fieldSelected(el);
+    if (!t) return;
+    try {
+      await copyTextRequired(t); // never delete what did not reach the clipboard
+    } catch {
+      return;
+    }
+    fieldReplaceSelection(el, "");
+  }
+  async function fieldCopy() {
+    const el = fieldRestore();
+    if (!el) return;
+    const t = fieldSelected(el);
+    if (t) await copyText(t);
+  }
+  async function fieldPaste() {
+    const el = fieldRestore();
+    if (!el) return;
+    let t = "";
+    try {
+      t = await navigator.clipboard.readText();
+    } catch {
+      toast("Clipboard read is blocked here: press Ctrl+V instead", "info", 3500);
+      return;
+    }
+    if (t) fieldReplaceSelection(el, t);
+  }
+  function fieldSelectAll() {
+    fieldRestore()?.select();
+  }
+
+  // Selected text anywhere in rendered content.
+  function selectionMenu(text: string, el: HTMLElement): MenuItem[] {
+    const trimmed = text.trim();
+    const row = el.closest("li[data-mi]") as HTMLElement | null;
+    const m = row ? messages[Number(row.getAttribute("data-mi")) - pageStart] : undefined;
+    const items: MenuItem[] = [
+      { head: true, kind: "selection", title: `"${trimmed.length > 48 ? `${trimmed.slice(0, 48)}…` : trimmed}"` },
+      { label: "Copy", icon: "copy", hint: "Ctrl+C", onSelect: () => copyText(text) },
+      { label: "Quote in reply", icon: "quote", onSelect: () => appendToDraft(m ? `> ${nameOf(m.author)}: ${trimmed}` : `> ${trimmed}`) },
+    ];
+    if (activeServerId !== null && cur) {
+      items.push({ label: "Search for it", icon: "search", onSelect: () => { view = "chat"; openSearch(); searchQuery = trimmed; } });
+    }
+    items.push(...rowActions(el));
+    return items;
+  }
+
+  // An http(s) link in rendered content (the renderer strips every other scheme).
+  function linkMenu(a: HTMLAnchorElement): MenuItem[] {
+    const url = a.href || a.getAttribute("href") || "";
+    let host = url;
+    try {
+      host = new URL(url).host || url;
+    } catch {
+      /* not a URL the browser can parse: show it as is */
+    }
+    const text = (a.textContent ?? "").trim();
+    return [
+      { head: true, kind: "link", title: host },
+      {
+        label: "Open in browser",
+        icon: "ext",
+        onSelect: () => void invoke("open_external_url", { url }).catch((err) => (error = String(err))),
+      },
+      { label: "Copy link", icon: "link", onSelect: () => copyText(url) },
+      { label: "Copy as markdown", icon: "copy", onSelect: () => copyText(text && text !== url ? `[${text}](${url})` : url) },
+      ...rowActions(a),
+    ];
+  }
+
+  // Every right-click the rows above did not claim lands here (window, bubble phase, so a row's
+  // own handler has already run and prevented the default). The WebView's grey menu never shows:
+  // a text field gets the edit menu, a selection or a link gets its own, empty space in the log
+  // gets the channel's, and anything else just swallows the click.
+  function onFallbackContext(e: MouseEvent) {
+    if (e.defaultPrevented) return;
+    const target = e.target as HTMLElement | null;
+    if (!target || typeof target.closest !== "function") return;
+    if (target.closest(".ctx-menu")) {
+      e.preventDefault();
+      return;
+    }
+    const field = target.closest("input, textarea") as HTMLInputElement | HTMLTextAreaElement | null;
+    if (field && (field instanceof HTMLTextAreaElement || TEXT_INPUT_TYPES.has(field.type))) {
+      openMenu(e, textFieldMenu(field));
+      return;
+    }
+    if (target.isContentEditable) return; // an editor that owns its own surface keeps the native menu
+    e.preventDefault();
+    if (locked) return;
+    const sel = window.getSelection();
+    const selText =
+      sel && !sel.isCollapsed && sel.rangeCount > 0 && sel.getRangeAt(0).intersectsNode(target) ? sel.toString() : "";
+    if (selText.trim()) {
+      openMenu(e, selectionMenu(selText, target));
+      return;
+    }
+    const a = target.closest("a[href]") as HTMLAnchorElement | null;
+    if (a) {
+      openMenu(e, linkMenu(a));
+      return;
+    }
+    if (target.closest(".messages, .channel")) {
+      const items = logSurfaceMenu();
+      if (items.length) openMenu(e, items);
+    }
   }
 
   // A reference chip's own label, without the leading icon glyph the renderer prepends.
@@ -8701,7 +9390,7 @@
   function rowActions(el: HTMLElement): MenuItem[] {
     const row = el.closest("li[data-mi]") as HTMLElement | null;
     const m = row ? messages[Number(row.getAttribute("data-mi")) - pageStart] : undefined;
-    return m ? [{ divider: true }, ...messageMenu(m)] : [];
+    return m ? [{ divider: true }, { label: "Message", icon: "reply", sub: messageMenu(m) }] : [];
   }
 
   // Context menu on rendered rich text: copy/post a [[wikilink]], copy a :emoji:, copy an embed,
@@ -8715,51 +9404,59 @@
       const cid = (el.getAttribute("data-file-cid") ?? "").toLowerCase();
       const label = chipLabel(el) || "file";
       openMenu(e, [
-        { label: "Properties", icon: "📄", onSelect: () => openFileRef(cid) },
-        { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](file:${cid})`) },
-        { label: "Copy address (CID)", icon: "#", onSelect: () => copyText(cid) },
+        { head: true, kind: "file", title: label },
+        { label: "Properties", icon: "info", onSelect: () => openFileRef(cid) },
+        { label: "Copy link", icon: "link", onSelect: () => copyText(`[${refLabel(label)}](file:${cid})`) },
+        { label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(cid) },
         ...rowActions(el),
       ]);
     } else if (el.hasAttribute("data-status-id")) {
       const id = el.getAttribute("data-status-id") ?? "";
       const label = chipLabel(el) || "status";
       openMenu(e, [
-        { label: "Open announcement", icon: "⊞", onSelect: () => openStatusRef(id) },
-        { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](status:${id})`) },
+        { head: true, kind: "announcement", title: label },
+        { label: "Open announcement", icon: "ext", onSelect: () => openStatusRef(id) },
+        { label: "Copy link", icon: "link", onSelect: () => copyText(`[${refLabel(label)}](status:${id})`) },
         ...rowActions(el),
       ]);
     } else if (el.hasAttribute("data-event-id")) {
       const id = el.getAttribute("data-event-id") ?? "";
       const label = chipLabel(el) || "event";
       openMenu(e, [
-        { label: "Open event", icon: "⧗", onSelect: () => openEventRef(id) },
-        { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](event:${id})`) },
+        { head: true, kind: "event", title: label },
+        { label: "Open event", icon: "ext", onSelect: () => openEventRef(id) },
+        { label: "Copy link", icon: "link", onSelect: () => copyText(`[${refLabel(label)}](event:${id})`) },
         ...rowActions(el),
       ]);
     } else if (el.hasAttribute("data-wikilink")) {
       const page = el.getAttribute("data-wikilink") ?? "";
       openMenu(e, [
-        { label: "Open page", icon: "⊞", onSelect: () => { view = "wiki"; openWikiPage(page); } },
-        { label: "Post link to chat", icon: "➦", onSelect: () => appendToDraft(`[[${page}]]`) },
-        { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[[${page}]]`) },
+        { head: true, kind: "wiki", title: page },
+        { label: "Open page", icon: "ext", onSelect: () => { view = "wiki"; openWikiPage(page); } },
+        { label: "Post link to chat", icon: "reply", onSelect: () => appendToDraft(`[[${page}]]`) },
+        { label: "Copy link", icon: "link", onSelect: () => copyText(`[[${page}]]`) },
         ...rowActions(el),
       ]);
     } else if (el.hasAttribute("data-emoji")) {
       const code = (el.getAttribute("data-emoji") ?? "").replace(/:/g, "");
-      openMenu(e, [{ label: `Copy :${code}:`, icon: "⧉", onSelect: () => copyText(`:${code}:`) }]);
+      openMenu(e, [
+        { head: true, kind: "emoji", title: `:${code}:` },
+        { label: "Copy code", icon: "copy", onSelect: () => copyText(`:${code}:`) },
+        ...rowActions(el),
+      ]);
     } else {
       // An inline embed (`![alt](cid:HEX)`) in chat, status or a wiki page : all three render
       // through this one context-menu path, so Properties works on every surface. Before the
       // blob resolves this is the placeholder span; after, it is the <img>/<video> itself.
       const cid = (el.getAttribute("data-embed-cid") ?? "").toLowerCase();
-      const items: MenuItem[] = [];
-      if (el instanceof HTMLImageElement) {
-        items.push({ label: "View image", icon: "⛶", onSelect: () => openLightbox(el) });
-      }
-      items.push({ label: "Properties", icon: "📄", onSelect: () => openFileRef(cid) });
       const embedded = filesByCid.get(cid);
-      if (embedded) items.push({ label: "Download", icon: "↓", onSelect: () => downloadFile(embedded) });
-      items.push({ label: "Copy address (CID)", icon: "#", onSelect: () => copyText(cid) });
+      const items: MenuItem[] = [{ head: true, kind: el instanceof HTMLImageElement ? "image" : "embed", title: embedded?.name ?? shortFp(cid) }];
+      if (el instanceof HTMLImageElement) {
+        items.push({ label: "View image", icon: "img", onSelect: () => openLightbox(el) });
+      }
+      items.push({ label: "Properties", icon: "info", onSelect: () => openFileRef(cid) });
+      if (embedded) items.push({ label: "Download", icon: "down", onSelect: () => downloadFile(embedded) });
+      items.push({ label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(cid) });
       // An image can cover its whole message row, so keep the message actions reachable here:
       // right-clicking the picture offers the same Reply/Edit/Delete as right-clicking the text.
       items.push(...rowActions(el));
@@ -13118,6 +13815,28 @@
     applyPeerGain(fp, "voice");
     try { localStorage.setItem(peerLevelKey(fp, "voice"), String(value)); } catch { /* ignore */ }
   }
+  // Their instrument, for you only: a percentage like the voice trim, but capped at unity. The
+  // notes are synthesized here, on the engine's per-source gain (0..1), so there is nothing sent
+  // to amplify past 100%. Remembered per fingerprint like the other trims.
+  let peerInstLevels = $state<Record<string, number>>({});
+  const peerInstKey = (fp: string) => `catcoms.call.instlevel.${fp}`;
+  const clampInstLevel = (n: number) => (Number.isFinite(n) ? Math.min(100, Math.max(0, Math.round(n))) : 100);
+  function peerInstLevelFor(fp: string): number {
+    const held = peerInstLevels[fp];
+    if (held !== undefined) return held;
+    try {
+      const raw = localStorage.getItem(peerInstKey(fp));
+      return raw === null ? 100 : clampInstLevel(Number(raw));
+    } catch {
+      return 100;
+    }
+  }
+  function setPeerInstLevel(fp: string, level: number) {
+    const value = clampInstLevel(level);
+    peerInstLevels = { ...peerInstLevels, [fp]: value };
+    jamEngine?.setSourceLevel(fp, value / 100);
+    try { localStorage.setItem(peerInstKey(fp), String(value)); } catch { /* ignore */ }
+  }
   function setPeerShareVolume(fp: string, level: number) {
     const value = normalizePeerLevel(level);
     peerShareVolumes = { ...peerShareVolumes, [fp]: value };
@@ -16696,6 +17415,7 @@
       delete jamPeerSn[fp];
       clearPeerJamUi(fp);
       jamApplyMutes(fp);
+      ensureJamEngine().setSourceLevel(fp, peerInstLevelFor(fp) / 100); // the trim you set for them last time
       const dc = peer.dc;
       dc.onopen = () => {
         pushInstState();
@@ -17560,10 +18280,24 @@
   function toggleReactionPicker(m: Msg) {
     reactionPickerFor = reactionPickerFor === m.id ? "" : m.id;
   }
+  // The right-click menu leads with the reactions you actually use: a local tally per emoji,
+  // seeded by the quick set until there is history. Only an ADDED reaction counts; taking one
+  // back is not a preference.
+  const REACT_TALLY_KEY = "catcoms.reactions.recent";
+  const REACT_STRIP_SIZE = 5;
+  let reactTally: Record<string, number> = {};
+  try { reactTally = parseTally(localStorage.getItem(REACT_TALLY_KEY)); } catch { /* ignore */ }
+  let reactRecent = $state(topReactions(reactTally, QUICK_EMOJI, REACT_STRIP_SIZE));
+  function noteReactionPick(emoji: string) {
+    reactTally = tallyReaction(reactTally, emoji);
+    reactRecent = topReactions(reactTally, QUICK_EMOJI, REACT_STRIP_SIZE);
+    try { localStorage.setItem(REACT_TALLY_KEY, JSON.stringify(reactTally)); } catch { /* ignore */ }
+  }
   async function toggleReaction(m: Msg, emoji: string) {
     const ch = cur?.active;
     reactionPickerFor = "";
     if (activeServerId === null || !ch || !m.id) return;
+    if (!m.reactions.some((r) => r.emoji === emoji && r.by.includes(myFp))) noteReactionPick(emoji);
     try {
       await invokeDebugged("toggle_reaction", { server: activeServerId, channel: ch, msgId: m.id, emoji });
     } catch (e) {
@@ -19301,13 +20035,30 @@
         return;
       }
       if (handleSpaceKey(e)) return;
+      // R / E on the message under the pointer: reply, or the reaction picker. They are the hints
+      // that row's right-click menu shows, which is the whole reason they exist. Resolved from
+      // what is under the pointer NOW, so an overlay that has since covered the log wins.
+      if (!locked && !menu && logPointer && view === "chat" && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !typingTarget(e.target)) {
+        const k = e.key.toLowerCase();
+        if (k === "r" || k === "e") {
+          const m = messageUnderPointer();
+          if (m?.id) {
+            e.preventDefault();
+            if (k === "r") startReply(m);
+            else reactionPickerFor = m.id;
+            return;
+          }
+        }
+      }
       if (e.key === "Escape") {
-        if (textEffectTarget) { textEffectTarget = null; showTextEffectCatalog = false; }
+        // The context menu goes first: it opens over anything, including the text-effect bar
+        // on a composer selection, and one Escape must close the thing on top.
+        if (menu) menu = null;
+        else if (textEffectTarget) { textEffectTarget = null; showTextEffectCatalog = false; }
         else if (showQuickSwitch) closeQuickSwitch();
         else if (scanOpen) closeScan(null);
         else if (showLinkDevice) closeLinkDevice();
         else if (verifyFor) verifyFor = null;
-        else if (menu) menu = null;
         else if (lightbox && fileInfo) closeFileInfo(); // Properties opened over the viewer
         else if (lightbox) closeLightbox();
         else if (reactionPickerFor) reactionPickerFor = "";
@@ -19441,6 +20192,7 @@
     onVisibility();
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("contextmenu", onFallbackContext);
     window.addEventListener("blur", onBlur);
     window.addEventListener("mousedown", onMouseNav);
     const stopTextEffects = mountTextEffectRuntime();
@@ -19480,6 +20232,7 @@
     }, 4000);
     return () => {
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("contextmenu", onFallbackContext);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("mousedown", onMouseNav);
@@ -19849,9 +20602,71 @@
 <!-- The profile editor, rendered by BOTH the profile surface (Ctrl+5) and Settings → My
      Profile: one form, two doors, so the two can never drift apart. -->
 {#snippet profileEditor()}
-  <div class="profile-tab tab-pane">
+  {@const profileTabs = PROFILE_TABS.filter((t) => t.id !== "frame" || CHAT_MESSAGE_FRAMES_ENABLED)}
+  <div class="profile-tab tab-pane" use:rangeFills={`${pEffect}|${pBubble}|${profileTab}`}>
+    <div class="ptabs" role="tablist" aria-label="Profile sections">
+      {#each profileTabs as t (t.id)}
+        <button type="button" class="ptab" class:on={profileTab === t.id} role="tab" aria-selected={profileTab === t.id} onclick={() => (profileTab = t.id)}>
+          {t.label}
+          {#if profileDirty[t.id]}<span class="dirty" title="Unsaved changes"></span>{/if}
+        </button>
+      {/each}
+    </div>
+    {#if profileTab === "identity"}
+    <div class="ppanel">
+    <div class="field id-lib">
+      <span class="pf-k">Identity library <small>saved on this device, available on every server</small></span>
+      {#if savedIdentities.length}
+        <div class="id-tiles">
+          {#each savedIdentities as ident (ident.id)}
+            <span class="id-tile">
+              <button type="button" class="id-pick" title={`Load ${ident.label}`} onclick={() => applyIdentity(ident)}>
+                {#if ident.avatar}
+                  <img class="avatar" src={imgSrc(ident.avatar)} alt="" />
+                {:else}
+                  <span class="avatar fallback" style={`background:${ident.color}`}>{(ident.name || ident.label).slice(0, 1).toUpperCase()}</span>
+                {/if}
+                <span class="id-text">
+                  {@render styledName(ident.name || ident.label, ident.color, ident.font, ident.effect)}
+                  <small>{ident.label}</small>
+                </span>
+              </button>
+              <button type="button" class="recipe-delete" aria-label={`Delete saved identity ${ident.label}`} title="Delete this identity" onclick={() => deleteIdentity(ident.id)}>✕</button>
+            </span>
+          {/each}
+        </div>
+      {:else}
+        <span class="muted small">Nothing saved yet. Set up a look, then save it here to reuse it on another server or switch back to it later.</span>
+      {/if}
+      <div class="recipe-save">
+        <input value={identityLabelDraft} maxlength="32" placeholder={`Label, e.g. ${pName.trim() || "weekend me"}`} aria-label="New identity label" oninput={(e) => (identityLabelDraft = e.currentTarget.value)} onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveIdentity(); } }} />
+        <button type="button" class="ghost small" disabled={!(identityLabelDraft.trim() || pName.trim())} onclick={saveIdentity}>Save current identity</button>
+      </div>
+      {#if identityLibraryError}<span class="fx-warnings" role="status">{identityLibraryError}</span>{/if}
+      <span class="muted small">Saves everything on all three tabs. Loading one fills the draft; Save profile is what publishes it.</span>
+    </div>
     <div class="field">
-      <span class="muted">Banner</span>
+      <span class="pf-k">Avatar</span>
+      <div class="avatar-row">
+        {#if pAvatar}
+          <img class="avatar lg" src={imgSrc(pAvatar)} alt="" />
+        {:else}
+          <span class="avatar lg fallback" style={`background:${pColor}`}>
+            {(pName || displayName).slice(0, 1).toUpperCase()}
+          </span>
+        {/if}
+        <label class="upload-btn">
+          {pAvatar ? "Replace avatar" : "Upload avatar"}
+          <input type="file" accept="image/*" onchange={(e) => { const t = e.currentTarget; void loadAvatar(t.files).then(() => (t.value = "")); }} />
+        </label>
+        {#if pAvatar}
+          <button type="button" class="ghost small" onclick={() => (pAvatar = "")}>Remove</button>
+        {/if}
+      </div>
+      <span class="muted small">A GIF or WebP under 64KiB keeps its animation; anything else becomes a 128px square.</span>
+    </div>
+    <div class="field">
+      <span class="pf-k">Banner</span>
       {#if pBanner}
         <img class="banner-preview" src={imgSrc(pBanner)} alt="" />
       {/if}
@@ -19861,18 +20676,43 @@
           <input type="file" accept="image/*" onchange={(e) => { const t = e.currentTarget; void loadBanner(t.files).then(() => (t.value = "")); }} />
         </label>
         {#if pBanner}
-          <button type="button" class="ghost" onclick={() => (pBanner = "")}>Remove</button>
+          <button type="button" class="ghost small" onclick={() => (pBanner = "")}>Remove</button>
         {/if}
       </div>
       <span class="muted small">Tops your profile card. A small animated GIF or WebP stays animated.</span>
     </div>
     <label class="field">
-      <span class="muted">Name</span>
+      <span class="pf-k">Name</span>
       <input bind:value={pName} placeholder="display name" />
     </label>
+    <div class="field">
+      <span class="pf-k">Colour <small>the name's base colour, under any effect</small></span>
+      <div class="ns-swatches">
+        <input type="color" value={pColor} aria-label="Custom name colour" oninput={(e) => setNameColor(e.currentTarget.value)} />
+        {#each NAME_COLORS as c}
+          <button
+            type="button"
+            class="ns-swatch"
+            class:active={pColor === c}
+            title={c}
+            aria-label={`Name colour ${c}`}
+            aria-pressed={pColor === c}
+            style={`background:${c}`}
+            onclick={() => setNameColor(c)}
+          ></button>
+        {/each}
+      </div>
+    </div>
+    <div class="field text-fx-field">
+      <div class="text-fx-field-head"><label class="pf-k" for="profile-bio">About you</label>{@render textEffectButton("bio", "Bio text effects")}</div>
+      <textarea id="profile-bio" bind:this={profileBioEl} bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…" onselect={() => onTextEffectSelection("bio")}></textarea>
+    </div>
+    </div>
+    {:else if profileTab === "name"}
+    <div class="ppanel">
     <div class="field name-studio">
       <div class="name-studio-head">
-        <span class="muted">Name Style Studio</span>
+        <span class="pf-k">Name Style Studio</span>
         <div class="name-studio-actions">
           <button type="button" class="ghost small" disabled={!styleUndo.length} onclick={undoNameStyle} title="Undo the last unsaved style change">↶ Undo</button>
           <button type="button" class="ghost small" disabled={!styleRedo.length} onclick={redoNameStyle} title="Redo the last undone style change">↷ Redo</button>
@@ -19906,7 +20746,7 @@
       </div>
     </div>
     <div class="field">
-      <span class="muted">Font</span>
+      <span class="pf-k">Font</span>
       <div class="ns-tiles">
         {#each NAME_FONTS as f}
           <button
@@ -19922,21 +20762,21 @@
       </div>
     </div>
     <div class="field type-studio">
-      <span class="muted">Typography</span>
+      <span class="pf-k">Typography</span>
       <div class="fx-option-grid">
         <label class="fx-option"><span>Weight <output>{effectOptions(pEffects, "typography").weight}</output></span><input type="range" min="400" max="900" step="100" value={effectOptions(pEffects, "typography").weight} oninput={(e) => updateStudioOption("typography", "weight", e.currentTarget.valueAsNumber)} /></label>
         <label class="fx-option"><span>Letter spacing <output>{effectOptions(pEffects, "typography").tracking}px</output></span><input type="range" min="-1" max="6" step="0.1" value={effectOptions(pEffects, "typography").tracking} oninput={(e) => updateStudioOption("typography", "tracking", e.currentTarget.valueAsNumber)} /></label>
         <label class="fx-option"><span>Bubble thickness <output>{effectOptions(pEffects, "typography").bubble}px</output></span><input type="range" min="0" max="3" step="0.25" value={effectOptions(pEffects, "typography").bubble} oninput={(e) => updateStudioOption("typography", "bubble", e.currentTarget.valueAsNumber)} /></label>
       </div>
       <div class="type-toggles">
-        <label><input type="checkbox" checked={effectOptions(pEffects, "typography").italic} onchange={(e) => updateStudioOption("typography", "italic", e.currentTarget.checked)} /> Italic</label>
-        <label><input type="checkbox" checked={effectOptions(pEffects, "typography").uppercase} onchange={(e) => updateStudioOption("typography", "uppercase", e.currentTarget.checked)} /> Uppercase</label>
+        <button type="button" class="ptog" class:on={!!effectOptions(pEffects, "typography").italic} aria-pressed={!!effectOptions(pEffects, "typography").italic} onclick={() => updateStudioOption("typography", "italic", !effectOptions(pEffects, "typography").italic)}><i>Aa</i> Italic</button>
+        <button type="button" class="ptog" class:on={!!effectOptions(pEffects, "typography").uppercase} aria-pressed={!!effectOptions(pEffects, "typography").uppercase} onclick={() => updateStudioOption("typography", "uppercase", !effectOptions(pEffects, "typography").uppercase)}>AA Uppercase</button>
         <button type="button" class="ghost small" onclick={() => resetNameEffect("typography")}>Reset typography</button>
       </div>
     </div>
     <div class="field">
       <div class="effect-field-head">
-        <span class="muted">Effects</span>
+        <span class="pf-k">Effects</span>
         <button
           type="button"
           class="ghost small"
@@ -20130,28 +20970,9 @@
         <span class="fx-readable">✓ Readable at compact chat sizes</span>
       {/if}
     </div>
-    <div class="field">
-      <span class="muted">Colour</span>
-      <div class="ns-swatches">
-        <input type="color" value={pColor} aria-label="Custom name colour" oninput={(e) => setNameColor(e.currentTarget.value)} />
-        {#each NAME_COLORS as c}
-          <button
-            type="button"
-            class="ns-swatch"
-            class:active={pColor === c}
-            title={c}
-            aria-label={`Name colour ${c}`}
-            aria-pressed={pColor === c}
-            style={`background:${c}`}
-            onclick={() => setNameColor(c)}
-          ></button>
-        {/each}
-      </div>
     </div>
-    <div class="field text-fx-field">
-      <div class="text-fx-field-head"><label class="muted" for="profile-bio">About you</label>{@render textEffectButton("bio", "Bio text effects")}</div>
-      <textarea id="profile-bio" bind:this={profileBioEl} bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…" onselect={() => onTextEffectSelection("bio")}></textarea>
-    </div>
+    {:else if profileTab === "frame"}
+    <div class="ppanel">
     <div class="field message-frame-field frame-studio">
       <div class="message-frame-head">
         <div>
@@ -20314,41 +21135,56 @@
           {/each}
         </div>
       {/if}
+      <span class="muted small">Surface, chassis and layers travel with your profile. Viewers may flatten peer frames locally in Settings - Appearance.</span>
+    </div>
+    </div>
+    {:else if profileTab === "arrival"}
+    <div class="ppanel">
+    <div class="field message-frame-field frame-studio arrival-studio">
       <div class="message-frame-head motion-studio-head">
         <div>
           <span class="name-studio-label">MESSAGE ARRIVAL STUDIO</span>
-          <strong>New-message arrival</strong>
+          <strong>How your new messages show up</strong>
         </div>
-        <span class="message-frame-kicker">PROFILE MOTION</span>
+        <button type="button" class="ghost small" disabled={pFrame.motion === "none" && arrivalIsDefault(pFrame.arrival)} onclick={resetArrival}>Reset arrival</button>
       </div>
-      <div class="frame-motion-grid" aria-label="New message arrival animation">
-        {#each FRAME_MOTIONS as motion}
-          <button
-            type="button"
-            class="frame-motion-tile motion-demo-{motion.id}"
-            class:active={pFrame.motion === motion.id}
-            title={motion.description}
-            aria-pressed={pFrame.motion === motion.id}
-            onclick={() => updateFrame({ motion: motion.id })}
-          >
-            <span aria-hidden="true">{motion.glyph}</span>
-            <b>{motion.label}</b>
-          </button>
+      <span class="muted small">Plays once on the row, the moment a message of yours lands on someone's screen. Loaded history stays still.</span>
+      {#if appearance.messageMotion === "off"}
+        <span class="fx-warnings" role="status">Arrivals are switched off on this device (Settings → Appearance → Message arrivals), so you will not see yours or anyone else's here. Members who keep them on still see this one.</span>
+      {/if}
+      <div class="motion-catalog" aria-label="New message arrival animation">
+        {#each MOTION_FAMILIES as fam (fam.id)}
+          <div class="motion-group">
+            <span class="name-studio-label">{fam.label} <small>{fam.hint}</small></span>
+            <div class="frame-motion-grid">
+              {#each FRAME_MOTIONS.filter((motion) => messageFrameMotionTraits(motion.id).family === fam.id) as motion (motion.id)}
+                <button
+                  type="button"
+                  class="frame-motion-tile"
+                  class:active={pFrame.motion === motion.id}
+                  title={motion.description}
+                  aria-pressed={pFrame.motion === motion.id}
+                  onclick={() => updateFrame({ motion: motion.id })}
+                >
+                  <span aria-hidden="true">{motion.glyph}</span>
+                  <b>{motion.label}</b>
+                </button>
+              {/each}
+            </div>
+          </div>
         {/each}
       </div>
       {#if pFrame.motion !== "none"}
+        {@const traits = messageFrameMotionTraits(pFrame.motion)}
         <div class="arrival-settings">
           <div class="fx-option-grid">
             <label class="fx-option"><span>Duration <output>{pFrame.arrival.duration}ms</output></span><input type="range" min="240" max="1200" step="20" value={pFrame.arrival.duration} oninput={(e) => updateFrameArrival({ duration: e.currentTarget.valueAsNumber })} /></label>
-            <label class="fx-option"><span>{pFrame.motion === "pop" ? "Scale depth" : "Travel"} <output>{pFrame.arrival.distance}</output></span><input type="range" min="4" max="80" step="2" value={pFrame.arrival.distance} oninput={(e) => updateFrameArrival({ distance: e.currentTarget.valueAsNumber })} /></label>
-            <label class="fx-option"><span>Starting visibility <output>{pFrame.arrival.fade}%</output></span><input type="range" min="0" max="80" step="5" value={pFrame.arrival.fade} oninput={(e) => updateFrameArrival({ fade: e.currentTarget.valueAsNumber })} /></label>
+            <label class="fx-option" class:dim={traits.distance === "none"}><span>{DISTANCE_LABELS[traits.distance]} <output>{arrivalDistanceReadout(traits.distance, pFrame.arrival.distance)}</output></span><input type="range" min="4" max="80" step="2" value={pFrame.arrival.distance} disabled={traits.distance === "none"} oninput={(e) => updateFrameArrival({ distance: e.currentTarget.valueAsNumber })} /></label>
+            <label class="fx-option" class:dim={!traits.fade}><span>Starting visibility <output>{traits.fade ? `${pFrame.arrival.fade}%` : "n/a"}</output></span><input type="range" min="0" max="80" step="5" value={pFrame.arrival.fade} disabled={!traits.fade} oninput={(e) => updateFrameArrival({ fade: e.currentTarget.valueAsNumber })} /></label>
             <div class="arrival-direction">
               <span class="muted small">ENTRY VECTOR</span>
-              <button type="button" class="ghost small" disabled={pFrame.motion === "pop"} onclick={() => updateFrameArrival({ direction: pFrame.arrival.direction < 0 ? 1 : -1 })}>
-                {#if pFrame.motion === "fly"}{pFrame.arrival.direction < 0 ? "← from left" : "from right →"}
-                {:else if pFrame.motion === "glide"}{pFrame.arrival.direction < 0 ? "↑ from above" : "from below ↓"}
-                {:else if pFrame.motion === "drift"}{pFrame.arrival.direction < 0 ? "↖ drift left" : "drift right ↗"}
-                {:else}centred{/if}
+              <button type="button" class="ghost small" disabled={!traits.direction} onclick={() => updateFrameArrival({ direction: pFrame.arrival.direction < 0 ? 1 : -1 })}>
+                {traits.direction ? (pFrame.arrival.direction < 0 ? traits.vector[0] : traits.vector[1]) : "centred"}
               </button>
             </div>
           </div>
@@ -20362,26 +21198,19 @@
           </div>
         </div>
       {/if}
-      <span class="muted small">Chassis, layer stack, and arrival recipe travel with your profile. Viewers may flatten peer frames or disable arrivals locally in Settings - Appearance.</span>
+      <span class="muted small">Your arrival travels with your profile. Anyone can switch arrivals off for themselves in Settings - Appearance, and reduced motion keeps every row still.</span>
     </div>
-    <div class="field">
-      <span class="muted">Avatar</span>
-      <div class="avatar-row">
-        {#if pAvatar}
-          <img class="avatar lg" src={imgSrc(pAvatar)} alt="" />
-        {:else}
-          <span class="avatar lg fallback" style={`background:${pColor}`}>
-            {(pName || displayName).slice(0, 1).toUpperCase()}
-          </span>
-        {/if}
-        <input type="file" accept="image/*" onchange={(e) => loadAvatar(e.currentTarget.files)} />
-        {#if pAvatar}
-          <button type="button" class="ghost" onclick={() => (pAvatar = "")}>Remove</button>
-        {/if}
-      </div>
-      <span class="muted small">A GIF or WebP under 64KiB keeps its animation; anything else becomes a 128px square.</span>
     </div>
-    <button onclick={saveProfile}>Save profile</button>
+    {/if}
+    <div class="psave">
+      <span class="status">
+        {#if profileDirty.any}<span class="dirty" aria-hidden="true"></span>Unsaved changes in {dirtyTabLabels()}
+        {:else if cur && !cur.isDm}Saved on {cur.name}
+        {:else}Nothing to save yet{/if}
+      </span>
+      <button type="button" class="ghost small" disabled={!profileDirty.any} onclick={discardProfileDraft}>Discard</button>
+      <button type="button" class="primary" disabled={activeServerId === null} onclick={saveProfile}>Save profile</button>
+    </div>
   </div>
 {/snippet}
 
@@ -20404,16 +21233,12 @@
   {@const pv = messageFrameStyle(pBubble)}
   {@const previewMotion = pFrame.motion}
   <ul
-    class="messages stx-plog frame-motion-preview"
+    class="messages stx-plog frame-motion-preview {previewMotion === 'none' ? '' : 'arrival-' + previewMotion}"
     class:preview-arrival={previewMotion !== "none"}
-    class:arrival-glide={previewMotion === "glide"}
-    class:arrival-fly={previewMotion === "fly"}
-    class:arrival-pop={previewMotion === "pop"}
-    class:arrival-drift={previewMotion === "drift"}
     style={messageFrameArrivalStyle(pBubble)}
     use:channelScan
   >
-    <li class="frame-{pFrame.shape}" class:has-bubble={!!pv} class:frame-start={!!pv} style={pv}>
+    <li class="frame-{pFrame.shape}" class:has-bubble={!!pv} class:frame-start={!!pv} style={pv} use:arrivalOrigin={previewMotion}>
       <span class="t">
         <span class="gutter-avatar">
           {#if pAvatar}
@@ -20436,7 +21261,7 @@
         <span class="text">tea is ready when you are <span class="mention mention-me">@you</span></span>
       </div>
     </li>
-    <li class="grouped frame-{pFrame.shape}" class:has-bubble={!!pv} class:frame-end={!!pv} style={pv}>
+    <li class="grouped frame-{pFrame.shape}" class:has-bubble={!!pv} class:frame-end={!!pv} style={pv} use:arrivalOrigin={previewMotion}>
       <span class="t">{fmtTime(Date.now())}</span>
       <div class="m-body">{@render frameLayers(pFrame)}<span class="text">bringing biscuits too</span></div>
     </li>
@@ -20579,6 +21404,111 @@
 
 <!-- The brand cat, drawn down from the logo's own geometry (assets/cat/icon-cat.svg): same ear
      angle, same chubby head, same happy closed eyes. -->
+<!-- One level of the right-click menu. Depth 0 is the box itself; depth 1 is a flyout, which is
+     rendered inside its parent row so the two read as one shape and move together. -->
+{#snippet menuRows(items: MenuItem[], depth: number)}
+  {#each items as item, i}
+    {#if "divider" in item}
+      <div class="ctx-divider"></div>
+    {:else if "section" in item}
+      <div class="ctx-sec">{item.section}</div>
+    {:else if "head" in item}
+      <div class="ctx-head">
+        <span class="ctx-kind">{item.kind}</span>
+        {#if item.fp}{@render avatarTag(item.fp)}{/if}
+        <span class="ctx-title" title={item.title}>{item.title}</span>
+      </div>
+      {#if item.info}<div class="ctx-info" class:on={item.online}>{item.info}</div>{/if}
+    {:else if "react" in item}
+      {@const m = item.react}
+      <div class="ctx-react" role="group" aria-label="React">
+        {#each reactRecent as e (e)}
+          {@const code = customEmojiCode(e)}
+          <button
+            class="ctx-rx"
+            type="button"
+            class:on={m.reactions.some((r) => r.emoji === e && r.by.includes(myFp))}
+            title={`React with ${e}`}
+            aria-label={`React with ${e}`}
+            onclick={() => { void toggleReaction(m, e); menu = null; }}
+          >
+            {#if code}{#if emojiUrls[code]}<img src={emojiUrls[code]} alt={e} />{:else}<span class="muted small">{e}</span>{/if}{:else}{e}{/if}
+          </button>
+        {/each}
+        <button
+          class="ctx-rx ctx-rx-more"
+          type="button"
+          class:on={menuReactOpen}
+          title={menuReactOpen ? "Fewer reactions" : "All reactions"}
+          aria-label={menuReactOpen ? "Fewer reactions" : "All reactions"}
+          aria-expanded={menuReactOpen}
+          onclick={() => (menuReactOpen = !menuReactOpen)}
+        >{@render icoCat()}</button>
+      </div>
+      {#if menuReactOpen}
+        <div class="ctx-react-grid">
+          {#each Object.keys(emojiMap) as code (code)}
+            <button class="ctx-rx" type="button" aria-label={`React with :${code}:`} onclick={() => { void toggleReaction(m, `:${code}:`); menu = null; }}>
+              {#if emojiUrls[code]}<img src={emojiUrls[code]} alt={code} />{:else}<span class="muted small">:{code}:</span>{/if}
+            </button>
+          {/each}
+          {#each EMOJI_SETS as set (set.label)}
+            {#each set.list as e (e)}
+              <button class="ctx-rx" type="button" aria-label={`React with ${e}`} onclick={() => { void toggleReaction(m, e); menu = null; }}>{e}</button>
+            {/each}
+          {/each}
+        </div>
+      {/if}
+    {:else if "slider" in item}
+      <div class="ctx-slider">
+        <span class="ctx-ico" aria-hidden="true">{@html menuIconSvg(item.icon)}</span>
+        <input
+          type="range"
+          min="0"
+          max={item.max}
+          step="5"
+          value={item.value}
+          aria-label={item.label}
+          title={item.label}
+          oninput={(e) => item.onInput(Number(e.currentTarget.value))}
+        />
+        <span class="ctx-pct">{item.value}%</span>
+      </div>
+    {:else}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="ctx-row" onpointerenter={() => hoverMenuRow(depth, i, !!item.sub)}>
+        <button
+          class="ctx-item"
+          class:danger={item.danger}
+          class:on={item.on}
+          class:open={depth === 0 && menuSub === i}
+          role="menuitem"
+          tabindex="-1"
+          disabled={item.disabled}
+          data-row={depth === 0 ? i : undefined}
+          data-hint={item.hint && item.hint.length === 1 ? item.hint : undefined}
+          aria-haspopup={item.sub ? "menu" : undefined}
+          aria-expanded={item.sub ? depth === 0 && menuSub === i : undefined}
+          onclick={() => pickMenuItem(item, depth, i)}
+        >
+          <span class="ctx-ico" aria-hidden="true">{@html menuIconSvg(item.icon)}</span>
+          <span class="ctx-label">{item.label}</span>
+          {#if item.sub}
+            <svg class="ctx-chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5" /></svg>
+          {:else if item.hint}
+            <span class="ctx-hint">{item.hint}</span>
+          {:else}
+            <span></span>
+          {/if}
+        </button>
+        {#if depth === 0 && item.sub && menuSub === i}
+          <div class="ctx-menu ctx-sub" role="menu">{@render menuRows(item.sub, 1)}</div>
+        {/if}
+      </div>
+    {/if}
+  {/each}
+{/snippet}
+
 {#snippet icoCat()}
   <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M5.6 9.1 6.1 4.2l4.2 2.9c.55-.1 1.1-.15 1.7-.15s1.15.05 1.7.15l4.2-2.9.5 4.9c.9 1.2 1.4 2.7 1.4 4.3 0 4.2-3.5 7.4-7.8 7.4s-7.8-3.2-7.8-7.4c0-1.6.5-3.1 1.4-4.3Z" />
@@ -22343,7 +23273,7 @@
     <h3><span>Channels</span> <span class="key">[ctrl+k]</span></h3>
     <ul class="channel-list">
       {#each cur?.channels ?? [] as c}
-        <li class="channel-row">
+        <li class="channel-row" use:contextMenu={() => channelMenu(c)}>
           <button
             class="channel-name"
             class:active={c.id === cur?.active && view === "chat"}
@@ -24109,6 +25039,8 @@
             use:channelScan
             onscroll={onChatScroll}
             onloadcapture={chatMediaSettled}
+            onpointermove={(e) => (logPointer = { x: e.clientX, y: e.clientY })}
+            onpointerleave={() => (logPointer = null)}
             ondragover={(e) => { e.preventDefault(); dragOver = true; }}
             ondragleave={() => (dragOver = false)}
             ondrop={(e) => onComposerDrop("chat", e)}
@@ -24153,7 +25085,7 @@
               {@const ident = identityOf(m.author)}
               {@const warning = warningFor(cur?.active ?? "", m.id)}
               <li
-                class="frame-{messageFrame.shape}"
+                class="frame-{messageFrame.shape} {arrival === 'none' ? '' : 'arrival-' + arrival}"
                 data-mi={mi}
                 data-author={m.author}
                 class:own={m.author === myFp}
@@ -24165,10 +25097,6 @@
                 class:frame-middle={!!bubble && framePosition === "middle"}
                 class:frame-end={!!bubble && framePosition === "end"}
                 class:message-arrival={arrival !== "none"}
-                class:arrival-glide={arrival === "glide"}
-                class:arrival-fly={arrival === "fly"}
-                class:arrival-pop={arrival === "pop"}
-                class:arrival-drift={arrival === "drift"}
                 class:search-match={showSearch && searchMatchSet.has(mi)}
                 class:search-current={showSearch && searchCur?.ch === cur?.active && searchCur?.idx === mi}
                 class:flash={!!m.id && m.id === flashId}
@@ -24176,6 +25104,7 @@
                 style={[bubble, arrivalVars].filter(Boolean).join(";")}
                 use:contextMenu={() => messageMenu(m)}
                 use:resolveChatRow={m}
+                use:arrivalOrigin={arrival}
                 use:lateSeen={activeLate.has(m.id) ? m.id : ""}
               >
                 {#if grouped}
@@ -25632,7 +26561,7 @@
               {@const vol = peerVolumes[fp] ?? DEFAULT_PEER_LEVEL}
               {@const shareVol = peerShareVolumes[fp] ?? DEFAULT_PEER_LEVEL}
               {@const hasShare = peerHasShareAudio(fp)}
-              <li class="stage-peer">
+              <li class="stage-peer" use:contextMenu={() => peerMenu(fp)}>
                 <div class="stage-row">
                   <span class="stage-av" class:talking={speaking[fp]}>{@render catEars(fp)}{@render callAvatarTag(fp)}</span>
                   <span class="stage-nm">{@render callNameTag(fp)}</span>
@@ -27063,6 +27992,25 @@
                   a static visual identity and stays silent. Plain shows ordinary readable text.
                 </p>
               </section>
+              <section class="set-section">
+                <h3>Message arrivals</h3>
+                <p class="muted small">
+                  Each member picks how their new messages show up (My Profile → Arrival). This is
+                  whether that plays on this device at all. Separate from text effects above: an
+                  arrival moves the whole row once as it lands, a text effect lives inside the words.
+                </p>
+                <div class="field">
+                  <span class="muted small">Playback</span>
+                  <div class="stx-seg text-fx-mode">
+                    <button type="button" class:on={appearance.messageMotion !== "off"} onclick={() => (appearance = { ...appearance, messageMotion: "" })}>PLAY</button>
+                    <button type="button" class:on={appearance.messageMotion === "off"} onclick={() => (appearance = { ...appearance, messageMotion: "off" })}>STILL</button>
+                  </div>
+                </div>
+                <p class="muted small">
+                  Still keeps every row where it lands, including your own, and tells nobody. The
+                  operating system's reduced-motion preference forces Still as well.
+                </p>
+              </section>
               {#if liveryActive && activeServerId !== null && !cur?.isDm}
                 <section class="set-section">
                   <h3>Livery</h3>
@@ -27120,14 +28068,6 @@
                     onchange={() => (appearance = { ...appearance, motion: appearance.motion === "off" ? "" : "off" })}
                   />
                   <span>Hover motion: icons lift and turn under the pointer</span>
-                </label>
-                <label class="toggle">
-                  <input
-                    type="checkbox"
-                    checked={appearance.messageMotion !== "off"}
-                    onchange={() => (appearance = { ...appearance, messageMotion: appearance.messageMotion === "off" ? "" : "off" })}
-                  />
-                  <span>Message arrivals: let each member's messages use that member's chosen entrance</span>
                 </label>
                 <label class="toggle">
                   <input
@@ -28691,28 +29631,15 @@
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div
         class="ctx-menu"
+        class:confirm={menu.confirm}
         bind:this={menuEl}
         role="menu"
         tabindex="-1"
         style="left:{menu.x}px; top:{menu.y}px"
         onkeydown={onMenuKey}
       >
-        {#each menu.items as item}
-          {#if "divider" in item}
-            <div class="ctx-divider"></div>
-          {:else}
-            <button
-              class="ctx-item"
-              class:danger={item.danger}
-              role="menuitem"
-              tabindex="-1"
-              disabled={item.disabled}
-              onclick={() => { const keep = item.onSelect(); if (keep !== true) menu = null; }}
-            >
-              {#if item.icon}<span class="ctx-icon">{item.icon}</span>{/if}<span class="ctx-label">{item.label}</span>
-            </button>
-          {/if}
-        {/each}
+        {@render menuRows(menu.items, 0)}
+        <div class="ctx-foot" aria-hidden="true"><span>↑↓ move</span><span>⏎ pick</span><span>type to jump</span><span class="sp"></span><span>esc</span></div>
       </div>
     {/if}
   {/if}

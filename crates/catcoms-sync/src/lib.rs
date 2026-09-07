@@ -941,7 +941,7 @@ pub struct SyncStats {
 
 /// Deferred recovery work, performed on the next async drain in [`ChannelSync::run_once`]
 /// (the handlers that detect a gap run synchronously while processing an event).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum CatchupTask {
     /// Fetch and replay membership commits from `from_epoch` onward.
     Commits {
@@ -3912,6 +3912,11 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// that source, not about the group, so it takes every eligible source saying it before the
     /// document is treated as caught up. Reset whenever the version moves.
     catchup_sources_checked: HashMap<(DocType, u128), (u64, BTreeSet<PeerId>)>,
+    /// Tasks whose lack of an eligible source has already been reported. A kept task is retried
+    /// on every drain, so without this the same stall is restated for as long as it lasts: one
+    /// document with one checked source wrote a line a second for half an hour. Emptied whenever
+    /// eligibility actually changes, so the next stall is reported afresh.
+    catchup_stall_reported: HashSet<CatchupTask>,
     /// An in-progress fork-resolution contest (only when `max_committer_rank >= 1`).
     pending: Option<PendingResolve>,
     /// Provisional-Welcome (or rejection) pushes to deliver to joiners once a
@@ -4207,6 +4212,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             catchup_cooldowns: HashMap::new(),
             catchup_continuations: HashMap::new(),
             catchup_sources_checked: HashMap::new(),
+            catchup_stall_reported: HashSet::new(),
             pending: None,
             welcome_outbox: Vec::new(),
             add_request_queue: VecDeque::new(),
@@ -5434,10 +5440,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // cooling off after failing us, or it has already answered at this version and the
             // sweep is waiting on somebody else. Both keep it out of this attempt; only the
             // second is a discharged obligation.
-            let cooling: Vec<PeerId> = match task {
-                CatchupTask::Doc { doc_type, doc_id } => {
-                    let mut out: Vec<PeerId> = self
-                        .catchup_cooldowns
+            // Kept apart rather than merged into one list, because they are not the same fact and
+            // reading a stall depends on telling them apart: a peer cooling off is one this node
+            // will ask again in [`CATCHUP_PEER_COOLDOWN_MS`], while a peer that has already
+            // answered at this version is one it will not ask again until the document moves.
+            // A stall on the first clears itself; a stall on the second is waiting for a source
+            // that may never arrive. Reported as one number, the two are indistinguishable.
+            let (cooling, checked): (Vec<PeerId>, Vec<PeerId>) = match task {
+                CatchupTask::Doc { doc_type, doc_id } => (
+                    self.catchup_cooldowns
                         .keys()
                         .filter(|(t, id, peer)| {
                             *t == doc_type
@@ -5445,26 +5456,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                                 && self.catchup_peer_is_cooling(*peer, doc_type, doc_id)
                         })
                         .map(|(_, _, peer)| *peer)
-                        .collect();
-                    out.extend(self.sources_checked(doc_type, doc_id));
-                    out
-                }
-                CatchupTask::Commits { .. } => Vec::new(),
+                        .collect(),
+                    self.sources_checked(doc_type, doc_id).into_iter().collect(),
+                ),
+                CatchupTask::Commits { .. } => (Vec::new(), Vec::new()),
             };
+            // Both still rule a peer out of this attempt.
+            let excluded: Vec<PeerId> = cooling.iter().chain(checked.iter()).copied().collect();
             // The peer that said this document has more to come is asked first while its claim
             // stands: it is the only source whose answer can retire that claim.
             let preferred = match task {
                 CatchupTask::Doc { doc_type, doc_id } => self
                     .catchup_continuation_source(doc_type, doc_id)
                     .filter(|peer| {
-                        !cooling.contains(peer)
+                        !excluded.contains(peer)
                             && Some(*peer) != avoid
                             && self.peer_is_connected(*peer)
                     }),
                 CatchupTask::Commits { .. } => None,
             };
             let Some(peer) =
-                preferred.or_else(|| self.pick_catchup_peer_excluding(avoid, &cooling))
+                preferred.or_else(|| self.pick_catchup_peer_excluding(avoid, &excluded))
             else {
                 // No usable catch-up source known yet; keep the task for a later
                 // tick (a new peer may appear), and likewise when the exclusion is
@@ -5481,21 +5493,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 let keep = self.known_peers.is_empty()
                     || avoid.is_some()
                     || matches!(retry, CatchupTask::Doc { .. });
-                tracing::debug!(
-                    task = ?retry,
-                    kept = keep,
-                    known_peers = self.known_peers.len(),
-                    proven_peers = self.member_peers.len(),
-                    failed_peers = self.failed_catchup_peers.len(),
-                    cooling = cooling.len(),
-                    "no eligible source for a catch-up task"
-                );
+                // Once per stall, not once per drain. A kept task is retried on every tick and
+                // its reason for being stuck rarely changes between them, so restating it is
+                // pure volume: the line that matters is the one that says the stall began.
+                if self.catchup_stall_reported.insert(retry) {
+                    tracing::debug!(
+                        task = ?retry,
+                        kept = keep,
+                        known_peers = self.known_peers.len(),
+                        proven_peers = self.member_peers.len(),
+                        failed_peers = self.failed_catchup_peers.len(),
+                        cooling = cooling.len(),
+                        checked = checked.len(),
+                        "no eligible source for a catch-up task"
+                    );
+                }
                 if keep {
                     self.requeue_catchup(retry);
                 }
                 self.catchup_inflight = None;
                 continue;
             };
+            // A source was found, so whatever stall this task was in is over. Forgetting it here
+            // is what lets the *next* stall be reported: a task that alternates between stalled
+            // and served is a different story from one that has been stuck since it was queued,
+            // and only clearing on progress can tell them apart.
+            self.catchup_stall_reported.remove(&retry);
             // Do not sign a request for a peer we are not connected to.
             //
             // A catch-up request carries a signed timestamp and is refused past
@@ -5656,6 +5679,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Start the sweep again, because this document moved.
     fn clear_sources_checked(&mut self, doc_type: DocType, doc_id: u128) {
         self.catchup_sources_checked.remove(&(doc_type, doc_id));
+        // The sweep starts again, so every source is eligible again and a stall reported under
+        // the old sweep no longer describes this one.
+        self.catchup_stall_reported
+            .remove(&CatchupTask::Doc { doc_type, doc_id });
     }
 
     /// Forget everything `peer` has said about any document's completeness, and re-open the
@@ -5675,6 +5702,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             peers.remove(&peer);
             !peers.is_empty()
         });
+        // This peer's standing just changed, which is exactly the event that can make a stalled
+        // task movable again. Any stall reported before it is about a pool that no longer holds.
+        self.catchup_stall_reported.clear();
     }
 
     /// The sources already asked at this document's current version. Empty once the version moves,
@@ -17407,6 +17437,105 @@ mod tests {
             "no source is eligible for this document while they are all cooling"
         );
         assert!(doc_queued(&bob), "and the gap is still owned");
+    }
+
+    /// A stall that cannot move is reported once, not once per drain.
+    ///
+    /// The drain retries a kept task on every tick, and a document whose only source is not worth
+    /// asking stays stalled until that changes. Reporting the condition per tick rather than per
+    /// transition is what buried a real log: one document with one excluded source wrote a line a
+    /// second for half an hour, into the record a "my message never arrived" report has to be read
+    /// out of. The transition is the event; the condition is not.
+    /// A `tracing` writer that keeps what was written, so a test can count emitted lines.
+    #[derive(Clone, Default)]
+    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        fn count(&self, needle: &str) -> usize {
+            String::from_utf8_lossy(&self.0.lock().unwrap())
+                .matches(needle)
+                .count()
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = CapturedLog;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_stall_is_reported_once_until_eligibility_changes() {
+        let logs = CapturedLog::default();
+        let _log_guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(logs.clone())
+                .with_max_level(tracing::Level::DEBUG)
+                .finish(),
+        );
+        const STALL: &str = "no eligible source for a catch-up task";
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let alice_peer = alice.local_peer();
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        bob.open_channel(DocType::Channel, 92).await.unwrap();
+
+        let task = CatchupTask::Doc {
+            doc_type: DocType::Channel,
+            doc_id: 92,
+        };
+        // Opening the channel queues catch-up work of its own, and this test is about one task
+        // that cannot move rather than about that sweep.
+        bob.catchup_queue.clear();
+        // The only source is left alone about this document, so the drain can find nobody.
+        bob.cool_off_catchup_peer(alice_peer, DocType::Channel, 92);
+        bob.enqueue_doc_catchup(DocType::Channel, 92);
+
+        bob.drain_catchup_queue().await;
+        assert_eq!(
+            logs.count(STALL),
+            1,
+            "the first drain that finds nobody says so"
+        );
+
+        // Every later drain finds the same nothing, and says nothing further about it.
+        for _ in 0..5 {
+            bob.drain_catchup_queue().await;
+        }
+        assert_eq!(
+            logs.count(STALL),
+            1,
+            "a stall that has not changed is not restated on every tick"
+        );
+        assert!(
+            bob.catchup_queue.contains(&task),
+            "and staying quiet is not the same as dropping the work"
+        );
+
+        // The sweep starting again is a real change in eligibility, so the next stall is reported
+        // afresh rather than being suppressed by the record of the last one.
+        bob.clear_sources_checked(DocType::Channel, 92);
+        bob.drain_catchup_queue().await;
+        assert_eq!(
+            logs.count(STALL),
+            2,
+            "a sweep that starts again re-arms the report"
+        );
     }
 
     /// A commit probe nobody answered is not a probe that found nothing.

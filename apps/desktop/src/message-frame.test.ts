@@ -3,12 +3,14 @@ import test from "node:test";
 import {
   CHAT_MESSAGE_FRAMES_ENABLED,
   DEFAULT_MESSAGE_FRAME,
+  MESSAGE_FRAME_MOTIONS,
   defaultMessageFrameLayer,
   encodeMessageFrame,
   messageFrameArrivalStyle,
   messageFrameEffect,
   messageFrameLayerStyle,
   messageFrameMotion,
+  messageFrameMotionTraits,
   messageFramePosition,
   messageFrameScanGeometry,
   messageFrameShape,
@@ -81,6 +83,43 @@ test("mf2 single effects migrate into the layer stack", () => {
   assert.equal(messageFrameEffect("mf2|#123456|60|70|glide|packet|trace"), "trace");
 });
 
+test("a motion this build does not know arrives as Still, keeping the rest of the frame", () => {
+  // The catalogue grows; an older build must not blank a newer peer's surface over one word.
+  assert.equal(messageFrameStyle("mf1|#123456|60|70|spin"), "--message-surface:#123456;--message-opacity:0.6;--message-edge:70%");
+  assert.equal(messageFrameMotion("mf1|#123456|60|70|spin"), "none");
+  const v3 = parseMessageFrame("mf3|#123456|60|70|hyperspace|packet|720.44.20.-1.spring|");
+  assert.equal(v3.motion, "none");
+  assert.equal(v3.shape, "packet");
+  assert.equal(v3.arrival.duration, 720);
+});
+
+test("every catalogue motion round-trips and has traits for the shared knobs", () => {
+  for (const motion of MESSAGE_FRAME_MOTIONS) {
+    const saved = encodeMessageFrame(frame({ motion }));
+    assert.equal(messageFrameMotion(saved), motion, motion);
+    const traits = messageFrameMotionTraits(motion);
+    assert.ok(["quiet", "reveal", "ceremony", "physical"].includes(traits.family), motion);
+    if (traits.direction) assert.ok(traits.vector[0] && traits.vector[1], `${motion} needs both vector labels`);
+    if (traits.family === "reveal") assert.equal(traits.fade, false, `${motion}: reveals are painted behind a mask`);
+  }
+});
+
+test("arrival variables carry the per-family meanings of the one distance slider", () => {
+  const wipe = messageFrameArrivalStyle(encodeMessageFrame(frame({ motion: "wipe", arrival: { ...DEFAULT_MESSAGE_FRAME.arrival, direction: -1 } })));
+  assert.match(wipe, /--message-arrival-clip-from:inset\(0 0 0 100%\)/);
+  assert.match(wipe, /--message-arrival-opacity:1(;|$)/);
+  const blinds = messageFrameArrivalStyle(encodeMessageFrame(frame({ motion: "blinds", arrival: { ...DEFAULT_MESSAGE_FRAME.arrival, distance: 30 } })));
+  assert.match(blinds, /--message-arrival-grain:18px/);
+  assert.match(blinds, /--message-arrival-blind-dir:to bottom/);
+  const swivel = messageFrameArrivalStyle(encodeMessageFrame(frame({ motion: "swivel", arrival: { ...DEFAULT_MESSAGE_FRAME.arrival, direction: -1 } })));
+  assert.match(swivel, /--message-arrival-origin:right center/);
+  assert.match(swivel, /--message-arrival-dir:-1/);
+  const quake = messageFrameArrivalStyle(encodeMessageFrame(frame({ motion: "quake", arrival: { ...DEFAULT_MESSAGE_FRAME.arrival, distance: 60 } })));
+  assert.match(quake, /--message-arrival-shake:10px/);
+  const slam = messageFrameArrivalStyle(encodeMessageFrame(frame({ motion: "slam", arrival: { ...DEFAULT_MESSAGE_FRAME.arrival, distance: 50 } })));
+  assert.match(slam, /--message-arrival-zoom:3.00/);
+});
+
 test("motion can be saved without forcing a coloured frame", () => {
   const saved = encodeMessageFrame(frame({ surface: "", motion: "drift" }));
   assert.equal(saved, "mf3||56|68|drift|terminal|480.30.12.1.soft|");
@@ -96,7 +135,6 @@ test("empty and malformed frames are inert", () => {
   assert.equal(messageFrameStyle("url(https://example.test/track)"), "");
   assert.equal(messageFrameStyle("image-set(url(x) 1x)"), "");
   assert.equal(messageFrameStyle("var(--panel)"), "");
-  assert.equal(messageFrameStyle("mf1|#123456|60|70|spin"), "");
   assert.equal(messageFrameStyle("mf1|#123456|60|70|fly|extra"), "");
   assert.equal(messageFrameStyle("mf2|#123456|60|70|fly|unknown|scan"), "");
   assert.equal(messageFrameStyle("mf2|#123456|60|70|fly|holo|unknown"), "");

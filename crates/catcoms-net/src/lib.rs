@@ -1630,6 +1630,22 @@ struct PendingPublish {
     items: Vec<(Topic, Bytes)>,
     /// The bytes `items` account for, so both bounds are enforced without rescanning.
     bytes: usize,
+    /// The held count last written to the log, so a retry pass that changes nothing stays
+    /// silent instead of restating it. A topic nobody subscribes to is retried for as long as
+    /// the node runs, and re-stating every held payload on every pass buries the log: one
+    /// unreachable topic held for an afternoon wrote 200k lines and 28MB, which is the whole
+    /// record a later "my message never arrived" report has to be read out of.
+    reported: Option<usize>,
+}
+
+/// Whether a publish is a payload's first attempt or a retry of one already held.
+///
+/// Only the first attempt is worth a line of its own. A retry that fails for the same reason
+/// re-states what the hold already recorded, so the retry pass reports the queue instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishAttempt {
+    First,
+    Retry,
 }
 
 impl PendingPublish {
@@ -1663,6 +1679,22 @@ impl PendingPublish {
                 "pending publish queue is full; dropped the oldest payload"
             );
         }
+    }
+
+    /// Whether this queue's depth is worth a line right now, recording that it was reported.
+    ///
+    /// A retry pass that leaves the depth exactly where the last report left it has nothing to
+    /// add: the payloads are the same payloads and the reason is the same reason. A depth that
+    /// moved is worth saying, because a queue growing under a stalled topic and one draining
+    /// slowly are different problems. An empty queue is never reported here; the pass that
+    /// emptied it says so itself.
+    fn should_report_depth(&mut self) -> bool {
+        let depth = self.items.len();
+        if self.reported == Some(depth) {
+            return false;
+        }
+        self.reported = Some(depth);
+        depth > 0
     }
 
     /// Remove everything held, for a retry pass that re-holds whatever still cannot go out.
@@ -3895,7 +3927,7 @@ impl Actor {
                     .unsubscribe(&to_ident(&topic));
             }
             Command::Publish(topic, data) => {
-                self.publish_or_hold(topic, data);
+                self.publish_or_hold(topic, data, PublishAttempt::First);
             }
             Command::Request {
                 peer,
@@ -4468,7 +4500,7 @@ impl Actor {
     /// wrong in both directions: a message too large for the protocol, or one this node cannot
     /// sign, waits forever for a subscription that would not help it, while the reason it
     /// actually failed is discarded before anyone can act on it.
-    fn publish_or_hold(&mut self, topic: Topic, data: Bytes) {
+    fn publish_or_hold(&mut self, topic: Topic, data: Bytes, attempt: PublishAttempt) {
         let len = data.len();
         match self
             .swarm
@@ -4483,17 +4515,25 @@ impl Actor {
                 tracing::trace!(bytes = len, "publish suppressed as a duplicate")
             }
             Err(error) if publish_failure_can_pass(&error) => {
+                self.pending_publish.hold(topic, data);
                 // `info`, not `debug`: the shared debug log keeps this crate at `info` to keep
                 // address churn out of it, and this line carries no address. It is the one
                 // transport-level fact a "my message never arrived" report needs.
-                self.pending_publish.hold(topic, data);
-                tracing::info!(
-                    bytes = len,
-                    %error,
-                    held = self.pending_publish.items.len(),
-                    held_bytes = self.pending_publish.bytes,
-                    "publish held for retry"
-                );
+                //
+                // Once per payload, though, not once per payload per retry pass. The first
+                // hold is the event; a retry failing the same way is the queue's business, and
+                // `flush_pending_publish` reports that only when the queue actually moves.
+                if attempt == PublishAttempt::First {
+                    let held = self.pending_publish.items.len();
+                    self.pending_publish.reported = Some(held);
+                    tracing::info!(
+                        bytes = len,
+                        %error,
+                        held,
+                        held_bytes = self.pending_publish.bytes,
+                        "publish held for retry"
+                    );
+                }
             }
             Err(error) => {
                 // Nothing about waiting makes an oversized message fit, a compression transform
@@ -4513,7 +4553,7 @@ impl Actor {
         let held = self.pending_publish.take();
         let attempted = held.len();
         for (topic, data) in held {
-            self.publish_or_hold(topic, data);
+            self.publish_or_hold(topic, data, PublishAttempt::Retry);
         }
         let still_held = self.pending_publish.items.len();
         if attempted > still_held {
@@ -4521,6 +4561,18 @@ impl Actor {
                 released = attempted - still_held,
                 still_held,
                 "held publications went out"
+            );
+        }
+        // The queue's own state, reported only when it changes. A pass that releases nothing and
+        // holds nothing new says exactly what the last one did, and this timer fires for as long
+        // as anything is held: reporting every pass is what turned an unreachable topic into a
+        // log nobody can read. A depth that moves is still worth a line, because a queue growing
+        // under a stalled topic and one draining slowly are different problems.
+        if self.pending_publish.should_report_depth() {
+            tracing::info!(
+                held = still_held,
+                held_bytes = self.pending_publish.bytes,
+                "publications still held for retry"
             );
         }
     }
@@ -6240,6 +6292,52 @@ mod tests {
             pending.bytes, 0,
             "a drained queue must not keep charging for what it handed back"
         );
+    }
+
+    /// A queue that has not moved is not re-announced on every retry pass.
+    ///
+    /// The retry timer fires for as long as anything is held, and a topic with no subscriber
+    /// holds for as long as the node runs. Reporting each held payload on each pass is what put
+    /// 200k lines and 28MB into one afternoon's debug log, drowning the record that a later
+    /// "my message never arrived" report has to be read out of. Depth that changes is news;
+    /// depth that has not is not.
+    #[test]
+    fn a_held_publish_queue_reports_its_depth_only_when_it_moves() {
+        let topic = |n: usize| Topic::new(format!("topic-{n}").into_bytes());
+        let mut pending = PendingPublish::default();
+
+        for n in 0..3 {
+            pending.hold(topic(n), Bytes::from(vec![0u8; 8]));
+        }
+        assert!(
+            pending.should_report_depth(),
+            "a queue that has just grown to three is worth saying once"
+        );
+        for _ in 0..100 {
+            assert!(
+                !pending.should_report_depth(),
+                "and a hundred retry passes that change nothing add nothing"
+            );
+        }
+
+        // Growth under a stalled topic is a different problem from a queue holding steady.
+        pending.hold(topic(3), Bytes::from(vec![0u8; 8]));
+        assert!(
+            pending.should_report_depth(),
+            "a depth that moved is news again"
+        );
+        assert!(!pending.should_report_depth());
+
+        // Draining is reported by the pass that drained it, not by this.
+        let _ = pending.take();
+        assert!(
+            !pending.should_report_depth(),
+            "an empty queue has nothing to hold and nothing to say"
+        );
+
+        // A queue refilling after a drain is once more worth a line.
+        pending.hold(topic(4), Bytes::from(vec![0u8; 8]));
+        assert!(pending.should_report_depth());
     }
 
     #[tokio::test]

@@ -1,8 +1,19 @@
 # Releasing Mewtual
 
-Mewtual ships as an unsigned Windows NSIS installer built by
-[`.github/workflows/release.yml`](../.github/workflows/release.yml), and installed copies update
-themselves through Tauri's updater. This is the maintainer's checklist.
+Mewtual ships as an unsigned Windows NSIS installer and unsigned Linux `.AppImage` and `.deb`
+bundles, all built by [`.github/workflows/release.yml`](../.github/workflows/release.yml), and
+installed copies update themselves through Tauri's updater. This is the maintainer's checklist.
+
+The workflow is two jobs. **Build Windows installer** runs the version checks, the frontend tests
+and the checks, then creates the draft release; **Build Linux bundles** waits for it and adds its
+artifacts to that same draft. They are deliberately not parallel: `tauri-action` creates the draft
+when the tag has none, so two jobs starting together can race and leave two drafts for one
+version. Expect roughly twice the wall-clock time of a Windows-only build.
+
+Not every bundle can update itself. The updater installs an AppImage in place, so `.AppImage`
+users are covered, but there is no Tauri updater format for `.deb`: those installs check, find a
+newer version, and cannot apply it. Point Debian and Ubuntu users at the AppImage if you want them
+to stay current without manual work.
 
 ## The updater's trust root
 
@@ -108,18 +119,25 @@ new one and must be reinstalled by hand. Rotate only if the key is lost or expos
    ```sh
    gh workflow run release.yml --repo Thalpy/Mewtual --ref <branch>
    gh run list --repo Thalpy/Mewtual --workflow=release.yml --limit 1   # get the run id
-   gh run watch <run-id> --repo Thalpy/Mewtual                          # ~20 minutes
+   gh run watch <run-id> --repo Thalpy/Mewtual                          # ~40 minutes, two jobs
    ```
 
    The branch does not have to be `main`. Whatever you point `--ref` at is what gets built, and
    the tag is created against that commit when the release is published.
-5. The workflow leaves a **draft** release holding the installer, its `.sig`, and `latest.json`.
-   Review it, edit the release body if needed, and publish (see below).
+5. The workflow leaves a **draft** release holding the Windows installer, the Linux `.AppImage`
+   and `.deb`, the `.sig` for each updatable bundle, and one `latest.json` covering both
+   platforms. Review it, edit the release body if needed, and publish (see below).
 
 If the draft has **no `.sig` and no `latest.json`**, the signing secrets or the
 `--config src-tauri/tauri.official.conf.json` argument did not take effect. Do not publish it:
 installs cannot verify an unsigned build, and a release without a manifest is invisible to the
 updater.
+
+`latest.json` is written twice, once per job, and the second write **merges** rather than
+replaces: `tauri-action` reads the asset already on the release and combines its `platforms` map
+with the new one. So the finished manifest should list both `windows-x86_64` and `linux-x86_64`.
+If it names only one, the other job either failed or built without the signing key, and every
+install on the missing platform will check for updates and find nothing.
 
 The release body is what users read inside the update prompt, so write it for them rather than for
 the repository.
