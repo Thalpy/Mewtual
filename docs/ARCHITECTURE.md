@@ -40,8 +40,11 @@ checks its actual local author/current Open epoch and all typed recovery evidenc
 existing durability path. New authoring is held on deletion or a superseding pointer hint; an
 exact current-log retry reseals unchanged so failed-flush deletions remain retryable. Holds never
 retire intents. Deletion screening is conservative for stable keys and best-effort after bounded
-recovery eviction. Replay scheduling/publication, settlement-wide capacity headroom and discovery
-remain to be integrated; no universal progress at full quota is claimed yet.
+recovery eviction. A cooperative replay pass now snapshots one author's bounded id set and paces
+one attempt at a time. It waits for an exact local submission acknowledgement, pauses failures at
+the same id, and never retires intents on traversal/submission. This is not an autonomous worker;
+aggregate scheduling, send-time lifecycle/gate checks, publication, settlement-wide capacity
+headroom and discovery remain to be integrated. No universal progress at full quota is claimed yet.
 
 The naive "one group, every device commits, replay old ciphertext to latecomers" design
 is broken. The load-bearing fixes:

@@ -1153,6 +1153,12 @@ install_registry_checkpoint(server, &ServerGroup, bucket, &MlsDevice, receipt_by
 replay_registry_intent(server, &ServerGroup, bucket, expected_doc_id:u128, &MlsDevice,
                        intent_id:[u8;32], rng, &mut EpochStorageBudget, &mut EpochIntentBudget)
   -> Result<(RegistryReplayOutcome, EpochRegistryState), AppError>;
+begin_registry_replay(server, &ServerGroup, bucket, expected_doc_id:u128, &MlsDevice,
+                      &mut EpochStorageBudget, &mut EpochIntentBudget)
+  -> Result<RegistryReplayPass, AppError>;
+step_registry_replay(&mut RegistryReplayPass, &ServerGroup, &MlsDevice, &dyn Clock, rng,
+                     &mut EpochStorageBudget, &mut EpochIntentBudget)
+  -> Result<RegistryReplayStep, AppError>;
 ```
 
 `EpochRegistryState` exposes only `doc_id`, `epoch`, `phase`, `op_count`, `quarantined_len` and a detached
@@ -1274,6 +1280,42 @@ overwrite newer state and is required to retry a Tombstone after a failed post-r
 Scope, membership, Open, all recovery validation and both durability barriers still apply.
 This one-step API neither schedules/sends replay nor retires intents, repairs forks or implements
 Restore; those remain separate actor/transport/recovery work.
+
+The optional `RegistryReplayPass` is a cooperative driver around that single-intent API, not a
+worker or transport outbox. Begin checks current local membership and both ledger inventories,
+then retains only that author's sorted saved ids, at most 10,000 / 320,000 id payload bytes in a
+boxed slice. It does NOT read/flush the source or prove the captured concrete id is current/Open.
+Every actual step reloads all enforcement state through `replay_registry_intent`. New intents are
+outside the snapshot; disappearance of a selected id pauses rather than implying finality.
+
+`RegistryReplayStep` is `Complete`, `Wait { retry_at_ms }`, `Paused`, `AwaitingSubmission`,
+`Held { intent_id, reason, state }` or `Prepared { intent_id, ticket, op, state }`. At most one
+actual replay runs per step. A monotonic 100-ms PER-PASS deadline is charged before calling replay,
+including failed attempts. Checked deadline arithmetic refuses exhaustion before work, and Paused
+is installed before any error/unwind can escape. Waiting/paused/complete/awaiting steps do no disk
+work. This is neither a global rate limit nor a bound on how many passes the future actor creates.
+
+Prepared waits for an exact `RegistryReplayTicket`; its private fresh allocation identifies ONE
+attempt, so stale/cross-pass/duplicate acknowledgements cannot advance. `pass.submitted(&ticket)`
+advances after the caller acknowledges local transport submission, not delivery. It retires nothing
+and cannot establish that sending was authorized. `pass.retry_submission(&ticket)` invalidates the
+ticket without advancing; the next eligible attempt reseals the same saved operation using the
+existing current-member and Open checks. `pass.retry_failed()` resumes a paused id without resetting
+its deadline or repairing budgets. No timeout skips work. Losing a ticket requires dropping and
+restarting the pass; durable intents/logs preserve exact retry semantics.
+
+`pass.progress()` reports selected/visited/submitted/held counts, with visited = submitted + held.
+Complete means the original ids were traversed, possibly with holds, NOT that the current ledger
+is empty, all edits were sent or any edit is final. Held advances once but preserves the intent for
+explicit recovery. Dropping/restarting may revisit previously submitted work; it never retires it.
+
+Passes are non-cloneable and bound to numeric server, full group/device, bucket, concrete epoch and
+a stable private physical-mount token, separate from rotating budget freshness. Wrong mount/group/
+device calls refuse without consuming the pass. This token is NOT a native unlock/server-incarnation
+lease: explicit UI lock can keep the vault mounted. Future consumers must cancel lifecycle-stale
+passes and recheck session/incarnation/membership/MLS epoch/Open immediately before sending. No
+ciphertext is retained in the pass; pass/step/ticket Debug redacts ids, scope and content. Aggregate
+work/concurrency scheduling, UI lifecycle, actual send/receive and automatic wakeup remain unwired.
 
 Public receipt fields and ciphertext are capped before encoding/decryption. Changed state uses
 an accounted atomic replacement; identical pre/post mutation snapshots instead sync the unchanged

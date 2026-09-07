@@ -214,7 +214,10 @@ fn registry_replay_checks_source_intent_recovery_inventory_and_budget_freshness(
     assert_eq!(intent_bytes(&store, &f), ledger);
 }
 
-fn budgets(store: &mut ServerStore, f: &Fixture) -> (EpochStorageBudget, EpochIntentBudget) {
+pub(super) fn budgets(
+    store: &mut ServerStore,
+    f: &Fixture,
+) -> (EpochStorageBudget, EpochIntentBudget) {
     let inv = inventory(store);
     (
         EpochStorageBudget::from_inventory(
@@ -225,7 +228,7 @@ fn budgets(store: &mut ServerStore, f: &Fixture) -> (EpochStorageBudget, EpochIn
         EpochIntentBudget::from_inventory(&inv).unwrap(),
     )
 }
-fn put(f: &Fixture, n: u8, epoch: u64) -> DomainOp {
+pub(super) fn put(f: &Fixture, n: u8, epoch: u64) -> DomainOp {
     RegistryOp::Put {
         key: f.key.clone(),
         epoch,
@@ -233,12 +236,12 @@ fn put(f: &Fixture, n: u8, epoch: u64) -> DomainOp {
     .domain_op(&f.group.group_id(), [n; 16])
     .unwrap()
 }
-fn tombstone(f: &Fixture, n: u8) -> DomainOp {
+pub(super) fn tombstone(f: &Fixture, n: u8) -> DomainOp {
     RegistryOp::Tombstone { key: f.key.clone() }
         .domain_op(&f.group.group_id(), [n; 16])
         .unwrap()
 }
-fn journal(
+pub(super) fn journal(
     store: &mut ServerStore,
     f: &Fixture,
     domain: DomainOp,
@@ -291,13 +294,13 @@ fn signed(f: &Fixture, result: (RegistryReplayOutcome, EpochRegistryState)) -> S
     )
     .unwrap()
 }
-fn sync(step: ReplaySync, path: &Path, bytes: u64) -> Result<(), AppError> {
+pub(super) fn sync(step: ReplaySync, path: &Path, bytes: u64) -> Result<(), AppError> {
     match step {
         ReplaySync::Intent => crate::store::epoch_intents::sync_intent(path, bytes),
         _ => sync_registry(path, bytes),
     }
 }
-fn intent_bytes(store: &ServerStore, f: &Fixture) -> Vec<u8> {
+pub(super) fn intent_bytes(store: &ServerStore, f: &Fixture) -> Vec<u8> {
     let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.document).unwrap();
     fs::read(
         store

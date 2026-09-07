@@ -15,8 +15,9 @@ their intent before the epoch, returning publication-ready ciphertext only after
 An exact retry reseals the original signed change under current membership, not a new delta.
 Registry installation now saves recovery and receipt-covered intent retirement before atomic
 successor selection. One saved author-owned intent can be replayed through a checked bounded
-store step; network publication, background replay, other managed-file families and production
-orchestration are not wired yet. Studio
+store step, now driven by a cooperative one-ledger replay pass. Network publication, automatic
+wakeups/global replay scheduling, other managed-file families and production orchestration are
+not wired yet. Studio
 materializers, settlement orchestration, sync discovery, complete storage integration and app/UI events
 remain later slices and the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
@@ -312,6 +313,23 @@ full-envelope equality, not a marker, and keeps a Tombstone's failed post-rename
 All recovery validation, scope/current-author checks and both vault barriers still apply. The
 single-step API returns prepared ciphertext or a held reason; it neither schedules/sends replay
 nor retires held intents. Live replay scheduling and explicit recovery actions remain later work.
+
+The cooperative `RegistryReplayPass` now selects only the actual local author's saved ids, in
+canonical id order, from a ledger checked against both inventories. It retains a boxed snapshot
+of at most 10,000 ids (320,000 payload bytes), not bodies/ciphertext. Begin takes an explicit
+captured concrete id and does not establish that its source is current/Open; each actual step
+does so through the checked replay adapter. One attempt runs per step, paced by a monotonic
+100-ms per-pass deadline charged before work. Errors/unwinds pause without skipping; checked
+deadline overflow refuses work. This is not a global scheduler or per-server ingest limit.
+
+Prepared work waits for an opaque exact-attempt local submission ticket. Stale/cross-pass or
+duplicate acknowledgements cannot advance; explicit failed-send retry reseals the same saved id
+and preserves pacing. No timeout assumes success. Holds are visited once without removing their
+intent. Complete means snapshot traversal, never delivery/finality or an empty current ledger.
+New ids need another pass; missing selected ids pause. Dropping/restarting, including after a lost
+ticket, preserves durable intents and exact-current-log retry behavior. Mount binding is local
+and rejects a reopened vault, not a lock/incarnation send permit. Live consumers must still bound
+active passes/aggregate work and recheck lifecycle, membership, MLS epoch and Open before sending.
 Caps: 64 KiB per intent, 10,000 intents and 4 MiB per logical document, 64 MiB per vault,
 20,000 markers per epoch (one for each operation admitted by the epoch maximum).
 

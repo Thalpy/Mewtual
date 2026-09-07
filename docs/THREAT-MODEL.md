@@ -347,6 +347,21 @@ table with the commit that closed it.
   sends nothing, retires nothing, and does not implement a worker, live actor/transport checks or
   Restore. Its result Debug omits ciphertext/content. Per-call ledger/log/recovery work is bounded
   but repeated use still needs live scheduling/rate limits.
+- **Replay traversal is not a delivery or lifecycle permit.** The cooperative registry pass keeps
+  only a fixed, original-author id snapshot (at most 10,000 / 320,000 id payload bytes), and each
+  actual attempt runs the existing checked store replay. Begin validates the ledger, not that the
+  captured epoch is current/Open. A per-pass monotonic 100-ms deadline is charged before work;
+  checked overflow refuses, errors/unwinds pause, and neither retries nor wall-clock corrections
+  reset pacing. Prepared results wait for an opaque exact-attempt ticket; duplicate, stale or
+  cross-pass acknowledgements never skip an id. A missing ticket has no timeout-success path:
+  dropping/restarting preserves durable intents and exact-log retries. Traversal/submission never
+  retires an intent or proves delivery/finality. Later additions require another pass, and missing
+  selected ids pause even when normally retired by a receipt. Holds count as visited only.
+  A private stable physical-mount token rejects use after reopen but is NOT a native UI-lock or
+  server-incarnation permit (native lock may keep the store mounted). No ciphertext queue is held;
+  Debug omits scope, ids and content. This is trusted local orchestration, not a peer-facing API:
+  aggregate pass concurrency/work limits, lifecycle cancellation, automatic wakeups and all live
+  send-time checks/publication remain required before actor/transport integration.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
   no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains

@@ -31,9 +31,13 @@ pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
 const MAX_INBOUND_CIPHERTEXT: usize = MAX_SIGNED_EPOCH_OP_BYTES + 4 + 16;
 
 mod installation;
+mod pass;
 mod recovery;
 mod replay;
 pub use installation::RegistryInstallOutcome;
+pub use pass::{
+    RegistryReplayPass, RegistryReplayProgress, RegistryReplayStep, RegistryReplayTicket,
+};
 pub use replay::{RegistryReplayHold, RegistryReplayOutcome};
 
 /// Detached read-only persisted state. Debug deliberately excludes registry keys and content.

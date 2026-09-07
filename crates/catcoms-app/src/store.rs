@@ -48,6 +48,7 @@ pub use epoch_recovery::inventory::{
 pub use epoch_recovery::{EpochRecoveryAction, EpochRecoveryState, EpochRecoveryUpdate};
 pub use epoch_registry::{
     EpochRegistryState, RegistryInstallOutcome, RegistryReplayHold, RegistryReplayOutcome,
+    RegistryReplayPass, RegistryReplayProgress, RegistryReplayStep, RegistryReplayTicket,
 };
 pub mod epoch_budget;
 
@@ -387,6 +388,9 @@ pub struct ServerStore {
     // Process-local freshness only, never wire authority. Replaced before any intent-file I/O;
     // budgets made from older scans (or another mounted vault) cannot authorize a new write.
     intent_generation: std::sync::Arc<()>,
+    // Stable only for this physical mount, unlike the rotating intent-inventory token. Replay
+    // passes are local work cursors, not authority across reopen or the native UI-lock boundary.
+    replay_mount: std::sync::Arc<()>,
     // This OS lock is intentionally held until the store is dropped. The in-process Tauri mutex
     // serializes commands, while this guard prevents a second app process from forking durable MLS,
     // invite-ledger, registry, or transport state from the same starting snapshot.
@@ -415,6 +419,7 @@ impl ServerStore {
             dir,
             keys,
             intent_generation: std::sync::Arc::new(()),
+            replay_mount: std::sync::Arc::new(()),
             _session: session,
         })
     }

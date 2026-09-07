@@ -215,6 +215,23 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
     ) -> Result<LocalIntent, AppError> {
+        let state = self.checked_epoch_replay_state(server, document, budget, intents)?;
+        let found = state
+            .pending()
+            .find(|(id, _)| *id == intent_id)
+            .map(|(_, intent)| intent.clone());
+        found.ok_or_else(|| invalid("saved replay intent is missing"))
+    }
+
+    /// Checked ledger snapshot for selection only. Its ids are not a continuing write permit:
+    /// replay reopens the actual records and repeats both inventory checks on every attempt.
+    pub(super) fn checked_epoch_replay_state(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+    ) -> Result<EpochIntentState, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
         let (state, old) = match self.read_epoch_intent_record(&scope, document) {
@@ -234,11 +251,7 @@ impl ServerStore {
             return Err(invalid(error));
         }
         intents.preflight(&self.intent_generation, id, old, old.unwrap_or(0), true)?;
-        let found = state
-            .pending()
-            .find(|(id, _)| *id == intent_id)
-            .map(|(_, intent)| intent.clone());
-        found.ok_or_else(|| invalid("saved replay intent is missing"))
+        Ok(state)
     }
 
     /// Save one local intent before applying or gossiping the edit. The actual local MLS device,

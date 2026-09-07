@@ -7,6 +7,7 @@ use rand_core::SeedableRng;
 
 mod installation;
 mod local;
+mod pass;
 mod recovery;
 mod replay;
 mod settlement;

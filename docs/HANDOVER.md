@@ -8,6 +8,51 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 cooperative registry replay pass (2026-09-07).** `begin_registry_replay` snapshots only
+  the actual member's saved intent ids from a ledger checked against both inventories.
+  `step_registry_replay` attempts at most one existing checked replay, paced at 100 ms per pass
+  by the injected monotonic clock. The pass keeps at most 10,000 boxed ids (320,000 payload bytes),
+  no operation bodies or ciphertext queue. Begin captures an explicit concrete epoch id; it is
+  not a check that the source is current/Open. Every actual attempt still performs those checks.
+
+  Prepared work waits for an opaque, exact-attempt submission ticket. Duplicate/stale/cross-pass
+  acknowledgements cannot skip an edit. A failed send retries the same saved id with a fresh
+  reseal; errors/unwinds pause before cursor advancement and retain the charged deadline. Held
+  ids are visited once without removing their intents. Missing/retired ids pause, not silently
+  succeed. Completion counts snapshot traversal, including holds, never delivery/finality or
+  the current ledger being empty. Later additions/rotation require a fresh pass.
+
+  Stable physical-mount binding rejects reuse after vault reopen, independently of rotating
+  intent-budget freshness. It is NOT UI-lock or server-incarnation authorization: the store may
+  stay mounted while the UI locks. Lost tickets/abandoned prepared results recover by dropping
+  and restarting the pass; no timeout advances it. No wire or persistence format changed.
+
+  **Next:** live coordinator ownership, bounded aggregate scheduling and send-time lifecycle/gate
+  checks, actual network publication, settlement-wide capacity handling and receipt-head/seed
+  discovery, then Studio/actor consumers. This is a cooperative backend driver, not an autonomous
+  worker or an end-to-end feature. UI remains user-owned; concurrent release changes are excluded.
+
+  Nine focused pass regressions pass: own-id selection/new additions, exact/stale/cross-pass
+  acknowledgements, held-once traversal, clock boundaries/overflow, wrong mount/group/device/epoch,
+  member removal, failed post-rename writes/unwinds, lost prepared results across reopen, real
+  receipt retirement/rotation and the maximal 10,000-intent ledger. Design, actual-diff and final
+  documentation adversarial reviews have no remaining findings. The review's comment correction
+  distinguishes an abandoned Prepared result from a Held result, which advances traversal only.
+  Verification passed:
+
+  - `cargo check -p catcoms-app`
+  - `cargo test -p catcoms-app registry_pass -- --nocapture` (9 tests); the submission/ticket test
+    was rerun after adding an explicit wall-clock-jump assertion.
+  - `cargo test --all --all-features` (existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests)
+  - `npm.cmd --prefix apps/desktop test` (1,135 tests)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh` (Git Bash) and worktree/staged `git diff --check`
+
+  Frontend static/build/visual checks were not run for this backend-only slice; no UI or bridge
+  source changed here. Concurrent release-workflow/documentation changes are not part of its review.
+
 - **P1 author-owned registry replay step (2026-09-07).** `replay_registry_intent` now takes a
   saved intent id and captured concrete epoch id, never a replacement body/nonce. It requires
   the actual current member to be the original author, checks both budgets and the saved Open
