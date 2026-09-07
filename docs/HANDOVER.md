@@ -8,6 +8,44 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 cooperative registry sender (2026-09-07).** The Server adapter now connects saved-intent
+  replay to driver-acknowledged one-shot publication. A cursor binds the exact sync instance at
+  begin, rejecting same-device/group replacement; exclusive Server/store borrows span checked
+  preparation through dispatch. The actual local full identity, MLS scope and current blinded
+  registry topic are checked before sending. No legacy document-map entry or retry outbox is used.
+  Only Submitted advances. Duplicate, refusal, cancellation and unwind preserve the saved id and
+  per-pass deadline for fresh resealing; every outcome keeps the durable intent. Cancellation
+  after driver admission remains ambiguous, not rollback or delivery proof.
+
+  **Next:** bounded live coordinator ownership/wakeups and native lifecycle cancellation, managed
+  registry receive/catch-up, receipt-head/seed discovery, settlement-wide capacity handling and
+  Studio/actor consumers. This is a cooperative backend API, not an autonomous worker or a new
+  frontend feature. No driver deadline, aggregate pass cap or gossip-size change is claimed.
+  UI remains user-owned; concurrent upload/release source and documentation are excluded.
+
+  Nine focused regressions cover exact submitted bytes/typed registry receive, transport refusals,
+  Duplicate, cancellation, lost acknowledgement, unwind, fresh resealing without reauthoring,
+  replaced sync/mount, failed storage and Closing gates, conservative holds, malformed/foreign/
+  oversized packets, current MLS/routing and redacted diagnostics. The typed receive test is not
+  live managed-ingress/newcomer coverage. Read-only design/diff review and re-review have no
+  remaining findings. The review's low test gap is fixed: rejected packets have a subscribed
+  observer and explicit error checks, proving NoPeers cannot masquerade as authorization refusal.
+  Verification passed:
+
+  - `cargo test --all --all-features` (existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests)
+  - `npm.cmd --prefix apps/desktop test` (1,135 tests)
+  - `cargo test --all --all-features --lib registry_send -- --nocapture` (final 6 tests)
+  - `cargo test --all --all-features --lib registry_publication -- --nocapture` (final 3 tests)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh` (Git Bash) and worktree/staged `git diff --check`
+
+  Initial crate-focused checks also passed; an intermediate app rerun hit stale compiled sync
+  metadata. Crate-scoped generated-cache cleanup restored compilation; the final full suite and
+  focused reruns include all final source changes. Frontend static/build/visual checks were not
+  run for this backend-only slice. Concurrent upload/release work is not certified by this review.
+
 - **P1 one-shot transport prerequisite (2026-09-07).** `MeshTransport::publish_once` now waits
   for one actual driver attempt instead of treating command enqueueing as publication. Production
   uses a separate command that cannot enter the legacy `pending_publish` ciphertext retry queue.

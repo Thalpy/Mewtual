@@ -59,7 +59,9 @@ use catcoms_wire::{Decoder, DocType, Encoder};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+mod registry_publication;
 mod roles;
+pub use registry_publication::RegistrySyncInstance;
 // Re-export the role-authority logic so the product/UI layer (catcoms-app) reuses this exact,
 // canonical implementation rather than keeping a second copy that could drift.
 pub use roles::{
@@ -1809,6 +1811,9 @@ fn decode_join_resp(bytes: &[u8]) -> Result<JoinResp, SyncError> {
 /// Errors from channel synchronization.
 #[derive(Debug, Error)]
 pub enum SyncError {
+    /// Driver-acknowledged one-shot publication failed; this is not a local-edit rollback.
+    #[error(transparent)]
+    Publication(#[from] catcoms_rt::PublishOnceError),
     /// A transport-level error.
     #[error(transparent)]
     Transport(#[from] catcoms_rt::TransportError),
@@ -3738,6 +3743,8 @@ pub enum PostJoinDiscoveryEvent {
 
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     transport: T,
+    /// Process-local incarnation, freshly allocated by new/restore; never persisted or sent.
+    registry_instance: RegistrySyncInstance,
     group: ServerGroup,
     device: MlsDevice,
     rng: R,
@@ -4161,6 +4168,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let clock: Arc<dyn Clock + Send> = Arc::from(clock);
         let mut this = Self {
             transport,
+            registry_instance: RegistrySyncInstance::new(),
             group,
             device,
             rng,

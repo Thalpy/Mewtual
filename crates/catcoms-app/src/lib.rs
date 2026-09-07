@@ -55,6 +55,7 @@ mod actor;
 pub mod creative;
 mod moderation;
 pub mod pairing;
+pub mod registry_replay;
 pub mod store;
 pub use actor::{spawn, AppCommand, AppEvent, Envelope, ServerActor, Trace, TracedEvent};
 pub use moderation::{

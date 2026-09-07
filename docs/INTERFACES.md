@@ -111,7 +111,8 @@ Implementations:
   send. `Closed` may mean unknown submission, not rollback. No outcome retires a P1 intent.
   `MemNetwork` implements immediate bounded fan-out, reports `NoPeers` when no other live
   subscriber accepts it, and has no deferred retry; it does not model libp2p cache/queue behaviour.
-  P1 replay/actor send-time authority and lifecycle integration remain unimplemented.
+  The cooperative registry sender below uses this seam; actor ownership, native lifecycle
+  cancellation and automatic replay wakeups remain unimplemented.
 
   `request_connected` / `notify_connected` are deliberately narrow repair sends: the actor
   succeeds only when its current peer map and `Swarm::is_connected` both say
@@ -1276,8 +1277,9 @@ No ciphertext escapes until both records cross their barriers. A later failure k
 saved intent for retry/recovery; a marker never retires it. Closing/Fault refuses both new local edits
 and retries without adding intents. Restored intents must be replayed only by their original author;
 this API accepts new local operations, not a foreign author's replay authorization. It prepares
-ciphertext under the current MLS epoch but does not send it. The future sender must recheck session/
-server incarnation, membership, MLS epoch and that the retained document is still Open at send time.
+ciphertext under the current MLS epoch but does not send it. The cooperative sender below owns
+server-instance, membership, MLS and Open checks; native session cancellation remains its caller's
+responsibility before live integration.
 
 `replay_registry_intent` performs one bounded replay step from the saved ledger, without accepting
 a body/nonce from its caller. The original author must equal the actual device, still a current
@@ -1334,10 +1336,40 @@ explicit recovery. Dropping/restarting may revisit previously submitted work; it
 Passes are non-cloneable and bound to numeric server, full group/device, bucket, concrete epoch and
 a stable private physical-mount token, separate from rotating budget freshness. Wrong mount/group/
 device calls refuse without consuming the pass. This token is NOT a native unlock/server-incarnation
-lease: explicit UI lock can keep the vault mounted. Future consumers must cancel lifecycle-stale
+lease: explicit UI lock can keep the vault mounted. Raw pass consumers must cancel lifecycle-stale
 passes and recheck session/incarnation/membership/MLS epoch/Open immediately before sending. No
-ciphertext is retained in the pass; pass/step/ticket Debug redacts ids, scope and content. Aggregate
-work/concurrency scheduling, UI lifecycle, actual send/receive and automatic wakeup remain unwired.
+ciphertext is retained in the pass; pass/step/ticket Debug redacts ids, scope and content.
+
+`Server::{begin_registry_replay, send_registry_replay_step}` adds a cooperative sender. Begin takes
+the store, numeric server, bucket, concrete document id and both inventories, then returns a private
+`ServerRegistryReplay` bound immediately to this exact `ChannelSync` instance. Restoring even the
+same group/device mints a new process-local token and refuses an old cursor before preparation.
+The cursor exposes only `progress()` and `retry_failed()`, not raw submission tickets or packets.
+One async step takes exclusive Server/store/cursor/budget borrows and returns
+`RegistryReplaySendStep::{Complete, Wait, Paused, Held, Attempt}`. Attempt carries the intent id,
+`Result<PublishSubmission, SyncError>` and saved registry state; Debug omits ids and content.
+
+Preparation uses the Server's actual group/device/Clock/RNG through synchronous trusted-local
+`ChannelSync::with_registry_context`, not caller-provided snapshots. Exclusive borrows remain held
+through awaited dispatch, excluding interleaving changes to known local membership and the store
+gate. This is not proof of remote currency or native UI-unlock authority. Immediately after
+Prepared, a private guard owns the exact ticket: only Submitted advances; Duplicate, error, future
+drop and unwind invalidate the attempt without skipping its saved id or resetting its 100-ms
+deadline. No result retires an intent. A later attempt reruns store checks and freshly seals the
+same saved operation. Cancellation after driver admission is ambiguous, not rollback.
+
+`ChannelSync::publish_local_registry_once(expected_doc_id, SealedOp)` rejects wrong type/id/MLS
+epoch, oversized ciphertext, non-current local membership, invalid signatures and nonlocal full
+authors. It opens and validates the canonical registry domain envelope under the actual group,
+then uses the current blinded DocRegistry topic and awaits `publish_once` without an outbox or a
+legacy document-map entry. `SyncError::Publication` preserves the transport's typed refusal.
+This low-level trusted API does not itself establish Open/durability; the Server adapter obtains
+the packet from the checked store while retaining exclusive access. `RegistrySyncInstance` uses
+allocation identity, not equality of token contents, and is neither persisted nor sent.
+
+There is no autonomous worker, driver deadline, aggregate pass scheduler, native lock cancellation,
+managed live receive/catch-up or automatic wakeup yet. The existing gossip-size limit can refuse
+an otherwise accepted P1 operation; this slice changes no transport limit or wire format.
 
 Public receipt fields and ciphertext are capped before encoding/decryption. Changed state uses
 an accounted atomic replacement; identical pre/post mutation snapshots instead sync the unchanged
@@ -1364,8 +1396,8 @@ explicit cleanup before reconciliation. Unresolved ownership still blocks server
 
 These APIs require the caller's sole complete server budget; inventory is not a continuing write
 lease. Checked installation/retirement and single-intent replay are implemented at the store layer.
-They do not implement network publication/catch-up serving, receipt-head discovery, live replay/ingress
-scheduling or actor/Studio wiring. Each mutation currently rebuilds a bounded saved graph (local
+The cooperative sender supplies one-shot publication, not catch-up serving, receipt-head discovery,
+live replay/ingress scheduling or actor/Studio wiring. Each mutation rebuilds a bounded saved graph (local
 editing also checks the source before journaling); apply planned rate/work limits before live
 transport integration.
 

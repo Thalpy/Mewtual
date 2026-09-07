@@ -27,6 +27,10 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 
 [dev-dependencies]
+# A driver-acknowledgement seam exercises replay cancellation and ambiguous submission without
+# sockets or sleeps. These are existing workspace dependencies, used only by test transports.
+async-trait.workspace = true
+bytes.workspace = true
 # The product layer is transport-generic, so almost every test here runs on the in-memory mesh.
 # `tcp_product_e2e` is the exception: connect/disconnect only exist on a real transport, and
 # presence is defined in terms of them, so that one test needs a real libp2p node.

@@ -360,8 +360,22 @@ table with the commit that closed it.
   A private stable physical-mount token rejects use after reopen but is NOT a native UI-lock or
   server-incarnation permit (native lock may keep the store mounted). No ciphertext queue is held;
   Debug omits scope, ids and content. This is trusted local orchestration, not a peer-facing API:
-  aggregate pass concurrency/work limits, lifecycle cancellation, automatic wakeups and all live
-  send-time checks/publication remain required before actor/transport integration.
+  aggregate pass concurrency/work limits, native lifecycle cancellation and automatic wakeups
+  remain required before live actor integration. The cooperative sender adds the checks below.
+- **The cooperative registry sender binds known local state, not remote currency.** Its cursor
+  captures the exact sync-instance allocation at begin; a same-device/group restore refuses the
+  old cursor. Exclusive sync/store borrows cover checked saved-intent preparation and awaited
+  one-shot dispatch. The store verifies Open, full current author and both durability barriers;
+  sync independently checks current full local identity, signature, MLS scope, canonical registry
+  envelope and current blinded routing. No generic document is opened or retry outbox populated.
+  The trusted local context/publication APIs do not independently grant Open or durable authority.
+  A private exact-ticket guard advances only on Submitted. Duplicate, errors, cancellation and
+  unwind preserve the saved id and charged deadline for fresh resealing; every outcome retains
+  the durable intent. Cancellation after driver admission cannot retract gossip/cache effects.
+  This is a cooperative backend call, not live actor orchestration, a native lock lease, a bound
+  on aggregate passes, a driver deadline or evidence that a remote receipt has already arrived.
+  Managed ingress/catch-up and automatic wakeup remain unwired. Cursor/result Debug redact scope
+  and content; the sync token is process-local and never persisted or transmitted.
 - **One-shot publication limits application retries, not gossip lifetime.** `publish_once` waits
   for the driver's single attempt and bypasses Mewtual's legacy ciphertext retry queue. Production
   owns at most 16 compact 512-KiB payloads with 64-byte topics awaiting/entering this path, with
@@ -370,8 +384,9 @@ table with the commit that closed it.
   work; a race after it cannot retract the synchronous attempt. Normal libp2p caches and handler
   queues can retain bytes even after NoPeers/QueuesFull, and a lost acknowledgement is ambiguous.
   Submitted/Duplicate are not delivery or finality. This adds no identity, membership, epoch-gate,
-  UI-lock or server-incarnation authority. Those checks and live P1 sender integration remain
-  required. Legacy publication behaviour and gossip limits are unchanged; input caps do not
+  UI-lock or server-incarnation authority itself; the cooperative Server adapter owns its separate
+  known-state checks. Native lifecycle policy and live scheduling remain required. Legacy
+  publication behaviour and gossip limits are unchanged; input caps do not
   guarantee gossip accepts that size. This is a local API, not a new peer-controlled message kind.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives

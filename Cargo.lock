@@ -469,9 +469,11 @@ checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 name = "catcoms-app"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "automerge",
  "base64",
  "blake3",
+ "bytes",
  "catcoms-crypto",
  "catcoms-discovery",
  "catcoms-log",

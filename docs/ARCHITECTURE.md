@@ -42,18 +42,24 @@ exact current-log retry reseals unchanged so failed-flush deletions remain retry
 retire intents. Deletion screening is conservative for stable keys and best-effort after bounded
 recovery eviction. A cooperative replay pass now snapshots one author's bounded id set and paces
 one attempt at a time. It waits for an exact local submission acknowledgement, pauses failures at
-the same id, and never retires intents on traversal/submission. This is not an autonomous worker;
-aggregate scheduling, send-time lifecycle/gate checks, publication, settlement-wide capacity
-headroom and discovery remain to be integrated. No universal progress at full quota is claimed yet.
+the same id, and never retires intents on traversal/submission. The cooperative Server sender now
+binds that pass to the exact sync instance and holds exclusive sync/store borrows from checked
+preparation through one-shot dispatch. Actual full local identity, MLS epoch and current blinded
+routing are checked before sending. Only Submitted advances; Duplicate, errors, cancellation and
+unwind preserve the saved id for a fresh reseal without resetting pacing. This is not an autonomous
+worker: aggregate scheduling, native lifecycle cancellation, receive/catch-up, settlement-wide
+capacity headroom and discovery remain to be integrated. No universal progress at full quota is
+claimed yet.
 
-The transport now offers a one-shot publication prerequisite, not a live P1 sender. Legacy
+The transport offers one-shot publication, now used by that cooperative backend sender. Legacy
 `publish` acknowledges actor enqueueing and can hold ciphertext for later retries. `publish_once`
 instead waits for one driver attempt and never enters that application retry queue. Its bounded
 commands retain their capacity after caller cancellation until drained. Cancellation observed at
 the last driver check suppresses an attempt, but cannot retract work admitted before it. Normal
 gossip caches/handler queues may retain bytes even after some refusal results; cache duplicates
-and local submissions are never delivery proofs. P1 must still own lifecycle checks, durable ids
-and fresh resealing on retry; this additive seam does not change existing chat publication.
+and local submissions are never delivery proofs. The sender owns saved-id retries and known-state
+checks, not native UI-lock policy, driver deadlines or live actor wakeups. These additive seams do
+not change existing chat publication or wire/persistence formats.
 
 The naive "one group, every device commits, replay old ciphertext to latecomers" design
 is broken. The load-bearing fixes:
