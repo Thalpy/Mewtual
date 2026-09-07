@@ -31,6 +31,8 @@ use crate::{
     StorageSnapshot, SwitchboardOffer, WikiPendingEdit, WikiRevision,
 };
 
+mod file_transfers;
+
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
 const DISCOVERY_DRAIN_MS: u64 = 500;
 /// Arrival ids one channel delta carries. A notification needs the rows that arrived, not all of
@@ -53,14 +55,17 @@ const PEX_REQUEST_MS: u64 = 3_000;
 /// error string). One chunk per command keeps the actor responsive during a large download.
 type ChunkResult = Result<(Vec<u8>, Option<String>), String>;
 
-/// Await one actor-owned chunk fetch while retaining a native cancellation edge.
+/// Await one detached chunk request while retaining a native cancellation edge.
 ///
 /// Dropping only the bridge's reply receiver does not cancel an [`AppCommand`] already executing
-/// inside the actor. The cancellation receiver must therefore participate in the same `select!`
-/// as the `Server` future so a stale room cannot keep this actor pinned behind a withholding peer.
-async fn fetch_chunk_or_cancel<F>(mut cancel: Option<RequestCancellation>, fetch: F) -> ChunkResult
+/// inside a worker. Cancellation participates in the same `select!` as the network future;
+/// the worker's drop guard then signals its separately accounted lower request.
+async fn fetch_chunk_or_cancel<F, O>(
+    mut cancel: Option<RequestCancellation>,
+    fetch: F,
+) -> Result<O, String>
 where
-    F: Future<Output = ChunkResult>,
+    F: Future<Output = Result<O, String>>,
 {
     let Some(cancel) = cancel.as_mut() else {
         return fetch.await;
@@ -589,6 +594,19 @@ pub enum AppCommand {
     FileAvailable {
         cid: Vec<u8>,
         reply: oneshot::Sender<bool>,
+    },
+    /// Explicit local retention. No peer or replicated document can enable this operation.
+    KeepFile {
+        cid: Vec<u8>,
+        cancel: Option<RequestCancellation>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    KeptFiles {
+        reply: oneshot::Sender<catcoms_storage::kept::KeptFiles>,
+    },
+    ForgetKeptFile {
+        cid: Vec<u8>,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Remove a file from the shared index by content address (owner/admin only).
     DeleteFile {
@@ -2362,7 +2380,48 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
-    /// Whether the file's blob is held locally (openable without a network fetch).
+    /// Explicitly reserve, fetch and verify one durable local copy, or check/repair its saved plan.
+    /// Cancellation abandons an unfinished reservation; completed copies require explicit release.
+    pub async fn keep_file(
+        &self,
+        cid: Vec<u8>,
+        cancel: Option<RequestCancellation>,
+    ) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::KeepFile { cid, cancel, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver
+            .await
+            .unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn kept_files(&self) -> catcoms_storage::kept::KeptFiles {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::KeptFiles { reply })
+            .await
+            .is_err()
+        {
+            return Default::default();
+        }
+        receiver.await.unwrap_or_default()
+    }
+
+    pub async fn forget_kept_file(&self, cid: Vec<u8>) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::ForgetKeptFile { cid, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver
+            .await
+            .unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Presence only, not an integrity scan or evidence of any remote copy.
     pub async fn file_available(&self, cid: Vec<u8>) -> bool {
         let (reply, rx) = oneshot::channel();
         if self
@@ -3362,6 +3421,7 @@ where
         // A sync event inside the throttle window must not be forgotten. Dirty channels are
         // coalesced here and revisited by an injected-clock timer even if the network goes idle.
         let mut delivery_dirty = HashSet::new();
+        let mut file_transfers = file_transfers::FileTransfers::new();
         loop {
             let delivery_clock = server.runtime_clock();
             let delivery_delay =
@@ -3920,31 +3980,10 @@ where
                             .and_then(|arr| server.file_download_plan(&Cid::from_bytes(arr)));
                         let _ = reply.send(plan);
                     }
-                    // Fetch ONE chunk, then return to the select! loop; so a large download no
-                    // longer pins the actor: other commands + sync_once interleave between chunks
-                    // (the bridge orchestrates the per-chunk loop + reassembly + progress).
+                    // Return to the loop while the network is waiting, including during ONE
+                    // slow chunk. The bridge still owns reassembly and whole-file verification.
                     Some(AppCommand::FetchFileChunk { cid, idx, cancel, reply }) => {
-                        let res = match <[u8; 32]>::try_from(cid.as_slice()) {
-                            Ok(arr) => {
-                                let server_cancellation = cancel.clone();
-                                fetch_chunk_or_cancel(
-                                cancel,
-                                async {
-                                    server
-                                        .fetch_file_chunk_cancellable(
-                                            &Cid::from_bytes(arr),
-                                            idx,
-                                            server_cancellation,
-                                        )
-                                        .await
-                                        .map_err(|e| e.to_string())
-                                },
-                            )
-                            .await
-                            },
-                            Err(_) => Err("bad content address".to_string()),
-                        };
-                        let _ = reply.send(res);
+                        file_transfers.chunk(&mut server, cid, idx, cancel, reply);
                     }
                     Some(AppCommand::FileHead { cid, reply }) => {
                         let head = <[u8; 32]>::try_from(cid.as_slice())
@@ -3959,19 +3998,7 @@ where
                         max_len,
                         reply,
                     }) => {
-                        let res = match <[u8; 32]>::try_from(cid.as_slice()) {
-                            Ok(arr) => server
-                                .read_file_range(
-                                    &Cid::from_bytes(arr),
-                                    expected_manifest_version,
-                                    start,
-                                    max_len,
-                                )
-                                .await
-                                .map_err(|e| e.to_string()),
-                            Err(_) => Err("bad content address".to_string()),
-                        };
-                        let _ = reply.send(res);
+                        file_transfers.range(&mut server, cid, expected_manifest_version, start, max_len, reply);
                     }
                     Some(AppCommand::FileAvailable { cid, reply }) => {
                         let avail = match <[u8; 32]>::try_from(cid.as_slice()) {
@@ -3979,6 +4006,15 @@ where
                             Err(_) => false,
                         };
                         let _ = reply.send(avail);
+                    }
+                    Some(AppCommand::KeepFile { cid, cancel, reply }) => {
+                        file_transfers.keep(&mut server, cid, cancel, reply);
+                    }
+                    Some(AppCommand::KeptFiles { reply }) => { let _ = reply.send(server.sync.kept_files()); }
+                    Some(AppCommand::ForgetKeptFile { cid, reply }) => {
+                        let result = <[u8; 32]>::try_from(cid.as_slice()).map_err(|_| "bad content address".to_string())
+                            .and_then(|raw| server.sync.forget_kept(&Cid::from_bytes(raw)).map_err(|e| e.to_string()));
+                        let _ = reply.send(result);
                     }
                     Some(AppCommand::DeleteFile { cid, reply }) => {
                         let res = match <[u8; 32]>::try_from(cid.as_slice()) {
@@ -4556,6 +4592,18 @@ where
                     Some(AppCommand::Shutdown) | None => {
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
+                    }
+                },
+                // Queued commands have priority even when a local-copy worker is already ready.
+                // Do not add an immediate fallback that polls/drops sync_once: legacy outbox
+                // drains may own unpublished work across an await. Local Keep yields each chunk;
+                // an all-local finite copy can still delay background sync, never queued commands.
+                // Network waits own no Server borrow. A ready result is committed against the
+                // current index/membership before another chunk or provider can be admitted.
+                completed = file_transfers.next(), if !file_transfers.is_empty() => {
+                    event_tx.idle();
+                    if let Some(completed) = completed {
+                        file_transfers.complete(&mut server, completed);
                     }
                 },
                 // A receipt may be the final network event in a quiet room. Wake from the same
@@ -5471,10 +5519,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_interrupts_an_actor_owned_chunk_future() {
+    async fn cancellation_interrupts_a_detached_chunk_wait() {
         let (cancel, receiver) = tokio::sync::watch::channel(false);
         let cancellation = RequestCancellation::new(receiver, None);
-        let stalled = fetch_chunk_or_cancel(Some(cancellation), std::future::pending());
+        let stalled =
+            fetch_chunk_or_cancel(Some(cancellation), std::future::pending::<ChunkResult>());
         tokio::pin!(stalled);
 
         assert!(timeout(Duration::from_millis(10), &mut stalled)

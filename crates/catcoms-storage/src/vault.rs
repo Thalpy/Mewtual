@@ -289,7 +289,7 @@ fn lock_vault(dir: &Path) -> Result<File, StorageError> {
     try_lock_file(&dir.join(VAULT_LOCK_FILE))
 }
 
-fn try_lock_file(path: &Path) -> Result<File, StorageError> {
+pub(crate) fn try_lock_file(path: &Path) -> Result<File, StorageError> {
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)

@@ -251,6 +251,18 @@ impl MeshTransport for MemNetwork {
         self.request(peer, proto, data).await
     }
 
+    async fn request_connected_cancellable(
+        &self,
+        peer: PeerId,
+        proto: ProtocolId,
+        data: Bytes,
+        cancellation: RequestCancellation,
+    ) -> Result<Bytes, TransportError> {
+        // Hub delivery cannot dial; its responder retains the accounting until consumed/dropped.
+        self.request_cancellable(peer, proto, data, cancellation)
+            .await
+    }
+
     async fn notify_connected(
         &self,
         peer: PeerId,

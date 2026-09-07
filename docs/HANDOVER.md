@@ -180,6 +180,27 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   focused reruns include all final source changes. Frontend static/build/visual checks were not
   run for this backend-only slice. Concurrent upload/release work is not certified by this review.
 
+- **Detached file fetches, first-index convergence and local kept copies (2026-09-07).**
+  File chunk/range network waits now run in bounded tasks, with driver-level connected-only admission,
+  cancellation and transport-retirement accounting. The actor validates exact current file/MLS
+  authority again before storing a response. Independent first `ROOT/FILES` list conflicts share one
+  deterministic bounded read/mutation projection. The desktop separates cached bytes from remote
+  availability and offers explicit per-file Keep / Check and repair / Release with a separate sealed
+  1 GiB / 32-file local store, durable commit, restart verification state and exclusive directory lease.
+  See [the implementation and remaining limits](design-file-reliability.md). Remote confirmations,
+  automatic replication, holder-aware eviction, unlisted standalone export and whole-variant Keep
+  retry after a corrupt presence-ranked candidate remain follow-ups. Queued commands are interleaved;
+  legacy actor operations and all-local-copy background-sync delay are not claimed solved.
+
+  Verification on the integrated tree (2026-09-08): `cargo test --all --all-features` passed
+  1,179 tests (six existing ignored harness/probe tests); the separate Tauri suite passed 192;
+  `npm --prefix apps/desktop test` passed 1,140. Root and Tauri formatting checks, root Clippy
+  with `-D warnings`, the ambient-dependency gate, Tauri `cargo check`, frontend `check`/`build`
+  and `git diff --check` passed. Build retains the existing bundle-size advisory. Read-only
+  adversarial design/diff review and integration re-review have no blocker/high findings;
+  the limits above remain explicit follow-ups. Visual fixture inspection could not run because
+  this session exposed no browser surface; no screenshot or visual validation is claimed.
+
 - **File re-upload and encrypted manifest variants (2026-09-07).** Upload dedup now verifies a
   complete local copy before reusing metadata or discarding staged bytes. Missing/unreadable copies
   receive a fresh attested repair; repeat repairs reuse only the current device's verified exact
@@ -189,11 +210,10 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   variant instead of hiding every duplicate encryption. Regression coverage includes both upload
   paths, remote fallback, forged ownership, bounded verification, and repaired downloads/previews
   after a complete vault close/reopen with abandoned-upload staging cleanup.
-  Remaining limits: no remote possession acknowledgement/retention promise or off-actor scheduling;
-  publication's complete local verification can occupy the actor for a whole file. Differing MIME
-  or legacy chunk layouts remain explicit conflicts. Concurrent *first* uploads into independently
-  created empty `ROOT/FILES` lists can still hide one CRDT list; the convergence regression starts
-  from an initialized shared list. Malicious incompatible/over-four variant claims can still deny
+  Publication's complete local verification can still occupy the actor for a whole file. Differing
+  MIME or legacy chunk layouts remain explicit conflicts. The later reliability slice above resolves
+  concurrent first-list visibility and schedules chunk/range network waits outside the actor.
+  Malicious incompatible/over-four variant claims can still deny
   resolution. Older clients keep their prior conflicting-manifest behavior until upgraded; the
   wire and persistence encodings are unchanged. These are not claims of universal image/transfer
   reliability.

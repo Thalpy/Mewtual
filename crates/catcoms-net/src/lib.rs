@@ -1220,6 +1220,7 @@ enum Command {
     RequestConnected {
         peer: PeerId,
         data: Bytes,
+        cancellation: Option<RequestCancellation>,
         reply: oneshot::Sender<Result<Bytes, TransportError>>,
     },
     /// Send a request whose reply nobody is waiting for (see [`catcoms_rt::MeshTransport::notify`]).
@@ -3974,7 +3975,21 @@ impl Actor {
                     }
                 }
             }
-            Command::RequestConnected { peer, data, reply } => {
+            Command::RequestConnected {
+                peer,
+                data,
+                cancellation,
+                reply,
+            } => {
+                if reply.is_closed()
+                    || cancellation
+                        .as_ref()
+                        .is_some_and(RequestCancellation::is_cancelled)
+                {
+                    let _ = reply.send(Err(TransportError::Cancelled));
+                    return;
+                }
+                let keepalive = cancellation.and_then(|value| value.keepalive());
                 let live = self
                     .peers
                     .get(&peer)
@@ -3996,7 +4011,7 @@ impl Actor {
                             id,
                             PendingRequest {
                                 reply,
-                                _keepalive: None,
+                                _keepalive: keepalive,
                             },
                         );
                     }
@@ -5869,7 +5884,12 @@ impl MeshHandle {
     ) -> Result<Bytes, TransportError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::RequestConnected { peer, data, reply })
+            .send(Command::RequestConnected {
+                peer,
+                data,
+                cancellation: None,
+                reply,
+            })
             .await
             .map_err(|_| TransportError::Closed)?;
         rx.await.map_err(|_| TransportError::Closed)?
@@ -5986,10 +6006,42 @@ impl MeshTransport for MeshService {
     ) -> Result<Bytes, TransportError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::RequestConnected { peer, data, reply })
+            .send(Command::RequestConnected {
+                peer,
+                data,
+                cancellation: None,
+                reply,
+            })
             .await
             .map_err(|_| TransportError::Closed)?;
         rx.await.map_err(|_| TransportError::Closed)?
+    }
+
+    async fn request_connected_cancellable(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        data: Bytes,
+        mut cancellation: RequestCancellation,
+    ) -> Result<Bytes, TransportError> {
+        if cancellation.is_cancelled() {
+            return Err(TransportError::Cancelled);
+        }
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::RequestConnected {
+                peer,
+                data,
+                cancellation: Some(cancellation.clone()),
+                reply,
+            })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(TransportError::Cancelled),
+            result = rx => result.map_err(|_| TransportError::Closed)?,
+        }
     }
 
     /// Queue the send and return; the only wait is for room in the actor's command channel.
@@ -8124,6 +8176,25 @@ mod tests {
             .expect("the memory peers should connect");
         }
 
+        for closed_reply in [false, true] {
+            let (reply, receiver) = oneshot::channel();
+            let (signal, cancelled) = watch::channel(!closed_reply);
+            if closed_reply {
+                drop(receiver);
+            }
+            // Send directly so caller-side early cancellation cannot hide a missing driver check.
+            client
+                .cmd_tx
+                .send(Command::RequestConnected {
+                    peer: server_peer,
+                    data: Bytes::from_static(b"must not send"),
+                    reply,
+                    cancellation: Some(RequestCancellation::new(cancelled, None)),
+                })
+                .await
+                .unwrap();
+            drop(signal);
+        }
         // Positive half: a live connection carries the proof without any additional dial.
         let handle = client.handle();
         let request = tokio::spawn(async move {
@@ -8173,6 +8244,16 @@ mod tests {
         .await
         .expect("a disconnected proof is rejected immediately");
         assert!(matches!(outcome, Err(TransportError::Unreachable(peer)) if peer == server_peer));
+        let (_signal, receiver) = watch::channel(false);
+        let outcome = client
+            .request_connected_cancellable(
+                server_peer,
+                ProtocolId(RR_PROTOCOL),
+                Bytes::from_static(b"blob"),
+                RequestCancellation::new(receiver, None),
+            )
+            .await;
+        assert!(matches!(outcome, Err(TransportError::Unreachable(peer)) if peer == server_peer));
         // Path detail is emitted after the aggregate disconnect edge, so an empty
         // `ConnectionPathsChanged` may still be queued here. That refinement is not a redial; the
         // contract this regression protects is that no new aggregate connection edge appears.
@@ -8219,57 +8300,70 @@ mod tests {
             .expect("the memory peers should connect");
         }
 
-        let drops = Arc::new(AtomicUsize::new(0));
-        let keepalive: SharedRequestKeepalive = Arc::new(RequestDropObserved {
-            drops: Arc::clone(&drops),
-        });
-        let (cancel, receiver) = watch::channel(false);
-        let cancellation = RequestCancellation::new(receiver, Some(keepalive));
-        let request_client = Arc::clone(&client);
-        let request = tokio::spawn(async move {
-            request_client
-                .request_cancellable(
-                    server_peer,
-                    ProtocolId(RR_PROTOCOL),
-                    Bytes::from_static(b"bounded"),
-                    cancellation,
-                )
-                .await
-        });
-
-        let responder = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some(TransportEvent::Request {
-                    data, responder, ..
-                }) = server.next_event().await
-                {
-                    assert_eq!(&data[..], b"bounded");
-                    break responder;
+        for connected_only in [false, true] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let keepalive: SharedRequestKeepalive = Arc::new(RequestDropObserved {
+                drops: Arc::clone(&drops),
+            });
+            let (cancel, receiver) = watch::channel(false);
+            let cancellation = RequestCancellation::new(receiver, Some(keepalive));
+            let request_client = Arc::clone(&client);
+            let request = tokio::spawn(async move {
+                if connected_only {
+                    request_client
+                        .request_connected_cancellable(
+                            server_peer,
+                            ProtocolId(RR_PROTOCOL),
+                            Bytes::from_static(b"bounded"),
+                            cancellation,
+                        )
+                        .await
+                } else {
+                    request_client
+                        .request_cancellable(
+                            server_peer,
+                            ProtocolId(RR_PROTOCOL),
+                            Bytes::from_static(b"bounded"),
+                            cancellation,
+                        )
+                        .await
                 }
-            }
-        })
-        .await
-        .expect("the request should enter the remote transport");
-        cancel.send(true).unwrap();
-        assert!(matches!(
-            request.await.unwrap(),
-            Err(TransportError::Cancelled)
-        ));
-        assert_eq!(
-            drops.load(Ordering::SeqCst),
-            0,
-            "cancelling the waiter must not recycle accounting for live libp2p work"
-        );
+            });
 
-        responder.respond(Bytes::from_static(b"late"));
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while drops.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the matching response should retire the pending request and its keepalive");
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
+            let responder = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(TransportEvent::Request {
+                        data, responder, ..
+                    }) = server.next_event().await
+                    {
+                        assert_eq!(&data[..], b"bounded");
+                        break responder;
+                    }
+                }
+            })
+            .await
+            .expect("the request should enter the remote transport");
+            cancel.send(true).unwrap();
+            assert!(matches!(
+                request.await.unwrap(),
+                Err(TransportError::Cancelled)
+            ));
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                0,
+                "cancelling the waiter must not recycle accounting for live libp2p work"
+            );
+
+            responder.respond(Bytes::from_static(b"late"));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while drops.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the matching response should retire the pending request and its keepalive");
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[test]

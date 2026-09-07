@@ -2227,7 +2227,7 @@ Every whole-file take load is serialized/coalesced to one running plus one lates
 continuation is bound to the exact call lifecycle lease, server, channel and deck CID, and current
 listing/size/trust admission is rerun after download before parsing, caching or starting playback.
 Before `download_file`, the take path reserves one `begin_inline_download(cancellation)` token;
-`cancel_inline_download(cancellation)` is observed inside the actor-owned chunk await, not merely
+`cancel_inline_download(cancellation)` is observed inside the detached chunk wait, not merely
 at the JavaScript continuation. Cancellation acknowledgement promptly retires the old JavaScript
 coordinator slot. If libp2p already submitted a request, a shared native keepalive leaves that
 registration charged until the exact request responds, fails, or times out; at most four such
@@ -2266,3 +2266,21 @@ file's name, because a recipe has no identity of its own beyond its id. Ingress 
 the listed size is refused above `JAM_PATCH_FILE_MAX_BYTES` (4 KiB) before the whole-file fetch, and
 the transport string and its decoded length are refused again before `JSON.parse`. A loaded patch is
 kept in the same twelve-slot local library as a saved one and becomes the loader's own sound.
+
+### Bounded file fetch and kept-copy contracts
+
+`MeshTransport::request_connected_cancellable` fails closed by default and requires a live connection
+at actual driver admission. `ChannelSync::{prepare_blob_fetch, authenticate_blob_fetch,
+complete_blob_fetch}` split one opaque authenticated attempt from actor-owned validation/storage.
+`ServerActor::{fetch_file_chunk_cancellable, read_file_range}` use bounded detached network workers;
+ranges above `CHUNK_BYTES` are rejected before I/O. See [limits and lifecycle](design-file-reliability.md).
+
+The local-only `get_kept_files(server)`, `keep_file(server,cid,cancellation)` and
+`forget_kept_file(server,cid)` commands expose explicit device ownership. Keep claims a native
+`begin_inline_download` registration; lock/cancel signals the exact lease. Inventory returns bounded
+CID/version/checked rows plus conservative allocated bytes and a fixed local limit, never saved
+wrapped manifests or keys. Existing copies load unchecked and can be explicitly checked/repaired
+from their saved manifest after unlisting. They do not enter `files()` or authorize media heads.
+The additive `BlobStore` keep methods fail closed on unsupported stores. `KeptBlobStore` reserves,
+verifies, flushes and separately owns copies; ordinary put/delete/staging target primary storage.
+Remote confirmations and automated retention/eviction are not part of this interface.

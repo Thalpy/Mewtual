@@ -543,6 +543,21 @@ pub trait MeshTransport: Send + Sync {
         Err(TransportError::Unreachable(peer))
     }
 
+    /// Cancellable, accounted request over a connection that is still live at driver admission.
+    ///
+    /// File-provider fallback must neither redial an old route nor recycle concurrency while a
+    /// cancelled stream is still owned below the caller. Implementations without both properties
+    /// fail closed instead of delegating to a dialing or unaccounted request method.
+    async fn request_connected_cancellable(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        _data: Bytes,
+        _cancellation: RequestCancellation,
+    ) -> Result<Bytes, TransportError> {
+        Err(TransportError::Unreachable(peer))
+    }
+
     /// Send an addressed message to `peer` **without waiting for a reply**, returning as soon as
     /// it is queued for sending.
     ///
@@ -817,6 +832,18 @@ mod publication_tests {
         async fn next_event(&self) -> Option<TransportEvent> {
             unreachable!()
         }
+    }
+
+    #[tokio::test]
+    async fn connected_cancellable_unsupported_transport_fails_closed() {
+        let transport: &dyn MeshTransport = &LegacyOnly;
+        let (_sender, receiver) = watch::channel(false);
+        let peer = PeerId::from_u64(1);
+        assert!(matches!(
+            transport.request_connected_cancellable(peer, ProtocolId("test"), Bytes::new(),
+                RequestCancellation::new(receiver, None)).await,
+            Err(TransportError::Unreachable(p)) if p == peer
+        ));
     }
 
     #[tokio::test]

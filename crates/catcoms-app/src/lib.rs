@@ -2914,9 +2914,9 @@ pub struct FileEntry {
 }
 
 /// A listed file plus how many of its chunks this device already holds locally, for the file
-/// browser's availability indicator. `held_chunks == total_chunks` ⇒ openable with no network
-/// fetch; `0 < held < total` ⇒ partially downloaded; `held == 0` ⇒ not yet downloaded. The counts
-/// are a pure local blob-store check (zero network cost).
+/// browser's availability indicator. Equal counts mean every ciphertext CID is present, not that
+/// the stored bytes have passed verification. Partial counts indicate an incomplete local cache.
+/// These are presence-only checks with zero network cost; opening still authenticates every chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileListing {
     /// The file index entry (metadata).
@@ -3056,6 +3056,49 @@ fn write_file_size_limit(doc: &mut AutoCommit, bytes: u64) -> Result<(), Automer
     Ok(())
 }
 
+/// Concurrent first uploads can create distinct List objects at ROOT/FILES. Preserve every such
+/// list rather than treating Automerge's winning object as the whole index. Object-id ordering is
+/// stable across replicas and survives save/load; it also defines the shared bounded row prefix.
+///
+/// Automerge 0.10 internally materializes all conflicting property values in both get/get_all.
+/// This limits application-level list/row work, not the dependency's inherited history allocation.
+fn file_index_lists(doc: &AutoCommit) -> Result<Vec<ObjId>, AutomergeError> {
+    let values = doc.get_all(ROOT, FILES)?;
+    if values.len() > MAX_FILE_ENTRIES {
+        return Err(AutomergeError::Fail);
+    }
+    let mut lists: Vec<_> = values
+        .into_iter()
+        .filter_map(|(value, object)| {
+            matches!(value, Value::Object(ObjType::List)).then_some(object)
+        })
+        .collect();
+    lists.sort_by_key(ToString::to_string);
+    Ok(lists)
+}
+
+/// Snapshot locations before decoding or mutation. Malformed rows still consume the ONE shared
+/// 256-row budget. Deletion walks this snapshot backwards, never newly revealed tail rows.
+fn file_index_positions(
+    doc: &AutoCommit,
+) -> Result<Vec<(ObjId, usize, Option<ObjId>)>, AutomergeError> {
+    let mut positions = Vec::new();
+    for list in file_index_lists(doc)? {
+        let limit = doc.length(&list).min(MAX_FILE_ENTRIES - positions.len());
+        for index in 0..limit {
+            let row = match doc.get(&list, index)? {
+                Some((Value::Object(ObjType::Map), row)) => Some(row),
+                _ => None,
+            };
+            positions.push((list.clone(), index, row));
+        }
+        if positions.len() == MAX_FILE_ENTRIES {
+            break;
+        }
+    }
+    Ok(positions)
+}
+
 /// Append a file entry (name + author + folder path + encoded `FileRef` + circulation expiry)
 /// to the index doc.
 fn write_file_entry(
@@ -3067,9 +3110,9 @@ fn write_file_entry(
     expires: FileExpiry,
     attestation: Option<(&[u8], &[u8])>,
 ) -> Result<(), AutomergeError> {
-    let list = match doc.get(ROOT, FILES)? {
-        Some((Value::Object(ObjType::List), id)) => id,
-        _ => doc.put_object(ROOT, FILES, ObjType::List)?,
+    let list = match file_index_lists(doc)?.pop() {
+        Some(id) => id,
+        None => doc.put_object(ROOT, FILES, ObjType::List)?,
     };
     let index = doc.length(&list);
     let entry = doc.insert_object(&list, index, ObjType::Map)?;
@@ -3152,9 +3195,9 @@ fn bounded_file_bytes(doc: &AutoCommit, obj: &ObjId, key: &str, max: usize) -> O
 /// decoded `FileRef`; entries with a malformed ref are skipped).
 fn read_file_entries(doc: &AutoCommit, group_id: &[u8]) -> Vec<FileEntry> {
     let mut out = Vec::new();
-    if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, FILES) {
-        for i in 0..doc.length(&list).min(MAX_FILE_ENTRIES) {
-            if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&list, i) {
+    if let Ok(positions) = file_index_positions(doc) {
+        for (_, _, row) in positions {
+            if let Some(entry) = row {
                 let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES)
                 else {
                     continue;
@@ -3224,9 +3267,12 @@ fn read_file_entries(doc: &AutoCommit, group_id: &[u8]) -> Vec<FileEntry> {
 }
 
 fn raw_file_index_row_count(doc: &AutoCommit) -> usize {
-    match doc.get(ROOT, FILES) {
-        Ok(Some((Value::Object(ObjType::List), list))) => doc.length(&list),
-        _ => 0,
+    match file_index_lists(doc) {
+        Ok(lists) => lists
+            .iter()
+            .fold(0usize, |count, list| count.saturating_add(doc.length(list))),
+        // Unreadable/over-conflicted metadata must not make a successful append invisible.
+        Err(_) => MAX_FILE_ENTRIES + 1,
     }
 }
 
@@ -3243,12 +3289,8 @@ fn delete_file_entry(
     cid: &[u8],
     folder: Option<&str>,
 ) -> Result<(), AutomergeError> {
-    let list = match doc.get(ROOT, FILES)? {
-        Some((Value::Object(ObjType::List), id)) => id,
-        _ => return Ok(()),
-    };
-    for i in (0..doc.length(&list).min(MAX_FILE_ENTRIES)).rev() {
-        if let Some((Value::Object(ObjType::Map), entry)) = doc.get(&list, i)? {
+    for (list, i, row) in file_index_positions(doc)?.into_iter().rev() {
+        if let Some(entry) = row {
             let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES) else {
                 continue;
             };
@@ -3277,12 +3319,8 @@ fn set_file_entry_expiry(
     folder: &str,
     expires: FileExpiry,
 ) -> Result<(), AutomergeError> {
-    let list = match doc.get(ROOT, FILES)? {
-        Some((Value::Object(ObjType::List), id)) => id,
-        _ => return Ok(()),
-    };
-    for i in 0..doc.length(&list).min(MAX_FILE_ENTRIES) {
-        if let Some((Value::Object(ObjType::Map), entry)) = doc.get(&list, i)? {
+    for (_, _, row) in file_index_positions(doc)? {
+        if let Some(entry) = row {
             let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES) else {
                 continue;
             };
@@ -4717,11 +4755,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// the short display fingerprint is insufficient: verify the full local key and attestation.
     fn owned_upload_slot(&self, name: &str, folder: &str, cid: &Cid) -> Option<ObjId> {
         let doc = self.sync.doc(DocType::FileIndex, FILE_INDEX_DOC)?.doc();
-        let (_, list) = doc.get(ROOT, FILES).ok()??;
         let key = self.sync.my_public_key();
         let author = self.my_fingerprint();
-        for index in 0..doc.length(&list).min(MAX_FILE_ENTRIES) {
-            let Some((Value::Object(ObjType::Map), row)) = doc.get(&list, index).ok()? else {
+        for (_, _, row) in file_index_positions(doc).ok()? {
+            let Some(row) = row else {
                 continue;
             };
             if bounded_file_string(doc, &row, F_NAME, MAX_FILE_NAME_BYTES).as_deref() != Some(name)
@@ -5167,6 +5204,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         start: u64,
         max_len: usize,
     ) -> Result<FileRange, AppError> {
+        // The media bridge requests one chunk-sized window. Bound this public seam too: a
+        // caller-controlled range must not allocate a whole file, especially with parallel reads.
+        if max_len > CHUNK_BYTES {
+            return Err(AppError::Invalid(
+                "media range exceeds the response window limit".into(),
+            ));
+        }
         let Some(resolved) = file_resolution::resolve(&self.files(), cid) else {
             return Err(AppError::Invalid(
                 "no unambiguous file manifest in this server's index".into(),
@@ -12988,117 +13032,125 @@ mod tests {
 
     #[tokio::test]
     async fn independent_identical_uploads_converge_without_breaking_previews() {
-        let clock = ManualClock::new(T0);
-        let (mut alice, mut bob, alice_peer) = wiki_duo(&clock).await;
-        alice.open_files().await.unwrap();
-        bob.open_files().await.unwrap();
-        alice
-            .add_file("seed.txt", "text/plain", "", b"initialize shared list")
-            .await
-            .unwrap();
-        let (catchup, _) = tokio::join!(bob.request_files_catchup(alice_peer), alice.sync_once());
-        catchup.unwrap();
-        assert_eq!(
-            bob.files().len(),
-            1,
-            "both uploads start from the same shared list"
-        );
-        let data = b"\x89PNG\r\n\x1a\nindependently shared";
-        let cid = alice
-            .add_file("alice.png", "image/png", "alice", data)
-            .await
-            .unwrap();
-        bob.add_file("bob.png", "image/png", "bob", data)
-            .await
-            .unwrap();
-        let alice_ref = alice
-            .files()
-            .into_iter()
-            .find(|entry| entry.cid == cid.as_bytes())
-            .unwrap()
-            .file_ref;
-        let bob_ref = bob
-            .files()
-            .into_iter()
-            .find(|entry| entry.cid == cid.as_bytes())
-            .unwrap()
-            .file_ref;
-        assert_ne!(
-            alice_ref, bob_ref,
-            "fresh encryption must remain randomized"
-        );
-        drain_sync(&mut alice).await;
-        drain_sync(&mut bob).await;
-        tokio::select! {
-            result = alice.request_files_catchup(PeerId::from_u64(2)) => { result.unwrap(); }
-            _ = async { loop { bob.sync_once().await.unwrap(); } } => unreachable!(),
-        }
-        tokio::select! {
-            result = bob.request_files_catchup(alice_peer) => { result.unwrap(); }
-            _ = async { loop { alice.sync_once().await.unwrap(); } } => unreachable!(),
-        }
-        assert_eq!(alice.files().len(), 3);
-        assert_eq!(bob.files().len(), 3);
-        let head = alice
-            .file_head(&cid)
-            .expect("compatible encrypted variants resolve");
-        assert_eq!(
-            bob.file_head(&cid).unwrap().manifest_version,
-            head.manifest_version
-        );
-        // Neither peer runs its responder here: each must use its own authenticated copy.
-        for server in [&mut alice, &mut bob] {
-            assert_eq!(
-                server
-                    .read_file_range(&cid, head.manifest_version, 0, data.len())
+        for shared_seed in [false, true] {
+            let clock = ManualClock::new(T0);
+            let (mut alice, mut bob, alice_peer) = wiki_duo(&clock).await;
+            alice.open_files().await.unwrap();
+            bob.open_files().await.unwrap();
+            if shared_seed {
+                alice
+                    .add_file("seed.txt", "text/plain", "", b"initialize shared list")
                     .await
-                    .unwrap()
-                    .bytes,
-                data
-            );
-            assert_eq!(server.download_file(&cid).await.unwrap(), data);
-        }
-        // Leave only the non-canonical encryption at the remote provider. This forces the
-        // missing canonical network attempt to fall through to a separately authenticated ref.
-        let canonical = file_resolution::resolve(&alice.files(), &cid)
-            .unwrap()
-            .variants[0]
-            .0
-            .file_ref
-            .clone();
-        let (requester, provider) = if canonical == alice_ref {
-            (&mut alice, &mut bob)
-        } else {
-            (&mut bob, &mut alice)
-        };
-        for blob in requester.sync.blob_cids() {
-            requester.sync.delete_blob(&blob).unwrap();
-        }
-        let (_cancel, cancellation) = tokio::sync::watch::channel(true);
-        assert!(requester
-            .fetch_file_chunk_cancellable(
-                &cid,
-                0,
-                Some(RequestCancellation::new(cancellation, None))
-            )
-            .await
-            .is_err());
-        assert!(
-            requester.sync.blob_cids().is_empty(),
-            "cancelled fallback stores nothing"
-        );
-        let provider_author = provider.my_fingerprint();
-        let (bytes, from) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            tokio::select! {
-                result = requester.fetch_file_chunk(&cid, 0) => result,
-                _ = async { loop { provider.sync_once().await.unwrap(); } } => unreachable!(),
+                    .unwrap();
+                let (catchup, _) =
+                    tokio::join!(bob.request_files_catchup(alice_peer), alice.sync_once());
+                catchup.unwrap();
+                assert_eq!(
+                    bob.files().len(),
+                    1,
+                    "both uploads start from the same shared list"
+                );
             }
-        })
-        .await
-        .expect("remote variant fallback is bounded")
-        .unwrap();
-        assert_eq!(bytes, data);
-        assert_eq!(from.as_deref(), Some(provider_author.as_str()));
+            let data = b"\x89PNG\r\n\x1a\nindependently shared";
+            let cid = alice
+                .add_file("alice.png", "image/png", "alice", data)
+                .await
+                .unwrap();
+            bob.add_file("bob.png", "image/png", "bob", data)
+                .await
+                .unwrap();
+            let alice_ref = alice
+                .files()
+                .into_iter()
+                .find(|entry| entry.cid == cid.as_bytes())
+                .unwrap()
+                .file_ref;
+            let bob_ref = bob
+                .files()
+                .into_iter()
+                .find(|entry| entry.cid == cid.as_bytes())
+                .unwrap()
+                .file_ref;
+            assert_ne!(
+                alice_ref, bob_ref,
+                "fresh encryption must remain randomized"
+            );
+            drain_sync(&mut alice).await;
+            drain_sync(&mut bob).await;
+            tokio::select! {
+                result = alice.request_files_catchup(PeerId::from_u64(2)) => { result.unwrap(); }
+                _ = async { loop { bob.sync_once().await.unwrap(); } } => unreachable!(),
+            }
+            tokio::select! {
+                result = bob.request_files_catchup(alice_peer) => { result.unwrap(); }
+                _ = async { loop { alice.sync_once().await.unwrap(); } } => unreachable!(),
+            }
+            let expected_rows = if shared_seed { 3 } else { 2 };
+            assert_eq!(alice.files().len(), expected_rows);
+            assert_eq!(bob.files().len(), expected_rows);
+            assert_eq!(alice.file_index_row_count(), expected_rows);
+            assert_eq!(bob.file_index_row_count(), expected_rows);
+            let head = alice
+                .file_head(&cid)
+                .expect("compatible encrypted variants resolve");
+            assert_eq!(
+                bob.file_head(&cid).unwrap().manifest_version,
+                head.manifest_version
+            );
+            // Neither peer runs its responder here: each must use its own authenticated copy.
+            for server in [&mut alice, &mut bob] {
+                assert_eq!(
+                    server
+                        .read_file_range(&cid, head.manifest_version, 0, data.len())
+                        .await
+                        .unwrap()
+                        .bytes,
+                    data
+                );
+                assert_eq!(server.download_file(&cid).await.unwrap(), data);
+            }
+            // Leave only the non-canonical encryption at the remote provider. This forces the
+            // missing canonical network attempt to fall through to a separately authenticated ref.
+            let canonical = file_resolution::resolve(&alice.files(), &cid)
+                .unwrap()
+                .variants[0]
+                .0
+                .file_ref
+                .clone();
+            let (requester, provider) = if canonical == alice_ref {
+                (&mut alice, &mut bob)
+            } else {
+                (&mut bob, &mut alice)
+            };
+            for blob in requester.sync.blob_cids() {
+                requester.sync.delete_blob(&blob).unwrap();
+            }
+            let (_cancel, cancellation) = tokio::sync::watch::channel(true);
+            assert!(requester
+                .fetch_file_chunk_cancellable(
+                    &cid,
+                    0,
+                    Some(RequestCancellation::new(cancellation, None))
+                )
+                .await
+                .is_err());
+            assert!(
+                requester.sync.blob_cids().is_empty(),
+                "cancelled fallback stores nothing"
+            );
+            let provider_author = provider.my_fingerprint();
+            let (bytes, from) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::select! {
+                    result = requester.fetch_file_chunk(&cid, 0) => result,
+                    _ = async { loop { provider.sync_once().await.unwrap(); } } => unreachable!(),
+                }
+            })
+            .await
+            .expect("remote variant fallback is bounded")
+            .unwrap();
+            assert_eq!(bytes, data);
+            assert_eq!(from.as_deref(), Some(provider_author.as_str()));
+        }
     }
 
     #[tokio::test]
@@ -14145,6 +14197,94 @@ mod tests {
             let (_, entry) = doc.get(&list, index).unwrap().unwrap();
             assert_eq!(expiry_field(&doc, &entry), FileExpiry::Never);
         }
+    }
+
+    #[test]
+    fn concurrent_file_lists_share_one_budget_and_mutate_the_same_visible_rows() {
+        let bytes = b"independent first lists";
+        let (chunk, _) = catcoms_storage::seal_file(
+            bytes,
+            "text/plain",
+            &[9; 32],
+            &mut ChaCha20Rng::seed_from_u64(88),
+        )
+        .unwrap();
+        let reference = FileManifest {
+            plaintext_cid: Cid::of(bytes),
+            total_size: bytes.len() as u64,
+            mime: "text/plain".into(),
+            chunks: vec![chunk],
+        }
+        .encode();
+        let mut left = AutoCommit::new();
+        left.set_actor(automerge::ActorId::from(vec![1]));
+        let mut right = AutoCommit::new();
+        right.set_actor(automerge::ActorId::from(vec![2]));
+        for doc in [&mut left, &mut right] {
+            for _ in 0..150 {
+                write_file_entry(
+                    doc,
+                    "same.txt",
+                    "author",
+                    "docs",
+                    &reference,
+                    FileExpiry::Never,
+                    None,
+                )
+                .unwrap();
+            }
+        }
+        left.merge(&mut right).unwrap();
+        assert_eq!(file_index_lists(&left).unwrap().len(), 2);
+        assert_eq!(raw_file_index_row_count(&left), 300);
+        assert_eq!(
+            read_file_entries(&left, b"test group").len(),
+            MAX_FILE_ENTRIES
+        );
+        set_file_entry_expiry(
+            &mut left,
+            Cid::of(bytes).as_bytes(),
+            "docs",
+            FileExpiry::At(7),
+        )
+        .unwrap();
+        assert!(read_file_entries(&left, b"test group")
+            .iter()
+            .all(|row| row.expires == FileExpiry::At(7)));
+        // Save/load and another merge preserve every list identity and the same bounded prefix.
+        let mut restored = AutoCommit::load(&left.save()).unwrap();
+        restored.merge(&mut right).unwrap();
+        assert_eq!(
+            read_file_entries(&restored, b"test group"),
+            read_file_entries(&left, b"test group")
+        );
+        delete_file_entry(&mut restored, Cid::of(bytes).as_bytes(), Some("docs")).unwrap();
+        assert_eq!(raw_file_index_row_count(&restored), 300 - MAX_FILE_ENTRIES);
+        assert!(
+            read_file_entries(&restored, b"test group")
+                .iter()
+                .all(|row| row.expires == FileExpiry::Never),
+            "deletion cannot walk newly revealed tail rows or reset the budget for each list"
+        );
+    }
+
+    #[test]
+    fn malformed_rows_in_another_first_list_still_consume_the_shared_budget() {
+        let mut left = AutoCommit::new();
+        left.set_actor(automerge::ActorId::from(vec![1]));
+        let mut right = AutoCommit::new();
+        right.set_actor(automerge::ActorId::from(vec![2]));
+        let list = left.put_object(ROOT, FILES, ObjType::List).unwrap();
+        for index in 0..MAX_FILE_ENTRIES {
+            left.insert(&list, index, "malformed").unwrap();
+        }
+        let list = right.put_object(ROOT, FILES, ObjType::List).unwrap();
+        right.insert_object(&list, 0, ObjType::Map).unwrap();
+        left.merge(&mut right).unwrap();
+        assert_eq!(raw_file_index_row_count(&left), MAX_FILE_ENTRIES + 1);
+        let positions = file_index_positions(&left).unwrap();
+        assert_eq!(positions.len(), MAX_FILE_ENTRIES);
+        assert!(positions.iter().all(|(_, _, row)| row.is_none()));
     }
 
     #[tokio::test]

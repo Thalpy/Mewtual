@@ -20,6 +20,33 @@ use crate::StorageError;
 /// and promotes the whole set once its manifest is published, so an upload that never finishes
 /// leaves nothing in the store to account for. See [`put_staged`](BlobStore::put_staged).
 pub trait BlobStore {
+    /// Explicit local copies have a separate quota and ownership from fetched/uploaded cache
+    /// bytes. Unsupported stores (especially memory/FIFO stores) never claim durable retention.
+    fn kept_files(&self) -> crate::kept::KeptFiles {
+        crate::kept::KeptFiles::default()
+    }
+    /// Reserve the complete exact plan before accepting any retained network bytes.
+    fn begin_keep(&mut self, _plan: crate::kept::KeepPlan) -> Result<u64, StorageError> {
+        Err(StorageError::Io(
+            "kept copies require the encrypted disk store".into(),
+        ))
+    }
+    /// Write only into the reservation selected by this process-local token.
+    fn put_keep(&mut self, _token: u64, _bytes: &[u8]) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Called only after the application has verified the complete ordered plaintext CID.
+    fn finish_keep(&mut self, _token: u64) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Cancel this exact reservation. Failed cleanup must not refund its capacity.
+    fn abort_keep(&mut self, _token: u64) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Explicit local release; replicated expiry/unlisting never calls this operation.
+    fn forget_kept(&mut self, _cid: &Cid) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
     /// Whether held bytes survive dropping this store. Publication APIs that promise a saved
     /// blob must fail closed on the default in-memory fallback after an attachment failure.
     fn is_persistent(&self) -> bool {
@@ -244,7 +271,7 @@ const STAGING_DIR: &str = "staging";
 
 /// Inspect the opened file before reading. `take` also bounds a file that grows after metadata
 /// is checked. Never reserve from an untrusted on-disk length or fall back to `fs::read`.
-fn read_bounded(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, StorageError> {
+pub(crate) fn read_bounded(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, StorageError> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -290,7 +317,7 @@ fn flush_promoted(dir: &Path, cid: &Cid) -> Result<(), StorageError> {
 /// does not persist a freshly-created group directory's entry in its parent. Sync all ancestors
 /// on open, including retries where a previous failed open already made the directories visible.
 /// Windows retains the existing vault's file-flush-only platform guarantee.
-fn create_blob_directory(dir: &Path) -> Result<(), StorageError> {
+pub(crate) fn create_blob_directory(dir: &Path) -> Result<(), StorageError> {
     create_blob_directory_with_sync(dir, |path| {
         #[cfg(unix)]
         {
@@ -554,7 +581,7 @@ impl<R: CryptoRngCore> std::fmt::Debug for SealingBlobStore<R> {
 }
 
 /// Frame a sealed blob for disk: `nonce(24) ‖ ciphertext`.
-fn encode_sealed(s: &SealedBlob) -> Vec<u8> {
+pub(crate) fn encode_sealed(s: &SealedBlob) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.nonce.len() + s.ciphertext.len());
     out.extend_from_slice(&s.nonce);
     out.extend_from_slice(&s.ciphertext);
@@ -562,7 +589,7 @@ fn encode_sealed(s: &SealedBlob) -> Vec<u8> {
 }
 
 /// Parse a sealed blob from disk bytes.
-fn decode_sealed(bytes: &[u8]) -> Result<SealedBlob, StorageError> {
+pub(crate) fn decode_sealed(bytes: &[u8]) -> Result<SealedBlob, StorageError> {
     if bytes.len() <= 24 {
         return Err(StorageError::Malformed);
     }

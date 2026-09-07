@@ -4065,6 +4065,7 @@ dependencies = [
  "catcoms-mls",
  "catcoms-net",
  "catcoms-rt",
+ "catcoms-storage",
  "catcoms-sync",
  "hex",
  "libp2p",

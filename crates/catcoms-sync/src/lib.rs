@@ -59,10 +59,12 @@ use catcoms_wire::{Decoder, DocType, Encoder};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+mod blob_fetch;
 pub mod registry_catchup;
 mod registry_ingress;
 mod registry_publication;
 mod roles;
+pub use blob_fetch::{CompletedBlobFetch, PendingBlobFetch, MAX_BLOB_FETCH_PEERS};
 pub use registry_ingress::RegistryWatch;
 pub use registry_publication::RegistrySyncInstance;
 // Re-export the role-authority logic so the product/UI layer (catcoms-app) reuses this exact,
@@ -3747,7 +3749,10 @@ pub enum PostJoinDiscoveryEvent {
 }
 
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
-    transport: T,
+    // Only this owner consumes next_event. Detached requests share outbound access without
+    // moving MLS state, document authority, RNG, or the blob store out of the actor.
+    transport: Arc<T>,
+    blob_fetch_instance: Arc<()>,
     /// Process-local incarnation, freshly allocated by new/restore; never persisted or sent.
     registry_instance: RegistrySyncInstance,
     registry_ingress: registry_ingress::RegistryIngress,
@@ -4177,7 +4182,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         rng.fill_bytes(file_wrap_key.as_mut());
         let clock: Arc<dyn Clock + Send> = Arc::from(clock);
         let mut this = Self {
-            transport,
+            transport: Arc::new(transport),
+            blob_fetch_instance: Arc::new(()),
             registry_instance: RegistrySyncInstance::new(),
             registry_ingress: registry_ingress::RegistryIngress::default(),
             registry_pages: registry_catchup::RegistryRequests::default(),
@@ -4648,6 +4654,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Saved-content commands must not silently use the process-local attachment fallback.
     pub fn has_persistent_blob_store(&self) -> bool {
         self.blobs.is_persistent()
+    }
+
+    /// Local explicit-retention operations. Their policy/consent lives in the owning app actor;
+    /// these calls are never exposed through member requests or replicated expiry fields.
+    pub fn kept_files(&self) -> catcoms_storage::kept::KeptFiles {
+        self.blobs.kept_files()
+    }
+    pub fn begin_keep(&mut self, plan: catcoms_storage::kept::KeepPlan) -> Result<u64, SyncError> {
+        Ok(self.blobs.begin_keep(plan)?)
+    }
+    pub fn put_keep(&mut self, token: u64, bytes: &[u8]) -> Result<(), SyncError> {
+        Ok(self.blobs.put_keep(token, bytes)?)
+    }
+    pub fn finish_keep(&mut self, token: u64) -> Result<(), SyncError> {
+        Ok(self.blobs.finish_keep(token)?)
+    }
+    pub fn abort_keep(&mut self, token: u64) -> Result<(), SyncError> {
+        Ok(self.blobs.abort_keep(token)?)
+    }
+    pub fn forget_kept(&mut self, cid: &Cid) -> Result<(), SyncError> {
+        Ok(self.blobs.forget_kept(cid)?)
     }
 
     /// Encrypt a file under this group's stable file-wrap key (Phase 9h). Returns its
@@ -16436,7 +16463,7 @@ mod tests {
         );
     }
 
-    async fn build_members(n: u64) -> (std::sync::Arc<Hub>, Vec<Member>, Vec<DeviceId>) {
+    pub(super) async fn build_members(n: u64) -> (std::sync::Arc<Hub>, Vec<Member>, Vec<DeviceId>) {
         assert!(n >= 1);
         let hub = Hub::new();
         let founder = MlsDevice::generate().unwrap();
@@ -16481,7 +16508,7 @@ mod tests {
     /// exact signed descriptor per member. `build_members` intentionally leaves intermediate
     /// joiners behind to exercise catch-up elsewhere; repair tests need a genuinely converged
     /// roster so every helper can authenticate both ends of an A -> C -> B request.
-    fn converge_and_publish_test_routes(members: &mut [Member]) {
+    pub(super) fn converge_and_publish_test_routes(members: &mut [Member]) {
         let founder_peer = members[0].local_peer();
         let commits: Vec<_> = members[0].commit_log.iter().cloned().collect();
         let final_epoch = members[0].epoch();

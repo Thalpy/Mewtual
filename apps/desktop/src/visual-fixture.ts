@@ -291,6 +291,12 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
           },
         ],
       });
+    case "get_kept_files":
+      return { supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], error: null };
+    case "file_available":
+      return true;
+    case "get_file_usage":
+      return { wiki_pages: [], status_count: 0, chat_count: 0, event_count: 0, pinned: false };
     case "get_wiki_pinned_cids":
       return [];
     case "get_statuses":

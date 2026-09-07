@@ -8408,7 +8408,120 @@ async fn dismiss_dm_request(
     Ok(())
 }
 
-/// Whether a shared file's blob is held locally (openable without a network fetch).
+#[derive(Serialize)]
+struct UiKeptFile {
+    cid: String,
+    manifest_version: String,
+    checked: bool,
+}
+
+#[derive(Serialize)]
+struct UiKeptFiles {
+    supported: bool,
+    allocated_bytes: u64,
+    limit_bytes: u64,
+    files: Vec<UiKeptFile>,
+    error: Option<String>,
+}
+
+fn bridge_kept_files(view: catcoms_storage::kept::KeptFiles) -> UiKeptFiles {
+    UiKeptFiles {
+        supported: view.supported,
+        allocated_bytes: view.allocated_bytes,
+        limit_bytes: view.limit_bytes,
+        files: view
+            .files
+            .into_iter()
+            .map(|file| UiKeptFile {
+                cid: file.plan.cid.to_hex(),
+                manifest_version: hex::encode(file.plan.version),
+                checked: file.checked,
+            })
+            .collect(),
+        error: view.error,
+    }
+}
+
+fn kept_cid(cid: &str) -> Result<Vec<u8>, String> {
+    if cid.len() != 64 || !cid.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("bad content address".into());
+    }
+    hex::decode(cid).map_err(|_| "bad content address".into())
+}
+
+/// Local retention inventory includes unlisted copies so explicit release remains possible. Never
+/// return wrapped manifests/keys through this UI projection or treat it as media authorization.
+#[tauri::command]
+async fn get_kept_files(state: State<'_, AppState>, server: u64) -> Result<UiKeptFiles, String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let view = actor.kept_files().await;
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    if state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|entry| entry.instance)
+        != Some(instance)
+    {
+        return Err("server changed".into());
+    }
+    Ok(bridge_kept_files(view))
+}
+
+/// One explicit, quota-reserved copy. The shared native cancellation lease closes the lock/sweep
+/// race and retains accounting through lower transport retirement. No UI commit guard spans I/O.
+#[tauri::command]
+async fn keep_file(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+    cancellation: String,
+) -> Result<(), String> {
+    let raw = kept_cid(&cid)?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (lease, receiver) = claim_inline_download(&state, &cancellation)?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    drop(require_ui_session_generation(&state, generation).await?);
+    actor
+        .keep_file(
+            raw,
+            Some(RequestCancellation::new(
+                receiver,
+                Some(lease.request_keepalive()),
+            )),
+        )
+        .await?;
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    if state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|entry| entry.instance)
+        != Some(instance)
+    {
+        return Err("server changed".into());
+    }
+    Ok(())
+}
+
+/// Explicit local release only; unrelated cached chunks or replicated listings are unchanged.
+#[tauri::command]
+async fn forget_kept_file(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+) -> Result<(), String> {
+    let raw = kept_cid(&cid)?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let actor = actor_of(&state, server).await?;
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    actor.forget_kept_file(raw).await
+}
+
+/// Cheap local presence only. This does not authenticate each chunk or prove remote availability.
 #[tauri::command]
 async fn file_available(
     state: State<'_, AppState>,
@@ -15761,6 +15874,9 @@ pub fn run() {
             cancel_inline_download,
             download_file,
             file_available,
+            get_kept_files,
+            keep_file,
+            forget_kept_file,
             delete_file,
             set_file_expiry,
             get_file_usage,
@@ -15870,6 +15986,44 @@ pub fn run() {
 mod tests {
     use super::*;
     use catcoms_rt::ManualClock;
+
+    #[test]
+    fn kept_inventory_exposes_no_wrapped_manifest_or_keys() {
+        let value = bridge_kept_files(catcoms_storage::kept::KeptFiles {
+            supported: true,
+            allocated_bytes: 12,
+            limit_bytes: 100,
+            files: vec![catcoms_storage::kept::KeptFile {
+                plan: catcoms_storage::kept::KeepPlan {
+                    cid: catcoms_storage::Cid::of(b"file"),
+                    version: [7; 32],
+                    manifest: b"secret wrapped file keys".to_vec(),
+                    chunks: vec![(catcoms_storage::Cid::of(b"ciphertext"), 20)],
+                },
+                checked: false,
+            }],
+            error: None,
+        });
+        let json = serde_json::to_value(value).unwrap();
+        assert_eq!(json["files"][0]["checked"], false);
+        assert_eq!(json["files"][0].as_object().unwrap().len(), 3);
+        assert!(json["files"][0].get("manifest").is_none());
+        assert!(!json.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn kept_file_commands_bound_content_addresses_before_decode() {
+        assert_eq!(kept_cid(&"ab".repeat(32)).unwrap(), vec![0xab; 32]);
+        for bad in [
+            "ab".repeat(33),
+            "../file".into(),
+            "é".repeat(32),
+            "g".repeat(64),
+            String::new(),
+        ] {
+            assert!(kept_cid(&bad).is_err());
+        }
+    }
 
     /// A burst of sends must cost the writes it needs, and no send may be told it is durable by a
     /// write that predates it. The interleaving that matters: three changes land, the first writer

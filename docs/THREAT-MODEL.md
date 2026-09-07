@@ -534,7 +534,7 @@ table with the commit that closed it.
   lease. Disconnect retracts that edge's consent and reconnect must announce fresh consent.
   Shared-take ingress rejects oversize listings before whole-file download, bounds encoded bytes
   before decode, keeps a bounded per-call LRU, and serializes/coalesces downloads. Each take read
-  has a native cancellation signal observed inside the actor-owned chunk fetch; cancellation
+  has a native cancellation signal observed inside the detached chunk fetch; cancellation
   acknowledgement preempts the stale JavaScript slot, while a transport-owned keepalive retains
   its native charge until the exact submitted request responds, fails or times out. A four-request
   process cap and exact UI-generation cleanup therefore bound rapid call churn even against a
@@ -777,3 +777,25 @@ roadmap:
 - When a residual is closed, move it up with the commit hash.
 - When a Tauri command is added or removed, update `apps/desktop/src/tauri-command-security.ts`;
   the frontend suite checks the ledger against the native handler and every literal invocation.
+
+### Detached file reads and explicit kept copies
+
+Network workers own only an opaque signed blob request. Completion rechecks the exact sync owner,
+current group/epoch/local membership, expected provider, request nonce and response signature/CID;
+the application rechecks its current manifest-set identity and cancellation before storage. Each
+attempt owns independent server/process permits until actual transport retirement, even after an
+application timeout. Connected-only admission cannot redial from cached routes. Responses and ranges
+are bounded, and an abandoned worker explicitly signals cancellation before queued driver admission.
+
+Explicit kept copies additionally reserve an exact full manifest before fetching, authenticate/open
+bytes before writing directly into a separate sealed quota domain, and verify the ordered whole-file
+CID before durable commit. Partial records remain charged until bounded cleanup succeeds. Exclusive
+OS leases prevent two mounts from sweeping active work or forking quota accounting. Ordinary cache
+GC and unsigned shared expiry cannot destroy local kept ownership. Startup resets verified evidence;
+explicit Check and repair remains separate from media authorization and may use its saved exact
+manifest after unlisting. UI lock cancels native leases and prevents stale inventory/results from
+crossing the original session/actor-instance boundary. Remote copies remain unconfirmed.
+
+These controls do not solve arbitrary inherited Automerge history allocation, Byzantine conflicting
+index claims, permanent remote availability, continuous local disk health, or all legacy actor waits.
+See [the detailed limits and follow-ups](design-file-reliability.md).

@@ -660,8 +660,13 @@ impl ServerStore {
     /// unchanged); the bytes survive restart and are opaque without the passphrase.
     pub fn blob_store(&self, key: &str) -> Result<Box<dyn BlobStore + Send>, AppError> {
         let dir = self.dir.join("blobs").join(key);
-        let store = SealingBlobStore::open(dir, self.keys.blob_key()?, OsCryptoRng)?;
-        Ok(Box::new(store))
+        let store = SealingBlobStore::open(&dir, self.keys.blob_key()?, OsCryptoRng)?;
+        Ok(Box::new(catcoms_storage::kept::KeptBlobStore::open(
+            Box::new(store),
+            dir.join("kept"),
+            self.keys.blob_key()?,
+            OsCryptoRng,
+        )))
     }
 
     /// Read + unseal the registry (empty if none yet).

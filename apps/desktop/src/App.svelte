@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { fileAvailability, keptCopyLabel, fileInventoryRequests, mutateFileInventory, type KeptFiles } from "./file-availability";
   import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -3661,6 +3662,56 @@
   // Whether ≥1 live peer previously proved it could serve authenticated catch-up (a conservative
   // availability hint refreshed with the file list). This is stricter than `onlineMembers`.
   let hasPeers = $state(false);
+  let keptFiles = $state<KeptFiles | null>(null);
+  const fileInventoryGate = fileInventoryRequests();
+  let keptTransfer = $state<{ server: number; cid: string; cancellation: string } | null>(null);
+
+  function cancelKeptTransfer() {
+    const transfer = keptTransfer;
+    keptTransfer = null;
+    if (transfer) void invoke("cancel_inline_download", { cancellation: transfer.cancellation }).catch(() => {});
+  }
+  $effect(() => {
+    if (keptTransfer && (locked || keptTransfer.server !== activeServerId)) untrack(cancelKeptTransfer);
+  });
+
+  async function keepFileHere(cid: string) {
+    const server = activeServerId;
+    const gen = viewGeneration;
+    if (server === null || locked || keptTransfer) return;
+    const transfer = { server, cid, cancellation: `keep-${crypto.randomUUID()}` };
+    keptTransfer = transfer;
+    fileInventoryGate.invalidate();
+    try {
+      await invoke("begin_inline_download", { cancellation: transfer.cancellation });
+      if (keptTransfer?.cancellation !== transfer.cancellation || !unlockedViewCurrent(gen, server)) {
+        await invoke("cancel_inline_download", { cancellation: transfer.cancellation });
+        return;
+      }
+      await invoke("keep_file", { server, cid, cancellation: transfer.cancellation });
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    } catch (e) {
+      if (keptTransfer?.cancellation === transfer.cancellation && unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptTransfer?.cancellation === transfer.cancellation) keptTransfer = null;
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    }
+  }
+
+  async function forgetKeptFile(cid: string) {
+    const server = activeServerId;
+    const gen = viewGeneration;
+    if (server === null || locked || keptTransfer) return;
+    fileInventoryGate.invalidate();
+    try {
+      await mutateFileInventory(
+        () => invoke("forget_kept_file", { server, cid }), refreshFiles,
+        () => unlockedViewCurrent(gen, server),
+      );
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    }
+  }
   let uploading = $state(false);
   let folder = $state(""); // current folder in the Files tab
   let newFolder = $state(""); // new-folder name input
@@ -6721,6 +6772,9 @@
     deviceMap = {};
     files = [];
     hasPeers = false;
+    keptFiles = null;
+    fileInventoryGate.invalidate();
+    cancelKeptTransfer();
     wikiPinned = new Set();
     wikiPages = [];
     wikiMap = {}; // name -> body: the previous server's page CONTENT, not just its names
@@ -7457,15 +7511,17 @@
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null) return;
+    const request = fileInventoryGate.begin();
     try {
       // Wiki-pinned content addresses are derived fresh from the wiki on the backend each call: a
       // file embedded in a live page never drops out of circulation, whatever its expiry says. It
       // is a second round-trip, so it rides alongside the listing rather than after it.
-      const [listing, pinned] = await Promise.allSettled([
+      const [listing, pinned, kept] = await Promise.allSettled([
         invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", { server }),
         invoke<string[]>("get_wiki_pinned_cids", { server }),
+        invoke<KeptFiles>("get_kept_files", { server }),
       ]);
-      if (!viewCurrent(gen, server)) return; // another group's shared files
+      if (!fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) return; // another group's shared files
       // Applied independently: a failing pin lookup must not blank the listing it only decorates.
       if (listing.status === "fulfilled") {
         files = listing.value.files;
@@ -7474,8 +7530,9 @@
         error = String(listing.reason);
       }
       if (pinned.status === "fulfilled") wikiPinned = new Set(pinned.value);
+      keptFiles = kept.status === "fulfilled" ? kept.value : null;
     } catch (e) {
-      if (viewCurrent(gen, server)) error = String(e);
+      if (fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) error = String(e);
     }
   }
   async function refreshStorageHealth() {
@@ -7552,12 +7609,7 @@
       return hasPeers
         ? { cls: "downloading", icon: "↓", label: "Waiting for source" }
         : { cls: "offline", icon: "○", label: "No proven member path" };
-    if (f.total > 0 && f.held >= f.total)
-      return { cls: "local", icon: "●", label: "On this device" };
-    if (f.held > 0)
-      return { cls: "partial", icon: "◐", label: `Partial ${f.held}/${f.total}` };
-    if (hasPeers) return { cls: "remote", icon: "○", label: "Downloadable" };
-    return { cls: "offline", icon: "○", label: "No proven member path" };
+    return fileAvailability(f.held, f.total, hasPeers);
   }
   async function refreshStatuses() {
     const gen = viewGeneration;
@@ -11327,7 +11379,7 @@
     } else {
       lines.push(`File size: ${formatBytes(t.size)}`);
       lines.push("Source: this device");
-      lines.push("Availability: members download these chunks on demand");
+      lines.push("Published in the shared index; remote copies are unconfirmed");
     }
     if (t.error) lines.push(`Detail: ${t.error}`);
     return lines.join("\n");
@@ -11338,6 +11390,7 @@
 
   async function openFileInfo(f: UiFile) {
     if (activeServerId === null) return;
+    cancelKeptTransfer();
     fileInfo = f;
     fileInfoAvail = null;
     fileInfoPreview = "";
@@ -11379,6 +11432,7 @@
   }
 
   function closeFileInfo() {
+    cancelKeptTransfer();
     fileInfo = null;
     fileInfoPreview = "";
     fileInfoPreviewError = false;
@@ -24245,7 +24299,7 @@
                     <dt>Who sees</dt><dd>Members may see each other's IP addresses.</dd>
                     <dt>Removal</dt><dd><span class="m">Cooperative.</span> A ban depends on every member's app playing fair.</dd>
                     <dt>Offline</dt><dd>Catch-up waits until another member is online. Works on a LAN with no internet.</dd>
-                    <dt>Files</dt><dd>Circulate for a month, then expire unless pinned to a wiki page.</dd>
+                    <dt>Files</dt><dd>Circulation dates are metadata. Files need a reachable holder; local kept copies are opt-in.</dd>
                   </dl>
                 </div>
                 <div class="tc-foot"><span>best for</span><span class="who">friend circles · small crews</span></div>
@@ -25741,6 +25795,21 @@
               {/each}
             </nav>
           </div>
+          {#if keptFiles?.supported}
+            <details class="kept-copies-panel">
+              <summary>Kept on this device ? {keptFiles.files.length}/32 ? {fmtSize(keptFiles.allocated_bytes)} of {fmtSize(keptFiles.limit_bytes)} allocated</summary>
+              <p class="muted small">These encrypted copies survive ordinary cache cleanup and shared-list removal. Export still requires a shared listing. Releasing a copy frees its reserved storage; other cached bytes may remain.</p>
+              {#if keptFiles.error}<p role="alert">{keptFiles.error}</p>{/if}
+              {#each keptFiles.files as copy (copy.cid)}
+                <div class="kept-copy-row">
+                  <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}? (unlisted)`} ? {keptCopyLabel(copy)}</span>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptFiles.error} onclick={() => keepFileHere(copy.cid)}>Check and repair</button>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)}>Release kept copy</button>
+                </div>
+              {/each}
+              {#if keptTransfer}<button class="ghost small" onclick={cancelKeptTransfer}>Cancel keeping</button>{/if}
+            </details>
+          {/if}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <ul
             class="file-list tab-pane"
@@ -29344,7 +29413,7 @@
             {#if previewKind}
               <div class="file-preview">
                 {#if fileInfoPreviewError}
-                  <p class="muted small">Preview unavailable: the file isn't downloaded yet and no peer is sharing it right now.</p>
+                  <p class="muted small">Preview unavailable. The file may be missing, unreachable, unsupported, or unable to pass verification.</p>
                 {:else if !fileInfoPreview}
                   <p class="muted small">Loading preview…</p>
                 {:else if previewKind === "image"}
@@ -29406,7 +29475,7 @@
                 {:else if fileTextState === "binary"}
                   <p class="muted small file-text-note">This isn't readable text: download it and open it in the right app.</p>
                 {:else if fileTextState === "error"}
-                  <p class="muted small file-text-note">Can't read it: the file isn't downloaded yet and no peer is sharing it right now.</p>
+                  <p class="muted small file-text-note">Unable to read this file. Its contents may be unreachable or may have failed verification.</p>
                 {:else if fileTextState === "ready"}
                   {#if !fileText.trim()}
                     <p class="muted small file-text-note">This file is empty.</p>
@@ -29425,10 +29494,21 @@
                 {#if fileInfoAvail === null}
                   <span class="muted">checking…</span>
                 {:else if fileInfoAvail}
-                  <span class="avail yes">● Available on this device</span>
+                  <span class="avail yes">● Cached here; checked when opened</span>
                 {:else}
-                  <span class="avail no">○ Not downloaded: fetched from a peer on demand</span>
+                  <span class="avail no">○ {hasPeers ? "Remote copy unconfirmed; a fetch can be attempted" : "Not cached; no connected provider"}</span>
                 {/if}
+              </dd>
+              <dt>Kept copy</dt>
+              <dd>
+                <span>{keptCopyLabel(keptFiles?.files.find((copy) => copy.cid === fileInfo?.cid))}</span>
+                {#if keptFiles?.supported && !keptFiles.error}
+                  <button class="ghost small" disabled={!!keptTransfer} onclick={() => fileInfo && keepFileHere(fileInfo.cid)}>
+                    {keptFiles.files.some((copy) => copy.cid === fileInfo?.cid) ? "Check and repair copy" : "Keep on this device"}
+                  </button>
+                  {#if keptTransfer?.cid === fileInfo.cid}<button class="ghost small" onclick={cancelKeptTransfer}>Cancel keeping</button>{/if}
+                  <p class="muted small">Stores a verified encrypted copy within this server's 1 GiB / 32-file limit. Checking may fetch missing chunks. Remote copies remain unconfirmed.</p>
+                {:else if keptFiles?.error}<p class="muted small">{keptFiles.error}</p>{/if}
               </dd>
               <dt>Uploaded by</dt>
               <dd>{nameOf(fileInfo.author)}</dd>

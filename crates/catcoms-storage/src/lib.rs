@@ -24,6 +24,7 @@
 pub mod blob;
 pub mod cid;
 pub mod filecrypto;
+pub mod kept;
 pub mod pad;
 pub mod retention;
 pub mod vault;
