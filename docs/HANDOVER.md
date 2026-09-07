@@ -8,6 +8,55 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 bounded registry page serving (2026-09-07).** Rough P1 backend estimate: **65%, with
+  about +/-10 percentage points uncertainty**. This is an engineering estimate, not a count of
+  commits and not Creative Suite/UI readiness. The protocol core, checked persistence, registry
+  settlement/recovery and cooperative gossip paths exist. Automatic runtime ownership, managed
+  catch-up/discovery, remaining recovery/repair/succession integration and Studio consumers are
+  substantial unfinished work.
+
+  `Server::{begin_registry_page_provider, serve_registry_page}` now read accepted registry
+  history from the checked vault and reseal bounded pages under current MLS. An 81-byte HMAC
+  cursor binds exact provider/requester/scope, initial heads/seed, a fixed accepted-log prefix,
+  position and ten-minute monotonic lifetime. New appends do not reset or extend the prefix;
+  changed prefixes restart, byte-identical reloads can continue. Up to 32 operations and 512 KiB
+  of framed ciphertext fit per page. More than 64 independent heads can still complete from
+  an empty initial frontier without repeatedly receiving the same prefix.
+
+  Missing removed-author history reports `HistoricalAuthorizationRequired`; it is not silently
+  skipped or accepted under the provider's identity. Already-delivered cursor history does not
+  block later current-author descendants when an author is removed between pages. A rotated
+  epoch requires the requester's claimed verified seed. Claims are not possession proofs, and
+  prefix completion is not currency/finality. Runtime/mount, membership, caps, MAC and expiry
+  check before source I/O; concrete-id matching requires the captured bucket's checked load.
+  No source writes, intent retirement, subscriptions or delivery acknowledgements occur.
+
+  **Next:** authenticated request routing with aggregate source-read limits, receiver paging and
+  durable admission, then receipt-head/seed discovery and automatic coordinator/native lifecycle
+  ownership. This is a callable page-serving backend, not automatic reconnection or a new wire
+  request/response format. UI and unrelated release changes remain untouched.
+  Twelve focused regressions cover append/reload progress, current-MLS resealing, 65 independent
+  heads, exact padded byte limits, seed requirements, removed-author dependencies, cursor scope/
+  tampering/expiry, provider/mount replacement and rejection before corrupt-source reads. The
+  HMAC framing golden vector was independently reproduced with .NET HMACSHA256. Read-only
+  design/diff review and re-review have no remaining findings; the review's already-delivered
+  removed-author case and pre-I/O wording clarification are fixed. Verification passed:
+
+  - `cargo test -p catcoms-replication --lib registry_page -- --nocapture` (9 tests)
+  - `cargo test -p catcoms-app --lib registry_page -- --nocapture` (3 tests)
+  - `cargo test --all --all-features` (existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests)
+  - `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `npm.cmd --prefix apps/desktop test` (1,135 tests)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh` (Git Bash), worktree/staged `git diff --check`
+
+  The final backend/native runs include the review fix. Frontend static/build/visual checks were
+  not run for this backend-only slice. HMAC/zeroize are now direct replication dependencies at
+  already-locked versions; both workspace lockfiles record the edges, with no package upgrades.
+  No UI or native bridge source changed; concurrent release work is outside this review.
+
 - **P1 opt-in registry gossip receiver (2026-09-07).** Actual network ticks now route watched
   registry traffic into a bounded authenticated inbox, separate from generic Automerge documents.
   The Server drain persists one packet through the existing typed gate/accounting/barrier. Tests

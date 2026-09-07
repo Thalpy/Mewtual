@@ -1424,6 +1424,57 @@ process-local and reset on sync restore; no wire or persistence format changes. 
 store ownership, lifecycle cancellation, registry/receipt-head discovery and managed catch-up remain
 unimplemented. A rotated persisted epoch needs a newly installed watch, never a retargeted old handle.
 
+### Cooperative registry catch-up page serving
+
+`Server::begin_registry_page_provider(&ServerStore, server:u64, bucket:u8)` returns an opaque,
+non-cloneable `ServerRegistryPageProvider` with a random provider-local MAC key. It binds the
+exact sync instance, physical mount, captured numeric server and bucket; it reads/creates no
+document and subscribes no topic. Drop on runtime/mount replacement. This is not a native lock
+lease, a network request registration or an aggregate provider-count limit.
+
+`serve_registry_page(&ServerStore, &mut provider, RegistryPageRequest)` synchronously loads the
+checked source and returns `RegistryPageOutcome::{Page, Restart, CheckpointRequired,
+HistoricalAuthorizationRequired}` or an error. The request carries a full requester device id,
+concrete doc id, at most 64 strictly sorted unique initial heads, optional claimed verified seed
+hash and optional 81-byte opaque cursor. Runtime/mount and current local/requester membership,
+field caps, cursor HMAC and expiry are checked before source I/O. The current concrete id and
+seed match are checked after loading. Corruption errors, absence restarts; neither becomes a
+successful empty document. Fault refuses. Closing history may be read without opening its gate.
+
+The low-level `RegistryPageProvider` uses HMAC-SHA256 over length-framed provider/requester,
+full group/logical/type/concrete scope, initial heads/seed and a version-1 cursor payload:
+`version:u8, frozen_count:u32, next_position:u32, issued_monotonic_ms:u64, prefix_digest:32,
+mac:32`. Integers are big-endian. The prefix digest includes the seed hash and length-framed
+signed envelopes in accepted-log order. This provider-local order is already dependency-complete;
+it need not equal another peer's order. MAC comparison uses the library's constant-time verify.
+The ephemeral key is zeroized on drop and must be reminted across runtime restarts. The fixed
+ten-minute expiry is not renewed by continuation; wall-clock changes grant no credit.
+
+Repeat the ORIGINAL heads/seed on every continuation. Unknown heads restart. The frozen count
+and digest allow append-only growth or byte-identical source reload, but refuse changed prefixes.
+Returned pages subtract the initial ancestor closure and advance by cursor position, including
+already emitted dependencies. A requester with more than 64 heads can begin at [] (plus its
+verified seed if rotated) and deduplicate repeats. A page contains at most 32 freshly current-MLS
+sealed operations and 512 KiB summed `4 + SealedOp::encode().len()`; cursor/future response envelope
+bytes are extra. Any nonterminal page emits at least one operation. No plaintext seed, vault
+snapshot, quarantined body or old ciphertext is exported. `next:None` means the captured prefix
+ended, not that later edits do not exist or that the provider is current. Debug redacts identities,
+scope, cursor bytes and content.
+
+Missing removed-author operations in the REMAINING page range produce
+`HistoricalAuthorizationRequired`, never omission or impersonation. Previously emitted cursor
+positions and initial ancestors are claimed held history, so author removal after delivery need
+not block later descendants. These are not possession proofs: a conforming requester derives its
+heads/seed from verified state and continues only after persisting a dependency-complete page.
+Historical authority transfer, receiver paging and checkpoint/head/seed discovery remain unwired.
+
+This trusted-local API has no network caller yet. Future routing MUST derive requester identity
+from authenticated outer requests, not body fields, and enforce aggregate rate/concurrency and
+cancellation before source reads. One call rebuilds at most the bounded saved epoch, then walks
+its bounded change index/ancestor sets; there is no unbounded recursion, requester table or cached
+history copy in the provider. The page API itself imposes no aggregate call-rate limit and grants
+no delivery acknowledgement, intent retirement, saved mutation or finality.
+
 ### Registry persistence and inventory constraints
 
 Public receipt fields and ciphertext are capped before encoding/decryption. Changed state uses

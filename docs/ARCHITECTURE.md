@@ -77,6 +77,18 @@ after the same topic was rewatched. Revoking a watch needs only its exact genera
 mount can discard its own queued traffic without gaining permission to ingest. Desired
 watch installation itself never awaits. Actor/native ownership, discovery and catch-up remain next.
 
+Registry catch-up now has a cooperative read-only page provider over checked vault history, not
+a network handler. Its HMAC cursor freezes the provider's dependency-complete accepted-log prefix
+and advances by position, so appends and large head sets cannot force the same prefix forever.
+Every page freshly seals at most 32 operations / 512 KiB of framed bytes; byte-identical reloads
+preserve cursors, changed prefixes and provider restarts do not. Source seeds must already be
+verified by a conforming requester; missing removed-author history explicitly needs historical
+authorization rather than weakening live operation admission. Already emitted cursor history
+counts as claimed held dependencies. Requester claims and prefix completion prove no remote
+possession, finality or currency. The app binds provider state to the exact runtime/mount and
+validates bounded request/MAC/current membership before source I/O. Authenticated network request
+routing, aggregate source-read scheduling, receiver paging and checkpoint/head discovery remain.
+
 The naive "one group, every device commits, replay old ciphertext to latecomers" design
 is broken. The load-bearing fixes:
 

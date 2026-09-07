@@ -23,6 +23,7 @@ use crate::{
     Receipt, ReceiptBook, ReceiptIngest, ReplError, SealedOp, SignedOp, MAX_CHECKPOINT_BYTES,
 };
 
+pub mod catchup;
 mod settlement;
 pub use settlement::RegistrySettlementPlan;
 

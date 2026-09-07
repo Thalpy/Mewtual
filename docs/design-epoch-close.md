@@ -513,8 +513,9 @@ restart format stores the raw seed and signed operations, not a separate Automer
 rebuilds the DAG, validates typed changes and matches complete gate metadata and receipt phase.
 Receipt admission only closes editing and retains the full source. The store now attaches it to
 vault persistence/inventory for inbound edits and receipt seals, returning outcomes only after
-the save/flush barrier. Local edits now join intent preparation and registry persistence, while
-live publication/discovery remain unwired. The store installation transaction now saves recovery
+the save/flush barrier. Local edits now join intent preparation and registry persistence;
+cooperative gossip send/receive exists, but automatic orchestration/discovery remain unwired.
+The store installation transaction now saves recovery
 and receipt-covered intent retirement before atomically replacing the source. The core successor
 builder alone leaves the predecessor untouched and gives no authority to discard it.
 
@@ -524,6 +525,21 @@ are topologically ordered and dependency-complete relative to the heads plus eve
 delivered under the cursor; a reconstructed log bumps the generation and answers "restart".
 Catch-up serves seeds by change hash, closes, receipts and repairs by record hash, receipt
 heads by logical key, and operation pages by document id.
+
+Implemented registry page-serving prerequisite: a provider-local cursor freezes accepted-log
+count and a digest of that exact signed prefix plus seed. Appends beyond the prefix do not reset
+progress; an identical checked reload can continue, while prefix changes or a reminted provider
+key require restart. Original sorted heads (64 max) and the claimed verified seed repeat on every
+request and are MAC-bound with provider/requester and scope. Pages carry at most 32 operations /
+512 KiB of framed current-MLS ciphertext, with no empty nonterminal page. The Server adapter reads
+vault-authenticated history, checks membership/cursor bounds/MAC/expiry before source I/O and pins
+runtime/mount. Missing still-undelivered removed-author operations report that historical
+authorization is required; previously delivered cursor history need not block current-author
+descendants. No authority check on live ingestion is relaxed. This is not a network request kind,
+receiver paging driver or proof of remote currency. Network authentication/rate scheduling and
+receipt-head/seed/historical-authority discovery remain to be integrated; `INTERFACES.md` records
+the exact local contract. Rebuilds changing prefix bytes invalidate continuation, not arbitrary
+read-only reloads of byte-identical history.
 
 **Storage.** Preflight admission under one accounting lock before any inbound record or local
 commit. Never evictable: the open epoch, the current checkpoint and its predecessor until

@@ -400,6 +400,21 @@ table with the commit that closed it.
   quota, stale MLS, storage refusal or unknown watches require author retry or future catch-up.
   Past/future MLS reception, catch-up/discovery and actor/native lifecycle ownership remain unwired.
   Watches and rate debt are process-local, not restart-stable security policy or native lock leases.
+- **Registry page cursors are continuation claims, not remote possession or currency proofs.**
+  Cooperative page serving binds an ephemeral HMAC-SHA256 key to the exact provider/requester,
+  full group/logical/concrete scope, initial heads/seed, fixed accepted-log prefix and monotonic
+  ten-minute lifetime. App handles additionally pin physical mount and sync instance; bounded
+  request/MAC/current-member checks precede source I/O. Actual concrete-id matching follows the
+  checked bucket load. At most 32 operations / 512 KiB of framed ciphertext are emitted per page,
+  freshly sealed under current MLS without changing authorship. Already emitted positions and
+  initial heads count as claimed held dependencies. Missing removed-author history cannot be
+  laundered through a current provider; it reports that historical authorization is required.
+  No seed is implicitly installed, source mutated, intent retired or receipt issued. Completion
+  covers only the frozen prefix, not newer appends. Repeated valid requests can still consume
+  bounded but substantial source-rebuild work: no network handler is connected, and aggregate
+  admission/rates, authenticated requester binding, receiver pagination and checkpoint/head
+  discovery remain mandatory integration work. Debug hides scope/content/cursors; the random
+  provider secret is zeroized and never persisted or transmitted.
 - **One-shot publication limits application retries, not gossip lifetime.** `publish_once` waits
   for the driver's single attempt and bypasses Mewtual's legacy ciphertext retry queue. Production
   owns at most 16 compact 512-KiB payloads with 64-byte topics awaiting/entering this path, with

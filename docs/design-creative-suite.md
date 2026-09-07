@@ -734,17 +734,17 @@ replay keys, rank and host attribution.
 
 ## 7. Phases and prerequisites
 
-**Implementation roadmap (2026-09-05; backend status, not a feature-completion percentage).**
+**Implementation roadmap (2026-09-07; backend status, not a feature-completion percentage).**
 P1 is in progress. Tested building blocks are not yet a live shared Studio; the feature table
 below contains 25 creative slices with very different sizes, so counting commits or completed
 helpers would give a misleading percentage. The owner's frontend work proceeds separately.
 
 | Milestone | Current evidence | Still needed to close it |
 |---|---|---|
-| P1 protocol core | Implemented/tested: signed operations, closes, owner receipt/fault state, epoch gate, intent/recovery models | Connect persistence and transport; standalone models do not settle live documents |
-| P1 checkpoints and registry | Implemented/tested: deterministic seeds, isolated install/restart, typed bucket materialization and size preflight | Connect receipt-head discovery, catch-up and settlement |
-| P1 durable storage | Implemented/tested: recovery/owner receipt saves, local intent preparation with a vault-wide cap, peak-space accounting, bounded three-family inventory and unpublished-staging cleanup | Remaining managed-file types, sole coordinator, intent retirement and multi-record settlement/restart transaction |
-| P1 network and application integration | Not connected | Cursor catch-up, keyed head/seed/record fetch, lifecycle orchestration, actor/bridge events and end-to-end restart/partition tests |
+| P1 protocol core | Implemented/tested: signed operations, closes, owner receipt/fault state, epoch gate, intent/recovery models | Finish live orchestration and remaining repair/succession paths; standalone models do not settle live documents |
+| P1 checkpoints and registry | Implemented/tested: deterministic seeds, typed bucket materialization/preflight, recovery-first durable successor installation and restart | Receipt-head/seed discovery, receiver catch-up, settlement-wide capacity handling |
+| P1 durable storage | Implemented/tested: recovery/owner receipt saves, vault-wide intent cap, four-family inventory/cleanup, durable edits, included-only intent retirement and registry installation barriers | Sole coordinator, other managed document families, remaining recovery actions and full-capacity settlement integration |
+| P1 network and application integration | Cooperative saved-intent sender, opt-in gossip receiver and bounded cursor page serving from checked vault history | Authenticated page request routing, receiver paging, keyed head/seed/record fetch, aggregate scheduling, native lifecycle ownership, actor/bridge events and end-to-end restart/partition tests |
 | C0c immutable blob seam | Native `publish_pix` and `request_blob_bounded` wired through actor and sync; PIX1 validator, bounded cache/dedup/response checks and tests | Owner's frontend invocation, creative reference enumeration/retention, profile result and consented-avatar work; C0c as a whole is not complete |
 | Creative backend contracts | Stable document tags exist; Studio-specific materializers are not implemented | C0 publication/identity work, C3a/C5a domain operations, score/flipnote schemas and export paths |
 | Usable collaborative Studio | Not connected end to end | Shared save/load, publication, claims, settlement/recovery actions and export integrated with the owner's UI |
@@ -757,7 +757,7 @@ not claim that real shared saves, owner receipts or Restore operations happened.
 I/O still needs its codec/export contract tests; local UI readiness is not protocol readiness.
 
 **Next backend order:** expose independent save/fetch primitives first (C0c blob seam now available),
-then finish the P1 storage transaction and restart path; wire P1 discovery,
+then finish P1's remaining settlement/recovery integration and wire discovery,
 catch-up and application lifecycle; then connect typed Studio documents (C5a) and score/flipnote
 behavior (C5b-c/C6). Independent C0 codec, publication and identity slices can proceed alongside
 that work. UI implementation remains with the owner throughout.

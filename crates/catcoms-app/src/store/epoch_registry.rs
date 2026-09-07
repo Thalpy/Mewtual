@@ -56,6 +56,21 @@ impl std::fmt::Debug for EpochRegistryState {
 }
 
 impl EpochRegistryState {
+    /// Read-only page from the already authenticated/rebuilt unit. The Server adapter checks
+    /// runtime/mount binding and request authority before loading this potentially large file.
+    pub(crate) fn catchup_page(
+        &self,
+        provider: &mut catcoms_replication::registry_epoch::catchup::RegistryPageProvider,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        request: catcoms_replication::registry_epoch::catchup::RegistryPageRequest<'_>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<catcoms_replication::registry_epoch::catchup::RegistryPageOutcome, AppError> {
+        provider
+            .page(&self.unit, group, device, request, rng)
+            .map_err(invalid)
+    }
+
     /// Capture this id when preparing an edit; retries must keep it across rotations.
     pub fn doc_id(&self) -> u128 {
         self.unit.doc_id()
