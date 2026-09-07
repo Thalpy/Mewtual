@@ -8,6 +8,46 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 durable local registry publication preparation (2026-09-07).**
+  `ServerStore::edit_registry_epoch` connects the existing intent and registry adapters under one
+  exclusive store borrow: canonical/type/scope/current-author validation, intent save/flush,
+  then checked edit and epoch save/flush. No ciphertext returns before both barriers. A failure
+  after the first retains the intent for retry/recovery. Markers never retire intents.
+  The caller supplies one stable nonce/envelope per logical operation; retries reseal its exact
+  retained signed change, even after newer heads or a restart. They never reauthor another delta.
+  A retained id with different body rejects before journaling, including when the log arrived
+  through inbound ingest with no local ledger. Closing/Fault refuses new local edits and retries.
+
+  `RegistryEpoch::{validate_local_edit,edit_or_reseal}` provide those bounded typed/retry checks.
+  Snapshot comparison now uses the normalized restored state before/after mutation: refreshing
+  the current quota owner alone does not force an ordinary replacement copy at the content cap.
+  Actual saved bytes remain authenticated/accounted and are flushed, not silently rewritten.
+  There is no wire/persistence format change and no UI or network integration in this slice.
+
+  **Next:** recovery-first successor installation/settlement and intent retirement; receipt-head,
+  seed and held-history serving/discovery; the complete-budget coordinator; then actor/Studio
+  integration. Local publication is now prepared durably, but the future sender must recheck
+  session/server incarnation, membership, MLS epoch and Open immediately before sending. This
+  is not an automatic replay loop, an outbox or end-to-end P1 readiness.
+
+  Human/adversarial review target: `store/epoch_registry.rs`,
+  `store/epoch_registry/tests/local.rs`, and `registry_epoch.rs` local retry helpers. Try every
+  intent/epoch write and flush boundary, a restart with newer heads, a conflicting nonce without
+  a ledger, a stale intent budget, a closed epoch, removal of the author, and owner succession
+  at the content cap. Nine new regressions (seven store tests with failure matrices, two core
+  tests) pass. `cargo test -p catcoms-app registry_` (21 tests) and
+  `cargo test -p catcoms-replication registry_local` (2 tests) pass, as do the full
+  `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests), and
+  `npm.cmd --prefix apps/desktop test` (1109 tests) suites. `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` (Git Bash on Windows), and diff checks pass.
+  Adversarial design review identified retained-body conflict and owner-refresh cap cases;
+  both are implemented and regression-tested. Actual-diff and documentation reviews report no
+  remaining actionable findings. No UI/native source was changed, so visual validation and
+  frontend static/build checks were not run. Concurrent unrelated changes are excluded from this
+  slice and its commit.
+
 - **P1 durable registry ingress and sealing (2026-09-06).** `ServerStore` now has
   `load_registry_epoch`, `ingest_registry_epoch` and `seal_registry_epoch`, returning only
   detached read-only `EpochRegistryState`. They reload the checked raw seed/signed log/gate/book
@@ -24,7 +64,8 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   to seal and journal the owner decision when content is full. Unpublished registry attempts
   conservatively charge content and may require explicit cleanup before a fresh budget fits.
 
-  **Remaining:** local intent-to-edit publication and held-op resealing/serving; successor
+  **Remaining at this stage:** local publication preparation/resealing is now added above;
+  held-op serving and successor
   installation and recovery-first multi-record settlement; fault/tenure orchestration;
   receipt-head/seed discovery; the sole complete-budget coordinator and live ingress work/rate
   limits; actor/Studio consumers. Each saved mutation currently rebuilds a bounded graph, so this

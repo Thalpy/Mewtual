@@ -446,6 +446,8 @@ pub struct RegistryEpoch; // private EncryptedDoc + EpochGate + ReceiptBook + op
   new(&ServerGroup, bucket, actor:DeviceId) -> Result<Self>;
   from_checkpoint(&ServerGroup, bucket, actor, Receipt, expected_tenure_start, seed) -> Result<Self>;
   edit(&MlsDevice, &ServerGroup, rng, &DomainOp) -> Result<SealedOp>;
+  validate_local_edit(&MlsDevice, &ServerGroup, &DomainOp) -> Result<()>;
+  edit_or_reseal(&MlsDevice, &ServerGroup, rng, &DomainOp) -> Result<SealedOp>;
   ingest(&SealedOp, &ServerGroup, &MlsDevice) -> Result<Admission>;
   seal(Receipt, &ServerGroup, expected_tenure_start) -> Result<ReceiptIngest>; // retains full source
   doc_id(); epoch(); phase(); op_count(); quarantined_len(); projection(); // detached/read-only
@@ -1105,16 +1107,20 @@ unready after errors/panics, with no guessed refunds. The token does not track o
 their metadata/admission and the sole complete per-server budget remain coordinator work.
 `IntentLedger::document()` exposes its full scope for the enclosing store decoder's equality check.
 
-This is a persist-before-edit prerequisite, not live editing or automatic replay. Retirement must
-be implemented with checkpoint/recovery persistence; no store/actor/network path invokes it yet.
+This is a persist-before-edit prerequisite, not live editing or automatic replay. The registry
+adapter below now invokes it; retirement still requires checkpoint/recovery persistence and no
+actor/network path invokes these adapters yet.
 
-### Durable registry ingress and sealing (P1, not yet live-wired)
+### Durable registry edits, ingress and sealing (P1, not yet live-wired)
 
 `ServerStore` now exposes:
 
 ```rust
 load_registry_epoch(server, &ServerGroup, bucket:u8, &MlsDevice)
   -> Result<Option<EpochRegistryState>, AppError>;
+edit_registry_epoch(server, &ServerGroup, bucket, &MlsDevice, DomainOp, rng,
+                    &mut EpochStorageBudget, &mut EpochIntentBudget)
+  -> Result<(SealedOp, EpochRegistryState), AppError>;
 ingest_registry_epoch(server, &ServerGroup, bucket, &MlsDevice, &SealedOp, rng, &mut EpochStorageBudget)
   -> Result<(Admission, EpochRegistryState), AppError>;
 seal_registry_epoch(server, &ServerGroup, bucket, &MlsDevice, Receipt, tenure_start, rng, &mut EpochStorageBudget)
@@ -1130,11 +1136,29 @@ current owner/tenure and bucket verification before disk work; a normally absent
 without invalidating accounting, whereas loss of an inventoried source requires reconciliation.
 Sealing retains all source history; saved post-seal quarantine hashes are NOT accepted edits.
 
+Local editing uses two ordered barriers under the exclusive store borrow: validate the canonical
+registry operation and current local author, save/flush its intent, then reload, apply and save/flush
+the registry epoch. The nonce/envelope is supplied by the caller and MUST stay unchanged on retry.
+`validate_local_edit` checks scope, canonical body, actor/membership, Open/epoch ceiling and any
+retained-id conflict before journaling. It is not a storage or prospective projection permit.
+`edit_or_reseal` repeats those checks and either authors normally through the typed projection
+preflight or reseals the exact retained signed change, never reauthoring it against newer heads.
+Because ids omit the body, a retained id's full envelope is compared even if no local ledger exists.
+
+No ciphertext escapes until both records cross their barriers. A later failure keeps the already
+saved intent for retry/recovery; a marker never retires it. Closing/Fault refuses both new local edits
+and retries without adding intents. Restored intents must be replayed only by their original author;
+this API accepts new local operations, not a foreign author's replay authorization. It prepares
+ciphertext under the current MLS epoch but does not send it. The future sender must recheck session/
+server incarnation, membership, MLS epoch and that the retained document is still Open at send time.
+
 Public receipt fields and ciphertext are capped before encoding/decryption. Changed state uses
-an accounted atomic replacement; identical encoded state instead syncs the unchanged authenticated
-file and parent. Failed writes, flushes or unwinds grant no success and poison accounting until
-reconciliation. A loaded state alone grants no acknowledgement after an uncertain rename. The
-existing durability model remains file sync plus Unix-only parent sync.
+an accounted atomic replacement; identical pre/post mutation snapshots instead sync the unchanged
+authenticated file and parent. Both snapshots use the restored current owner: refreshing this
+derived quota owner alone needs no copy at the content cap. Actual old bytes remain accounted and
+flushed, and each restore derives the owner again. Failed writes, flushes or unwinds grant no
+success and poison accounting until reconciliation. A loaded state alone grants no acknowledgement
+after an uncertain rename. The existing durability model remains file sync plus Unix-only parent sync.
 
 Peer-writable history, seed and metadata charge ordinary content. Only exact receipt-book growth,
 the opening receipt and the optional gate receipt hash charge protocol allowance; an owner seal
@@ -1152,10 +1176,11 @@ regardless of their intended mutation; a receipt-copy orphan at the content ceil
 explicit cleanup before reconciliation. Unresolved ownership still blocks server composition.
 
 These APIs require the caller's sole complete server budget; inventory is not a continuing write
-lease. They do not implement local intent-to-edit publication/resealing, successor installation,
-recovery-first settlement/pruning, receipt-head discovery, live ingress scheduling or actor/Studio
-wiring. Each mutation currently rebuilds a bounded saved graph; apply planned rate/work limits
-before live transport integration.
+lease. They do not implement network publication/catch-up serving, successor installation,
+recovery-first settlement/pruning or intent retirement, receipt-head discovery, live ingress
+scheduling or actor/Studio wiring. Each mutation currently rebuilds a bounded saved graph (local
+editing also checks the source before journaling); apply planned rate/work limits before live
+transport integration.
 
 `get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
 the complete bounded `states` array. The webview accepts only a strictly newer revision for its

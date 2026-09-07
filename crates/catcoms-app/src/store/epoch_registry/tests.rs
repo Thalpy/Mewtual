@@ -5,6 +5,8 @@ use catcoms_wire::DocType;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod local;
+
 const SERVER: u64 = 73;
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(710)
@@ -222,7 +224,7 @@ fn registry_store_failed_write_and_post_rename_failure_require_reconciliation_an
             WritePurpose::Ordinary,
             &mut rng(),
             &mut budget,
-            |unit| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
+            |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
             |path, bytes| {
                 if committed {
                     atomic_write(path, bytes)?;
@@ -249,7 +251,7 @@ fn registry_store_failed_write_and_post_rename_failure_require_reconciliation_an
                 WritePurpose::Ordinary,
                 &mut rng(),
                 &mut budget,
-                |unit| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
+                |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
                 |path, bytes| {
                     assert!(!committed);
                     atomic_write(path, bytes)
@@ -292,7 +294,7 @@ fn registry_store_failed_duplicate_sync_or_writer_panic_cannot_acknowledge() {
             WritePurpose::Ordinary,
             &mut rng(),
             &mut budget,
-            |unit| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
+            |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
             |_, _| panic!("duplicate must not replace"),
             |_, _| Err(AppError::Io("injected sync failure".into()))
         )
@@ -311,7 +313,7 @@ fn registry_store_failed_duplicate_sync_or_writer_panic_cannot_acknowledge() {
             WritePurpose::Ordinary,
             &mut rng(),
             &mut budget,
-            |unit| unit.ingest(&next, &f.group, &f.device).map_err(invalid),
+            |unit, _| unit.ingest(&next, &f.group, &f.device).map_err(invalid),
             |_, _| panic!("injected writer panic"),
             sync_registry,
         )
@@ -720,7 +722,7 @@ fn registry_store_receipt_retry_after_failed_flush_and_removed_owner_inventory()
         WritePurpose::Settlement,
         &mut rng(),
         &mut budget,
-        |unit| unit.seal(receipt.clone(), &f.group, 0).map_err(invalid),
+        |unit, _| unit.seal(receipt.clone(), &f.group, 0).map_err(invalid),
         |path, bytes| {
             atomic_write(path, bytes)?;
             Err(AppError::Io("post-rename failure".into()))

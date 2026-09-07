@@ -15,8 +15,8 @@ use crate::epoch::{
     MAX_RECEIPT_BYTES, MAX_SIGNED_EPOCH_OP_BYTES,
 };
 use crate::registry::{
-    edit_registry, ingest_registry, preflight, registry_document, validate_registry_change,
-    RegistryProjection,
+    edit_registry, ingest_registry, preflight, registry_document, validate_domain,
+    validate_registry_change, RegistryProjection, MAX_REGISTRY_EPOCH,
 };
 use crate::{
     epoch_zero_id, Admission, DomainOp, EncryptedDoc, EpochGate, EpochPhase, LogicalDocument,
@@ -186,6 +186,80 @@ impl RegistryEpoch {
             rng,
             domain,
         )
+    }
+
+    /// Check canonical semantics, scope, local authority, lifecycle and retained-id conflicts
+    /// BEFORE journaling an intent. This is not the prospective projection/storage preflight;
+    /// those still run on edit. Failure here must not strand an irreconcilable durable intent.
+    pub fn validate_local_edit(
+        &self,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        domain: &DomainOp,
+    ) -> Result<(), ReplError> {
+        validate_domain(&self.logical, self.bucket, domain)?;
+        if group.group_id() != self.logical.server_id {
+            return Err(ReplError::EpochScope);
+        }
+        if device.device_id() != self.actor
+            || group.member_signature_key(&device.device_id()).as_deref()
+                != Some(device.public_key_bytes().as_slice())
+        {
+            return Err(ReplError::EpochAuthority);
+        }
+        if self.phase() != EpochPhase::Open {
+            return Err(ReplError::EpochClosed);
+        }
+        if self.epoch() >= MAX_REGISTRY_EPOCH {
+            return Err(ReplError::EpochBound);
+        }
+        self.held_local_operation(device, domain)?;
+        Ok(())
+    }
+
+    // This scan is bounded by the epoch log caps. Markers alone cannot identify the bytes to
+    // republish, and the id omits the body: compare the whole canonical envelope, not just its id.
+    fn held_local_operation(
+        &self,
+        device: &MlsDevice,
+        domain: &DomainOp,
+    ) -> Result<Option<&SignedOp>, ReplError> {
+        let author = device.device_id();
+        let id = domain.id(&author);
+        for op in self
+            .doc
+            .signed_log()
+            .iter()
+            .filter(|op| op.author_device == author)
+        {
+            let held = op.parsed_domain_op()?.ok_or(ReplError::Malformed)?;
+            if held.id(&author) == id {
+                if held != *domain {
+                    return Err(ReplError::IntentConflict);
+                }
+                return Ok(Some(op));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Apply a durably journaled intent or reseal its EXACT retained signed change on retry.
+    /// Never reauthor a saved operation against newer heads. Current membership and Open are
+    /// required even for a retry. This only prepares ciphertext: the caller must persist/flush
+    /// the whole unit before exposing it, and recheck session/group/epoch at actual network send.
+    pub fn edit_or_reseal(
+        &mut self,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        rng: &mut impl CryptoRngCore,
+        domain: &DomainOp,
+    ) -> Result<SealedOp, ReplError> {
+        self.validate_local_edit(device, group, domain)?;
+        self.refresh_owner(group)?;
+        if let Some(held) = self.held_local_operation(device, domain)? {
+            return SealedOp::seal(held, group, device, rng);
+        }
+        self.edit(device, group, rng, domain)
     }
 
     /// Authenticate, type-check and admit one network operation through the same epoch gate.
@@ -505,6 +579,82 @@ mod tests {
                 self.owner.device_id(),
             )
         }
+    }
+
+    #[test]
+    fn registry_local_retry_keeps_exact_signed_change_after_restart_and_new_heads() {
+        let mut f = Fixture::new();
+        let mut epoch = f.empty();
+        let first = f.domain(1);
+        epoch
+            .edit_or_reseal(&f.owner, &f.group, &mut f.rng, &first)
+            .unwrap();
+        let original = epoch.doc.signed_log()[0].clone();
+        f.edit(&mut epoch, 2);
+        let saved = epoch.snapshot().unwrap();
+        let mut epoch = f.restore(&saved).unwrap();
+        let retry = epoch
+            .edit_or_reseal(&f.owner, &f.group, &mut f.rng, &first)
+            .unwrap();
+        let key = f
+            .group
+            .channel_secret(&f.owner, DocType::DocRegistry, epoch.doc_id())
+            .unwrap();
+        assert_eq!(retry.open(&key).unwrap(), original);
+        assert_eq!(epoch.snapshot().unwrap(), saved);
+        assert_eq!(epoch.op_count(), 2);
+        // A marker is not evidence of equality: the id deliberately does not hash the body.
+        let mut conflicting = f.domain(2);
+        conflicting.nonce = first.nonce;
+        assert!(matches!(
+            epoch.validate_local_edit(&f.owner, &f.group, &conflicting),
+            Err(ReplError::IntentConflict)
+        ));
+        assert!(matches!(
+            epoch.edit_or_reseal(&f.owner, &f.group, &mut f.rng, &conflicting),
+            Err(ReplError::IntentConflict)
+        ));
+        assert_eq!(epoch.snapshot().unwrap(), saved);
+    }
+
+    #[test]
+    fn registry_local_retry_requires_current_author_actor_scope_and_open_gate() {
+        let mut f = Fixture::new();
+        let mut epoch = f.empty();
+        let domain = f.domain(1);
+        f.edit(&mut epoch, 1);
+        let next = MlsDevice::generate().unwrap();
+        let welcome = f
+            .group
+            .add_member(&f.owner, next.key_package().unwrap())
+            .unwrap()
+            .welcome;
+        let mut group = ServerGroup::join(&next, &welcome).unwrap();
+        assert!(
+            matches!(
+                epoch.edit_or_reseal(&next, &group, &mut f.rng, &domain),
+                Err(ReplError::EpochAuthority)
+            ),
+            "another admitted member cannot use this actor"
+        );
+        let wrong_group = ServerGroup::create(&f.owner).unwrap();
+        assert!(matches!(
+            epoch.validate_local_edit(&f.owner, &wrong_group, &domain),
+            Err(ReplError::EpochScope)
+        ));
+        epoch.seal(f.receipt(&epoch, 7), &f.group, 0).unwrap();
+        assert!(matches!(
+            epoch.edit_or_reseal(&f.owner, &f.group, &mut f.rng, &domain),
+            Err(ReplError::EpochClosed)
+        ));
+        group.remove_member(&next, &f.owner.device_id()).unwrap();
+        assert!(
+            matches!(
+                epoch.validate_local_edit(&f.owner, &group, &domain),
+                Err(ReplError::EpochAuthority)
+            ),
+            "a removed original author cannot retry"
+        );
     }
 
     #[test]

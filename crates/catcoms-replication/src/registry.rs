@@ -476,7 +476,7 @@ pub fn checkpoint_registry_close(
     Ok((materialized.checkpoint(close.hash())?, closure))
 }
 
-fn validate_domain(
+pub(crate) fn validate_domain(
     document: &LogicalDocument,
     bucket: u8,
     domain: &DomainOp,

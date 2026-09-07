@@ -9,8 +9,11 @@ transitions now also have a standalone vault-sealed store API with crash-safe re
 peak-space accounting, bounded recovery-file inventory discovery and explicit staging cleanup.
 Owner receipt decisions now have an accounted vault-backed prepare/completion adapter with exact
 crash retries. A combined bounded inventory/cleanup covers owner journals and recovery files;
-explicit intent-covering variants and vault-backed local intent preparation now add the third
-family. Publication, intent retirement, other managed-file families and production orchestration
+explicit intent-covering variants and vault-backed local intent preparation add the third family.
+Registry epochs add the fourth: inbound edits and owner seals persist, and local edits now save
+their intent before the epoch, returning publication-ready ciphertext only after both barriers.
+An exact retry reseals the original signed change under current membership, not a new delta.
+Network publication, intent retirement, other managed-file families and production orchestration
 are not wired yet. Studio
 materializers, settlement orchestration, sync discovery, complete storage integration and app/UI events
 remain later slices and the feature is not usable yet. Revision 4
@@ -426,9 +429,9 @@ restart format stores the raw seed and signed operations, not a separate Automer
 rebuilds the DAG, validates typed changes and matches complete gate metadata and receipt phase.
 Receipt admission only closes editing and retains the full source. The store now attaches it to
 vault persistence/inventory for inbound edits and receipt seals, returning outcomes only after
-the save/flush barrier. Live discovery, local intent-to-publication orchestration and the
-recovery-first settlement transaction remain unwired. Successor construction leaves the
-predecessor untouched and gives no authority to discard it.
+the save/flush barrier. Local edits now join intent preparation and registry persistence, while
+live publication/discovery and the recovery-first settlement transaction remain unwired. Successor
+construction leaves the predecessor untouched and gives no authority to discard it.
 
 **Catch-up.** Requests carry up to 64 heads and an opaque provider cursor bound by HMAC to
 `(provider, requester, doc type, doc id, log generation, position, expiry 10 minutes)`; pages
@@ -546,6 +549,17 @@ Unpublished registry attempts conservatively charge ordinary content (including 
 attempts), so an orphan at the content ceiling may require explicit cleanup before reconciliation.
 This is still not a sole all-family coordinator or live transport path; graph rebuild work needs
 the specified ingress scheduling/rate limits when integrated.
+
+Local `edit_registry_epoch` now performs canonical/scope/current-author and Open checks before
+journaling, including a full-envelope comparison against any retained operation with the same id.
+It then durably prepares the intent, reloads the epoch and either applies the edit or reseals its
+exact saved signed operation; only after the epoch save/flush does ciphertext return. Failure of
+the second record leaves a valid durable intent, never a published operation without recovery data.
+Exact retries sync both unchanged files without replacement copies, including when restoring has
+derived a new quota-exempt owner. No new persistence or wire version is required. Markers do not
+retire intents, Closing/Fault refuses publication preparation, and automatic cross-epoch replay
+remains part of recovery. Actual sending must recheck session, server incarnation, current
+membership/MLS epoch and the retained document's Open lifecycle; this API sends nothing itself.
 
 ## 13. Application events
 

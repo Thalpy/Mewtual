@@ -233,7 +233,7 @@ impl ServerStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_epoch_intent_with_io(
+    pub(super) fn prepare_epoch_intent_with_io(
         &mut self,
         server: u64,
         document: &LogicalDocument,
@@ -428,7 +428,7 @@ fn invalid(error: impl std::fmt::Display) -> AppError {
 // Re-sync only: no new ciphertext, nonce, staging file, or free-space requirement. Mounted-store
 // exclusion protects the authenticated file between read and flush; hostile concurrent local path
 // replacement is outside this guarantee. Keep regular-file checks at the actual open too.
-fn sync_intent(path: &Path, expected_bytes: u64) -> Result<(), AppError> {
+pub(super) fn sync_intent(path: &Path, expected_bytes: u64) -> Result<(), AppError> {
     let metadata = fs::symlink_metadata(path).map_err(|e| AppError::Io(e.to_string()))?;
     if !regular_file(&metadata) || metadata.len() != expected_bytes {
         return Err(invalid("retry file changed"));

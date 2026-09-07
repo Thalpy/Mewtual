@@ -255,7 +255,7 @@ table with the commit that closed it.
   Type-specific semantic validation remains the coordinator's job. There is no retirement API:
   neither a received operation nor its marker can delete a pending intent. New writes charge
   ordinary content and full replacement peak. A separate 64 MiB vault cap counts physical final
-  intent bytes and all temporaries, including unknown ownership; an explicit three-family scan
+  intent bytes and all temporaries, including unknown ownership; a scan covering all three families
   is required. Mount/generation provenance rejects cross-vault, stale and duplicated budget use
   after intent write/sync/cleanup attempts. Both budgets fail closed after uncertain I/O.
   Exact retries sync an authenticated unchanged final and parent without a replacement copy,
@@ -284,8 +284,19 @@ table with the commit that closed it.
   cleanup removes only unpublished attempts, conservatively content-charged. This is not yet a
   production all-family budget coordinator or live ingest path. Per-mutation graph reconstruction
   is bounded but still requires ingress scheduling/rate limits before transport integration.
-  Callers must still persist local intents before authoring/publication and excluded recovery
-  before source retirement. No production discovery, pruning, repair or multi-record settlement
+  Local registry editing now joins the intent and epoch adapters under the exclusive store borrow:
+  typed/current-author validation and full retained-id comparison precede intent persistence;
+  ciphertext returns only after both intent and epoch saves/flushes. An interrupted publication
+  retry reseals the exact signed change, not a new change against newer heads. Ids omit bodies,
+  so equality requires the entire canonical envelope even when no local ledger exists yet.
+  Post-restore/pre-mutation comparison ignores only normalization such as the current quota owner;
+  a retry at the content cap still flushes the authenticated original file rather than copying it.
+  A saved intent survives a later edit/save failure and is never retired by a marker. Closing/Fault
+  refuses local publication preparation, and an author removed from the roster cannot retry.
+  Returned ciphertext is not a permanent send permit: live transport must still recheck session,
+  server incarnation, membership, MLS epoch and Open at send. Automatic replay must use the intent's
+  original author. Callers must still persist excluded recovery before source retirement.
+  No production discovery, pruning, repair or multi-record settlement
   is wired. The existing file-sync/Unix-parent-sync durability and local-path threat boundary apply.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives

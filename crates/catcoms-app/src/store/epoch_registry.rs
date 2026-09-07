@@ -1,15 +1,16 @@
-//! Durable inbound registry epochs. Reload, gated mutation, accounting and atomic vault save
+//! Durable registry epochs. Reload, gated mutation, accounting and atomic vault save
 //! share one exclusive store borrow. No caller can replace a saved epoch with an arbitrary view.
-//! Local authoring, successor selection, recovery settlement and pruning are separate work.
+//! Local edits save intents before changes. Successor selection, settlement and pruning remain
+//! separate work; returned ciphertext is prepared for, not proof of, network publication.
 
 use std::io::Read;
 
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_replication::epoch::{MAX_RECEIPT_BYTES, MAX_SIGNED_EPOCH_OP_BYTES};
-use catcoms_replication::registry::{registry_document, RegistryProjection};
+use catcoms_replication::registry::{registry_document, RegistryOp, RegistryProjection};
 use catcoms_replication::registry_epoch::{RegistryEpoch, MAX_REGISTRY_EPOCH_SNAPSHOT_BYTES};
 use catcoms_replication::{
-    Admission, EpochPhase, LogicalDocument, Receipt, ReceiptIngest, SealedOp,
+    Admission, DomainOp, EpochPhase, LogicalDocument, Receipt, ReceiptIngest, SealedOp,
 };
 
 use super::epoch_budget::{
@@ -65,6 +66,120 @@ impl EpochRegistryState {
 }
 
 impl ServerStore {
+    /// Journal one canonical local intent, then save its checked registry edit before returning
+    /// ciphertext. Reuse the SAME nonce/envelope on retry; a held edit reseals the original signed
+    /// bytes, even after newer edits arrive. Both intent and epoch cross their durability barriers.
+    /// A failure after the first barrier deliberately retains the intent for later retry/recovery.
+    /// Closing/Fault refuses both new edits and retries. No intent retirement or network send is
+    /// performed; the sender must still recheck its session, group epoch and document lifecycle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_registry_epoch(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        operation: DomainOp,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+    ) -> Result<(SealedOp, EpochRegistryState), AppError> {
+        self.edit_registry_epoch_with_io(
+            server,
+            group,
+            bucket,
+            device,
+            operation,
+            rng,
+            budget,
+            intents,
+            atomic_write,
+            super::epoch_intents::sync_intent,
+            atomic_write,
+            sync_registry,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn edit_registry_epoch_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        operation: DomainOp,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+        intent_writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        intent_sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        epoch_writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        epoch_sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+    ) -> Result<(SealedOp, EpochRegistryState), AppError> {
+        let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        // Bound and authenticate the caller before rebuilding any saved graph or copying its
+        // operation into the intent ledger. RegistryOp decoding is capped at 1024 body bytes.
+        if operation.doc_type != document.doc_type
+            || operation.logical_key != document.logical_key
+            || RegistryOp::decode(&operation.body)
+                .map_err(invalid)?
+                .domain_op(&document.server_id, operation.nonce)
+                .map_err(invalid)?
+                != operation
+        {
+            return Err(invalid("invalid local registry operation"));
+        }
+        if group.member_signature_key(&device.device_id()).as_deref()
+            != Some(device.public_key_bytes().as_slice())
+        {
+            return Err(invalid("local registry author is not a current member"));
+        }
+        // Check before preparing an intent, including a conflicting id held via inbound ingest
+        // with NO local ledger yet. Otherwise we could durably strand the conflicting body.
+        let checked = match self.load_registry_epoch(server, group, bucket, device) {
+            Ok(Some(state)) => state.unit,
+            Ok(None) => RegistryEpoch::new(group, bucket, device.device_id()).map_err(invalid)?,
+            Err(error) => {
+                budget.invalidate();
+                return Err(error);
+            }
+        };
+        checked
+            .validate_local_edit(device, group, &operation)
+            .map_err(invalid)?;
+        drop(checked);
+        self.prepare_epoch_intent_with_io(
+            server,
+            &document,
+            operation.clone(),
+            device,
+            group,
+            rng,
+            budget,
+            intents,
+            intent_writer,
+            intent_sync,
+        )?;
+        // The exclusive store borrow spans both records. There is no accepted edit or outbound
+        // result between them. An uncertain second save never rolls back the already-safe intent.
+        self.update_registry_with_io(
+            server,
+            group,
+            bucket,
+            device,
+            true,
+            WritePurpose::Ordinary,
+            rng,
+            budget,
+            |unit, rng| {
+                unit.edit_or_reseal(device, group, rng, &operation)
+                    .map_err(invalid)
+            },
+            epoch_writer,
+            epoch_sync,
+        )
+    }
+
     /// Read the checked, vault-authenticated current registry bucket, preserving historical
     /// admission across owner changes. Only absent means None; corrupt state never resets.
     pub fn load_registry_epoch(
@@ -117,7 +232,7 @@ impl ServerStore {
             WritePurpose::Ordinary,
             rng,
             budget,
-            |unit| unit.ingest(sealed, group, device).map_err(invalid),
+            |unit, _| unit.ingest(sealed, group, device).map_err(invalid),
             atomic_write,
             sync_registry,
         )
@@ -161,7 +276,7 @@ impl ServerStore {
             WritePurpose::Settlement,
             rng,
             budget,
-            |unit| unit.seal(receipt, group, tenure_start).map_err(invalid),
+            |unit, _| unit.seal(receipt, group, tenure_start).map_err(invalid),
             atomic_write,
             sync_registry,
         )
@@ -171,7 +286,7 @@ impl ServerStore {
     // failed save returns no updated state/outcome; after uncertain rename, a retry reloads the
     // authentic final and must flush it again rather than mistake visibility for durability.
     #[allow(clippy::too_many_arguments)]
-    fn update_registry_with_io<T>(
+    fn update_registry_with_io<T, R: CryptoRngCore>(
         &mut self,
         server: u64,
         group: &ServerGroup,
@@ -179,9 +294,9 @@ impl ServerStore {
         device: &MlsDevice,
         allow_create: bool,
         purpose: WritePurpose,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut R,
         budget: &mut EpochStorageBudget,
-        apply: impl FnOnce(&mut RegistryEpoch) -> Result<T, AppError>,
+        apply: impl FnOnce(&mut RegistryEpoch, &mut R) -> Result<T, AppError>,
         writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
         sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
     ) -> Result<(T, EpochRegistryState), AppError> {
@@ -230,7 +345,12 @@ impl ServerStore {
         if held.is_none() && !allow_create {
             return Err(invalid("registry source is missing; fetch before sealing"));
         }
-        let outcome = apply(&mut unit)?;
+        // Restore refreshes the quota-exempt owner from the current group. Compare mutation
+        // against that normalized baseline, not old disk bytes, so a harmless owner refresh
+        // does not require a replacement copy at the content cap. The actual old bytes still
+        // cross a flush barrier, and every subsequent restore derives the owner again.
+        let before = Zeroizing::new(unit.snapshot().map_err(invalid)?);
+        let outcome = apply(&mut unit, rng)?;
         let snapshot = Zeroizing::new(unit.snapshot().map_err(invalid)?);
         let mut e = Encoder::new();
         e.put_bytes(&scope).map_err(invalid)?;
@@ -238,10 +358,7 @@ impl ServerStore {
         e.put_bytes(&snapshot).map_err(invalid)?;
         let plain = Zeroizing::new(e.finish());
         let path = self.registry_epoch_path(&scope);
-        if held
-            .as_ref()
-            .is_some_and(|old| old.plain.as_slice() == plain.as_slice())
-        {
+        if held.is_some() && before.as_slice() == snapshot.as_slice() {
             let record = observed.ok_or_else(|| invalid("unchanged record is absent"))?;
             let reservation = budget
                 .reserve_sync(&storage_scope, record)
