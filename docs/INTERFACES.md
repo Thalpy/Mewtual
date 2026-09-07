@@ -453,6 +453,7 @@ pub struct RegistryEpoch; // private EncryptedDoc + EpochGate + ReceiptBook + op
   // Separately constructs seed-backed successor preserving the receipt book; source untouched.
   edit(&MlsDevice, &ServerGroup, rng, &DomainOp) -> Result<SealedOp>;
   validate_local_edit(&MlsDevice, &ServerGroup, &DomainOp) -> Result<()>;
+  retains_local_operation(&MlsDevice, &ServerGroup, &DomainOp) -> Result<bool>; // exact signed log, not marker
   edit_or_reseal(&MlsDevice, &ServerGroup, rng, &DomainOp) -> Result<SealedOp>;
   ingest(&SealedOp, &ServerGroup, &MlsDevice) -> Result<Admission>;
   seal(Receipt, &ServerGroup, expected_tenure_start) -> Result<ReceiptIngest>; // retains full source
@@ -1149,6 +1150,9 @@ install_registry_checkpoint(server, &ServerGroup, bucket, &MlsDevice, receipt_by
                             tenure_start, &dyn Clock, rng, &mut EpochStorageBudget,
                             &mut EpochIntentBudget)
   -> Result<(RegistryInstallOutcome, EpochRegistryState), AppError>;
+replay_registry_intent(server, &ServerGroup, bucket, expected_doc_id:u128, &MlsDevice,
+                       intent_id:[u8;32], rng, &mut EpochStorageBudget, &mut EpochIntentBudget)
+  -> Result<(RegistryReplayOutcome, EpochRegistryState), AppError>;
 ```
 
 `EpochRegistryState` exposes only `doc_id`, `epoch`, `phase`, `op_count`, `quarantined_len` and a detached
@@ -1247,6 +1251,30 @@ this API accepts new local operations, not a foreign author's replay authorizati
 ciphertext under the current MLS epoch but does not send it. The future sender must recheck session/
 server incarnation, membership, MLS epoch and that the retained document is still Open at send time.
 
+`replay_registry_intent` performs one bounded replay step from the saved ledger, without accepting
+a body/nonce from its caller. The original author must equal the actual device, still a current
+member. Unknown ids, missing/stale concrete epochs, Closing/Fault, malformed slots and mismatched
+inventories refuse without new intents or outbound ciphertext. Both server and vault-intent
+inventories are checked, including freshness, before the decision; every retained/staged recovery
+slot is type-checked/accounted even for an exact retry. Prepared uses the normal two-barrier edit
+path, preserving the saved envelope and returning ciphertext only after intent/epoch durability.
+
+`RegistryReplayOutcome` is `Prepared(SealedOp)` or `Held(RegistryReplayHold)`; Debug redacts the
+ciphertext/content. New authoring is held with `DeletedPointer` on current or retained/staged
+tombstones, or `SupersededPointer` when a current admitted/overflow hint exceeds the saved Put's
+epoch. Deletion takes precedence. Held retains the intent and source bytes, is not an ack or
+finality/durability claim for that intent, and must not be immediately auto-looped. Registry keys
+are stable and intents lack origin epochs: a deliberate later re-put can conservatively need
+manual recovery. Missing deletion evidence after two-slot eviction is best-effort, not proof a key
+was never deleted. No saved envelope is silently rewritten to "catch up" its hint.
+
+An exact authenticated CURRENT signed-log match (full author/envelope, never just a marker)
+instead reseals the original change unchanged, even after deletion or a higher hint. It cannot
+overwrite newer state and is required to retry a Tombstone after a failed post-rename flush.
+Scope, membership, Open, all recovery validation and both durability barriers still apply.
+This one-step API neither schedules/sends replay nor retires intents, repairs forks or implements
+Restore; those remain separate actor/transport/recovery work.
+
 Public receipt fields and ciphertext are capped before encoding/decryption. Changed state uses
 an accounted atomic replacement; identical pre/post mutation snapshots instead sync the unchanged
 authenticated file and parent. Both snapshots use the restored current owner: refreshing this
@@ -1271,8 +1299,8 @@ regardless of their intended mutation; a receipt-copy orphan at the content ceil
 explicit cleanup before reconciliation. Unresolved ownership still blocks server composition.
 
 These APIs require the caller's sole complete server budget; inventory is not a continuing write
-lease. They do not implement network publication/catch-up serving, successor installation,
-recovery-first settlement/pruning or intent retirement, receipt-head discovery, live ingress
+lease. Checked installation/retirement and single-intent replay are implemented at the store layer.
+They do not implement network publication/catch-up serving, receipt-head discovery, live replay/ingress
 scheduling or actor/Studio wiring. Each mutation currently rebuilds a bounded saved graph (local
 editing also checks the source before journaling); apply planned rate/work limits before live
 transport integration.

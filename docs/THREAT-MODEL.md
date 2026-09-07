@@ -332,6 +332,21 @@ table with the commit that closed it.
   Conservative per-record content reserves and physical intent replacement headroom can still
   refuse at full quota. No live actor/discovery, repair or automatic replay is wired. The existing
   file-sync/Unix-parent-sync durability and local-path threat boundary apply.
+- **Registry replay preserves original authorship and exact retry identity.** The store's single-step
+  replay accepts only a saved intent id plus a captured concrete epoch, never a supplied body or
+  author. It verifies the actual current member is the saved author, the existing epoch is Open,
+  both inventories match (including intent freshness), and every retained/staged recovery slot
+  is typed and accounted. New authoring is held on current/recovered tombstones or a higher
+  admitted/overflow pointer hint; holds retain the intent and are not delivery/finality acks.
+  A full-envelope authenticated CURRENT-log match can reseal unchanged despite newer evidence,
+  preserving post-rename Tombstone retries without reapplying effects. Markers and same-id/different
+  bodies cannot invoke that exception. Both vault barriers still precede returned ciphertext.
+  Stable keys and missing intent-origin epochs make holds deliberately conservative, including
+  some legitimate later re-puts. Once two-slot recovery eviction forgets a deletion, its absence
+  is not proof the key was never deleted; this protection is explicitly best-effort. The seam
+  sends nothing, retires nothing, and does not implement a worker, live actor/transport checks or
+  Restore. Its result Debug omits ciphertext/content. Per-call ledger/log/recovery work is bounded
+  but repeated use still needs live scheduling/rate limits.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
   no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains

@@ -46,7 +46,9 @@ pub use epoch_recovery::inventory::{
     EpochStorageScanProgress, EpochStorageScanProgress as RecoveryScanProgress,
 };
 pub use epoch_recovery::{EpochRecoveryAction, EpochRecoveryState, EpochRecoveryUpdate};
-pub use epoch_registry::{EpochRegistryState, RegistryInstallOutcome};
+pub use epoch_registry::{
+    EpochRegistryState, RegistryInstallOutcome, RegistryReplayHold, RegistryReplayOutcome,
+};
 pub mod epoch_budget;
 
 /// One persisted server in the registry: enough to relist it in the UI and reload its

@@ -8,6 +8,7 @@ use rand_core::SeedableRng;
 mod installation;
 mod local;
 mod recovery;
+mod replay;
 mod settlement;
 
 const SERVER: u64 = 73;

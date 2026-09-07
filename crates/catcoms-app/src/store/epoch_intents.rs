@@ -204,6 +204,43 @@ impl ServerStore {
             .map(|(state, _)| state)
     }
 
+    /// Read one saved envelope with BOTH inventories checked before a replay decision. This is
+    /// not a write/flush permit and never creates missing data. The replay coordinator checks the
+    /// original author and typed semantics, then uses the normal two-barrier edit path.
+    pub(super) fn checked_epoch_replay_intent(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+        intent_id: &[u8; 32],
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+    ) -> Result<LocalIntent, AppError> {
+        let scope = scope_bytes(server, document)?;
+        let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
+        let (state, old) = match self.read_epoch_intent_record(&scope, document) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                budget.invalidate();
+                intents.ready = false;
+                return Err(error);
+            }
+        };
+        let id = *blake3::hash(&scope).as_bytes();
+        let observed = old
+            .map(|n| storage_record(server, document, &scope, n))
+            .transpose()?;
+        if let Err(error) = budget.verify_record(&storage_scope, id, observed) {
+            intents.ready = false;
+            return Err(invalid(error));
+        }
+        intents.preflight(&self.intent_generation, id, old, old.unwrap_or(0), true)?;
+        let found = state
+            .pending()
+            .find(|(id, _)| *id == intent_id)
+            .map(|(_, intent)| intent.clone());
+        found.ok_or_else(|| invalid("saved replay intent is missing"))
+    }
+
     /// Save one local intent before applying or gossiping the edit. The actual local MLS device,
     /// not a payload identity, supplies its author; it must still belong to the document's group.
     /// Type-specific semantic validation must run before calling this envelope-storage adapter.

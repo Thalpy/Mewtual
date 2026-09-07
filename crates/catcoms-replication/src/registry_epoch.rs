@@ -246,6 +246,20 @@ impl RegistryEpoch {
         Ok(None)
     }
 
+    /// Whether this Open unit retains the exact authenticated local change, not merely a marker.
+    /// Replay may reseal such a change without reapplying its effect over newer state. Scope,
+    /// membership, lifecycle and full-envelope equality are checked just as for local editing;
+    /// the result is not proof of disk durability or a continuing network-send permit.
+    pub fn retains_local_operation(
+        &self,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        domain: &DomainOp,
+    ) -> Result<bool, ReplError> {
+        self.validate_local_edit(device, group, domain)?;
+        Ok(self.held_local_operation(device, domain)?.is_some())
+    }
+
     /// Apply a durably journaled intent or reseal its EXACT retained signed change on retry.
     /// Never reauthor a saved operation against newer heads. Current membership and Open are
     /// required even for a retry. This only prepares ciphertext: the caller must persist/flush
@@ -593,6 +607,53 @@ mod tests {
                 self.owner.device_id(),
             )
         }
+    }
+
+    #[test]
+    fn registry_replay_presence_requires_full_signed_envelope_not_marker() {
+        use automerge::transaction::Transactable;
+        let mut f = Fixture::new();
+        let mut epoch = f.empty();
+        let first = f.domain(1);
+        assert!(!epoch
+            .retains_local_operation(&f.owner, &f.group, &first)
+            .unwrap());
+        // Deliberately bypass the checked RegistryEpoch restart constructor to test that even
+        // a forged marker in a legacy generic document is not treated as retained signed work.
+        let mut graph = epoch.doc.doc().clone();
+        let id: String = first
+            .id(&f.owner.device_id())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        graph
+            .put(automerge::ROOT, format!("_p1/op/{id}"), 1u64)
+            .unwrap();
+        let mut e = Encoder::new();
+        e.put_u16(DocType::DocRegistry.tag());
+        e.put_u128(epoch.doc_id());
+        e.put_bytes(&graph.save()).unwrap();
+        e.put_u32(0); // no authenticated log
+        epoch.doc = EncryptedDoc::restore_for_actor(&e.finish(), &f.owner.device_id()).unwrap();
+        assert!(!epoch
+            .retains_local_operation(&f.owner, &f.group, &first)
+            .unwrap());
+        let mut epoch = f.empty();
+        f.edit(&mut epoch, 1);
+        assert!(epoch
+            .retains_local_operation(&f.owner, &f.group, &first)
+            .unwrap());
+        let mut different = f.domain(2);
+        different.nonce = first.nonce;
+        assert!(matches!(
+            epoch.retains_local_operation(&f.owner, &f.group, &different),
+            Err(ReplError::IntentConflict)
+        ));
+        epoch.seal(f.receipt(&epoch, 7), &f.group, 0).unwrap();
+        assert!(matches!(
+            epoch.retains_local_operation(&f.owner, &f.group, &first),
+            Err(ReplError::EpochClosed)
+        ));
     }
 
     #[test]

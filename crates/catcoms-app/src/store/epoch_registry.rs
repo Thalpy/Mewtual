@@ -32,7 +32,9 @@ const MAX_INBOUND_CIPHERTEXT: usize = MAX_SIGNED_EPOCH_OP_BYTES + 4 + 16;
 
 mod installation;
 mod recovery;
+mod replay;
 pub use installation::RegistryInstallOutcome;
+pub use replay::{RegistryReplayHold, RegistryReplayOutcome};
 
 /// Detached read-only persisted state. Debug deliberately excludes registry keys and content.
 pub struct EpochRegistryState {

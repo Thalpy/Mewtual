@@ -35,8 +35,13 @@ receipt book do. Exact retries flush the actual successor without replacing newe
 Save requests carry a concrete epoch id so retired intents cannot silently reappear on retry.
 Delayed opening-receipt conflicts fault even a successor already sealed by a newer receipt,
 preserving both accepted content and high-water evidence. This is a tested backend adapter,
-not live actor/transport orchestration. Automatic replay, settlement-wide capacity headroom and
-discovery remain to be integrated; no universal progress at full quota is claimed yet.
+not live actor/transport orchestration. A bounded replay step now selects a saved intent by id,
+checks its actual local author/current Open epoch and all typed recovery evidence, then uses the
+existing durability path. New authoring is held on deletion or a superseding pointer hint; an
+exact current-log retry reseals unchanged so failed-flush deletions remain retryable. Holds never
+retire intents. Deletion screening is conservative for stable keys and best-effort after bounded
+recovery eviction. Replay scheduling/publication, settlement-wide capacity headroom and discovery
+remain to be integrated; no universal progress at full quota is claimed yet.
 
 The naive "one group, every device commits, replay old ciphertext to latecomers" design
 is broken. The load-bearing fixes:

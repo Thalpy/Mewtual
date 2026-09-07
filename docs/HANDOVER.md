@@ -8,6 +8,47 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 author-owned registry replay step (2026-09-07).** `replay_registry_intent` now takes a
+  saved intent id and captured concrete epoch id, never a replacement body/nonce. It requires
+  the actual current member to be the original author, checks both budgets and the saved Open
+  epoch, and validates/account-checks every retained/staged typed recovery slot. It reuses the
+  existing intent-then-epoch durability barriers before returning prepared ciphertext.
+
+  New authoring is held on current/recovered pointer deletion or a higher current admitted/overflow
+  hint, preserving the saved intent. Stable registry keys lack intent-origin epochs, so this is
+  deliberately conservative; two-snapshot eviction also makes absent deletion evidence best-effort,
+  not permanent protection. Exact authenticated current-log matches instead reseal the original
+  change without changing newer state, including a Tombstone saved before a failed flush. A marker
+  or same id with different body never earns that exception. No new wire/persistence format.
+
+  **Next:** bounded replay scheduling/publication, settlement-wide capacity handling, receipt-head/
+  seed discovery and live actor/Studio integration. This is one bounded store step, not automatic
+  live replay. Held edits need later explicit recovery UX; they are not deleted or marked final.
+  UI remains user-owned. Concurrent frontend/release/networking changes are excluded from this slice.
+
+  Focused verification: one core and eight store replay tests pass, including real rotation,
+  staged/retained tombstones, marker spoofing, foreign author, stale epoch, current-log retries,
+  superseded admitted/overflow hints, malformed recovery, all-family accounting and failed
+  writes/flushes/unwinds. Read-only adversarial review found no blocker/high/medium; its flush-test
+  gap and overbroad heading are fixed. Verification passed:
+
+  - `cargo check -p catcoms-app`
+  - `cargo test -p catcoms-replication registry_replay -- --nocapture` and
+    `cargo test -p catcoms-app registry_replay -- --nocapture`; the final flush matrix also passed
+    its focused run and the full root suite.
+  - `cargo test --all --all-features` (existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests)
+  - `npm.cmd --prefix apps/desktop test` (1,135 tests)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings` (final rerun passed after an
+    unrelated concurrent sync lint issue was corrected; this slice did not edit that code)
+  - `cargo clippy -p catcoms-app -p catcoms-replication --all-targets --all-features --no-deps -- -D warnings`
+  - `bash scripts/check-no-ambient.sh` and `git diff --check`
+
+  These runs include the working tree's concurrent changes, not an adversarial review of them.
+  Frontend static/build/visual checks were not run for this backend-only slice; no UI or bridge
+  source changed here.
+
 - **P1 registry checkpoint installation (2026-09-07).** The store can now select a checked
   successor under one exclusive borrow: flush the full Closing source, durably save typed recovery,
   hold any pending eviction warning, durably retire only full-envelope-matching receipt-covered

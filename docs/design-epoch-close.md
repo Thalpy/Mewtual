@@ -13,8 +13,10 @@ explicit intent-covering variants and vault-backed local intent preparation add 
 Registry epochs add the fourth: inbound edits and owner seals persist, and local edits now save
 their intent before the epoch, returning publication-ready ciphertext only after both barriers.
 An exact retry reseals the original signed change under current membership, not a new delta.
-Network publication, intent retirement, other managed-file families and production orchestration
-are not wired yet. Studio
+Registry installation now saves recovery and receipt-covered intent retirement before atomic
+successor selection. One saved author-owned intent can be replayed through a checked bounded
+store step; network publication, background replay, other managed-file families and production
+orchestration are not wired yet. Studio
 materializers, settlement orchestration, sync discovery, complete storage integration and app/UI events
 remain later slices and the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
@@ -296,6 +298,20 @@ marker commit atomically and the whole change is charged to the epoch. A root ke
 concurrent-create race of a lazily-created shared map, and every domain materializer ignores this
 reserved prefix. Replay into an `Open` epoch is idempotent by the marker keys; replay into a
 checkpoint consults recovery snapshots for tombstones and applies otherwise.
+The registry's stable keys need a narrower rule than Studio's random element ids: its store
+replay step HOLDS, never deletes, a saved intent when new authoring targets current/retained/staged
+deletion evidence or would replace a higher current admitted/overflow pointer hint. It accepts
+only the saved id and an explicitly captured existing Open epoch, requires the original current
+local author, and never rewrites the nonce/envelope. Because origin epochs are not recorded in
+the ledger, even a deliberate later re-put can conservatively need explicit recovery. After
+two-snapshot eviction, absent deletion evidence is only best-effort protection.
+
+An exact authenticated CURRENT-log operation instead reseals its original signed bytes, without
+changing materialization, even if deletion/newer hints arrived afterward. This exception requires
+full-envelope equality, not a marker, and keeps a Tombstone's failed post-rename flush retryable.
+All recovery validation, scope/current-author checks and both vault barriers still apply. The
+single-step API returns prepared ciphertext or a held reason; it neither schedules/sends replay
+nor retires held intents. Live replay scheduling and explicit recovery actions remain later work.
 Caps: 64 KiB per intent, 10,000 intents and 4 MiB per logical document, 64 MiB per vault,
 20,000 markers per epoch (one for each operation admitted by the epoch maximum).
 
@@ -469,8 +485,9 @@ rebuilds the DAG, validates typed changes and matches complete gate metadata and
 Receipt admission only closes editing and retains the full source. The store now attaches it to
 vault persistence/inventory for inbound edits and receipt seals, returning outcomes only after
 the save/flush barrier. Local edits now join intent preparation and registry persistence, while
-live publication/discovery and the recovery-first settlement transaction remain unwired. Successor
-construction leaves the predecessor untouched and gives no authority to discard it.
+live publication/discovery remain unwired. The store installation transaction now saves recovery
+and receipt-covered intent retirement before atomically replacing the source. The core successor
+builder alone leaves the predecessor untouched and gives no authority to discard it.
 
 **Catch-up.** Requests carry up to 64 heads and an opaque provider cursor bound by HMAC to
 `(provider, requester, doc type, doc id, log generation, position, expiry 10 minutes)`; pages
@@ -576,7 +593,8 @@ cleanup attempts; failures require fresh inventory reconciliation. Per-document 
 4 MiB canonical-operation limits still come from the core ledger. Global intent metadata also has
 the scanner's 65,536-record rail. This does not admit other managed families' metadata: the sole
 coordinator still must compose all storage types, validate domain semantics before preparation,
-replay only as the original author, and retire intents atomically with checkpoint/recovery state.
+replay only as the original author, and enforce the ordered source/recovery/retirement/selection
+barriers in section 7; registry store adapters now do so, but live orchestration remains unwired.
 
 The explicit `scan_epoch_storage_with_registry` and `cleanup_epoch_storage_staging_with_registry`
 now include the fourth implemented family, scope-bound vault `.registry-epoch` records. Inventory
