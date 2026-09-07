@@ -22,6 +22,9 @@ use crate::{
     LogicalDocument, ReplError, SealedOp, VerifiedCheckpoint, VerifiedReceipt,
 };
 
+mod recovery;
+pub use recovery::RegistryRecovery;
+
 /// Live pointer slots in one of the server's 256 buckets.
 pub const MAX_REGISTRY_POINTERS: usize = 2048;
 /// Rotation warning threshold, leaving room for migration before the hard ceiling.

@@ -438,6 +438,9 @@ pub struct PointerKey;        // type + bounded logical key; deterministic bucke
 pub enum RegistryOp { Put { key:PointerKey, epoch:u64 }, Tombstone { key:PointerKey } }
 pub struct RegistryProjection; // admitted pointers, explicit overflow and tombstones
   read(...); checkpoint(close_hash); verify_checkpoint(&VerifiedReceipt, bucket, raw_bytes);
+pub struct RegistryRecovery; // typed, local-only recovery; content-redacted Debug
+  from_snapshot(&RecoverySnapshot, &LogicalDocument, bucket) -> Result<Self>;
+  projection(); receipt_hash(); excluded_operations(); // historical evidence, not replay permission
 registry_document(server_id, bucket) -> Result<LogicalDocument>;
 edit_registry(..., &DomainOp) -> Result<SealedOp>; ingest_registry(...) -> Result<Admission>;
 checkpoint_registry_close(...) -> Result<(CheckpointSeed, ClosureStats)>; // verified named closure, source untouched
@@ -463,6 +466,8 @@ pub struct RegistrySettlementPlan; // private, computation-only, content-redacte
   receipt(); checkpoint(); source_projection(); // immutable references
   included_operation_ids(); excluded_operations(); // author-derived ids; no replay authority
   source_version() -> [u8;32]; matches_source(&mut RegistryEpoch) -> Result<bool>;
+  source_base_close() -> Option<[u8;32]>; // close that opened the source, not its successor
+  recovery_snapshot() -> Result<Option<RecoverySnapshot>>; // bounded, not persisted
 ```
 
 ---
@@ -1132,6 +1137,9 @@ seal_registry_epoch(server, &ServerGroup, bucket, &MlsDevice, Receipt, tenure_st
   -> Result<(ReceiptIngest, EpochRegistryState), AppError>;
 plan_registry_settlement(server, &ServerGroup, bucket, &MlsDevice, close_bytes, tenure_start)
   -> Result<RegistrySettlementPlan, AppError>;
+stage_registry_recovery(server, &ServerGroup, bucket, &MlsDevice, close_bytes, tenure_start,
+                        &dyn Clock, rng, &mut EpochStorageBudget)
+  -> Result<Option<EpochRecoveryUpdate>, AppError>;
 ```
 
 `EpochRegistryState` exposes only `epoch`, `phase`, `op_count`, `quarantined_len` and a detached
@@ -1160,6 +1168,30 @@ must reload/revalidate authority and the source version under the document gate,
 persist typed recovery, then install. A plan does not guarantee the eventual recovery encoding
 fits its byte cap/reservation. This API does not replace a source, write recovery, retire intents,
 or finish settlement; the source remains Closing and fully retained.
+
+`stage_registry_recovery` takes no stale plan: it reloads and verifies the source's exact accounting
+record, recomputes the plan, then validates every existing registry recovery slot before a nonempty
+save through the
+accounted recovery adapter. It holds the exclusive store borrow throughout, with no await or source
+mutation. None means no excluded operations, overflow or tombstones need a new snapshot; it is not
+an installation permit or a health check of old recovery files, which that path does not load.
+Some returns the saved slots/warning only after durable replacement.
+`EvictionPending` still holds future installation in Closing. Exact retries preserve snapshot ids
+and the warning deadline even if late packets added quarantine hashes. Failed I/O poisons accounting
+and grants no success; the source remains intact. A content-full first/second snapshot may still
+refuse, without crediting future source deletion. Settlement-wide reservation/installation is later.
+
+Registry recovery has a versioned typed payload inside the unchanged generic `RecoverySnapshot` v1.
+It carries the full source pointers, overflow and pointer-key tombstones, selected receipt hash,
+and excluded author-bound domain operations; `applied_ops` is the sorted source-operation id union.
+The outer base-close is the close that opened the source (None at epoch zero). Generic collection
+metadata arrays are empty: registry keys are not Studio random element ids. Snapshot identity omits
+the ephemeral whole-source fingerprint, quarantine and quota-owner metadata. The exact aggregate
+6-MiB cap is checked before payload allocation/persistence; decoding validates the full wrapper,
+scope, canonical ordering, disjoint key sets, bounds and excluded-id membership in `applied_ops`.
+`RecoverySnapshot` Debug now redacts content even when nested in a generic Option/Result. These are
+vault-local records, not independently signed replay requests; pointer verification and Restore,
+repair/rewind-specific typed records, intent retirement, actor/bridge and installation remain unwired.
 
 Local editing uses two ordered barriers under the exclusive store borrow: validate the canonical
 registry operation and current local author, save/flush its intent, then reload, apply and save/flush

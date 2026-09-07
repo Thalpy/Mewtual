@@ -302,9 +302,10 @@ impl ServerStore {
         )
     }
 
-    // Private writer injection exercises the same admission/commit order with exact disk failures.
+    // Store-internal writer seam shared by typed registry staging; it exercises the same
+    // admission/commit order with exact disk failures. No public caller can inject a writer.
     #[allow(clippy::too_many_arguments)]
-    fn update_epoch_recovery_accounted_with_writer(
+    pub(super) fn update_epoch_recovery_accounted_with_writer(
         &mut self,
         server: u64,
         document: &LogicalDocument,

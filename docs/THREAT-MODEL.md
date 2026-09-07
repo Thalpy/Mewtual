@@ -304,6 +304,17 @@ table with the commit that closed it.
   metadata and grants no installation/prune authority: a future transaction must recheck source
   and authority under the gate and persist bounded typed recovery first. Recovery capacity is
   not implied by a successful plan, and stale-owner receipts fail preparation after succession.
+  The typed registry staging adapter now recomputes that plan under exclusive store access,
+  verifies the actual source footprint and (before a nonempty save) every existing typed recovery
+  slot, and uses accounted
+  durable recovery persistence. It never accepts a caller's stale plan or replaces the source.
+  Recovery contains full pointer keys/tombstones/overflow and excluded author-attributed operations;
+  decoding checks the generic wrapper too, but trusts authenticated local provenance rather than
+  re-verifying discarded signatures. Snapshot ids exclude quarantine/owner-normalization metadata,
+  so late traffic cannot churn slots or reset warning deadlines. Snapshot Debug is content-redacted.
+  A successful stage still grants no installation/prune/replay permission; storage refusal or a
+  pending third-slot warning leaves Closing history intact. This does not implement Restore,
+  repair/rewind-specific typed recovery, automatic intent replay or settlement-wide reservation.
   No production discovery, pruning, repair or multi-record settlement
   is wired. The existing file-sync/Unix-parent-sync durability and local-path threat boundary apply.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be

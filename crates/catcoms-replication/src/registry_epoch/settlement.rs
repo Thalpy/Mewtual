@@ -19,6 +19,7 @@ pub struct RegistrySettlementPlan {
     source_projection: RegistryProjection,
     included: BTreeSet<[u8; 32]>,
     excluded: BTreeMap<[u8; 32], LocalIntent>,
+    source_base_close: Option<[u8; 32]>,
 }
 
 impl std::fmt::Debug for RegistrySettlementPlan {
@@ -32,6 +33,17 @@ impl std::fmt::Debug for RegistrySettlementPlan {
 }
 
 impl RegistrySettlementPlan {
+    /// Close which opened the SOURCE epoch, not the close selecting its successor.
+    pub fn source_base_close(&self) -> Option<[u8; 32]> {
+        self.source_base_close
+    }
+
+    /// Build bounded typed recovery evidence. None means no excluded operations, overflow or
+    /// tombstones need retention. This is not persistence or permission to install/prune.
+    pub fn recovery_snapshot(&self) -> Result<Option<crate::RecoverySnapshot>, ReplError> {
+        crate::registry::RegistryRecovery::snapshot_for_plan(self)
+    }
+
     /// Selected held receipt, freshly checked against the supplied current owner and tenure.
     pub fn receipt(&self) -> &Receipt {
         &self.receipt
@@ -145,6 +157,10 @@ impl RegistryEpoch {
             excluded,
             source_projection: self.projection()?,
             source_version: source_version(self)?,
+            source_base_close: self
+                .opening
+                .as_ref()
+                .map(|receipt| receipt.close_record_hash),
         })
     }
 }

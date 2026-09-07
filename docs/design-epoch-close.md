@@ -324,6 +324,36 @@ The tombstone and element lists are strictly ordered by element id, conflicts by
 value operation id, and applied operations by operation id; duplicates reject. All three physical
 slots must name the same logical document.
 
+**Registry recovery specialization (implemented, excluded settlements only).** Registry keys are
+typed logical keys, not random element ids. Its generic `tombstones`, `elements` and `conflicts`
+arrays are empty; the projection payload retains complete admitted pointers, overflow and
+pointer-key tombstones, plus excluded domain operations with full author identities. Inherited
+seed-only pointers have no invented operation author. The outer `applied_ops` is the sorted union
+of accepted source-operation ids; excluded operation ids must be a subset. The outer base close
+is the source epoch's opening close, absent only at epoch zero. The selected receipt hash is
+historical provenance, not current authority or permission to replay another author's operation.
+
+Payload v1 uses the existing big-endian/length-framed codec, in this exact order: `u8 version=1`,
+`bytes group_id`, `u8 bucket`, `bytes receipt_hash[32]`, admitted-pointer list, overflow-pointer
+list, tombstone-key list, excluded-operation list. Lists start with `u32 count`. Pointer entries
+are `u16 type_tag, bytes logical_key, u64 target_epoch`; tombstones omit target_epoch. Excluded
+entries are `bytes author[32], bytes DomainOp-v1`, strictly ordered by derived operation id.
+Pointer/key lists are strictly ordered by type/key, mutually disjoint; overflow requires all 2048
+admitted slots occupied. The combined key count is at most 2048 seed keys plus 20,000 operations,
+and the entire generic snapshot remains at most 6 MiB. Exact size preflight precedes encoding.
+The payload deliberately excludes quarantine/gate bookkeeping: identical recovery content keeps
+its snapshot id and warning deadline across retries despite newly quarantined packets.
+
+`stage_registry_recovery` recomputes from checked Closing state under exclusive store access,
+verifies its source accounting and (before a nonempty save) all existing typed slots, then uses the
+accounted recovery adapter. No evidence needs a slot when exclusions, overflow and tombstones
+are all empty; that path does not inspect or claim health of old recovery files. Failure or an
+eviction-pending warning never installs/prunes the source. The
+first/second snapshot may still refuse at the content ceiling until a future multi-record
+settlement reservation is implemented. Restore/Copy/Export, repair/rewind-specific typed records,
+checkpoint installation and intent retirement remain separate work; this adapter grants none
+of those actions implicitly.
+
 At most 6 MiB, preflighted before persistence. Physical state per logical document is **two
 retained slots plus one staged slot**, and the staged slot is counted in the settlement
 reserve (section 12). The transition:

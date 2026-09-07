@@ -3,18 +3,25 @@ use automerge::transaction::{CommitOptions, Transactable};
 use automerge::{AutoCommit, ROOT};
 use catcoms_replication::{CloseRecord, SignedOp};
 
-#[test]
-fn registry_store_settlement_plan_checks_exact_durable_source_without_writes() {
-    let root = tempfile::tempdir().unwrap();
+pub(super) struct TestSource {
+    pub(super) f: Fixture,
+    pub(super) store: ServerStore,
+    pub(super) budget: EpochStorageBudget,
+    pub(super) close: Vec<u8>,
+    pub(super) receipt: Receipt,
+}
+
+/// Real 2-MiB closure plus an optional excluded edit, through checked ingest and vault writes.
+pub(super) fn source_fixture(path: &Path, excluded: bool) -> TestSource {
     let f = Fixture::new();
-    let mut store = open(root.path());
+    let mut store = open(path);
     let mut budget = budget(&mut store, &f);
     let mut writer = AutoCommit::new().with_actor(automerge::ActorId::from(
         f.device.device_id().as_bytes().to_vec(),
     ));
     let mut close = None;
     let mut receipt = None;
-    for n in 0..11u8 {
+    for n in 0..if excluded { 11u8 } else { 10u8 } {
         let domain = RegistryOp::Put {
             key: f.key.clone(),
             epoch: u64::from(n),
@@ -86,7 +93,25 @@ fn registry_store_settlement_plan_checks_exact_durable_source_without_writes() {
             close = Some(selected.encode());
         }
     }
-    let close = close.unwrap();
+    TestSource {
+        f,
+        store,
+        budget,
+        close: close.unwrap(),
+        receipt: receipt.unwrap(),
+    }
+}
+
+#[test]
+fn registry_store_settlement_plan_checks_exact_durable_source_without_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let TestSource {
+        f,
+        mut store,
+        mut budget,
+        close,
+        receipt,
+    } = source_fixture(root.path(), true);
     let plan = |store: &ServerStore| {
         store.plan_registry_settlement(SERVER, &f.group, f.key.bucket(), &f.device, &close, 0)
     };
@@ -99,7 +124,7 @@ fn registry_store_settlement_plan_checks_exact_durable_source_without_writes() {
             &f.group,
             f.key.bucket(),
             &f.device,
-            receipt.unwrap(),
+            receipt,
             0,
             &mut rng(),
             &mut budget,

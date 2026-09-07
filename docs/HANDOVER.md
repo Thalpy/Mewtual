@@ -8,6 +8,46 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 typed registry recovery staging (2026-09-07).** `stage_registry_recovery` now recomputes
+  the exact receipt-bound plan from checked saved Closing state, validates source accounting and
+  every existing typed registry recovery slot before a nonempty save, and persists through the accounted
+  adapter. It returns saved slots/warnings, not installation authority. Source history and intents
+  remain unchanged. Empty evidence consumes no slot; third-slot retries retain the warning deadline.
+
+  `RegistryRecovery` defines a canonical, bounded local payload for full source pointers, overflow,
+  pointer-key tombstones and excluded author-bound domain operations. It validates the generic
+  wrapper, full scope, ordering/disjointness, derived ids and the exact aggregate 6-MiB cap. It does
+  not invent Studio-style random ids/authors for registry keys. The source opening close is carried
+  in recovery's base field. Snapshot identity excludes quarantine and quota-owner bookkeeping, so
+  late packets cannot manufacture extra recovery versions. Generic `RecoverySnapshot` Debug now
+  redacts content too. The generic wire/persistence envelope is unchanged; registry payload v1 is
+  specified in design-epoch-close section 10. Unknown/opaque old registry payloads fail closed.
+
+  **Next:** crash-safe successor installation, settlement-wide reservation and intent retirement;
+  then discovery and live coordinator/actor/Studio integration. Repair/rewind-specific typed records
+  and Restore/Copy/Export actions remain unwired. At the content ceiling, first/second recovery
+  snapshots can still refuse rather than crediting an unperformed source deletion. UI stays with
+  the user; no frontend/native source was changed by this slice.
+
+  Review/test targets: `registry/recovery.rs`, `registry_epoch/settlement.rs`,
+  `store/epoch_registry/recovery.rs` and their adjacent tests. Seven new core tests and five store
+  tests cover golden encoding, wrapper/scope/count/key/author rejection, payload size bounds,
+  valid overflow, malformed excluded operations, tombstone-only evidence, empty plans,
+  quarantine-stable ids, real 2-MiB source histories,
+  restart, failed saves before/after rename, stale inventory, storage refusal, invalid old slots,
+  and the bounded third-slot warning. Rotated-source coverage is also expanded. Focused tests
+  pass. Adversarial design, actual-diff and documentation reviews have no remaining actionable
+  findings; the review's overflow/domain-decoder coverage and empty-path wording findings are fixed.
+  Final verification passes: `cargo test -p catcoms-replication --lib registry_recovery` (7),
+  `cargo test -p catcoms-app registry_recovery_stage` (5), `cargo check -p catcoms-app`,
+  `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190),
+  `npm.cmd --prefix apps/desktop test` (1135), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` (Git Bash on Windows), and `git diff --check`.
+  Frontend static/build and visual checks were not run for this backend-only slice. Concurrent
+  UI/release changes are excluded from this slice and its commit.
+
 - **P1 receipt-bound registry settlement preparation (2026-09-07).** Rough implementation
   estimate: **55%, with about +/-10 percentage points uncertainty**, for P1 backend work, not
   the whole Creative Suite or end-to-end readiness. Core validation, journals, storage admission
@@ -596,6 +636,7 @@ TCP** (verified, incl. through a relay).
 | 12h | **Desktop performance + IPC hardening (first slice).** Live profile message frames are rollout-gated without deleting their studio/config. Chat mounts a bounded 320-row tail with anchored paging/jumps, caches only bounded sanitized HTML, resolves rich placeholders per row, coalesces event snapshots, avoids forced bottom scroll and schedules cross-server inbox scans at idle. Feedback/Wiki Help are lazy Svelte components with feature CSS; QR codecs are dynamic chunks, reducing the measured App chunk from 881.49 kB to 709.33 kB minified. The 100-command Tauri surface has an executable review ledger; explicit lock now atomically saves UI continuity, rejects every non-bootstrap command, suppresses actor events and re-checks long downloads while native actors stay online. Full plan/audit: [`PERFORMANCE-SECURITY-HARDENING.md`](PERFORMANCE-SECURITY-HARDENING.md). Native paged history, larger Settings/operations extraction, remote-media consent and worker search remain queued. | active; first slice fully test-gated |
 | 12i | **MIDI controllers in Settings → Devices; reliable hot-plug.** Web MIDI moves out of a one-shot lazy request into `midi.ts` (pure, unit-tested: parsing, pedal-aware routing, device rows, status diagnosis) plus retryable browser plumbing. Every connected input is wired rather than only the last in the map, disconnected ports are skipped, an already-granted permission reconnects at startup without prompting, and a lost device lifts the notes it was sounding. Settings → Devices gains a live controller panel: status verdict with one honest reason, device list with routed/unplugged/filtered state, per-port input routing persisted locally (matched by id then name), an always-on message monitor (velocity + channel; clock/sensing counted separately so a live-but-silent cable is distinguishable), a stuck-note release, and setup + troubleshooting help. Sustain (CC64) is honoured for the call instrument **only**: deferring note-offs on the melody lock would change the secret an identical performance encodes, and that vault has no recovery path. Velocity is parsed and displayed but not yet mapped to loudness; per-instrument receive controls remain queued. | ✅ added 2026-08-21 |
 | 12j | **Unread indicators become state, and the jukebox stops lying about playback.** From an adversarial review of `P-fixes`. `AppEvent::ChannelUpdated` grows a typed `ChannelChange` (an arrival is "a message id never seen before", not a count that grew), so a reaction, a topic edit or a jukebox add can no longer read as an unread chat message. Read marks are no longer advanced by a refresh: `unread.ts` (pure, unit-tested) owns one observation predicate (chat surface active, no takeover/call-focus over it, window focused, document visible, pinned to the newest row) and a selected-but-unobserved channel goes unread exactly like an inactive one; a failed `get_messages` no longer clears the badge it was navigating to. New `get_channel_heads(server)` rebuilds unread from durable read marks at unlock, resume and once each server's directory settles, which is the only path that survives an explicit lock or a restart; mention badges come back the same way from the inbox scan. Sender-clock timestamps are clamped to a plausible ceiling before any read decision, so one wrong clock can neither hide later messages nor stick as a permanent unread row, and the server rail/orbit/DM dots all derive from the one `unread` list. Jukebox: a `hello` is answered with the current transport immediately instead of waiting up to five seconds for the next re-announce, transport revisions are bounded (`1e308` passed `Number.isInteger` and could not be incremented past, wedging the deck), a blocked `play()` surfaces as a clickable ENABLE PLAYBACK chip instead of silence under a "SYNCED" label, a listener that cannot fetch or decode says so, and queue reads are generation-guarded and no longer turn every error into an empty queue | ✅ |
+| 12k | **Profile editor tabs + the arrival catalogue** (owner: "really cramped", sliders "look like dev art", wants PowerPoint-style arrivals; Livery tabs deliberately NOT done, frames expected to be dropped). The shared `profileEditor` snippet is one draft behind tabs **Identity** (avatar via `upload-btn`, banner, name, colour, bio) / **Name style** (studio, font, typography with pill toggles, effects, master, readability) / **Arrival**; a **Frame** tab exists only while `CHAT_MESSAGE_FRAMES_ENABLED`. `profileTab` state, `profileDirty` derived per tab against `profiles[myFp]` (gold dot on the tab, named in the sticky `.psave` bar with Discard + Save), `.profile-tab` widened 420→620px, every range in the editor wears the `.lv-range` look (`rangeFills` container action paints `--pct`, watches for sliders that unfold later). **Arrival catalogue**: `MESSAGE_FRAME_MOTIONS` 5→22 (wipe, split, blinds, checker, bars, wheel, dissolve; blackout, newsflash, swivel, flip, spiral, crawl; bounce, boomerang, slam, quake) with `messageFrameMotionTraits()` saying what the one distance slider means per motion (travel/depth/grain/amplitude/spin/none) and whether fade and the entry vector apply; the picker renders four families. **Compat**: `parseMessageFrame` now maps an UNKNOWN motion id to Still instead of rejecting the whole frame, so an older build keeps a newer peer's surface. CSS: one keyframe set per motion (0% → 25% then hold) shared by live rows (`animation-iteration-count: 0.25`, so a settled row stops being a stacking context) and the looping preview; mask reveals ride one registered `--arr-p` (initial 1: a frozen animation never hides a row); the log row and preview carry a dynamic `arrival-{id}` class instead of five `class:` directives. Fixes found on the way: arrival ids were pruned at 900ms while durations reach 1200ms (now 1500ms); `.messages` clips horizontal overflow so a fly-in cannot flash a scrollbar; effect tiles clip their own sparkles instead of spilling over the neighbour's border. Gotcha: the visual fixture zeroes every animation for determinism, so arrival screenshots need that rule removed over CDP first. | ✅ in tree |
 | 13 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 14 | hardening: cover traffic, supply-chain attestation, metadata-index aging, recovery import, **security review** (deeper adversarial scenarios land here) | planned |
 

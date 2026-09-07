@@ -6,6 +6,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 mod local;
+mod recovery;
 mod settlement;
 
 const SERVER: u64 = 73;

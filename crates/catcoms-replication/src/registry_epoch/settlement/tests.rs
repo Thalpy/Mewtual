@@ -213,6 +213,15 @@ fn registry_settlement_rotated_source_preserves_inherited_seed_and_partitions_on
     source.seal(receipt.clone(), &f.group, 0).unwrap();
     let before = source.snapshot().unwrap();
     let plan = source.prepare_settlement(&close, &f.group, 0).unwrap();
+    let snapshot = plan.recovery_snapshot().unwrap().unwrap();
+    assert_eq!(snapshot.base_close_record_hash, Some(f.close.hash()));
+    let recovered = crate::registry::RegistryRecovery::from_snapshot(
+        &snapshot,
+        &source.logical,
+        f.key.bucket(),
+    )
+    .unwrap();
+    assert_eq!(recovered.projection(), plan.source_projection());
     assert_eq!(source.snapshot().unwrap(), before);
     assert_eq!(plan.included_operation_ids().len(), 10);
     assert_eq!(plan.excluded_operations().len(), 1);
@@ -251,6 +260,48 @@ fn registry_settlement_rotated_source_preserves_inherited_seed_and_partitions_on
         &[automerge::ChangeHash(
             plan.checkpoint().origin().seed_hash()
         )]
+    );
+}
+
+#[test]
+fn registry_recovery_plan_identity_ignores_quarantine_and_empty_settlement_needs_no_slot() {
+    let mut f = Fixture::new();
+    let original = f.source.snapshot().unwrap();
+    f.seal();
+    assert!(f.plan().unwrap().recovery_snapshot().unwrap().is_none());
+    f.source =
+        RegistryEpoch::restore(&original, &f.group, f.key.bucket(), f.owner.device_id()).unwrap();
+    f.edit(10);
+    let before_late = f.source.snapshot().unwrap();
+    f.edit(11);
+    let late = SealedOp::seal(
+        f.source.doc.signed_log().last().unwrap(),
+        &f.group,
+        &f.owner,
+        &mut f.rng,
+    )
+    .unwrap();
+    f.source = RegistryEpoch::restore(&before_late, &f.group, f.key.bucket(), f.owner.device_id())
+        .unwrap();
+    f.seal();
+    let plan = f.plan().unwrap();
+    let snapshot = plan.recovery_snapshot().unwrap().unwrap();
+    assert_eq!(snapshot.base_close_record_hash, None);
+    let recovered = crate::registry::RegistryRecovery::from_snapshot(
+        &snapshot,
+        &f.source.logical,
+        f.key.bucket(),
+    )
+    .unwrap();
+    assert_eq!(recovered.excluded_operations().len(), 1);
+    assert_eq!(snapshot.applied_ops.len(), 11);
+    f.source.ingest(&late, &f.group, &f.owner).unwrap();
+    let retry = f.plan().unwrap();
+    assert_ne!(plan.source_version(), retry.source_version());
+    assert_eq!(snapshot, retry.recovery_snapshot().unwrap().unwrap());
+    assert_eq!(
+        snapshot.id().unwrap(),
+        retry.recovery_snapshot().unwrap().unwrap().id().unwrap()
     );
 }
 

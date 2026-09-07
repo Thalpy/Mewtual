@@ -2500,7 +2500,7 @@ pub struct RecoveryConflict {
 }
 
 /// Canonical, vault-sealed recovery materialization for one logical document.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecoverySnapshot {
     /// Logical target.
     pub doc_type: DocType,
@@ -2522,6 +2522,20 @@ pub struct RecoverySnapshot {
     pub conflicts: Vec<RecoveryConflict>,
     /// Operations already reflected in the projection.
     pub applied_ops: Vec<Hash32>,
+}
+
+impl std::fmt::Debug for RecoverySnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Snapshots can travel through generic Option/Result and command diagnostics. Never
+        // dump private projection bytes, keys, authors or conflict content through those paths.
+        f.debug_struct("RecoverySnapshot")
+            .field("doc_type", &self.doc_type)
+            .field("epoch", &self.epoch)
+            .field("reason", &self.reason)
+            .field("projection_bytes", &self.projection.len())
+            .field("applied_operations", &self.applied_ops.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl RecoverySnapshot {
