@@ -523,7 +523,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   mint_invite(nonce:[u8;16], expires_at_ms, bootstrap) -> Result<InviteToken>;
   mint_invite_with_rendezvous(nonce, expires_at_ms, bootstrap, rendezvous:Vec<String>) -> Result<InviteToken>;  // 6e-3d-9
   async open_channel(DocType, doc_id) -> Result<()>;       // create doc + subscribe its ns_secret_L-keyed topic
-  async post(DocType, doc_id, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<()>;  // edit + gossip
+  async post(DocType, doc_id, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<()>;  // edit, then gossip; Ok once the EDIT applied
   async run_once() -> Result<bool>;                        // drain outbox + recovery + sub-resync; then handle ONE event
   async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;        // incremental where possible; see KIND_CATCHUP_SINCE
   async request_commit_catchup(peer:PeerId, from_epoch:u64) -> Result<usize>;  // missed-commit recovery (ordered replay, SIGNED response)
@@ -661,6 +661,17 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
   Pre-join **`join_ns`**: `"catcoms1-" ‖ hex(keyed(derive_key("…/join-rz/hkdf/v1", invite_nonce), "catcoms/join-rz/v1" ‖ group_id ‖ rz_peer)[..20])`.
 - **`SealedOp`** (gossip payload): `u16 doc_type ‖ u128 doc_id ‖ u64 epoch ‖ bytes nonce(24) ‖ bytes ciphertext`.
   Ciphertext = XChaCha20-Poly1305 of the encoded `SignedOp` under `channel_secret(doc,epoch)`.
+  - **The edit is the acceptance point, not the broadcast.** Everything that can legitimately
+    refuse a `post` happens before the edit is applied: an unopened document, a missing routing
+    secret, a sealing or automerge failure. Past that the operation exists with a stable change
+    hash in a document this process will serve and persist, so a refused *publication* is a
+    delivery still owed rather than a failed post; it is queued in the same bounded `outbox` as a
+    membership commit and retried on the next tick. Reporting it as an error told every caller
+    above that nothing had happened while something had: the app layer skipped delivery tracking,
+    the actor skipped its UI delta and the desktop skipped its save, while the message sat in the
+    channel, so retyping it minted a second copy under a new id and both surfaced later. After
+    the transport's own classification (see `MeshService`), the only publication failure that
+    still reaches this layer is the command channel being closed, i.e. a send racing shutdown.
 - **`CommitRecord`** (control payload): `bytes group_id ‖ u64 commit_epoch ‖ bytes committer_device(32) ‖ bytes mls_commit ‖ bytes base_auth(32) ‖ bytes committer_sig(64)`.
 - **Request/response** (`ProtocolId("/catcoms/rr/1")`): first payload byte = **kind**:
   - `0` KIND_CATCHUP; **authed** body wrapping `u16 doc_type ‖ u128 doc_id`; response = op bundle,

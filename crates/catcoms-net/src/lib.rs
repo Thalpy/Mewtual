@@ -4483,8 +4483,17 @@ impl Actor {
                 tracing::trace!(bytes = len, "publish suppressed as a duplicate")
             }
             Err(error) if publish_failure_can_pass(&error) => {
-                tracing::debug!(bytes = len, %error, "publish held for retry");
+                // `info`, not `debug`: the shared debug log keeps this crate at `info` to keep
+                // address churn out of it, and this line carries no address. It is the one
+                // transport-level fact a "my message never arrived" report needs.
                 self.pending_publish.hold(topic, data);
+                tracing::info!(
+                    bytes = len,
+                    %error,
+                    held = self.pending_publish.items.len(),
+                    held_bytes = self.pending_publish.bytes,
+                    "publish held for retry"
+                );
             }
             Err(error) => {
                 // Nothing about waiting makes an oversized message fit, a compression transform
@@ -4501,8 +4510,18 @@ impl Actor {
     }
 
     fn flush_pending_publish(&mut self) {
-        for (topic, data) in self.pending_publish.take() {
+        let held = self.pending_publish.take();
+        let attempted = held.len();
+        for (topic, data) in held {
             self.publish_or_hold(topic, data);
+        }
+        let still_held = self.pending_publish.items.len();
+        if attempted > still_held {
+            tracing::info!(
+                released = attempted - still_held,
+                still_held,
+                "held publications went out"
+            );
         }
     }
 

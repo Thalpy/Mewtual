@@ -920,6 +920,35 @@ select:focus {
   font-family: var(--mono);
 }
 
+/* History that arrived late: a row that sorted behind the read position after it was read past.
+   The divider names the run and the row keeps a hairline until it has been looked at. */
+.messages li.late-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 2px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  color: var(--warn, var(--accent));
+}
+
+.messages li.late-divider::before,
+.messages li.late-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: color-mix(in oklab, var(--warn, var(--accent)) 45%, transparent);
+}
+
+.messages li.late {
+  box-shadow: inset 2px 0 0 color-mix(in oklab, var(--warn, var(--accent)) 70%, transparent);
+}
+
+.jump-late {
+  color: var(--warn, var(--accent));
+}
+
 .messages li:hover {
   background: color-mix(in oklab, var(--bg-elev) 55%, transparent);
 }

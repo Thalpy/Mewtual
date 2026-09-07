@@ -119,6 +119,7 @@
   } from "./youtube-deck";
   import {
     CLOCK_SKEW_GRACE_MS, NO_READ_MARK, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
+    addLatePast, clearLatePast, lateArrivals,
     transitionApplied, transitionMismatch, unreadChannels, unreadDecision, unreadFromHeads,
     type ChannelChange, type ChannelHead, type ReadMark, type UnreadDecision, type UnreadState,
   } from "./unread";
@@ -3281,6 +3282,133 @@
   function readMarkOf(key: string): ReadMark {
     return readMarks[key] ?? NO_READ_MARK;
   }
+  // History that arrived late: per conversation, the messages that landed BEHIND this device's
+  // read position and have not yet been in front of the person. A mesh delivers whenever two
+  // members finally meet, so a morning's messages can arrive in the evening and sort into a part
+  // of the log already scrolled past; unread state measures forward from the cursor, so they
+  // raise no badge. Ids only (the list reorders under positions and timestamps), sealed with the
+  // read marks so a restart does not clear the one thing that survived the desync.
+  let latePast = $state<Record<string, string[]>>({});
+  // Per-server "point out history that arrived late" preference, default on. Mine alone: it is
+  // about my attention, not group policy, so the owner cannot switch off somebody else's marker.
+  const latePastOffKey = (id: number) => `catcoms.latepast.off.${id}`;
+  let latePastMarkers = $state(true);
+  function loadLatePastMarkers(id: number) {
+    try { latePastMarkers = localStorage.getItem(latePastOffKey(id)) !== "1"; } catch { latePastMarkers = true; }
+  }
+  function setLatePastMarkers(v: boolean) {
+    latePastMarkers = v;
+    if (activeServerId === null) return;
+    try {
+      if (v) localStorage.removeItem(latePastOffKey(activeServerId));
+      else localStorage.setItem(latePastOffKey(activeServerId), "1");
+    } catch { /* best-effort */ }
+  }
+  /** The late ids of the conversation on screen, or none while the marker is switched off. */
+  let activeLate = $derived.by(() => {
+    const k = chanKey();
+    return new Set(latePastMarkers && k ? latePast[k] ?? [] : []);
+  });
+  /** The earliest-sorting late row that is loaded, for the header jump; else the oldest recorded. */
+  function firstLateId(): string {
+    if (!activeLate.size) return "";
+    const loaded = messages.find((m) => activeLate.has(m.id));
+    return loaded?.id ?? [...activeLate][0];
+  }
+  /**
+   * Record which of an update's arrivals landed in this person's past.
+   *
+   * Runs for every channel, on or off screen: the rows are fetched by id (they need not be
+   * loaded), placed against the conversation's read mark, and the late ones are kept until each
+   * has actually been in front of the person. Written down either way, because "a message
+   * arrived and nothing announced it" is exactly the report this exists to explain.
+   */
+  async function recordLateArrivals(server: number, channel: string, arrivals: string[]) {
+    const key = chatScopeKey(server, channel);
+    const mark = readMarkOf(key);
+    if (!mark.ts && !mark.id) return; // never read: its first history is not missed history
+    let rows: TailMsg[];
+    try {
+      rows = await fetchArrivals(server, channel, arrivals);
+    } catch (e) {
+      diagRecord({ section: "channels", code: "UI.LATE_PAST.LOOKUP_FAILED", level: "warn", fields: { server, channel, arrivals: arrivals.length, error: String(e) } });
+      return;
+    }
+    // The active conversation's ceiling is measured natively over the whole channel; elsewhere
+    // the fetched rows and the mark itself are what there is to measure against.
+    const ceiling = server === activeServerId && channel === cur?.active
+      ? readTsCeiling
+      : readCeiling([...rows.map((r) => r.ts), mark.ts], Date.now());
+    const late = lateArrivals(rows, mark, myFp, ceiling);
+    diagRecord({
+      section: "channels",
+      code: "UI.LATE_PAST.RECORDED",
+      level: late.length ? "info" : "debug",
+      fields: { server, channel, arrivals: arrivals.length, fetched: rows.length, late: late.length, mark_ts: mark.ts, markers_on: latePastMarkers },
+    });
+    if (!late.length) return;
+    const next = addLatePast(latePast[key] ?? [], late);
+    if (next === latePast[key]) return;
+    latePast = { ...latePast, [key]: next };
+    scheduleUiStateSave();
+  }
+  /** A late row has been in front of the person: forget it, durably. */
+  function markLateSeen(id: string) {
+    const k = chanKey();
+    if (!k) return;
+    const current = latePast[k];
+    if (!current) return;
+    const next = clearLatePast(current, [id]);
+    if (next === current) return;
+    diagRecord({ section: "channels", code: "UI.LATE_PAST.SEEN", level: "debug", fields: { key: k, remaining: next.length } });
+    const copy = { ...latePast };
+    if (next.length) copy[k] = next;
+    else delete copy[k];
+    latePast = copy;
+    scheduleUiStateSave();
+  }
+  /**
+   * Svelte action on a late row: it counts as seen once most of it has been inside the log's
+   * viewport, in a focused and visible window, for long enough to have been looked at rather than
+   * scrolled through. Scrolling past a row at speed is not seeing it.
+   */
+  const LATE_SEEN_DWELL_MS = 700;
+  let lateObserver: IntersectionObserver | null = null;
+  const lateDwell = new Map<Element, ReturnType<typeof setTimeout>>();
+  function lateSeenObserver(): IntersectionObserver {
+    if (lateObserver) return lateObserver;
+    lateObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const pending = lateDwell.get(entry.target);
+        if (!entry.isIntersecting) {
+          if (pending) { clearTimeout(pending); lateDwell.delete(entry.target); }
+          continue;
+        }
+        if (pending) continue;
+        lateDwell.set(entry.target, setTimeout(() => {
+          lateDwell.delete(entry.target);
+          if (!entry.target.isConnected || document.visibilityState !== "visible" || !document.hasFocus()) return;
+          const id = (entry.target as HTMLElement).dataset.lateId ?? "";
+          if (id) markLateSeen(id);
+        }, LATE_SEEN_DWELL_MS));
+      }
+    }, { root: messagesEl ?? null, threshold: 0.6 });
+    return lateObserver;
+  }
+  function lateSeen(node: HTMLLIElement, id: string) {
+    let watched = "";
+    const watch = (next: string) => {
+      if (watched) { lateSeenObserver().unobserve(node); const t = lateDwell.get(node); if (t) { clearTimeout(t); lateDwell.delete(node); } }
+      watched = next;
+      node.dataset.lateId = next;
+      if (next) lateSeenObserver().observe(node);
+    };
+    watch(id);
+    return {
+      update(next: string) { if (next !== watched) watch(next); },
+      destroy() { watch(""); },
+    };
+  }
   let dividerTs = $state(Number.POSITIVE_INFINITY);
   /** Id of the last message read here, frozen with `dividerTs`. See `captureDivider`. */
   let dividerId = $state("");
@@ -3307,7 +3435,7 @@
     return save;
   }
   function continuityJson(): string {
-    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies });
+    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast });
   }
   /**
    * Seal the current continuity snapshot without the ordinary typing/read-position debounce.
@@ -3365,6 +3493,7 @@
       readMarks = next.readMarks;
       statusCursors = next.statusCursors;
       fileTrustPolicies = next.fileTrustPolicies;
+      latePast = next.latePast;
     } catch (e) {
       if (generation !== uiStateLoadGeneration || locked) return;
       console.warn("UI continuity load failed", e);
@@ -3372,6 +3501,7 @@
       readMarks = {};
       statusCursors = {};
       fileTrustPolicies = {};
+      latePast = {};
       error = `Durable history could not be authenticated and was not loaded: ${e}`;
     } finally {
       if (generation === uiStateLoadGeneration && !locked) {
@@ -6394,6 +6524,7 @@
     loadServerSoundPreferences(id); // local message/mention/news overrides for this server
     loadSrvTurn(id); // this server's operator-set TURN (for the Server-settings editor)
     loadLiveryOptOut(id); // whether the user opted out of this server's livery
+    loadLatePastMarkers(id); // whether history that arrived late is pointed out here
     loadVerified(id); // this server's locally-verified members
     loadDraftFor(chanKey()); // restore this server's active-channel draft
     captureDivider(); // snapshot the read boundary for this server's active channel
@@ -18722,6 +18853,12 @@
         // reacting to an old message, renaming the topic and queueing a track all used to look
         // exactly like somebody talking.
         const change = readChannelChange(e.payload);
+        // An arrival that sorts behind this device's read mark is history that was missed, and
+        // nothing below announces it: the badge measures forward from the cursor. Placed and
+        // recorded for every channel, on screen or not, before anything else decides.
+        if (change.messagesAppended && change.arrivals.length) {
+          void recordLateArrivals(server, channel, change.arrivals);
+        }
         // Why this update did or did not raise a badge. Read here, against the surface state that
         // actually decided it, and written down further below once the badge has had its chance to
         // move: "reacted to an old message", "the window was behind something" and "they were
@@ -23767,6 +23904,9 @@
               {#if firstUnreadIdx >= 0}
                 <button class="ghost small jump-unread" title="Jump to where you left off" onclick={() => void scrollToMatch(firstUnreadIdx)}>↑ {unreadCount} new</button>
               {/if}
+              {#if activeLate.size}
+                <button class="ghost small jump-late" title="Messages that arrived after you had read past them. Click to go to the earliest." onclick={() => void jumpToMessageId(firstLateId())}>↑ {activeLate.size} arrived late</button>
+              {/if}
               <span class="chip ok" title="Messages in this group are end-to-end encrypted (MLS)">MLS · E2E</span>
               <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F · Ctrl+Shift+F for filters)" aria-label="Search messages" onclick={() => openSearch()}>{@render icoSearch()}</button>
               {#if pinnedMsgs.length}
@@ -23990,6 +24130,9 @@
               {#if mi === firstUnreadIdx}
                 <li class="unread-divider" aria-hidden="true"><span>new · {unreadCount} unread</span></li>
               {/if}
+              {#if activeLate.has(m.id) && !(prev && activeLate.has(prev.id))}
+                <li class="late-divider" aria-hidden="true"><span>arrived late · you had not seen this</span></li>
+              {/if}
               {@const grouped =
                 !!prev &&
                 mi !== firstUnreadIdx &&
@@ -24029,9 +24172,11 @@
                 class:search-match={showSearch && searchMatchSet.has(mi)}
                 class:search-current={showSearch && searchCur?.ch === cur?.active && searchCur?.idx === mi}
                 class:flash={!!m.id && m.id === flashId}
+                class:late={activeLate.has(m.id)}
                 style={[bubble, arrivalVars].filter(Boolean).join(";")}
                 use:contextMenu={() => messageMenu(m)}
                 use:resolveChatRow={m}
+                use:lateSeen={activeLate.has(m.id) ? m.id : ""}
               >
                 {#if grouped}
                   <span class="t" title={new Date(m.ts).toLocaleString()}>
@@ -26934,6 +27079,20 @@
                     </span>
                   </label>
                   <p class="muted small">Opting out is yours alone; nobody is told.</p>
+                </section>
+              {/if}
+              {#if activeServerId !== null}
+                <section class="set-section">
+                  <h3>Missed history</h3>
+                  <label class="toggle">
+                    <input
+                      type="checkbox"
+                      checked={latePastMarkers}
+                      onchange={() => setLatePastMarkers(!latePastMarkers)}
+                    />
+                    <span>Point out messages that arrive after you had already read past them</span>
+                  </label>
+                  <p class="muted small">Members connect at different times, so a message written this morning can reach you tonight and sort into history you have already read. This marks those rows until you have looked at them. Yours alone, per server.</p>
                 </section>
               {/if}
               <section class="set-section">

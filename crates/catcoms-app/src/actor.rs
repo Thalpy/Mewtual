@@ -4458,6 +4458,12 @@ where
                         // it learns that the existing connection belongs to this roster member.
                         let online = server.online_members();
                         if online != last_online {
+                            tracing::debug!(
+                                online = online.len(),
+                                was = last_online.len(),
+                                via = "discovery",
+                                "presence changed"
+                            );
                             last_online = online.clone();
                             let _ = event_tx.send(AppEvent::ConnectivityChanged { online }).await;
                         }
@@ -4598,7 +4604,21 @@ where
                             moved_channels.push(channel);
                             // The version was consumed just above; a second check here would
                             // read "unchanged" and swallow the very change it is meant to report.
-                            if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                            let change = channel_delta(&server, channel, &mut counts);
+                            // The document version and what the UI was told about it, side by
+                            // side: the last of the four states a report conflates, and the one
+                            // that separates "the message never arrived" from "it arrived and
+                            // the screen was never told".
+                            tracing::debug!(
+                                channel,
+                                version = server.doc_version(crate::DocType::Channel, channel),
+                                appended = change.as_ref().is_some_and(|c| c.messages_appended),
+                                arrivals = change.as_ref().map_or(0, |c| c.arrivals.len()),
+                                changed = change.as_ref().is_some_and(|c| c.messages_changed),
+                                emitted = change.is_some(),
+                                "channel document moved"
+                            );
+                            if let Some(change) = change {
                                 let _ = event_tx
                                     .send(AppEvent::ChannelUpdated { channel, change })
                                     .await;
@@ -4688,6 +4708,12 @@ where
                         let online = server.online_members();
                         let presence_changed = online != last_online;
                         if presence_changed {
+                            tracing::debug!(
+                                online = online.len(),
+                                was = last_online.len(),
+                                via = "transport",
+                                "presence changed"
+                            );
                             last_online = online.clone();
                             let _ = event_tx
                                 .send(AppEvent::ConnectivityChanged { online })

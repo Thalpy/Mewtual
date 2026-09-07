@@ -3762,7 +3762,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// (subscribing is async, rotation is not).
     needs_resync: bool,
     config: SyncConfig,
-    /// Membership commits queued for the control topic (drained in async run_once).
+    /// Broadcasts queued for a later tick (drained in async `run_once`): membership commits for
+    /// the control topic, and any document operation whose publication the transport refused
+    /// after the edit was already applied (see [`ChannelSync::post`]).
     outbox: Vec<(Topic, Vec<u8>)>,
     /// Transport peers to **evict** (P6): queued by an applied Remove commit, drained in the
     /// async `run_once` (the transport verb is async, the commit path is not). Transient and
@@ -4785,6 +4787,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// **automerge change hash** of the edit; the handle [`ChannelSync::peers_with_change`]
     /// takes to report who has since proved they hold it. Callers that don't track delivery
     /// simply drop it.
+    ///
+    /// **The edit is the acceptance point, not the broadcast.** Everything that can legitimately
+    /// refuse the write happens before it: an unopened document, a missing routing secret, a
+    /// sealing or automerge failure. Past that the operation exists, with a stable hash, in a
+    /// document this process will go on to serve and persist; reporting a failed *publication* as
+    /// a failed post told every caller above that nothing had happened while something had. In
+    /// the product that meant a message committed to the local channel with no delivery tracking,
+    /// no UI event and no save, so retyping it minted a second copy under a new id and both
+    /// surfaced later.
+    ///
+    /// A publication that cannot go out now is queued in the same bounded outbox as a membership
+    /// commit and retried on the next tick, and the operation is recoverable regardless: it is in
+    /// the document, so it persists with it and reaches other members through ordinary catch-up.
     pub async fn post<F>(
         &mut self,
         doc_type: DocType,
@@ -4809,8 +4824,28 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             bytes = bytes.len(),
             "post op"
         );
-        self.transport.publish(topic, Bytes::from(bytes)).await?;
+        if let Err(error) = self
+            .transport
+            .publish(topic.clone(), Bytes::from(bytes.clone()))
+            .await
+        {
+            tracing::warn!(
+                %error,
+                ?doc_type,
+                doc_id,
+                "op accepted locally but could not be published; queued for the next tick"
+            );
+            self.queue_broadcast(topic, bytes);
+        }
         Ok(change)
+    }
+
+    /// Queue a payload for the next [`Self::drain_outbox`], within `max_outbox` (oldest dropped).
+    fn queue_broadcast(&mut self, topic: Topic, bytes: Vec<u8>) {
+        self.outbox.push((topic, bytes));
+        while self.outbox.len() > self.config.max_outbox {
+            self.outbox.remove(0);
+        }
     }
 
     /// Process one inbound transport event (gossiped op, membership commit, or a
@@ -4840,11 +4875,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// rest of the session.
     fn sweep_docs_on_reconnect(&mut self, peer: PeerId) {
         if !self.peer_is_preferred_source(peer) {
+            tracing::debug!(
+                ?peer,
+                open_docs = self.docs.len(),
+                "recovery sweep declined: peer has not proved it can serve a catch-up"
+            );
             return;
         }
+        let before = self.catchup_queue.len();
         for (doc_type, doc_id) in self.docs.keys().copied().collect::<Vec<_>>() {
             self.enqueue_doc_catchup(doc_type, doc_id);
         }
+        tracing::debug!(
+            ?peer,
+            open_docs = self.docs.len(),
+            queued = self.catchup_queue.len() - before,
+            queue_len = self.catchup_queue.len(),
+            "recovery sweep queued every open document"
+        );
     }
 
     fn touch_member_routes(&mut self) {
@@ -4978,6 +5026,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             })
             .map(|(device, _)| *device)
             .collect();
+        // The four states a user's report conflates (connected, authenticated, subscribed,
+        // caught up) start being told apart here: this is "connected", and the rest of the line
+        // says how much of the other three this peer already had.
+        tracing::debug!(
+            ?peer,
+            claimed_by_member = !reconnected_devices.is_empty(),
+            proven = self.peer_is_preferred_source(peer),
+            bound = self.peer_has_bound_member_proof(peer),
+            connected = self.connected_peers.len(),
+            epoch = self.group.epoch(),
+            "peer connected"
+        );
         self.topology_promotions
             .retain(|device| !reconnected_devices.contains(device));
         self.remember_peer(peer);
@@ -5077,6 +5137,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         }
         let changes_member_route = self.peer_claimed_by_current_member(peer);
+        tracing::debug!(
+            ?peer,
+            claimed_by_member = changes_member_route,
+            proven = self.peer_is_preferred_source(peer),
+            connected = self.connected_peers.len(),
+            inflight_catchup = self
+                .catchup_inflight
+                .as_ref()
+                .is_some_and(|(_, asked)| *asked == Some(peer)),
+            "peer disconnected"
+        );
         if let Some(evidence) = self.pairwise_reachability.get_mut(&peer) {
             evidence.active_paths.clear();
             evidence.updated_at_ms = self.clock.monotonic_ms();
@@ -5303,6 +5374,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // same peer on the very next tick and blocks again, which is how a node with a
             // standing task stops serving anybody else: two of them chasing each other never let
             // go. Cooling the pair off keeps the gap owned while freeing the tick.
+            tracing::debug!(
+                task = ?interrupted,
+                peer = ?asked,
+                "catch-up tick was cancelled mid-request; task restored to the front of the queue"
+            );
             if let (Some(peer), CatchupTask::Doc { doc_type, doc_id }) = (asked, interrupted) {
                 self.cool_off_catchup_peer(peer, doc_type, doc_id);
             }
@@ -5405,6 +5481,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 let keep = self.known_peers.is_empty()
                     || avoid.is_some()
                     || matches!(retry, CatchupTask::Doc { .. });
+                tracing::debug!(
+                    task = ?retry,
+                    kept = keep,
+                    known_peers = self.known_peers.len(),
+                    proven_peers = self.member_peers.len(),
+                    failed_peers = self.failed_catchup_peers.len(),
+                    cooling = cooling.len(),
+                    "no eligible source for a catch-up task"
+                );
                 if keep {
                     self.requeue_catchup(retry);
                 }
@@ -5425,11 +5510,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // Deferring costs nothing: the task is re-queued, connections are established by the
             // dial plan and PEX, and the next tick signs a request that can actually leave.
             if !self.peer_is_connected(peer) {
+                tracing::debug!(
+                    task = ?retry,
+                    ?peer,
+                    "catch-up deferred: chosen source is not connected right now"
+                );
                 self.requeue_catchup(retry);
                 self.catchup_inflight = None;
                 continue;
             }
             attempted = true;
+            tracing::debug!(task = ?task, ?peer, "catch-up request starting");
             // Now that a peer is chosen, record it with the task: if this tick is cancelled while
             // waiting on it, the restore knows who not to ask again immediately.
             self.catchup_inflight = Some((task, Some(peer)));
@@ -5460,6 +5551,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     let closed = outcome.answered()
                         && self.pending_commits.is_empty()
                         && gap_at.is_none_or(|gap| here >= gap);
+                    tracing::debug!(
+                        ?peer,
+                        ?outcome,
+                        from_epoch,
+                        gap_at,
+                        epoch_before = before,
+                        epoch_after = here,
+                        buffered_commits = self.pending_commits.len(),
+                        closed,
+                        "commit catch-up finished"
+                    );
                     if closed {
                         if progressed {
                             // Progress made: clear the failed-peer set and stop chasing.
@@ -5801,6 +5903,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .iter()
             .any(|proof| proof.peer == peer && proof.device == device);
         if newly_proven {
+            // "Authenticated", in the four-state vocabulary: a roster member answered at this
+            // transport peer. `bound` says whether the exchange also proved the endpoint.
+            tracing::debug!(
+                ?peer,
+                device = %roles::fingerprint(&device),
+                bound,
+                proven_peers = self.member_peers.len() + 1,
+                sweep_owed = self.first_proof_sweep_owed,
+                "peer proven as a current member"
+            );
             // Any document whose search concluded while it was unproven concluded without it, so
             // those go back on the queue.
             self.forget_source_answers(peer);
@@ -10652,9 +10764,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // but empty document, and answers exactly this.
                     self.note_source_checked(peer, doc_type, doc_id);
                     if self.unchecked_source_exists(doc_type, doc_id) {
+                        tracing::debug!(
+                            ?doc_type,
+                            doc_id,
+                            ?peer,
+                            version = self.doc_version(doc_type, doc_id),
+                            sources_checked = self.sources_checked(doc_type, doc_id).len(),
+                            "source has nothing further; another source still owes an answer"
+                        );
                         self.cool_off_catchup_peer(peer, doc_type, doc_id);
                         self.enqueue_doc_catchup(doc_type, doc_id);
                     } else {
+                        // "Caught up", in the four-state vocabulary: every source this node is
+                        // obliged to hear from has said so at this version.
+                        tracing::debug!(
+                            ?doc_type,
+                            doc_id,
+                            version = self.doc_version(doc_type, doc_id),
+                            sources_checked = self.sources_checked(doc_type, doc_id).len(),
+                            "document converged: every owed source has answered at this version"
+                        );
                         self.clear_catchup_continuation(doc_type, doc_id);
                     }
                 }
@@ -10846,7 +10975,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if applied_count > 0 {
             self.enqueue_doc_catchup(doc_type, doc_id);
         }
-        tracing::debug!(applied = applied_count, "applied doc catch-up");
+        tracing::debug!(
+            ?doc_type,
+            doc_id,
+            applied = applied_count,
+            offered = bundle.len(),
+            version = self.doc_version(doc_type, doc_id),
+            "applied doc catch-up"
+        );
         Ok(applied_count)
     }
 
@@ -14242,6 +14378,9 @@ mod tests {
         published: std::sync::Mutex<Vec<Vec<u8>>>,
         /// Peer-bound reconnect batches accepted by this fake transport.
         dialed: std::sync::Mutex<Vec<(PeerId, Vec<String>)>>,
+        /// While set, `publish` refuses instead of delivering: a transport going away underneath
+        /// a local edit that has already been applied.
+        refuse_publish: std::sync::atomic::AtomicBool,
     }
 
     impl RecordingNet {
@@ -14253,10 +14392,15 @@ mod tests {
                 denied: std::sync::Mutex::new(HashSet::new()),
                 published: std::sync::Mutex::new(Vec::new()),
                 dialed: std::sync::Mutex::new(Vec::new()),
+                refuse_publish: std::sync::atomic::AtomicBool::new(false),
             }
         }
         fn published(&self) -> Vec<Vec<u8>> {
             self.published.lock().expect("mutex").clone()
+        }
+        fn refuse_publish(&self, refuse: bool) {
+            self.refuse_publish
+                .store(refuse, std::sync::atomic::Ordering::SeqCst);
         }
         fn is_denied(&self, peer: &PeerId) -> bool {
             self.denied.lock().expect("mutex").contains(peer)
@@ -14275,6 +14419,14 @@ mod tests {
             self.inner.unsubscribe(topic).await
         }
         async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError> {
+            // Recorded only once it has actually gone out, so `published()` means delivered
+            // rather than attempted.
+            if self
+                .refuse_publish
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(TransportError::Closed);
+            }
             self.published.lock().expect("mutex").push(data.to_vec());
             self.inner.publish(topic, data).await
         }
@@ -14734,6 +14886,52 @@ mod tests {
             node.evicted_devices.len() <= MAX_EVICTED_DEVICES,
             "the readmission ledger must be bounded too"
         );
+    }
+
+    /// A send the transport refused is still a send.
+    ///
+    /// `post` applies the edit and only then hands the bytes over, so a publication failure
+    /// arrives once the operation exists, with a stable hash, in a document this process will go
+    /// on to serve and persist. Reporting that as a failed post told every caller above that
+    /// nothing had happened: the app layer skipped delivery tracking, the actor skipped the UI
+    /// delta and the desktop skipped its save, while the message sat in the channel regardless.
+    /// Retyping it minted a second copy under a new id, and both surfaced later.
+    #[tokio::test]
+    async fn a_refused_publication_still_accepts_the_operation_and_owes_the_delivery() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let mut node = recording_node();
+        node.open_channel(DocType::Channel, 5).await.unwrap();
+        // The transport going away underneath a send: the one failure `publish` still reports to
+        // this layer, now that the swarm classifies and retries the rest itself.
+        node.transport.refuse_publish(true);
+
+        let change = node
+            .post(DocType::Channel, 5, |d| d.put(ROOT, "msg", "hello"))
+            .await
+            .expect("an applied edit is an accepted post, whatever the transport did next");
+        assert_eq!(
+            node.doc(DocType::Channel, 5).map(|d| d.op_count()),
+            Some(1),
+            "the operation is in the document either way; that is what made the error a lie"
+        );
+        assert!(
+            node.transport.published().is_empty(),
+            "and nothing went out, so the delivery is genuinely still owed"
+        );
+        assert_eq!(node.outbox.len(), 1, "owed, rather than dropped");
+
+        // The caller can now track what it was told had happened, and a later tick delivers it.
+        node.track_delivery_target(DocType::Channel, 5, change);
+        node.transport.refuse_publish(false);
+        node.drain_outbox().await;
+        assert_eq!(
+            node.transport.published().len(),
+            1,
+            "the queued operation goes out once the transport can take it"
+        );
+        assert!(node.outbox.is_empty(), "and is not sent again after that");
     }
 
     /// P6 on the **committer's own** removal path: `request_remove` must not only rotate the

@@ -177,6 +177,11 @@ You're now in a shared, encrypted `#general` channel. Type and send.
 - Every server starts with **#general**. Create/join a channel by typing its name into
   **join #channel…**. Anyone who opens the same name lands in the same channel.
 - A **dot** marks unread. Opening a channel pulls its **backlog** from another member.
+- Members connect at different times, so a message written this morning can reach you tonight
+  and sort into history you had already read. Those rows get an **arrived late** divider and a
+  hairline, and the channel header shows **↑ N arrived late** to jump to the earliest; a row is
+  forgotten once it has actually been on screen in front of you. The marker is on by default and
+  is yours alone, per server: **Settings → Appearance → Missed history**.
 - Long channels initially mount only the latest messages so scrolling and new arrivals stay
   responsive. Scroll to an edge or use **Load older/newer messages**; search, reply and unread
   jumps mount a bounded window around their target automatically.

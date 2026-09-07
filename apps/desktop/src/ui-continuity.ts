@@ -1,5 +1,5 @@
 import { sanitizeStatusCursor, type StatusCursors } from "./statusread.ts";
-import type { ReadMark } from "./unread";
+import { MAX_LATE_PAST, type LatePast, type ReadMark } from "./unread.ts";
 import { sanitizeFileTrustPolicies, type FileTrustPolicies } from "./file-trust.ts";
 
 export type UiContinuity = {
@@ -17,6 +17,13 @@ export type UiContinuity = {
   statusCursors: StatusCursors;
   /** Per-server automatic-fetch policy; sealed because it names member relationships. */
   fileTrustPolicies: FileTrustPolicies;
+  /**
+   * Per conversation (same key as `readMarks`), the messages that arrived behind this person's
+   * read position and have not yet been in front of them. Sealed for the same reason as the read
+   * marks, and persisted at all because a restart is the one moment the markers matter most: the
+   * thing that survived a desync must not be the thing a reboot clears.
+   */
+  latePast: Record<string, LatePast>;
 };
 
 const MAX_ENTRIES = 2_000;
@@ -58,7 +65,21 @@ export function sanitizeUiContinuity(value: unknown): UiContinuity {
     if (cursor.ts > 0 || cursor.ids.length) statusCursors[server] = cursor;
   }
   const fileTrustPolicies = sanitizeFileTrustPolicies(root.fileTrustPolicies);
-  return { version: 1, drafts, readMarks, statusCursors, fileTrustPolicies };
+  const latePast: Record<string, LatePast> = {};
+  for (const [key, item] of Object.entries(record(root.latePast)).slice(0, MAX_ENTRIES)) {
+    if (key.length > MAX_KEY_CHARS || !Array.isArray(item)) continue;
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (const id of item) {
+      if (typeof id !== "string" || !id.length || id.length > MAX_ID_CHARS || seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    // Newest last is the order they were added in, so an over-long list keeps its newest.
+    const kept = ids.length > MAX_LATE_PAST ? ids.slice(ids.length - MAX_LATE_PAST) : ids;
+    if (kept.length) latePast[key] = kept;
+  }
+  return { version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast };
 }
 
 /**
@@ -110,6 +131,7 @@ export function planLegacyReadMarkMigration(
       readMarks: parsed,
       statusCursors: current.statusCursors,
       fileTrustPolicies: current.fileTrustPolicies,
+      latePast: current.latePast,
     });
     return { state: migrated, saveBeforeRemoval: true, removeLegacy: true };
   } catch {

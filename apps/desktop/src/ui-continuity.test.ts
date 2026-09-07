@@ -17,10 +17,10 @@ test("continuity sanitization keeps only bounded drafts and safe read positions"
     },
   });
   assert.deepEqual(state, {
-    version: 1, drafts: { good: "draft" }, readMarks: { good: { ts: 42, id: "m1" } }, statusCursors: {}, fileTrustPolicies: {},
+    version: 1, drafts: { good: "draft" }, readMarks: { good: { ts: 42, id: "m1" } }, statusCursors: {}, fileTrustPolicies: {}, latePast: {},
   });
   assert.deepEqual(sanitizeUiContinuity({ drafts: [], readMarks: null }), {
-    version: 1, drafts: {}, readMarks: {}, statusCursors: {}, fileTrustPolicies: {},
+    version: 1, drafts: {}, readMarks: {}, statusCursors: {}, fileTrustPolicies: {}, latePast: {},
   });
 });
 
