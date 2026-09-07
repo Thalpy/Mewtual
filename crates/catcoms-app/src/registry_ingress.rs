@@ -12,10 +12,10 @@ use std::sync::Arc;
 /// Non-cloneable watch bound to an exact sync instance, vault mount, local server and bucket.
 /// Its sync token additionally pins concrete epoch and installation generation. Never a UI lease.
 pub struct ServerRegistryWatch {
-    inner: RegistryWatch,
-    mount: Arc<()>,
-    server: u64,
-    bucket: u8,
+    pub(crate) inner: RegistryWatch,
+    pub(crate) mount: Arc<()>,
+    pub(crate) server: u64,
+    pub(crate) bucket: u8,
 }
 impl std::fmt::Debug for ServerRegistryWatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -65,7 +65,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         })
     }
 
-    fn check_registry_watch(
+    pub(crate) fn check_registry_watch(
         &self,
         store: &ServerStore,
         watch: &ServerRegistryWatch,

@@ -15,9 +15,11 @@ their intent before the epoch, returning publication-ready ciphertext only after
 An exact retry reseals the original signed change under current membership, not a new delta.
 Registry installation now saves recovery and receipt-covered intent retirement before atomic
 successor selection. One saved author-owned intent can be replayed through a checked bounded
-store step, now driven by a cooperative one-ledger replay pass. Network publication, automatic
-wakeups/global replay scheduling, other managed-file families and production orchestration are
-not wired yet. Studio
+store step, now driven by a cooperative one-ledger replay pass and one-shot network sender.
+Opt-in authenticated registry gossip and kind-20 paged requests use cooperative saved-state
+adapters; bounded provider cursors are available, but durable receiver continuation and keyed
+receipt/seed discovery are not complete. Automatic wakeups/global replay scheduling, other
+managed-file families and production orchestration are not wired yet. Studio
 materializers, settlement orchestration, sync discovery, complete storage integration and app/UI events
 remain later slices and the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the

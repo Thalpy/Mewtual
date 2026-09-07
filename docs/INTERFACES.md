@@ -1455,7 +1455,7 @@ and digest allow append-only growth or byte-identical source reload, but refuse 
 Returned pages subtract the initial ancestor closure and advance by cursor position, including
 already emitted dependencies. A requester with more than 64 heads can begin at [] (plus its
 verified seed if rotated) and deduplicate repeats. A page contains at most 32 freshly current-MLS
-sealed operations and 512 KiB summed `4 + SealedOp::encode().len()`; cursor/future response envelope
+sealed operations and 512 KiB summed `4 + SealedOp::encode().len()`; cursor/response envelope
 bytes are extra. Any nonterminal page emits at least one operation. No plaintext seed, vault
 snapshot, quarantined body or old ciphertext is exported. `next:None` means the captured prefix
 ended, not that later edits do not exist or that the provider is current. Debug redacts identities,
@@ -1466,14 +1466,67 @@ Missing removed-author operations in the REMAINING page range produce
 positions and initial ancestors are claimed held history, so author removal after delivery need
 not block later descendants. These are not possession proofs: a conforming requester derives its
 heads/seed from verified state and continues only after persisting a dependency-complete page.
-Historical authority transfer, receiver paging and checkpoint/head/seed discovery remain unwired.
+Historical authority transfer, automatic durable receiver continuation and checkpoint/head/seed
+discovery remain unwired.
 
-This trusted-local API has no network caller yet. Future routing MUST derive requester identity
-from authenticated outer requests, not body fields, and enforce aggregate rate/concurrency and
-cancellation before source reads. One call rebuilds at most the bounded saved epoch, then walks
-its bounded change index/ancestor sets; there is no unbounded recursion, requester table or cached
-history copy in the provider. The page API itself imposes no aggregate call-rate limit and grants
-no delivery acknowledgement, intent retirement, saved mutation or finality.
+The direct trusted-local page API imposes no aggregate call-rate limit. One call rebuilds at most
+the bounded saved epoch, then walks its bounded change index/ancestor sets. It grants no delivery
+acknowledgement, intent retirement, saved mutation or finality. Network callers use the adapter below.
+
+### Authenticated registry page exchange (cooperative, kind 20)
+
+`Server::request_registry_page(peer, RegistryPageQuery)` requests exactly one unadmitted page.
+The endpoint must already have a transport-bound proof for a current full device identity;
+candidate discovery is not permission to disclose registry identifiers. The requester signs
+with its actual device. Kind 20 uses the existing authenticated-request envelope, including
+actual requester transport peer binding. Current MLS epoch and exact current member public keys
+are required at queue and source-read time; old request kinds retain their compatible transcripts.
+
+The version-1 inner query is canonical big-endian:
+`version:u8=1, bucket:u8, doc_id:u128, head_count:u8, heads:[bytes32], seed:bytes, cursor:bytes`.
+Every `bytes` field has a u32 length prefix. Heads are strictly increasing, unique and at most
+64; seed is empty or 32 bytes, cursor empty or 81 version-1 bytes. No trailing data is accepted.
+The inner cap is 2444 bytes and authenticated body cap 2588 bytes (plus one kind byte).
+Requester identity is derived solely from the verified outer signature, never a body field.
+
+`run_once` queues requests only for an exact installed registry watch. There are at most eight
+pending responders per sync instance and one per full requester across all buckets, with a
+five-second monotonic admission lifetime. Replacement/unwatch drops that bucket's queue.
+Global pre-authentication work is limited to 10 requests/sec, burst 20; each verified full
+requester gets 1/sec, burst 2, with at most 4096 debt rows. Replacement and cancellation do not
+reset debt; only fully refilled rows are reclaimed. Source callbacks additionally share a 2/sec,
+burst-4 rail across all watches. Expiry is swept on enqueue/drain; stale records can remain
+bounded in an idle queue but can never be served after expiry. Refusals/errors drop the responder.
+
+`Server::serve_registry_request_step(store, provider, watch)` drains one request through the
+checked saved source. The provider must match the watch's captured numeric server, bucket,
+runtime and physical mount. Scope checks happen before queue consumption; current membership,
+MLS epoch, freshness, watch generation and service budget are checked before source I/O.
+`None` means no eligible work, including throttling. `Some(())` means a response was handed to
+the responder, NOT delivery. Cancelled requesters may still cause bounded source work because
+Responder does not expose cancellation. No source mutation, intent retirement or generic ack occurs.
+
+Answer bytes are `version:u8=1, status:u8`. Status 1=Restart, 2=CheckpointRequired and
+3=HistoricalAuthorizationRequired end there. Status 0 adds `op_count:u8`, length-framed
+SealedOps and one length-framed optional cursor. At most 32 ops and 512 KiB of framed ops are
+allowed; each op must match DocRegistry, concrete id and current MLS epoch. Empty nonterminal
+pages reject. Signed framing is `[provider_pubkey:bytes32, signature:bytes64, answer:bytes]`.
+The answer cap is 524376 bytes, signed response cap 524484 bytes. The latter is checked after
+the transport has buffered its globally bounded frame but before payload copies/signature work.
+
+The response signature uses `catcoms/registry-page-response/v1` in the existing length-framed
+signed-response transcript (group, requester key, timestamp, nonce, request epoch), with a bound
+bundle of length-framed actual provider PeerId, entire canonical query and entire answer. The
+client requires the same full device that proved the selected endpoint. Tampered, relayed or
+cross-query responses cannot become a page. An empty unsigned response means unsupported/refused,
+not an empty document; there is no legacy catch-up fallback. Decrypted author/projection/DAG
+admission is still the durable receiver's job; it must save all operations before using `next`.
+
+One outbound request has a ten-second injected-clock deadline. Four fixed per-sync permits are
+retained by `RequestCancellation` accounting until the transport actually releases its work;
+dropping or timing out the caller publishes cancellation but does not recycle a live stream's
+permit. No retry, durable receive cursor, actor/native scheduler or receipt/seed discovery is
+provided by this exchange alone.
 
 ### Registry persistence and inventory constraints
 

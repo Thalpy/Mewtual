@@ -16,6 +16,8 @@ catcoms-discovery = { path = "../catcoms-discovery" }
 thiserror.workspace = true
 bytes.workspace = true
 futures.workspace = true
+# Cancellation signalling only; production execution still uses the catcoms-rt clock seam.
+tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 blake3 = "1"
 hex = "0.4"

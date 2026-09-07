@@ -1,12 +1,14 @@
-//! Cooperative read-only serving of durable registry operation pages. This does not expose a
-//! network request kind: future routing must authenticate the requester and bound aggregate work.
+//! Cooperative read-only serving of durable registry operation pages. The network adapter drains
+//! a bounded authenticated request through the same mounted source; UI and scheduling stay separate.
 
 use std::sync::Arc;
 
+use crate::registry_ingress::ServerRegistryWatch;
 use catcoms_replication::registry_epoch::catchup::{
     RegistryPageOutcome, RegistryPageProvider, RegistryPageRequest,
 };
-use catcoms_rt::{CryptoRngCore, MeshTransport};
+use catcoms_rt::{CryptoRngCore, MeshTransport, PeerId};
+use catcoms_sync::registry_catchup::RegistryPageQuery;
 use catcoms_sync::RegistrySyncInstance;
 
 use crate::{AppError, Server, ServerStore};
@@ -28,6 +30,56 @@ impl std::fmt::Debug for ServerRegistryPageProvider {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    /// Fetch a transport-verified page from an already proven member endpoint. No store write,
+    /// cursor advancement, epoch installation or delivery/finality acknowledgement occurs here.
+    /// The durable receive driver must gate and save every op before following a continuation.
+    pub async fn request_registry_page(
+        &mut self,
+        peer: PeerId,
+        query: RegistryPageQuery<'_>,
+    ) -> Result<Option<RegistryPageOutcome>, AppError> {
+        Ok(self.sync.request_registry_page(peer, query).await?)
+    }
+
+    /// Answer one authenticated network request using only the durable registry bound to this
+    /// watch/provider pair. Mount and scope checks precede even queue consumption; sync checks
+    /// current requester authority, watch generation and aggregate service debt before vault I/O.
+    /// None means no eligible work (including throttling), not an empty or settled document.
+    pub fn serve_registry_request_step(
+        &mut self,
+        store: &ServerStore,
+        provider: &mut ServerRegistryPageProvider,
+        watch: &ServerRegistryWatch,
+    ) -> Result<Option<()>, AppError> {
+        self.check_registry_watch(store, watch)?;
+        if !self.sync.matches_registry_instance(&provider.instance)
+            || !Arc::ptr_eq(&provider.mount, &store.registry_mount())
+            || provider.server != watch.server
+            || provider.bucket != watch.bucket
+        {
+            return Err(AppError::Invalid(
+                "registry page provider/watch scope mismatch".into(),
+            ));
+        }
+        self.sync
+            .serve_registry_request(&watch.inner, |group, device, rng, request| {
+                if !provider
+                    .inner
+                    .preflight_request(group, device, provider.bucket, &request)
+                    .map_err(|e| AppError::Invalid(e.to_string()))?
+                {
+                    return Ok(RegistryPageOutcome::Restart);
+                }
+                let Some(state) =
+                    store.load_registry_epoch(provider.server, group, provider.bucket, device)?
+                else {
+                    return Ok(RegistryPageOutcome::Restart);
+                };
+                state.catchup_page(&mut provider.inner, group, device, request, rng)
+            })?
+            .transpose()
+    }
+
     /// Mint a constant-sized, restart-local provider key using the actual Server RNG and clock.
     /// Does not load/create a registry record, subscribe a topic or establish remote currency.
     pub fn begin_registry_page_provider(

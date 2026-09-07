@@ -8,6 +8,51 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Autonomous backend completion / P1 authenticated registry pages (2026-09-07).** The owner
+  requested continued backend implementation, periodic verified pushes, adversarial reviews,
+  and final Markdown UI integration guidelines. UI remains owner-owned; the canonical mockups
+  and unrelated release changes are untouched. [BACKEND-IMPLEMENTATION.md](BACKEND-IMPLEMENTATION.md)
+  is the acceptance checklist. P1 remains roughly **65% (+/-10 points)**: this closes another
+  network adapter, not the remaining orchestration/discovery/Studio integration.
+
+  Kind 20 now authenticates registry page requests over the actual requester transport identity.
+  `run_once` retains at most eight watched requests, one per full requester, under independent
+  preauth, requester and source-read rates. `Server::serve_registry_request_step` binds the
+  provider/watch to the same runtime, physical vault, numeric server and bucket before draining
+  the checked saved source. Client `request_registry_page` requires a pre-existing current
+  bound-member endpoint proof, caps signed replies before copying, verifies a query-bound
+  domain-separated signature, and returns unadmitted typed pages without legacy fallback.
+  Four outbound permits remain charged through actual transport termination after cancellation.
+  Neither a response handoff nor cursor completion means delivery, finality or currency.
+
+  Seven sync regressions cover canonical framing, request/response binding, key/epoch changes,
+  expiry/watch replacement, all resource rails, and delayed-driver cancellation accounting.
+  App coverage includes a genuinely joined second member fetching 32+1 saved operations, explicit
+  durable admission and vault reopen, plus provider/watch/server/mount rejection before I/O.
+  The initial mount test correctly hit the vault's single-writer lock; it now closes the old
+  mount before reopening, preserving that security invariant. Design review's retained-request
+  capacity and endpoint metadata concerns are fixed. Actual-diff review and re-review have no
+  remaining findings; the low-priority alternate-current-signer and stale-proof test gaps are fixed.
+  Maximum-epoch source-read timing is an explicit incomplete follow-up before automatic scheduling,
+  recorded in the acceptance checklist. Verification passed:
+
+  - `cargo test -p catcoms-sync registry_page_ --lib` (7 focused tests, including review regressions)
+  - `cargo test -p catcoms-app registry_page_network --lib` and the corrected adapter regression;
+    all five app page tests also passed in the full suite
+  - `cargo test --all --all-features` (app 334 passed / 4 existing ignored, sync 176, replication 66;
+    workspace integration/doc tests passed, existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 passed)
+  - `npm.cmd --prefix apps/desktop test` (1135 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `git diff --check`
+
+  **Next:** a bounded durable receiver continuation driver, then keyed receipt-head/seed discovery
+  and runtime/coordinator ownership. The network test drives receive admission explicitly; no
+  automatic actor/native page driver, Studio materializer or new UI command is claimed here.
+
 - **P1 bounded registry page serving (2026-09-07).** Rough P1 backend estimate: **65%, with
   about +/-10 percentage points uncertainty**. This is an engineering estimate, not a count of
   commits and not Creative Suite/UI readiness. The protocol core, checked persistence, registry

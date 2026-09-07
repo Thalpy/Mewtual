@@ -27,6 +27,15 @@ const PAYLOAD_BYTES: usize = REGISTRY_CURSOR_BYTES - 32;
 /// Reminting the provider key invalidates all its cursors; it must not survive a runtime restart.
 pub struct RegistryPageCursor([u8; REGISTRY_CURSOR_BYTES]);
 impl RegistryPageCursor {
+    /// Copy an opaque wire continuation after its fixed framing has been checked. This is NOT
+    /// authentication: only the issuing provider can verify its MAC, scope and expiry.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ReplError> {
+        if bytes.len() != REGISTRY_CURSOR_BYTES || bytes[0] != 1 {
+            return Err(ReplError::Malformed);
+        }
+        Ok(Self(bytes.try_into().map_err(|_| ReplError::Malformed)?))
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }

@@ -219,6 +219,99 @@ async fn registry_receive_two_actual_members_persist_duplicate_and_restart() {
 }
 
 #[tokio::test]
+async fn registry_page_network_serves_saved_history_to_an_actual_joined_member() {
+    use catcoms_replication::registry_epoch::catchup::RegistryPageOutcome;
+    use catcoms_sync::registry_catchup::RegistryPageQuery;
+    let mut pair = Pair::new().await;
+    for nonce in 2..=33 {
+        pair.edit(nonce);
+    }
+    let watch = pair
+        .alice
+        .watch_registry_epoch(&pair.alice_store, SERVER, pair.key.bucket())
+        .unwrap();
+    let mut provider = pair
+        .alice
+        .begin_registry_page_provider(&pair.alice_store, SERVER, pair.key.bucket())
+        .unwrap();
+    pair.alice.flush_registry_subscriptions().await.unwrap();
+    // A normal transport-bound signed catch-up exchange proves the endpoint first. The page
+    // query must not disclose registry metadata to an arbitrary invite/discovery candidate.
+    let alice_peer = pair.alice.local_peer();
+    let (proof, tick) = tokio::join!(
+        pair.bob
+            .sync
+            .request_catchup(alice_peer, DocType::Wiki, 123),
+        pair.alice.sync_once()
+    );
+    proof.unwrap();
+    tick.unwrap();
+    let mut cursor = None;
+    let mut received = 0;
+    for expected in [32, 1] {
+        let query = RegistryPageQuery {
+            bucket: pair.key.bucket(),
+            doc_id: pair.id,
+            heads: &[],
+            seed: None,
+            cursor: cursor.as_ref().map(
+                |c: &catcoms_replication::registry_epoch::catchup::RegistryPageCursor| c.as_bytes(),
+            ),
+        };
+        let (reply, ()) = tokio::join!(pair.bob.request_registry_page(alice_peer, query), async {
+            pair.alice.sync_once().await.unwrap();
+            assert!(pair
+                .alice
+                .serve_registry_request_step(&pair.alice_store, &mut provider, &watch)
+                .unwrap()
+                .is_some());
+        });
+        let RegistryPageOutcome::Page(page) = reply.unwrap().unwrap() else {
+            panic!("expected saved page")
+        };
+        assert_eq!(page.operations.len(), expected);
+        // A successful network exchange alone has not installed anything on the receiver.
+        assert_eq!(pair.state().map_or(0, |state| state.op_count()), received);
+        for op in &page.operations {
+            let (admission, _) = pair
+                .bob
+                .sync
+                .with_registry_context(|group, device, _, rng| {
+                    pair.bob_store.ingest_registry_epoch(
+                        SERVER,
+                        group,
+                        pair.key.bucket(),
+                        device,
+                        op,
+                        rng,
+                        &mut pair.bob_budget,
+                    )
+                })
+                .unwrap();
+            assert_eq!(admission, Admission::Accepted);
+        }
+        cursor = page.next;
+        received += expected;
+    }
+    assert!(cursor.is_none());
+    assert_eq!(pair.state().unwrap().op_count(), 33);
+    drop(pair.bob_store);
+    pair.bob_store = ServerStore::open(pair.bob_root.path(), b"receive-test", &mut rng()).unwrap();
+    assert_eq!(
+        pair.state().unwrap().projection().unwrap().pointers[&pair.key],
+        33
+    );
+    assert_eq!(
+        pair.alice_store
+            .load_epoch_intents(SERVER, &pair.document)
+            .unwrap()
+            .pending()
+            .len(),
+        33
+    );
+}
+
+#[tokio::test]
 async fn registry_receive_rewatch_server_replacement_and_failed_budget_never_claim_success() {
     let mut pair = Pair::new().await;
     pair.send().await;

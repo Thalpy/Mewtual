@@ -14,9 +14,9 @@ const MAX_PACKET: usize = MAX_SIGNED_EPOCH_OP_BYTES + 78;
 /// Exact installed watch generation. Same-id replacement, server restore and explicit unwatch
 /// invalidate old handles. No wire authority or plaintext body is exposed by this local token.
 pub struct RegistryWatch {
-    bucket: u8,
-    doc_id: u128,
-    generation: Arc<()>,
+    pub(super) bucket: u8,
+    pub(super) doc_id: u128,
+    pub(super) generation: Arc<()>,
     instance: RegistrySyncInstance,
 }
 
@@ -28,7 +28,7 @@ impl fmt::Debug for RegistryWatch {
 
 pub(super) struct Watched {
     pub(super) doc_id: u128,
-    generation: Arc<()>,
+    pub(super) generation: Arc<()>,
 }
 
 struct Incoming {
@@ -40,25 +40,28 @@ struct Incoming {
 /// Fixed-point token bucket: one token = 1000 units. Monotonic rollback cannot refill debt;
 /// saturated arithmetic handles a very long idle interval without wrapping into fresh capacity.
 #[derive(Clone, Copy)]
-struct Rate {
+pub(super) struct Rate {
     units: u64,
     at_ms: u64,
 }
 impl Rate {
-    fn full(now: u64, burst: u64) -> Self {
+    pub(super) fn is_full(&self, burst: u64) -> bool {
+        self.units == burst * 1000
+    }
+    pub(super) fn full(now: u64, burst: u64) -> Self {
         Self {
             units: burst * 1000,
             at_ms: now,
         }
     }
-    fn refill(&mut self, now: u64, per_second: u64, burst: u64) {
+    pub(super) fn refill(&mut self, now: u64, per_second: u64, burst: u64) {
         self.units = self
             .units
             .saturating_add(now.saturating_sub(self.at_ms).saturating_mul(per_second))
             .min(burst * 1000);
         self.at_ms = self.at_ms.max(now);
     }
-    fn charge(&mut self, now: u64, per_second: u64, burst: u64) -> bool {
+    pub(super) fn charge(&mut self, now: u64, per_second: u64, burst: u64) -> bool {
         self.refill(now, per_second, burst);
         if self.units < 1000 {
             return false;
@@ -82,6 +85,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// The next run_once (or explicit flush) reconciles transport subscriptions. One slot/bucket.
     pub fn watch_registry(&mut self, bucket: u8, doc_id: u128) -> RegistryWatch {
         let generation = Arc::new(());
+        self.registry_pages.drop_bucket(bucket);
         self.registry_ingress
             .queue
             .retain(|item| item.bucket != bucket);
@@ -120,6 +124,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(SyncError::NoSuchDoc);
         }
         self.registry_ingress.watches.remove(&watch.bucket);
+        self.registry_pages.drop_bucket(watch.bucket);
         self.registry_ingress
             .queue
             .retain(|item| item.bucket != watch.bucket);

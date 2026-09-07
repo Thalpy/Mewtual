@@ -410,11 +410,25 @@ table with the commit that closed it.
   initial heads count as claimed held dependencies. Missing removed-author history cannot be
   laundered through a current provider; it reports that historical authorization is required.
   No seed is implicitly installed, source mutated, intent retired or receipt issued. Completion
-  covers only the frozen prefix, not newer appends. Repeated valid requests can still consume
-  bounded but substantial source-rebuild work: no network handler is connected, and aggregate
-  admission/rates, authenticated requester binding, receiver pagination and checkpoint/head
-  discovery remain mandatory integration work. Debug hides scope/content/cursors; the random
+  covers only the frozen prefix, not newer appends. Debug hides scope/content/cursors; the random
   provider secret is zeroized and never persisted or transmitted.
+- **Registry network pages are bounded member claims, not saved state.** Kind 20 binds requests
+  to the actual requester transport peer and responses to the actual provider peer, whole query,
+  group, requester key, request nonce/timestamp/MLS epoch and answer under a separate domain.
+  Both full current member keys and current MLS epoch are checked; queued work rechecks before
+  source I/O. Clients disclose registry ids/heads/cursors only to an already transport-bound
+  current member endpoint. Eight pending responders, one per full requester across all buckets,
+  expire for admission after five monotonic seconds. Independent global preauth (10/sec, burst 20),
+  per-device (1/sec, burst 2, at most 4096 debt rows) and source-read (2/sec, burst 4) rails limit
+  work. Watch replacement does not reset debt. A compromised member can consume those bounded
+  resources or withhold data; fairness/proof of currency is not claimed. Response framing is
+  capped at 524484 bytes after transport buffering but before body copies/signature work; decoded
+  operations still require durable author/DAG/projection admission. No legacy fallback is allowed.
+  The client publishes cancellation on drop/ten-second timeout and keeps at most four transport
+  requests charged until the driver terminates them. Requester cancellation may not suppress an
+  already queued provider read; responder handoff proves no delivery. No source is mutated or
+  intent retired by paging. Runtime scheduling, durable receive cursors and receipt/seed discovery
+  remain separate integration requirements.
 - **One-shot publication limits application retries, not gossip lifetime.** `publish_once` waits
   for the driver's single attempt and bypasses Mewtual's legacy ciphertext retry queue. Production
   owns at most 16 compact 512-KiB payloads with 64-byte topics awaiting/entering this path, with

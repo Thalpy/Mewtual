@@ -211,6 +211,47 @@ fn registry_page_store_rejects_mount_server_and_bucket_retargeting() {
 }
 
 #[test]
+fn registry_page_network_adapter_rejects_mismatched_provider_scope_before_source_io() {
+    let mut f = Fixture::new();
+    f.edit(1);
+    let watch = f
+        .server
+        .watch_registry_epoch(&f.store, SERVER, f.key.bucket())
+        .unwrap();
+    let mut wrong_server = f
+        .server
+        .begin_registry_page_provider(&f.store, SERVER + 1, f.key.bucket())
+        .unwrap();
+    let mut wrong_bucket = f
+        .server
+        .begin_registry_page_provider(&f.store, SERVER, f.key.bucket().wrapping_add(1))
+        .unwrap();
+    let mut provider = f.begin();
+    // Queue presence cannot make an unrelated provider a read permit. The exact mismatch error
+    // is returned even when loading the source would fail with a different corruption error.
+    std::fs::write(f.file(), b"corrupt network source").unwrap();
+    for wrong in [&mut wrong_server, &mut wrong_bucket] {
+        assert!(f
+            .server
+            .serve_registry_request_step(&f.store, wrong, &watch)
+            .unwrap_err()
+            .to_string()
+            .contains("provider/watch scope mismatch"));
+    }
+    drop(f.store);
+    f.store = ServerStore::open(f.root.path(), b"page-store", &mut rng()).unwrap();
+    assert!(f
+        .server
+        .serve_registry_request_step(&f.store, &mut provider, &watch)
+        .is_err());
+    f.server.unwatch_registry_epoch(&watch).unwrap();
+    assert!(f
+        .server
+        .serve_registry_request_step(&f.store, &mut provider, &watch)
+        .is_err());
+}
+
+#[test]
 fn registry_page_store_preflights_untrusted_cursor_before_reading_corrupt_source() {
     let mut f = Fixture::new();
     for n in 0..33 {
