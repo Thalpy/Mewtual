@@ -362,6 +362,17 @@ table with the commit that closed it.
   Debug omits scope, ids and content. This is trusted local orchestration, not a peer-facing API:
   aggregate pass concurrency/work limits, lifecycle cancellation, automatic wakeups and all live
   send-time checks/publication remain required before actor/transport integration.
+- **One-shot publication limits application retries, not gossip lifetime.** `publish_once` waits
+  for the driver's single attempt and bypasses Mewtual's legacy ciphertext retry queue. Production
+  owns at most 16 compact 512-KiB payloads with 64-byte topics awaiting/entering this path, with
+  non-waiting admission and capacity retained on cancelled queued commands until drained. The
+  final closed-receiver check is the admission boundary: cancellation observed before it suppresses
+  work; a race after it cannot retract the synchronous attempt. Normal libp2p caches and handler
+  queues can retain bytes even after NoPeers/QueuesFull, and a lost acknowledgement is ambiguous.
+  Submitted/Duplicate are not delivery or finality. This adds no identity, membership, epoch-gate,
+  UI-lock or server-incarnation authority. Those checks and live P1 sender integration remain
+  required. Legacy publication behaviour and gossip limits are unchanged; input caps do not
+  guarantee gossip accepts that size. This is a local API, not a new peer-controlled message kind.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
   no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains

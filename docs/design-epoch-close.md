@@ -330,6 +330,15 @@ New ids need another pass; missing selected ids pause. Dropping/restarting, incl
 ticket, preserves durable intents and exact-current-log retry behavior. Mount binding is local
 and rejects a reopened vault, not a lock/incarnation send permit. Live consumers must still bound
 active passes/aggregate work and recheck lifecycle, membership, MLS epoch and Open before sending.
+
+The additive `MeshTransport::publish_once` prerequisite now waits for a driver attempt without
+entering Mewtual's legacy ciphertext retry queue. It is not yet consumed by this replay path.
+Driver cancellation is effective only if observed before admission; normal gossip caches and
+handler queues can outlive an attempt, even after some error results. Local Submitted/Duplicate
+outcomes do not imply delivery or intent retirement. Retries still require fresh authority checks
+and resealing by saved id, not reuse of a previously prepared body. The API's bounded inputs do
+not raise the configured gossip message-size limit.
+
 Caps: 64 KiB per intent, 10,000 intents and 4 MiB per logical document, 64 MiB per vault,
 20,000 markers per epoch (one for each operation admitted by the epoch maximum).
 

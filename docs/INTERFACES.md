@@ -39,6 +39,7 @@ pub trait MeshTransport: Send + Sync {
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError>;
     async fn unsubscribe(&self, topic: Topic) -> Result<(), TransportError>;
     async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError>;
+    async fn publish_once(&self, topic: Topic, data: Bytes) -> Result<PublishSubmission, PublishOnceError>; // fail-closed default
     async fn request(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<Bytes, TransportError>;
     async fn request_connected(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<Bytes, TransportError>; // fail-closed default
     async fn notify(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>;
@@ -76,6 +77,8 @@ pub enum ConnectionDirection { Dialer, Listener }
 pub struct Responder;  fn respond(self, Bytes);  fn channel() -> (Responder, ResponderRx);
 pub struct ResponderRx; async fn recv(self) -> Option<Bytes>;
 pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, NoResponse, InvalidDialBatch }
+pub enum PublishSubmission { Submitted, Duplicate } // local driver/cache evidence, NEVER delivery
+pub enum PublishOnceError { Unsupported, TooLarge, Busy, Closed, NoPeers, QueuesFull, Failed }
 pub trait DialPermit: Send + Debug { fn address(&self)->&str; fn commit_if_current(self:Box<Self>)->Option<String>; }
 pub type BoxedDialPermit = Box<dyn DialPermit>;
 ```
@@ -91,6 +94,25 @@ Implementations:
   produces no further subscription events, and are bounded by `MAX_PENDING_PUBLISH` (256) and
   `MAX_PENDING_PUBLISH_BYTES` (8 MiB), oldest dropped first. The queue is a bridge across a
   transient failure, not durable storage: what matters past it is recovered by document catch-up.
+  **`publish_once` is a separate, driver-acknowledged path:** one synchronous gossip attempt,
+  never the legacy `pending_publish` retry queue. Unsupported transports fail closed rather than
+  fall back to `publish`. `MeshService` admits at most 16 queued/being-attempted commands, each
+  with at most 512 KiB of payload and 64 topic bytes; capacity is acquired before compact-copying
+  slices, and a full command queue returns `Busy` without waiting. A cancelled queued command
+  keeps its capacity until drained. This bounds owned pending payloads to 8 MiB plus 1 KiB of
+  topics, excluding caller inputs and already-admitted gossip state. The gossip configuration
+  may reject a payload below this API ceiling; its limits are unchanged.
+
+  Dropping the caller future closes its acknowledgement receiver. The driver checks that receiver
+  immediately before its synchronous attempt; a drop observed then suppresses work. After that
+  admission boundary, cancellation/acknowledgement loss cannot retract it. Even `NoPeers` or
+  `QueuesFull` can leave normal libp2p cache effects (its cache insertion precedes some refusals).
+  `Duplicate` is distinct from `Submitted` and proves neither delivery nor a successful prior
+  send. `Closed` may mean unknown submission, not rollback. No outcome retires a P1 intent.
+  `MemNetwork` implements immediate bounded fan-out, reports `NoPeers` when no other live
+  subscriber accepts it, and has no deferred retry; it does not model libp2p cache/queue behaviour.
+  P1 replay/actor send-time authority and lifecycle integration remain unimplemented.
+
   `request_connected` / `notify_connected` are deliberately narrow repair sends: the actor
   succeeds only when its current peer map and `Swarm::is_connected` both say
   the transport is live. Unlike ordinary `request_control`, it never consults `recent_peers` and

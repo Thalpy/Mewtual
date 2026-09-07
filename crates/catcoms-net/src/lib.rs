@@ -69,6 +69,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::num::NonZeroU16;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -100,8 +101,10 @@ use libp2p::{
 };
 use thiserror::Error;
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, Semaphore};
 use tokio::task::JoinHandle;
+
+mod publication;
 
 /// Max request/response frame size.
 const MAX_FRAME: usize = 16 * 1024 * 1024;
@@ -1200,6 +1203,9 @@ enum Command {
     Subscribe(Topic),
     Unsubscribe(Topic),
     Publish(Topic, Bytes),
+    /// Separate from legacy retrying publication. Owns its capacity until the driver handles it,
+    /// even when its waiting caller disappears. Never enters `pending_publish`.
+    PublishOnce(publication::Publication),
     Request {
         peer: PeerId,
         data: Bytes,
@@ -3929,6 +3935,9 @@ impl Actor {
             Command::Publish(topic, data) => {
                 self.publish_or_hold(topic, data, PublishAttempt::First);
             }
+            Command::PublishOnce(publication) => {
+                publication.run(&mut self.swarm.behaviour_mut().gossipsub);
+            }
             Command::Request {
                 peer,
                 data,
@@ -5143,6 +5152,9 @@ fn current_authenticated_routes(
 pub struct MeshService {
     local: PeerId,
     cmd_tx: mpsc::Sender<Command>,
+    /// Independent of the shared command count; bounded one-shot payload ownership survives
+    /// cancellation until the queued command is drained. No unbounded admission waiters.
+    publish_once_slots: Arc<Semaphore>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     connection_snapshot_rx: watch::Receiver<Vec<PeerConnectionSnapshot>>,
     authenticated_route_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
@@ -5268,6 +5280,7 @@ impl MeshService {
         Self {
             local,
             cmd_tx,
+            publish_once_slots: Arc::new(Semaphore::new(publication::MAX_IN_FLIGHT)),
             event_rx: Mutex::new(event_rx),
             connection_snapshot_rx,
             authenticated_route_rx,
@@ -5909,6 +5922,14 @@ impl MeshTransport for MeshService {
             .send(Command::Publish(topic, data))
             .await
             .map_err(|_| TransportError::Closed)
+    }
+
+    async fn publish_once(
+        &self,
+        topic: Topic,
+        data: Bytes,
+    ) -> Result<catcoms_rt::PublishSubmission, catcoms_rt::PublishOnceError> {
+        publication::publish_once(&self.cmd_tx, &self.publish_once_slots, topic, data).await
     }
 
     async fn request(

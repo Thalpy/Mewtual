@@ -8,6 +8,50 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 one-shot transport prerequisite (2026-09-07).** `MeshTransport::publish_once` now waits
+  for one actual driver attempt instead of treating command enqueueing as publication. Production
+  uses a separate command that cannot enter the legacy `pending_publish` ciphertext retry queue.
+  Unsupported transports fail closed; the deterministic memory broker implements bounded immediate
+  fan-out. Existing chat publication, UI and wire/persistence formats are unchanged.
+
+  There are at most 16 queued/being-attempted compact payloads per mesh service (512 KiB each,
+  64-byte topics). Both semaphore and shared command-queue saturation return Busy without waiting.
+  Cancelled commands retain capacity until drained. The driver suppresses a dropped future only
+  when cancellation is observed before its final admission check; later races/ack loss cannot
+  retract an attempt. Normal libp2p cache/handler effects remain possible even after NoPeers or
+  QueuesFull. Submitted and Duplicate are distinct, and neither proves delivery or retires intents.
+
+  **Next:** use this seam in the cooperative replay sender with actual session/server, membership,
+  MLS epoch and Open-gate checks; then live coordinator ownership/aggregate scheduling. Registry
+  receive/catch-up, receipt-head/seed discovery, settlement-wide capacity handling and Studio/actor
+  integration still remain. The seam's 512-KiB bound is not a guarantee the current gossip size
+  configuration accepts every P1 operation; that limit remains unchanged and reports TooLarge.
+
+  Eleven focused regressions cover driver acknowledgement/classification, exact input bounds,
+  compact slice ownership, semaphore/shared-queue saturation, cancellation before and after
+  admission, shutdown, no implicit retry, unsupported fallback, memory fan-out and real libp2p
+  memory-swarm submission/reception. Read-only design and actual-diff adversarial reviews found
+  no blocker/high/medium. The low coverage suggestion is fixed: capacity is asserted inside an
+  attempt and an injected unwind releases it, reports Closed to the waiter and queues no retry.
+  The final eight net tests pass, including this test-only addition after the full suite started.
+  Verification passed:
+
+  - `cargo test -p catcoms-net publish_once -- --nocapture` (initial 7 tests), then
+    `cargo test -p catcoms-net --lib publish_once -- --nocapture` (final 8 tests)
+  - `cargo test -p catcoms-rt publish_once -- --nocapture` (3 tests)
+  - `cargo test --all --all-features` (existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests)
+  - `npm.cmd --prefix apps/desktop test` (1,135 tests)
+  - `cargo clippy --all-targets --all-features -- -D warnings` (including final rerun)
+  - `cargo fmt -p catcoms-net -p catcoms-rt -- --check`
+  - `bash scripts/check-no-ambient.sh` (Git Bash) and `git diff --check`
+
+  `cargo fmt --all -- --check` was run but reports only concurrent, unrelated upload-code
+  formatting differences. Those app/native upload and release-workflow/documentation changes
+  are excluded from this commit/review; some continued after full-suite compilation, so these
+  results do not certify the evolving unrelated work. Frontend static/build/visual checks were
+  not run for this transport-only slice; it changes no UI or native bridge source.
+
 - **P1 cooperative registry replay pass (2026-09-07).** `begin_registry_replay` snapshots only
   the actual member's saved intent ids from a ledger checked against both inventories.
   `step_registry_replay` attempts at most one existing checked replay, paced at 100 ms per pass

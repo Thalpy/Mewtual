@@ -46,6 +46,15 @@ the same id, and never retires intents on traversal/submission. This is not an a
 aggregate scheduling, send-time lifecycle/gate checks, publication, settlement-wide capacity
 headroom and discovery remain to be integrated. No universal progress at full quota is claimed yet.
 
+The transport now offers a one-shot publication prerequisite, not a live P1 sender. Legacy
+`publish` acknowledges actor enqueueing and can hold ciphertext for later retries. `publish_once`
+instead waits for one driver attempt and never enters that application retry queue. Its bounded
+commands retain their capacity after caller cancellation until drained. Cancellation observed at
+the last driver check suppresses an attempt, but cannot retract work admitted before it. Normal
+gossip caches/handler queues may retain bytes even after some refusal results; cache duplicates
+and local submissions are never delivery proofs. P1 must still own lifecycle checks, durable ids
+and fresh resealing on retry; this additive seam does not change existing chat publication.
+
 The naive "one group, every device commits, replay old ciphertext to latecomers" design
 is broken. The load-bearing fixes:
 

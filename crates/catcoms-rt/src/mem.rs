@@ -15,9 +15,10 @@ use tokio::sync::oneshot;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::transport::{
-    DialSubmission, MeshTransport, PeerConnectionSnapshot, PeerId, ProtocolId, RequestCancellation,
-    Responder, Topic, TransportError, TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT,
-    MAX_PEER_DIAL_BATCH,
+    DialSubmission, MeshTransport, PeerConnectionSnapshot, PeerId, ProtocolId, PublishOnceError,
+    PublishSubmission, RequestCancellation, Responder, Topic, TransportError, TransportEvent,
+    MAX_CONNECTED_PEER_SNAPSHOT, MAX_PEER_DIAL_BATCH, MAX_PUBLISH_ONCE_BYTES,
+    MAX_PUBLISH_ONCE_TOPIC_BYTES,
 };
 
 #[derive(Debug, Default)]
@@ -150,6 +151,45 @@ impl MeshTransport for MemNetwork {
         Ok(())
     }
 
+    async fn publish_once(
+        &self,
+        topic: Topic,
+        data: Bytes,
+    ) -> Result<PublishSubmission, PublishOnceError> {
+        if data.len() > MAX_PUBLISH_ONCE_BYTES
+            || topic.as_bytes().len() > MAX_PUBLISH_ONCE_TOPIC_BYTES
+        {
+            return Err(PublishOnceError::TooLarge);
+        }
+        // No await or deferred worker: cancellation before this future is polled does nothing;
+        // once polled, the whole attempt is synchronous. Compact slices so a tiny test event
+        // cannot retain an arbitrarily large backing allocation. This deterministic test broker
+        // does not model libp2p's duplicate cache or its bounded per-peer handler queues.
+        let topic = Topic::new(Bytes::copy_from_slice(topic.as_bytes()));
+        let data = Bytes::copy_from_slice(&data);
+        let mut submitted = false;
+        for peer in self.hub.subscribers(&topic) {
+            if peer != self.local {
+                submitted |= self
+                    .hub
+                    .deliver(
+                        peer,
+                        TransportEvent::Gossip {
+                            topic: topic.clone(),
+                            from: self.local,
+                            data: data.clone(),
+                        },
+                    )
+                    .is_ok();
+            }
+        }
+        if submitted {
+            Ok(PublishSubmission::Submitted)
+        } else {
+            Err(PublishOnceError::NoPeers)
+        }
+    }
+
     async fn request(
         &self,
         peer: PeerId,
@@ -263,6 +303,77 @@ mod tests {
 
     fn bytes(s: &'static str) -> Bytes {
         Bytes::from_static(s.as_bytes())
+    }
+
+    #[tokio::test]
+    async fn publish_once_has_no_deferred_retry_and_never_echoes_to_self() {
+        let hub = Hub::new();
+        let a = hub.join(PeerId::from_u64(1));
+        let b = hub.join(PeerId::from_u64(2));
+        let topic = Topic::new("one-shot");
+        a.subscribe(topic.clone()).await.unwrap();
+        assert_eq!(
+            a.publish_once(topic.clone(), bytes("old")).await,
+            Err(PublishOnceError::NoPeers)
+        );
+        b.subscribe(topic.clone()).await.unwrap();
+        drop(a.publish_once(topic.clone(), bytes("unpolled")));
+        assert!(b.rx.lock().await.try_recv().is_err());
+        assert_eq!(
+            a.publish_once(topic.clone(), bytes("current")).await,
+            Ok(PublishSubmission::Submitted)
+        );
+        match b.rx.lock().await.try_recv().unwrap() {
+            TransportEvent::Gossip {
+                topic: actual,
+                from,
+                data,
+            } => {
+                assert_eq!(actual, topic);
+                assert_eq!(from, a.local_peer());
+                assert_eq!(data, bytes("current"));
+            }
+            _ => panic!("expected gossip"),
+        }
+        assert!(a.rx.lock().await.try_recv().is_err());
+        assert!(b.rx.lock().await.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn publish_once_checks_exact_input_limits_and_closed_subscribers() {
+        let hub = Hub::new();
+        let a = hub.join(PeerId::from_u64(1));
+        let b = hub.join(PeerId::from_u64(2));
+        let topic = Topic::new(vec![1; MAX_PUBLISH_ONCE_TOPIC_BYTES]);
+        b.subscribe(topic.clone()).await.unwrap();
+        assert_eq!(
+            a.publish_once(
+                topic.clone(),
+                Bytes::from(vec![0; MAX_PUBLISH_ONCE_BYTES + 1])
+            )
+            .await,
+            Err(PublishOnceError::TooLarge)
+        );
+        assert_eq!(
+            a.publish_once(
+                Topic::new(vec![1; MAX_PUBLISH_ONCE_TOPIC_BYTES + 1]),
+                bytes("x")
+            )
+            .await,
+            Err(PublishOnceError::TooLarge)
+        );
+        assert!(b.rx.lock().await.try_recv().is_err());
+        assert_eq!(
+            a.publish_once(topic.clone(), Bytes::from(vec![0; MAX_PUBLISH_ONCE_BYTES]))
+                .await,
+            Ok(PublishSubmission::Submitted)
+        );
+        assert!(b.rx.lock().await.try_recv().is_ok());
+        drop(b);
+        assert_eq!(
+            a.publish_once(topic, bytes("gone")).await,
+            Err(PublishOnceError::NoPeers)
+        );
     }
 
     #[tokio::test]
