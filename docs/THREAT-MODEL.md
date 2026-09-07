@@ -252,7 +252,8 @@ table with the commit that closed it.
   prepare-only vault adapter binds the local mount id and full group/type/key, checks the actual
   local device's current roster signing key, and saves before reporting success. It bounds public
   envelope fields before encoding and verifies the embedded ledger scope even when empty.
-  Type-specific semantic validation remains the coordinator's job. There is no retirement API:
+  Type-specific semantic validation remains the coordinator's job. There is no arbitrary-id
+  public retirement API:
   neither a received operation nor its marker can delete a pending intent. New writes charge
   ordinary content and full replacement peak. A separate 64 MiB vault cap counts physical final
   intent bytes and all temporaries, including unknown ownership; a scan covering all three families
@@ -263,7 +264,8 @@ table with the commit that closed it.
   unpublished siblings, not saved intents, and still needs a fresh scan before credit is released.
   Parent sync remains Unix-only; hostile local path replacement, device failure and backup
   rollback remain outside these guarantees. Storage admission across other record types,
-  multi-record retirement, replay and network/editor integration are still unwired.
+  live settlement scheduling, replay and network/editor integration are still unwired. The checked
+  registry store transaction below now performs receipt-covered retirement before source replacement.
 - **Registry restart consistency is not settlement durability.** The `RegistryEpoch` coordinator
   rebuilds only a receipt-bound raw seed plus bounded, individually signed and schema-checked
   changes. It accepts no separately saved Automerge state that could introduce unsigned roots.
@@ -301,7 +303,7 @@ table with the commit that closed it.
   recovery inputs include excluded accepted operations with their verified authors, not replay
   permission or late quarantined content. A whole-source fingerprint distinguishes peers with
   identical receipts but different excluded work. Planning changes no durable state or quota-owner
-  metadata and grants no installation/prune authority: a future transaction must recheck source
+  metadata and grants no installation/prune authority: the installation transaction must recheck source
   and authority under the gate and persist bounded typed recovery first. Recovery capacity is
   not implied by a successful plan, and stale-owner receipts fail preparation after succession.
   The typed registry staging adapter now recomputes that plan under exclusive store access,
@@ -315,8 +317,21 @@ table with the commit that closed it.
   A successful stage still grants no installation/prune/replay permission; storage refusal or a
   pending third-slot warning leaves Closing history intact. This does not implement Restore,
   repair/rewind-specific typed recovery, automatic intent replay or settlement-wide reservation.
-  No production discovery, pruning, repair or multi-record settlement
-  is wired. The existing file-sync/Unix-parent-sync durability and local-path threat boundary apply.
+  The registry installation adapter now flushes the full checked Closing source, validates old
+  recovery even for empty plans, saves needed recovery and holds any eviction warning before
+  retiring receipt-covered intents and atomically selecting the successor. Retirement compares
+  full author/domain envelopes, not just nonce-derived ids. Until replacement the durable source
+  is the finality proof; excluded/unaccepted intents stay pending. Exact installed retries flush
+  current successor bytes and never rerun old retirement or overwrite newer edits/seals. Local
+  edit requests carry the captured concrete id, checked before journaling and before editing,
+  preventing old Save retries from becoming new operations after source/marker retirement.
+  Delayed same-tenure opening-receipt conflicts fault both Open and Closing successors while
+  retaining high-water and accepted work. Restart binds historical fault evidence to the exact
+  seed-opening receipt. ReceiptBook's bounded local v2 form preserves a newer high-water above
+  that fault pair; old readers explicitly reject it, and ordinary v1 records stay compatible.
+  Conservative per-record content reserves and physical intent replacement headroom can still
+  refuse at full quota. No live actor/discovery, repair or automatic replay is wired. The existing
+  file-sync/Unix-parent-sync durability and local-path threat boundary apply.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
   no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains

@@ -28,6 +28,16 @@ promotion and flush; publishing a Studio reference remains a later operation. P1
 Automerge or sync: it adds permission to retire their retained history into owner-receipted,
 verifiable checkpoints with bounded recovery. Existing snapshots alone do not provide that.
 
+The registry's store-level checkpoint transaction now orders durable barriers as source flush,
+typed recovery, included-only intent retirement, then atomic successor selection. Until selection
+the complete Closing source remains the restart proof; afterward the verified seed and preserved
+receipt book do. Exact retries flush the actual successor without replacing newer work. Local
+Save requests carry a concrete epoch id so retired intents cannot silently reappear on retry.
+Delayed opening-receipt conflicts fault even a successor already sealed by a newer receipt,
+preserving both accepted content and high-water evidence. This is a tested backend adapter,
+not live actor/transport orchestration. Automatic replay, settlement-wide capacity headroom and
+discovery remain to be integrated; no universal progress at full quota is claimed yet.
+
 The naive "one group, every device commits, replay old ciphertext to latecomers" design
 is broken. The load-bearing fixes:
 

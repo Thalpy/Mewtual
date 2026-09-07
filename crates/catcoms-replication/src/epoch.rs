@@ -338,8 +338,10 @@ impl IntentLedger {
 
     /// Remove intents proven final by a receipted closure.
     ///
-    /// This method performs no persistence itself. Settlement must first persist excluded content
-    /// in recovery and atomically commit the returned ledger state with the installed checkpoint.
+    /// This method performs no persistence itself or full-envelope comparison. Settlement must
+    /// verify the covered envelopes, flush the entire receipted source, persist excluded recovery,
+    /// then durably save this monotonic retirement BEFORE atomically replacing that source with
+    /// its checkpoint. Until replacement the source is the restart proof. Markers/acks are not.
     pub fn remove_receipted(&mut self, operation_ids: &BTreeSet<Hash32>) -> usize {
         let before = self.intents.len();
         self.intents.retain(|id, intent| {
@@ -1538,6 +1540,47 @@ impl ReceiptBook {
         Ok(ReceiptIngest::Advanced)
     }
 
+    /// Recheck the retained opening receipt even while a later receipt seals the successor.
+    /// Do not feed it through the high-water filter: that would hide delayed equivocation.
+    /// Only this immediately preceding, seed-bound receipt is kept, not an audit history.
+    pub(crate) fn check_opening_receipt(
+        &mut self,
+        receipt: Receipt,
+        opening: &Receipt,
+        group: &ServerGroup,
+        tenure_start: u64,
+        gate: &EpochGate,
+    ) -> Result<ReceiptIngest, ReplError> {
+        receipt.verify_current_owner(group, tenure_start)?;
+        if receipt.document != gate.document
+            || receipt.document != opening.document
+            || receipt.closed_epoch != opening.closed_epoch
+            || opening.closed_epoch.checked_add(1) != Some(gate.epoch)
+            || receipt.tenure_id != opening.tenure_id
+        {
+            return Err(ReplError::EpochScope);
+        }
+        let mut inner = gate.inner.lock().expect("epoch gate poisoned");
+        if self.is_faulted() {
+            return Ok(ReceiptIngest::Fault);
+        }
+        if !matches!(inner.phase, EpochPhase::Open | EpochPhase::Closing) {
+            return Err(ReplError::EpochClosed);
+        }
+        if &receipt == opening {
+            return Ok(ReceiptIngest::Duplicate);
+        }
+        if !receipts_conflict(opening, &receipt) {
+            return Err(ReplError::ReceiptConflict);
+        }
+        // Keep latest/tenure/previous intact: latest may be the successor's sealing receipt.
+        // Fault evidence is separately bounded. Fault clears the gate seal, not accepted work.
+        self.fault = Some(canonical_receipt_pair(opening.clone(), receipt));
+        inner.phase = EpochPhase::Fault;
+        inner.receipt_hash = None;
+        Ok(ReceiptIngest::Fault)
+    }
+
     /// Latest verified receipt, if any.
     pub fn latest(&self) -> Option<&Receipt> {
         self.latest.as_ref()
@@ -1596,7 +1639,13 @@ impl ReceiptBook {
     /// receipts against the current group before using them as network authority after restore.
     pub fn encode(&self) -> Result<Vec<u8>, ReplError> {
         let mut e = Encoder::new();
-        e.put_u8(1);
+        // v2 adds a retained high-water receipt above an opening-epoch fault pair. Old readers
+        // reject that state explicitly; ordinary v1 books remain byte compatible.
+        let historical_fault = self
+            .fault
+            .as_ref()
+            .is_some_and(|(a, b)| self.latest.as_ref().is_some_and(|r| r != a && r != b));
+        e.put_u8(if historical_fault { 2 } else { 1 });
         put_tenure(&mut e, self.tenure.as_ref());
         put_receipt(&mut e, self.latest.as_ref());
         put_receipt(&mut e, self.previous_until_installed.as_ref());
@@ -1624,7 +1673,8 @@ impl ReceiptBook {
             return Err(ReplError::EpochBound);
         }
         let mut d = Decoder::new(bytes);
-        if d.get_u8().map_err(|_| ReplError::Malformed)? != 1 {
+        let version = d.get_u8().map_err(|_| ReplError::Malformed)?;
+        if version != 1 && version != 2 {
             return Err(ReplError::Malformed);
         }
         let tenure = get_tenure(&mut d)?;
@@ -1659,10 +1709,22 @@ impl ReceiptBook {
                 || !receipts_conflict(a, b)
                 || latest
                     .as_ref()
-                    .is_none_or(|latest| latest.hash() != a.hash() && latest.hash() != b.hash())
+                    .is_none_or(|latest| {
+                        latest != a && latest != b && !(version == 2
+                            && a.closed_epoch == b.closed_epoch
+                            && a.closed_epoch.checked_add(1) == Some(latest.closed_epoch)
+                            && (TenureSelection::from(latest) == TenureSelection::from(a)
+                                || TenureSelection::from(latest) == TenureSelection::from(b)))
+                    })
             {
                 return Err(ReplError::Malformed);
             }
+        }
+        let historical_fault = fault
+            .as_ref()
+            .is_some_and(|(a, b)| latest.as_ref().is_some_and(|r| r != a && r != b));
+        if (version == 2) != historical_fault {
+            return Err(ReplError::Malformed);
         }
         if [&previous_until_installed]
             .into_iter()
@@ -2011,6 +2073,13 @@ impl EpochGate {
         {
             return Err(ReplError::Malformed);
         }
+        // A delayed fault may name the immediately preceding epoch, but one evidence member
+        // must be EXACTLY the opening receipt that authenticated this unit's seed.
+        let opening_fault = book.fault.as_ref().is_some_and(|(a, b)| {
+            (Some(a) == opening || Some(b) == opening)
+                && a.closed_epoch == b.closed_epoch
+                && receipts_conflict(a, b)
+        });
         for receipt in book
             .latest
             .iter()
@@ -2018,7 +2087,13 @@ impl EpochGate {
             .chain(book.fault.iter().flat_map(|(a, b)| [a, b]))
         {
             if receipt.document != self.document
-                || (receipt.closed_epoch != self.epoch && Some(receipt) != opening)
+                || (receipt.closed_epoch != self.epoch
+                    && Some(receipt) != opening
+                    && !(opening_fault
+                        && book
+                            .fault
+                            .as_ref()
+                            .is_some_and(|(a, b)| receipt == a || receipt == b)))
             {
                 return Err(ReplError::EpochScope);
             }
@@ -2039,7 +2114,9 @@ impl EpochGate {
             }
             EpochPhase::Fault => book.fault.as_ref().is_some_and(|(a, b)| {
                 receipts_conflict(a, b)
-                    && (a.closed_epoch == self.epoch || b.closed_epoch == self.epoch)
+                    && (a.closed_epoch == self.epoch
+                        || b.closed_epoch == self.epoch
+                        || opening_fault)
             }),
             // Settlement/pruning is intentionally unavailable through the registry coordinator.
             EpochPhase::Settled => false,

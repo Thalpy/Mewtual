@@ -1,7 +1,8 @@
 //! Durable registry epochs. Reload, gated mutation, accounting and atomic vault save
 //! share one exclusive store borrow. No caller can replace a saved epoch with an arbitrary view.
-//! Local edits save intents before changes. Successor selection, settlement and pruning remain
-//! separate work; returned ciphertext is prepared for, not proof of, network publication.
+//! Local edits save intents before changes. Installation saves recovery and covered-intent
+//! retirement before selecting a seed-backed successor; live replay/discovery remain separate.
+//! Returned ciphertext is prepared for, not proof of, network publication.
 
 use std::io::Read;
 
@@ -29,7 +30,9 @@ pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
 // and AEAD tag. Bound the public struct before SealedOp::open can allocate plaintext.
 const MAX_INBOUND_CIPHERTEXT: usize = MAX_SIGNED_EPOCH_OP_BYTES + 4 + 16;
 
+mod installation;
 mod recovery;
+pub use installation::RegistryInstallOutcome;
 
 /// Detached read-only persisted state. Debug deliberately excludes registry keys and content.
 pub struct EpochRegistryState {
@@ -47,6 +50,11 @@ impl std::fmt::Debug for EpochRegistryState {
 }
 
 impl EpochRegistryState {
+    /// Capture this id when preparing an edit; retries must keep it across rotations.
+    pub fn doc_id(&self) -> u128 {
+        self.unit.doc_id()
+    }
+
     /// Concrete retained epoch, not evidence that settlement/pruning has completed.
     pub fn epoch(&self) -> u64 {
         self.unit.epoch()
@@ -99,6 +107,8 @@ impl ServerStore {
     /// ciphertext. Reuse the SAME nonce/envelope on retry; a held edit reseals the original signed
     /// bytes, even after newer edits arrive. Both intent and epoch cross their durability barriers.
     /// A failure after the first barrier deliberately retains the intent for later retry/recovery.
+    /// Keep the captured concrete `expected_doc_id` on retry too: once rotated, the old request
+    /// refuses before journaling rather than reauthoring its now-retired id in a different epoch.
     /// Closing/Fault refuses both new edits and retries. No intent retirement or network send is
     /// performed; the sender must still recheck its session, group epoch and document lifecycle.
     #[allow(clippy::too_many_arguments)]
@@ -107,6 +117,7 @@ impl ServerStore {
         server: u64,
         group: &ServerGroup,
         bucket: u8,
+        expected_doc_id: u128,
         device: &MlsDevice,
         operation: DomainOp,
         rng: &mut impl CryptoRngCore,
@@ -117,6 +128,7 @@ impl ServerStore {
             server,
             group,
             bucket,
+            expected_doc_id,
             device,
             operation,
             rng,
@@ -135,6 +147,7 @@ impl ServerStore {
         server: u64,
         group: &ServerGroup,
         bucket: u8,
+        expected_doc_id: u128,
         device: &MlsDevice,
         operation: DomainOp,
         rng: &mut impl CryptoRngCore,
@@ -173,6 +186,9 @@ impl ServerStore {
                 return Err(error);
             }
         };
+        if checked.doc_id() != expected_doc_id {
+            return Err(invalid("registry edit belongs to a retired epoch"));
+        }
         checked
             .validate_local_edit(device, group, &operation)
             .map_err(invalid)?;
@@ -201,6 +217,9 @@ impl ServerStore {
             rng,
             budget,
             |unit, rng| {
+                if unit.doc_id() != expected_doc_id {
+                    return Err(invalid("registry edit belongs to a retired epoch"));
+                }
                 unit.edit_or_reseal(device, group, rng, &operation)
                     .map_err(invalid)
             },

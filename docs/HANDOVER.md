@@ -8,6 +8,42 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 registry checkpoint installation (2026-09-07).** The store can now select a checked
+  successor under one exclusive borrow: flush the full Closing source, durably save typed recovery,
+  hold any pending eviction warning, durably retire only full-envelope-matching receipt-covered
+  intents, then atomically replace the source with its verified seed and preserved receipt book.
+  Excluded/unaccepted intents remain pending. Exact installed retries only flush the actual
+  successor, preserving newer edits, seals and intents. Local edits now require the captured
+  concrete document id; retrying an old Save cannot reauthor it after its markers are retired.
+
+  A conflicting current-owner opening receipt faults both Open and Closing successors without
+  losing their accepted content or newer high-water receipt. Fault evidence must anchor to the
+  exact opening receipt. The bounded local ReceiptBook codec uses v2 only for a delayed fault
+  below a newer high-water; ordinary v1 remains unchanged, and older readers fail closed on v2.
+  Repair-sequence state survives construction of the successor.
+
+  **Next:** automatic author-owned replay, settlement-wide capacity reservation, receipt-head/seed
+  discovery and live coordinator/actor/Studio consumers. The registry store transaction is tested,
+  not live-wired. Restore/Copy/Export and repair/rewind remain unwired. Conservative first/second
+  recovery reservations and the physical 64-MiB intent replacement cap can still hold Closing at
+  full quota; no early deletion credit or universal full-quota progress is claimed. UI remains
+  user-owned; concurrent UI/release changes are excluded from this slice.
+
+  Ten new core/store tests cover seed-only edit dependencies, repair-state preservation, delayed
+  opening equivocation in Open/Closing, v1/v2 canonicality, included/excluded/unaccepted intents,
+  stale Save and installed retries (including a newer seal), empty/corrupt recovery, exact eviction
+  acknowledgement, physical intent headroom and nine before-write/after-rename/panic cases.
+  Adversarial design, actual-diff and final documentation reviews have no remaining findings.
+  The review's version canonicality and retry close-signature checks are fixed with regressions.
+  Final checks passed: `cargo check -p catcoms-app`,
+  `cargo test -p catcoms-replication registry_checkpoint -- --nocapture` (2), focused store tests,
+  `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190),
+  `npm.cmd --prefix apps/desktop test` (1135), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` (Git Bash), and worktree/staged `git diff --check`.
+  Frontend static/build/visual checks were not run: this slice changes no frontend/native source.
+
 - **P1 typed registry recovery staging (2026-09-07).** `stage_registry_recovery` now recomputes
   the exact receipt-bound plan from checked saved Closing state, validates source accounting and
   every existing typed registry recovery slot before a nonempty save, and persists through the accounted

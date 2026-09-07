@@ -192,6 +192,15 @@ pinned outside the cap. Candidate order has no authority.
 5. **Prune** through the sealed epoch and mark it `Settled`.
 6. **Replay** this peer's own unconfirmed intents that the closure excluded into the checkpoint.
 
+Registry store implementation: steps 3-5 select one seed-backed successor by an atomic replacement
+of the full Closing restart unit, rather than writing a temporary pruned predecessor. It flushes
+that complete source before saving recovery, then durably retires only exact receipt-covered
+intent envelopes before replacement. A crash before replacement leaves the source as the finality
+proof; afterward the successor's opening receipt and seed are the proof. Exact installation retries
+flush the actual successor without rerunning predecessor retirement or replacing newer edits.
+Save retries retain their original concrete document id; deliberate replay explicitly targets the
+new one. Full-quota capacity orchestration and automatic replay are not live-wired yet.
+
 An intent is **final** when inside a receipted closure. Until then it is retained, vault-sealed,
 and replayed wherever the document is next `Open`.
 

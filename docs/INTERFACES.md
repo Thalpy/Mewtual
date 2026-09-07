@@ -448,6 +448,9 @@ checkpoint_registry_close(...) -> Result<(CheckpointSeed, ClosureStats)>; // ver
 pub struct RegistryEpoch; // private EncryptedDoc + EpochGate + ReceiptBook + opening receipt
   new(&ServerGroup, bucket, actor:DeviceId) -> Result<Self>;
   from_checkpoint(&ServerGroup, bucket, actor, Receipt, expected_tenure_start, seed) -> Result<Self>;
+  opened_by(&Receipt) -> bool; // exact opening receipt, Open/Closing only; no durability proof
+  checkpoint_successor(&RegistrySettlementPlan, &ServerGroup, expected_tenure_start) -> Result<Self>;
+  // Separately constructs seed-backed successor preserving the receipt book; source untouched.
   edit(&MlsDevice, &ServerGroup, rng, &DomainOp) -> Result<SealedOp>;
   validate_local_edit(&MlsDevice, &ServerGroup, &DomainOp) -> Result<()>;
   edit_or_reseal(&MlsDevice, &ServerGroup, rng, &DomainOp) -> Result<SealedOp>;
@@ -461,10 +464,11 @@ pub struct RegistryEpoch; // private EncryptedDoc + EpochGate + ReceiptBook + op
   storage_protocol_bytes() -> Result<usize>; // exact receipt-only bytes, not declared usage
 // Restore is local-only, not network authorization. Caller journals intent before edit and
 // atomically vault-persists the unit before publishing/acknowledging. No mutable handles escape;
-// no pruning, source replacement, fault repair or recovery acknowledgement API exists yet.
+// This core builder does not prune/replace the source or acknowledge recovery. The store
+// transaction below does; live orchestration and fault repair are still separate work.
 pub struct RegistrySettlementPlan; // private, computation-only, content-redacted Debug
   receipt(); checkpoint(); source_projection(); // immutable references
-  included_operation_ids(); excluded_operations(); // author-derived ids; no replay authority
+  included_operation_ids(); included_operations(); excluded_operations(); // full envelopes; no replay authority
   source_version() -> [u8;32]; matches_source(&mut RegistryEpoch) -> Result<bool>;
   source_base_close() -> Option<[u8;32]>; // close that opened the source, not its successor
   recovery_snapshot() -> Result<Option<RecoverySnapshot>>; // bounded, not persisted
@@ -989,8 +993,9 @@ recovery slots, not settlement itself. Actions are `Stage(RecoverySnapshot)`,
 as its domain-separated filename derivation. Exclusive mutable store access serializes reload,
 transition and replacement. Even idempotent retries re-save before returning, including exact
 acknowledgement retries after `CommittedButNotDurable`; stale acknowledgements cannot promote a
-newer warning. Reading alone never expires recovery. This internal prerequisite is not connected
-to the actor/bridge, inventory bootstrap, removal cleanup, or checkpoint pruning yet.
+newer warning. Reading alone never expires recovery. The registry store installation below now
+uses it before checkpoint selection/source pruning; actor/bridge, live inventory bootstrap and
+removal cleanup remain unwired.
 
 `catcoms_app::store::epoch_budget` adds `StorageScope`, `Footprint`, `StorageRecord`,
 `Replacement`, `WritePurpose`, `EpochStorageBudget`, and `BudgetError`. A budget is constructed or
@@ -1121,14 +1126,14 @@ This is a persist-before-edit prerequisite, not live editing or automatic replay
 adapter below now invokes it; retirement still requires checkpoint/recovery persistence and no
 actor/network path invokes these adapters yet.
 
-### Durable registry edits, ingress and sealing (P1, not yet live-wired)
+### Durable registry edits, sealing and checkpoint installation (P1, not yet live-wired)
 
 `ServerStore` now exposes:
 
 ```rust
 load_registry_epoch(server, &ServerGroup, bucket:u8, &MlsDevice)
   -> Result<Option<EpochRegistryState>, AppError>;
-edit_registry_epoch(server, &ServerGroup, bucket, &MlsDevice, DomainOp, rng,
+edit_registry_epoch(server, &ServerGroup, bucket, expected_doc_id:u128, &MlsDevice, DomainOp, rng,
                     &mut EpochStorageBudget, &mut EpochIntentBudget)
   -> Result<(SealedOp, EpochRegistryState), AppError>;
 ingest_registry_epoch(server, &ServerGroup, bucket, &MlsDevice, &SealedOp, rng, &mut EpochStorageBudget)
@@ -1140,9 +1145,13 @@ plan_registry_settlement(server, &ServerGroup, bucket, &MlsDevice, close_bytes, 
 stage_registry_recovery(server, &ServerGroup, bucket, &MlsDevice, close_bytes, tenure_start,
                         &dyn Clock, rng, &mut EpochStorageBudget)
   -> Result<Option<EpochRecoveryUpdate>, AppError>;
+install_registry_checkpoint(server, &ServerGroup, bucket, &MlsDevice, receipt_bytes, close_bytes,
+                            tenure_start, &dyn Clock, rng, &mut EpochStorageBudget,
+                            &mut EpochIntentBudget)
+  -> Result<(RegistryInstallOutcome, EpochRegistryState), AppError>;
 ```
 
-`EpochRegistryState` exposes only `epoch`, `phase`, `op_count`, `quarantined_len` and a detached
+`EpochRegistryState` exposes only `doc_id`, `epoch`, `phase`, `op_count`, `quarantined_len` and a detached
 `projection`; no mutable document or arbitrary-save API escapes. Records are versioned,
 scope-bound, vault-sealed `.registry-epoch` files. Every mutation reloads and validates the full
 signed source under one exclusive store borrow, checks its exact accounting record, and saves
@@ -1157,13 +1166,13 @@ tenure receipt, reconstructs only its dependency-complete closure and verifies t
 seed against the receipt's expected hash. Missing source/heads, malformed closes, another close
 from a current member, a wrong seed, stale authority and Fault all refuse without writes.
 The plan retains the full source projection (including overflow/tombstones), included operation
-ids and excluded accepted author-bound domain operations in canonical id order. Quarantined
+ids plus their full envelopes and excluded accepted author-bound domain operations in canonical id order. Quarantined
 late bodies are not accepted source work. Excluded peer operations are recovery evidence, never
 permission to journal or replay as that peer. The plan's Debug excludes all content.
 
 `source_version` fingerprints the entire normalized local restart unit, not just its receipt:
 peers with the same receipt can have different excluded edits. It is serialization-version
-dependent and is not a wire id, currency proof or durability/installation permit. Future settlement
+dependent and is not a wire id, currency proof or durability/installation permit. Settlement
 must reload/revalidate authority and the source version under the document gate, preflight and
 persist typed recovery, then install. A plan does not guarantee the eventual recovery encoding
 fits its byte cap/reservation. This API does not replace a source, write recovery, retire intents,
@@ -1179,7 +1188,33 @@ Some returns the saved slots/warning only after durable replacement.
 `EvictionPending` still holds future installation in Closing. Exact retries preserve snapshot ids
 and the warning deadline even if late packets added quarantine hashes. Failed I/O poisons accounting
 and grants no success; the source remains intact. A content-full first/second snapshot may still
-refuse, without crediting future source deletion. Settlement-wide reservation/installation is later.
+refuse, without crediting future source deletion. Settlement-wide capacity reservation is later.
+
+`install_registry_checkpoint` requires bounded canonical receipt/close bytes, the exact held
+current-owner decision and independently observed tenure. Under one exclusive store borrow it
+flushes the checked source, validates/account-checks old recovery even for an empty new plan,
+saves needed typed recovery, then holds any eviction warning. `RecoveryPending` is not success
+at installing: callers surface the existing saved warning and its acknowledgement/timer actions.
+Next it compares receipt-covered intent ids AND full author/domain envelopes, saves monotonic
+included-only retirement, reloads/rechecks the entire source version and atomically selects the
+verified successor seed. The receipt book (including repair anti-replay state) is preserved.
+`Installed` returns only after the final vault barrier. Until replacement the durable Closing
+source proves why included intents are final; excluded/unaccepted intents are never retired.
+
+On an exact opening-receipt retry, `AlreadyInstalled` flushes the actual successor unchanged,
+even if newer edits or a newer closing receipt arrived. It does not repeat old retirement or
+reinstall the seed. Fault and stale/other receipt scopes refuse. Failed writes/flushes poison the
+affected inventories; reconcile actual files before retry. No new journal or record family is
+introduced. Full-quota progress is still limited by per-record content reservations and the
+64-MiB physical intent ceiling: a shrinking ledger also needs its full replacement copy.
+Automatic replay, repair, discovery and actor/network orchestration remain separate work.
+
+Delayed current-owner equivocation against the retained opening receipt faults the successor
+even while a newer receipt seals it. Accepted content, seed, opening receipt and high-water are
+retained. Restart requires one fault-evidence member to equal that seed's exact opening receipt;
+unrelated older evidence refuses. ReceiptBook v2 encodes only the new case of a retained newer
+high-water above the opening-epoch pair; ordinary books remain v1, new readers accept both, and
+old readers reject v2 rather than dropping its fault. No network receipt encoding changes.
 
 Registry recovery has a versioned typed payload inside the unchanged generic `RecoverySnapshot` v1.
 It carries the full source pointers, overflow and pointer-key tombstones, selected receipt hash,
@@ -1191,11 +1226,14 @@ the ephemeral whole-source fingerprint, quarantine and quota-owner metadata. The
 scope, canonical ordering, disjoint key sets, bounds and excluded-id membership in `applied_ops`.
 `RecoverySnapshot` Debug now redacts content even when nested in a generic Option/Result. These are
 vault-local records, not independently signed replay requests; pointer verification and Restore,
-repair/rewind-specific typed records, intent retirement, actor/bridge and installation remain unwired.
+repair/rewind-specific typed records and actor/bridge integration remain unwired.
 
 Local editing uses two ordered barriers under the exclusive store borrow: validate the canonical
 registry operation and current local author, save/flush its intent, then reload, apply and save/flush
-the registry epoch. The nonce/envelope is supplied by the caller and MUST stay unchanged on retry.
+the registry epoch. The nonce/envelope and captured concrete `expected_doc_id` are supplied by
+the caller and MUST stay unchanged on retry. The id is checked before journaling and again before
+the final gated edit; a retired-epoch retry refuses instead of creating a second edit after its
+old log/markers were pruned. Deliberate author-owned replay targets the newly read concrete id.
 `validate_local_edit` checks scope, canonical body, actor/membership, Open/epoch ceiling and any
 retained-id conflict before journaling. It is not a storage or prospective projection permit.
 `edit_or_reseal` repeats those checks and either authors normally through the typed projection

@@ -294,6 +294,17 @@ impl RegistryEpoch {
         expected_tenure_start: u64,
     ) -> Result<ReceiptIngest, ReplError> {
         self.refresh_owner(group)?;
+        if let Some(opening) = &self.opening {
+            if receipt.closed_epoch == opening.closed_epoch {
+                return self.receipts.check_opening_receipt(
+                    receipt,
+                    opening,
+                    group,
+                    expected_tenure_start,
+                    &self.gate,
+                );
+            }
+        }
         self.receipts
             .ingest_and_seal(receipt, group, expected_tenure_start, &self.gate)
             .map(|(outcome, _)| outcome)

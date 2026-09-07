@@ -18,6 +18,7 @@ pub struct RegistrySettlementPlan {
     source_version: [u8; 32],
     source_projection: RegistryProjection,
     included: BTreeSet<[u8; 32]>,
+    included_operations: BTreeMap<[u8; 32], LocalIntent>,
     excluded: BTreeMap<[u8; 32], LocalIntent>,
     source_base_close: Option<[u8; 32]>,
 }
@@ -71,6 +72,12 @@ impl RegistrySettlementPlan {
         &self.included
     }
 
+    /// Full authenticated envelopes covered by the receipt. Retirement must compare these,
+    /// not ids alone: a nonce-derived id deliberately does not bind the operation body.
+    pub fn included_operations(&self) -> &BTreeMap<[u8; 32], LocalIntent> {
+        &self.included_operations
+    }
+
     /// Accepted source operations outside the closure, in canonical id order. These are
     /// author-attributed recovery data, NOT replay permission: only an operation's own local
     /// author may journal/replay it. Late quarantined bodies were never accepted and are absent.
@@ -93,6 +100,43 @@ fn source_version(source: &mut RegistryEpoch) -> Result<[u8; 32], ReplError> {
 }
 
 impl RegistryEpoch {
+    /// True only for this exact opening receipt, never a later epoch or a fault. Installed
+    /// retries may flush this unit, but must not reconstruct its seed over subsequent edits.
+    pub fn opened_by(&self, receipt: &Receipt) -> bool {
+        self.opening.as_ref() == Some(receipt)
+            && matches!(self.phase(), EpochPhase::Open | EpochPhase::Closing)
+    }
+
+    /// Build a separate successor after rechecking the entire source and current authority.
+    /// This is not permission to discard the source: the store must first flush it, save
+    /// recovery and retire only receipt-covered intents before atomically selecting this unit.
+    pub fn checkpoint_successor(
+        &mut self,
+        plan: &RegistrySettlementPlan,
+        group: &ServerGroup,
+        expected_tenure_start: u64,
+    ) -> Result<Self, ReplError> {
+        if self.phase() != EpochPhase::Closing
+            || self.receipts.is_faulted()
+            || self.receipts.latest() != Some(plan.receipt())
+            || !plan.matches_source(self)?
+        {
+            return Err(ReplError::ReceiptConflict);
+        }
+        let mut successor = Self::from_checkpoint(
+            group,
+            self.bucket,
+            self.actor,
+            plan.receipt.clone(),
+            expected_tenure_start,
+            plan.checkpoint.bytes(),
+        )?;
+        // Carry anti-replay repair state; the standalone constructor starts a fresh book.
+        successor.receipts = self.receipts.clone();
+        successor.receipts.mark_latest_installed();
+        Ok(successor)
+    }
+
     /// Prepare recovery/checkpoint inputs without changing accepted history, gate or receipts.
     /// Closing and an exact held current-owner receipt are required. The caller supplies the
     /// independently observed tenure start, never a value taken on trust from that receipt.
@@ -136,24 +180,29 @@ impl RegistryEpoch {
         let checkpoint =
             RegistryProjection::verify_checkpoint(&verified, self.bucket, seed.bytes())?;
         let included = closure.domain_operation_ids()?;
+        let mut included_operations = BTreeMap::new();
         let mut excluded = BTreeMap::new();
         for op in self.doc.signed_log() {
             let operation = op.parsed_domain_op()?.ok_or(ReplError::Malformed)?;
             let id = operation.id(&op.author_device);
-            if !included.contains(&id) {
-                excluded.insert(
-                    id,
-                    LocalIntent {
-                        author: op.author_device,
-                        operation,
-                    },
-                );
-            }
+            let target = if included.contains(&id) {
+                &mut included_operations
+            } else {
+                &mut excluded
+            };
+            target.insert(
+                id,
+                LocalIntent {
+                    author: op.author_device,
+                    operation,
+                },
+            );
         }
         Ok(RegistrySettlementPlan {
             receipt,
             checkpoint,
             included,
+            included_operations,
             excluded,
             source_projection: self.projection()?,
             source_version: source_version(self)?,

@@ -1,5 +1,5 @@
-//! Persist-before-edit local intents. This adapter only adds intents: retirement must be part of
-//! the later checkpoint/recovery transaction, never inferred from a live document's marker.
+//! Persist-before-edit local intents. Receipt-covered retirement is store-internal and must
+//! follow the source/recovery durability barriers, never a live document's marker.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -24,6 +24,8 @@ pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
 /// Conservative vault-wide intent ceiling: sealed final files PLUS unpublished siblings and the
 /// full replacement copy at peak. Framing counts too; this is stricter than a payload-only cap.
 pub const MAX_VAULT_INTENT_BYTES: u64 = 64 * 1024 * 1024;
+
+mod retirement;
 
 /// Read-only replay data, not authority to edit or proof an intent is final. There is deliberately
 /// no public constructor, mutation/retirement method, or content-bearing Debug implementation.
@@ -170,7 +172,10 @@ impl EpochIntentBudget {
             return Err(invalid("vault intent inventory must be reconciled"));
         }
         // The old final and ALL orphan attempts remain charged until replacement succeeds.
-        if old.is_none() && self.record_slots >= super::epoch_budget::MAX_ACCOUNTED_RECORDS {
+        if old.is_none()
+            && !sync_only
+            && self.record_slots >= super::epoch_budget::MAX_ACCOUNTED_RECORDS
+        {
             return Err(invalid("vault intent inventory has too many records"));
         }
         if self
@@ -204,7 +209,7 @@ impl ServerStore {
     /// Type-specific semantic validation must run before calling this envelope-storage adapter.
     /// Exact retries sync the authenticated unchanged final file and its parent without another
     /// copy, so an earlier post-rename failure remains retryable at the cap. Failure returns no
-    /// edit permit; retry/reconcile before editing. There is NO removal API: markers/acks alone
+    /// edit permit; retry/reconcile before editing. There is no standalone public removal API: markers/acks alone
     /// cannot retire durable intents.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_epoch_intent(

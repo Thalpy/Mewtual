@@ -150,6 +150,173 @@ impl Fixture {
 }
 
 #[test]
+fn registry_checkpoint_successor_preserves_book_and_seed_only_dependencies() {
+    let mut f = Fixture::new();
+    f.edit(11);
+    f.seal();
+    // Exercise saved repair anti-replay state, which from_checkpoint alone would reset.
+    let mut bytes = f.source.receipts.encode().unwrap();
+    let end = bytes.len();
+    bytes[end - 8..].copy_from_slice(&42u64.to_be_bytes());
+    f.source.receipts = ReceiptBook::decode(&bytes).unwrap();
+    let plan = f.plan().unwrap();
+    let before = f.source.snapshot().unwrap();
+    let mut successor = f.source.checkpoint_successor(&plan, &f.group, 0).unwrap();
+    assert_eq!(
+        f.source.snapshot().unwrap(),
+        before,
+        "construction cannot prune"
+    );
+    assert_eq!(successor.epoch(), 1);
+    assert_eq!(successor.op_count(), 0);
+    assert_eq!(successor.projection().unwrap().pointers[&f.key], 9);
+    let bytes = successor.receipts.encode().unwrap();
+    assert_eq!(&bytes[bytes.len() - 8..], &42u64.to_be_bytes());
+    let domain = RegistryOp::Put {
+        key: f.key.clone(),
+        epoch: 12,
+    }
+    .domain_op(&f.group.group_id(), [12; 16])
+    .unwrap();
+    successor
+        .edit(&f.owner, &f.group, &mut f.rng, &domain)
+        .unwrap();
+    let mut graph = successor.doc.doc().clone();
+    let change = graph.get_last_local_change().unwrap();
+    assert_eq!(
+        change.deps().iter().map(|h| h.0).collect::<Vec<_>>(),
+        vec![plan.checkpoint().origin().seed_hash()]
+    );
+    assert!(successor.opened_by(&f.receipt));
+    let snapshot = successor.snapshot().unwrap();
+    let restored =
+        RegistryEpoch::restore(&snapshot, &f.group, f.key.bucket(), f.owner.device_id()).unwrap();
+    assert_eq!(restored.op_count(), 1);
+    assert_eq!(restored.projection().unwrap().pointers[&f.key], 12);
+}
+
+#[test]
+fn registry_checkpoint_opening_equivocation_faults_open_and_closing_successors_on_restart() {
+    let mut f = Fixture::new();
+    f.seal();
+    let plan = f.plan().unwrap();
+    for closing in [false, true] {
+        let mut successor = f.source.checkpoint_successor(&plan, &f.group, 0).unwrap();
+        let domain = RegistryOp::Put {
+            key: f.key.clone(),
+            epoch: 12,
+        }
+        .domain_op(&f.group.group_id(), [12; 16])
+        .unwrap();
+        successor
+            .edit(&f.owner, &f.group, &mut f.rng, &domain)
+            .unwrap();
+        if closing {
+            let seed = successor
+                .projection()
+                .unwrap()
+                .checkpoint([80; 32])
+                .unwrap();
+            let next = Receipt::sign(
+                successor.logical.clone(),
+                1,
+                [80; 32],
+                seed.change_hash(),
+                0,
+                InheritedCheckpoint::EpochZero,
+                &f.owner,
+            )
+            .unwrap();
+            successor.seal(next, &f.group, 0).unwrap();
+        }
+        let before = successor.snapshot().unwrap();
+        let latest = successor.receipts.latest().unwrap().clone();
+        let ordinary = successor.receipts.encode().unwrap();
+        assert_eq!(ordinary[0], 1);
+        assert_eq!(
+            ReceiptBook::decode(&ordinary).unwrap().encode().unwrap(),
+            ordinary
+        );
+        let mut noncanonical = ordinary.clone();
+        noncanonical[0] = 2;
+        assert!(ReceiptBook::decode(&noncanonical).is_err());
+        assert_eq!(
+            successor.seal(f.receipt.clone(), &f.group, 0).unwrap(),
+            ReceiptIngest::Duplicate
+        );
+        assert_eq!(successor.snapshot().unwrap(), before);
+        let mut bad = f.receipt.clone();
+        bad.signature[0] ^= 1;
+        assert!(successor.seal(bad, &f.group, 0).is_err());
+        assert_eq!(successor.snapshot().unwrap(), before);
+        let conflicting = Receipt::sign(
+            f.receipt.document.clone(),
+            0,
+            [81; 32],
+            [82; 32],
+            0,
+            InheritedCheckpoint::EpochZero,
+            &f.owner,
+        )
+        .unwrap();
+        assert_eq!(
+            successor.seal(conflicting, &f.group, 0).unwrap(),
+            ReceiptIngest::Fault
+        );
+        assert_eq!(
+            successor.receipts.latest(),
+            Some(&latest),
+            "keep successor high-water"
+        );
+        let snapshot = successor.snapshot().unwrap();
+        let fault_bytes = successor.receipts.encode().unwrap();
+        assert_eq!(fault_bytes[0], if closing { 2 } else { 1 });
+        assert_eq!(
+            ReceiptBook::decode(&fault_bytes).unwrap().encode().unwrap(),
+            fault_bytes
+        );
+        if closing {
+            let mut wrong_version = fault_bytes;
+            wrong_version[0] = 1;
+            assert!(ReceiptBook::decode(&wrong_version).is_err());
+        }
+        let mut restored =
+            RegistryEpoch::restore(&snapshot, &f.group, f.key.bucket(), f.owner.device_id())
+                .unwrap();
+        assert_eq!(restored.phase(), EpochPhase::Fault);
+        assert_eq!(restored.op_count(), 1);
+        assert_eq!(restored.projection().unwrap().pointers[&f.key], 12);
+        assert!(restored
+            .edit(&f.owner, &f.group, &mut f.rng, &domain)
+            .is_err());
+        assert!(!restored.opened_by(&f.receipt));
+        // Real signatures and a real conflict are insufficient without the exact opening anchor.
+        let mut unrelated = ReceiptBook::default();
+        for n in [90, 91] {
+            unrelated
+                .ingest_verified(
+                    Receipt::sign(
+                        f.receipt.document.clone(),
+                        0,
+                        [n; 32],
+                        [n; 32],
+                        0,
+                        InheritedCheckpoint::EpochZero,
+                        &f.owner,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        restored.receipts = unrelated;
+        let forged = restored.snapshot().unwrap();
+        assert!(
+            RegistryEpoch::restore(&forged, &f.group, f.key.bucket(), f.owner.device_id()).is_err()
+        );
+    }
+}
+
+#[test]
 fn registry_settlement_rotated_source_preserves_inherited_seed_and_partitions_only_new_ops() {
     let mut f = Fixture::new();
     f.seal();
