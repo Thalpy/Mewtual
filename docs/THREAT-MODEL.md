@@ -653,7 +653,22 @@ table with the commit that closed it.
   fences stale/duplicate Studio budget handles, not interleaved raw writes by other P1 adapters:
   a sole coordinator remains required. Blobs/legacy snapshots are outside this inventory. No
   network snapshot authority, completed Studio settlement, live publication, retention guarantee
-  or actor/native Save/Load follows from these store APIs.
+  or actor/native Save/Load follows from these store APIs alone.
+  The new explicit native Index/art transactions lend the sole mounted store only AFTER the
+  actor's Ready rendezvous. Numeric-server persistence, UI commit and exact registry-incarnation
+  locks are acquired without awaiting; a busy fence drops Ready and writes nothing. The blocking
+  worker retains these guards and the sole live Server across caller/actor cancellation, saving
+  the current MLS/device snapshot before Studio intents/source. Results recheck UI generation and
+  server incarnation; guards drop before awaited events. A worker panic fails the actor closed.
+  Current channel/member and complete-domain checks precede mutation I/O. Create accepts an
+  existing object only as an exact retained-operation retry, never as a header-overwrite shortcut.
+  Frame edits require exact declared-length, CID-valid, validated 192x144 PIX bytes in the mounted
+  namespace and re-promote/flush before their reference. This is local byte existence, not remote
+  possession, a retention pin or a reclamation guard. Create is two-file and can leave an unlisted
+  object on index refusal. A cancelled operation already running may finish durably; cancellation
+  suppresses stale results, not committed content. Finite scans/restores run off-executor but
+  retain lifecycle locks and have no accepted-size latency guarantee. Views say local/provisional;
+  automatic gossip, owner settlement, retention and UI wiring remain separate gates.
   Sound/score/export state continues to refuse pending its typed support.
   Exact retry recognition belongs to the retained signed
   envelope/gate, not timestamps or marker-only success.

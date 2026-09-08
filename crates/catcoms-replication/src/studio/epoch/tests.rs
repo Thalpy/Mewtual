@@ -103,6 +103,12 @@ fn studio_epoch_restarts_and_reseals_original_change_after_later_deletion() {
         let mut restored =
             StudioEpoch::restore(&bytes, &group, target(frame), owner.device_id()).unwrap();
         assert_eq!(restored.projection().unwrap(), projection);
+        assert!(restored
+            .contains_exact_operation(owner.device_id(), &op)
+            .unwrap());
+        assert!(!restored
+            .contains_exact_operation(DeviceId::from_bytes([0; 32]), &op)
+            .unwrap());
         let again = restored
             .edit_or_reseal(&owner, &group, &mut rng(), &op, 999)
             .unwrap();

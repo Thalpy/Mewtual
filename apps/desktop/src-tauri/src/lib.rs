@@ -55,6 +55,7 @@ use zeroize::Zeroizing;
 
 mod creative_blobs;
 mod errors;
+mod studio;
 mod tasks;
 use errors::{codes, AppError, ErrorCode};
 
@@ -330,7 +331,7 @@ impl Drop for InlineDownloadLeaseInner {
 /// on-disk store once the user has unlocked it with a passphrase (`None` = in-memory only).
 #[derive(Default)]
 struct AppState {
-    servers: Mutex<HashMap<u64, ServerEntry>>,
+    servers: Arc<Mutex<HashMap<u64, ServerEntry>>>,
     /// Monotonic process-local source for [`ServerEntry::instance`]. Wrapping would require more
     /// actor installations than the process can perform in its lifetime; zero has no special
     /// meaning and is permitted after that theoretical wrap.
@@ -381,7 +382,7 @@ struct AppState {
     /// writes did not even serialize against each other. Here they do, and the incarnation check
     /// inside the lock then decides which of them is still entitled to write.
     persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
-    store: Mutex<Option<ServerStore>>,
+    store: Arc<Mutex<Option<ServerStore>>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
     session_resumable: Mutex<bool>,
@@ -395,7 +396,7 @@ struct AppState {
     /// Orders the externally-visible parts of a long command against explicit lock completion.
     /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
     /// reply event or server registration to occur after `lock_session` itself has completed.
-    ui_session_commit: Mutex<()>,
+    ui_session_commit: Arc<Mutex<()>>,
     /// The newest exact Ctrl+L/close snapshot registered before either command waits on the shared
     /// commit mutex. A remounted close can consume it even though its JS coordinator is gone.
     pending_ui_lock_snapshot: Mutex<Option<PendingUiLockSnapshot>>,
@@ -2087,6 +2088,16 @@ fn forward_events(
                 continue;
             }
             match ev.event {
+                AppEvent::StudioUpdated { channel, object } => {
+                    emit_tracked(
+                        &app,
+                        "studio-updated",
+                        serde_json::json!({
+                            "server": server, "channel": channel.to_string(), "object": object.map(hex::encode)
+                        }),
+                        trace,
+                    );
+                }
                 AppEvent::ChannelsUpdated => {
                     emit_tracked(&app, "channels-changed", ServerEvt { server }, trace);
                 }
@@ -15883,6 +15894,11 @@ pub fn run() {
             get_wiki_pinned_cids,
             creative_blobs::publish_pix,
             creative_blobs::request_blob_bounded,
+            studio::studio_list,
+            studio::studio_read,
+            studio::studio_create,
+            studio::studio_apply,
+            studio::studio_apply_index,
             post_status,
             get_statuses,
             edit_status,

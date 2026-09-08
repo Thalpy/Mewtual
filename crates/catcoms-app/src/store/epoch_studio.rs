@@ -62,6 +62,17 @@ pub struct EpochStudioState {
     unit: StudioEpoch,
 }
 impl EpochStudioState {
+    /// Complete retained signed-envelope comparison; never use projection/marker equality to
+    /// infer a retry. This read-only evidence does not replace the store's edit/flush barriers.
+    pub fn contains_exact_operation(
+        &self,
+        author: catcoms_crypto::DeviceId,
+        operation: &DomainOp,
+    ) -> Result<bool, AppError> {
+        self.unit
+            .contains_exact_operation(author, operation)
+            .map_err(invalid)
+    }
     pub fn doc_id(&self) -> u128 {
         self.unit.doc_id()
     }

@@ -667,7 +667,9 @@ not a writable capability or network proof.
   writes; it does not account blobs or legacy snapshots. Failed/uncertain I/O requires rescanning.
 - `load_studio_epoch(server, group, target, device) -> Option<EpochStudioState>`: authenticated,
   bounded read-only restore; `None` means actual absence, never malformed/unreadable state.
-  The detached state exposes only doc id, epoch, phase, op/quarantine counts and typed projection.
+  The detached state exposes doc id, epoch, phase, op/quarantine counts and typed projection.
+  `contains_exact_operation(author, domain)` checks the complete retained signed envelope for
+  Create retry recognition; historical presence grants no current membership or edit permission.
 - `edit_studio_epoch(server, group, target, expected_doc_id, device, operation, ts, rng, budget)`
   returns `(SealedOp, EpochStudioState)` only after the intent then source durability barriers.
   Preserve concrete epoch id, nonce and complete envelope across retry. Source presence/absence
@@ -693,9 +695,85 @@ hash charge protocol; user/seed/metadata/quarantine bytes charge content. Atomic
 reserve old-plus-new peak bytes; unchanged files are flushed without rewriting. File sync plus
 Unix-only parent sync uses the existing vault durability seam, not a new Windows guarantee.
 
-These are store APIs, not actor/native commands, network-send permits or UI-ready serialized
-views. Real PIX publication already exists separately below; the caller must still coordinate
-blob/reference publication, retention, indexing, events, automatic sync and recovery installation.
+These store APIs are not network-send permits. The explicit native adapter below coordinates
+local indexing and blob/reference ordering. Retention, automatic sync and recovery installation
+remain separate integration work.
+
+### Native Studio Save/Load (gate 2, Index/art only)
+
+These commands require the unlocked session and an existing current server/channel. `server`
+is the native numeric server id; `channel` is its canonical decimal u128 string. Object ids,
+operation nonces and physical `epochId` are exactly 32 lowercase hex characters. Preserve the
+nonce and complete request across retries; do not generate another operation on a busy error.
+
+| Command | Arguments besides `server`, `channel` | Result |
+|---|---|---|
+| `studio_list` | None | Index view; an absent Index is empty epoch zero, not a created file. |
+| `studio_read` | `object` | Flipnote view, or `null` for actual absence. Corrupt/unreadable state rejects. |
+| `studio_create` | `object`, `nonce`, `title`, `createdAtMs` | Saved Flipnote view. Creates its title then puts the Index entry with actual full author and unrecorded expiry. |
+| `studio_apply` | `object`, `epochId`, `nonce`, `body` | Updated Flipnote view. `body` is the canonical JSON **string**, not an Automerge change or object. |
+| `studio_apply_index` | `epochId`, `nonce`, `body` | Updated Index view using canonical IndexOp JSON string. |
+
+Create's `createdAtMs` must be a nonnegative JS-safe integer. Both complete operation envelopes
+must fit the existing 64 KiB limit, not just their title/body alone. Create currently targets
+epoch zero for both the new object and Index; rotated-index creation is not installed yet.
+The two writes are **not atomic**: index/storage refusal can leave an unlisted object. Retry the
+same object, nonce, title and timestamp to complete it. Only an exact saved initial operation
+permits an existing object; a new nonce must use Apply instead. An exact retry after a later
+rename/deletion does not undo that change. Closing/Fault and stale physical-epoch edits reject.
+On a Create error, the initiating caller should reread its known object id before retrying;
+an uncertain/partial write is not reported through a durable-success event.
+
+Apply supports InsertFrame, RemoveFrame, ReplaceFrame and Title/Fps headers. Sound, score and
+export operations reject until gate 6. IndexOp retains its closed grammar and live-author creator
+binding. Local Insert/Replace first requires the actual held PIX blob at the declared length,
+valid PIX1 and exactly 192x144 dimensions; it re-promotes/flushes before saving the reference.
+Use `publish_pix` below first; a placeholder CID or missing blob is an error, not a fetch request.
+
+Every successful view has this envelope (read/apply use the same shape):
+
+```text
+{ v: 1, epochId: hex32, epoch: decimalString, channel: decimalString,
+  publication: "local", provisional: true,
+  phase: "open" | "closing" | "settled" | "fault", content: ... }
+```
+
+`epochId` is opaque; carry it from the read into Apply. The epoch **number** is a string to avoid
+JS precision loss. Phase is the stored P1 gate phase, not proof that every displayed edit has an
+owner receipt or reached a peer. This adapter does not gossip, retire intents or drive settlement.
+IPC encoding over 32 MiB rejects rather than silently dropping conflict evidence.
+
+Index `content` has `kind: "index"`, maps `objects`, `overflow`, `deletedObjects`, and `tombstones`
+keyed by hex object id. Each entry retains `creations: [{value, source}]` plus title/expiry
+registers. A register is `{selected: {value, source}, conflicts: [{value, source}]}`.
+Creation values contain kind, title, `createdBy`, `ts` and expiry. Expiry is discriminated:
+`{kind:"unrecorded"}`, `{kind:"never"}`, or `{kind:"at",ms}`; zero is a timestamp, never Never.
+
+Flipnote `content` has `kind: "flipnote"`, nullable title/fps registers, `timeline: hexId[]`,
+`declaredFrameBytes`, `overCap: {frameId:{count,bytes}}`, `tombstones`, and `frames`.
+Frames retain `pixels` registers with `{cid:hex64, bytes}` values and all insertion
+`{value,source}` alternatives; insertion values contain `checkpoint`, nullable `after`, `anchor`,
+`before` ids, and `blob`. Do not discard hidden/deleted/conflicting values when adapting this view.
+Sources contain full `author:hex64`, `opId:hex64`, `nonce:hex32`; frame sources also retain `ts`.
+Tombstone maps contain source arrays. This is not the fixture store's flattened root format.
+
+`AppEvent::StudioUpdated {channel, object}` forwards as `studio-updated` with
+`{server, channel:decimalString, object:hex32|null}` after a successful local mutation; null means
+Index-only. **Every event invalidates that channel's Index**, and a non-null object additionally
+invalidates that object: Create changes both, without emitting two events. This is not yet a
+remote-change or settlement notification.
+
+Internally `ServerActor::studio_begin(StudioRequest) -> StudioReady` uses a bounded queue with
+no vault guard. The actor's Ready lease window is five injected-clock seconds; expiry is checked
+again when a lease arrives. Native Ready waiting also has a five-second bound and reuses four
+native operation slots. Every post-Ready lock acquisition is fail-fast. A trusted local
+`StudioVaultLease` holds the sole mounted store plus numeric-server persistence, UI commit and
+registry-incarnation guards. The actor moves its sole live Server into a finite blocking worker,
+checks current channel/membership and saves its current server snapshot before intent/source
+writes. The worker retains custody across invoke/actor cancellation; a running save may finish,
+but UI/session/incarnation checks suppress stale responses. Panic stops the actor. Guards drop
+before reply/event waits. Bounded scans/restores are not a measured latency promise, and no blob
+pin or retention guarantee follows from successful local Save. No UI adapter is installed here.
 
 ### Creative blob seam (C0c, independent of Studio/P1 metadata)
 

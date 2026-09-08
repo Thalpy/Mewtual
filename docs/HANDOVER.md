@@ -8,6 +8,75 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 2, actor/native local Save/Reopen (2026-09-08).**
+  `catcoms_app::studio` connects the existing accounted Index/art store to five native commands:
+  `studio_create`, `studio_list`, `studio_read`, `studio_apply` and `studio_apply_index`.
+  Actor/native regressions now create a Flipnote, publish actual canonical 192x144 PIX bytes,
+  save its real CID, restart from the command-saved server snapshot, and reopen identical
+  projection/blob bytes. This advances the same gate 2, not a new P1 design or another roadmap.
+
+  A Ready handshake queues no vault guard. After Ready, native obtains persistence/UI/store/
+  registry-incarnation guards without awaiting; contention refuses with an exact-retry instruction.
+  A finite blocking worker owns the sole live Server and mounted vault through the transaction,
+  including caller/actor cancellation. Guards drop before awaited replies/events. Worker panic
+  stops the actor instead of resuming missing/stale state. Live channel/member and full-envelope
+  checks precede mutation I/O; the result-bearing current server snapshot is saved before new
+  intent/source writes. Local frame references require exact held PIX bytes and promotion/flush.
+  This adds no automatic Studio gossip, receipts, replay, retention pins or source reuse cache.
+
+  Create writes object then Index, and can leave an unlisted object on Index refusal. Preserve
+  object/nonce/title/timestamp on retry. Existing objects require an exact retained initial
+  operation; a new nonce cannot overwrite an existing title via Create. Exact retries preserve
+  later titles/deletions. Create currently targets epoch zero for both files; rotated-index
+  creation waits for the gate 4 installer. Art Apply supports title/fps and frame insert/replace/
+  remove; unsupported sound/score/export operations still reject.
+
+  Native views retain full identities, conflicts, hidden/deleted values and cap flags. They say
+  `publication: "local"`, `provisional: true`, and carry the actual phase plus opaque physical
+  epoch id. Expiry is unrecorded/never/at, with zero preserved as a timestamp. `studio-updated`
+  forwards successful local changes, not remote edits or settlement. Every event invalidates the
+  channel Index plus its named object, because Create changes both. On a Create error the caller
+  rereads its known object id; uncertain writes emit no durable-success event. The command/result
+  contract is in INTERFACES. No TS, Svelte, fixture or canonical mockup was edited; UI wiring
+  remains user-owned and the fixture store remains in memory until that adapter is replaced.
+
+  Eleven new tests (six actor/app, five native) cover real Save/restart, missing/wrong PIX,
+  unknown channels, pre-I/O creator/envelope rejection, failed server snapshot, exact retries,
+  existing-id overwrite refusal and partial Create retry after Index capacity is freed. Lifecycle
+  tests cover each busy fence, lock/generation/incarnation changes, dropped Ready, expiry including
+  simultaneous timer/lease readiness, cancelled receivers, and actual RNG-paused disk workers
+  whose invoke or parent actor is aborted. Worker custody and durable completion are verified
+  before reopening. The existing core retry test also checks the new exact-operation getter.
+
+  Actual-diff adversarial review caught Medium issues in pre-I/O validation and Create overwrite;
+  both are fixed with regressions. Low deadline and in-flight cancellation coverage findings are
+  fixed too, and the final Low event-contract ambiguity is clarified above. Final read-only
+  review of the actual implementation/tests/docs reports no remaining Blocker/High/Medium/Low.
+
+  Verification passed:
+
+  - `cargo test --all --all-features` (including 397 app unit tests, 157 replication unit tests
+    and all workspace integration/doc tests; existing ignored tests/probes unchanged).
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (197).
+  - `npm.cmd --prefix apps/desktop test` (1144).
+  - `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`.
+  - `cargo fmt --all -- --check` and
+    `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check`.
+  - `cargo clippy --all-targets --all-features -- -D warnings`.
+  - `bash scripts/check-no-ambient.sh` through Git Bash.
+  - Unstaged/staged diff whitespace checks.
+
+  Focused native Studio tests also passed during iteration. No new ignored/skipped tests.
+  No frontend runtime/layout source changed, so no frontend check/build or screenshot was needed.
+
+  **Next task:** gate 2's complete creative reference enumeration and retention-path integration,
+  covering current/conflicting frames and later export/recovery records without deleting held
+  content prematurely. Save proves local bytes, not retention against subsequent reclamation.
+  All seven full gates remain open: Index/art typed support and local Save are now integrated;
+  automatic sharing/joining, rotation/recovery, claims and sound/export remain their named gates.
+  No percentage is inferred from unequal gates. No remote push pending destination approval;
+  unrelated release workflow/RELEASING changes remain outside this work.
+
 - **Flipnote gate 2, accounted vault Save/Reopen for Index/art (2026-09-08).**
   `StudioEpoch` privately owns the typed document, signed log, gate, opening receipt and receipt
   book. Its bounded version-1 vault snapshot contains raw seed and signed operations, not a

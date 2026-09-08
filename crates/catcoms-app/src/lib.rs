@@ -62,6 +62,7 @@ pub mod registry_ingress;
 pub mod registry_replay;
 pub mod registry_seed;
 pub mod store;
+pub mod studio;
 pub use actor::{spawn, AppCommand, AppEvent, Envelope, ServerActor, Trace, TracedEvent};
 pub use moderation::{
     ModerationEvent, ModerationState, ModerationVote, MAX_MOD_EVIDENCE_BYTES, MAX_MOD_EVIDENCE_IDS,

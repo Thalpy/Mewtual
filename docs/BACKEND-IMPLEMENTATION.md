@@ -26,7 +26,8 @@ connection to any existing reclamation path are required before promising retain
 
 These are ordered integration milestones, not equal-sized percentages. All seven remain open.
 The first user-observable target is gate 2: **create, save, restart, reopen** through real backend
-commands. Gate 1 begins with the missing typed Studio operations; it does not wait for P1 support
+commands. Its Index/art native-path test now passes; reference/retention work still keeps the full
+gate open. Gate 1 begins with the typed Studio operations; it does not wait for P1 support
 for unrelated document types. Tests and review accompany each slice, not only gate 7.
 
 | Gate | Remaining work | Completion evidence |
@@ -95,25 +96,37 @@ rotations without history growth, actual seed-hash golden vectors, 999-frame/8 M
 concurrent overflow, 1024 conflict fields, and bounded complete recovery. This reuses existing P1
 signing, gates, rollback and seed installation; it adds no finality protocol.
 Sound/score/export projections must land before those families can be admitted. Historical-view
-work is bounded but not latency-qualified for production scheduling. No Studio actor/native
-write path is installed and no full product gate is closed.
+work is bounded but not latency-qualified for production scheduling. The explicit Index/art
+actor/native path below is now installed; no full product gate is closed.
 Gate 2 now has `StudioEpoch` and accounted `ServerStore` Index/art Save/Load. The store journals
 the exact intent, persists the full signed source/gate/receipts, then returns prepared ciphertext.
 Restart, exact retry, both crash barriers, corrupted files, storage-ceiling refusal and persisted
 fault tests exercise the actual vault adapter. A real promoted PIX blob plus its saved frame CID
-also survives reopening. This is store-level evidence, not the actor/native acceptance test.
+also survives reopening. The subsequent actor/native tests now prove this through real commands.
 Five-family inventory includes Studio files and their temporary copies; no new budget or finality
 protocol replaces the existing P1 foundations.
-**Next implementation target: gate 2's actor/native create/list/read/apply path**, including sole
-store/lifecycle ownership, real CID publication/reference plumbing and expiry serialization.
-Art persistence need not wait for sound/export; those operations refuse. Full gate 2 remains open.
-The fixture's numeric-only expiry view still needs an explicit absent/null/timestamp adapter at
-gate 2; zero remains a timestamp and must never be used as a Never sentinel.
+Gate 2 now exposes native `studio_create`, `studio_list`, `studio_read`, `studio_apply` and
+`studio_apply_index`. Actor and native tests create a Flipnote, publish canonical PIX bytes,
+save its real CID, restart from the command-saved server snapshot and reopen identical state.
+Exact retries do not duplicate edits or overwrite later titles. Create writes the object then
+the index; an index refusal can leave an unlisted object, and retrying the exact request completes
+it. Current Create targets epoch zero; rotated-index creation awaits the gate 4 installer.
+The Ready handshake transfers the sole live Server and mounted vault to a finite blocking worker,
+retaining persistence/UI/registry guards even if the invoke or actor is cancelled. Busy fences
+refuse without awaiting the actor. No snapshot success or shared publication is fabricated.
+Views retain conflicts, tombstones, overflow and full identities, and say `publication: "local"`
+and `provisional: true`. Expiry is explicitly unrecorded/never/at, including timestamp zero.
+Local `studio-updated` events are forwarded; automatic remote edits/settlement events are not.
+**Next implementation target: gate 2's frame/export/recovery CID enumeration and retention-path
+integration.** Real PIX promotion is checked before saving a local frame reference, but that is
+not a pin against later reclamation. Sound/export mutations still refuse. Full gate 2 remains open.
+The user-owned frontend must adapt these documented results instead of the fixture's numeric-only
+expiry and in-memory blob map; no UI source or canonical mockup was changed.
 
 At `db979dd` on `Create-suite-2`, native `publish_pix` and `request_blob_bounded` are wired through
 the actor. They publish/fetch immutable bytes, not a Studio document. `studio-store.ts` still
-uses an in-memory object/blob map and placeholder CIDs; Rust Index/art materializers and core
-admission now exist, but create/list/read/apply commands are missing. P1 has tested protocol/store and cooperative
+uses an in-memory object/blob map and placeholder CIDs; the new native commands provide the
+durable Index/art replacement, but the frontend has not been switched over. P1 has tested protocol/store and cooperative
 registry discovery/settlement adapters, but not automatic production orchestration for Studio.
 The latest saved-source probes still show about 11 seconds for a dense registry page, beyond
 the current request deadlines. This is an integration blocker, not completed performance work.

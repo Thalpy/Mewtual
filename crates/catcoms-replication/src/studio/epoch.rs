@@ -177,6 +177,22 @@ impl StudioEpoch {
         }
         Ok(None)
     }
+    /// Read-only exact saved-operation evidence, not marker/current-value equality. This grants
+    /// no edit or send authority; a caller still needs current membership and the open gate.
+    /// Useful for refusing accidental create-over-existing before any new intent is journalled.
+    pub fn contains_exact_operation(
+        &self,
+        author: DeviceId,
+        domain: &DomainOp,
+    ) -> Result<bool, ReplError> {
+        domain.encode()?;
+        if domain.doc_type != self.logical.doc_type
+            || domain.logical_key != self.logical.logical_key
+        {
+            return Err(ReplError::EpochScope);
+        }
+        Ok(self.held(author, domain)?.is_some())
+    }
     /// Pre-journal validation prevents invalid targets/origins or impossible projections from
     /// stranding durable intents. It authors only a detached draft; neither signs nor mutates us.
     /// A retained exact retry bypasses NEW-edit policy: later deletion/cap growth must not prevent

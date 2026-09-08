@@ -24,7 +24,7 @@ code was written), the honest residual risks, and the phased build plan.
 Creative immutable blobs are independent of the P1 document lifecycle. The C0c native seam uses
 the existing blob staging/store and authenticated fetch protocol, with PIX1 validation and bounded
 reads/response decoding added at the relevant boundaries. Publication returns a real CID only after
-promotion and flush; publishing a Studio reference remains a later operation. P1 does not replace
+promotion and flush; saving a Studio reference is a separate subsequent operation. P1 does not replace
 Automerge or sync: it adds permission to retire their retained history into owner-receipted,
 verifiable checkpoints with bounded recovery. Existing snapshots alone do not provide that.
 
@@ -63,7 +63,7 @@ No user operations, markers or tombstones enter the compact seed. Generic P1 has
 verification and canonical typed rebuilding both run before installation. Recovery uses the
 existing bounded envelope with a complete typed payload, not the lossy generic summary arrays.
 Historical reads still repeat Automerge clock work; boundedness is not measured production
-latency. No actor/native or user-interface binding is added.
+latency. These projection helpers themselves provide no actor/native or user-interface binding.
 `StudioEpoch` now privately owns the Index/art document, signed log, gate, opening receipt and
 receipt book. Its bounded vault-only restart format revalidates signatures, causal mutations,
 typed seed and gate/log coherence; removed authors remain historical evidence, not current edit
@@ -74,8 +74,22 @@ source and persists faults; it does not settle, prune or install a replacement.
 Opt-in five-family inventory adds Studio records and temporaries to the existing storage/intent
 budgets. A mount-local generation rejects stale scans and duplicate Studio budget handles. The
 coordinator must still exclude interleaved raw registry/recovery/owner writes; the token is not
-a global filesystem transaction or blob-retention guarantee. Actor/native Save/Load and automatic
-sync/settlement remain integration work, with dense-source latency still unqualified.
+a global filesystem transaction or blob-retention guarantee.
+Explicit Index/art Save/Load now runs through `ServerActor::studio_begin` and five native commands.
+The bounded queue carries no vault guard: the actor advertises Ready before native attempts all
+locks fail-fast. The transferred lease retains mounted vault, numeric-server persistence, UI
+commit and exact registry-incarnation guards. One blocking worker owns the sole live Server
+(not a cloned MLS/device) plus that lease; invoke/actor cancellation cannot release its custody
+mid-write. Guards drop before reply/event awaits. A worker panic stops the actor rather than
+resuming an absent or stale Server. Live channel/member and complete-envelope checks precede
+mutation I/O; current MLS/device snapshot persistence precedes the intent/source write.
+Local frame references require exact held, validated 192x144 PIX bytes promoted and flushed in
+the same vault namespace. Create writes the object before the Index and is exact-retryable, not
+atomic across files; a different nonce cannot rename an existing object through Create.
+Native projections retain conflict/deletion evidence and three-state expiry. Local update events
+invalidate views, while responses explicitly label local publication and provisional edits.
+Current Create targets epoch zero. Automatic sync/settlement, retention and the rotated-index
+installer remain integration work, with dense-source latency still unqualified. UI is unchanged.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
 even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.

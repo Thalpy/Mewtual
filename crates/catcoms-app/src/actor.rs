@@ -228,6 +228,11 @@ impl EventSink {
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
 pub enum AppCommand {
+    /// No vault guard may be queued. The dedicated Ready/lease exchange starts only in this arm.
+    Studio {
+        request: crate::studio::StudioRequest,
+        ready: oneshot::Sender<crate::studio::StudioReady>,
+    },
     /// Store an immutable PIX blob; no Studio metadata is changed. Cancellation also owns the
     /// native concurrency slot while the command is queued or executing.
     PublishPix {
@@ -966,6 +971,13 @@ impl ChannelChange {
 /// An event from a running server actor to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
+    /// A local durable Studio transaction finished. Invalidate the channel's Index on EVERY
+    /// event, plus the named object when present: Create changes both. Remote updates arrive
+    /// in a later sync slice. An errored/partial Create must be reread by its initiating caller.
+    StudioUpdated {
+        channel: u128,
+        object: Option<[u8; 16]>,
+    },
     /// The shared channel directory changed; the UI should re-fetch it (`channels`).
     ChannelsUpdated,
     /// A channel's rendered content changed; the UI should re-fetch it (`messages`). Using
@@ -1037,6 +1049,21 @@ pub struct ServerActor {
 }
 
 impl ServerActor {
+    /// Queue only bounded intent metadata, never a vault/lifecycle lock. The receiver must use
+    /// fail-fast lock acquisition after Ready. Dropping this future leaves queued work powerless.
+    pub async fn studio_begin(
+        &self,
+        request: crate::studio::StudioRequest,
+    ) -> Result<crate::studio::StudioReady, String> {
+        request.validate().map_err(|e| e.to_string())?;
+        let (ready, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::Studio { request, ready })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await
+            .map_err(|_| "server stopped or Studio request expired".to_string())
+    }
     /// A handle whose commands belong to one operation.
     ///
     /// The join between the caller's diagnostics and the actor's. A caller that has minted a trace
@@ -3865,6 +3892,46 @@ where
                             .seal_upload_chunk(&bytes, &mime)
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
+                    }
+                    Some(AppCommand::Studio { request, ready }) => {
+                        let target = request.target();
+                        let changed = request.changes_state();
+                        let (lease_tx, lease_rx) = oneshot::channel::<crate::studio::StudioVaultLease>();
+                        let (reply, result) = oneshot::channel();
+                        if ready.send(crate::studio::StudioReady { lease: lease_tx, result }).is_err() { continue; }
+                        let clock = server.runtime_clock();
+                        let deadline = clock.monotonic_ms().saturating_add(5_000);
+                        let lease = tokio::select! {
+                            biased;
+                            result = lease_rx => match result { Ok(v) => v, Err(_) => continue },
+                            _ = clock.sleep(Duration::from_secs(5)) => continue,
+                        };
+                        // A queued lease and timer can become ready together. The biased select
+                        // must not extend this custody window merely by preferring the lease.
+                        if reply.is_closed() || clock.monotonic_ms() >= deadline { continue; }
+                        // MOVE the sole Server, never clone live membership into a stale worker.
+                        // Worker-owned native guards survive cancellation/abort of this waiter.
+                        let worked = tokio::task::spawn_blocking(move || {
+                            let mut lease = lease;
+                            let result = match lease.store.as_mut() {
+                                Some(store) if !reply.is_closed() => server.studio_transaction(store, lease.server, request).map_err(|e| e.to_string()),
+                                _ => Err("Studio request cancelled or vault closed".into()),
+                            };
+                            drop(lease); // BEFORE reply and any bounded event-channel await.
+                            (server, reply, result)
+                        }).await;
+                        let (returned, reply, result) = match worked {
+                            Ok(value) => value,
+                            Err(_) => { tracing::error!("Studio worker panicked; stopping actor with unavailable state"); return; }
+                        };
+                        server = returned;
+                        let notify = changed && result.is_ok();
+                        let _ = reply.send(result);
+                        if notify {
+                            let object = match target { catcoms_replication::studio::StudioTarget::Index { .. } => None,
+                                catcoms_replication::studio::StudioTarget::Flipnote { object, .. } => Some(object) };
+                            let _ = event_tx.send(AppEvent::StudioUpdated { channel: u128::from_be_bytes(target.channel()), object }).await;
+                        }
                     }
                     Some(AppCommand::PublishPix { bytes, cancellation, reply }) => {
                         let res = if cancellation.as_ref().is_some_and(RequestCancellation::is_cancelled) || reply.is_closed() {
