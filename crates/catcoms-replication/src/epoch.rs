@@ -1638,6 +1638,17 @@ impl ReceiptBook {
     /// Canonical peer-local state. The caller vault-seals these bytes and re-verifies held
     /// receipts against the current group before using them as network authority after restore.
     pub fn encode(&self) -> Result<Vec<u8>, ReplError> {
+        self.encode_mode(false)
+    }
+
+    // Version 3 is confined to the registry's explicitly tagged checkpoint-adoption unit.
+    // It can retain a distant target above an opening/prior-target fault. The enclosing unit
+    // must bind that evidence to its actual retained source; ordinary books cannot decode it.
+    pub(crate) fn encode_adoption(&self) -> Result<Vec<u8>, ReplError> {
+        self.encode_mode(true)
+    }
+
+    fn encode_mode(&self, adoption: bool) -> Result<Vec<u8>, ReplError> {
         let mut e = Encoder::new();
         // v2 adds a retained high-water receipt above an opening-epoch fault pair. Old readers
         // reject that state explicitly; ordinary v1 books remain byte compatible.
@@ -1645,7 +1656,13 @@ impl ReceiptBook {
             .fault
             .as_ref()
             .is_some_and(|(a, b)| self.latest.as_ref().is_some_and(|r| r != a && r != b));
-        e.put_u8(if historical_fault { 2 } else { 1 });
+        e.put_u8(if adoption {
+            3
+        } else if historical_fault {
+            2
+        } else {
+            1
+        });
         put_tenure(&mut e, self.tenure.as_ref());
         put_receipt(&mut e, self.latest.as_ref());
         put_receipt(&mut e, self.previous_until_installed.as_ref());
@@ -1669,12 +1686,24 @@ impl ReceiptBook {
 
     /// Restore peer-local receipt/fault state without trusting redundant derived fields.
     pub fn decode(bytes: &[u8]) -> Result<Self, ReplError> {
+        Self::decode_mode(bytes, false)
+    }
+
+    pub(crate) fn decode_adoption(bytes: &[u8]) -> Result<Self, ReplError> {
+        Self::decode_mode(bytes, true)
+    }
+
+    fn decode_mode(bytes: &[u8], adoption: bool) -> Result<Self, ReplError> {
         if bytes.len() > MAX_RECEIPT_BOOK_BYTES {
             return Err(ReplError::EpochBound);
         }
         let mut d = Decoder::new(bytes);
         let version = d.get_u8().map_err(|_| ReplError::Malformed)?;
-        if version != 1 && version != 2 {
+        if if adoption {
+            version != 3
+        } else {
+            version != 1 && version != 2
+        } {
             return Err(ReplError::Malformed);
         }
         let tenure = get_tenure(&mut d)?;
@@ -1710,7 +1739,7 @@ impl ReceiptBook {
                 || latest
                     .as_ref()
                     .is_none_or(|latest| {
-                        latest != a && latest != b && !(version == 2
+                        latest != a && latest != b && !adoption && !(version == 2
                             && a.closed_epoch == b.closed_epoch
                             && a.closed_epoch.checked_add(1) == Some(latest.closed_epoch)
                             && (TenureSelection::from(latest) == TenureSelection::from(a)
@@ -1723,7 +1752,7 @@ impl ReceiptBook {
         let historical_fault = fault
             .as_ref()
             .is_some_and(|(a, b)| latest.as_ref().is_some_and(|r| r != a && r != b));
-        if (version == 2) != historical_fault {
+        if !adoption && (version == 2) != historical_fault {
             return Err(ReplError::Malformed);
         }
         if [&previous_until_installed]
@@ -2042,6 +2071,25 @@ impl EpochGate {
         book: &ReceiptBook,
         opening: Option<&Receipt>,
     ) -> Result<(), ReplError> {
+        self.verify_restart_mode(operations, book, opening, false)
+    }
+
+    pub(crate) fn verify_adoption_restart(
+        &self,
+        operations: &[AdmittedOperation],
+        book: &ReceiptBook,
+        opening: Option<&Receipt>,
+    ) -> Result<(), ReplError> {
+        self.verify_restart_mode(operations, book, opening, true)
+    }
+
+    fn verify_restart_mode(
+        &self,
+        operations: &[AdmittedOperation],
+        book: &ReceiptBook,
+        opening: Option<&Receipt>,
+        adoption: bool,
+    ) -> Result<(), ReplError> {
         let inner = self.inner.lock().expect("epoch gate poisoned");
         if operations.len() != inner.operations.len()
             || operations
@@ -2063,6 +2111,9 @@ impl EpochGate {
             receipt.restore_verified_from_vault()?;
         } else if self.epoch != 0 {
             return Err(ReplError::EpochScope);
+        }
+        if adoption {
+            return book.verify_adoption_state(&self.document, &inner, opening);
         }
         // A book may keep the opening receipt as its previous head. No unrelated older head
         // belongs in this one-epoch unit; long-term owner issuance is a separate journal.
@@ -3113,6 +3164,8 @@ impl RecoverySlots {
         Ok(slots)
     }
 }
+
+mod adoption;
 
 #[cfg(test)]
 mod tests {

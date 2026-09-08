@@ -65,6 +65,14 @@ identities, current MLS, actual transports and the exact query/answer. Raw seeds
 visible. The receipt's exact Automerge hash is checked before parsing, then the canonical registry
 schema. Fetching never writes the receiver's vault, retires intents or replaces provisional work.
 The future newcomer installer must enforce recovery/high-water/mount checks under its durable gate.
+Its registry core now has explicit checkpoint-adoption state: a distant selected receipt seals
+the entire held source, with no pruning, and a typed plan preserves the whole previous version.
+Retargets keep the same content-derived recovery id; seed-only and terminal-epoch versions count.
+The outer restart v2 / adoption-only receipt-book v3 keep nonadjacent selections separate from
+ordinary adjacent settlement. Opening/prior-target equivocation is checked before stale filtering.
+Fault is a successful typed outcome which the future store transaction must save before reporting
+failure; bad seed or recovery must not suppress that evidence. Constructing a separate successor
+does not install it, retire intents, or provide a transferable network-authority permit.
 
 The registry's store-level checkpoint transaction now orders durable barriers as source flush,
 typed recovery, included-only intent retirement, then atomic successor selection. Until selection

@@ -8,6 +8,51 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 distant-checkpoint adoption core (2026-09-08).** Registry epochs can now freeze a whole
+  source against a freshly selected distant checkpoint, including a new-owner rewind. No accepted
+  source operation is dropped. Explicit outer restart v2 embeds adoption-only receipt-book v3;
+  ordinary books and epochs keep their existing formats and strict adjacent settlement rules.
+  Restart binds the original seed, log and gate metadata, independently checks same-tenure
+  non-regression against the actual opening, and retains opening/prior-target equivocation below
+  the high-water. A successful typed Fault outcome must be saved by the future store adapter
+  before reporting installation failure, even if seed/recovery work fails.
+
+  `RegistryAdoptionPlan` verifies the exact raw seed and builds bounded Rewound recovery for
+  the whole prior version, including seed-only pointers and terminal epoch 4096. Its identity
+  excludes destination receipts, quarantine and quota-owner changes, so retargets reuse the same
+  staged warning/deadline. The stricter source fingerprint still invalidates stale plans.
+  `adopted_successor` constructs one separate seed-backed epoch, preserves receipt/repair state,
+  and retires no intents. Exact opening retries preserve newer edits. Ordinary settlement cannot
+  consume adoption state even when the selected closed epoch equals the source epoch.
+
+  Nine focused regressions pass. Read-only design/diff review identified and resolved one Medium
+  restart splice: an R0/R1 book must not select below a source opened by R10 in the same tenure.
+  The regression failed before the fix and passes afterward. Both Low findings are fixed:
+  post-seal quarantine/retarget/restart preserves recovery-warning identity, and stale interface
+  wording is corrected. Static re-review has no remaining code findings or blocker/high.
+  Required verification passed:
+
+  - `cargo test --all --all-features` (app 363 passed / 4 existing ignored; replication 76;
+    all workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No code changed after these suite runs. Frontend check/build/visual checks and separate native
+  `cargo check` were not needed: neither frontend nor native bridge source changed.
+
+  **Next:** connect the scoped kind-21/22 pass to the accounted recovery-first vault transaction,
+  then normal open-epoch catch-up. This core is not a durable installation or network permit.
+  The installer must recheck mount/server/current authority/high-water/inventory, persist Fault
+  independently of recovery failure, and retain Closing across failed writes or warnings. A
+  seven-day warning can outlive the 60-second fetch handle; resumption requires fresh discovery.
+  No actor/native scheduling, UI, intent retirement on seed matches, or final UI guide is added.
+  The backend acceptance checklist remains open; no completion-percentage increase is claimed
+  for this core prerequisite. Unrelated release files remain untouched.
+
 - **P1 expected-hash registry seed fetch (2026-09-08).** Additive kind 22 now fetches the exact
   owner-selected Automerge seed from any independently proven current-member endpoint. The
   cooperative vault provider serves only the installed opening seed, not the latest receipt's

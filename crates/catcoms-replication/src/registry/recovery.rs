@@ -37,12 +37,14 @@ impl RegistryRecovery {
         &self.projection
     }
 
-    /// Hash of the held receipt selecting the closure; not a replacement for its signature.
+    /// For Excluded, the held receipt selecting the closure. For Rewound, the SOURCE opening
+    /// receipt (all-zero only for epoch zero), not the destination. Never signature authority.
     pub fn receipt_hash(&self) -> [u8; 32] {
         self.receipt_hash
     }
 
-    /// Excluded accepted operations in derived-id order. Only their original authors may replay
+    /// Excluded accepted operations (ALL source operations for Rewound), in derived-id order.
+    /// Only their original authors may replay
     /// their own durable intents. Other members can later Restore using their OWN new operations.
     pub fn excluded_operations(&self) -> &BTreeMap<[u8; 32], LocalIntent> {
         &self.excluded
@@ -92,6 +94,44 @@ impl RegistryRecovery {
         Ok(Some(snapshot))
     }
 
+    /// Whole-version evidence when the selected checkpoint's closure is not locally held.
+    /// Destination-independent bytes are essential: fresh owner selections must not consume
+    /// recovery slots or restart the seven-day eviction warning for the same frozen source.
+    pub(crate) fn snapshot_for_rewind(
+        projection: RegistryProjection,
+        opening: Option<&crate::Receipt>,
+        operations: BTreeMap<[u8; 32], LocalIntent>,
+    ) -> Result<Option<RecoverySnapshot>, ReplError> {
+        if operations.is_empty()
+            && projection.pointers.is_empty()
+            && projection.overflow.is_empty()
+            && projection.tombstones.is_empty()
+        {
+            return Ok(None);
+        }
+        let mut snapshot = RecoverySnapshot {
+            doc_type: DocType::DocRegistry,
+            logical_key: projection.document.logical_key.clone(),
+            epoch: projection.epoch,
+            base_close_record_hash: opening.map(|receipt| receipt.close_record_hash),
+            reason: RecoveryReason::Rewound,
+            projection: Vec::new(),
+            tombstones: Vec::new(),
+            elements: Vec::new(),
+            conflicts: Vec::new(),
+            applied_ops: operations.keys().copied().collect(),
+        };
+        let overhead = snapshot.encode()?.len();
+        let typed = Self {
+            projection,
+            receipt_hash: opening.map_or([0; 32], crate::Receipt::hash),
+            excluded: operations,
+        };
+        snapshot.projection = typed.encode(MAX_RECOVERY_SNAPSHOT_BYTES - overhead)?;
+        snapshot.encode()?;
+        Ok(Some(snapshot))
+    }
+
     /// Validate a generic snapshot's registry specialization BEFORE exposing it to Restore or
     /// Export. Expected scope comes from the authenticated vault record, not this payload.
     /// Bounds, canonical ordering, key disjointness, full author ids and domain semantics are
@@ -106,9 +146,13 @@ impl RegistryRecovery {
             || *expected != registry_document(&expected.server_id, bucket)?
             || snapshot.doc_type != DocType::DocRegistry
             || snapshot.logical_key != expected.logical_key
-            || snapshot.epoch >= MAX_REGISTRY_EPOCH
+            || snapshot.epoch > MAX_REGISTRY_EPOCH
+            || (snapshot.epoch == MAX_REGISTRY_EPOCH && snapshot.reason != RecoveryReason::Rewound)
             || (snapshot.epoch == 0) != snapshot.base_close_record_hash.is_none()
-            || snapshot.reason != RecoveryReason::Excluded
+            || !matches!(
+                snapshot.reason,
+                RecoveryReason::Excluded | RecoveryReason::Rewound
+            )
             || !snapshot.elements.is_empty()
             || !snapshot.tombstones.is_empty()
             || !snapshot.conflicts.is_empty()
@@ -170,7 +214,14 @@ impl RegistryRecovery {
             excluded.insert(id, LocalIntent { author, operation });
         }
         d.finish().map_err(malformed)?;
-        if excluded.is_empty() && overflow.is_empty() && tombstones.is_empty() {
+        if (excluded.is_empty()
+            && overflow.is_empty()
+            && tombstones.is_empty()
+            && (snapshot.reason != RecoveryReason::Rewound || pointers.is_empty()))
+            || (snapshot.reason == RecoveryReason::Rewound
+                && (excluded.keys().copied().collect::<Vec<_>>() != snapshot.applied_ops
+                    || ((snapshot.epoch == 0) != (receipt_hash == [0; 32]))))
+        {
             return Err(ReplError::Malformed);
         }
         let typed = Self {

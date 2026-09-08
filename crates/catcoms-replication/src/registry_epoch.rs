@@ -2,8 +2,8 @@
 //!
 //! This is an in-memory coordinator, not a disk transaction or a settlement worker. The caller
 //! must vault-seal and atomically persist its snapshot before publishing edits or acknowledging
-//! receipts. Closing retains the entire accepted log. Recovery persistence, successor selection,
-//! pruning and transport discovery are deliberately not exposed here.
+//! receipts. Closing retains the entire accepted log. Plans can build a separate successor, but
+//! recovery persistence, durable selection, pruning and transport discovery are not exposed.
 
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{MlsDevice, ServerGroup};
@@ -23,7 +23,9 @@ use crate::{
     Receipt, ReceiptBook, ReceiptIngest, ReplError, SealedOp, SignedOp, MAX_CHECKPOINT_BYTES,
 };
 
+mod adoption;
 pub mod catchup;
+pub use adoption::RegistryAdoptionPlan;
 mod settlement;
 pub use settlement::RegistrySettlementPlan;
 
@@ -48,6 +50,9 @@ pub struct RegistryEpoch {
     gate: EpochGate,
     receipts: ReceiptBook,
     opening: Option<Receipt>,
+    // Explicit restart mode: the selected checkpoint need not be adjacent to this still-whole
+    // source. Never infer this permission from a receipt epoch or weaken ordinary restoration.
+    adopting: bool,
 }
 
 impl RegistryEpoch {
@@ -75,6 +80,7 @@ impl RegistryEpoch {
             actor,
             receipts: ReceiptBook::default(),
             opening: None,
+            adopting: false,
         })
     }
 
@@ -128,6 +134,7 @@ impl RegistryEpoch {
             gate,
             receipts,
             opening: Some(receipt),
+            adopting: false,
         })
     }
 
@@ -327,8 +334,9 @@ impl RegistryEpoch {
 
     /// Verify owner/tenure and seal admission atomically. All source content remains available;
     /// this API cannot finish settlement or bypass a failed recovery write.
-    /// A different new-tenure receipt while already Closing returns `ReceiptConflict` unchanged:
-    /// applying that adoption/rewind requires the future recovery-first settlement worker.
+    /// In ordinary mode a different new-tenure receipt while Closing returns `ReceiptConflict`:
+    /// applying that adoption/rewind requires the explicit checkpoint-adoption path. Once in
+    /// that mode, receipt delivery uses its bounded retarget/fault rules instead.
     pub fn seal(
         &mut self,
         receipt: Receipt,
@@ -336,6 +344,9 @@ impl RegistryEpoch {
         expected_tenure_start: u64,
     ) -> Result<ReceiptIngest, ReplError> {
         self.refresh_owner(group)?;
+        if self.adopting {
+            return self.begin_checkpoint_adoption(receipt, group, expected_tenure_start);
+        }
         if let Some(opening) = &self.opening {
             if receipt.closed_epoch == opening.closed_epoch {
                 return self.receipts.check_opening_receipt(
@@ -356,7 +367,7 @@ impl RegistryEpoch {
     /// a wire format: receipt history and past membership admission are trusted only locally.
     pub fn snapshot(&mut self) -> Result<Vec<u8>, ReplError> {
         let mut e = Encoder::new();
-        e.put_u8(1);
+        e.put_u8(if self.adopting { 2 } else { 1 });
         e.put_u8(self.bucket);
         for bytes in [
             self.opening
@@ -364,7 +375,7 @@ impl RegistryEpoch {
                 .map(Receipt::encode)
                 .unwrap_or_default(),
             self.doc.checkpoint_bytes()?.unwrap_or_default(),
-            self.receipts.encode()?,
+            self.receipt_book_bytes()?,
             self.gate.encode()?,
         ] {
             e.put_bytes(&bytes).map_err(|_| ReplError::EpochBound)?;
@@ -423,8 +434,7 @@ impl RegistryEpoch {
     /// an owner seal at the content ceiling can still add its bounded protocol state.
     pub fn storage_protocol_bytes(&self) -> Result<usize, ReplError> {
         let book_growth = self
-            .receipts
-            .encode()?
+            .receipt_book_bytes()?
             .len()
             .checked_sub(ReceiptBook::default().encode()?.len())
             .ok_or(ReplError::Malformed)?;
@@ -453,15 +463,22 @@ impl RegistryEpoch {
             return Err(ReplError::EpochBound);
         }
         let mut d = Decoder::new(bytes);
-        if d.get_u8().map_err(|_| ReplError::Malformed)? != 1 {
-            return Err(ReplError::Malformed);
-        }
+        let adopting = match d.get_u8().map_err(|_| ReplError::Malformed)? {
+            1 => false,
+            2 => true,
+            _ => return Err(ReplError::Malformed),
+        };
         if d.get_u8().map_err(|_| ReplError::Malformed)? != bucket {
             return Err(ReplError::EpochScope);
         }
         let opening = field(&mut d, MAX_RECEIPT_BYTES)?;
         let seed = field(&mut d, MAX_CHECKPOINT_BYTES)?;
-        let receipts = ReceiptBook::decode(field(&mut d, MAX_RECEIPT_BOOK_BYTES)?)?;
+        let book = field(&mut d, MAX_RECEIPT_BOOK_BYTES)?;
+        let receipts = if adopting {
+            ReceiptBook::decode_adoption(book)?
+        } else {
+            ReceiptBook::decode(book)?
+        };
         let gate = EpochGate::decode(field(&mut d, MAX_EPOCH_GATE_BYTES)?)?;
         let count = d.get_u32().map_err(|_| ReplError::Malformed)? as usize;
         if count > MAX_EPOCH_OPERATIONS {
@@ -505,7 +522,11 @@ impl RegistryEpoch {
                 validate_registry_change(&result.logical, bucket, epoch, domain, change, before)
             },
         )?;
-        gate.verify_restart(&metadata, &receipts, result.opening.as_ref())?;
+        if adopting {
+            gate.verify_adoption_restart(&metadata, &receipts, result.opening.as_ref())?;
+        } else {
+            gate.verify_restart(&metadata, &receipts, result.opening.as_ref())?;
+        }
         // Prefixes were preflighted before their original vault admission. On restart validate
         // every signed change's semantics but encode the full prospective seed only once.
         if epoch < crate::registry::MAX_REGISTRY_EPOCH {
@@ -515,8 +536,17 @@ impl RegistryEpoch {
         }
         result.gate = gate;
         result.receipts = receipts;
+        result.adopting = adopting;
         result.gate.update_owner(owner);
         Ok(result)
+    }
+
+    fn receipt_book_bytes(&self) -> Result<Vec<u8>, ReplError> {
+        if self.adopting {
+            self.receipts.encode_adoption()
+        } else {
+            self.receipts.encode()
+        }
     }
 }
 

@@ -150,6 +150,37 @@ impl Fixture {
 }
 
 #[test]
+fn registry_adoption_mode_cannot_use_ordinary_settlement_even_at_the_same_epoch() {
+    let mut f = Fixture::new();
+    f.seal();
+    let ordinary = f.plan().unwrap();
+    assert_eq!(
+        f.source
+            .begin_checkpoint_adoption(f.receipt.clone(), &f.group, 0)
+            .unwrap(),
+        ReceiptIngest::Duplicate
+    );
+    assert!(f.source.adopting);
+    assert_eq!(f.source.epoch(), f.receipt.closed_epoch);
+    assert!(f.plan().is_err());
+    assert!(f
+        .source
+        .checkpoint_successor(&ordinary, &f.group, 0)
+        .is_err());
+    // Adoption requires whole-version recovery even if this receipt would cover every op.
+    let plan = f
+        .source
+        .prepare_checkpoint_adoption(&f.receipt, ordinary.checkpoint().bytes(), &f.group, 0)
+        .unwrap();
+    assert_eq!(
+        plan.recovery_snapshot().unwrap().applied_ops.len(),
+        f.source.op_count()
+    );
+    let mut successor = f.source.adopted_successor(&plan, &f.group, 0).unwrap();
+    assert_eq!(successor.snapshot().unwrap()[0], 1);
+}
+
+#[test]
 fn registry_checkpoint_successor_preserves_book_and_seed_only_dependencies() {
     let mut f = Fixture::new();
     f.edit(11);

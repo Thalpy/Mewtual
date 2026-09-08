@@ -208,6 +208,16 @@ flush the actual successor without rerunning predecessor retirement or replacing
 Save retries retain their original concrete document id; deliberate replay explicitly targets the
 new one. Full-quota capacity orchestration and automatic replay are not live-wired yet.
 
+Newcomer core implementation: a discovered checkpoint need not close the epoch held locally.
+Explicit adoption state freezes that whole source and retains the selected high-water plus one
+prior target. Delayed conflicts with that target or the original seed-opening receipt fault
+before stale filtering. A typed Rewound plan conservatively keeps the complete previous version,
+including seed-only pointers; no intent is retired merely because a seed has a matching value.
+Recovery identity depends on source content, not the destination receipt or late quarantine, so
+retargeting reuses the same warning. The bounded core can construct a separate successor, but the
+recovery-first vault installer is still pending. It must save Fault outcomes even when no seed
+can be installed, and reacquire fresh discovery after restart or an expired fetch handle.
+
 An intent is **final** when inside a receipted closure. Until then it is retained, vault-sealed,
 and replayed wherever the document is next `Open`.
 

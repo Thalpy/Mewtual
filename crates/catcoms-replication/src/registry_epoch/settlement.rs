@@ -93,7 +93,7 @@ impl RegistrySettlementPlan {
     }
 }
 
-fn source_version(source: &mut RegistryEpoch) -> Result<[u8; 32], ReplError> {
+pub(super) fn source_version(source: &mut RegistryEpoch) -> Result<[u8; 32], ReplError> {
     let mut hash = blake3::Hasher::new_derive_key("catcoms/registry-settlement-source/v1");
     hash.update(&source.snapshot()?);
     Ok(*hash.finalize().as_bytes())
@@ -116,7 +116,8 @@ impl RegistryEpoch {
         group: &ServerGroup,
         expected_tenure_start: u64,
     ) -> Result<Self, ReplError> {
-        if self.phase() != EpochPhase::Closing
+        if self.adopting
+            || self.phase() != EpochPhase::Closing
             || self.receipts.is_faulted()
             || self.receipts.latest() != Some(plan.receipt())
             || !plan.matches_source(self)?
@@ -155,7 +156,7 @@ impl RegistryEpoch {
             return Err(ReplError::EpochBound);
         }
         let close = CloseRecord::decode(&close.encode())?;
-        if self.phase() != EpochPhase::Closing || self.receipts.is_faulted() {
+        if self.adopting || self.phase() != EpochPhase::Closing || self.receipts.is_faulted() {
             return Err(ReplError::EpochClosed);
         }
         let receipt = self.receipts.latest().ok_or(ReplError::ReceiptConflict)?;

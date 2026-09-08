@@ -29,6 +29,9 @@ The protocol/store foundations have substantially more coverage than the runtime
       behind a fresh kind-21/runtime/MLS/owner-bound handle. Joined members exercise both routes
       and the installed vault source. Recovery-first newcomer installation still remains;
       fetching creates no local epoch and does not settle, prune or replay provisional edits.
+      The explicit adoption core now retains the whole source across distant selections,
+      restarts and faults, and produces destination-independent whole-version recovery. Its
+      successor builder is not the accounted vault installer; that integration remains open.
       The installer must recheck this context, mount, high-water and recovery; raw mutable
       `ReceiptHeadAnswer.proof: Some` is not an admission permit or proof the seed is available.
       Independently observed owner-tenure evidence is saved with MLS; unknown tenure must

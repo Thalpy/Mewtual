@@ -332,6 +332,24 @@ table with the commit that closed it.
   Conservative per-record content reserves and physical intent replacement headroom can still
   refuse at full quota. No live actor/discovery, repair or automatic replay is wired. The existing
   file-sync/Unix-parent-sync durability and local-path threat boundary apply.
+- **Newcomer adoption planning is not durable installation.** The registry core can now seal a
+  whole source against a distant or new-tenure checkpoint, retaining every signed operation.
+  Ordinary restart remains v1; explicit adoption v2 contains an adoption-only bounded receipt
+  book v3. Its decoder is not accepted by the ordinary book entry point. Restart still checks
+  the actual original seed, signed log and gate metadata. Historical fault pairs must bind to
+  the retained opening or prior target, not unrelated spliced receipts. Both anchors are screened
+  before stale filtering; Fault preserves high-water evidence and blocks successor construction.
+  Ordinary settlement rejects adoption mode even at an equal epoch. A separately constructed
+  successor has one verified seed and carries repair anti-replay bookkeeping.
+
+  Whole-source Rewound recovery includes seed-only pointers and terminal epoch 4096; exact outer
+  caps still apply. Its identity excludes the destination receipt and quarantine, so retargets
+  cannot reset eviction deadlines. The core never persists recovery, retires intents or replaces
+  the source. The forthcoming store transaction must durably save a successful typed Fault
+  outcome independently of seed/recovery errors, and save recovery before replacement. A seven-
+  day warning can outlive the 60-second fetch pass: resumption needs freshly scoped discovery,
+  never a reconstructed permit from the saved receipt. Bounded historical evidence is not a
+  complete owner audit chain; automatic installation, fault repair and runtime scheduling remain.
 - **Registry replay preserves original authorship and exact retry identity.** The store's single-step
   replay accepts only a saved intent id plus a captured concrete epoch, never a supplied body or
   author. It verifies the actual current member is the saved author, the existing epoch is Open,

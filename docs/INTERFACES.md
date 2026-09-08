@@ -481,8 +481,14 @@ pub struct RegistryEpoch; // private EncryptedDoc + EpochGate + ReceiptBook + op
   ingest(&SealedOp, &ServerGroup, &MlsDevice) -> Result<Admission>;
   seal(Receipt, &ServerGroup, expected_tenure_start) -> Result<ReceiptIngest>; // retains full source
   prepare_settlement(&CloseRecord, &ServerGroup, expected_tenure_start) -> Result<RegistrySettlementPlan>;
+  begin_checkpoint_adoption(Receipt, &ServerGroup, expected_tenure_start) -> Result<ReceiptIngest>;
+  // Seals but retains the whole source, including distant/rewound selections. Persist Fault
+  // outcomes before reporting failure. Scope/tenure must come from fresh discovery in networking.
+  prepare_checkpoint_adoption(&Receipt, raw_seed, &ServerGroup, expected_tenure_start) -> Result<RegistryAdoptionPlan>;
+  adopted_successor(&RegistryAdoptionPlan, &ServerGroup, expected_tenure_start) -> Result<Self>;
+  // Construction only: store must save recovery and finish warnings BEFORE replacing source.
   doc_id(); epoch(); phase(); op_count(); quarantined_len(); projection(); // detached/read-only
-  snapshot() -> Result<Vec<u8>>; // raw seed + signed log + gate/book, bounded version 1
+  snapshot() -> Result<Vec<u8>>; // raw seed + signed log + gate/book, v1 ordinary / v2 adoption
   restore(vault_authenticated_bytes, &ServerGroup, expected_bucket, actor) -> Result<Self>;
   validate_vault_snapshot(vault_authenticated_bytes, server_id, bucket) -> Result<usize>;
   storage_protocol_bytes() -> Result<usize>; // exact receipt-only bytes, not declared usage
@@ -496,6 +502,13 @@ pub struct RegistrySettlementPlan; // private, computation-only, content-redacte
   source_version() -> [u8;32]; matches_source(&mut RegistryEpoch) -> Result<bool>;
   source_base_close() -> Option<[u8;32]>; // close that opened the source, not its successor
   recovery_snapshot() -> Result<Option<RecoverySnapshot>>; // bounded, not persisted
+pub struct RegistryAdoptionPlan; // private, typed, content-redacted; never a durable/network permit
+  receipt(); checkpoint(); matches_source(&mut RegistryEpoch) -> Result<bool>;
+  recovery_snapshot() -> Option<&RecoverySnapshot>; // complete prior version, no intent retirement
+// Adoption restart uses an isolated book v3, rejected by ordinary ReceiptBook::decode. Rewound
+// registry recovery retains all source operations plus seed pointers/overflow/tombstones, up to
+// terminal epoch 4096. receipt_hash() names the SOURCE opening (zero for epoch zero). Its bytes
+// are independent of destination receipts and quarantine, preserving eviction-warning identity.
 ```
 
 ---
@@ -1258,8 +1271,9 @@ the ephemeral whole-source fingerprint, quarantine and quota-owner metadata. The
 6-MiB cap is checked before payload allocation/persistence; decoding validates the full wrapper,
 scope, canonical ordering, disjoint key sets, bounds and excluded-id membership in `applied_ops`.
 `RecoverySnapshot` Debug now redacts content even when nested in a generic Option/Result. These are
-vault-local records, not independently signed replay requests; pointer verification and Restore,
-repair/rewind-specific typed records and actor/bridge integration remain unwired.
+vault-local records, not independently signed replay requests. Rewound whole-version records now
+exist in the adoption core. Pointer verification, Restore, the recovery-first adoption installer,
+repair-specific typed records and actor/bridge integration remain unwired.
 
 Local editing uses two ordered barriers under the exclusive store borrow: validate the canonical
 registry operation and current local author, save/flush its intent, then reload, apply and save/flush
