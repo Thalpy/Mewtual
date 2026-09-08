@@ -814,6 +814,54 @@ before reply/event waits. Bounded scans/restores are not a measured latency prom
 reference guard above protects saved pixels from existing cache-reclamation paths, not disk
 corruption, arbitrary external filesystem edits or expiry enforcement. No UI adapter is installed.
 
+### Studio operation exchange (gate 3, cooperative Index/art adapter)
+
+`catcoms_app::studio_exchange` extends the saved sources above with explicit transport calls:
+
+- `watch_studio_epoch(store, server, target) -> ServerStudioWatch` loads a checked concrete
+  source, or chooses deterministic epoch zero only on actual absence. It validates the current
+  channel/local member and binds full logical target, physical vault mount, numeric server,
+  sync incarnation and watch generation. It writes no source and performs no discovery.
+- `flush_studio_subscriptions()` uses the existing cancel-safe routing-topic reconciler.
+  `unwatch_studio_epoch(&watch)` immediately revokes that exact generation and queued bytes;
+  asynchronous unsubscription follows. Dropping the watch alone does not unsubscribe. A stale
+  mount's handle may revoke itself, never a newer replacement.
+- `receive_studio_step(store, watch, budget) -> Option<StudioReceived>` consumes at most one
+  authenticated packet and returns `Admission` plus `EpochStudioState` only after accounted
+  `ingest_studio_epoch` persistence. `Accepted`, `Duplicate`, `Quarantined` and
+  `RejectedQuarantineFull` retain their existing meanings. Queueing is not admission; quarantine
+  is not a timeline edit. Missing dependencies, bad channel roots and storage errors emit no ack.
+- `send_saved_studio_once(store, server, target, expected_doc_id, operation, budget)` requires
+  an exact OWN full DomainOp already in the saved source. It cannot create an edit, accept an
+  unsaved nonce/body, or send another member's operation. Existing exact retry checks Open and
+  current membership, flushes intent/source, and reseals for current MLS/routing before the
+  existing one-shot transport attempt. Submitted is local driver admission, not delivery. No
+  result, cancellation or refusal retires the intent or queues ciphertext for later retry.
+
+The low-level sync `StudioWatch`/publish seam is trusted-local, not a UI capability. There is one
+slot per `(type, logical key)`, at most 16 watches; a conflicting channel binding for one object
+replaces the slot and revokes old traffic rather than creating another logical document. All
+Studio-tagged gossip is intercepted before legacy document ingestion, even unwatched/malformed
+traffic. No legacy delivery receipt, accepted counter or catch-up fallback is earned.
+
+The Studio inbox holds at most 16 copied sealed packets, each at most 256 KiB + 78 envelope
+bytes. Its separate aggregate pre-authentication allowance is 50/s, burst 200; post-authentication
+debt is 10/s, burst 50 per full author/type/logical key with at most 4096 rows. Only fully refilled
+rows can be removed. Rewatch, channel rebinding and epoch rotation do not refund debt. These
+fixed allowances are additional to the existing registry inbox, not a shared fairness promise.
+Current full local/author membership and MLS are checked at enqueue and again before drain;
+grandfather routing topics do not authorize old-MLS ciphertext. Signature/body checks do not
+prove the frame root's channel: the existing typed durable gate does that before source creation.
+
+These are **cooperative backend calls, not new actor/native commands or automatic sharing**.
+Callers must retain exclusive Server/store plus native persistence/UI/incarnation custody across
+the send await. Source restoration/persistence is synchronous and not latency-qualified; it needs
+bounded off-executor ownership/source reuse before automatic scheduling. Rotation requires a new
+checked watch; receipt/seed discovery and checkpoint installation are not supplied by these calls.
+Dropped traffic needs explicit saved-op retry or future catch-up. No pixels are auto-fetched, no
+receipt is produced, and no remote `studio-updated` or settlement event is emitted yet. The native
+Save result stays `publication: "local"`; UI adapters and canonical rendering remain user-owned.
+
 ### Creative blob seam (C0c, independent of Studio/P1 metadata)
 
 - Native `publish_pix({server, bytesB64}) -> {cid, bytes}` calls

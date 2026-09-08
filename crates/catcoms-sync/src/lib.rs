@@ -65,6 +65,8 @@ pub mod receipt_head;
 pub mod registry_catchup;
 mod registry_ingress;
 mod registry_publication;
+mod studio_exchange;
+pub use studio_exchange::StudioWatch;
 pub mod registry_seed;
 mod roles;
 pub use blob_fetch::{CompletedBlobFetch, PendingBlobFetch, MAX_BLOB_FETCH_PEERS};
@@ -3767,6 +3769,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Process-local incarnation, freshly allocated by new/restore; never persisted or sent.
     registry_instance: RegistrySyncInstance,
     registry_ingress: registry_ingress::RegistryIngress,
+    studio_exchange: studio_exchange::StudioExchange,
     registry_pages: registry_catchup::RegistryRequests,
     receipt_heads: receipt_head::HeadRequests,
     registry_seeds: registry_seed::SeedRequests,
@@ -4201,6 +4204,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             blob_fetch_instance: Arc::new(()),
             registry_instance: RegistrySyncInstance::new(),
             registry_ingress: registry_ingress::RegistryIngress::default(),
+            studio_exchange: studio_exchange::StudioExchange::default(),
             registry_pages: registry_catchup::RegistryRequests::default(),
             receipt_heads: receipt_head::HeadRequests::default(),
             registry_seeds: registry_seed::SeedRequests::default(),
@@ -5338,7 +5342,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // for the next one would leave the ex-member attached across the rotation.
                     self.drain_evictions().await;
                     self.resync_if_needed().await;
-                } else if !self.on_registry_gossip(&topic, &data) {
+                } else if !self.on_registry_gossip(&topic, &data)
+                    && !self.on_studio_gossip(&topic, &data)
+                {
                     self.on_gossip(from, &data);
                 }
                 Ok(true)
@@ -6468,6 +6474,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             for watch in self.registry_ingress.watches.values() {
                 if let Some(t) = self.channel_topic_for(DocType::DocRegistry, watch.doc_id, slot) {
+                    set.insert(t);
+                }
+            }
+            for ((doc_type, _), watch) in &self.studio_exchange.watches {
+                if let Some(t) = self.channel_topic_for(*doc_type, watch.doc_id, slot) {
                     set.insert(t);
                 }
             }

@@ -8,6 +8,54 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 3, cooperative saved-operation exchange (2026-09-08).**
+  `catcoms_app::studio_exchange` connects already-saved Index/art operations to the existing
+  encrypted gossip/one-shot transport and accounted Studio receive store. Two actual members
+  join through the invite flow, Save real PIX references, send, durably receive and reopen.
+  Bob also edits the received source through normal Save, sends back to Alice, and Alice reopens
+  Bob's attributed result. This is backend adapter evidence, not automatic desktop collaboration.
+
+  `watch_studio_epoch` derives a checked concrete source or absent epoch zero. Full logical
+  target, channel, numeric server, sync/watch incarnation and vault mount bind the handle.
+  The sync inbox keeps one watch per logical type/key, not per channel alias, and intercepts
+  both Studio tags unconditionally before legacy ingestion. Current full-member/MLS checks
+  run at enqueue and drain; typed channel/causal/cap validation and the existing source barrier
+  decide acceptance. Queued, duplicate, quarantined or failed packets earn no delivery ack.
+  `send_saved_studio_once` requires the exact own retained envelope before existing retry and
+  fresh sealing; it cannot create an unsaved edit or bypass native Save's PIX/snapshot ordering.
+  Only the existing one-shot sender dispatches; no cancellation/result retires an intent.
+
+  Limits are 16 watches, 16 copied packets of at most 256 KiB + 78 bytes, a separate Studio
+  pre-auth allowance of 50/s burst 200, and full-author/logical-document debt of 10/s burst 50
+  in at most 4096 rows. Rewatch/channel/epoch changes cannot refund debt. Existing subscription
+  reconciliation handles cancellation; unwatch revokes immediately, drop alone does not.
+  No new P1, wire, persistence, crypto or routing format, pin ledger or scheduler is introduced.
+
+  Fifteen new tests (nine app, six sync) cover real two-member Index/art exchange and restart,
+  both edit directions, exact duplicates, missing dependencies followed by retry, unsaved or
+  changed-envelope send refusal, post-save send cancellation/NoPeers, a receipt arriving after
+  queueing, channel mismatch before source creation, stale watch/mount/sync handles, packet/
+  watch/rate rails, full-author checks, old MLS refusal and current routing. Design review's
+  saved-only-send and one-logical-watch constraints are implemented. Actual-diff review found
+  no Blocker/High/Medium and two Low test gaps, both now covered by passing regressions.
+  Final docs/test re-review reports no remaining Blocker/High/Medium/Low. Verification passed:
+  `cargo test --all --all-features` (including 414 app, 160 replication and 220 sync unit tests
+  plus all integration/doc suites), `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  (197), `npm.cmd --prefix apps/desktop test` (1144), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, `bash scripts/check-no-ambient.sh`
+  via Git Bash, and diff whitespace checks. Existing ignored tests are unchanged; none was added
+  or loosened. No native/UI source changed, so no frontend build or screenshot was needed.
+
+  **Next task:** gate 3's bounded off-executor source ownership/reuse and runtime driving,
+  then automatic catch-up/discovery and remote events. Do not rebuild the exchange adapter.
+  Its synchronous restore/write work must not be installed inline in the network loop; the
+  existing dense-registry latency measurement remains a blocker for automatic service.
+  The caller still supplies native persistence/UI/incarnation custody across send awaits.
+  No actor/native exchange commands, remote `studio-updated` events, background retries,
+  PIX auto-fetch, Studio checkpoint installer or automatic owner receipts are added here.
+  Native Save remains local/provisional. UI remains user-owned; games remain paused.
+  Local commits only; remote destination approval remains outstanding.
+
 - **Flipnote gate 2, conservative byte-reference protection (2026-09-08).**
   The current Index/art Save/Reopen path is now connected to actual held-blob reclamation.
   `ServerStore::creative_pinned_cids()` opts into the existing five-family scan and derives a

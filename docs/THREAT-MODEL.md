@@ -683,6 +683,19 @@ table with the commit that closed it.
   mutation, storage corruption, a new blob quota or remote possession. Expiry/tombstones alone
   do not override still-retained recovery/history. No new durable format, finality or expiry policy
   is introduced; kept-copy release and non-held staging cleanup keep their separate semantics.
+  The explicit Studio exchange adapter now sends only an exact OWN operation already in the
+  saved Open source, through current-member checks, both retry durability barriers, fresh MLS
+  sealing and one-shot dispatch. It cannot create an unsaved edit or bypass native PIX ordering.
+  Its opt-in inbox intercepts both Studio tags before legacy ingestion. It admits no document
+  until the existing typed store validates channel-bound roots/causal changes/caps and persists.
+  Current full local/author identity and MLS are checked again after queue delay. Logical watches
+  are capped at 16, packets at 16 times (256 KiB + 78 bytes); channel/epoch replacement revokes
+  old generations without resetting logical full-author debt. The separate Studio pre-auth bucket
+  is 50/s burst 200; author/document buckets are 10/s burst 50 with 4096 rows, reclaiming only
+  fully refilled rows. These are fixed extra rails, not cross-inbox fairness. No queued frame is
+  an accepted edit, blob-possession assertion or delivery receipt. Cancellation/refusal keep
+  durable intents and require explicit retry. Native custody, bounded off-executor source reuse,
+  automatic driving, remote events, catch-up and seed discovery remain gate 3 integration work.
   Sound/score/export state continues to refuse pending its typed support.
   Exact retry recognition belongs to the retained signed
   envelope/gate, not timestamps or marker-only success.

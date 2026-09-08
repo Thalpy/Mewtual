@@ -107,6 +107,16 @@ and upload cleanup use the guarded delete, but still do not promise freed disk s
 kept-copy release and unreferenced staging cleanup retain their separate ownership semantics.
 Future sound/export/doodle record support must extend enumeration before enabling reclamation
 for those formats; current unsupported records cannot be interpreted as an empty hold set.
+Explicit Studio exchange now reuses current sealed operations, blinded topics, the cancel-safe
+subscription reconciler and one-shot publication. A bounded opt-in sync inbox authenticates,
+but the existing accounted Studio store remains the only durable admission path. Logical
+watch identity excludes channel aliases and retains full-author rate debt across replacement.
+Saved-only send matches the entire own operation in the current source before exact retry and
+resealing; it cannot become another edit path bypassing native Save's PIX/snapshot ordering.
+Server adapters bind channel, source, mount and current membership. These are cooperative
+calls with two-member persistence tests, not automatic actor scheduling, catch-up, discovery,
+source reuse or remote UI events. Synchronous reconstruction and native lifecycle custody still
+need integration before live background use; current native Save remains local/provisional.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
 even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.
