@@ -181,7 +181,7 @@ impl StudioTarget {
             |staged| recovery::preflight(self.read(&logical, epoch, staged)?, &operations.borrow()),
         )
     }
-    fn local_policy(
+    pub(super) fn local_policy(
         &self,
         projection: &StudioProjection,
         domain: &DomainOp,

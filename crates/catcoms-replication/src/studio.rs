@@ -27,6 +27,8 @@ mod snapshot;
 pub use recovery::{StudioProjection, StudioRecovery};
 mod admission;
 pub use admission::StudioTarget;
+mod epoch;
+pub use epoch::{StudioEpoch, MAX_STUDIO_EPOCH_SNAPSHOT_BYTES};
 pub use frames::{
     flipnote_document, validate_frame_change, FlipnoteFrameProjection, FrameBlob, FrameEntry,
     FrameInsertion, FrameLimits, FrameRegister, FrameSource, FrameValue, FLIPNOTE_FRAME_BYTES,

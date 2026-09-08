@@ -86,6 +86,17 @@ impl ServerStore {
         self.cleanup_epoch_files(EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry)
     }
 
+    /// Also remove eligible unpublished Studio temporary siblings. Never removes final epochs
+    /// or retained recovery; a fresh five-family inventory is mandatory after this pass.
+    pub fn cleanup_epoch_storage_staging_with_studio(
+        &mut self,
+    ) -> Result<EpochStorageCleanup<'_>, AppError> {
+        self.studio_generation = std::sync::Arc::new(());
+        self.cleanup_epoch_files(
+            EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        )
+    }
+
     fn cleanup_epoch_files(
         &mut self,
         coverage: EpochInventoryCoverage,

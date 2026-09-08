@@ -641,7 +641,19 @@ table with the commit that closed it.
   Typed recovery validates source epoch/base-close consistency and uses source-stable opening
   provenance for Rewound, so retargeting cannot reset recovery ids and warning lifetimes. These
   codecs do not authenticate caller-invented provenance, persist evidence, retire intents or
-  authorize pruning. Accounted storage/settlement and actor/native Save/Load are still unwired.
+  authorize pruning. The owned `StudioEpoch` now revalidates raw signed history, typed seed,
+  opening/retained receipts and exact gate/log coherence on vault restore. Historical removed
+  authors remain readable; every new edit requires current membership. The accounted Studio
+  store verifies observed source presence OR absence against inventory before journaling an
+  intent, then persists the whole source before returning prepared ciphertext. Receipt authority
+  rejects before disk reconstruction; sealing/Fault results cross the same persistence barrier
+  and never prune history. Uncertain writes/flushes poison accounting; retries compare complete
+  envelopes and sync unchanged files rather than create another operation. Five-family inventory
+  authenticates bounded Studio files and charges unpublished copies. Its mount-local generation
+  fences stale/duplicate Studio budget handles, not interleaved raw writes by other P1 adapters:
+  a sole coordinator remains required. Blobs/legacy snapshots are outside this inventory. No
+  network snapshot authority, completed Studio settlement, live publication, retention guarantee
+  or actor/native Save/Load follows from these store APIs.
   Sound/score/export state continues to refuse pending its typed support.
   Exact retry recognition belongs to the retained signed
   envelope/gate, not timestamps or marker-only success.

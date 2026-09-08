@@ -32,6 +32,7 @@ mod epoch_intents;
 mod epoch_owner;
 mod epoch_recovery;
 mod epoch_registry;
+mod epoch_studio;
 pub use epoch_intents::{EpochIntentBudget, EpochIntentState, MAX_VAULT_INTENT_BYTES};
 pub use epoch_owner::EpochOwnerReceiptState;
 pub use epoch_recovery::cleanup::{
@@ -51,6 +52,7 @@ pub use epoch_registry::{
     RegistryOwnerRotationOutcome, RegistryPageAdmission, RegistryReplayHold, RegistryReplayOutcome,
     RegistryReplayPass, RegistryReplayProgress, RegistryReplayStep, RegistryReplayTicket,
 };
+pub use epoch_studio::{EpochStudioBudget, EpochStudioState};
 pub mod epoch_budget;
 
 /// One persisted server in the registry: enough to relist it in the UI and reload its
@@ -389,6 +391,9 @@ pub struct ServerStore {
     // Process-local freshness only, never wire authority. Replaced before any intent-file I/O;
     // budgets made from older scans (or another mounted vault) cannot authorize a new write.
     intent_generation: std::sync::Arc<()>,
+    // Studio budget minting/write attempts and five-family cleanup invalidate captured scans.
+    // Other raw P1 adapters still require the same sole coordinator/exclusive accounting owner.
+    studio_generation: std::sync::Arc<()>,
     // Stable only for this physical mount, unlike the rotating intent-inventory token. Replay
     // passes are local work cursors, not authority across reopen or the native UI-lock boundary.
     replay_mount: std::sync::Arc<()>,
@@ -426,6 +431,7 @@ impl ServerStore {
             dir,
             keys,
             intent_generation: std::sync::Arc::new(()),
+            studio_generation: std::sync::Arc::new(()),
             replay_mount: std::sync::Arc::new(()),
             _session: session,
         })

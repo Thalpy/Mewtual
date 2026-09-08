@@ -64,6 +64,18 @@ verification and canonical typed rebuilding both run before installation. Recove
 existing bounded envelope with a complete typed payload, not the lossy generic summary arrays.
 Historical reads still repeat Automerge clock work; boundedness is not measured production
 latency. No actor/native or user-interface binding is added.
+`StudioEpoch` now privately owns the Index/art document, signed log, gate, opening receipt and
+receipt book. Its bounded vault-only restart format revalidates signatures, causal mutations,
+typed seed and gate/log coherence; removed authors remain historical evidence, not current edit
+authority. The `ServerStore` adapter saves the exact intent before this whole unit and returns
+prepared ciphertext only after both durability barriers. Exact retained-envelope retries flush
+unchanged files, including at the ordinary content ceiling. Receipt sealing retains the complete
+source and persists faults; it does not settle, prune or install a replacement.
+Opt-in five-family inventory adds Studio records and temporaries to the existing storage/intent
+budgets. A mount-local generation rejects stale scans and duplicate Studio budget handles. The
+coordinator must still exclude interleaved raw registry/recovery/owner writes; the token is not
+a global filesystem transaction or blob-retention guarantee. Actor/native Save/Load and automatic
+sync/settlement remain integration work, with dense-source latency still unqualified.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
 even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.

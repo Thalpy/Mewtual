@@ -8,6 +8,70 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 2, accounted vault Save/Reopen for Index/art (2026-09-08).**
+  `StudioEpoch` privately owns the typed document, signed log, gate, opening receipt and receipt
+  book. Its bounded version-1 vault snapshot contains raw seed and signed operations, not a
+  compressed Automerge save. Restart checks signatures, dependency closure, exact causal
+  mutations, seed/receipt binding and gate/log coherence. Historical removed-author edits remain
+  readable; new edits/reseals require current membership. Exact retries compare the complete
+  retained envelope before current target/cap policy, so a later deletion cannot invent another
+  operation or prevent retry. No mutable document/gate escape or new finality protocol is added.
+
+  `ServerStore::{load,edit,ingest,seal}_studio_epoch` now supplies the actual durability adapter.
+  It verifies observed source presence/absence against the ledger, preflights a new edit, saves
+  its exact sealed intent, then saves the whole source before returning prepared ciphertext.
+  Duplicate retries flush unchanged files. Uncertain writes/flushes/unwinds require reconciliation;
+  a failed second barrier retains its intent for retry without reporting success. Receipt authority
+  rejects before reconstruction; valid Closing/Fault outcomes persist with full source history.
+  These APIs do not issue receipts, install successors, settle/prune history or retire intents.
+
+  The new `.studio-epoch` vault family is keyed by numeric server/full group/type/logical id,
+  with the channel checked inside the seal rather than permitting alternate object filenames.
+  Explicit five-family scans/cleanup include Studio records and unpublished temporaries; older
+  scans/cleanup remain narrow. `EpochStudioBudget` composes existing storage/global-intent
+  budgets from one fresh scan. Mount-local generation checks reject duplicate minting, stale
+  scans, superseded wrappers and old mounts. Other raw registry/recovery/owner writes still
+  require sole-coordinator exclusion; blobs/legacy snapshots are not covered by this inventory.
+
+  Fifteen new tests (four core, eleven store) cover save/reopen/exact signed retries, both
+  durability barriers with write/flush/panic failures, malformed/aliased/oversized sealed files,
+  missing dependencies/duplicates/signatures/domain data/gates/seeds/count bounds, removed
+  authors, delayed opening equivocation, durable faults, stale scans/cleanup and byte accounting.
+  At the content ceiling exact retries still succeed, new intents refuse, and receipt sealing
+  uses protocol/settlement headroom. A real canonical 192x144 PIX staged/promoted in the vault
+  plus its saved frame CID survives reopening and rejects an undersized bounded read.
+  This is store-level evidence, not an actor/native Save acceptance test.
+
+  Actual-diff adversarial review found one Medium (authenticate receipts before disk work),
+  fixed with an invalid-signature/missing-source regression. Re-review has no remaining
+  Blocker/High/Medium/Low. Final documentation review is clear; its scan-invalidation wording
+  precision is fixed (early schema/authority rejection intentionally preserves freshness).
+
+  Verification passed:
+
+  - `cargo test -p catcoms-replication studio::epoch::` (4).
+  - `cargo test -p catcoms-app store::epoch_studio::` (11; rerun after mechanical lint cleanup).
+  - `cargo test --all --all-features` (including 157 replication unit tests and full integration/
+    doc suites; existing ignored probes unchanged). The later lint cleanup only names a private
+    tuple type and changes side-effect-only `map_err` to `inspect_err`; focused tests above
+    recheck the touched store path afterward.
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192; rerun after cleanup).
+  - `npm.cmd --prefix apps/desktop test` (1144).
+  - `cargo check -p catcoms-replication` and `cargo check -p catcoms-app` during implementation.
+  - `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+    `bash scripts/check-no-ambient.sh` via Git Bash, and unstaged/staged diff whitespace checks.
+
+  No new ignored/skipped tests. No UI/native source changed, so no screenshot, frontend build
+  or extra native `cargo check` was required. Local commit only; remote destination approval
+  remains outstanding. Release workflow and RELEASING changes are excluded.
+
+  **Next task:** gate 2's actor/native create/list/read/apply and lifecycle ownership, then
+  real CID/reference/expiry plumbing. The existing native PIX publish/fetch commands already
+  work; this slice does not connect them to a Studio save or retention pass. Automatic sync,
+  discovery/settlement/recovery and sound/export remain later gates. All seven full product
+  gates remain open; the concrete advance is the owned vault adapter, not another protocol
+  redesign. UI stays user-owned, games/avatar work paused, unrelated release changes preserved.
+
 - **Flipnote Index/art checkpoint and P1 core consumer (2026-09-08).**
   `studio::StudioTarget` now owns the typed core edit/ingest composition for Index and art:
   canonical mutation preparation, causal validation, local 64-object/999-frame/8 MiB refusal

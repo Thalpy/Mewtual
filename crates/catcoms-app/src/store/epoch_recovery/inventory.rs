@@ -12,7 +12,7 @@ use crate::store::{epoch_intents, epoch_owner};
 use catcoms_wire::DocType;
 
 /// Explicit file-family coverage, carried unchanged through cleanup, scan and completed result.
-/// No variant includes blobs, non-registry epoch snapshots or other future P1 record families.
+/// No variant includes blobs or future non-Studio/non-registry epoch snapshot families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpochInventoryCoverage {
     /// Compatibility mode: existing recovery-only APIs never inspect/delete owner journals.
@@ -23,13 +23,17 @@ pub enum EpochInventoryCoverage {
     RecoveryOwnerReceiptsAndIntents,
     /// Also covers durable registry epochs; earlier modes keep their exact narrower coverage.
     RecoveryOwnerReceiptsIntentsAndRegistry,
+    /// Five-family Studio metadata inventory; blobs remain a separate lifecycle.
+    RecoveryOwnerReceiptsIntentsRegistryAndStudio,
 }
 
 impl EpochInventoryCoverage {
     pub(in crate::store) fn includes_intents(self) -> bool {
         matches!(
             self,
-            Self::RecoveryOwnerReceiptsAndIntents | Self::RecoveryOwnerReceiptsIntentsAndRegistry
+            Self::RecoveryOwnerReceiptsAndIntents
+                | Self::RecoveryOwnerReceiptsIntentsAndRegistry
+                | Self::RecoveryOwnerReceiptsIntentsRegistryAndStudio
         )
     }
 }
@@ -45,6 +49,8 @@ pub enum EpochRecordKind {
     Intents,
     /// Checked registry document/gate/receipt restart units.
     Registry,
+    /// Checked Index/art document/gate/receipt restart units.
+    Studio,
 }
 
 impl EpochRecordKind {
@@ -54,6 +60,7 @@ impl EpochRecordKind {
             Self::OwnerReceipts => ".owner-receipts",
             Self::Intents => ".intents",
             Self::Registry => ".registry-epoch",
+            Self::Studio => ".studio-epoch",
         }
     }
     fn domain(self) -> &'static [u8] {
@@ -62,6 +69,7 @@ impl EpochRecordKind {
             Self::OwnerReceipts => epoch_owner::RECORD_DOMAIN,
             Self::Intents => epoch_intents::RECORD_DOMAIN,
             Self::Registry => super::super::epoch_registry::RECORD_DOMAIN,
+            Self::Studio => super::super::epoch_studio::RECORD_DOMAIN,
         }
     }
     fn scope(self, server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {
@@ -70,6 +78,7 @@ impl EpochRecordKind {
             Self::OwnerReceipts => epoch_owner::scope_bytes(server, document),
             Self::Intents => epoch_intents::scope_bytes(server, document),
             Self::Registry => super::super::epoch_registry::scope_bytes(server, document),
+            Self::Studio => super::super::epoch_studio::scope_bytes(server, document),
         }
     }
     fn sealed_cap(self) -> usize {
@@ -78,6 +87,7 @@ impl EpochRecordKind {
             Self::OwnerReceipts => epoch_owner::MAX_SEALED_BYTES,
             Self::Intents => epoch_intents::MAX_SEALED_BYTES,
             Self::Registry => super::super::epoch_registry::MAX_SEALED_BYTES,
+            Self::Studio => super::super::epoch_studio::MAX_SEALED_BYTES,
         }
     }
 }
@@ -103,6 +113,8 @@ pub struct EpochStorageScanProgress {
     pub intent_records: usize,
     /// Authenticated checked registry epochs; zero unless coverage explicitly includes them.
     pub registry_records: usize,
+    /// Checked Studio epoch files; zero unless explicitly included by coverage.
+    pub studio_records: usize,
     /// Canonically named staging siblings, including empty or partial files.
     pub orphan_files: usize,
     /// Physical ciphertext bytes read and authenticated (no orphan bodies are read).
@@ -174,6 +186,7 @@ impl std::fmt::Debug for EpochStorageOrphan {
 /// ```
 pub struct EpochStorageInventory {
     pub(in crate::store) intent_generation: std::sync::Arc<()>,
+    pub(in crate::store) studio_generation: std::sync::Arc<()>,
     coverage: EpochInventoryCoverage,
     records: BTreeMap<(EpochRecordKind, [u8; 32]), EpochStorageInventoryEntry>,
     orphans: BTreeMap<String, EpochStorageOrphan>,
@@ -194,6 +207,7 @@ impl EpochStorageInventory {
     fn empty(coverage: EpochInventoryCoverage, intent_generation: std::sync::Arc<()>) -> Self {
         Self {
             intent_generation,
+            studio_generation: std::sync::Arc::new(()),
             coverage,
             records: BTreeMap::new(),
             orphans: BTreeMap::new(),
@@ -268,6 +282,7 @@ impl EpochStorageInventory {
                     EpochRecordKind::Registry => {
                         b"catcoms/epoch-registry-temp-inventory/v1".as_slice()
                     }
+                    EpochRecordKind::Studio => b"catcoms/epoch-studio-temp-inventory/v1".as_slice(),
                 })
                 .expect("constant fits");
                 e.put_bytes(orphan.name.as_bytes())
@@ -280,7 +295,9 @@ impl EpochStorageInventory {
                     // a temporary to guess which allowance it should consume.
                     footprint: if matches!(
                         orphan.kind(),
-                        EpochRecordKind::Intents | EpochRecordKind::Registry
+                        EpochRecordKind::Intents
+                            | EpochRecordKind::Registry
+                            | EpochRecordKind::Studio
                     ) {
                         Footprint {
                             content: orphan.bytes,
@@ -346,6 +363,12 @@ impl ServerStore {
         self.scan_epoch_files(EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry)
     }
 
+    /// All currently implemented P1 metadata families, including Studio. Earlier APIs keep
+    /// their exact coverage and cannot bootstrap a Studio write budget. Does not include blobs.
+    pub fn scan_epoch_storage_with_studio(&mut self) -> Result<EpochStorageScan<'_>, AppError> {
+        self.scan_epoch_files(EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio)
+    }
+
     pub(in crate::store) fn scan_epoch_files(
         &mut self,
         coverage: EpochInventoryCoverage,
@@ -358,7 +381,8 @@ impl ServerStore {
             ));
         }
         let directory = fs::read_dir(path).map_err(|e| AppError::Io(e.to_string()))?;
-        let inventory = EpochStorageInventory::empty(coverage, self.intent_generation.clone());
+        let mut inventory = EpochStorageInventory::empty(coverage, self.intent_generation.clone());
+        inventory.studio_generation = self.studio_generation.clone();
         Ok(EpochStorageScan {
             store: self,
             directory,
@@ -464,6 +488,9 @@ impl EpochStorageScan<'_> {
                         EpochRecordKind::Registry => {
                             self.store.read_epoch_registry_plain(&entry.path())
                         }
+                        EpochRecordKind::Studio => {
+                            self.store.read_epoch_studio_plain(&entry.path())
+                        }
                     }?
                     .ok_or_else(|| invalid("epoch record disappeared during inventory"))?;
                     self.progress.authenticated_bytes = self
@@ -498,6 +525,9 @@ impl EpochStorageScan<'_> {
                                 &plain, server, &document, scope, size,
                             )?
                         }
+                        EpochRecordKind::Studio => super::super::epoch_studio::inventory_record(
+                            &plain, server, &document, scope, size,
+                        )?,
                     };
                     if self
                         .inventory
@@ -520,6 +550,7 @@ impl EpochStorageScan<'_> {
                         EpochRecordKind::OwnerReceipts => self.progress.owner_receipt_records += 1,
                         EpochRecordKind::Intents => self.progress.intent_records += 1,
                         EpochRecordKind::Registry => self.progress.registry_records += 1,
+                        EpochRecordKind::Studio => self.progress.studio_records += 1,
                     }
                     break;
                 }
@@ -609,12 +640,22 @@ pub(super) fn storage_name(
         EpochRecordKind::OwnerReceipts,
         EpochRecordKind::Intents,
         EpochRecordKind::Registry,
+        EpochRecordKind::Studio,
     ] {
         if family == EpochRecordKind::Intents && !coverage.includes_intents() {
             continue;
         }
         if family == EpochRecordKind::Registry
-            && coverage != EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry
+            && !matches!(
+                coverage,
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry
+                    | EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio
+            )
+        {
+            continue;
+        }
+        if family == EpochRecordKind::Studio
+            && coverage != EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio
         {
             continue;
         }

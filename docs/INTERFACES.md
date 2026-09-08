@@ -630,6 +630,73 @@ absent exactly in epoch zero. Rewound provenance is the SOURCE opening receipt (
 zero); Excluded provenance identifies the closure-selecting receipt. The current constructor
 expects authenticated frozen-source inputs and supplies no persistence or retirement barrier.
 
+### Studio owned epoch and vault Save/Load (Index/art only)
+
+`catcoms_replication::studio::StudioEpoch` privately owns the document, actor, gate, ordinary
+receipt book and optional opening receipt. `new` opens deterministic epoch zero;
+`from_checkpoint` verifies the current-owner receipt and typed expected seed into a separate
+unit, not a replacement/deletion permit. `restore` accepts only authenticated local vault bytes,
+revalidates historical signatures/causal mutations/seed/gate and refreshes the current quota owner.
+Removed authors remain readable but cannot author or reseal new output. `validate_local_edit`
+checks scope, current local membership, open phase, exact retained-envelope equality and (for new
+work) causal/cap/exact checkpoint-plus-recovery preflight. `edit_or_reseal` requires a preceding
+durable intent and a subsequent whole-unit save before publication. `ingest` and `seal` share its
+exclusive ownership; a delayed conflicting opening receipt cannot hide behind a newer high-water.
+There is no mutable document/gate escape and no settlement/replacement method.
+
+The version-1 plaintext snapshot is: `u8(1)`, length-framed channel[16], opening receipt (or empty),
+raw checkpoint (or empty), receipt book, gate, then u32 operation count and each length-framed
+complete SignedOp. All integers/framing use `catcoms_wire::Encoder`; there is no compressed
+Automerge save. The cap is `MAX_STUDIO_EPOCH_SNAPSHOT_BYTES`, the sum of existing component
+caps plus count/framing overhead; each component, signed-op total and operation count are also
+checked before reconstruction. `validate_vault_snapshot` returns only classified protocol bytes,
+not a writable capability or network proof.
+
+`ServerStore` exposes:
+
+- `scan_epoch_storage_with_studio` / `cleanup_epoch_storage_staging_with_studio`: explicit
+  `RecoveryOwnerReceiptsIntentsRegistryAndStudio` coverage. Earlier APIs keep narrower coverage.
+  `EpochRecordKind::Studio` and `studio_records` identify the fifth family. Only canonical
+  unpublished temporary siblings are cleanup targets; final records and intents are never deleted.
+- `studio_storage_budget(server, group, inventory) -> EpochStudioBudget`: consumes the freshness
+  of one completed five-family scan to compose existing storage/global-intent budgets. The
+  non-Clone wrapper is bound to the mount/server/full group. A new mint supersedes the previous
+  wrapper; every attempt entering the checked Studio budget and five-family cleanup invalidates
+  captured scans. Early schema/authority rejection leaves their freshness unchanged.
+  This requires sole coordinator ownership with no interleaved raw registry/recovery/owner
+  writes; it does not account blobs or legacy snapshots. Failed/uncertain I/O requires rescanning.
+- `load_studio_epoch(server, group, target, device) -> Option<EpochStudioState>`: authenticated,
+  bounded read-only restore; `None` means actual absence, never malformed/unreadable state.
+  The detached state exposes only doc id, epoch, phase, op/quarantine counts and typed projection.
+- `edit_studio_epoch(server, group, target, expected_doc_id, device, operation, ts, rng, budget)`
+  returns `(SealedOp, EpochStudioState)` only after the intent then source durability barriers.
+  Preserve concrete epoch id, nonce and complete envelope across retry. Source presence/absence
+  must match the scanned ledger before any intent write. New-operation validation/preflight also
+  precedes journaling. A second-barrier failure can retain a replayable intent without a saved
+  edit; it returns no output. An exact retained retry flushes the unchanged intent/source files.
+- `ingest_studio_epoch(... sealed, rng, budget)` returns saved `(Admission, state)`; ciphertext
+  is bounded before decryption. Duplicate/Late results also cross a save/flush barrier, and Late
+  is quarantine, not an edit acknowledgement.
+- `seal_studio_epoch(... receipt, tenure_start, rng, budget)` verifies current receipt authority
+  before disk work, then saves receipt/book/gate including typed Fault outcomes with full source
+  history retained. It requires an existing source and independently established tenure context;
+  it neither issues receipts nor settles, prunes, repairs or installs checkpoint replacements.
+
+One path per numeric server/full group/type/logical id is
+`servers/<BLAKE3(scope)>.studio-epoch`. Scope is the length-framed
+`catcoms/epoch-studio-store/v1` domain, u64 server, framed full group, u16 type and framed 16-byte
+logical key. Channel is checked inside the sealed wrapper, not an alternate object filename.
+Plaintext wraps framed scope, channel and snapshot; vault framing adds 40 physical bytes.
+The store caps both path metadata and actual bounded reads, authenticates the seal and verifies
+scope/name consistency during inventory. Receipt-book growth, opening receipt and closing gate
+hash charge protocol; user/seed/metadata/quarantine bytes charge content. Atomic replacements
+reserve old-plus-new peak bytes; unchanged files are flushed without rewriting. File sync plus
+Unix-only parent sync uses the existing vault durability seam, not a new Windows guarantee.
+
+These are store APIs, not actor/native commands, network-send permits or UI-ready serialized
+views. Real PIX publication already exists separately below; the caller must still coordinate
+blob/reference publication, retention, indexing, events, automatic sync and recovery installation.
+
 ### Creative blob seam (C0c, independent of Studio/P1 metadata)
 
 - Native `publish_pix({server, bytesB64}) -> {cid, bytes}` calls

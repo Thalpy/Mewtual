@@ -97,9 +97,16 @@ signing, gates, rollback and seed installation; it adds no finality protocol.
 Sound/score/export projections must land before those families can be admitted. Historical-view
 work is bounded but not latency-qualified for production scheduling. No Studio actor/native
 write path is installed and no full product gate is closed.
-**Next implementation target: gate 2's durable art Save/Load**, starting with an owned typed
-epoch and accounted vault restore/save plus sealed intents, then actor/native commands and real
-CID/reference plumbing. Art persistence need not wait for sound/export; those operations refuse.
+Gate 2 now has `StudioEpoch` and accounted `ServerStore` Index/art Save/Load. The store journals
+the exact intent, persists the full signed source/gate/receipts, then returns prepared ciphertext.
+Restart, exact retry, both crash barriers, corrupted files, storage-ceiling refusal and persisted
+fault tests exercise the actual vault adapter. A real promoted PIX blob plus its saved frame CID
+also survives reopening. This is store-level evidence, not the actor/native acceptance test.
+Five-family inventory includes Studio files and their temporary copies; no new budget or finality
+protocol replaces the existing P1 foundations.
+**Next implementation target: gate 2's actor/native create/list/read/apply path**, including sole
+store/lifecycle ownership, real CID publication/reference plumbing and expiry serialization.
+Art persistence need not wait for sound/export; those operations refuse. Full gate 2 remains open.
 The fixture's numeric-only expiry view still needs an explicit absent/null/timestamp adapter at
 gate 2; zero remains a timestamp and must never be used as a Never sentinel.
 
