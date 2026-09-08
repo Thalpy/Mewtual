@@ -56,7 +56,7 @@ accepted hashes, dependency completeness, nonrepetition and page caps. Before/af
 must be identical. The always-run unrotated and seeded smoke tests fully drain 33 operations over
 two pages, with no machine-speed assertions.
 
-## Measurements and scheduling decision
+## Baseline measurements
 
 Observed on 2026-09-08, Windows 10.0.26200, Intel i9-12900KF (24 logical processors), Rust 1.89.0,
 default release profile, after the required suites and compilation completed. Each row is one
@@ -79,7 +79,7 @@ Three sampled pages delivered 3, 96, 65 and 3 operations respectively. Only the 
 catch-up in that sample. The seeded case tests a small real seed with a full tail, not a maximal
 2-MiB seed or a maximal 2,048-pointer projection. Those shapes remain additional profiling coverage.
 
-**Decision:** the current full source rebuild cannot be scheduled inline per request. The small-op
+**Baseline decision:** the full source rebuild cannot be scheduled inline per request. The small-op
 case's approximately 13-second service time exceeds both the five-second provider admission lifetime
 and the ten-second client deadline. Input/rate caps alone do not make this path production-ready.
 The detached comparison locates most cost in reconstruction, not file I/O or page resealing.
@@ -87,6 +87,45 @@ Investigate redundant historical causal-view work first, preserving all signatur
 schema, predecessor and restart checks. Then establish a bounded off-executor work/cache strategy
 with source-version and authority rechecks before automatic service. Do not lengthen deadlines or
 weaken admission merely to make this fixture pass.
+
+## After indexed restore queries (2026-09-08)
+
+Registry restore now uses applied change-graph metadata for Boolean dependency/duplicate checks,
+not raw-change reconstruction. Where the authenticated change's dependencies equal the entire
+actual frontier, semantic validation uses current-view reads and omits its already-proven
+dependency-presence check. Older/concurrent/proper-subset views retain historical semantics;
+live edit/ingest do not assert this optimization. No signature, typed schema, marker, predecessor,
+seed, gate or final projection check is removed. Wire formats and limits are unchanged.
+
+The same release executable probes, isolated process sampling and machine were used after builds
+and other tests finished. Each row is again one observation, not a statistical performance bound.
+Signed counts, snapshot/file lengths and delivered samples exactly match the baseline table.
+
+| Case | Read + unseal ms | Restore ms | Detached page ms | Full-path pages 0 / 1 / 2 ms | Observed process peak bytes |
+|---|---|---|---|---|---|
+| Byte-heavy, epoch 0 | 7 | 21 | 9 | 34 / 35 / 37 | 33,832,960 |
+| Small operations, epoch 0 | 7 | 11,422 | 34 | 11,357 / 10,577 / 11,077 | 55,750,656 |
+| 65 independent current-member roots | 1 | 13 | <1 | 14 / 14 / 15 | 33,259,520 |
+| Byte-heavy, receipted epoch 1 | 7 | 21 | 7 | 37 / 34 / 33 | 34,197,504 |
+
+The small-op setup took 169,107 ms; it uses production edit/ingest rather than the optimized
+restore loop. Shared empty-predecessor lookup elision leaves admission semantics unchanged.
+An intermediate exact-frontier-only build measured 10,431–10,496 ms per dense page. That variation
+means these runs do not establish an additional dense-history speedup from metadata membership
+alone. Byte-heavy pages improved in these observations, but **the dense source is still too slow
+for the request deadlines**. The original scheduling conclusion therefore remains unchanged.
+
+Five always-run regressions compare optimized and historical semantics across seeded/unrotated
+histories, concurrent branches in both orders, proper subsets of a live frontier, marker-only
+edits and cross-property/seed-slot predecessor attacks. They also compare metadata/raw presence
+for queued and accepted changes, and require missing dependencies and re-enveloped duplicates to
+reject before semantic validation. The opt-in app probes continue to enforce the real capacity,
+exact hashes, page/dependency bounds and unchanged-vault assertions.
+
+**Next:** bounded off-executor reconstruction/source reuse, with exact source-version and current
+authority rechecks. Cold-source preparation cannot consume a five-second admitted request and
+then return a stale success. Nor may a long rebuild hold the vault mutex and block unrelated saves.
+These are runtime integration requirements, not a reason to remove validation or enlarge timeouts.
 
 Automatic scheduling remains disabled. A worker holding the vault mutex through the whole rebuild
 could still block unrelated persistence. Runtime integration must separately preserve source-version

@@ -1524,6 +1524,17 @@ Missing removed-author operations in the REMAINING page range produce
 positions and initial ancestors are claimed held history, so author removal after delivery need
 not block later descendants. These are not possession proofs: a conforming requester derives its
 heads/seed from verified state and continues only after persisting a dependency-complete page.
+
+Saved-source reconstruction uses the applied change graph's metadata for Boolean dependency and
+duplicate presence checks; queued changes and serialized metadata grant no admission. It also has
+an internal exact-frontier optimization: after authenticating each operation and checking its
+dependencies, the restore loop compares them with all actual current
+Automerge heads. Only exact equality permits current-view property reads; other views retain
+historical reads. The exact-frontier path need not reconstruct each dependency again for the
+semantic validator's redundant presence check. No wire/snapshot field enables it, no prefix is
+truncated, and all signatures, semantic checks, gate verification and final projection preflight
+still run. See `P1-PERFORMANCE.md`
+for measured costs rather than inferring latency from the byte cap.
 Historical authority transfer and automatic receiver scheduling remain unwired. Cooperative durable
 receive, keyed head/seed exchange and explicit registry installation are described below.
 

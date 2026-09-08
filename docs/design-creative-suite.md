@@ -742,9 +742,11 @@ The current engineering estimate is **25% for the entire backend, versus 65% for
 each with roughly ten-percentage-point uncertainty; neither includes UI or measures acceptance
 test coverage. `BACKEND-IMPLEMENTATION.md` tracks the open acceptance milestones.
 
-`P1-PERFORMANCE.md` now records real saved-source release probes. A valid small-operation-heavy
-registry takes about 13 seconds to rebuild per page, so source reconstruction is the immediate
-runtime prerequisite; the measurements do not close automatic catch-up or increase these estimates.
+`P1-PERFORMANCE.md` records real saved-source release probes. Indexed restore queries improve
+byte-heavy pages, but a valid small-operation-heavy registry still takes roughly 11 seconds per
+saved-source page (baseline about 13). Bounded off-executor reconstruction/source reuse with
+version and authority fences is the immediate runtime prerequisite; these measurements do not
+close automatic catch-up or increase the estimates.
 
 | Milestone | Current evidence | Still needed to close it |
 |---|---|---|

@@ -153,6 +153,15 @@ watch installation itself never awaits. Actor/native ownership, automatic schedu
 cooperative discovery/catch-up/installation paths remain next.
 
 Registry catch-up has a cooperative read-only page provider over checked vault history.
+Vault reconstruction checks dependency/duplicate presence through Automerge's applied change-graph
+metadata, without reconstructing raw operations merely to test membership. It avoids historical
+visibility scans for a change whose dependencies exactly equal the entire current frontier.
+The trusted restore loop derives that equality after signature,
+actor, scope and dependency checks, with no mutation before semantic validation. Other branches
+retain historical reads, and live edit/ingest never asserts this optimization. The exact-frontier
+path also skips the semantic validator's already-proven dependency-presence predicate. This changes no
+wire/snapshot format, membership rule, cap or request deadline. `P1-PERFORMANCE.md` records measurements;
+off-executor scheduling and source reuse still need lifecycle/version fences before automatic use.
 Its HMAC cursor freezes the provider's dependency-complete accepted-log prefix
 and advances by position, so appends and large head sets cannot force the same prefix forever.
 Every page freshly seals at most 32 operations / 512 KiB of framed bytes; byte-identical reloads

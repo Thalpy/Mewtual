@@ -16,7 +16,7 @@ use crate::epoch::{
 };
 use crate::registry::{
     edit_registry, ingest_registry, preflight, registry_document, validate_domain,
-    validate_registry_change, RegistryProjection, MAX_REGISTRY_EPOCH,
+    validate_registry_change_in_view, RegistryProjection, MAX_REGISTRY_EPOCH,
 };
 use crate::{
     epoch_zero_id, Admission, DomainOp, EncryptedDoc, EpochGate, EpochPhase, LogicalDocument,
@@ -30,6 +30,9 @@ pub use adoption::RegistryAdoptionPlan;
 pub use owner::RegistryOwnerDecision;
 mod settlement;
 pub use settlement::RegistrySettlementPlan;
+
+#[cfg(test)]
+mod restore_tests;
 
 /// Raw seed + signed content + gate + receipts, including bounded length framing. There is no
 /// second, potentially compressed Automerge save to trust or decompress during restore.
@@ -520,8 +523,16 @@ impl RegistryEpoch {
         let metadata = result.doc.restore_domain_log(
             &result.logical,
             operations,
-            |domain, change, before| {
-                validate_registry_change(&result.logical, bucket, epoch, domain, change, before)
+            |domain, change, before, current_view| {
+                validate_registry_change_in_view(
+                    &result.logical,
+                    bucket,
+                    epoch,
+                    domain,
+                    change,
+                    before,
+                    current_view,
+                )
             },
         )?;
         if adopting {

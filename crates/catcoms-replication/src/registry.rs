@@ -502,6 +502,23 @@ pub(crate) fn validate_registry_change(
     change: &Change,
     before: &AutoCommit,
 ) -> Result<(), ReplError> {
+    // Live edit/ingest may have unrelated concurrent state. Only the vault restore loop can
+    // certify an exact frontier match; these paths always consult the author's causal view.
+    validate_registry_change_in_view(document, bucket, epoch, domain, change, before, false)
+}
+
+/// `current_view` is a local optimization fact derived by `restore_domain_log` from the full
+/// actual frontier immediately before validation. It is NOT a wire field or caller-supplied
+/// authority. A subset, prefix or truncated head list must never enable current-view reads.
+pub(crate) fn validate_registry_change_in_view(
+    document: &LogicalDocument,
+    bucket: u8,
+    epoch: u64,
+    domain: &DomainOp,
+    change: &Change,
+    before: &AutoCommit,
+    current_view: bool,
+) -> Result<(), ReplError> {
     let operation = validate_domain(document, bucket, domain)?;
     let actor: [u8; 32] = change
         .actor_id()
@@ -519,10 +536,14 @@ pub(crate) fn validate_registry_change(
     if change.len() > allowed.len() {
         return Err(ReplError::Malformed);
     }
-    if change
-        .deps()
-        .iter()
-        .any(|hash| before.get_change_by_hash(hash).is_none())
+    // Exact-frontier restore has already checked every dependency in the applied graph. Do not
+    // reconstruct them again only to repeat a presence predicate. Other callers/views keep the
+    // independent historical availability check before any get_at/get_all_at query.
+    if !current_view
+        && change
+            .deps()
+            .iter()
+            .any(|hash| before.get_change_by_hash(hash).is_none())
     {
         return Err(ReplError::EpochScope);
     }
@@ -537,22 +558,32 @@ pub(crate) fn validate_registry_change(
         // Automerge predecessors are global operation ids. Checking only obj/key/action would
         // let a Put to an allowed header hide a seed slot or another pointer by referencing its
         // id. Every predecessor must be visible under this exact property at the author's deps.
-        let prior_values = before
-            .get_all_at(ROOT, key.as_str(), change.deps())
+        // A new marker/property has no predecessors to validate. Avoid a historical lookup
+        // for that vacuous predicate, but retain every schema/value/marker check around it.
+        if !op.pred.is_empty() {
+            let prior_values = if current_view {
+                before.get_all(ROOT, key.as_str())
+            } else {
+                before.get_all_at(ROOT, key.as_str(), change.deps())
+            }
             .map_err(am_error)?;
-        for pred in op.pred.iter() {
-            if !prior_values.iter().any(|(_, id)| matches!(id, automerge::ObjId::Id(counter, actor, _) if *counter == pred.0 && actor == &pred.1)) {
-                return Err(ReplError::Malformed);
+            for pred in op.pred.iter() {
+                if !prior_values.iter().any(|(_, id)| matches!(id, automerge::ObjId::Id(counter, actor, _) if *counter == pred.0 && actor == &pred.1)) {
+                    return Err(ReplError::Malformed);
+                }
             }
         }
     }
     // An idempotent request still earns a marker, so its durable intent can be receipted. It may
     // omit the no-op value write only when its *causal* view already held that value; a value
     // seen solely on another merged branch is not evidence inside this change's future closure.
-    let already_applied = before
-        .get_at(ROOT, &entry.0, change.deps())
-        .map_err(am_error)?
-        .is_some_and(|(value, _)| scalar_eq(&value, &entry.1));
+    let prior_entry = if current_view {
+        before.get(ROOT, &entry.0)
+    } else {
+        before.get_at(ROOT, &entry.0, change.deps())
+    }
+    .map_err(am_error)?;
+    let already_applied = prior_entry.is_some_and(|(value, _)| scalar_eq(&value, &entry.1));
     if !seen.contains(&marker) || (!seen.contains(&entry.0) && !already_applied) {
         return Err(ReplError::Malformed);
     }

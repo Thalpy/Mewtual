@@ -579,6 +579,14 @@ table with the commit that closed it.
   their causal root property; an allowed header write cannot hide a seed's protected slot through
   a cross-key predecessor. Typed Studio validators must provide equivalent semantic checks when
   implemented; generic callbacks are not an authorization policy by themselves.
+  Vault restoration tests dependency and duplicate presence using metadata from Automerge's
+  applied graph, not a saved or peer-asserted index; unresolved queued changes do not count.
+  It can use indexed current-view reads only when an authenticated change's
+  complete dependency list exactly matches the actual current frontier. The restore loop derives
+  that fact locally immediately before immutable validation; saved metadata or a peer cannot assert
+  it. Only that path skips the semantic validator's already-proven dependency-presence check.
+  Older/concurrent/proper-subset views still use historical reads. Property-specific predecessor
+  checks and marker-only winner semantics are unchanged, as are live edit/ingest authorization.
 - **Epoch-managed document operations above 1 MiB disclose their coarse size.** P1 bounds the
   domain envelope to 64 KiB and a whole signed operation to 256 KiB, so conforming creative and
   registry operations stay inside the existing sealed-op padding ladder. The generic legacy

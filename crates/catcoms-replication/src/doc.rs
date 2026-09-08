@@ -136,7 +136,7 @@ impl EncryptedDoc {
         mut validate: V,
     ) -> Result<Vec<AdmittedOperation>, ReplError>
     where
-        V: FnMut(&DomainOp, &Change, &AutoCommit) -> Result<(), ReplError>,
+        V: FnMut(&DomainOp, &Change, &AutoCommit, bool) -> Result<(), ReplError>,
     {
         if !self.log.is_empty() || operations.len() > crate::epoch::MAX_EPOCH_OPERATIONS {
             return Err(ReplError::EpochBound);
@@ -163,18 +163,30 @@ impl EncryptedDoc {
                 return Err(ReplError::EpochAuthority);
             }
             let domain_op_id = domain.id(&op.author_device);
+            // Presence comes from Automerge's accepted change graph, not a saved index.
+            // Reconstructing each predecessor's raw operations would add historical scans just
+            // to answer existence. Metadata is sufficient here: this graph starts with only a
+            // verified seed, and each accepted predecessor has passed this loop's full checks.
             if !ids.insert(domain_op_id)
                 || self.applied.contains(&op.hash())
-                || self.doc.get_change_by_hash(&change.hash()).is_some()
+                || self.doc.get_change_meta_by_hash(&change.hash()).is_some()
                 || (self.checkpoint.is_some() && change.deps().is_empty())
                 || change
                     .deps()
                     .iter()
-                    .any(|h| self.doc.get_change_by_hash(h).is_none())
+                    .any(|h| self.doc.get_change_meta_by_hash(h).is_none())
             {
                 return Err(ReplError::Malformed);
             }
-            validate(&domain, &change, &self.doc)?;
+            // Historical reads perform causal visibility work for each property. When a change
+            // depends on the ENTIRE actual frontier, its causal view is exactly the current
+            // committed view. Derive that fact here, after authentication/dependency checks,
+            // never from saved metadata or a peer assertion. No mutation occurs before the
+            // immutable validator uses it. Concurrent/older branches still use historical reads.
+            let mut deps = change.deps().to_vec();
+            deps.sort_unstable();
+            let current_view = self.doc.get_heads() == deps;
+            validate(&domain, &change, &self.doc, current_view)?;
             self.doc
                 .apply_changes([change])
                 .map_err(crate::checkpoint::am_error)?;

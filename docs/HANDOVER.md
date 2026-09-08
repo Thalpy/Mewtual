@@ -8,6 +8,47 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 indexed registry restoration (2026-09-08).** Restore uses Automerge's applied graph
+  metadata for Boolean dependency/duplicate checks instead of rebuilding raw predecessor changes.
+  A change whose dependencies exactly equal all current heads can use indexed current-view
+  property reads; only that path skips the semantic validator's already-proven dependency check.
+  The restore loop derives the fact locally after authentication and dependency admission.
+  Concurrent/older/proper-subset views remain historical; live edit/ingest authorization and
+  semantics are unchanged. No
+  signatures, typed semantics, predecessor/marker checks, seed/gate verification or projection
+  preflight are removed, and no format, limit, request deadline or UI changes.
+
+  Five focused regressions pass: differential seeded/unrotated branch delivery, current-head
+  proper subsets, marker-only edits, cross-property/seed-slot attacks, queued versus applied
+  lookup equivalence, and missing/re-enveloped duplicate changes rejecting before semantics.
+  Read-only actual-diff design/re-review found no remaining findings; its initial Low missing
+  proper-subset regression was added. All four release probes pass on the final production code.
+
+  The performance result is deliberately limited: byte-heavy pages measured 33–37 ms versus
+  42–48 ms at baseline, while 8,002 small operations still take about **11 seconds per page**
+  versus about 13 at baseline. The dense request-deadline problem remains unresolved; neither
+  the feature nor automatic scheduling is ready. `P1-PERFORMANCE.md` retains both tables and
+  the intermediate run's variability. Next is bounded off-executor reconstruction/source reuse
+  with exact version/authority checks, then sole vault ownership and whole-server snapshot
+  ordering. Overall estimates remain about 25% backend / 65% P1, each ±10 percentage points.
+
+  Required verification passed on the final code and regression source:
+
+  - `cargo test --all --all-features` (app 380 passed / 8 ignored: 4 existing + 4 opt-in probes;
+    replication 86; sync 214; every workspace unit, integration and doc suite passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  The final documentation review's Low ambiguous "unchanged edit/ingest" wording is corrected
+  to unchanged authorization/semantics. No runtime or test code changed after verification;
+  only this result record followed. Frontend static/build/visual checks and separate native
+  `cargo check` were not required because neither frontend nor bridge source changed.
+  User release edits and canonical UI remain untouched. This is not backend completion.
+
 - **P1 saved-source performance evidence (2026-09-08).** Added an opt-in release harness using
   actual signed/typed admission, accounted vault encoding, restore, provider and
   `Server::serve_registry_page` paths. Two always-run smoke tests fully drain unrotated and real

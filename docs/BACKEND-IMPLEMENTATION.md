@@ -46,10 +46,11 @@ The protocol/store foundations have substantially more coverage than the runtime
       Whole-server snapshot publication must share the native numeric-server persistence ordering
       or an exact-incarnation fence: an older asynchronously captured snapshot must not overwrite
       newer P1 MLS/tenure evidence. The separate store mutex alone does not establish this ordering.
-      Release source profiling is recorded in `P1-PERFORMANCE.md`: a valid 8,002-small-op source
-      takes about 13 seconds per saved-source page, exceeding request deadlines. Reconstruction
-      cost must be addressed before automatic scheduling, with a measured bounded work/cache
-      strategy; fixed memory/rate caps alone do not prove latency. This prerequisite remains open.
+      Release source profiling is recorded in `P1-PERFORMANCE.md`: indexed restore queries improve
+      byte-heavy pages, but a valid 8,002-small-op source still takes roughly 11 seconds per saved
+      page (baseline about 13), exceeding request deadlines. Bounded off-executor reconstruction
+      and source reuse need version/authority fences before automatic scheduling; fixed memory/rate
+      caps alone do not prove latency. This prerequisite remains open.
 - [ ] Owner receipt issuance, succession, fault/repair and settlement driven end to end.
       Explicit registry owner rotation now derives an eligible close/seed from its checked source,
       journals that exact close with the receipt, and seals/installs recovery-first under a durable
