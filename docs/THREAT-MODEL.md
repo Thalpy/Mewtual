@@ -473,7 +473,9 @@ table with the commit that closed it.
   inventories, rejects saved faults/corruption/lost indexed sources, and requires pending-preferred
   journal/source-head equality before bounded flush/re-save and signing. Missing/stale permits
   or disagreement yield hints only. One-shot proof establishes owner selection, not seed availability
-  or validity. Source/intent/publication state is unchanged. Eight fixed-lifetime queued requests,
+  or validity. Source and intent state are unchanged; checked local reply-channel handoff can
+  complete the exact owner publication journal, without proving driver admission or peer delivery.
+  Eight fixed-lifetime queued requests,
   full-identity rates, four driver-owned outbound slots and source service rails bound resources;
   rate debt is process-local and Sybils still reach aggregate caps. Signed repair bytes are not
   served yet. Registry seed fetching and explicit recovery-first installation are implemented;

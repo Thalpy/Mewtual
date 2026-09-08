@@ -742,6 +742,10 @@ The current engineering estimate is **25% for the entire backend, versus 65% for
 each with roughly ten-percentage-point uncertainty; neither includes UI or measures acceptance
 test coverage. `BACKEND-IMPLEMENTATION.md` tracks the open acceptance milestones.
 
+`P1-PERFORMANCE.md` now records real saved-source release probes. A valid small-operation-heavy
+registry takes about 13 seconds to rebuild per page, so source reconstruction is the immediate
+runtime prerequisite; the measurements do not close automatic catch-up or increase these estimates.
+
 | Milestone | Current evidence | Still needed to close it |
 |---|---|---|
 | P1 protocol core | Implemented/tested: signed operations, closes, owner receipt/fault state, epoch gate, intent/recovery models; explicit source-derived owner rotation with exact close journaling and checked local reply-channel publication completion | Automatic orchestration and remaining repair/succession paths; explicit adapters are not a live scheduler or delivery acknowledgement |

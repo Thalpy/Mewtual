@@ -11,6 +11,7 @@ mod installation;
 mod local;
 mod owner;
 mod pass;
+mod performance;
 mod receive;
 mod recovery;
 mod replay;

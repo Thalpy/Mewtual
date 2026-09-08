@@ -8,6 +8,42 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 saved-source performance evidence (2026-09-08).** Added an opt-in release harness using
+  actual signed/typed admission, accounted vault encoding, restore, provider and
+  `Server::serve_registry_page` paths. Two always-run smoke tests fully drain unrotated and real
+  receipted successor histories; four explicit ignored profiling cases exercise near-4-MiB
+  byte-heavy and small-op logs, 65 current-member roots, and a seeded full tail. Exact hashes,
+  dependencies, page caps, real capacity rejection and unchanged vault bytes are asserted. No
+  production behavior, UI, wire format or limit changes. Setup's batch save is test-only.
+
+  `P1-PERFORMANCE.md` records the commands, phase boundaries, raw results and honest memory/cache
+  limitations. The important result is 8,002 small operations / 4,194,072 signed bytes:
+  **12.8 seconds to restore and about 13 seconds per full saved-source page**, versus 29 ms for
+  a page from an already restored source. The actual valid source exceeds provider/client request
+  deadlines. Byte-heavy and seeded full tails took 42–48 ms per page; 65 roots took 16 ms. The
+  immediate next step is investigate redundant causal-history work in restoration, then bounded
+  off-executor work/source reuse with exact version/authority checks. Do not enable automatic
+  service or claim a safe runtime work budget from the existing byte/rate caps. Shared vault
+  ownership and whole-server snapshot ordering remain required afterward.
+
+  All four release profiling cases passed. Read-only actual-worktree review found no
+  blocker/high/medium or harness defect; its Low stale publication-state sentence in the threat
+  model is corrected. Required verification passed on the final test source:
+
+  - `cargo test --all --all-features` (app 380 passed / 8 ignored: 4 existing + 4 opt-in probes;
+    replication 81, sync 214; all workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No code changed after these checks; only results/status documentation followed. Frontend
+  static/build/visual checks and separate native `cargo check` were not needed because neither
+  source changed. User release edits and canonical UI remain untouched. Overall estimates stay
+  about 25% backend / 65% P1, each ±10 percentage points; no integration milestone is closed here.
+
 - **P1 checked receipt publication completion (2026-09-08).**
   Kind-21 owner-proof serving now connects an accepted local reply-channel handoff to the exact
   accounted owner-journal completion, under the same synchronous Server/store/mount/server gate.
