@@ -8,7 +8,7 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
-- **Flipnote gate 3, cooperative saved-operation exchange (2026-09-08).**
+- **Flipnote gate 3, cooperative saved-operation exchange (2026-09-08, `dda1fad`).**
   `catcoms_app::studio_exchange` connects already-saved Index/art operations to the existing
   encrypted gossip/one-shot transport and accounted Studio receive store. Two actual members
   join through the invite flow, Save real PIX references, send, durably receive and reopen.
