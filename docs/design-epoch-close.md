@@ -17,8 +17,9 @@ Registry installation now saves recovery and receipt-covered intent retirement b
 successor selection. One saved author-owned intent can be replayed through a checked bounded
 store step, now driven by a cooperative one-ledger replay pass and one-shot network sender.
 Opt-in authenticated registry gossip and kind-20 paged requests use cooperative saved-state
-adapters; bounded provider cursors are available, but durable receiver continuation and keyed
-receipt/seed discovery are not complete. Automatic wakeups/global replay scheduling, other
+adapters; bounded provider cursors and durable receiver continuation are implemented. Independent
+owner-tenure observations now persist with the MLS snapshot; keyed receipt/seed discovery and
+the proof publication barrier are not complete. Automatic wakeups/global replay scheduling, other
 managed-file families and production orchestration are not wired yet. Studio
 materializers, settlement orchestration, sync discovery, complete storage integration and app/UI events
 remain later slices and the feature is not usable yet. Revision 4
@@ -456,6 +457,15 @@ initial tenure id, before any succession, is derived the same way from the found
 the group epoch at which it became committer, so there is no undefined state. Old-owner
 signatures are rejected because the signer is not the committer; tenures of one device are
 distinct because the tenure id includes the group epoch.
+
+Implemented local evidence: sync observes the actual applied owner transition (including an
+Add into a recycled low leaf) and saves its resulting group epoch with that exact MLS snapshot.
+Only locally founded epoch zero starts known. Welcome joins and legacy snapshots have Unknown
+tenure, which same-owner commits preserve. An upgraded existing owner or a newly joined lowest-
+leaf owner can therefore remain unable to authorize rotation until independent evidence or a
+later witnessed transition exists. The implementation does not substitute the current group
+epoch or a restored receipt's claimed tenure. This observation is not a flush/publication grant;
+the owner proof path must still persist and recheck the matching snapshot and decision.
 
 **Newcomers.** A peer joining after a succession, for a document the new owner has not yet
 receipted, can verify neither the old receipts (the signer is not the current committer) nor a

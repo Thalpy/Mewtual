@@ -60,6 +60,7 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 mod blob_fetch;
+mod owner_tenure;
 pub mod registry_catchup;
 mod registry_ingress;
 mod registry_publication;
@@ -3761,6 +3762,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     // topic before calculating the next routing diff; never lose unsubscribe ownership.
     routing_subscription_pending: Option<Topic>,
     group: ServerGroup,
+    /// Saved with this exact MLS group; never inferred from a received receipt or Welcome.
+    owner_tenure: owner_tenure::OwnerTenure,
     device: MlsDevice,
     rng: R,
     clock: Arc<dyn Clock + Send>,
@@ -4188,6 +4191,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             registry_ingress: registry_ingress::RegistryIngress::default(),
             registry_pages: registry_catchup::RegistryRequests::default(),
             routing_subscription_pending: None,
+            owner_tenure: owner_tenure::OwnerTenure::new(&group),
             group,
             device,
             rng,
@@ -4369,6 +4373,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .map_err(|_| oversize())?;
             e.put_bytes(&cached.owner_sig).map_err(|_| oversize())?;
         }
+        // P1 observed tenure is an optional versioned tail for old-snapshot compatibility.
+        // Persist it together with MLS: a separately saved counter could bless an old tenure
+        // after a crash or A -> B -> A. Unknown is encoded explicitly on every new snapshot.
+        e.put_bytes(&self.owner_tenure.encode(&self.group)?)
+            .map_err(|_| oversize())?;
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -4470,6 +4479,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             (gen, set, nodes, direct)
         };
+        let tenure_bytes = if d.is_empty() {
+            None
+        } else {
+            Some(d.get_bytes().map_err(|_| bad())?)
+        };
         d.finish().map_err(|_| bad())?;
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
@@ -4478,7 +4492,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // file-wrap key is persisted separately (appended last), so the routing struct here
         // carries `None` for it.
         let (device, group) = restore_server(&mls)?;
+        let tenure = match tenure_bytes {
+            Some(bytes) => owner_tenure::OwnerTenure::decode(bytes, &group)?,
+            None => owner_tenure::OwnerTenure::unknown(&group),
+        };
         let mut this = Self::new(transport, group, device, rng, clock);
+        this.owner_tenure = tenure;
         let (label, secrets) = decode_routing_state(&routing_bytes)?;
         this.adopt_routing_state(RoutingState {
             label,
@@ -4720,6 +4739,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) -> Self {
         let connection_handoff = std::mem::take(&mut routing.connection_handoff);
         let mut this = Self::new(transport, group, device, rng, clock);
+        this.owner_tenure = owner_tenure::OwnerTenure::unknown(&this.group);
         // A joiner has NO group file-wrap key of its own; only the founder mints one. Zero
         // the random key `new` seeded so that an absent/failed transfer leaves `has_file_key`
         // false (and `add_file` refuses), rather than a wrong random key that would silently
@@ -10267,7 +10287,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // departed members on all three branches below.
         let before = self.group.member_device_ids();
         let advanced = match &p.mine {
-            Some(_) if we_won => match self.group.merge_staged_self(&self.device) {
+            Some(_) if we_won => match self
+                .with_observed_mls_transition(|node| node.group.merge_staged_self(&node.device))
+            {
                 // We won: merge our own staged commit.
                 Ok(()) => {
                     if i_removed {
@@ -10289,10 +10311,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 if let Err(e) = self.group.abort_staged(&self.device) {
                     tracing::error!(error = %e, "abort of losing staged commit failed");
                 }
-                match self
-                    .group
-                    .process_incoming(&self.device, &p.best.mls_commit)
-                {
+                match self.with_observed_mls_transition(|node| {
+                    node.group
+                        .process_incoming(&node.device, &p.best.mls_commit)
+                }) {
                     Ok(inc) => {
                         self.note_commit_applied(&inc, &before);
                         true
@@ -10303,10 +10325,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     }
                 }
             }
-            None => match self
-                .group
-                .process_incoming(&self.device, &p.best.mls_commit)
-            {
+            None => match self.with_observed_mls_transition(|node| {
+                node.group
+                    .process_incoming(&node.device, &p.best.mls_commit)
+            }) {
                 // Pure applier: apply the winner.
                 Ok(inc) => {
                     self.note_commit_applied(&inc, &before);
@@ -10381,10 +10403,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // The roster as it stands *before* the commit, so an applied removal can name who left
         // (MLS reports only that a removal happened). Bounded by the group size.
         let before = self.group.member_device_ids();
-        match self
-            .group
-            .process_incoming(&self.device, &record.mls_commit)
-        {
+        match self.with_observed_mls_transition(|node| {
+            node.group
+                .process_incoming(&node.device, &record.mls_commit)
+        }) {
             Ok(inc) => {
                 self.evict_past_keys();
                 self.note_commit_applied(&inc, &before);
@@ -10562,7 +10584,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         let record = self.sign_staged_record(&staged);
         self.snapshot_epoch_keys();
-        if let Err(e) = self.group.merge_staged_self(&self.device) {
+        if let Err(e) =
+            self.with_observed_mls_transition(|node| node.group.merge_staged_self(&node.device))
+        {
             tracing::error!(error = %e, "merge of remove commit failed");
             let _ = self.group.abort_staged(&self.device);
             return;
@@ -12481,8 +12505,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
         let outcome = self
-            .group
-            .add_member_via_invite(&self.device, key_package, invite, &mut self.ledger, now)
+            .with_observed_mls_transition(|node| {
+                node.group.add_member_via_invite(
+                    &node.device,
+                    key_package,
+                    invite,
+                    &mut node.ledger,
+                    now,
+                )
+            })
             .ok()?;
         self.evict_past_keys();
         let record =
@@ -13036,7 +13067,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .ok()?;
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
-        let outcome = self.group.add_member(&self.device, key_package).ok()?;
+        let outcome = self
+            .with_observed_mls_transition(|node| node.group.add_member(&node.device, key_package))
+            .ok()?;
         self.evict_past_keys();
         // Burn the certificate. `check_device_add` already refused a consumed nonce, so this can
         // only fail on a re-entrant path; treat it as already-burned rather than unwinding a

@@ -400,6 +400,20 @@ table with the commit that closed it.
   quota, stale MLS, storage refusal or unknown watches require author retry or future catch-up.
   Past/future MLS reception, catch-up/discovery and actor/native lifecycle ownership remain unwired.
   Watches and rate debt are process-local, not restart-stable security policy or native lock leases.
+- **Current owner identity alone is not current tenure.** Sync now independently tracks the
+  owner transition it actually observed, saving it with the exact MLS group in one authenticated
+  snapshot. Founding is known zero; old snapshots and Welcome joins remain Unknown, including
+  a joiner that becomes owner through a recycled lowest leaf. All actual merge paths observe
+  the resulting group before propagating even a post-merge helper error. Failed pre-merge work
+  and same-owner commits cannot fabricate a new start. A missed hook or panic leaves a position
+  mismatch: the getter reports Unknown and snapshot refuses instead of saving stale authority.
+  A strict 57-byte versioned tail rejects wrong owner/epoch, partial fields or extra bytes;
+  absence alone is legacy Unknown. Unknown may persist indefinitely and prevents fresh owner
+  proof/rotation authority until independent evidence or a witnessed transition exists. It is
+  never repaired by trusting the candidate receipt's tenure or substituting the current epoch.
+  This is local evidence, not a durability grant. Runtime integration must flush the matching
+  MLS snapshot/owner decision and recheck current membership, fault and tenure before signing
+  a head proof. That publication/discovery path remains unwired.
 - **Registry page cursors are continuation claims, not remote possession or currency proofs.**
   Cooperative page serving binds an ephemeral HMAC-SHA256 key to the exact provider/requester,
   full group/logical/concrete scope, initial heads/seed, fixed accepted-log prefix and monotonic

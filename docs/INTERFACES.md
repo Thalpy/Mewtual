@@ -1473,6 +1473,31 @@ The direct trusted-local page API imposes no aggregate call-rate limit. One call
 the bounded saved epoch, then walks its bounded change index/ancestor sets. It grants no delivery
 acknowledgement, intent retirement, saved mutation or finality. Network callers use the adapter below.
 
+### Independently observed owner tenure
+
+`ChannelSync::observed_owner_tenure_start() -> Option<u64>` reports local evidence about the
+current designated committer. `Some(0)` is the locally observed founding tenure; None means
+unknown, never an implicit zero. Only an actually applied owner change establishes a new start
+at the resulting MLS epoch. Same-owner commits preserve both knowledge and Unknown. All inbound,
+staged winner/loser/applier, synchronous removal, invite Add and companion Add paths observe the
+actual group before propagating the helper's result, including an error following a merge.
+
+The sync snapshot appends one length-framed version-1 tenure tail after direct-admission results:
+`version:u8=1, observed_epoch:u64, owner:bytes, start:bytes`. Integers are big-endian; each `bytes`
+has a u32 length. Owner is empty or the full 32-byte identity, start is empty or 8-byte epoch.
+The body cap is 57 bytes. Observed epoch/owner must match the MLS snapshot exactly; a known
+start requires an owner and cannot exceed that epoch. Missing tail alone loads as Unknown;
+partial, malformed or trailing data rejects. New snapshots always encode the tail, including
+Unknown. Older binaries reject the new tail; backward reading of old snapshots is supported,
+not downgrade compatibility. Existing peer-address extraction stops before this appended data.
+
+Welcome joins start Unknown, even if the new device fills the lowest leaf and becomes owner.
+Legacy upgrades and such owners may remain Unknown indefinitely across same-owner commits.
+Do not recover availability by assigning the current epoch or copying a receipt's own tenure.
+The observation is not a publication permit: a future proof publisher must flush this exact
+MLS snapshot and the irrevocable owner decision, check fault/current membership, and recheck
+tenure at signing/submission. No new head proof, editing lease or wire request is issued here.
+
 ### Authenticated registry page exchange (cooperative, kind 20)
 
 `Server::request_registry_page(peer, RegistryPageQuery)` requests exactly one unadmitted page.

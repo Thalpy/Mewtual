@@ -8,6 +8,45 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 independently observed owner tenure (2026-09-08).** Sync now records the start of the
+  current owner's tenure from actual applied MLS transitions and saves that observation in the
+  same authenticated snapshot as the group. This distinguishes A-to-B-to-A ownership without
+  trusting a restored receipt to establish its own currency. The founding group starts known
+  at zero. Welcome joins and old snapshots start Unknown; same-owner commits preserve Unknown.
+  An Add into a recycled lowest leaf can change the owner, and is observed just like a Remove.
+
+  All production merge paths use one synchronous observation seam. The adversarial diff review
+  identified a post-merge helper-error edge: MLS can advance before later serialization fails.
+  Observation now follows the actual group before propagating either result. The regression
+  preserves the original error while proving the matching group/tenure can still be saved.
+  Re-review found no remaining implementation findings. A missed hook or panic fails closed:
+  the getter reports Unknown and a mismatched snapshot is refused.
+
+  Eight new regressions cover founding/joining, strict tail framing and partial-tail rejection,
+  legacy upgrade/restart, real staged winner/loser/applier and ordered commits, A-to-B-to-A,
+  synchronous Remove, invite/companion Add, unknown newly joined owners, and post-merge errors.
+  Two existing registry fixtures now perform their setup Add through the same observation seam;
+  their original assertions are unchanged. Required verification passed on the final code:
+
+  - `cargo test -p catcoms-sync --lib` (189 passed)
+  - `cargo test --all --all-features` (app 357 passed / 4 existing ignored, replication 66,
+    sync 189; remaining workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  **Limits/next:** this getter is independent local evidence, not a publication permit. The
+  receipt-head publisher still needs to flush the matching MLS snapshot and irrevocable owner
+  decision and recheck current membership, fault and tenure. Legacy or newly joined owners can
+  remain Unknown indefinitely; assigning the current epoch or copying a receipt is not a safe
+  availability fallback. Old snapshots load as Unknown; older binaries reject the new tail,
+  so this is backward-read support, not downgrade compatibility. Keyed receipt-head/expected-seed
+  discovery and runtime ownership remain next. No UI/native source changed; no static/build/
+  visual frontend check or separate native `cargo check` was needed for this sync-only slice.
+
 - **P1 durable registry receiver continuation (2026-09-08).** The cooperative receiver now
   derives heads/seed from checked durable state and retains at most one page in each of four
   watch-bound passes. Fetching never borrows the vault; persistence validates the entire page

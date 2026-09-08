@@ -159,9 +159,13 @@ async fn registry_publication_uses_new_mls_and_routing_state_and_restores_new_in
     let instance = node.registry_instance();
     let doc_id = source.doc_id();
     let other = MlsDevice::generate().unwrap();
-    node.group
-        .add_member(&node.device, other.key_package().unwrap())
-        .unwrap();
+    // Keep the test's direct MLS setup on the production observation boundary so a later
+    // snapshot includes matching tenure evidence; the publication/restart assertions stay.
+    node.with_observed_mls_transition(|node| {
+        node.group
+            .add_member(&node.device, other.key_package().unwrap())
+    })
+    .unwrap();
     assert!(node.publish_local_registry_once(doc_id, old).await.is_err());
     // Exercise the current label rather than accidentally selecting a grandfathered route.
     node.routing_label = 1;

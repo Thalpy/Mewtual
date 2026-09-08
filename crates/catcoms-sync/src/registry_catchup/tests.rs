@@ -376,9 +376,12 @@ struct DelayedDriver {
 async fn registry_page_client_rejects_rebound_and_malformed_signed_responses() {
     let (mut original, _, watch, _) = setup();
     let other = MlsDevice::generate().unwrap();
+    // Snapshot fixtures must observe the same applied transition as the live MLS paths.
     original
-        .group
-        .add_member(&original.device, other.key_package().unwrap())
+        .with_observed_mls_transition(|node| {
+            node.group
+                .add_member(&node.device, other.key_package().unwrap())
+        })
         .unwrap();
     let snapshot = original.snapshot().unwrap();
     for mode in 0..12 {

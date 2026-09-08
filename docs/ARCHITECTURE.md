@@ -28,6 +28,17 @@ promotion and flush; publishing a Studio reference remains a later operation. P1
 Automerge or sync: it adds permission to retire their retained history into owner-receipted,
 verifiable checkpoints with bounded recovery. Existing snapshots alone do not provide that.
 
+P1 owner authority now also has independent local tenure evidence in the MLS synchronizer.
+Locally founded epoch zero is known; Welcome joins and legacy snapshots are Unknown. Every
+applied owner-changing MLS transition records its resulting epoch, including Adds into recycled
+low leaf slots. Same-owner commits preserve Unknown rather than inventing a start. A shared
+synchronous mutation seam observes the actual group before propagating a helper result, including
+an error after a successful merge. The observation is saved in the same strict snapshot as MLS,
+not in a separately advanced sidecar. A received receipt never establishes its own tenure.
+This supplies local evidence only: fresh owner proofs still require the actor/store publication
+barrier and discovery wiring. An upgraded or newly joined owner with Unknown tenure may remain
+unable to authorize rotation until independent evidence or a witnessed transition is available.
+
 The registry's store-level checkpoint transaction now orders durable barriers as source flush,
 typed recovery, included-only intent retirement, then atomic successor selection. Until selection
 the complete Closing source remains the restart proof; afterward the verified seed and preserved
