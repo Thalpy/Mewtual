@@ -580,6 +580,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
+            StudioRecovery::inspect_vault_references(&snapshot, &logical).unwrap(),
+            (1..=6).map(|n| [n; 32]).collect(),
+            "all conflicting/overflow alternatives pin"
+        );
+        assert_eq!(
             *StudioRecovery::from_snapshot(&snapshot, &logical, channel)
                 .unwrap()
                 .projection(),

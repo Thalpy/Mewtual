@@ -8,6 +8,62 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 2, conservative byte-reference protection (2026-09-08).**
+  The current Index/art Save/Reopen path is now connected to actual held-blob reclamation.
+  `ServerStore::creative_pinned_cids()` opts into the existing five-family scan and derives a
+  full-group union across numeric-server aliases. It covers complete signed source history,
+  verified seed-only baselines, pending intents, and both retained and staged typed recovery.
+  Current/hidden/conflicting/over-cap/deleted and sequentially replaced pixel values stay held
+  while their evidence remains retained. No new durable format, pin journal or P1 protocol.
+
+  All same-mount persistent blob handles share a guard outside the kept-copy adapter. Source,
+  intent and both recovery writers add references before persistence; uncertain writes keep
+  conservative holds. Only a completed exclusive generation-current reference scan replaces
+  the set. Ordinary accounting scans never do. Native Studio refreshes Unknown before holding
+  a new PIX CID and reading/promoting it, so its later budget scan cannot erase the pre-hold.
+  The guard remains locked through synchronous deletion, and store drop revokes stale handles.
+  Namespace aliases cannot escape through separators; hex case aliases share full-group holds.
+
+  A bounded absence-only reserved-filename check permits empty new mounts. Restored P1 mounts
+  start Unknown; corrupt/unsupported/partial metadata, stale scans and the 65,536-reference rail
+  refuse reclamation instead of truncating. Explicit scans or Studio access can refresh; failed
+  refresh does not prevent healthy reads. Ordinary file unlisting still succeeds, but does not
+  promise freed bytes. Known unreferenced cache content still deletes. Staging cleanup and
+  explicit kept-copy release retain their separate semantics. This is physical byte-liveness,
+  not circulation expiry, a new blob quota, filesystem-tamper protection or a latency guarantee.
+
+  Eleven new regressions (eight app/store, three core), plus expanded crash-matrix and maximal
+  conflict tests, cover same-mount handles, numeric aliases, full-group isolation, restart,
+  source-only and intent-only holds, retained/staged recovery and eventual evicted-version
+  release, unknown/corrupt/partial/overflow refusal, stale scan generation and mount revocation.
+  Actual fileshare unlisting/upload cleanup exercises the guard. A fake inner deletion checks
+  that the mutex is still held at unlink, without timing-dependent threads. Sequential replacement
+  and hidden checkpoint-replacement tests prove the enumerator is not merely the visible view.
+
+  Design review approved reuse of the existing inventory/write boundaries. Actual-diff review
+  found one High (a successor's current register can hide a retained seed CID) and one Low
+  (check-through-unlink regression); both are fixed and re-reviewed. Seed holds are derived from
+  the verified seed-only projection and recomputed on restore, not trusted from persisted cache.
+  Final code re-review reports no remaining Blocker/High/Medium/Low; final documentation review
+  found only three stale descriptions, now corrected. Focused reference/crash/core tests,
+  the complete root backend suite, native full suite
+  (197), frontend full suite (1144), native Cargo check, root formatting, Clippy and ambient
+  checks have passed. Existing ignored tests are unchanged; no regression was skipped.
+
+  Full verification commands (all passed): `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`, `npm --prefix apps/desktop test`
+  (via `npm.cmd` on Windows), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, `bash scripts/check-no-ambient.sh`,
+  and `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`.
+
+  **Next task:** gate 3's two-member Index/art edit exchange and newcomer path. The one-device
+  art Save/Reopen/reference-protection milestone is implemented; wider sound/export records
+  extend these same seams in gate 6. Do not reopen the completed P1 foundations or add P2 expiry
+  enforcement. Runtime rotation/recovery actions, claims, sound/export and final UI acceptance
+  remain their named gates. No UI/native command was added; canonical UI remains user-owned.
+  The user's separate release work was committed as `c4444aa` during this slice and is untouched.
+  This work is intended for a local commit only; remote destination approval remains outstanding.
+
 - **Flipnote gate 2, actor/native local Save/Reopen (2026-09-08).**
   `catcoms_app::studio` connects the existing accounted Index/art store to five native commands:
   `studio_create`, `studio_list`, `studio_read`, `studio_apply` and `studio_apply_index`.

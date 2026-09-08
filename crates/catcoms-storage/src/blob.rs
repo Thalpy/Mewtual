@@ -66,7 +66,9 @@ pub trait BlobStore {
     /// Whether the store currently holds `cid`.
     fn has(&self, cid: &Cid) -> bool;
 
-    /// Remove `cid`. Returns whether it was present.
+    /// Remove a held copy of `cid`. Returns whether a copy was removed; a reference-protecting
+    /// adapter may retain it (`false`) or refuse while its inventory is unknown. This is not
+    /// evidence that no copy exists; use `has`/verified reads to determine availability.
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError>;
 
     /// All currently-held content addresses.

@@ -245,6 +245,67 @@ fn studio_epoch_removed_author_history_remains_readable_but_cannot_reseal() {
     assert_eq!(inventory, 0);
 }
 
+#[test]
+fn studio_references_keep_seed_replacements_hidden_by_successor_edits() {
+    let owner = MlsDevice::generate().unwrap();
+    let group = ServerGroup::create(&owner).unwrap();
+    let mut source = StudioEpoch::new(&group, target(true), owner.device_id()).unwrap();
+    let a = insert(&source, owner.device_id());
+    source
+        .edit_or_reseal(&owner, &group, &mut rng(), &a, 100)
+        .unwrap(); // birth A = 3
+    let b = domain(
+        &source,
+        FlipnoteOp::ReplaceFrame {
+            frame: [1; 16],
+            cid: [4; 32],
+            bytes: 10,
+        }
+        .encode()
+        .unwrap(),
+        2,
+    );
+    source
+        .edit_or_reseal(&owner, &group, &mut rng(), &b, 101)
+        .unwrap();
+    let seed = source.projection().unwrap().checkpoint([7; 32]).unwrap();
+    let opening = receipt(&source, &owner, 7);
+    let mut next = StudioEpoch::from_checkpoint(
+        &group,
+        target(true),
+        owner.device_id(),
+        opening,
+        0,
+        seed.bytes(),
+    )
+    .unwrap();
+    let c = domain(
+        &next,
+        FlipnoteOp::ReplaceFrame {
+            frame: [1; 16],
+            cid: [5; 32],
+            bytes: 10,
+        }
+        .encode()
+        .unwrap(),
+        3,
+    );
+    next.edit_or_reseal(&owner, &group, &mut rng(), &c, 102)
+        .unwrap();
+    assert!(
+        !super::super::references::projection_cids(&next.projection().unwrap()).contains(&[4; 32])
+    );
+    let all = std::collections::BTreeSet::from([[3; 32], [4; 32], [5; 32]]);
+    assert_eq!(next.blob_cids().unwrap(), all);
+    let bytes = next.snapshot().unwrap();
+    assert_eq!(
+        StudioEpoch::inspect_vault_references(&bytes, &group.group_id(), target(true))
+            .unwrap()
+            .1,
+        all
+    );
+}
+
 // Re-encode a vault-authenticated container with damaged internals. Vault authentication is not
 // a substitute for checking signed-change provenance, dependency closure and the restart gate.
 fn rewrite_snapshot(

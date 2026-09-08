@@ -234,6 +234,20 @@ pub(super) fn check_header(
     Ok(())
 }
 
+/// Peek only for vault reference inspection; the caller must subsequently check the complete
+/// typed header and payload. This value alone is never an authorization context.
+pub(super) fn payload_channel(bytes: &[u8]) -> Result<ElementId, ReplError> {
+    payload_bound(bytes)?;
+    let mut d = Decoder::new(bytes);
+    if d.get_u8().map_err(malformed)? != 1 {
+        return Err(ReplError::Malformed);
+    }
+    d.get_bytes().map_err(malformed)?;
+    d.get_u64().map_err(malformed)?;
+    d.get_bytes().map_err(malformed)?;
+    array(&mut d)
+}
+
 pub(super) fn payload_bound(bytes: &[u8]) -> Result<(), ReplError> {
     if bytes.len() > MAX_RECOVERY_SNAPSHOT_BYTES {
         return Err(ReplError::EpochBound);

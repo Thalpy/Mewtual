@@ -285,9 +285,27 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
             Ok(())
         })?;
+        // Replacing refresh MUST precede transient pre-holds. The later accounting scan stays
+        // reference-neutral, or it could erase a PIX hold before its intent reaches disk.
+        if !store.creative_references_known() {
+            // Failed discovery keeps deletion disabled. It must not prevent reading an otherwise
+            // healthy document; mutation accounting independently refuses unsafe disk state.
+            let _ = store.creative_pinned_cids();
+        }
+        if let StudioRequest::Apply {
+            target,
+            nonce,
+            body,
+            ..
+        } = &request
+        {
+            let logical = target.document(&self.group_id()).map_err(invalid)?;
+            store.hold_creative_operation(&logical, &domain(*target, *nonce, body.clone()));
+        }
         // New local pixel references require exact already-held bytes in this mounted vault.
-        // No network fetch or silent reference to a placeholder hash. Retention is a separate
-        // remaining gate: this validation does not pin the blob against a later explicit delete.
+        // No network fetch or silent reference to a placeholder hash. The pre-hold above and
+        // durable write hooks protect these bytes from same-mount cache reclamation; this
+        // validation alone does not protect against filesystem damage or external deletion.
         if let StudioRequest::Apply {
             target: StudioTarget::Flipnote { .. },
             body,

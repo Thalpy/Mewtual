@@ -382,7 +382,8 @@ Replacement pixels use the actual Automerge winner; every live alternative and i
 declaration remains in the frame map, even for deleted/over-cap frames. The timeline includes all
 nondeleted frames; cap flags apply once list position reaches 999 or cumulative selected declared
 bytes exceed 8 MiB. Later small frames are not packed around excess. This is neither a retention
-policy nor the later `creative_pinned_cids()` integration. Reader bounds are 188,192 primitives
+policy nor a deletion guard by itself; the implemented store protection is described in §2.10.
+Reader bounds are 188,192 primitives
 and 6 MiB of visible key/value bytes, independent of exact checkpoint admission. No live write,
 checkpoint/recovery serialization or Save/Load is enabled by this frame-reader slice.
 
@@ -467,6 +468,15 @@ and exports in every epoch and recovery snapshot still held, every chat doodle a
 announcement reply, returning the cids referenced by anything not deleted and not past its
 recorded expiry, reading every concurrent value of a conflicted `cid` field through `get_all`.
 The retention pass must consult it.
+
+Implementation note (2026-09-08, active Index/art scope): physical cache deletion has a stronger
+conservative hold set than circulation expiry. `ServerStore::creative_pinned_cids()` includes
+whole retained sources, verified seed-only baselines, pending intents, and retained/staged typed
+recovery, including superseded/deleted pixel versions. A tombstone/deadline cannot release bytes
+still needed by that evidence. A shared mount-local guard protects existing unlist/upload cleanup;
+there is no durable pin journal or automatic expiry pass. Actual export/doodle projection coverage
+remains with those deferred slices, and unsupported typed state refuses reclamation. See
+INTERFACES for bounds, Unknown handling, and the distinction between a report and deletion authority.
 
 **Exports have a durable record.** Under each flipnote root:
 

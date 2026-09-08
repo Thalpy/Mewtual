@@ -26,14 +26,16 @@ connection to any existing reclamation path are required before promising retain
 
 These are ordered integration milestones, not equal-sized percentages. All seven remain open.
 The first user-observable target is gate 2: **create, save, restart, reopen** through real backend
-commands. Its Index/art native-path test now passes; reference/retention work still keeps the full
-gate open. Gate 1 begins with the typed Studio operations; it does not wait for P1 support
+commands. Its Index/art native-path and reference-protection tests now pass; that art milestone
+is implemented and the next active work is gate 3. Wider sound/export families remain gate 6
+work, so this does not close every family in the seven full gates. Gate 1 begins with typed Studio
+operations; it does not wait for P1 support
 for unrelated document types. Tests and review accompany each slice, not only gate 7.
 
 | Gate | Remaining work | Completion evidence |
 |---|---|---|
 | 1. Typed Flipnote documents | Rust StudioIndex/Flipnote domain-op validation, deterministic projection, conflict/Restore data and exact checkpoint preflight; frame, byte, sfx and patch caps. Unsupported linked-score behavior stays unavailable until gate 6, never silently accepted. | Tests exercise valid edits, malformed/cross-document operations, both concurrent delivery orders and cap boundaries through the real P1 gate. |
-| 2. Durable one-device Save/Load | Accounted vault/lifecycle ownership for these types; actor/native create/list/read/apply commands; publish real PIX blobs before frame records; sealed intents; frame/export/recovery CID enumeration and expiry metadata. No UI edits. | An actor/native-path test creates and edits a Flipnote, restarts the backend, and reads identical frames from real CIDs. Crash/storage-refusal cases preserve the last durable state. Saved open-epoch edits are labelled provisional, not receipted. |
+| 2. Durable one-device Save/Load | **Index/art milestone implemented:** accounted vault/lifecycle ownership, native commands, real PIX CIDs, sealed intents, conservative source/seed/recovery reference protection and three-state expiry. Extend these same seams to actual sound/export records in gate 6. No UI edits. | Actor/native create/edit/restart/reopen uses real CIDs. Failure cases preserve durable state. Fileshare unlisting/upload cleanup cannot delete referenced pixels; full scans/restart include superseded seed/history, pending intents and retained/staged recovery. Open edits remain provisional. |
 | 3. Two-member collaboration and joining | Automatic runtime catch-up/gossip, keyed discovery and seed installation for registry and Studio documents; typed update events. Fence whole-server snapshots and cancellation/authority changes. Solve repeated dense source restoration with bounded off-executor preparation/reuse before enabling automatic serving. | Two members exchange edits automatically; a newcomer finds an epoch-0 document and a prepared rotated document by logical key. Tests cover stale/cancelled work and accepted-size histories within the request lifecycle, without relaxing validation/deadlines. |
 | 4. Rotation and recovery in the running app | Drive owner receipts without needing another member's query; atomic sealing, recovery-first settlement, own-intent replay, owner succession, fault/repair and recovery actions/events for the active types. | Production-adapter scenarios cover rotation, restart, owner offline/return, excluded edits, Restore/Copy/Export, storage exhaustion and staged-snapshot warnings. No pruning before the receipt and durable recovery barriers. |
 | 5. Collaborative frame claims | Required full-identity signalling and shared channel admission; bounded capability/session-bound claim, Ask and Pass messages with receiver-observed expiry. No game/avatar path or standalone drawing feature. | Two members observe advisory claim/Ask/Pass/expiry; collision, replay and disconnect tests pass. Claims never become edit locks. |
@@ -117,9 +119,22 @@ refuse without awaiting the actor. No snapshot success or shared publication is 
 Views retain conflicts, tombstones, overflow and full identities, and say `publication: "local"`
 and `provisional: true`. Expiry is explicitly unrecorded/never/at, including timestamp zero.
 Local `studio-updated` events are forwarded; automatic remote edits/settlement events are not.
-**Next implementation target: gate 2's frame/export/recovery CID enumeration and retention-path
-integration.** Real PIX promotion is checked before saving a local frame reference, but that is
-not a pin against later reclamation. Sound/export mutations still refuse. Full gate 2 remains open.
+`ServerStore::creative_pinned_cids()` now reuses an opt-in complete five-family inventory to
+derive byte-liveness holds from whole signed Studio histories, verified seed-only baselines,
+pending intents and retained/staged typed recovery. It includes hidden/deleted/conflicting and
+sequentially replaced pixels while their evidence remains held. This is conservative physical
+protection, not a circulation-expiry pass. Its 65,536-reference rail refuses reclamation rather
+than silently truncate; it adds no replicated cap or durable pin journal.
+All same-mount persistent blob handles share a deletion guard outside the kept-copy adapter.
+Writes add holds before I/O; uncertain writes retain them. Only a generation-current complete
+scan can remove holds. Unknown/corrupt/unsupported/partial metadata keeps bytes; restored P1
+mounts may defer GC until a successful Studio-triggered or explicit scan. Real unlist/upload
+cleanup regressions prove protection while unrelated known-unreferenced cache bytes still delete.
+The native transaction refreshes before pre-holding/reading new PIX bytes; its later accounting
+scan cannot erase that unpublished hold. No UI change or automatic expiry engine is included.
+**Next implementation target: gate 3's two-member Index/art edit exchange and newcomer path.**
+The one-device art Save/Reopen/reference-protection milestone is now implemented. Sound/export
+writers and their actual record coverage remain gate 6, not another prerequisite to art progress.
 The user-owned frontend must adapt these documented results instead of the fixture's numeric-only
 expiry and in-memory blob map; no UI source or canonical mockup was changed.
 

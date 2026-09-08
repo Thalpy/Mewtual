@@ -312,6 +312,7 @@ impl ServerStore {
         {
             return Err(invalid("intent author is not a current local member"));
         }
+        self.hold_creative_operation(document, &operation);
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
         let (mut state, old) = match self.read_epoch_intent_record(&scope, document) {
             Ok(value) => value,

@@ -498,8 +498,8 @@ validate_frame_change(&LogicalDocument, channel:[u8;16], epoch:u64, &DomainOp, &
 // policy, checkpoint preflight, blob validation or a production Studio edit/ingest adapter.
 // Title/fps registers are optional until set; no fabricated author for empty-title/12-fps defaults.
 // Art-only reader rejects unsupported sound/score/export state, including an explicit score:null.
-// Frames includes deleted/over-cap entries and all live CID alternatives. No reference expiry or
-// retention policy is applied, and the later creative_pinned_cids() integration is still missing.
+// Frames includes deleted/over-cap entries and all live CID alternatives. This reader applies no
+// expiry/retention policy; the store guard is described under Creative byte-reference protection.
 // Index record provenance is internally consistent, not independently authenticated. Read checks
 // every live concurrent value and returns all deletion/overflow evidence, but cannot detect hidden
 // historical deletion/forgery by inspecting current state alone. It is not an admission callback.
@@ -696,8 +696,46 @@ reserve old-plus-new peak bytes; unchanged files are flushed without rewriting. 
 Unix-only parent sync uses the existing vault durability seam, not a new Windows guarantee.
 
 These store APIs are not network-send permits. The explicit native adapter below coordinates
-local indexing and blob/reference ordering. Retention, automatic sync and recovery installation
-remain separate integration work.
+local indexing and blob/reference ordering. Conservative byte-reference protection is described
+below; automatic sync, expiry enforcement and recovery installation remain separate work.
+
+### Creative byte-reference protection (Index/art, gate 2)
+
+`ServerStore::creative_pinned_cids(&mut self) -> Result<CreativeReferences>` runs the existing
+five-family inventory with reference collection explicitly enabled. It authenticates complete
+Studio sources, pending local intent ledgers, and both retained/staged typed recovery. Studio
+references include current alternatives, the verified seed-only projection, and every retained
+signed operation. Sequential replacements, hidden/deleted/over-cap frames and old checkpoint
+values still hold their pixels. No blob body is fetched or read during enumeration.
+
+`CreativeReferences::{len,is_empty,for_group(&[u8])}` reports the full-group union across native
+numeric server aliases. This detached report is not a deletion permit; its Debug shows counts
+only. The current rail is 65,536 distinct `(group,CID)` entries. Overflow, incomplete traversal,
+unpublished metadata siblings, malformed/unsupported typed records, or stale generation returns
+an error and keeps reclamation disabled. Ordinary accounting scans do NOT install a hold set.
+
+Every persistent handle from `ServerStore::blob_store` wraps the kept-copy adapter in the same
+mount's guard. Valid namespace keys are 1..512 ASCII alphanumeric/`-`/`_`; full group namespaces
+are hex, with hex case aliases sharing protection. Separators cannot retarget a protected folder.
+Fresh mounts may prove an empty set by bounded absence of all reserved P1 filenames; restored
+P1 state starts Unknown. Studio access refreshes Unknown on its existing blocking worker before
+holding/verifying a new PIX CID. Failed refresh still permits healthy reads, but never deletion;
+normal mutation accounting independently checks disk state. An explicit complete scan can also
+refresh it. This adds no native command or UI rendering work.
+
+Before Studio source, intent and recovery persistence, holds grow monotonically. Failure does
+not release them. Only a fresh exclusive successful scan can subtract them after the relevant
+durable records are actually gone. The blob guard holds its mutex through synchronous deletion;
+store drop revokes stale handles. `BlobStore::delete`/sync `delete_blob` return true only when a
+held copy was removed; false may mean pinned, and Unknown returns an error. Current unlisting
+and upload-discard paths tolerate retained bytes, so successful unlisting is not reclaimed space.
+Kept-copy release acts on its separate copy; staging discard never removes held blobs.
+
+This is conservative physical byte-liveness, not expiry/circulation enforcement. A tombstone or
+deadline alone does not make a still-retained checkpoint, history, intent or recovery version
+expendable. Actual sound/export/doodle projections are not enabled; the body codec recognizes
+export CIDs but its hash extraction is not full production export coverage. Unknown future
+typed recovery fails closed. Dense-source latency and blob quota/expiry remain separate limits.
 
 ### Native Studio Save/Load (gate 2, Index/art only)
 
@@ -772,8 +810,9 @@ registry-incarnation guards. The actor moves its sole live Server into a finite 
 checks current channel/membership and saves its current server snapshot before intent/source
 writes. The worker retains custody across invoke/actor cancellation; a running save may finish,
 but UI/session/incarnation checks suppress stale responses. Panic stops the actor. Guards drop
-before reply/event waits. Bounded scans/restores are not a measured latency promise, and no blob
-pin or retention guarantee follows from successful local Save. No UI adapter is installed here.
+before reply/event waits. Bounded scans/restores are not a measured latency promise. The shared
+reference guard above protects saved pixels from existing cache-reclamation paths, not disk
+corruption, arbitrary external filesystem edits or expiry enforcement. No UI adapter is installed.
 
 ### Creative blob seam (C0c, independent of Studio/P1 metadata)
 

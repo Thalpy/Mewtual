@@ -168,6 +168,24 @@ impl StudioRecovery {
         document: &LogicalDocument,
         channel: ElementId,
     ) -> Result<Self, ReplError> {
+        Self::decode_snapshot(snapshot, document, Some(channel))
+    }
+
+    /// Vault-only reference inspection when the outer record has logical scope but no channel.
+    /// Read the channel from the bounded typed header, then run the SAME canonical decoder.
+    /// The result is only a conservative hold set, never channel/edit/Restore authority.
+    pub fn inspect_vault_references(
+        snapshot: &RecoverySnapshot,
+        document: &LogicalDocument,
+    ) -> Result<std::collections::BTreeSet<ContentId>, ReplError> {
+        Self::decode_snapshot(snapshot, document, None)?.blob_cids()
+    }
+
+    fn decode_snapshot(
+        snapshot: &RecoverySnapshot,
+        document: &LogicalDocument,
+        channel: Option<ElementId>,
+    ) -> Result<Self, ReplError> {
         snapshot.encode()?;
         if snapshot.doc_type != document.doc_type
             || snapshot.logical_key != document.logical_key
@@ -200,12 +218,12 @@ impl StudioRecovery {
             }
             operations.insert(id, intent);
         }
-        let projection = StudioProjection::decode(
-            document,
-            channel,
-            snapshot.epoch,
-            d.get_bytes().map_err(malformed)?,
-        )?;
+        let payload = d.get_bytes().map_err(malformed)?;
+        let channel = match channel {
+            Some(channel) => channel,
+            None => super::snapshot::payload_channel(payload)?,
+        };
+        let projection = StudioProjection::decode(document, channel, snapshot.epoch, payload)?;
         d.finish().map_err(malformed)?;
         if operations.keys().copied().collect::<Vec<_>>() != snapshot.applied_ops {
             return Err(ReplError::Malformed);

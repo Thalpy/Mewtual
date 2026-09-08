@@ -664,11 +664,25 @@ table with the commit that closed it.
   existing object only as an exact retained-operation retry, never as a header-overwrite shortcut.
   Frame edits require exact declared-length, CID-valid, validated 192x144 PIX bytes in the mounted
   namespace and re-promote/flush before their reference. This is local byte existence, not remote
-  possession, a retention pin or a reclamation guard. Create is two-file and can leave an unlisted
+  possession. Create is two-file and can leave an unlisted
   object on index refusal. A cancelled operation already running may finish durably; cancellation
   suppresses stale results, not committed content. Finite scans/restores run off-executor but
   retain lifecycle locks and have no accepted-size latency guarantee. Views say local/provisional;
-  automatic gossip, owner settlement, retention and UI wiring remain separate gates.
+  automatic gossip, owner settlement, expiry enforcement and UI wiring remain separate gates.
+  The new mount-shared persistent blob guard separately protects all retained Studio source and
+  verified seed-only CIDs, pending intents and retained/staged typed recovery. A seed's hidden
+  replacement value remains required even after a successor overwrites it. Writes union holds
+  before I/O; uncertain writes never unpin. Only an explicit, complete, exclusive reference scan
+  with the same mount/generation can replace the set. Full-group scope unions numeric aliases.
+  Unknown/corrupt/unsupported/partial records and the 65,536-reference rail refuse reclamation,
+  never authorize from a truncated list. A bounded absence-only P1 filename scan permits empty
+  new mounts; restored mounts may defer GC until an explicit or Studio-triggered scan succeeds.
+  The PIX pre-hold precedes exact read/promotion, and subsequent budget scans cannot erase it.
+  The guard stays locked through actual synchronous deletion; store drop revokes stale handles.
+  This covers existing unlist/upload-cleanup cache deletion, not arbitrary external filesystem
+  mutation, storage corruption, a new blob quota or remote possession. Expiry/tombstones alone
+  do not override still-retained recovery/history. No new durable format, finality or expiry policy
+  is introduced; kept-copy release and non-held staging cleanup keep their separate semantics.
   Sound/score/export state continues to refuse pending its typed support.
   Exact retry recognition belongs to the retained signed
   envelope/gate, not timestamps or marker-only success.

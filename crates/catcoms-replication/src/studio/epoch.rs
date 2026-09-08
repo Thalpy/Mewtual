@@ -38,6 +38,10 @@ pub struct StudioEpoch {
     gate: EpochGate,
     receipts: ReceiptBook,
     opening: Option<Receipt>,
+    // Derived from the VERIFIED seed-only projection before any successor edits. Current
+    // registers can hide an inherited replacement CID even though the retained seed needs it.
+    // Recomputed on restore; never trusted from a separate persisted pin list.
+    seed_blob_cids: std::collections::BTreeSet<ContentId>,
 }
 impl std::fmt::Debug for StudioEpoch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -72,6 +76,7 @@ impl StudioEpoch {
             logical,
             receipts: ReceiptBook::default(),
             opening: None,
+            seed_blob_cids: Default::default(),
         })
     }
     /// Verify current authority and canonical typed bytes, constructing a SEPARATE successor.
@@ -114,6 +119,11 @@ impl StudioEpoch {
             }
         }?;
         let doc = EncryptedDoc::from_checkpoint(&seed, &actor)?;
+        let seed_blob_cids = super::references::projection_cids(&target.read(
+            &logical,
+            seed.origin().epoch(),
+            doc.doc(),
+        )?);
         let gate = EpochGate::new(logical.clone(), doc.doc_id(), seed.origin().epoch(), owner);
         let mut receipts = ReceiptBook::default();
         receipts.ingest_verified(receipt.clone())?;
@@ -125,6 +135,7 @@ impl StudioEpoch {
             gate,
             receipts,
             opening: Some(receipt),
+            seed_blob_cids,
         })
     }
     pub fn document(&self) -> &LogicalDocument {
@@ -151,6 +162,18 @@ impl StudioEpoch {
     pub fn projection(&self) -> Result<StudioProjection, ReplError> {
         self.target
             .read(&self.logical, self.epoch(), self.doc.doc())
+    }
+    /// Conservative references from the whole retained source, not just its playable projection.
+    /// Superseded operations must remain recoverable until history/intents are safely retired.
+    pub fn blob_cids(&self) -> Result<std::collections::BTreeSet<ContentId>, ReplError> {
+        let mut out = super::references::projection_cids(&self.projection()?);
+        out.extend(self.seed_blob_cids.iter().copied());
+        for op in self.doc.signed_log() {
+            out.extend(operation_blob_cid(
+                &op.parsed_domain_op()?.ok_or(ReplError::Malformed)?,
+            )?);
+        }
+        Ok(out)
     }
     fn refresh_owner(&self, group: &ServerGroup) -> Result<(), ReplError> {
         if group.group_id() != self.logical.server_id {
@@ -375,6 +398,17 @@ impl StudioEpoch {
     ) -> Result<usize, ReplError> {
         let inert = DeviceId::from_bytes([0; 32]);
         Self::restore_scoped(bytes, server, target, inert, inert)?.storage_protocol_bytes()
+    }
+    /// Same full vault-only verification as inventory, also returning conservative references.
+    /// No current membership or writable capability is inferred from historical authors.
+    pub fn inspect_vault_references(
+        bytes: &[u8],
+        server: &[u8],
+        target: StudioTarget,
+    ) -> Result<(usize, std::collections::BTreeSet<ContentId>), ReplError> {
+        let inert = DeviceId::from_bytes([0; 32]);
+        let unit = Self::restore_scoped(bytes, server, target, inert, inert)?;
+        Ok((unit.storage_protocol_bytes()?, unit.blob_cids()?))
     }
     /// Only receipt bytes and the gate's closing hash consume protocol headroom. User content,
     /// seeds, admission metadata and quarantine hashes cannot spend the settlement allowance.

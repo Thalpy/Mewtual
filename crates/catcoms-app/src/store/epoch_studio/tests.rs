@@ -415,6 +415,102 @@ fn studio_store_invalid_receipt_is_rejected_before_disk_or_inventory_mutation() 
 }
 
 #[test]
+fn reference_scan_keeps_an_overwritten_checkpoint_register_after_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let mut blobs = store.blob_store(&hex::encode(f.group.group_id())).unwrap();
+    let a = blobs.put(b"birth pixels").unwrap();
+    let b = blobs.put(b"seed replacement").unwrap();
+    let c = blobs.put(b"successor replacement").unwrap();
+    let mut unit = StudioEpoch::new(&f.group, f.target, f.device.device_id()).unwrap();
+    for (n, body) in [
+        FlipnoteOp::InsertFrame {
+            frame: [1; 16],
+            after: None,
+            cid: *a.as_bytes(),
+            bytes: 10,
+        },
+        FlipnoteOp::ReplaceFrame {
+            frame: [1; 16],
+            cid: *b.as_bytes(),
+            bytes: 10,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        unit.edit_or_reseal(
+            &f.device,
+            &f.group,
+            &mut rng(),
+            &f.domain(body.encode().unwrap(), n as u8),
+            100,
+        )
+        .unwrap();
+    }
+    let source = EpochStudioState { unit };
+    let seed = source.projection().unwrap().checkpoint([7; 32]).unwrap();
+    let mut next = StudioEpoch::from_checkpoint(
+        &f.group,
+        f.target,
+        f.device.device_id(),
+        f.receipt(&source, 7),
+        0,
+        seed.bytes(),
+    )
+    .unwrap();
+    next.edit_or_reseal(
+        &f.device,
+        &f.group,
+        &mut rng(),
+        &f.domain(
+            FlipnoteOp::ReplaceFrame {
+                frame: [1; 16],
+                cid: *c.as_bytes(),
+                bytes: 10,
+            }
+            .encode()
+            .unwrap(),
+            3,
+        ),
+        101,
+    )
+    .unwrap();
+    // Test-only installed source: runtime checkpoint installation remains gate 4 work.
+    let mut budget = budget(&mut store, &f);
+    store
+        .save_studio_source(
+            SERVER,
+            next,
+            None,
+            &[],
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut budget.storage,
+            atomic_write,
+            sync_studio,
+        )
+        .unwrap();
+    store.creative_pinned_cids().unwrap();
+    assert!(!blobs.delete(&b).unwrap());
+    drop(store);
+    let mut store = open(root.path());
+    let mut blobs = store.blob_store(&hex::encode(f.group.group_id())).unwrap();
+    assert_eq!(
+        store
+            .creative_pinned_cids()
+            .unwrap()
+            .for_group(&f.group.group_id())
+            .count(),
+        3
+    );
+    for cid in [a, b, c] {
+        assert!(!blobs.delete(&cid).unwrap());
+    }
+}
+
+#[test]
 fn studio_store_full_content_allows_exact_retry_and_receipt_but_not_new_intent() {
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new(true);
@@ -545,8 +641,24 @@ fn studio_store_crash_matrix_has_intent_first_and_no_ciphertext_before_both_barr
                 f.load(&store).map_or(0, |s| s.op_count()),
                 usize::from(stage == 1 && mode == 1)
             );
+            let pins = store.creative_pinned_cids().unwrap();
+            assert_eq!(
+                pins.for_group(&f.group.group_id())
+                    .any(|cid| cid.as_bytes() == &[3; 32]),
+                stage == 1 || mode == 1,
+                "a durable intent pins even if its epoch write failed"
+            );
             drop(store);
             let mut store = open(root.path());
+            assert_eq!(
+                store
+                    .creative_pinned_cids()
+                    .unwrap()
+                    .for_group(&f.group.group_id())
+                    .count(),
+                usize::from(stage == 1 || mode == 1),
+                "same intent/source holds after restart"
+            );
             let mut b = budget(&mut store, &f);
             let (_, state) = f.edit(&mut store, &mut b, f.insert());
             assert_eq!(state.op_count(), 1);

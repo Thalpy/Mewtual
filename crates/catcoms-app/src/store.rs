@@ -28,11 +28,13 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::AppError;
 
+mod creative_references;
 mod epoch_intents;
 mod epoch_owner;
 mod epoch_recovery;
 mod epoch_registry;
 mod epoch_studio;
+pub use creative_references::{CreativeReferences, MAX_CREATIVE_REFERENCES};
 pub use epoch_intents::{EpochIntentBudget, EpochIntentState, MAX_VAULT_INTENT_BYTES};
 pub use epoch_owner::EpochOwnerReceiptState;
 pub use epoch_recovery::cleanup::{
@@ -394,6 +396,7 @@ pub struct ServerStore {
     // Studio budget minting/write attempts and five-family cleanup invalidate captured scans.
     // Other raw P1 adapters still require the same sole coordinator/exclusive accounting owner.
     studio_generation: std::sync::Arc<()>,
+    creative_protection: creative_references::SharedProtection,
     // Stable only for this physical mount, unlike the rotating intent-inventory token. Replay
     // passes are local work cursors, not authority across reopen or the native UI-lock boundary.
     replay_mount: std::sync::Arc<()>,
@@ -428,6 +431,7 @@ impl ServerStore {
         // first-launch power loss could retain a synced record but forget the newly created parent.
         sync_directory(&dir).map_err(|error| AppError::Io(error.to_string()))?;
         Ok(Self {
+            creative_protection: creative_references::Protection::new(&dir.join("servers")),
             dir,
             keys,
             intent_generation: std::sync::Arc::new(()),
@@ -666,14 +670,29 @@ impl ServerStore {
     /// vault's `blob_key` (content-addressed by plaintext CID, so the mesh fetch is
     /// unchanged); the bytes survive restart and are opaque without the passphrase.
     pub fn blob_store(&self, key: &str) -> Result<Box<dyn BlobStore + Send>, AppError> {
+        // A namespace alias must not bypass full-group deletion protection. Legacy local/test
+        // names remain supported, but separators/dot components are never a blob namespace.
+        if key.is_empty()
+            || key.len() > 512
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(AppError::Invalid("invalid blob namespace".into()));
+        }
         let dir = self.dir.join("blobs").join(key);
         let store = SealingBlobStore::open(&dir, self.keys.blob_key()?, OsCryptoRng)?;
-        Ok(Box::new(catcoms_storage::kept::KeptBlobStore::open(
+        let inner = Box::new(catcoms_storage::kept::KeptBlobStore::open(
             Box::new(store),
             dir.join("kept"),
             self.keys.blob_key()?,
             OsCryptoRng,
-        )))
+        ));
+        Ok(Box::new(creative_references::ProtectedBlobs {
+            inner,
+            group: hex::decode(key).unwrap_or_else(|_| key.as_bytes().to_vec()),
+            protection: self.creative_protection.clone(),
+        }))
     }
 
     /// Read + unseal the registry (empty if none yet).
@@ -685,6 +704,16 @@ impl ServerStore {
         let sealed = unframe(&bytes)?;
         let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &sealed)?);
         decode_registry(&plain)
+    }
+}
+
+impl Drop for ServerStore {
+    fn drop(&mut self) {
+        // A blob handle may outlive its vault mount. It must not delete under stale pins after
+        // a new mount has written metadata. This does not grant old handles new read authority.
+        if let Ok(mut state) = self.creative_protection.lock() {
+            state.unknown();
+        }
     }
 }
 

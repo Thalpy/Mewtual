@@ -88,8 +88,25 @@ the same vault namespace. Create writes the object before the Index and is exact
 atomic across files; a different nonce cannot rename an existing object through Create.
 Native projections retain conflict/deletion evidence and three-state expiry. Local update events
 invalidate views, while responses explicitly label local publication and provisional edits.
-Current Create targets epoch zero. Automatic sync/settlement, retention and the rotated-index
-installer remain integration work, with dense-source latency still unqualified. UI is unchanged.
+Current Create targets epoch zero. Automatic sync/settlement and the rotated-index installer
+remain integration work, with dense-source latency still unqualified. UI is unchanged.
+Persistent blob handles now share one mount-local deletion guard outside the kept-copy adapter.
+The derived reference union is keyed by full group bytes (including numeric-server aliases).
+Studio source/intent/recovery writes add holds before I/O; only a complete, generation-current,
+exclusive five-family reference scan replaces them. Unknown/corrupt/unsupported/partial state
+refuses held-blob deletion. A cheap bounded absence-only filename check can initialize an empty
+new mount; a restored P1 mount starts Unknown. Studio access refreshes before pre-holding new
+PIX CIDs, then verifies/promotes bytes. Its later budget scan is deliberately reference-neutral.
+Source holds include the verified seed-only projection as well as current projection and signed
+operations: successor edits can hide a seed's replacement pixels. Pending intents and BOTH
+retained and staged typed recovery also hold pixels, including deleted/superseded versions.
+The guard stays locked through synchronous unlink; dropping the store revokes old blob handles.
+There is no durable pin ledger or expiry engine. Full scans have existing work rails plus a
+65,536-reference cache rail; overflow holds bytes rather than truncate. Existing file unlisting
+and upload cleanup use the guarded delete, but still do not promise freed disk space. Explicit
+kept-copy release and unreferenced staging cleanup retain their separate ownership semantics.
+Future sound/export/doodle record support must extend enumeration before enabling reclamation
+for those formats; current unsupported records cannot be interpreted as an empty hold set.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
 even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.

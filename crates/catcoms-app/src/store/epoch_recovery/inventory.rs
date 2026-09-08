@@ -327,6 +327,10 @@ pub struct EpochStorageScan<'a> {
     entry_limit: usize,
     record_limit: usize,
     byte_limit: u64,
+    references: Option<(
+        std::sync::Arc<()>,
+        super::super::creative_references::CreativeReferences,
+    )>,
 }
 
 impl std::fmt::Debug for EpochStorageScan<'_> {
@@ -392,11 +396,49 @@ impl ServerStore {
             entry_limit: MAX_DIRECTORY_ENTRIES,
             record_limit: MAX_ACCOUNTED_RECORDS,
             byte_limit: MAX_AUTHENTICATED_BYTES,
+            references: None,
         })
     }
 }
 
 impl EpochStorageScan<'_> {
+    /// Opt-in only: ordinary budget scans must NOT replace a transient pre-publication hold.
+    pub(in crate::store) fn collect_creative_references(&mut self) -> Result<(), AppError> {
+        if self.progress.visited_entries != 0
+            || self.coverage()
+                != EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio
+        {
+            return Err(invalid("reference scan requires fresh full inventory"));
+        }
+        let generation = self
+            .store
+            .creative_protection
+            .lock()
+            .map_err(|_| invalid("reference protection poisoned"))?
+            .generation
+            .clone();
+        self.references = Some((generation, Default::default()));
+        Ok(())
+    }
+    pub(in crate::store) fn finish_creative_references(
+        self,
+    ) -> Result<super::super::creative_references::CreativeReferences, AppError> {
+        if self.failed || !self.progress.complete || !self.inventory.orphans.is_empty() {
+            // Partial temporary files may contain a not-yet-published reference. Never guess.
+            return Err(invalid(
+                "reference scan incomplete or unpublished metadata remains",
+            ));
+        }
+        let (generation, refs) = self
+            .references
+            .ok_or_else(|| invalid("not a reference scan"))?;
+        self.store
+            .creative_protection
+            .lock()
+            .map_err(|_| invalid("reference protection poisoned"))?
+            .install(&generation, refs.clone())?;
+        Ok(refs)
+    }
     /// Fixed coverage for this job, including before it completes.
     pub fn coverage(&self) -> EpochInventoryCoverage {
         self.inventory.coverage
@@ -510,6 +552,14 @@ impl EpochStorageScan<'_> {
                     let record = match family {
                         EpochRecordKind::Recovery => {
                             let state = EpochRecoveryState::decode(&plain, scope, &document)?;
+                            if let Some((_, refs)) = self.references.as_mut() {
+                                refs.add(
+                                    &document.server_id,
+                                    super::super::creative_references::recovery_cids(
+                                        &document, &state,
+                                    )?,
+                                )?;
+                            }
                             recovery_record(scope, state.footprint(size)?)
                         }
                         EpochRecordKind::OwnerReceipts => {
@@ -517,7 +567,26 @@ impl EpochStorageScan<'_> {
                             epoch_owner::storage_record(server, &document, scope, size)?
                         }
                         EpochRecordKind::Intents => {
-                            epoch_intents::EpochIntentState::decode(&plain, scope, &document)?;
+                            let state =
+                                epoch_intents::EpochIntentState::decode(&plain, scope, &document)?;
+                            if let Some((_, refs)) = self.references.as_mut() {
+                                if matches!(
+                                    document.doc_type,
+                                    DocType::StudioIndex | DocType::StudioObject
+                                ) {
+                                    for (_, intent) in state.pending() {
+                                        refs.add(
+                                            &document.server_id,
+                                            catcoms_replication::studio::operation_blob_cid(
+                                                &intent.operation,
+                                            )
+                                            .map_err(invalid)?,
+                                        )?;
+                                    }
+                                } else if document.doc_type != DocType::DocRegistry {
+                                    return Err(invalid("unsupported creative reference family"));
+                                }
+                            }
                             epoch_intents::storage_record(server, &document, scope, size)?
                         }
                         EpochRecordKind::Registry => {
@@ -525,9 +594,20 @@ impl EpochStorageScan<'_> {
                                 &plain, server, &document, scope, size,
                             )?
                         }
-                        EpochRecordKind::Studio => super::super::epoch_studio::inventory_record(
-                            &plain, server, &document, scope, size,
-                        )?,
+                        EpochRecordKind::Studio => {
+                            if let Some((_, refs)) = self.references.as_mut() {
+                                let (record, cids) =
+                                    super::super::epoch_studio::inventory_references(
+                                        &plain, server, &document, scope, size,
+                                    )?;
+                                refs.add(&document.server_id, cids)?;
+                                record
+                            } else {
+                                super::super::epoch_studio::inventory_record(
+                                    &plain, server, &document, scope, size,
+                                )?
+                            }
+                        }
                     };
                     if self
                         .inventory
@@ -590,6 +670,33 @@ impl EpochStorageScan<'_> {
         }
         Ok(self.inventory)
     }
+}
+
+/// Only the absence of ALL reserved P1 filenames proves an empty reference cache cheaply.
+/// Any final/temporary/alias, traversal error or exhausted rail starts the mount as Unknown.
+pub(in crate::store) fn epoch_files_absent(path: &Path) -> Result<bool, AppError> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| AppError::Io(e.to_string()))?;
+    if !metadata.is_dir() || is_link(&metadata) {
+        return Err(invalid("invalid epoch parent"));
+    }
+    for (n, entry) in fs::read_dir(path)
+        .map_err(|e| AppError::Io(e.to_string()))?
+        .enumerate()
+    {
+        if n >= MAX_DIRECTORY_ENTRIES {
+            return Err(invalid("epoch directory limit"));
+        }
+        let entry = entry.map_err(|e| AppError::Io(e.to_string()))?;
+        if storage_name(
+            &entry.file_name(),
+            EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        )?
+        .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

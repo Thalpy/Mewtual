@@ -337,6 +337,10 @@ impl ServerStore {
             .map_err(invalid)?;
         let transition = state.apply(action, clock.now_ms())?;
         let plain = state.encode(&scope, document)?;
+        self.hold_creative(
+            &document.server_id,
+            super::creative_references::recovery_cids(document, &state),
+        );
         // XChaCha20-Poly1305 adds a 24-byte nonce and a 16-byte tag. The full copy, not only
         // positive growth over the old file, must fit while atomic_write prepares its sibling.
         let record = recovery_record(&scope, state.footprint(plain.len() as u64 + 40)?);
@@ -409,6 +413,10 @@ impl ServerStore {
         let mut state = self.read_epoch_recovery(&scope, document)?;
         let transition = state.apply(action, clock.now_ms())?;
         let plain = state.encode(&scope, document)?;
+        self.hold_creative(
+            &document.server_id,
+            super::creative_references::recovery_cids(document, &state),
+        );
         let sealed = seal(&self.keys.db_key()?, &plain, rng)?;
         writer(&self.epoch_recovery_path(&scope), &frame(&sealed))?;
         Ok(EpochRecoveryUpdate { transition, state })

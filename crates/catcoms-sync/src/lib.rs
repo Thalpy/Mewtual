@@ -11229,9 +11229,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.blobs.cids()
     }
 
-    /// Delete a locally-held blob by content address (`Ok(true)` if it was held). Used by the
-    /// product layer's dedup-safe delete-time garbage collection; deletion is harmless if a peer
-    /// still holds it (the content-addressed blob can be re-fetched).
+    /// Delete a locally-held blob by content address (`Ok(true)` if a held copy was removed). Used by the
+    /// product layer's dedup-safe delete-time garbage collection. Persistent adapters also protect
+    /// Studio history/intents/recovery: false can mean retained, and unknown references refuse.
+    /// Successful metadata unlisting therefore never proves disk space was reclaimed.
     pub fn delete_blob(&mut self, cid: &Cid) -> Result<bool, SyncError> {
         Ok(self.blobs.delete(cid)?)
     }

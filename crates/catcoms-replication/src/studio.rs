@@ -29,11 +29,13 @@ mod admission;
 pub use admission::StudioTarget;
 mod epoch;
 pub use epoch::{StudioEpoch, MAX_STUDIO_EPOCH_SNAPSHOT_BYTES};
+mod references;
 pub use frames::{
     flipnote_document, validate_frame_change, FlipnoteFrameProjection, FrameBlob, FrameEntry,
     FrameInsertion, FrameLimits, FrameRegister, FrameSource, FrameValue, FLIPNOTE_FRAME_BYTES,
     FLIPNOTE_MAX_FRAMES,
 };
+pub use references::operation_blob_cid;
 #[cfg(test)]
 mod integration_tests;
 #[cfg(test)]

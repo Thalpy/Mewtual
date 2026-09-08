@@ -171,7 +171,8 @@ impl ServerStore {
             .transpose()
     }
     /// Preserve nonce/envelope and concrete expected_doc_id across retry. This saves the intent
-    /// before the epoch and only then returns ciphertext. It neither publishes nor pins blobs.
+    /// before the epoch and only then returns ciphertext. Reference holds precede persistence;
+    /// this does not publish, fetch, or establish that the referenced bytes are present.
     #[allow(clippy::too_many_arguments)]
     pub fn edit_studio_epoch(
         &mut self,
@@ -441,6 +442,11 @@ impl ServerStore {
         sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
     ) -> Result<EpochStudioState, AppError> {
         let scope = scope_bytes(server, unit.document())?;
+        // Add before either write/flush barrier, and keep holds even when persistence is uncertain.
+        self.hold_creative(
+            &unit.document().server_id,
+            unit.blob_cids().map_err(invalid),
+        );
         let storage_scope =
             StorageScope::new(server, &unit.document().server_id).map_err(invalid)?;
         let snapshot = Zeroizing::new(unit.snapshot().map_err(invalid)?);
@@ -605,6 +611,22 @@ pub(super) fn inventory_record(
     let protocol = StudioEpoch::validate_vault_snapshot(snapshot, &document.server_id, target)
         .map_err(invalid)?;
     storage_record(server, document, scope, size, protocol)
+}
+pub(super) fn inventory_references(
+    bytes: &[u8],
+    server: u64,
+    document: &LogicalDocument,
+    scope: &[u8],
+    size: u64,
+) -> Result<(StorageRecord, std::collections::BTreeSet<[u8; 32]>), AppError> {
+    let (target, snapshot) = decode_record(bytes, scope, document)?;
+    let (protocol, cids) =
+        StudioEpoch::inspect_vault_references(snapshot, &document.server_id, target)
+            .map_err(invalid)?;
+    Ok((
+        storage_record(server, document, scope, size, protocol)?,
+        cids,
+    ))
 }
 fn storage_record(
     server: u64,
