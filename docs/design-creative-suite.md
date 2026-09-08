@@ -873,9 +873,10 @@ coverage did not measure product integration or time remaining. `BACKEND-IMPLEME
 tracks the active Flipnote gates; this broader table records foundations and future backlog.
 
 `P1-PERFORMANCE.md` records real saved-source release probes. Indexed restore queries improve
-byte-heavy pages, but a valid small-operation-heavy registry still takes roughly 11 seconds per
-saved-source page (baseline about 13). Bounded off-executor reconstruction/source reuse with
-version and authority fences is the immediate runtime prerequisite; these measurements do not
+byte-heavy pages; dense reconstruction previously cost roughly 11 seconds per saved-source page
+(baseline about 13). Explicit bounded worker preparation and read-only source reuse now remove
+that rebuild from warm page serving, with exact saved-version and current-authority fences.
+The split jobs still need runtime driving outside actor/vault locks; these measurements do not
 close automatic catch-up. This work belongs to Flipnote's shared-runtime gate and is not a
 reason to wait for every P1 consumer before implementing the missing Studio types.
 
@@ -885,8 +886,8 @@ reason to wait for every P1 consumer before implementing the missing Studio type
 | P1 checkpoints and registry | Implemented/tested: deterministic seeds, typed bucket materialization/preflight, adjacent settlement and scoped newcomer installation with recovery/restart | Automatic lifecycle integration, other managed types, settlement-wide capacity handling |
 | P1 durable storage | Implemented/tested: recovery/owner receipt saves, vault-wide intent cap, four-family inventory/cleanup, durable edits, included-only intent retirement and registry installation barriers | Sole coordinator, other managed document families, remaining recovery actions and full-capacity settlement integration |
 | P1 network and application integration | Cooperative saved-intent sender, opt-in gossip, bounded durable page receive, keyed owner-head/expected-seed exchange and registry installation followed by fresh catch-up | Historical-authority/repair-record transfer, aggregate scheduling, native lifecycle ownership, actor/bridge events and production acceptance tests |
-| C0c immutable blob seam | Native `publish_pix` and `request_blob_bounded` wired through actor and sync; PIX1 validator, bounded cache/dedup/response checks and tests | Owner's frontend invocation and creative reference enumeration/retention; game-only profile result and consented-avatar work is paused |
-| Creative backend contracts | Static Rust codecs; Index/art projections, causal validators, canonical typed checkpoints/recovery and exact preflight through P1 core edit/ingest | Durable typed epoch/store ownership and actor/native Save/Load next; sound/export families still reject pending gate 6. No live Studio app path; broader C3 work is deferred |
+| C0c immutable blob seam | Native `publish_pix` and `request_blob_bounded` wired through actor and sync; PIX1 validator, bounded cache/dedup/response checks and conservative art source/intent/recovery reference protection | Owner's frontend invocation; actual sound/export references extend in gate 6. Game-only profile result and consented-avatar work is paused |
+| Creative backend contracts | Static Rust codecs; Index/art projections, causal validators, canonical typed checkpoints/recovery, exact preflight, accounted vault Save/Reopen and actor/native commands | Automatic shared runtime/events and Studio checkpoint installation; sound/export families still reject pending gate 6. Broader C3 work is deferred |
 | Usable collaborative Studio | Not connected end to end | Shared save/load, publication, claims, settlement/recovery actions and export integrated with the owner's UI |
 
 **UI work that can proceed now:** the canonical editor shell, local canvas tools, palette/theme
@@ -897,8 +898,8 @@ not claim that real shared saves, owner receipts or Restore operations happened.
 I/O still needs its codec/export contract tests; local UI readiness is not protocol readiness.
 
 **Next backend order:** the seven Flipnote gates in `BACKEND-IMPLEMENTATION.md` supersede the
-previous platform-first order. Begin typed StudioIndex/Flipnote operations now, then expose
-durable one-device Save/Load using accounted P1 storage. Follow with automatic collaboration,
+previous platform-first order. Typed Index/art and durable one-device Save/Load now exist using
+accounted P1 storage; the active gate is automatic collaboration. Follow with
 rotation/recovery, claims, sound/export and production acceptance. Complete each required P1
 path as part of those outcomes, not support for unrelated managed types. No claims of shared
 saves or settled edits until their actual production paths pass. UI remains with the owner.

@@ -254,6 +254,9 @@ async fn fetched_fixture_mode(queue_epoch_zero: bool, owner_generated: bool) -> 
             .alice
             .begin_registry_page_provider(&p.alice_store, SERVER, bucket)
             .unwrap();
+        crate::registry_catchup::prepare_test_source(&mut p.alice, &p.alice_store, &mut provider)
+            .await
+            .unwrap();
         let (result, ()) = tokio::join!(p.bob.fetch_registry_receive_step(&mut receive), async {
             p.alice.sync_once().await.unwrap();
             p.alice
@@ -670,6 +673,9 @@ async fn registry_seed_install_joined_peer_preserves_provisional_edit_then_catch
     let mut provider = p
         .alice
         .begin_registry_page_provider(&p.alice_store, SERVER, bucket)
+        .unwrap();
+    crate::registry_catchup::prepare_test_source(&mut p.alice, &p.alice_store, &mut provider)
+        .await
         .unwrap();
     let mut receive = p
         .bob

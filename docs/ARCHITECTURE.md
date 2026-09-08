@@ -254,7 +254,14 @@ actor, scope and dependency checks, with no mutation before semantic validation.
 retain historical reads, and live edit/ingest never asserts this optimization. The exact-frontier
 path also skips the semantic validator's already-proven dependency-presence predicate. This changes no
 wire/snapshot format, membership rule, cap or request deadline. `P1-PERFORMANCE.md` records measurements;
-off-executor scheduling and source reuse still need lifecycle/version fences before automatic use.
+explicit source preparation now separates capture under store custody, detached worker rebuild,
+and reattachment under reacquired custody. The worker owns no vault/device/MLS keys. Four
+process-wide slots remain charged through captured bytes, cancelled workers and retained results,
+including across remounts. Read-only cache attachment and each page compare the entire authenticated
+saved record, so gate/book-only faults invalidate it. Superseded preparation jobs cannot attach.
+Cold/stale service returns a local preparation error and never rebuilds inside the request path.
+Automatic scheduling and native lifecycle ownership still need integration; the split API must
+be driven without holding actor/vault locks through reconstruction.
 Its HMAC cursor freezes the provider's dependency-complete accepted-log prefix
 and advances by position, so appends and large head sets cannot force the same prefix forever.
 Every page freshly seals at most 32 operations / 512 KiB of framed bytes; byte-identical reloads

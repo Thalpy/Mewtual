@@ -492,6 +492,20 @@ table with the commit that closed it.
   No seed is implicitly installed, source mutated, intent retired or receipt issued. Completion
   covers only the frozen prefix, not newer appends. Debug hides scope/content/cursors; the random
   provider secret is zeroized and never persisted or transmitted.
+- **Prepared registry sources are local caches, not authority.** Capture authenticates the full
+  bounded non-link vault record; a detached worker runs the same signed history, typed projection,
+  gate and receipt-book checks as normal restore, without live authority keys. Installation checks
+  preparation generation, current runtime/mount/member and exact saved bytes again. Every page
+  rechecks the complete authenticated record (including gate/book), then uses current requester/
+  provider/remaining-author membership and fresh MLS sealing. Stale, missing and corrupt sources
+  never fall back to cached content. Cold/stale refusal is local, not a wire history claim.
+  Four process-wide permits cover capture, queued/running work, detached results and retained
+  sources; cancelling a future or remounting cannot refund a still-live body/job. Raw captures
+  are zeroized on drop; reconstructed Automerge heap is not claimed to be securely zeroized.
+  A cancelled blocking task may finish privately before its result is dropped, but never installs
+  itself. Runtime integration must release actor/store locks before awaiting reconstruction,
+  reacquire lifecycle custody for installation, and drop providers on lock/replacement. Automatic
+  scheduling, fairness and hard wall-time/heap-byte guarantees remain outside this cache primitive.
 - **Registry network pages are bounded member claims, not saved state.** Kind 20 binds requests
   to the actual requester transport peer and responses to the actual provider peer, whole query,
   group, requester key, request nonce/timestamp/MLS epoch and answer under a separate domain.

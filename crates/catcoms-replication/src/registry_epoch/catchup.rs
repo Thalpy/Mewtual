@@ -23,6 +23,27 @@ pub const MAX_REGISTRY_PAGE_BYTES: usize = 512 * 1024;
 const CURSOR_TTL_MS: u64 = 10 * 60 * 1000;
 const PAYLOAD_BYTES: usize = REGISTRY_CURSOR_BYTES - 32;
 
+/// Rebuilt, read-only page source from a caller-authenticated LOCAL vault snapshot. This is not
+/// a network snapshot admission API: neither mutable state nor a synthetic owner escapes. A
+/// caller may move reconstruction to a worker without giving it device keys or live MLS state.
+pub struct RegistryPageSource(RegistryEpoch);
+
+impl std::fmt::Debug for RegistryPageSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RegistryPageSource { .. }")
+    }
+}
+
+impl RegistryPageSource {
+    /// Verify exactly the same signed history, receipt book and gate as ordinary vault restore.
+    /// The caller must bind the saved bytes to this server/bucket and recheck their currency
+    /// before serving. Current provider/requester/author membership is checked at page time.
+    pub fn from_vault_snapshot(bytes: &[u8], server: &[u8], bucket: u8) -> Result<Self, ReplError> {
+        let inert = DeviceId::from_bytes([0; 32]);
+        RegistryEpoch::restore_scoped(bytes, server, bucket, inert, inert).map(Self)
+    }
+}
+
 /// Local checked starting frontier, never a peer-supplied checkpoint installation instruction.
 /// A wide frontier falls back to [] so all branches remain reachable through provider cursors.
 pub struct RegistryFrontier {
@@ -144,6 +165,19 @@ impl std::fmt::Debug for RegistryPageProvider {
 }
 
 impl RegistryPageProvider {
+    /// Serve a previously rebuilt local source with fresh authorization and MLS sealing. The
+    /// store adapter must first verify that the exact saved record still matches this source.
+    pub fn page_prepared(
+        &mut self,
+        source: &RegistryPageSource,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        request: RegistryPageRequest<'_>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<RegistryPageOutcome, ReplError> {
+        self.page(&source.0, group, device, request, rng)
+    }
+
     pub fn new(provider: DeviceId, clock: Arc<dyn Clock>, rng: &mut impl CryptoRngCore) -> Self {
         let mut key = Zeroizing::new([0; 32]);
         rng.fill_bytes(key.as_mut());

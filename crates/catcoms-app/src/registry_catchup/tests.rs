@@ -16,6 +16,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 const SERVER: u64 = 95;
+mod preparation;
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::from_seed([95; 32])
 }
@@ -97,9 +98,19 @@ impl Fixture {
             .unwrap();
     }
     fn begin(&mut self) -> ServerRegistryPageProvider {
-        self.server
+        let mut provider = self
+            .server
             .begin_registry_page_provider(&self.store, SERVER, self.key.bucket())
+            .unwrap();
+        self.prepare(&mut provider);
+        provider
+    }
+    fn prepare(&mut self, provider: &mut ServerRegistryPageProvider) {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
             .unwrap()
+            .block_on(prepare_test_source(&mut self.server, &self.store, provider))
+            .unwrap();
     }
     fn serve(
         &mut self,
@@ -141,13 +152,11 @@ impl Fixture {
 fn registry_page_store_serves_only_saved_history_without_writes_or_intent_retirement() {
     let mut f = Fixture::new();
     let mut provider = f.begin();
-    assert!(matches!(
-        f.serve(&mut provider, None).unwrap(),
-        RegistryPageOutcome::Restart
-    ));
+    assert!(f.serve(&mut provider, None).is_err());
     for n in 0..33 {
         f.edit(n);
     }
+    f.prepare(&mut provider);
     let path = f.file();
     let before = std::fs::read(&path).unwrap();
     let first = f.page(&mut provider, None);

@@ -8,6 +8,42 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 3, prepared registry page sources (2026-09-08).** The existing page adapter now
+  reuses a verified read-only source instead of replaying its entire saved history per request.
+  Begin captures authenticated bytes under current store/server custody; the opaque job rebuilds
+  off-executor without those borrows or authority keys; finish rechecks current membership,
+  runtime/mount, job generation and exact saved record under reacquired custody. Four process-wide
+  slots cover captured/queued/running/retained work through cancellation and remount. Page service
+  rereads the full authenticated record, including gate/book, so same-log receipt faults invalidate
+  old content. Cold/stale service requires explicit local preparation; it never silently rebuilds
+  or emits a wire Restart on that basis. Refresh preserves cursor MACs and frozen-prefix progress.
+  No formats, deadlines, P1 guarantees, mutation caches or UI source changed.
+
+  Six new regressions cover explicit cold preparation, continuation after append/refresh,
+  same-log receipt Fault and missing/oversized/corrupt sources, changed source during rebuild,
+  detached saves and superseded completions, and cancellation/remount/retention accounting.
+  Existing real joined-member page/seed/receive tests now explicitly prepare before serving.
+  The warm-path regression checks both explicit worker count and the old full-load entry point.
+  Required suites passed: `cargo test --all --all-features` (420 app, 160 replication, 220 sync
+  unit tests plus integration/doc suites), native Cargo tests (197), frontend tests (1144),
+  `cargo fmt --all -- --check`, Clippy all targets/features with `-D warnings`, the Git Bash
+  ambient-dependency gate, and diff checks. Existing ignored tests are unchanged. Actual-diff
+  adversarial review found two Low issues (test precision and stale roadmap wording), both fixed;
+  re-review reports no remaining Blocker/High/Medium/Low. All 14 focused page tests passed again
+  after the test-only counter fix. No native/UI source changed; no frontend build or screenshot
+  was needed.
+
+  All four isolated release probes passed. The dense 8,002-op source measured 12,658 ms for
+  explicit preparation and 42/36/45 ms for the three warm pages (previously roughly 11 seconds
+  per page). This is a 96-op sample, not complete catch-up or a worst-case latency guarantee;
+  cold rebuild and maximal-seed/projection coverage remain separate. Full numbers and caveats
+  are in `P1-PERFORMANCE.md`.
+
+  **Next remains gate 3 runtime integration:** drive these split jobs outside actor/vault locks,
+  recheck native lifecycle/snapshot custody on attachment, and connect automatic Studio exchange,
+  catch-up/discovery and remote events. This is a serving prerequisite, not automatic collaboration
+  or complete Studio checkpoint installation. Keep the existing exchange/store/receipt paths.
+
 - **Flipnote gate 3, cooperative saved-operation exchange (2026-09-08, `dda1fad`).**
   `catcoms_app::studio_exchange` connects already-saved Index/art operations to the existing
   encrypted gossip/one-shot transport and accounted Studio receive store. Two actual members

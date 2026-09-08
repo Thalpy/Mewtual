@@ -33,6 +33,9 @@ mod epoch_intents;
 mod epoch_owner;
 mod epoch_recovery;
 mod epoch_registry;
+#[cfg(test)]
+pub(crate) use epoch_registry::registry_full_loads_for_test;
+pub(crate) use epoch_registry::{RegistrySourceCapture, RegistrySourceStamp};
 mod epoch_studio;
 pub use creative_references::{CreativeReferences, MAX_CREATIVE_REFERENCES};
 pub use epoch_intents::{EpochIntentBudget, EpochIntentState, MAX_VAULT_INTENT_BYTES};

@@ -336,6 +336,21 @@ fn measure(case: &str, build: impl FnOnce(&mut Source), clock: &dyn Clock, max_p
     let mut provider = server
         .begin_registry_page_provider(&store, SERVER, bucket)
         .unwrap();
+    let (_, prepare_ms) = timed(clock, || {
+        let job = server
+            .begin_registry_page_preparation(&store, &mut provider)
+            .unwrap()
+            .unwrap();
+        let result = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(job.rebuild())
+            .unwrap();
+        server
+            .finish_registry_page_preparation(&store, &mut provider, result)
+            .unwrap();
+    });
+    println!("P1_PROFILE case={case} source_prepare_ms={prepare_ms}");
     let mut cursor: Option<RegistryPageCursor> = None;
     let mut seen = BTreeSet::new();
     if let Some(seed) = seed {

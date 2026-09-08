@@ -9,9 +9,12 @@ async fn prepare(pair: &mut Pair) -> (ServerRegistryWatch, ServerRegistryPagePro
         .watch_registry_epoch(&pair.alice_store, SERVER, pair.key.bucket())
         .unwrap();
     pair.alice.flush_registry_subscriptions().await.unwrap();
-    let provider = pair
+    let mut provider = pair
         .alice
         .begin_registry_page_provider(&pair.alice_store, SERVER, pair.key.bucket())
+        .unwrap();
+    crate::registry_catchup::prepare_test_source(&mut pair.alice, &pair.alice_store, &mut provider)
+        .await
         .unwrap();
     let peer = pair.alice.local_peer();
     let (proof, tick) = tokio::join!(

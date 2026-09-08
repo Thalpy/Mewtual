@@ -36,7 +36,7 @@ for unrelated document types. Tests and review accompany each slice, not only ga
 |---|---|---|
 | 1. Typed Flipnote documents | Rust StudioIndex/Flipnote domain-op validation, deterministic projection, conflict/Restore data and exact checkpoint preflight; frame, byte, sfx and patch caps. Unsupported linked-score behavior stays unavailable until gate 6, never silently accepted. | Tests exercise valid edits, malformed/cross-document operations, both concurrent delivery orders and cap boundaries through the real P1 gate. |
 | 2. Durable one-device Save/Load | **Index/art milestone implemented:** accounted vault/lifecycle ownership, native commands, real PIX CIDs, sealed intents, conservative source/seed/recovery reference protection and three-state expiry. Extend these same seams to actual sound/export records in gate 6. No UI edits. | Actor/native create/edit/restart/reopen uses real CIDs. Failure cases preserve durable state. Fileshare unlisting/upload cleanup cannot delete referenced pixels; full scans/restart include superseded seed/history, pending intents and retained/staged recovery. Open edits remain provisional. |
-| 3. Two-member collaboration and joining | **Cooperative saved-operation send/receive implemented** for Index/art. Still: automatic runtime catch-up/gossip, keyed discovery/seed installation and remote events. Fence whole-server snapshots and cancellation/authority changes; add bounded off-executor source preparation/reuse before automatic serving. | Two members must exchange edits automatically; a newcomer must find epoch-0 and prepared rotated objects by logical key. Explicit send/durable-receive/reopen now passes, but it does not close scheduling, joining or accepted-size latency evidence. |
+| 3. Two-member collaboration and joining | **Cooperative saved-operation send/receive implemented** for Index/art; explicit bounded registry source preparation/reuse is now available. Still: runtime ownership/driving, automatic catch-up/gossip, keyed discovery/Studio seed installation and remote events. Fence whole-server snapshots and cancellation/authority changes. | Two members must exchange edits automatically; a newcomer must find epoch-0 and prepared rotated objects by logical key. Explicit send/durable-receive/reopen and warm registry page serving pass, but do not close scheduling, joining or all accepted-size latency evidence. |
 | 4. Rotation and recovery in the running app | Drive owner receipts without needing another member's query; atomic sealing, recovery-first settlement, own-intent replay, owner succession, fault/repair and recovery actions/events for the active types. | Production-adapter scenarios cover rotation, restart, owner offline/return, excluded edits, Restore/Copy/Export, storage exhaustion and staged-snapshot warnings. No pruning before the receipt and durable recovery barriers. |
 | 5. Collaborative frame claims | Required full-identity signalling and shared channel admission; bounded capability/session-bound claim, Ask and Pass messages with receiver-observed expiry. No game/avatar path or standalone drawing feature. | Two members observe advisory claim/Ask/Pass/expiry; collision, replay and disconnect tests pass. Claims never become edit locks. |
 | 6. Sound and export | Linked-score typed operations/preflight/recovery, sfx/emoji patch sources, 64-patch union, deterministic valid-take export and byte-exact `.pixa` publication with durable export records. Cover the specified local GIF export contract without taking over UI design. | No-score and linked-score golden vectors, maximal accepted exports and malformed/over-cap rejection pass; exported bytes can be read back and validated. Playback-facing contracts preserve Deafen and membership teardown. |
@@ -98,11 +98,11 @@ Paths below use `rep/` = `crates/catcoms-replication/src/`, `app/` = `crates/cat
 | Receipt-bound settlement and recovery-first installation / 4 | `a09eb1e`, `6d55c25`, `9bc9ec4` | [rep/registry_epoch/settlement.rs](../crates/catcoms-replication/src/registry_epoch/settlement.rs), [app/store/epoch_registry/recovery.rs](../crates/catcoms-app/src/store/epoch_registry/recovery.rs), [app/store/epoch_registry/installation.rs](../crates/catcoms-app/src/store/epoch_registry/installation.rs) | Explicit registry settlement saves recovery before replacement and retires only covered intents. Automatic Studio settlement/actions remain gate 4. |
 | Durable replay and one-shot publication / 3-4 | `0d053dc`, `eea698d`, `cd6270e`, `fc508f1` | [app/store/epoch_registry/replay.rs](../crates/catcoms-app/src/store/epoch_registry/replay.rs), [app/registry_replay.rs](../crates/catcoms-app/src/registry_replay.rs), [sync/registry_publication.rs](../crates/catcoms-sync/src/registry_publication.rs), [transport.rs](../crates/catcoms-rt/src/transport.rs) | Checked saved-intent replay and driver-acknowledged send exist. Caller still owns scheduling/lifecycle; send admission is not delivery or settlement. |
 | Watched registry gossip / 3 | `fc777ef` | [app/registry_ingress.rs](../crates/catcoms-app/src/registry_ingress.rs), [sync/registry_ingress.rs](../crates/catcoms-sync/src/registry_ingress.rs) | Opt-in authenticated receive with durable admission. Not automatic Studio gossip. |
-| Paged catch-up and durable receiver continuation / 3 | `cce0528`, `81fb91b`, `3a8928c` | [rep/registry_epoch/catchup.rs](../crates/catcoms-replication/src/registry_epoch/catchup.rs), [app/registry_catchup.rs](../crates/catcoms-app/src/registry_catchup.rs), [sync/registry_catchup.rs](../crates/catcoms-sync/src/registry_catchup.rs) | Bound cursors, authenticated exchanges and save-before-advance exist for registry. Automatic serving still needs bounded off-executor source reuse and authority/version fences. |
+| Paged catch-up and durable receiver continuation / 3 | `cce0528`, `81fb91b`, `3a8928c` | [rep/registry_epoch/catchup.rs](../crates/catcoms-replication/src/registry_epoch/catchup.rs), [app/registry_catchup.rs](../crates/catcoms-app/src/registry_catchup.rs), [sync/registry_catchup.rs](../crates/catcoms-sync/src/registry_catchup.rs) | Bound cursors, authenticated exchanges and save-before-advance exist for registry. Explicit bounded source preparation/reuse now supplies version/authority fences; runtime driving remains. |
 | Observed tenure, keyed receipt heads and expected-hash seed fetch / 3-4 | `1cb161b`, `4084c50`, `2a40b2b` | [sync/owner_tenure.rs](../crates/catcoms-sync/src/owner_tenure.rs), [app/registry_head.rs](../crates/catcoms-app/src/registry_head.rs), [app/registry_seed.rs](../crates/catcoms-app/src/registry_seed.rs) | Cooperative authenticated registry discovery exists; fetching alone installs nothing. Reuse the checked handles, not raw proof fields, for runtime joining. |
 | Recovery-first adoption of discovered registry checkpoints / 3-4 | `a765bdb`, `9f779d1` | [rep/registry_epoch/adoption.rs](../crates/catcoms-replication/src/registry_epoch/adoption.rs), [app/store/epoch_registry/adoption.rs](../crates/catcoms-app/src/store/epoch_registry/adoption.rs), [app/registry_seed.rs](../crates/catcoms-app/src/registry_seed.rs) | Explicit installer preserves the source and recovery before replacement. Studio installation and automatic newcomer orchestration remain open. |
 | Owner rotation and reply-handoff completion / 4 | `fd2943f`, `022bbc9` | [app/store/epoch_registry/owner.rs](../crates/catcoms-app/src/store/epoch_registry/owner.rs), [app/store/epoch_owner.rs](../crates/catcoms-app/src/store/epoch_owner.rs), [app/registry_head.rs](../crates/catcoms-app/src/registry_head.rs) | Durable exact owner decisions and checked reply-channel completion exist. Quiet/solo progress and Studio orchestration remain; handoff is not remote delivery. |
-| Measured restore-query optimization / 3 | `c6092c1` (probe), `db979dd` | [rep/doc.rs](../crates/catcoms-replication/src/doc.rs), [rep/registry.rs](../crates/catcoms-replication/src/registry.rs), [app/store/epoch_registry/tests/performance.rs](../crates/catcoms-app/src/store/epoch_registry/tests/performance.rs) | Redundant history queries were removed without relaxing checks. Dense saved-source service still exceeds deadlines: reuse the [measurements](P1-PERFORMANCE.md), not a claim that latency is solved. |
+| Measured restore-query optimization / 3 | `c6092c1` (probe), `db979dd` | [rep/doc.rs](../crates/catcoms-replication/src/doc.rs), [rep/registry.rs](../crates/catcoms-replication/src/registry.rs), [app/store/epoch_registry/tests/performance.rs](../crates/catcoms-app/src/store/epoch_registry/tests/performance.rs) | Redundant history queries were removed without relaxing checks. Before source reuse, dense service exceeded deadlines; reuse the [cold/warm measurements](P1-PERFORMANCE.md), not a claim that every accepted shape's latency is solved. |
 
 ### Flipnote-specific work already integrated
 
@@ -116,7 +116,7 @@ Paths below use `rep/` = `crates/catcoms-replication/src/`, `app/` = `crates/cat
 | Accounted Index/art vault Save/Reopen / 2 | `7fbd683` | [rep/studio/epoch.rs](../crates/catcoms-replication/src/studio/epoch.rs), [app/store/epoch_studio.rs](../crates/catcoms-app/src/store/epoch_studio.rs) | Complete signed sources, sealed intents, exact retries, five-family inventory and restart exist. Reuse this owned source rather than a parallel persistence format. |
 | Actor/native local Save/Reopen and local events / 2 | `1a0ad9d` | [app/studio.rs](../crates/catcoms-app/src/studio.rs), [app/actor.rs](../crates/catcoms-app/src/actor.rs), [native/studio.rs](../apps/desktop/src-tauri/src/studio.rs) | Five Studio commands, lifecycle custody and real PIX save/restart tests exist. Local/provisional results are not shared edits; UI adaptation is user-owned. |
 | Reference protection at existing cache deletion paths / 2 | `bf1b64b` | [rep/studio/references.rs](../crates/catcoms-replication/src/studio/references.rs), [app/store/creative_references.rs](../crates/catcoms-app/src/store/creative_references.rs), [app/store/epoch_recovery/inventory.rs](../crates/catcoms-app/src/store/epoch_recovery/inventory.rs) | Saved art, seed/history, intents and retained/staged recovery hold their pixels. Reuse the shared guard/enumerator; expiry enforcement and actual export-record coverage are not included. |
-| Cooperative saved-operation exchange / 3 | `dda1fad` | [app/studio_exchange.rs](../crates/catcoms-app/src/studio_exchange.rs), [sync/studio_exchange.rs](../crates/catcoms-sync/src/studio_exchange.rs), [two-member tests](../crates/catcoms-app/src/studio_exchange/tests.rs) | Saved-only own send, bounded authenticated watches/inbox and durable typed receive work in both directions, including reopen. Automatic runtime scheduling/source reuse, catch-up/discovery and remote UI events remain open. |
+| Cooperative saved-operation exchange / 3 | `dda1fad` | [app/studio_exchange.rs](../crates/catcoms-app/src/studio_exchange.rs), [sync/studio_exchange.rs](../crates/catcoms-sync/src/studio_exchange.rs), [two-member tests](../crates/catcoms-app/src/studio_exchange/tests.rs) | Saved-only own send, bounded authenticated watches/inbox and durable typed receive work in both directions, including reopen. Automatic runtime scheduling, Studio source ownership, catch-up/discovery and remote UI events remain open. |
 
 ### Keeping this ledger useful
 
@@ -198,10 +198,16 @@ missing dependencies, stale watches/mounts, cancellation and a receipt arriving 
 Only already-saved own operations can be sent; this is not another local edit/publication path.
 There is no automatic scheduler, remote UI event or implicit blob fetch. The detailed API/bounds
 are in [INTERFACES](INTERFACES.md#studio-operation-exchange-gate-3-cooperative-indexart-adapter).
-**Next implementation target: gate 3's bounded off-executor source ownership/reuse and runtime
-driving, then automatic catch-up/discovery and remote events.** Reuse the tested exchange adapters;
-do not rebuild their inbox, saved-only send or persistence path. The dense-source latency blocker
-still applies; neither a new deadline nor inline heavy work is an acceptable scheduling fix.
+Gate 3 also has split registry source preparation: capture authenticated bytes, rebuild on a
+worker without store/Server borrows, then install only if runtime/mount/member/job generation and
+exact saved record still match. Four process-wide slots include cancelled workers and retained
+results. Warm pages recheck the full saved record without replaying it; cold/stale pages require
+local preparation. Receipt faults invalidate caches even when the source operations are unchanged.
+**Next implementation target: gate 3 runtime driving using these existing split jobs and exchange
+adapters, then automatic catch-up/discovery and remote events.** Do not rebuild their inbox,
+saved-only send, persistence or preparation paths. No automatic service may hold actor/vault
+locks through reconstruction. The [performance report](P1-PERFORMANCE.md) separates cold
+preparation from warm serving; neither larger deadlines nor skipped validation are used.
 The one-device art Save/Reopen/reference-protection milestone is now implemented. Sound/export
 writers and their actual record coverage remain gate 6, not another prerequisite to art progress.
 The user-owned frontend must adapt these documented results instead of the fixture's numeric-only
@@ -212,8 +218,9 @@ the actor. They publish/fetch immutable bytes, not a Studio document. `studio-st
 uses an in-memory object/blob map and placeholder CIDs; the new native commands provide the
 durable Index/art replacement, but the frontend has not been switched over. P1 has tested protocol/store and cooperative
 registry discovery/settlement adapters, but not automatic production orchestration for Studio.
-The latest saved-source probes still show about 11 seconds for a dense registry page, beyond
-the current request deadlines. This is an integration blocker, not completed performance work.
+The earlier dense probe spent about 11 seconds rebuilding each source per page. That work now
+belongs to explicit preparation, not each warm page; runtime integration and broader accepted-size
+measurements remain separate from the cache primitive.
 HANDOVER and `P1-PERFORMANCE.md` retain the individual commits' evidence.
 
 ## P1 foundation inventory (not the active delivery order)
@@ -253,10 +260,10 @@ all managed types are broad-design backlog; the seven gates above close only Fli
       or an exact-incarnation fence: an older asynchronously captured snapshot must not overwrite
       newer P1 MLS/tenure evidence. The separate store mutex alone does not establish this ordering.
       Release source profiling is recorded in `P1-PERFORMANCE.md`: indexed restore queries improve
-      byte-heavy pages, but a valid 8,002-small-op source still takes roughly 11 seconds per saved
-      page (baseline about 13), exceeding request deadlines. Bounded off-executor reconstruction
-      and source reuse need version/authority fences before automatic scheduling; fixed memory/rate
-      caps alone do not prove latency. This prerequisite remains open.
+      byte-heavy pages; a valid 8,002-small-op source previously took roughly 11 seconds per saved
+      page (baseline about 13), exceeding request deadlines. Explicit bounded worker reconstruction
+      and source reuse now supply version/authority fences. Runtime driving remains open; cold
+      preparation and warm serving are measured separately, and slot/rate caps do not prove latency.
 - [ ] Owner receipt issuance, succession, fault/repair and settlement driven end to end.
       Explicit registry owner rotation now derives an eligible close/seed from its checked source,
       journals that exact close with the receipt, and seals/installs recovery-first under a durable

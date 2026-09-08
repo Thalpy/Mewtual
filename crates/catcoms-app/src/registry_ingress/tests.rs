@@ -243,6 +243,9 @@ async fn registry_page_network_serves_saved_history_to_an_actual_joined_member()
         .alice
         .begin_registry_page_provider(&pair.alice_store, SERVER, pair.key.bucket())
         .unwrap();
+    crate::registry_catchup::prepare_test_source(&mut pair.alice, &pair.alice_store, &mut provider)
+        .await
+        .unwrap();
     pair.alice.flush_registry_subscriptions().await.unwrap();
     // A normal transport-bound signed catch-up exchange proves the endpoint first. The page
     // query must not disclose registry metadata to an arbitrary invite/discovery candidate.

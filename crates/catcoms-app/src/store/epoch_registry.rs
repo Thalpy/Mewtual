@@ -26,6 +26,16 @@ use super::*;
 pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-registry-store/v1";
 const MAX_RECORD_BYTES: usize = MAX_REGISTRY_EPOCH_SNAPSHOT_BYTES + 1024;
 pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
+#[cfg(test)]
+thread_local! {
+    // Thread-local because warm page service is synchronous and unrelated fixtures run in
+    // parallel. Pin the old full-load entry point, not just the new explicit worker closure.
+    static FULL_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(crate) fn registry_full_loads_for_test() -> usize {
+    FULL_LOADS.get()
+}
 // Every accepted inner op fits a 256-KiB padding bucket, plus the authenticated length footer
 // and AEAD tag. Bound the public struct before SealedOp::open can allocate plaintext.
 const MAX_INBOUND_CIPHERTEXT: usize = MAX_SIGNED_EPOCH_OP_BYTES + 4 + 16;
@@ -33,8 +43,10 @@ const MAX_INBOUND_CIPHERTEXT: usize = MAX_SIGNED_EPOCH_OP_BYTES + 4 + 16;
 mod adoption;
 mod head;
 mod owner;
+mod page_source;
 pub use adoption::RegistryAdoptionOutcome;
 pub use owner::RegistryOwnerRotationOutcome;
+pub(crate) use page_source::{RegistrySourceCapture, RegistrySourceStamp};
 mod installation;
 mod pass;
 mod receive;
@@ -70,21 +82,6 @@ impl EpochRegistryState {
     ) -> catcoms_replication::registry_epoch::catchup::RegistryFrontier {
         self.unit.catchup_frontier()
     }
-    /// Read-only page from the already authenticated/rebuilt unit. The Server adapter checks
-    /// runtime/mount binding and request authority before loading this potentially large file.
-    pub(crate) fn catchup_page(
-        &self,
-        provider: &mut catcoms_replication::registry_epoch::catchup::RegistryPageProvider,
-        group: &ServerGroup,
-        device: &MlsDevice,
-        request: catcoms_replication::registry_epoch::catchup::RegistryPageRequest<'_>,
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<catcoms_replication::registry_epoch::catchup::RegistryPageOutcome, AppError> {
-        provider
-            .page(&self.unit, group, device, request, rng)
-            .map_err(invalid)
-    }
-
     /// Capture this id when preparing an edit; retries must keep it across rotations.
     pub fn doc_id(&self) -> u128 {
         self.unit.doc_id()
@@ -272,6 +269,8 @@ impl ServerStore {
         bucket: u8,
         device: &MlsDevice,
     ) -> Result<Option<EpochRegistryState>, AppError> {
+        #[cfg(test)]
+        FULL_LOADS.set(FULL_LOADS.get() + 1);
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
         self.read_registry_record(&scope)?

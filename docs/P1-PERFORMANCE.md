@@ -38,8 +38,14 @@ one process when comparing this metric. No unsafe allocator instrumentation is i
 - `detached_page_ms`: production provider work on an already restored source, including authority,
   dependency traversal and fresh current-MLS resealing. This is a comparison point, not an
   implemented source cache.
-- `full_path_ms`: actual app adapter, including its runtime/mount/request checks and saved-source
-  read/rebuild/provider path. Page zero is an initial request; later pages repeat the original
+- `source_prepare_ms`: explicit production capture, off-executor verified reconstruction and
+  checked attachment. No network request is held during preparation, and the split production
+  API owns no Server/store borrow during rebuild. The synchronous profiling harness alone
+  creates a Tokio runtime and waits for the detached job before proceeding.
+- `full_path_ms`: actual warm app adapter, including runtime/mount/request checks, bounded
+  source read/unseal/full-record fingerprint and prepared-provider path. Historical tables below
+  predate source reuse and include a full rebuild per page. Page zero is an initial request;
+  later pages repeat the original
   heads/seed and use the returned opaque cursor. Only three pages are sampled in large cases;
   `complete=false` explicitly means this is not full catch-up timing. A byte-heavy page may hold
   only one operation because the 512-KiB page cap includes sealed framing/padding.
@@ -130,3 +136,36 @@ These are runtime integration requirements, not a reason to remove validation or
 Automatic scheduling remains disabled. A worker holding the vault mutex through the whole rebuild
 could still block unrelated persistence. Runtime integration must separately preserve source-version
 checks, mount/server ownership, snapshot ordering, and complete single-owner storage accounting.
+
+## After explicit preparation and source reuse (2026-09-08)
+
+The production adapter now splits bounded vault capture, detached worker reconstruction, and
+checked attachment. Its read-only source uses the same restore checks; every warm page still
+reads/unseals/hashes the complete saved record and authorizes/reseals against current MLS state.
+No full restore occurs during serving. Cold/stale caches require explicit local preparation,
+not an extended request deadline. Four process-wide slots count captures, workers and retained
+results through cancellation/remount; neither authority keys nor store/Server borrows enter
+the worker. The runtime must drive those split jobs without holding actor/vault locks.
+
+The same four release probes were run separately after correctness tests/builds completed, on
+the same machine as above. Values are milliseconds. Each row is one observation, not a worst-case
+or statistical bound. Counts, signed bytes and saved file lengths match the historical tables.
+No process-memory sampling was performed for this run.
+
+| Case | Read + unseal | Standalone restore | Detached page | Explicit preparation | Warm full-path pages 0 / 1 / 2 |
+|---|---|---|---|---|---|
+| Byte-heavy, epoch 0 | 8 | 23 | 10 | 45 | 17 / 15 / 16 |
+| Small operations, epoch 0 | 8 | 11,427 | 33 | 12,658 | 42 / 36 / 45 |
+| 65 independent current-member roots | 1 | 14 | 1 | 15 | 1 / 1 / 1 |
+| Byte-heavy, receipted epoch 1 | 7 | 21 | 7 | 41 | 17 / 17 / 15 |
+
+The dense fixture still needs 186,178 ms to construct its 8,002 valid signed operations. Its
+12,658-ms explicit preparation is separate from the three 36–45-ms warm pages; it has not become
+a fast cold path. The warm sample delivers 96 operations, not the full history. The byte-heavy
+samples deliver three operations each; the wide case alone fully completes in these three pages.
+Existing always-run 33-op unrotated/seeded smoke tests still fully drain their continuations.
+
+**Decision:** reuse removes the measured per-page reconstruction bottleneck for these fixtures.
+It does not finish automatic catch-up, prove performance for maximal seeds/projections or measure
+durable mutation/settlement cost. Next is runtime ownership/driving of the existing split API,
+including native lifecycle and whole-server snapshot ordering—not another reconstruction path.

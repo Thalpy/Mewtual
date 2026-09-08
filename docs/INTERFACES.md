@@ -1837,14 +1837,28 @@ exact sync instance, physical mount, captured numeric server and bucket; it read
 document and subscribes no topic. Drop on runtime/mount replacement. This is not a native lock
 lease, a network request registration or an aggregate provider-count limit.
 
-`serve_registry_page(&ServerStore, &mut provider, RegistryPageRequest)` synchronously loads the
-checked source and returns `RegistryPageOutcome::{Page, Restart, CheckpointRequired,
+`begin_registry_page_preparation(&ServerStore, &mut provider)` captures bounded authenticated
+vault bytes and returns an optional opaque job. Release store/actor locks before awaiting
+`job.rebuild()` on a Tokio worker; reacquire current lifecycle custody and call
+`finish_registry_page_preparation(&ServerStore, &mut provider, result)` to attach it. No live
+MLS/device keys enter the worker. Four process-wide slots cover captures, queued/running workers,
+detached results and retained sources, including cancelled callers and remounts. Refresh drops
+the old cache first and supersedes earlier jobs; it preserves the provider's cursor MAC key.
+Actual absence returns None; capacity/corruption are errors. Attachment checks current membership,
+runtime/mount, preparation generation and the exact complete authenticated saved record.
+
+`serve_registry_page(&ServerStore, &mut provider, RegistryPageRequest)` reuses the prepared
+read-only source and returns `RegistryPageOutcome::{Page, Restart, CheckpointRequired,
 HistoricalAuthorizationRequired}` or an error. The request carries a full requester device id,
 concrete doc id, at most 64 strictly sorted unique initial heads, optional claimed verified seed
 hash and optional 81-byte opaque cursor. Runtime/mount and current local/requester membership,
 field caps, cursor HMAC and expiry are checked before source I/O. The current concrete id and
-seed match are checked after loading. Corruption errors, absence restarts; neither becomes a
-successful empty document. Fault refuses. Closing history may be read without opening its gate.
+seed match are checked against the prepared source. Each page rereads/unseals/hashes the bounded
+complete saved record, including receipt book and gate, without replaying history. Cold/stale/
+missing sources require explicit LOCAL preparation; they are errors, not wire Restart or empty
+success. Corruption also errors and drops the cache. Fault refuses. Closing history may be read
+without opening its gate. `has_prepared_source()` is local cache presence, not verified currency.
+The network adapter likewise never starts a rebuild; its caller prepares before consuming work.
 
 The low-level `RegistryPageProvider` uses HMAC-SHA256 over length-framed provider/requester,
 full group/logical/type/concrete scope, initial heads/seed and a version-1 cursor payload:
@@ -1885,8 +1899,8 @@ for measured costs rather than inferring latency from the byte cap.
 Historical authority transfer and automatic receiver scheduling remain unwired. Cooperative durable
 receive, keyed head/seed exchange and explicit registry installation are described below.
 
-The direct trusted-local page API imposes no aggregate call-rate limit. One call rebuilds at most
-the bounded saved epoch, then walks its bounded change index/ancestor sets. It grants no delivery
+The direct trusted-local page API imposes no aggregate call-rate limit. One prepared call rereads
+the bounded saved record, then walks its bounded change index/ancestor sets. It grants no delivery
 acknowledgement, intent retirement, saved mutation or finality. Network callers use the adapter below.
 
 ### Independently observed owner tenure
