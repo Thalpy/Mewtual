@@ -303,6 +303,29 @@ a tombstone wins over any insertion of the same id, scalars project by Automerge
 concurrent-put rule with other values shown as conflicts, and delivery order never changes a
 projection. Restore adds and never overwrites; conflicts are shown, not resolved silently.
 
+**Rust index representation (gate 1, read-only so far).** The logical root above is a view,
+not nested Automerge map allocation. Physical root headers are `v`, `kind`, `channel` (the
+16-byte channel key as lowercase hex) and `epoch`. Insertion candidates live at
+`i/<object-id>/<derived-op-id>` and deletions at `d/<object-id>/<derived-op-id>`, both immutable
+within the epoch. `t/<object-id>` and `e/<object-id>` are mutable title/expiry registers. A record
+is a byte scalar containing byte `1`, the full 32-byte author, then the existing encoded
+`DomainOp`; its operation must match the property, and its id is recomputed. `_p1/op/<id>`
+markers are the existing constant `Uint(1)` values. Deletions retain each author's provenance.
+Creations do not write mutable registers: the smallest insertion id supplies initial values,
+then an explicit title/expiry register takes precedence, even if another insertion arrives late.
+Every live concurrent value is checked; exact duplicate records collapse, but one operation id
+with different bytes rejects. A mutable field with no insertion rejects. Tombstones hide all
+insertions of the same id. The first 64 nondeleted object ids are visible; overflow and deleted
+objects retain their live values/conflicts for recovery rather than disappearing from the view.
+
+The reader checks 128,192 primitive operations before `get_all` and bounds visible key/value
+bytes at 6 MiB (the existing 4 MiB content plus 2 MiB seed allowances). These are defensive
+reader limits, not encoded-checkpoint preflight or signed-log accounting. Signed causal delta
+validation must still authenticate provenance, prevent rewriting immutable properties or deleting
+evidence, check same-property predecessors and causal target existence, and invoke exact seed
+preflight before any live write or ingest. Checkpoint and typed recovery encodings remain a later
+gate-1 substep; this representation enables neither production Save/Load nor receipt verification.
+
 **What the studio requires of P1**, so a change to P1 that breaks one of these is caught here:
 
 1. Bounded retained state per logical document and per server, with a preflight admission

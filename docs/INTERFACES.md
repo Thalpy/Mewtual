@@ -456,7 +456,7 @@ pub struct CheckpointOrigin; // logical scope, epoch, close and seed hashes reta
 // Both checked P1 paths preflight the prospective materialization before gate admission/state swap:
 EncryptedDoc::edit_domain_preflight_gated(..., typed_change_validator, projection_preflight);
 EncryptedDoc::ingest_domain_preflight_gated(..., typed_change_validator, projection_preflight);
-// catcoms_replication::studio (static operation schema only; NOT a gated document consumer yet):
+// catcoms_replication::studio (codecs + read-only index projection; NOT a gated consumer yet):
 pub enum IndexOp;       // put_object, tombstone_object, set_title, set_expiry
   encode() -> Result<Vec<u8>>; decode(canonical_body) -> Result<Self>;
   decode_domain(&LogicalDocument, &DomainOp, verified_outer_author:&DeviceId) -> Result<Self>;
@@ -466,10 +466,21 @@ pub enum FlipnoteOp;    // frame, sfx, patch, export and discriminated header op
 pub enum StudioExpiry { Unrecorded, Never, At(u64) } // absent / null / integer; zero is At(0)
 pub struct StudioPatch; // private validated jam descriptor plus the existing SHA-256 identity
   new(&serde_json::Value) -> Result<Self>; id() -> [u8;32]; value() -> &serde_json::Value;
+studio_index_document(server_id:&[u8], channel:[u8;16]) -> Result<LogicalDocument>;
+pub struct StudioIndexProjection; // objects (64), overflow, deleted_objects, tombstones with sources
+  read(&LogicalDocument, epoch:u64, &AutoCommit) -> Result<Self>; document() -> &LogicalDocument;
+pub struct IndexEntry; // creations sorted by op id, mutable title/expiry IndexRegisters
+pub struct IndexRegister<T>; // selected IndexValue<T> + concurrent conflicts sorted by op id
+pub struct IndexValue<T>; // value + IndexSource (derived op id, asserted full author, nonce)
+pub struct IndexCreation; // kind/title/created_by/ts/three-state expiry, before any mutable writes
+// Index record provenance is internally consistent, not independently authenticated. Read checks
+// every live concurrent value and returns all deletion/overflow evidence, but cannot detect hidden
+// historical deletion/forgery by inspecting current state alone. It is not an admission callback.
 // JSON integers must be JS-safe and nonnegative where applicable; frame/export bytes are
 // declarations, not proof of a blob. Expected server/type/root-kind and verified outer author
 // come from the caller's authenticated context. Decoding checks no Automerge delta, aggregate
-// state, receipt or persistence barrier; the live Studio consumer remains unavailable.
+// state, receipt or persistence barrier; exact Studio checkpoint preflight and the live consumer
+// remain unavailable. No bridge projection serialization or Studio command is added by this API.
 // catcoms_replication::registry (first typed consumer; no automatic settlement yet):
 pub struct PointerKey;        // type + bounded logical key; deterministic bucket()
 pub enum RegistryOp { Put { key:PointerKey, epoch:u64 }, Tombstone { key:PointerKey } }

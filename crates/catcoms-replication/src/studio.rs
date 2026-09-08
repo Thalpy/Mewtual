@@ -1,7 +1,7 @@
-//! Typed Studio operation bodies shared by future local edits, ingest and durable intents.
+//! Typed Studio operations and read-only index state for future edits, ingest and durable intents.
 //!
 //! This is the schema boundary, NOT document admission: decoding proves neither authorship nor
-//! that an Automerge delta implements this operation. The Studio materializer must additionally
+//! that an Automerge delta implements this operation. The live Studio consumer must additionally
 //! check causal mutations, element existence/conflicts, aggregate caps and the exact next seed
 //! through P1's gated preflight before any edit can be published. No live path is enabled here.
 //! Physical document ids, group membership and receipt authority remain P1's responsibility.
@@ -16,6 +16,11 @@ use crate::{DomainOp, LogicalDocument, ReplError};
 
 mod patch;
 pub use patch::StudioPatch;
+mod index;
+pub use index::{
+    studio_index_document, IndexCreation, IndexEntry, IndexRegister, IndexSource, IndexValue,
+    StudioIndexProjection, MAX_INDEX_OBJECTS,
+};
 #[cfg(test)]
 mod tests;
 

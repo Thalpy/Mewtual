@@ -32,8 +32,14 @@ Studio's first Rust schema layer (`catcoms_replication::studio`) decodes the clo
 FlipnoteOp bodies, preserving stable element ids and the frontend's canonical JSON bytes.
 Contextual decoding checks the whole P1 envelope and expected type/key; Index creation additionally
 binds `created_by` to a caller-supplied, independently verified full author. This decoder grants
-no membership, causal-mutation, storage or publication authority. Studio projection/delta validators
-and exact checkpoint preflight remain necessary before enabling any live edit or ingest path.
+no membership, causal-mutation, storage or publication authority. The first read-only projection
+is StudioIndex: flat immutable insertion/deletion records retain full provenance and mutable
+title/expiry registers use Automerge's actual winner with all concurrent alternatives retained.
+The smallest insertion op id wins a same-object collision; the first 64 live object ids are
+visible, with explicit overflow and deleted content kept for later typed recovery. Every live
+root value is checked, including losing headers; primitive and value-byte limits bound the reader.
+This projection grants no authenticity to its records. Flipnote projection, Studio causal delta
+validators and exact checkpoint preflight remain necessary before any live edit or ingest path.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
 even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.

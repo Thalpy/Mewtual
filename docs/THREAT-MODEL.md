@@ -587,6 +587,15 @@ table with the commit that closed it.
   Shared vectors pin valid Unicode-scalar titles, safe JSON integers, lowercase fixed-size ids,
   FileExpiry's three states and the existing declaration-order jam patch hash. Schema checking
   does not make a declared frame length or an indexed creator claim authenticated by itself.
+  The read-only StudioIndex projection additionally checks scope against every live root value,
+  recomputes record operation ids, rejects visible nonce/body equivocation, preserves insertion
+  conflicts and removal provenance, and counts losing/deleted/over-cap content in its reader
+  budget. It bounds already-parsed CRDT work (128,192 primitive ops, 6 MiB of visible keys/values),
+  not wire parsing or retained signed history. Its asserted authors are still untrusted until
+  the future delta validator binds them to signed changes or a receipt-verified checkpoint.
+  It cannot prove an immutable record was never causally overwritten, that a rename saw its
+  target at the author's frontier, or that a missing tombstone was never deleted. No live Studio
+  admission is enabled, and no checkpoint-size or typed recovery completeness claim is added.
   Vault restoration tests dependency and duplicate presence using metadata from Automerge's
   applied graph, not a saved or peer-asserted index; unresolved queued changes do not count.
   It can use indexed current-view reads only when an authenticated change's

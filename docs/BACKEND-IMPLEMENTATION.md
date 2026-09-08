@@ -49,6 +49,7 @@ Gate 1 substeps (not extra product gates):
 
 - [x] Static IndexOp/FlipnoteOp body codec, complete-envelope checks and shared frontend vectors.
 - [ ] Deterministic Studio projections with stable ids, ordering, conflict and deletion evidence.
+      StudioIndex now has a read-only Automerge projection; Flipnote's frame timeline is next.
 - [ ] Causal Automerge-change validation and aggregate admission through the actual P1 gate.
 - [ ] Exact checkpoint-size preflight and typed checkpoint/recovery representation.
 
@@ -64,8 +65,13 @@ micro-optimization alone is not a reason to postpone Studio integration.
 Gate 1 now has the static Rust `studio::IndexOp`/`FlipnoteOp` codec: the closed operation set,
 complete-envelope bounds/scope, full-identity creator binding and validated jam patch hashes.
 Shared Rust/TypeScript byte vectors pin canonical encoding and three-state expiry. This is a
-schema substep only: no Studio delta validator, projection builder, checkpoint preflight or live
-write path is installed. Those are the next gate-1 work; none of the seven gates is closed.
+schema substep only. The subsequent read-only `studio::StudioIndexProjection` now materializes
+the channel's object list from actual Automerge state: stable-id ordering, smallest-op-id
+creation conflicts, Automerge rename/expiry winners, provenance-bearing tombstones, and explicit
+overflow beyond 64 visible objects. It checks all live concurrent values, including hidden and
+deleted content, and has primitive/byte reader bounds. This does not authenticate record claims.
+Flipnote's frame projection, signed causal delta validation, exact checkpoint/recovery encoding
+and P1 preflight remain gate-1 work. No Studio live write path is installed and no gate is closed.
 The fixture's numeric-only expiry view still needs an explicit absent/null/timestamp adapter at
 gate 2; zero remains a timestamp and must never be used as a Never sentinel.
 

@@ -8,6 +8,54 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 1, read-only StudioIndex projection (2026-09-08; verified).**
+  `studio::StudioIndexProjection` reads the channel's object list from actual Automerge state.
+  It keeps immutable insertion candidates by derived operation id, chooses the smallest for
+  a same-object collision, uses Automerge's actual mutable title/expiry winner, and retains all
+  live alternatives with full asserted author/nonce provenance. Deletions retain provenance too
+  and win over every insertion of their id. The first 64 live object ids are visible; overflow
+  and deleted objects remain explicit evidence rather than disappearing at the display cap.
+  Every concurrent header/record is checked, including hidden values. Reader limits bound
+  primitives and visible key/value bytes, separately from future signed-log/seed preflight.
+
+  Twenty focused Studio tests pass (11 new index tests). Actual-diff adversarial review found
+  one Medium: deleting all root keys made historical epoch-zero state look pristine. The reader
+  now also requires zero primitive operations and zero changes for the empty-root exception;
+  committed delete-all regressions cover headers alone and content plus markers. Re-review has
+  no remaining findings. The earlier boolean-tombstone design was changed before completion to
+  retain operation-id/full-author evidence needed by later recovery encoding.
+
+  Capacity tests use real CRDTs and a private lower-limit seam for exact/one-below byte and
+  primitive accounting, with the production 6 MiB inclusive/overflow arithmetic pinned
+  separately. The initial multi-MiB fixture run was stopped because construction was slow;
+  public reader limits are unchanged. These tests do not claim a maximal Studio checkpoint or
+  gated edit has been accepted.
+
+  Final verification passed:
+
+  - `cargo test -p catcoms-replication studio::` (20 passed)
+  - `cargo test --all --all-features` (app 380 passed / 8 existing ignored; replication 106;
+    sync 214; all workspace integration/doc suites passed; other existing ignored tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1144 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check` and staged diff checks
+
+  No runtime or test bytes changed after that verification. No frontend/native source changed,
+  so frontend static/build, native `cargo check` and visual screenshots were not required.
+  This slice is locally committed only; destination approval for pushing remains outstanding.
+
+  This remains a read-only core slice. No authenticated Studio delta validator, Flipnote frame
+  projection, checkpoint/recovery encoder, actor command, native binding or UI is added.
+  Assertions in index records are not authenticated by materialization; future signed-delta
+  validation must verify authorship, causal target existence, immutable writes and predecessors.
+  Gate 1 and all seven delivery gates remain open. Next is the Flipnote frame projection, then
+  causal admission and exact checkpoint/recovery preflight; production Save/Load is still gate 2.
+  Games/avatar and UI implementation remain untouched. The release workflow/documentation
+  changes in the worktree belong to the user and are excluded from this slice.
+
 - **Flipnote gate 1, operation-schema substep (2026-09-08; verified).**
   `catcoms_replication::studio` adds closed IndexOp/FlipnoteOp codecs, complete DomainOp size
   and target checks, full verified-creator binding, safe integer/identifier/header bounds,
