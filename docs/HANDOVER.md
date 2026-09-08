@@ -8,7 +8,7 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
-- **Flipnote gate 3, bounded automatic receive and remote events (2026-09-09).** Ordinary native
+- **Flipnote gate 3, bounded automatic receive and remote events (2026-09-09, `4a6c3a7`).** Ordinary native
   Read/Create/Apply now installs checked recent-target watches; same-watch reuse preserves queued
   packets and eviction explicitly revokes within the existing 16-watch rail. Reconciliation shares
   the existing two-second aggregate send deadline. One coalesced boolean drives one supervised

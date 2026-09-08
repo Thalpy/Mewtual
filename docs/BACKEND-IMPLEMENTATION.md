@@ -72,7 +72,7 @@ micro-optimization alone is not a reason to postpone Studio integration.
 
 ## Completed-work ledger: reuse before adding
 
-Audited against this branch's committed history through `cafb221` (2026-09-08). This groups
+Audited against this branch's committed history through `4a6c3a7` (2026-09-09). This groups
 the P1/Flipnote `feat` and `perf` commits from `57e51ad` onward, plus the original P1 commit
 `a67e284` and the performance probe. It is not a repository-wide release changelog: unrelated
 voice, files, release and user-owned UI work is not marked as Flipnote progress. Commit subjects
@@ -119,6 +119,7 @@ Paths below use `rep/` = `crates/catcoms-replication/src/`, `app/` = `crates/cat
 | Reference protection at existing cache deletion paths / 2 | `bf1b64b` | [rep/studio/references.rs](../crates/catcoms-replication/src/studio/references.rs), [app/store/creative_references.rs](../crates/catcoms-app/src/store/creative_references.rs), [app/store/epoch_recovery/inventory.rs](../crates/catcoms-app/src/store/epoch_recovery/inventory.rs) | Saved art, seed/history, intents and retained/staged recovery hold their pixels. Reuse the shared guard/enumerator; expiry enforcement and actual export-record coverage are not included. |
 | Cooperative saved-operation exchange / 3 | `dda1fad` | [app/studio_exchange.rs](../crates/catcoms-app/src/studio_exchange.rs), [sync/studio_exchange.rs](../crates/catcoms-sync/src/studio_exchange.rs), [two-member tests](../crates/catcoms-app/src/studio_exchange/tests.rs) | Saved-only own send, bounded authenticated watches/inbox and durable typed receive work in both directions, including reopen. Automatic runtime scheduling, Studio source ownership, catch-up/discovery and remote UI events remain open. |
 | Initial publication from ordinary actor/native Save / 3 | `cafb221` | [app/studio/publication.rs](../crates/catcoms-app/src/studio/publication.rs), [app/studio.rs](../crates/catcoms-app/src/studio.rs), [app/actor.rs](../crates/catcoms-app/src/actor.rs), [native/studio.rs](../apps/desktop/src-tauri/src/studio.rs), [actor Save regressions](../crates/catcoms-app/src/studio_exchange/tests/actor_save.rs) | Successful Create/Apply retains at most two actual store-returned packets and attempts existing one-shot publication under the same native/source custody and one aggregate two-second budget. Local Save survives send refusal/cancellation. No duplicate save or outbox; automatic watched receive, remote events, retry/catch-up and newcomer discovery remain open. |
+| Bounded automatic receive and remote updates / 3 | `4a6c3a7` | [app/studio/receiver.rs](../crates/catcoms-app/src/studio/receiver.rs), [native/studio.rs](../apps/desktop/src-tauri/src/studio.rs), [app/actor.rs](../crates/catcoms-app/src/actor.rs), [inventory.rs](../crates/catcoms-app/src/store/epoch_recovery/inventory.rs), [native two-member regressions](../apps/desktop/src-tauri/src/studio/tests/receiver.rs) | Recent-target watches, one paced native worker, same Ready/lease/typed ingest and incarnation-fenced remote events now work through ordinary commands. Existing inventory gains a conservative LOCAL 256 KiB automatic rail and fail-closed pause, not a lower document cap. Larger-vault reuse, missed-packet retry/catch-up and keyed discovery remain; do not rebuild this inbox or coordinator. |
 
 ### Keeping this ledger useful
 
