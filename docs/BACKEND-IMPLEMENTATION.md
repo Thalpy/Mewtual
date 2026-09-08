@@ -45,6 +45,13 @@ Gate 3 can test discovery against an explicitly prepared receipted fixture; auto
 production closes only at gate 4. Gate 5 supplies the reviewed identity/channel prerequisites
 before collaborative claims ship; art persistence need not wait for the whole C4 Draw product.
 
+Gate 1 substeps (not extra product gates):
+
+- [x] Static IndexOp/FlipnoteOp body codec, complete-envelope checks and shared frontend vectors.
+- [ ] Deterministic Studio projections with stable ids, ordering, conflict and deletion evidence.
+- [ ] Causal Automerge-change validation and aggregate admission through the actual P1 gate.
+- [ ] Exact checkpoint-size preflight and typed checkpoint/recovery representation.
+
 Progress reports name the gate, the observable behavior proved, tests/review evidence and the
 remaining blocker. The older 25%/65% figures are retired: they estimated broad foundations,
 not usable Flipnote integration or time remaining. Do not replace them with a new guessed figure.
@@ -53,6 +60,14 @@ performance/refactor slice must identify the failing gate and the acceptance evi
 micro-optimization alone is not a reason to postpone Studio integration.
 
 ## Current evidence
+
+Gate 1 now has the static Rust `studio::IndexOp`/`FlipnoteOp` codec: the closed operation set,
+complete-envelope bounds/scope, full-identity creator binding and validated jam patch hashes.
+Shared Rust/TypeScript byte vectors pin canonical encoding and three-state expiry. This is a
+schema substep only: no Studio delta validator, projection builder, checkpoint preflight or live
+write path is installed. Those are the next gate-1 work; none of the seven gates is closed.
+The fixture's numeric-only expiry view still needs an explicit absent/null/timestamp adapter at
+gate 2; zero remains a timestamp and must never be used as a Never sentinel.
 
 At `db979dd` on `Create-suite-2`, native `publish_pix` and `request_blob_bounded` are wired through
 the actor. They publish/fetch immutable bytes, not a Studio document. `studio-store.ts` still

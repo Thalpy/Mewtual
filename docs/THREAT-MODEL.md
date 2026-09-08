@@ -579,6 +579,14 @@ table with the commit that closed it.
   their causal root property; an allowed header write cannot hide a seed's protected slot through
   a cross-key predecessor. Typed Studio validators must provide equivalent semantic checks when
   implemented; generic callbacks are not an authorization policy by themselves.
+  The new Studio body codecs enforce static operation grammar, complete envelope size and
+  expected type/key; a `put_object` creator must match the supplied full verified author.
+  They are not installed as live admission callbacks: no proof of membership, group binding,
+  causal delta equivalence, aggregate projection caps, blob availability or persistence follows
+  from decoding. Production writes remain unavailable until those boundaries are implemented.
+  Shared vectors pin valid Unicode-scalar titles, safe JSON integers, lowercase fixed-size ids,
+  FileExpiry's three states and the existing declaration-order jam patch hash. Schema checking
+  does not make a declared frame length or an indexed creator claim authenticated by itself.
   Vault restoration tests dependency and duplicate presence using metadata from Automerge's
   applied graph, not a saved or peer-asserted index; unresolved queued changes do not count.
   It can use indexed current-view reads only when an authenticated change's

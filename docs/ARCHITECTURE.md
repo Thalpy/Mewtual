@@ -28,6 +28,16 @@ promotion and flush; publishing a Studio reference remains a later operation. P1
 Automerge or sync: it adds permission to retire their retained history into owner-receipted,
 verifiable checkpoints with bounded recovery. Existing snapshots alone do not provide that.
 
+Studio's first Rust schema layer (`catcoms_replication::studio`) decodes the closed IndexOp and
+FlipnoteOp bodies, preserving stable element ids and the frontend's canonical JSON bytes.
+Contextual decoding checks the whole P1 envelope and expected type/key; Index creation additionally
+binds `created_by` to a caller-supplied, independently verified full author. This decoder grants
+no membership, causal-mutation, storage or publication authority. Studio projection/delta validators
+and exact checkpoint preflight remain necessary before enabling any live edit or ingest path.
+Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
+Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
+even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.
+
 P1 owner authority now also has independent local tenure evidence in the MLS synchronizer.
 Locally founded epoch zero is known; Welcome joins and legacy snapshots are Unknown. Every
 applied owner-changing MLS transition records its resulting epoch, including Adds into recycled

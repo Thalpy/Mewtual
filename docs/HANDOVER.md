@@ -8,6 +8,43 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 1, operation-schema substep (2026-09-08; verified).**
+  `catcoms_replication::studio` adds closed IndexOp/FlipnoteOp codecs, complete DomainOp size
+  and target checks, full verified-creator binding, safe integer/identifier/header bounds,
+  three-state expiry and immutable validated jam patch recipes. Twenty-four shared byte vectors
+  exercise the actual TypeScript canonical serializer and jam hash alongside Rust roundtrips.
+  The design review caught the fixture's numeric expiry mismatch; the Rust contract preserves
+  absent/null/timestamp, with no sentinel-zero reinterpretation. That fixture/view adapter is
+  explicit gate-2 work, not an implied UI change in this slice.
+
+  Nine focused Rust tests and four frontend compatibility tests pass. Actual-diff adversarial
+  review and re-review have no remaining findings: its two Low coverage gaps were fixed with
+  syntactically valid deep JSON and 18 shared patch range vectors exercised by both languages.
+  No Studio materializer, causal change validator, exact checkpoint preflight, persistence
+  adapter or production write path is added;
+  gate 1 remains open. Next is that stateful gate-1 materializer/admission work, not another P1
+  platform refactor. Games/avatar and UI implementation remain untouched.
+
+  Final verification passed (including the added review regressions):
+
+  - `cargo test -p catcoms-replication studio::` (9 passed)
+  - `node --experimental-strip-types --test apps/desktop/src/studio-wire.test.ts` (4 passed)
+  - `cargo test --all --all-features` (app 380 passed / 8 existing ignored; replication 95;
+    sync 214; workspace integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1144 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `npm.cmd --prefix apps/desktop run check` (0 errors/warnings)
+  - `npm.cmd --prefix apps/desktop run build` (passed; large-bundle advisory remains)
+  - `git diff --check` and staged diff checks
+
+  No implementation/test bytes changed after that final verification. No native or UI source
+  changed, so separate native `cargo check` and visual screenshots were not required. This slice
+  is locally committed only; destination approval for pushing remains outstanding. The user's
+  release workflow and release documentation edits were preserved and excluded from the commit.
+
 - **Flipnote scope reset (2026-09-08).** The user paused games and asked to focus on Flipnote.
   Game-only avatar consent/profile changes are paused; the wider Creative Suite backlog is not
   the current completion target. `BACKEND-IMPLEMENTATION.md` now defines seven delivery gates:

@@ -456,7 +456,21 @@ pub struct CheckpointOrigin; // logical scope, epoch, close and seed hashes reta
 // Both checked P1 paths preflight the prospective materialization before gate admission/state swap:
 EncryptedDoc::edit_domain_preflight_gated(..., typed_change_validator, projection_preflight);
 EncryptedDoc::ingest_domain_preflight_gated(..., typed_change_validator, projection_preflight);
-// catcoms_replication::registry (first typed consumer; no sync discovery or automatic settlement yet):
+// catcoms_replication::studio (static operation schema only; NOT a gated document consumer yet):
+pub enum IndexOp;       // put_object, tombstone_object, set_title, set_expiry
+  encode() -> Result<Vec<u8>>; decode(canonical_body) -> Result<Self>;
+  decode_domain(&LogicalDocument, &DomainOp, verified_outer_author:&DeviceId) -> Result<Self>;
+pub enum FlipnoteOp;    // frame, sfx, patch, export and discriminated header operations
+  encode() -> Result<Vec<u8>>; decode(canonical_body) -> Result<Self>;
+  decode_domain(&LogicalDocument, &DomainOp) -> Result<Self>;
+pub enum StudioExpiry { Unrecorded, Never, At(u64) } // absent / null / integer; zero is At(0)
+pub struct StudioPatch; // private validated jam descriptor plus the existing SHA-256 identity
+  new(&serde_json::Value) -> Result<Self>; id() -> [u8;32]; value() -> &serde_json::Value;
+// JSON integers must be JS-safe and nonnegative where applicable; frame/export bytes are
+// declarations, not proof of a blob. Expected server/type/root-kind and verified outer author
+// come from the caller's authenticated context. Decoding checks no Automerge delta, aggregate
+// state, receipt or persistence barrier; the live Studio consumer remains unavailable.
+// catcoms_replication::registry (first typed consumer; no automatic settlement yet):
 pub struct PointerKey;        // type + bounded logical key; deterministic bucket()
 pub enum RegistryOp { Put { key:PointerKey, epoch:u64 }, Tombstone { key:PointerKey } }
 pub struct RegistryProjection; // admitted pointers, explicit overflow and tombstones

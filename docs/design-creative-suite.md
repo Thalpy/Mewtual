@@ -83,9 +83,13 @@ Every hash in this document is `H(domain, part1, part2, ...)` = SHA-256 over the
 of, for each part in order, a 4-byte big-endian length followed by the part's bytes. `domain` is
 an ASCII string. String parts are UTF-8 with no normalization unless stated. Integers are
 8-byte big-endian. Identities are the 32 raw device-id bytes. "Canonical JSON" means the
-serialization the jam patch validator already uses: object keys sorted by UTF-16 code unit, no
-whitespace, integers only, strings escaped per RFC 8259 in the shortest form. Every derivation
-ships a golden vector in the slice that introduces it. P1 uses the same conventions.
+Studio serialization: object keys sorted by UTF-16 code unit, no whitespace, integers only,
+strings escaped per RFC 8259 in the shortest form. Studio text contains valid Unicode scalars
+(lone surrogate escapes reject); integers crossing JSON are within JavaScript's safe range.
+Existing jam patch identities are a named exception: the jam validator hashes its reconstructed
+declaration-order JSON, not sorted keys. Embedding that recipe in a sorted Studio body does not
+change its hash. Shared Rust/TypeScript vectors pin both representations. Every derivation
+ships a golden vector in the slice that introduces it. P1 uses the framed-hash conventions above.
 
 ### 2.1 `pix:v1` is a byte-exact binary format decoded by our own code
 
@@ -374,6 +378,12 @@ pins the rest until deleted). Replacement is a new record plus `deleted` on the 
 **Expiry is recorded now, enforced later**, on studio objects, exports, announcement replies and
 chat doodle attachments (`{cid, bytes, expiry}`), using `FileExpiry` three-state semantics from
 the backend `Clock`.
+
+In Studio operation JSON, omitted `expiry` means Unrecorded, `null` means Never, and a
+nonnegative safe integer means At(that absolute millisecond timestamp). Zero is At(0), not
+Never. `set_expiry` with the field absent explicitly clears recorded expiry metadata. The Rust
+operation codec preserves all three. The in-memory frontend fixture still has a numeric-only
+view; gate-2 integration must adapt it explicitly before claiming production Save/Load.
 
 **`flipnote:v1` root**, in a `StudioObject` document:
 
@@ -764,7 +774,7 @@ reason to wait for every P1 consumer before implementing the missing Studio type
 | P1 durable storage | Implemented/tested: recovery/owner receipt saves, vault-wide intent cap, four-family inventory/cleanup, durable edits, included-only intent retirement and registry installation barriers | Sole coordinator, other managed document families, remaining recovery actions and full-capacity settlement integration |
 | P1 network and application integration | Cooperative saved-intent sender, opt-in gossip, bounded durable page receive, keyed owner-head/expected-seed exchange and registry installation followed by fresh catch-up | Historical-authority/repair-record transfer, aggregate scheduling, native lifecycle ownership, actor/bridge events and production acceptance tests |
 | C0c immutable blob seam | Native `publish_pix` and `request_blob_bounded` wired through actor and sync; PIX1 validator, bounded cache/dedup/response checks and tests | Owner's frontend invocation and creative reference enumeration/retention; game-only profile result and consented-avatar work is paused |
-| Creative backend contracts | Stable document tags exist; Studio-specific materializers are not implemented | C0 publication/identity work, C3a/C5a domain operations, score/flipnote schemas and export paths |
+| Creative backend contracts | Stable document tags and static Rust IndexOp/FlipnoteOp codecs exist; no Studio materializer or live admission path | Gate-1 causal delta validation, projections and exact checkpoint preflight, then the remaining active Flipnote gates; broader C3 work is deferred |
 | Usable collaborative Studio | Not connected end to end | Shared save/load, publication, claims, settlement/recovery actions and export integrated with the owner's UI |
 
 **UI work that can proceed now:** the canonical editor shell, local canvas tools, palette/theme
