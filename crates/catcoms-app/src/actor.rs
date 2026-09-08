@@ -230,7 +230,8 @@ impl EventSink {
 pub enum AppCommand {
     /// No vault guard may be queued. The dedicated Ready/lease exchange starts only in this arm.
     Studio {
-        request: crate::studio::StudioRequest,
+        /// None drives one authenticated inbox packet; it accepts no renderer packet/scope.
+        request: Option<crate::studio::StudioRequest>,
         ready: oneshot::Sender<crate::studio::StudioReady>,
     },
     /// Store an immutable PIX blob; no Studio metadata is changed. Cancellation also owns the
@@ -971,13 +972,17 @@ impl ChannelChange {
 /// An event from a running server actor to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
-    /// A local durable Studio transaction finished. Invalidate the channel's Index on EVERY
-    /// event, plus the named object when present: Create changes both. Remote updates arrive
-    /// in a later sync slice. An errored/partial Create must be reread by its initiating caller.
+    /// A local transaction or newly accepted remote Studio edit crossed its persistence barrier.
+    /// Invalidate the channel Index and named object. Duplicate/quarantined packets emit nothing.
+    /// An errored/partial Create must be reread by its initiating caller.
     StudioUpdated {
         channel: u128,
         object: Option<[u8; 16]>,
     },
+    /// Background Studio receive hit an admission/source/storage/work refusal (including missing
+    /// dependencies). Explicit successful Studio access retries it; inbound traffic alone does
+    /// not. Neither local corruption nor a receipt/settlement fault is implied.
+    StudioReceivePaused,
     /// The shared channel directory changed; the UI should re-fetch it (`channels`).
     ChannelsUpdated,
     /// A channel's rendered content changed; the UI should re-fetch it (`messages`). Using
@@ -1046,6 +1051,7 @@ pub enum AppEvent {
 #[derive(Debug, Clone)]
 pub struct ServerActor {
     cmd_tx: CommandSender,
+    studio_pending: tokio::sync::watch::Receiver<bool>,
 }
 
 impl ServerActor {
@@ -1056,6 +1062,21 @@ impl ServerActor {
         request: crate::studio::StudioRequest,
     ) -> Result<crate::studio::StudioReady, String> {
         request.validate().map_err(|e| e.to_string())?;
+        self.studio_ready(Some(request)).await
+    }
+    /// Trusted native coordinator only. The same Ready lease is required; no packet or target
+    /// may be supplied. Empty inboxes do no disk work. This is not a renderer command.
+    pub async fn studio_receive_begin(&self) -> Result<crate::studio::StudioReady, String> {
+        self.studio_ready(None).await
+    }
+    /// Coalesced scheduling hint with no content; the actor closing terminates its receiver.
+    pub fn studio_pending(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.studio_pending.clone()
+    }
+    async fn studio_ready(
+        &self,
+        request: Option<crate::studio::StudioRequest>,
+    ) -> Result<crate::studio::StudioReady, String> {
         let (ready, rx) = oneshot::channel();
         self.cmd_tx
             .send(AppCommand::Studio { request, ready })
@@ -1075,6 +1096,7 @@ impl ServerActor {
     /// in flight without either adopting the other's trace.
     pub fn with_trace(&self, trace: u64) -> ServerActor {
         ServerActor {
+            studio_pending: self.studio_pending.clone(),
             cmd_tx: CommandSender {
                 tx: self.cmd_tx.tx.clone(),
                 trace: Trace(trace),
@@ -3343,7 +3365,9 @@ where
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Envelope>(64);
     let (raw_events, event_rx) = mpsc::channel::<TracedEvent>(256);
     let event_tx = EventSink::new(raw_events);
+    let (studio_signal, studio_pending) = tokio::sync::watch::channel(false);
     let handle = tokio::spawn(async move {
+        let mut studio_receiver = crate::studio::StudioReceiver::default();
         // Per open channel: a content signature of its messages, topic and jukebox (see
         // `channel_delta`), so an edit/delete/add all surface a `ChannelUpdated` that says which
         // of the three it was.
@@ -3450,6 +3474,7 @@ where
         let mut delivery_dirty = HashSet::new();
         let mut file_transfers = file_transfers::FileTransfers::new();
         loop {
+            studio_receiver.signal(&server, &studio_signal);
             let delivery_clock = server.runtime_clock();
             let delivery_delay =
                 next_delivery_delay(delivery_clock.monotonic_ms(), &delivery, &delivery_dirty);
@@ -3894,8 +3919,6 @@ where
                         let _ = reply.send(res);
                     }
                     Some(AppCommand::Studio { request, ready }) => {
-                        let target = request.target();
-                        let changed = request.changes_state();
                         let (lease_tx, lease_rx) = oneshot::channel::<crate::studio::StudioVaultLease>();
                         let (reply, result) = oneshot::channel();
                         if ready.send(crate::studio::StudioReady { lease: lease_tx, result }).is_err() { continue; }
@@ -3915,29 +3938,33 @@ where
                             let mut lease = lease;
                             let cancelled = lease.is_cancelled();
                             let result = match lease.store.as_mut() {
-                                Some(store) if !reply.is_closed() && !cancelled => server.studio_transaction_with_publication(store, lease.server, request).map_err(|e| e.to_string()),
+                                Some(store) if !reply.is_closed() && !cancelled => studio_receiver.run(&mut server, store, lease.server, request).map_err(|e| e.to_string()),
                                 _ => Err("Studio request cancelled or vault closed".into()),
                             };
-                            (server, lease, reply, result)
+                            (server, studio_receiver, lease, reply, result)
                         }).await;
-                        let (returned, mut lease, mut reply, result) = match worked {
+                        let (returned, returned_receiver, mut lease, mut reply, result) = match worked {
                             Ok(value) => value,
                             Err(_) => { tracing::error!("Studio worker panicked; stopping actor with unavailable state"); return; }
                         };
                         server = returned;
-                        let result = match result {
-                            Ok(saved) => Ok(server.publish_studio_save(&mut lease, &mut reply, saved).await),
-                            Err(error) => Err(error),
+                        studio_receiver = returned_receiver;
+                        let (result, updated) = match result {
+                            Ok((saved, updated)) => (Ok(server.publish_studio_save(&mut lease, &mut reply, saved).await), updated),
+                            Err(error) => (Err(error), None),
                         };
                         // Keep custody through the bounded initial send, but never through replies
                         // or bounded event backpressure. A send result cannot change Save success.
                         drop(lease);
-                        let notify = changed && result.is_ok();
+                        studio_receiver.signal(&server, &studio_signal);
                         let _ = reply.send(result);
-                        if notify {
+                        if let Some(target) = updated {
                             let object = match target { catcoms_replication::studio::StudioTarget::Index { .. } => None,
                                 catcoms_replication::studio::StudioTarget::Flipnote { object, .. } => Some(object) };
                             let _ = event_tx.send(AppEvent::StudioUpdated { channel: u128::from_be_bytes(target.channel()), object }).await;
+                        }
+                        if studio_receiver.take_pause_notice() {
+                            let _ = event_tx.send(AppEvent::StudioReceivePaused).await;
                         }
                     }
                     Some(AppCommand::PublishPix { bytes, cancellation, reply }) => {
@@ -4700,6 +4727,7 @@ where
                 // reader would go on to trust.
                 cont = server.sync_once() => { event_tx.idle(); match cont {
                     Ok(true) => {
+                        studio_receiver.signal(&server, &studio_signal);
                         if server.has_pending_reciprocal() {
                             server.drive_pending_reciprocal().await;
                         }
@@ -4903,6 +4931,7 @@ where
     });
     (
         ServerActor {
+            studio_pending,
             cmd_tx: CommandSender {
                 tx: cmd_tx,
                 trace: Trace::NONE,
@@ -5618,6 +5647,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         let actor = ServerActor {
+            studio_pending: tokio::sync::watch::channel(false).1,
             cmd_tx: CommandSender {
                 tx,
                 trace: Trace::NONE,

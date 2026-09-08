@@ -13,6 +13,8 @@ use tokio::sync::{oneshot, OwnedMutexGuard};
 
 mod publication;
 pub(crate) use publication::StudioSavedTransaction;
+mod receiver;
+pub(crate) use receiver::StudioReceiver;
 
 /// Bounded before entering the actor queue. Bodies are the existing canonical Studio JSON,
 /// not renderer-authored Automerge changes. Keep ids/nonces/bodies stable across retries.
@@ -492,7 +494,21 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             })?;
         // A partial Create or failed final read returns Err above: none of its temporary packets
         // escape for automatic publication. Already saved local content/intents remain retryable.
-        Ok(StudioSavedTransaction { view, packets })
+        let mut observed: Vec<_> = packets.iter().map(|p| (p.target, p.epoch_id)).collect();
+        if observed.is_empty() {
+            let logical = target.document(&self.group_id()).map_err(invalid)?;
+            observed.push((
+                target,
+                view.as_ref()
+                    .map(|v| v.epoch_id)
+                    .unwrap_or_else(|| epoch_zero_id(logical.doc_type, &logical.logical_key)),
+            ));
+        }
+        Ok(StudioSavedTransaction {
+            view,
+            packets,
+            observed,
+        })
     }
 }
 fn invalid(error: impl std::fmt::Display) -> AppError {

@@ -798,10 +798,14 @@ Sources contain full `author:hex64`, `opId:hex64`, `nonce:hex32`; frame sources 
 Tombstone maps contain source arrays. This is not the fixture store's flattened root format.
 
 `AppEvent::StudioUpdated {channel, object}` forwards as `studio-updated` with
-`{server, channel:decimalString, object:hex32|null}` after a successful local mutation; null means
+`{server, channel:decimalString, object:hex32|null}` after a successful local mutation or newly
+Accepted remote edit's durable barrier; null means
 Index-only. **Every event invalidates that channel's Index**, and a non-null object additionally
-invalidates that object: Create changes both, without emitting two events. This is not yet a
-remote-change or settlement notification.
+invalidates that object: local Create changes both without emitting two events. Remote Create
+records arrive independently, so their two events have no cross-document order guarantee.
+Duplicates, quarantine and failed ingest emit no update. This is not a settlement notification.
+The bridge fences both Studio event types below against the original server incarnation and
+current unlocked UI generation through synchronous emission.
 
 Internally `ServerActor::studio_begin(StudioRequest) -> StudioReady` uses a bounded queue with
 no vault guard. The actor's Ready lease window is five injected-clock seconds; expiry is checked
@@ -833,8 +837,38 @@ operation. Transport admission may already have happened; cancellation does not 
 escaped. Residual lower-driver work uses existing transport slots after the native lease drops.
 
 Two Create sends are not remote atomicity or discovery: a peer not yet watching the object can
-miss its first packet. Automatic receive, remote events, catch-up/discovery and reconnect retries
-remain unwired. This is initial send integration, not complete shared Studio.
+miss its first packet. Catch-up/discovery and reconnect retries remain unwired. Automatic recent
+target receive is now integrated below, with a conservative small-vault service rail.
+
+Successful Read/Create/Apply retains checked source descriptors in an actor-owned, 16-target
+recent-use watch set. Create watches both object and Index. Read of an absent object watches only
+its deterministic epoch zero; it does not create a file or infer a remote current epoch. Same
+logical target/mount/epoch reuse preserves its queue; replacement/eviction explicitly unwatches.
+Subscription reconciliation shares the existing aggregate two-second send deadline; failure
+does not undo a local Save or claim subscription/delivery success. Read publishes no content.
+
+`ServerActor::studio_pending()` is a coalesced boolean scheduling hint, not a UI event or authority.
+One supervised native worker per exact installed actor drives `studio_receive_begin()` through
+the SAME Ready/lease/four-slot/cancellation path. The event consumer never waits for this work.
+Each pass selects one queued watch round-robin, verifies current mount/channel/member/MLS before
+disk work, scans the existing five-family inventory, saves the current server snapshot, then
+calls the existing durable receive adapter. No locks survive into reply/event awaits or pacing.
+The minimum delay between completed attempts and the next attempt is one injected-clock second;
+pending false/true churn cannot bypass it. Locked/busy native custody retains queued packets.
+
+Automatic inventory has a LOCAL service rail of 1024 visited directory entries, 64 P1 records
+and 256 KiB aggregate authenticated record bytes, checked before record reads/reconstruction.
+It covers the whole mounted vault, including unrelated registry records. An incomplete inventory
+never authorizes a write. Scan/snapshot/ingest failure pauses background receive until successful
+explicit Studio access; new traffic cannot restart it. Pre-drain failure retains the packet;
+an ingest error may already have consumed it. `studio-receive-paused` carries `{server}` once on
+that transition; UI should warn and offer explicit reopen/retry, not call it a settlement fault
+or proof of local corruption. Authenticated missing-dependency/causal-invalid input can also pause.
+This warning event still needs the user-owned UI listener; it is not a persistent UI status query.
+The existing document/wire caps and manual Save are unchanged. Larger-vault automatic receive
+still needs safe inventory/source reuse. These are work bounds, not a latency guarantee; one
+packet can still require bounded typed reconstruction. No pixels are fetched, no delivery ack
+is emitted and no intent is retired. Existing event backpressure can still stall the actor.
 
 ### Studio operation exchange (gate 3, cooperative Index/art adapter)
 
@@ -875,13 +909,15 @@ Current full local/author membership and MLS are checked at enqueue and again be
 grandfather routing topics do not authorize old-MLS ciphertext. Signature/body checks do not
 prove the frame root's channel: the existing typed durable gate does that before source creation.
 
-These are **cooperative backend calls, not new actor/native commands or automatic sharing**.
+These remain **cooperative backend calls**; the native runtime above now drives initial send
+and bounded recent-target receive through them.
 Callers must retain exclusive Server/store plus native persistence/UI/incarnation custody across
-the send await. Source restoration/persistence is synchronous and not latency-qualified; it needs
-bounded off-executor ownership/source reuse before automatic scheduling. Rotation requires a new
+the send await. Source restoration/persistence is synchronous and not latency-qualified;
+larger-vault automatic service still requires safe inventory/source reuse and measured evidence.
+Rotation requires a new
 checked watch; receipt/seed discovery and checkpoint installation are not supplied by these calls.
-Dropped traffic needs explicit saved-op retry or future catch-up. No pixels are auto-fetched, no
-receipt is produced, and no remote `studio-updated` or settlement event is emitted yet. The native
+Dropped traffic needs explicit saved-op retry or future catch-up. No pixels are auto-fetched and no
+receipt or settlement event is produced. The native
 Save result stays `publication: "local"`; UI adapters and canonical rendering remain user-owned.
 
 ### Creative blob seam (C0c, independent of Studio/P1 metadata)

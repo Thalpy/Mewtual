@@ -8,6 +8,55 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 3, bounded automatic receive and remote events (2026-09-09).** Ordinary native
+  Read/Create/Apply now installs checked recent-target watches; same-watch reuse preserves queued
+  packets and eviction explicitly revokes within the existing 16-watch rail. Reconciliation shares
+  the existing two-second aggregate send deadline. One coalesced boolean drives one supervised
+  native receiver per exact actor incarnation, through the same Ready/lease/four-slot/cancellation
+  path as Save. No event consumer awaits the actor. Each paced pass admits at most one packet,
+  rechecking current mount/channel/member/MLS before disk work, persisting the current server
+  snapshot before typed ingest. Only Accepted durable remote edits emit `studio-updated`.
+  Studio events retain UI/incarnation fences through emission; delayed old-actor events cannot
+  invalidate a replacement numeric server. Duplicate/quarantined/failed packets emit no edit event.
+
+  **Explicit limitation:** automatic inventory reuses the existing complete scanner with LOCAL
+  limits of 1024 visited entries, 64 records and 256 KiB aggregate authenticated P1 record bytes
+  across the whole mounted vault. Limits reject before oversized reconstruction, never admit a
+  partial inventory. Admission/source/storage/work failure pauses until successful explicit
+  Studio access; new traffic cannot restart a failed scan. `studio-receive-paused` is bridged
+  once on transition and is not a settlement fault or proof of corruption. Its UI listener remains
+  user-owned. Manual Save/document caps are unchanged. Large-vault inventory reuse, retry/catch-up
+  and newcomer discovery remain Gate 3; this slice does not close it or promise accepted-size
+  latency. No pixels are auto-fetched, receipts produced or intents retired.
+
+  Focused regressions cover real native two-member Create/PIX Apply, automatic receive/update
+  events, edit-back and restart; unchanged-true and false-to-true pacing; old-incarnation/locked
+  events and receive; same-watch queue retention, duplicate suppression, mount replacement,
+  recent-watch eviction, oversized unrelated-record refusal before authentication and a held
+  failure that only explicit access retries. Sync precheck covers valid queue preservation and
+  stale-MLS removal. The implementation extends the existing inbox/store/snapshot/lease, not
+  another P1 protocol or persistence owner. UI source and canonical mockups remain untouched.
+
+  Design review's automatic-scan amplification finding drove the lower automatic-work rail and
+  fail-closed pause, without removing any validation. Pre-I/O current context checks, pacing and
+  incarnation-fenced emission address its other findings. Actual-diff review found no remaining
+  Blocker/High/Medium; Low pacing-test precision and stale contract wording were fixed and
+  re-reviewed. Remaining focused test follow-up: exercise channel-directory removal through the
+  app adapter; the pre-I/O check exists and stale-mount/current-MLS regressions pass.
+
+  Verification passed: `cargo test --all --all-features` (433 app and 221 sync unit tests,
+  plus the other workspace integration/doc suites),
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (200),
+  `npm.cmd --prefix apps/desktop test` (1144), root and native `cargo fmt -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, native `cargo check`,
+  `bash scripts/check-no-ambient.sh` through Git Bash, and diff checks. The final eight-test
+  native Studio module and full native suite passed again after pacing-test strengthening.
+  Existing ignored tests are unchanged. No frontend build/screenshot was needed (UI unchanged).
+
+  **Next:** safe larger-vault inventory/source reuse for this receiver, then missed-packet
+  retry/catch-up and keyed newcomer discovery. Reuse the ledger's existing paths; do not lift
+  the automatic rail before evidence supports the resulting background work.
+
 - **Flipnote gate 3, initial publication from normal Save (2026-09-08, `cafb221`).** Successful native/actor
   Apply and Create now automatically attempt one-shot publication of their actual store-returned
   packets. The private batch is at most two packets and leaves the worker only after complete

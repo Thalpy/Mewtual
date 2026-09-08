@@ -217,6 +217,29 @@ fn studio_inbox_rechecks_mls_full_author_logical_scope_and_topic() {
         .is_err());
 }
 
+#[test]
+fn studio_receive_precheck_preserves_valid_queue_and_consumes_stale_mls() {
+    let (mut node, _, source, _, sealed, _) = setup();
+    let topic = node
+        .channel_topic_for(sealed.doc_type, sealed.doc_id, 0)
+        .unwrap();
+    let watch = node.watch_studio(target(), source.doc_id()).unwrap();
+    assert!(!node.check_studio_inbound(&watch).unwrap());
+    node.on_studio_gossip(&topic, &sealed.encode());
+    assert!(node.studio_has_inbound(&watch));
+    assert!(node.check_studio_inbound(&watch).unwrap());
+    assert_eq!(node.studio_exchange.queue.len(), 1);
+    let stranger = MlsDevice::generate().unwrap();
+    node.group
+        .add_member(&node.device, stranger.key_package().unwrap())
+        .unwrap();
+    assert!(node.check_studio_inbound(&watch).is_err());
+    assert!(!node.studio_has_inbound(&watch));
+    assert!(node.studio_exchange.queue.is_empty());
+    node.unwatch_studio(&watch).unwrap();
+    assert!(node.check_studio_inbound(&watch).is_err());
+}
+
 #[tokio::test]
 async fn studio_sender_rejects_wrong_packets_and_uses_one_shot_current_route() {
     let (mut node, observer, source, _, sealed, _) = setup();

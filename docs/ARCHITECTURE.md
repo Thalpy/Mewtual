@@ -113,10 +113,10 @@ but the existing accounted Studio store remains the only durable admission path.
 watch identity excludes channel aliases and retains full-author rate debt across replacement.
 Saved-only send matches the entire own operation in the current source before exact retry and
 resealing; it cannot become another edit path bypassing native Save's PIX/snapshot ordering.
-Server adapters bind channel, source, mount and current membership. These are cooperative
-calls with two-member persistence tests, not automatic actor scheduling, catch-up, discovery,
-source reuse or remote UI events. Synchronous reconstruction and native lifecycle custody still
-need integration before live background use; current native Save remains local/provisional.
+Server adapters bind channel, source, mount and current membership. These low-level cooperative
+calls provide no scheduler, catch-up or discovery themselves. The bounded native runtime below
+now supplies scheduling/custody and remote events; larger-source reuse and joining remain open.
+Native Save remains local/provisional.
 Initial publication is now integrated into that existing Save arm. Its private bounded batch
 contains only the packets returned by successful durable edits, exposed after the final view
 read; partial Create errors expose no batch. The worker returns the sole Server and lease, and
@@ -124,8 +124,20 @@ the actor keeps the same native/source custody through at most two one-shot atte
 two-second injected-clock deadline. No duplicate save/reseal pass is performed for this initial
 send. Native cancellation/operation accounting follow the actual worker/lease; interruption or
 send failure cannot retire an intent or undo Save. Guards drop before reply/event backpressure.
-The response remains a local/provisional acknowledgement, not a delivery claim. Automatic receive,
-watch/discovery management and retry scheduling remain separate Gate 3 integration work.
+The response remains a local/provisional acknowledgement, not a delivery claim.
+Successful access now installs at most 16 recent-target watches from the already-checked source
+descriptors; same-watch reuse preserves queued traffic, eviction revokes it. Reconciliation shares
+the existing two-second network wait budget. An independent coalesced boolean wakes one native
+receiver per exact actor incarnation, never through an actor-awaiting event consumer. One packet
+per paced pass gets the same Ready/lease/off-executor custody as Save. Current watch/mount/channel
+and membership/MLS are rechecked before disk work; snapshot persistence precedes typed ingest.
+Only newly Accepted durable edits emit remote StudioUpdated; events recheck native incarnation.
+The initial automatic inventory uses the existing scanner with local limits (1024 directory
+entries, 64 records, 256 KiB authenticated bytes), rejecting before oversized reconstruction.
+Failures pause until successful explicit Studio access and emit StudioReceivePaused; peer traffic
+cannot repeatedly trigger a failed scan. This is not a reduced document cap or completed large-
+vault collaboration: safe inventory/source reuse, discovery and retry/catch-up remain Gate 3.
+No new persistence, finality, blob fetch or UI implementation is introduced.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
 even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.

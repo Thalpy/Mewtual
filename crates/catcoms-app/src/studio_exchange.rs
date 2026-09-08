@@ -13,10 +13,10 @@ use std::sync::Arc;
 /// Scope is captured, not supplied again at drain. Dropping this handle alone does not revoke
 /// its desired transport subscription; explicitly unwatch before replacing lifecycle custody.
 pub struct ServerStudioWatch {
-    inner: StudioWatch,
-    mount: Arc<()>,
-    server: u64,
-    target: StudioTarget,
+    pub(crate) inner: StudioWatch,
+    pub(crate) mount: Arc<()>,
+    pub(crate) server: u64,
+    pub(crate) target: StudioTarget,
 }
 impl std::fmt::Debug for ServerStudioWatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -130,6 +130,102 @@ fn authorize(
     ))
 }
 
+/// One supervised receiver per installed actor, not one task per packet or open document.
+/// The actor's boolean watch coalesces inbox work without making its event consumer await the
+/// actor (which could deadlock on event backpressure). No vault guard is kept between passes.
+pub(crate) fn spawn_receiver(app: AppHandle, server: u64, instance: u64, actor: ServerActor) {
+    let task = tokio::spawn(async move {
+        drive_receiver(
+            &app.state::<AppState>(),
+            server,
+            instance,
+            &actor,
+            &SystemClock,
+        )
+        .await;
+    });
+    supervise("studio_receive", server, task);
+}
+
+async fn drive_receiver(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    actor: &ServerActor,
+    clock: &dyn Clock,
+) {
+    let mut pending = actor.studio_pending();
+    loop {
+        if pending.has_changed().is_err() {
+            break;
+        }
+        if !*pending.borrow_and_update() {
+            if pending.changed().await.is_err() {
+                break;
+            }
+            continue;
+        }
+        if state
+            .servers
+            .lock()
+            .await
+            .get(&server)
+            .is_none_or(|e| e.instance != instance)
+        {
+            break;
+        }
+        // Busy, locked or failed storage leaves no success claim. Retry at most once per
+        // second while this bounded inbox is nonempty; no packet is pulled before custody.
+        let _ = receive_once(state, server, instance, actor).await;
+        // Even repeated false/true edges cannot reset the throttle. No locks/slots remain
+        // held during this delay; actor closure is noticed on its next bounded iteration.
+        clock.sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+async fn receive_once(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    actor: &ServerActor,
+) -> Result<(), String> {
+    let generation = unlocked_ui_session_generation(state).await?;
+    let (slot, signal) = claim_internal_inline_download(state)?;
+    let mut cancellation = RequestCancellation::new(signal, Some(slot.request_keepalive()));
+    let ready = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err("Studio receive cancelled".into()),
+        _ = SystemClock.sleep(std::time::Duration::from_secs(5)) => return Err("Studio receiver busy".into()),
+        ready = actor.studio_receive_begin() => ready?,
+    };
+    // Uses the ORIGINAL worker incarnation, never the actor currently occupying this number.
+    let lease = authorize(state, server, instance, generation)?.with_cancellation(cancellation);
+    ready.execute(lease).await?;
+    Ok(())
+}
+
+/// Retain exact UI/incarnation custody through synchronous emission, after source leases have
+/// dropped. Delayed old-actor events cannot invalidate a replacement server's Studio views.
+pub(crate) async fn forward_if_current(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    emit: impl FnOnce(),
+) -> bool {
+    let Ok(generation) = unlocked_ui_session_generation(state).await else {
+        return false;
+    };
+    let Ok(_commit) = require_ui_session_generation(state, generation).await else {
+        return false;
+    };
+    let entries = state.servers.lock().await;
+    if entries.get(&server).is_none_or(|e| e.instance != instance) {
+        return false;
+    }
+    emit();
+    true
+}
+
 #[tauri::command]
 pub(crate) async fn studio_list(
     state: State<'_, AppState>,

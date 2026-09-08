@@ -14,6 +14,8 @@ pub(super) struct StudioSavedPacket {
 pub(crate) struct StudioSavedTransaction {
     pub(crate) view: Option<StudioView>,
     pub(super) packets: Vec<StudioSavedPacket>,
+    // Checked by the just-finished transaction, including actual absence. Never peer-supplied.
+    pub(super) observed: Vec<(StudioTarget, u128)>,
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
@@ -32,6 +34,24 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ) -> Option<StudioView> {
         let clock = self.runtime_clock();
         let deadline = clock.monotonic_ms().saturating_add(2_000);
+        // Successful Read/Save also establishes desired watches. Reconcile before returning so
+        // an ordinary successful local subscription does not depend on unrelated later traffic.
+        // Failure/timeout still reports the saved/read view, not a delivery or catch-up promise.
+        if !saved.observed.is_empty() && !reply.is_closed() && !lease.is_cancelled() {
+            let cancelled = async {
+                match lease.cancellation.as_mut() {
+                    Some(c) => c.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = reply.closed() => return saved.view,
+                _ = cancelled => return saved.view,
+                _ = clock.sleep(Duration::from_millis(2_000)) => return saved.view,
+                _ = self.flush_studio_subscriptions() => {}
+            }
+        }
         for packet in saved.packets {
             if reply.is_closed() || lease.is_cancelled() || clock.monotonic_ms() >= deadline {
                 break;

@@ -720,8 +720,23 @@ table with the commit that closed it.
   is 50/s burst 200; author/document buckets are 10/s burst 50 with 4096 rows, reclaiming only
   fully refilled rows. These are fixed extra rails, not cross-inbox fairness. No queued frame is
   an accepted edit, blob-possession assertion or delivery receipt. Cancellation/refusal keep
-  durable intents and require explicit retry. Native custody, bounded off-executor source reuse,
-  automatic driving, remote events, catch-up and seed discovery remain gate 3 integration work.
+  durable intents and require explicit retry. Native automatic recent-target receive now uses
+  the same lease/sole-Server worker, current snapshot-before-ingest ordering and typed store.
+  Only checked local Read/Save descriptors add watches; incoming packets cannot choose a source.
+  Same-target access preserves the inbox; 16-target eviction revokes it. One coalesced hint and
+  one paced worker per exact native incarnation avoid per-packet tasks or event-consumer cycles.
+  Current channel/mount/member/MLS checks precede disk work. A delayed old-actor update cannot be
+  emitted under a replacement numeric server id; the UI/incarnation fence lasts through emission.
+  Automatic inventory reuses the full verifier with LOCAL service limits of 1024 visited entries,
+  64 records and 256 KiB aggregate authenticated bytes before reconstruction, including unrelated
+  saved P1 sources. A partial scan never grants storage admission. Scan/snapshot/ingest failure
+  pauses until successful explicit access, emitting a non-settlement pause warning; inbound
+  traffic cannot refund that hold. Busy/locked native access retains the bounded inbox; consumed
+  bad or dropped packets still need retry/catch-up. The one-second pacing cannot be bypassed by
+  pending-state churn. This bounds automatic work, not worst-case latency or full-size service;
+  larger vaults still need safe inventory reuse. The pause event has no user-owned UI listener yet.
+  No pixels are fetched, no intent is retired, and no update is emitted for duplicate/quarantined
+  input. Catch-up/seed discovery and larger-source automatic service remain gate 3 integration work.
   Sound/score/export state continues to refuse pending its typed support.
   Exact retry recognition belongs to the retained signed
   envelope/gate, not timestamps or marker-only success.

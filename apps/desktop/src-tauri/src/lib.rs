@@ -2038,6 +2038,7 @@ fn install_reconnect_capture_worker(app: &AppHandle, server: u64, actor: ServerA
 fn forward_events(
     app: AppHandle,
     server: u64,
+    instance: u64,
     mut events: mpsc::Receiver<catcoms_app::TracedEvent>,
 ) {
     let task = tokio::spawn(async move {
@@ -2088,15 +2089,16 @@ fn forward_events(
                 continue;
             }
             match ev.event {
-                AppEvent::StudioUpdated { channel, object } => {
-                    emit_tracked(
-                        &app,
-                        "studio-updated",
-                        serde_json::json!({
-                            "server": server, "channel": channel.to_string(), "object": object.map(hex::encode)
-                        }),
-                        trace,
-                    );
+                event @ (AppEvent::StudioUpdated { .. } | AppEvent::StudioReceivePaused) => {
+                    let state = app.state::<AppState>();
+                    studio::forward_if_current(&state, server, instance, || match event {
+                        AppEvent::StudioUpdated { channel, object } => emit_tracked(
+                            &app, "studio-updated",
+                            serde_json::json!({"server": server, "channel": channel.to_string(), "object": object.map(hex::encode)}), trace,
+                        ),
+                        AppEvent::StudioReceivePaused => emit_tracked(&app, "studio-receive-paused", ServerEvt { server }, trace),
+                        _ => unreachable!(),
+                    }).await;
                 }
                 AppEvent::ChannelsUpdated => {
                     emit_tracked(&app, "channels-changed", ServerEvt { server }, trace);
@@ -3148,7 +3150,7 @@ async fn register_server(
     };
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
     supervise("server_actor", id, task);
-    forward_events(app.clone(), id, events);
+    forward_events(app.clone(), id, instance, events);
     let timer_actor = actor.clone();
     state.servers.lock().await.insert(
         id,
@@ -3171,6 +3173,7 @@ async fn register_server(
         },
     );
     install_reconnect_capture_worker(app, id, timer_actor.clone());
+    studio::spawn_receiver(app.clone(), id, instance, timer_actor.clone());
     // Start only after the entry exists. A zero-millisecond randomized first tick must not race
     // the registry insertion and silently skip the initial interface/discovery refresh.
     spawn_discovery_timer(app.clone(), id, timer_actor);
@@ -11833,13 +11836,14 @@ async fn reload_one(
 
     // Register under the SAME id as on disk (don't allocate a new one).
     supervise("server_actor", record.id, task);
-    forward_events(app.clone(), record.id, events);
+    let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
+    forward_events(app.clone(), record.id, instance, events);
     let timer_actor = actor.clone();
     state.servers.lock().await.insert(
         record.id,
         ServerEntry {
             actor,
-            instance: state.next_server_instance.fetch_add(1, Ordering::Relaxed),
+            instance,
             group_id,
             device_id,
             invite: presented_invite,
@@ -11859,6 +11863,7 @@ async fn reload_one(
         },
     );
     install_reconnect_capture_worker(app, record.id, timer_actor.clone());
+    studio::spawn_receiver(app.clone(), record.id, instance, timer_actor.clone());
     spawn_discovery_timer(app.clone(), record.id, timer_actor);
     // Re-seal if the port moved. (The reserved peer-record sequence block was already sealed by
     // `load_or_init_server_net`, before the transport came up.)

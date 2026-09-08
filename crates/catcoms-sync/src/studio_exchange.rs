@@ -97,6 +97,33 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                         && Arc::ptr_eq(&entry.generation, &watch.generation)
                 })
     }
+    /// Constant-bounded scheduling hint only; it grants no admission or storage authority.
+    pub fn studio_has_inbound(&self, watch: &StudioWatch) -> bool {
+        self.studio_watch_is_current(watch)
+            && self.studio_exchange.queue.iter().any(|item| {
+                item.key == key(watch.target) && Arc::ptr_eq(&item.generation, &watch.generation)
+            })
+    }
+    /// Recheck the next packet before a coordinator spends disk work on snapshot/inventory.
+    /// Stale membership/MLS consumes that volatile packet, never durable state. Drain repeats
+    /// authentication; this hint is not a transferable authorization token.
+    pub fn check_studio_inbound(&mut self, watch: &StudioWatch) -> Result<bool, SyncError> {
+        if !self.studio_watch_is_current(watch) {
+            return Err(SyncError::NoSuchDoc);
+        }
+        let Some(index) = self.studio_exchange.queue.iter().position(|item| {
+            item.key == key(watch.target) && Arc::ptr_eq(&item.generation, &watch.generation)
+        }) else {
+            return Ok(false);
+        };
+        if let Err(error) =
+            self.authenticate_studio(&self.studio_exchange.queue[index].sealed, watch.target)
+        {
+            self.studio_exchange.queue.remove(index);
+            return Err(error);
+        }
+        Ok(true)
+    }
     /// Drop alone does not unsubscribe. An old token cannot revoke a same-key replacement.
     /// Debt is keyed by full author/logical document and survives rewatch and epoch rotation.
     pub fn unwatch_studio(&mut self, watch: &StudioWatch) -> Result<(), SyncError> {

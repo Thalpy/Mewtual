@@ -3,6 +3,7 @@ use catcoms_rt::{Hub, ManualClock, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::future::Future;
+mod receiver;
 
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(81)

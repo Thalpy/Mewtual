@@ -373,6 +373,19 @@ impl ServerStore {
         self.scan_epoch_files(EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio)
     }
 
+    /// Conservative initial background-service rail, not a document acceptance or convergence
+    /// rule. Reuse the SAME authenticated inventory, with lower limits checked before record
+    /// reads/reconstruction. Larger vaults need future inventory reuse; explicit Save is unchanged.
+    pub(crate) fn scan_studio_receive_inventory(
+        &mut self,
+    ) -> Result<EpochStorageScan<'_>, AppError> {
+        let mut scan = self.scan_epoch_storage_with_studio()?;
+        scan.entry_limit = 1024;
+        scan.record_limit = 64;
+        scan.byte_limit = 256 * 1024;
+        Ok(scan)
+    }
+
     pub(in crate::store) fn scan_epoch_files(
         &mut self,
         coverage: EpochInventoryCoverage,
@@ -1085,6 +1098,33 @@ mod tests {
         let mut scan = store.scan_epoch_recovery().unwrap();
         scan.byte_limit = bytes - 1;
         while scan.step().is_ok() {}
+        assert_eq!(scan.progress.authenticated_bytes, 0);
+        assert!(scan.finish().is_err());
+    }
+
+    #[test]
+    fn studio_automatic_inventory_caps_before_unrelated_source_authentication() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        // An unrelated large registry record must refuse on metadata size, even if its body
+        // is corrupt. No decrypt, Automerge reconstruction or partial inventory is allowed.
+        let name = format!("{}.registry-epoch", "00".repeat(32));
+        fs::write(
+            root.path().join("servers").join(name),
+            vec![0; 256 * 1024 + 1],
+        )
+        .unwrap();
+        let mut scan = store.scan_studio_receive_inventory().unwrap();
+        assert_eq!(scan.entry_limit, 1024);
+        assert_eq!(scan.record_limit, 64);
+        assert_eq!(scan.byte_limit, 256 * 1024);
+        let error = loop {
+            match scan.step() {
+                Err(error) => break error.to_string(),
+                Ok(p) => assert!(!p.complete, "oversized registry record was skipped"),
+            }
+        };
+        assert!(error.contains("byte limit"), "{error}");
         assert_eq!(scan.progress.authenticated_bytes, 0);
         assert!(scan.finish().is_err());
     }
