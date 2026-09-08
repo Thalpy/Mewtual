@@ -8,6 +8,23 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote scope reset (2026-09-08).** The user paused games and asked to focus on Flipnote.
+  Game-only avatar consent/profile changes are paused; the wider Creative Suite backlog is not
+  the current completion target. `BACKEND-IMPLEMENTATION.md` now defines seven delivery gates:
+  typed documents, durable one-device Save/Load, sharing/joining, rotation/recovery, advisory
+  claims, sound/export and production acceptance/UI contract handoff. The older 25%/65%
+  estimates in historical entries below are retired, not reaffirmed current estimates.
+  Next is the missing Rust StudioIndex/Flipnote domain operations and preflight, leading to
+  a real create/save/restart/reopen test; required P1 storage/lifecycle work is included in that
+  path rather than bypassed. Automatic shared-runtime work must still solve the measured dense
+  registry request cost and snapshot/lifecycle fences. No new P1 guarantees or unrelated
+  document consumers are added. Canonical UI remains user-owned.
+
+  This update changes planning documentation only. Read-only actual-diff adversarial review
+  found no findings; `git diff --check` passed. Runtime suites were not rerun; the previous
+  code slice's verification is recorded below. `db979dd` is locally committed, not pushed;
+  destination approval remains outstanding. Unrelated release edits remain untouched.
+
 - **P1 indexed registry restoration (2026-09-08).** Restore uses Automerge's applied graph
   metadata for Boolean dependency/duplicate checks instead of rebuilding raw predecessor changes.
   A change whose dependencies exactly equal all current heads can use indexed current-view

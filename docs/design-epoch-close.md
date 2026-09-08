@@ -1,5 +1,11 @@
 # Design: epoch close, owner checkpoints and bounded recovery (P1)
 
+**Implementation scope (2026-09-08):** P1 is being integrated for Flipnote, not completed for
+every future document family before Studio work begins. The active consumers are the registry,
+StudioIndex and StudioObject (flipnotes and linked scores). `BACKEND-IMPLEMENTATION.md` gives
+the delivery gates. This narrows implementation scope, not the receipt, recovery, authorization
+or resource guarantees below. Games and game-only avatar-consent work are paused.
+
 Status: accepted design, revision 5; protocol-core implementation and adversarial testing have
 started. The current slice defines and tests operation envelopes, closes, receipts and their
 crash journals, the persisted epoch gate, durable intent metadata, and bounded recovery slots.

@@ -10,6 +10,14 @@ staged per document with Restore, Copy and Export. This document keeps the studi
 contract: document types, roots, events, the closed domain-operation sets with stable element
 ids and merge rules, and the properties it requires of P1.
 
+**Active implementation scope (2026-09-08): Flipnote only, with its required P1 integration.**
+Games and game-only avatar-consent/profile work are paused at the user's request. Standalone
+Draw/Pictochat, chat/announcement doodles, knocks and GB cam are deferred. Flipnote retains
+sound, linked scores, export, advisory claims and recovery; shared identity/channel work is
+limited to those dependencies. The broader design below is preserved as backlog, not the
+active completion target. `BACKEND-IMPLEMENTATION.md` defines seven evidence-based delivery
+gates, starting with typed documents and durable one-device Save/Load. UI remains user-owned.
+
 UI reference (2026-09-05): the owner's `Main.html`, `Inspector.html`, `Timeline.html`,
 `Palette.html` and `Tools.html`, with matching PNGs, under
 `C:\Users\phaso\AppData\Local\Temp\claude\m--Git--local--CatComs\682d22fb-7c91-4ed4-9226-deea8738efd5\scratchpad\flipnote\preview`
@@ -738,15 +746,16 @@ replay keys, rank and host attribution.
 P1 is in progress. Tested building blocks are not yet a live shared Studio; the feature table
 below contains 25 creative slices with very different sizes, so counting commits or completed
 helpers would give a misleading percentage. The owner's frontend work proceeds separately.
-The current engineering estimate is **25% for the entire backend, versus 65% for P1 alone**,
-each with roughly ten-percentage-point uncertainty; neither includes UI or measures acceptance
-test coverage. `BACKEND-IMPLEMENTATION.md` tracks the open acceptance milestones.
+The earlier 25%/65% estimates are retired following the Flipnote scope reset: foundation
+coverage did not measure product integration or time remaining. `BACKEND-IMPLEMENTATION.md`
+tracks the active Flipnote gates; this broader table records foundations and future backlog.
 
 `P1-PERFORMANCE.md` records real saved-source release probes. Indexed restore queries improve
 byte-heavy pages, but a valid small-operation-heavy registry still takes roughly 11 seconds per
 saved-source page (baseline about 13). Bounded off-executor reconstruction/source reuse with
 version and authority fences is the immediate runtime prerequisite; these measurements do not
-close automatic catch-up or increase the estimates.
+close automatic catch-up. This work belongs to Flipnote's shared-runtime gate and is not a
+reason to wait for every P1 consumer before implementing the missing Studio types.
 
 | Milestone | Current evidence | Still needed to close it |
 |---|---|---|
@@ -754,7 +763,7 @@ close automatic catch-up or increase the estimates.
 | P1 checkpoints and registry | Implemented/tested: deterministic seeds, typed bucket materialization/preflight, adjacent settlement and scoped newcomer installation with recovery/restart | Automatic lifecycle integration, other managed types, settlement-wide capacity handling |
 | P1 durable storage | Implemented/tested: recovery/owner receipt saves, vault-wide intent cap, four-family inventory/cleanup, durable edits, included-only intent retirement and registry installation barriers | Sole coordinator, other managed document families, remaining recovery actions and full-capacity settlement integration |
 | P1 network and application integration | Cooperative saved-intent sender, opt-in gossip, bounded durable page receive, keyed owner-head/expected-seed exchange and registry installation followed by fresh catch-up | Historical-authority/repair-record transfer, aggregate scheduling, native lifecycle ownership, actor/bridge events and production acceptance tests |
-| C0c immutable blob seam | Native `publish_pix` and `request_blob_bounded` wired through actor and sync; PIX1 validator, bounded cache/dedup/response checks and tests | Owner's frontend invocation, creative reference enumeration/retention, profile result and consented-avatar work; C0c as a whole is not complete |
+| C0c immutable blob seam | Native `publish_pix` and `request_blob_bounded` wired through actor and sync; PIX1 validator, bounded cache/dedup/response checks and tests | Owner's frontend invocation and creative reference enumeration/retention; game-only profile result and consented-avatar work is paused |
 | Creative backend contracts | Stable document tags exist; Studio-specific materializers are not implemented | C0 publication/identity work, C3a/C5a domain operations, score/flipnote schemas and export paths |
 | Usable collaborative Studio | Not connected end to end | Shared save/load, publication, claims, settlement/recovery actions and export integrated with the owner's UI |
 
@@ -765,11 +774,12 @@ settlement and recovery can be exercised as explicitly synthetic fixtures. These
 not claim that real shared saves, owner receipts or Restore operations happened. `.pix`/`.pixa`
 I/O still needs its codec/export contract tests; local UI readiness is not protocol readiness.
 
-**Next backend order:** expose independent save/fetch primitives first (C0c blob seam now available),
-then finish P1's remaining settlement/recovery integration and automatically drive the cooperative
-discovery/catch-up/installation APIs through the application lifecycle; then connect typed Studio documents (C5a) and score/flipnote
-behavior (C5b-c/C6). Independent C0 codec, publication and identity slices can proceed alongside
-that work. UI implementation remains with the owner throughout.
+**Next backend order:** the seven Flipnote gates in `BACKEND-IMPLEMENTATION.md` supersede the
+previous platform-first order. Begin typed StudioIndex/Flipnote operations now, then expose
+durable one-device Save/Load using accounted P1 storage. Follow with automatic collaboration,
+rotation/recovery, claims, sound/export and production acceptance. Complete each required P1
+path as part of those outcomes, not support for unrelated managed types. No claims of shared
+saves or settled edits until their actual production paths pass. UI remains with the owner.
 
 P1 reuses Automerge, signed encrypted operations, MLS membership and vault persistence. Existing
 snapshots reload retained history; they do not authorize throwing it away. P1 adds bounded history
@@ -817,10 +827,12 @@ enforcement. The implementation milestones above are parts of P1, not additional
 | C8d | per-call results in the Play tab and bounded history | C8a |
 | C9 | GB cam | video path as landed |
 
-C2a, C3b, C8a are independent after their prerequisites. C6 must not start until C4 and C5 have
-had a review pass. Prerequisites noted in the jam section still apply to anything that renders
-sound: Deafen must gate rendering, and roster revocation must tear down the removed member's
-call connections.
+C2a, C3b, C8a are independent after their prerequisites in the broader backlog. For the active
+Flipnote scope, typed art persistence may proceed before the standalone C4 Draw product;
+collaborative claims still require reviewed C0b/C0d and the relevant C4a channel contracts.
+The C5 document contracts remain a prerequisite. Prerequisites noted in the jam section still
+apply to anything that renders sound: Deafen must gate rendering, and roster revocation must
+tear down the removed member's call connections.
 
 ## 8. Remaining open questions
 
