@@ -4,11 +4,19 @@ Mewtual ships as an unsigned Windows NSIS installer and unsigned Linux `.AppImag
 bundles, all built by [`.github/workflows/release.yml`](../.github/workflows/release.yml), and
 installed copies update themselves through Tauri's updater. This is the maintainer's checklist.
 
-The workflow is two jobs. **Build Windows installer** runs the version checks, the frontend tests
-and the checks, then creates the draft release; **Build Linux bundles** waits for it and adds its
-artifacts to that same draft. They are deliberately not parallel: `tauri-action` creates the draft
-when the tag has none, so two jobs starting together can race and leave two drafts for one
-version. Expect roughly twice the wall-clock time of a Windows-only build.
+The workflow is three jobs. **Build Windows installer** runs the version checks, the frontend
+tests and the checks, then creates the draft release; **Build Linux bundles** waits for it and
+adds its artifacts to that same release, addressing it by the id the first job reports; **Verify
+the release is complete** reads the finished release back and fails the run unless every bundle,
+every `.sig` and both platform entries in `latest.json` are on it. Expect roughly twice the
+wall-clock time of a Windows-only build.
+
+The build jobs are deliberately not parallel: the release has to exist before anything can be
+added to it. Passing the id from one to the other is what stops them disagreeing about which
+release that is. Given a tag instead, `tauri-action` looks for a *draft* carrying it, and a
+published release with that tag reads to it as no release at all, so it creates a second one and
+the bundles end up split across two releases with a half-complete `latest.json` on each. That is
+what happened to `v0.3.0-alpha.17`; see "Do not publish until the run is green" below.
 
 Not every bundle can update itself. The updater installs an AppImage in place, so `.AppImage`
 users are covered, but there is no Tauri updater format for `.deb`: those installs check, find a
@@ -124,23 +132,42 @@ new one and must be reinstalled by hand. Rotate only if the key is lost or expos
 
    The branch does not have to be `main`. Whatever you point `--ref` at is what gets built, and
    the tag is created against that commit when the release is published.
-5. The workflow leaves a **draft** release holding the Windows installer, the Linux `.AppImage`
-   and `.deb`, the `.sig` for each updatable bundle, and one `latest.json` covering both
-   platforms. Review it, edit the release body if needed, and publish (see below).
+5. When the run is **green, all three jobs**, it has left a **draft** release holding the Windows
+   installer, the Linux `.AppImage` and `.deb`, the `.sig` for each updatable bundle, and one
+   `latest.json` covering both platforms. The verify job prints `is complete and safe to publish`
+   when it is happy. Review the draft, edit the release body if needed, and publish (see below).
 
 If the draft has **no `.sig` and no `latest.json`**, the signing secrets or the
 `--config src-tauri/tauri.official.conf.json` argument did not take effect. Do not publish it:
 installs cannot verify an unsigned build, and a release without a manifest is invisible to the
 updater.
 
-`latest.json` is written twice, once per job, and the second write **merges** rather than
-replaces: `tauri-action` reads the asset already on the release and combines its `platforms` map
-with the new one. So the finished manifest should list both `windows-x86_64` and `linux-x86_64`.
-If it names only one, the other job either failed or built without the signing key, and every
-install on the missing platform will check for updates and find nothing.
+`latest.json` is written twice, once per build job, and the second write **merges** rather than
+replaces: `tauri-action` reads the asset already on that release id and combines its `platforms`
+map with the new one. So the finished manifest should list both `windows-x86_64` and
+`linux-x86_64`. If it names only one, the other job either failed, built without the signing key,
+or wrote to a different release, and every install on the missing platform will check for updates
+and find nothing. The verify job fails the run on exactly this, so a green run has both.
 
 The release body is what users read inside the update prompt, so write it for them rather than for
 the repository.
+
+### Do not publish until the run is green
+
+Publishing the draft while **Build Linux bundles** is still running used to split the release in
+two, and it did so silently: the Linux job could not find a draft for the tag any more, so it made
+one, and that second release carried a `latest.json` naming only Linux. Publishing *that* would
+have made it `latest` and cut every Windows install off from updates.
+
+The Linux job now uploads by release id, so this no longer splits anything: publish early and the
+bundles simply land on the published release a few minutes later. Two things still argue for
+waiting for the whole run:
+
+- Between publishing and the Linux job finishing, the live `latest.json` has no `linux-x86_64`
+  entry, so AppImage installs checking in that window are told there is nothing new. It heals
+  itself, but the release is briefly wrong.
+- The verify job is the only thing that checks the release is actually complete. Publishing ahead
+  of it means shipping before anything has confirmed the bundles and signatures are all there.
 
 ### Publishing the draft
 
@@ -193,7 +220,11 @@ failed". It ignores the skip marker, so a version someone skipped is offered aga
 
 Three reasons it can correctly find nothing, in the order worth checking:
 
-1. **The release is a draft or a pre-release.** GitHub's `latest` pointer skips both.
+1. **The release is a draft or a pre-release.** GitHub's `latest` pointer skips both, so a build
+   that exists on the releases page can still be invisible. Worth ruling out first, because the
+   window between the workflow creating the draft and someone publishing it is exactly when a
+   maintainer is most likely to be testing the check. The toast naming your *current* version is
+   what "found nothing" looks like; it is not the app misreading the new release.
 2. **The `latest` redirect is still cached** on the previous version (see above). Wait a few
    minutes, or confirm against the tag-pinned URL.
 3. **The build has no update channel.** Builds from source, and the hand-uploaded `0.2.0-alpha.2`

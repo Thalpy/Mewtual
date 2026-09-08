@@ -12,6 +12,15 @@ jobs:
   windows:
     name: Build Windows installer
     runs-on: windows-latest
+    # The Linux job addresses the release by id, not by tag, and these are how it learns the id.
+    # Looking it up by tag is what split v0.3.0-alpha.17 across two releases: tauri-action
+    # searches the release list for a *draft* carrying the tag, and when it finds a published
+    # release with that tag instead it treats it as "not found" and creates a second, draft
+    # release for the same tag. Publishing the draft before the Linux job finished was enough to
+    # trigger that, and the second release carried its own latest.json listing only Linux.
+    outputs:
+      releaseId: ${{ steps.build.outputs.releaseId }}
+      appVersion: ${{ steps.build.outputs.appVersion }}
 
     steps:
       - name: Check out source
@@ -57,7 +66,12 @@ jobs:
               exit 1
             fi
           done
-          if [ "$(gh release view "v$conf" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)" = "false" ]; then
+          # Counts every release carrying the tag rather than asking for one: a published release
+          # and a leftover draft can share a tag (a draft has no real tag until it is published),
+          # and `gh release view` answers with whichever it happens to reach first.
+          published=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"v$conf\" and .draft == false) | .tag_name" | wc -l)
+          if [ "$published" -ne 0 ]; then
             echo "::error::v$conf is already published, and nothing here bumps the version. Bump it first (docs/RELEASING.md step 1)."
             exit 1
           fi
@@ -78,6 +92,7 @@ jobs:
       # as a prerelease: GitHub's `releases/latest/download/...` skips prereleases, and that is
       # the URL the in-app updater reads its manifest from.
       - name: Build installer and create draft release
+        id: build
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -103,8 +118,11 @@ jobs:
 
             See CHANGELOG.md for what changed, and for known limitations.
           releaseDraft: true
-          # Publishes latest.json alongside the installer: the manifest the updater polls.
-          includeUpdaterJson: true
+          # Publishes latest.json alongside the installer: the manifest the updater polls. The
+          # input is `uploadUpdaterJson`, and it already defaults to true; it is spelled out here
+          # because the manifest is the whole point of the job. An unknown `with:` key is
+          # silently discarded by Actions, so a misspelling here would look like it worked.
+          uploadUpdaterJson: true
           # tauri.official.conf.json carries the update endpoint, the public key and the
           # updater artifacts, and is merged in HERE rather than living in tauri.conf.json.
           # The repository is public: without this split, anyone's fork or source build would
@@ -114,9 +132,9 @@ jobs:
 
   linux:
     name: Build Linux bundles
-    # Waits on the Windows job rather than running beside it. tauri-action creates the draft
-    # release if the tag has none, so two jobs starting at once can race and produce two drafts
-    # for one version. Serialising costs wall-clock time and nothing else.
+    # Waits on the Windows job rather than running beside it: the release has to exist before
+    # anything can be added to it, and this job is handed its id rather than hunting for it.
+    # Serialising costs wall-clock time and nothing else.
     needs: windows
     # Pinned rather than ubuntu-latest on purpose: an AppImage cannot run on a glibc older than
     # the one it was built against, so building on the newest runner would silently drop every
@@ -158,10 +176,28 @@ jobs:
       # The frontend tests and checks are not repeated here: the Windows job ran them against
       # this same commit and this job does not start unless they passed.
 
-      # Adds the Linux artifacts to the draft the Windows job already created, found by tag.
-      # No releaseBody here: tauri-action leaves an existing release's body alone, and a second
-      # copy of that text would only drift from the one above.
-      - name: Build bundles and add them to the draft release
+      # An empty releaseId would send tauri-action back to searching by tag, which is the failure
+      # this job exists to avoid, and it would do so quietly: `Number('')` is 0, which the action
+      # reads as "no id given". Fail here instead, before a ten-minute build.
+      - name: Check the release id came through
+        env:
+          RELEASE_ID: ${{ needs.windows.outputs.releaseId }}
+        run: |
+          if [ -z "$RELEASE_ID" ]; then
+            echo "::error::The Windows job did not report a release id, so these bundles have nowhere to go."
+            exit 1
+          fi
+          echo "Uploading into release $RELEASE_ID."
+
+      # Adds the Linux artifacts to the release the Windows job created, addressed by id.
+      #
+      # By id and not by tag on purpose. Given a tag, tauri-action looks for a DRAFT with it, and
+      # a published release with that tag reads to it as no release at all: it then creates a
+      # second one. An id names one release whatever its state, so publishing the draft while
+      # this job is still building now just means the bundles land on the published release.
+      #
+      # No releaseBody or releaseName here: with an id, tauri-action touches only the assets.
+      - name: Build bundles and add them to the release
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -169,11 +205,79 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
-          tagName: v__VERSION__
-          releaseName: Mewtual v__VERSION__
-          releaseDraft: true
-          # Merges a linux-x86_64 entry into the latest.json the Windows job uploaded rather than
-          # replacing it: tauri-action reads the existing asset and combines the platform maps.
-          # Only the AppImage carries an updater artifact; a .deb install cannot self-update.
-          includeUpdaterJson: true
+          releaseId: ${{ needs.windows.outputs.releaseId }}
+          # Merges the linux entries into the latest.json the Windows job uploaded rather than
+          # replacing it: tauri-action reads the existing asset off this same release and
+          # combines the platform maps. That merge is why the id has to be the same one.
+          uploadUpdaterJson: true
           args: --bundles appimage,deb --config src-tauri/tauri.official.conf.json
+
+  # Everything above can succeed and still leave a release that cannot update anyone: a build
+  # that produced no signature, a latest.json that lists one platform because the other job's
+  # assets went somewhere else, a second release quietly holding half the bundles. None of that
+  # shows up until an install fails to notice the release, which is exactly when nobody is
+  # looking. So the run does not go green until the release has been read back and checked.
+  verify:
+    name: Verify the release is complete
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check the assets and the updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.windows.outputs.releaseId }}
+          VERSION: ${{ needs.windows.outputs.appVersion }}
+        run: |
+          set -euo pipefail
+          fail=0
+          note() { echo "::error::$1"; fail=1; }
+
+          # One release per tag. Two is the failure that split v0.3.0-alpha.17, and it leaves
+          # each half looking complete on its own.
+          same_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"v$VERSION\") | \"\(.id) draft=\(.draft)\"")
+          # grep -c rather than wc -l: an empty result is still one line to wc, which would read
+          # "no release at all" as "exactly one" and pass.
+          tagged=$(printf '%s\n' "$same_tag" | grep -c . || true)
+          echo "Releases tagged v$VERSION ($tagged):"
+          printf '%s\n' "$same_tag" | sed 's/^/  /'
+          if [ "$tagged" -ne 1 ]; then
+            note "Expected exactly one release tagged v$VERSION, found $tagged. If it is more than one, the bundles are split across them: move the assets onto release $RELEASE_ID and delete the rest."
+          fi
+
+          assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate --jq '.[].name')
+          echo "Assets on release $RELEASE_ID:"
+          echo "$assets" | sed 's/^/  /'
+
+          # Matched by suffix rather than by full filename: the bundlers decide the rest of the
+          # name, and a rename should not fail the release. A missing platform still does.
+          for want in '-setup\.exe$' '-setup\.exe\.sig$' '\.AppImage$' '\.AppImage\.sig$' '\.deb$' '\.deb\.sig$' '^latest\.json$'; do
+            if ! echo "$assets" | grep -qE "$want"; then
+              note "No asset matching /$want/ on release $RELEASE_ID. A .sig missing means the signing secrets did not reach the build, and nothing can update to this release."
+            fi
+          done
+
+          # The manifest is the only thing installed copies ever read, so read it the way they do.
+          manifest_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+            --jq '.[] | select(.name == "latest.json") | .id')
+          if [ -n "$manifest_id" ]; then
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$manifest_id" > latest.json
+            echo "latest.json says version $(jq -r .version latest.json), platforms:"
+            jq -r '.platforms | keys[]' latest.json | sed 's/^/  /'
+            if [ "$(jq -r .version latest.json)" != "$VERSION" ]; then
+              note "latest.json announces $(jq -r .version latest.json) but this release is $VERSION."
+            fi
+            for key in windows-x86_64 linux-x86_64; do
+              if [ "$(jq -r --arg k "$key" '.platforms[$k].signature // ""' latest.json)" = "" ]; then
+                note "latest.json has no signed $key entry, so no $key install can update to this release."
+              fi
+            done
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "Do not publish this release until the errors above are resolved."
+            exit 1
+          fi
+          echo "Release $RELEASE_ID is complete and safe to publish (docs/RELEASING.md step 5)."
