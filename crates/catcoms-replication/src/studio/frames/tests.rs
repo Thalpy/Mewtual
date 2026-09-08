@@ -875,6 +875,7 @@ fn deep_anchor_and_right_origin_forests_are_iterative_and_restart_preserves_all_
             );
             let r = decode_record(&logical(), &bytes).unwrap();
             let insertion = FrameInsertion {
+                checkpoint: false,
                 after: if right_origin {
                     None
                 } else {

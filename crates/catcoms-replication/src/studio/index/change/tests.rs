@@ -399,7 +399,7 @@ fn index_change_rejects_wrong_records_missing_headers_hidden_actions_and_marker_
 }
 
 #[test]
-fn index_change_refuses_bad_scope_rotated_epochs_and_immutable_header_rewrites() {
+fn index_change_refuses_bad_scope_seedless_checkpoint_epochs_and_immutable_header_rewrites() {
     let base = empty(&author(1));
     let domain = domain(&logical(), &put(9, &author(1)), 1);
     let (created, good) = draft(&base, &logical(), &domain, &author(1));

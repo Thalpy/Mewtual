@@ -52,11 +52,13 @@ Gate 1 substeps (not extra product gates):
       StudioIndex and the Flipnote art/frame subset now have read-only Automerge projections.
       Sound/score/export projection support remains separate; unsupported state rejects.
 - [ ] Causal Automerge-change validation and aggregate admission through the actual P1 gate.
-      Epoch-zero StudioIndex and art/frame semantic callbacks are tested through signed P1
-      edit/ingest, including causal target/origin/predecessor attacks and rollback. Production
-      aggregate admission and checkpoint-epoch support remain; no typed writer substitutes
-      reader bounds for exact preflight.
+      `StudioTarget` now supplies Index/art writers and signed P1 edit/ingest with exact
+      prospective checkpoint AND whole-version recovery preflight, in epoch zero and verified
+      checkpoint epochs. Sound/score/export families remain fail-closed pending gate 6 support.
 - [ ] Exact checkpoint-size preflight and typed checkpoint/recovery representation.
+      Complete for Index/art: canonical compact seeds, full typed recovery, original attribution,
+      bounded conflicts, exact aggregate encoding and omission of old ops from successive seeds.
+      The checkbox covers all Flipnote families; audio/export representation remains pending.
 
 Progress reports name the gate, the observable behavior proved, tests/review evidence and the
 remaining blocker. The older 25%/65% figures are retired: they estimated broad foundations,
@@ -80,24 +82,31 @@ title/fps registers and provenance-bearing deletions. It retains every live alte
 frame and flags the 999-frame / 8 MiB over-cap suffix without fetching blobs. Same-gap op-id
 ordering respects captured placement; deleted/losing insertions remain ordering anchors.
 It rejects sound/score/export state rather than return an incomplete successful view.
-Epoch-zero `validate_index_change` now supplies the Index semantic callback: canonical signed-actor
+`validate_index_change` supplies the Index semantic callback: canonical signed-actor
 record binding, causal target existence (including overflow), immutable evidence and exact register
-predecessors. Signed gate tests prove rejection leaves the document/log/gate unchanged. It is not
-a production adapter. The epoch-zero art `validate_frame_change` now likewise checks exact record
+predecessors. Signed gate tests prove rejection leaves the document/log/gate unchanged.
+The art `validate_frame_change` likewise checks exact record
 mutations and derives insertion origins from the sender's causal view, retaining hidden anchors.
 Signed tests cover ordering, concurrent deletion, false origin claims and unchanged state on
-rejection. Exact checkpoint/recovery encoding and aggregate P1 preflight remain gate-1 work;
-sound/score/export projections must land before those families can be admitted. Both callbacks
-refuse checkpoint epochs pending their actual typed seed formats. Historical-view work is bounded
-but not latency-qualified for production scheduling.
-No Studio live write path is installed and no gate is closed.
+rejection. Both now accept actual typed checkpoint baselines at the sender's causal frontier.
+`StudioTarget` connects these validators and exact seed/recovery encoding to existing P1 gated
+edits/ingest. Core tests cover edit/checkpoint/owner verification/reopen/concurrent edit, forty
+rotations without history growth, actual seed-hash golden vectors, 999-frame/8 MiB and 64-object
+concurrent overflow, 1024 conflict fields, and bounded complete recovery. This reuses existing P1
+signing, gates, rollback and seed installation; it adds no finality protocol.
+Sound/score/export projections must land before those families can be admitted. Historical-view
+work is bounded but not latency-qualified for production scheduling. No Studio actor/native
+write path is installed and no full product gate is closed.
+**Next implementation target: gate 2's durable art Save/Load**, starting with an owned typed
+epoch and accounted vault restore/save plus sealed intents, then actor/native commands and real
+CID/reference plumbing. Art persistence need not wait for sound/export; those operations refuse.
 The fixture's numeric-only expiry view still needs an explicit absent/null/timestamp adapter at
 gate 2; zero remains a timestamp and must never be used as a Never sentinel.
 
 At `db979dd` on `Create-suite-2`, native `publish_pix` and `request_blob_bounded` are wired through
 the actor. They publish/fetch immutable bytes, not a Studio document. `studio-store.ts` still
-uses an in-memory object/blob map and placeholder CIDs; Rust Studio materializers and
-create/list/read/apply commands are missing. P1 has tested protocol/store and cooperative
+uses an in-memory object/blob map and placeholder CIDs; Rust Index/art materializers and core
+admission now exist, but create/list/read/apply commands are missing. P1 has tested protocol/store and cooperative
 registry discovery/settlement adapters, but not automatic production orchestration for Studio.
 The latest saved-source probes still show about 11 seconds for a dense registry page, beyond
 the current request deadlines. This is an integration blocker, not completed performance work.

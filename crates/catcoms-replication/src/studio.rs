@@ -1,9 +1,9 @@
-//! Typed Studio operations and read-only projections for future edits, ingest and durable intents.
+//! Typed Studio operations, projections, checkpoints and P1 core edit/ingest consumers.
 //!
-//! This is the schema boundary, NOT document admission: decoding proves neither authorship nor
-//! that an Automerge delta implements this operation. The live Studio consumer must additionally
-//! check causal mutations, element existence/conflicts, aggregate caps and the exact next seed
-//! through P1's gated preflight before any edit can be published. No live path is enabled here.
+//! Body decoding alone proves neither authorship nor that an Automerge delta implements the
+//! operation. `StudioTarget` combines causal validation and exact seed/recovery preflight with
+//! existing P1 admission. The application must still own durable intents, accounted storage,
+//! publication and settlement; no actor/native Studio write path is enabled by this core API.
 //! Physical document ids, group membership and receipt authority remain P1's responsibility.
 
 use catcoms_crypto::DeviceId;
@@ -22,11 +22,18 @@ pub use index::{
     IndexSource, IndexValue, StudioIndexProjection, MAX_INDEX_OBJECTS,
 };
 mod frames;
+mod recovery;
+mod snapshot;
+pub use recovery::{StudioProjection, StudioRecovery};
+mod admission;
+pub use admission::StudioTarget;
 pub use frames::{
     flipnote_document, validate_frame_change, FlipnoteFrameProjection, FrameBlob, FrameEntry,
     FrameInsertion, FrameLimits, FrameRegister, FrameSource, FrameValue, FLIPNOTE_FRAME_BYTES,
     FLIPNOTE_MAX_FRAMES,
 };
+#[cfg(test)]
+mod integration_tests;
 #[cfg(test)]
 mod tests;
 

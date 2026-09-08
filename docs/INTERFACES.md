@@ -456,7 +456,7 @@ pub struct CheckpointOrigin; // logical scope, epoch, close and seed hashes reta
 // Both checked P1 paths preflight the prospective materialization before gate admission/state swap:
 EncryptedDoc::edit_domain_preflight_gated(..., typed_change_validator, projection_preflight);
 EncryptedDoc::ingest_domain_preflight_gated(..., typed_change_validator, projection_preflight);
-// catcoms_replication::studio (codecs + read-only projections; NOT a gated consumer yet):
+// catcoms_replication::studio (codecs, typed projections/checkpoints + P1 core consumers):
 pub enum IndexOp;       // put_object, tombstone_object, set_title, set_expiry
   encode() -> Result<Vec<u8>>; decode(canonical_body) -> Result<Self>;
   decode_domain(&LogicalDocument, &DomainOp, verified_outer_author:&DeviceId) -> Result<Self>;
@@ -474,23 +474,23 @@ pub struct IndexRegister<T>; // selected IndexValue<T> + concurrent conflicts so
 pub struct IndexValue<T>; // value + IndexSource (derived op id, asserted full author, nonce)
 pub struct IndexCreation; // kind/title/created_by/ts/three-state expiry, before any mutable writes
 validate_index_change(&LogicalDocument, epoch:u64, &DomainOp, &Change, before:&AutoCommit) -> Result<()>;
-// Pure epoch-zero semantic callback; epoch > 0 refuses pending the real typed seed format.
+// Pure semantic callback; epoch > 0 requires the typed immutable seed at change.deps().
 // The change actor must be independently bound to the signed current author by P1. `before`
 // is accepted authenticated history, never a peer-supplied snapshot. Targets/predecessors are
 // checked at change.deps(), including overflow/deleted evidence, not the receiver's merged view.
-// This is not a typed edit/ingest adapter: exact checkpoint/recovery preflight is still required.
+// This callback alone is not admission; StudioTarget adds exact checkpoint/recovery preflight.
 flipnote_document(server_id:&[u8], object:[u8;16]) -> Result<LogicalDocument>;
 pub struct FlipnoteFrameProjection; // art subset: all frames/tombstones, live timeline, cap flags
   read(&LogicalDocument, channel:[u8;16], epoch:u64, &AutoCommit) -> Result<Self>;
   document() -> &LogicalDocument; insertion_order() -> &[[u8;32]]; // includes hidden anchor nodes
 pub struct FrameEntry; // insertion candidates + pixel-replacement register (actual AM winner)
-pub struct FrameInsertion; // after stable frame id, resolved anchor/before insertion op ids, blob
+pub struct FrameInsertion; // after/anchor/before, blob, checkpoint:bool (normalized seed position)
 pub struct FrameBlob; // cid:[u8;32], bytes:u64; declarations, not available/valid PIX proof
 pub struct FrameSource; // derived op id, asserted full author/nonce/timestamp (safe integer ms)
 pub struct FrameValue<T>; pub struct FrameRegister<T>; // source/value and selected/conflicts
 pub struct FrameLimits; // count/bytes flags; cumulative over-cap suffix remains in timeline
 validate_frame_change(&LogicalDocument, channel:[u8;16], epoch:u64, &DomainOp, &Change, before:&AutoCommit) -> Result<()>;
-// Pure epoch-zero art callback: insert/remove/replace frame, title/fps only. Derives both origins
+// Pure art callback: insert/remove/replace frame, title/fps only. Derives both origins
 // at change.deps(), including hidden direct children; full actor and canonical envelope/metadata
 // must match the record. Fresh markers and exact same-property predecessors are mandatory.
 // Assumes authenticated accepted history plus P1 signed actor/member/server/physical checks.
@@ -506,8 +506,35 @@ validate_frame_change(&LogicalDocument, channel:[u8;16], epoch:u64, &DomainOp, &
 // JSON integers must be JS-safe and nonnegative where applicable; frame/export bytes are
 // declarations, not proof of a blob. Expected server/type/root-kind and verified outer author
 // come from the caller's authenticated context. Decoding checks no Automerge delta, aggregate
-// state, receipt or persistence barrier; exact Studio checkpoint preflight and the live consumer
-// remain unavailable. No bridge projection serialization or Studio command is added by this API.
+// state, receipt or persistence barrier. No bridge serialization or Studio command is added.
+StudioIndexProjection::checkpoint(close:[u8;32]) -> Result<CheckpointSeed>;
+StudioIndexProjection::verify_checkpoint(&VerifiedReceipt, bytes:&[u8]) -> Result<VerifiedCheckpoint>;
+FlipnoteFrameProjection::checkpoint(close:[u8;32]) -> Result<CheckpointSeed>;
+FlipnoteFrameProjection::verify_checkpoint(&VerifiedReceipt, channel:[u8;16], bytes:&[u8]) -> Result<VerifiedCheckpoint>;
+pub enum StudioProjection { Index(StudioIndexProjection), Flipnote(Box<FlipnoteFrameProjection>) }
+  document(); epoch(); channel(); checkpoint(close:[u8;32]);
+pub enum StudioTarget { Index { channel:[u8;16] }, Flipnote { channel:[u8;16], object:[u8;16] } }
+  document(server:&[u8]) -> Result<LogicalDocument>; channel() -> [u8;16];
+  read(&LogicalDocument, epoch:u64, &AutoCommit) -> Result<StudioProjection>;
+  edit(&mut EncryptedDoc, &EpochGate, &MlsDevice, &ServerGroup, &mut impl CryptoRngCore,
+       &DomainOp, ts:u64) -> Result<SealedOp>;
+  ingest(&mut EncryptedDoc, &EpochGate, &SealedOp, &ServerGroup, &MlsDevice) -> Result<Admission>;
+// Core only: caller MUST persist intent before edit, save accounted document/log/gate before
+// publication and use retained-log body-checked reseal for retry. NoChange is not durable success.
+// Local insertion refuses cap growth; remote concurrency retains deterministic overflow.
+// BOTH paths preflight actual encoded 2 MiB seed and 6 MiB complete recovery including op bodies.
+pub struct StudioRecovery; // private complete projection/operations; redacted Debug
+  snapshot(&StudioProjection, base_close:Option<[u8;32]>, RecoveryReason,
+           selecting_receipt:[u8;32], &BTreeMap<[u8;32],LocalIntent>) -> Result<RecoverySnapshot>;
+  from_snapshot(&RecoverySnapshot, expected:&LogicalDocument, channel:[u8;16]) -> Result<Self>;
+  projection() -> &StudioProjection; operations() -> &BTreeMap<[u8;32],LocalIntent>;
+  selecting_receipt() -> [u8;32];
+// Source base-close is absent exactly at epoch zero. For Rewound, selecting_receipt is the
+// SOURCE opening hash (zero at epoch zero), never the destination: frozen-source bytes must
+// stay stable on retarget. For Excluded it names the receipt selecting this source's closure.
+// Constructors validate bounded canonical content, NOT arbitrary provenance/receipt currency.
+// The complete payload retains every conflict/deletion author/hidden origin and supplied op body;
+// generic elements/conflicts/tombstones arrays stay empty; applied_ops exactly matches payload ops.
 // catcoms_replication::registry (first typed consumer; no automatic settlement yet):
 pub struct PointerKey;        // type + bounded logical key; deterministic bucket()
 pub enum RegistryOp { Put { key:PointerKey, epoch:u64 }, Tombstone { key:PointerKey } }
@@ -566,6 +593,42 @@ pub struct RegistryAdoptionPlan; // private, typed, content-redacted; never a du
 ---
 
 ## 5. Storage & retention  *(catcoms-storage)*
+
+### Studio checkpoint/recovery bytes (Index and art subset)
+
+These are typed P1 payloads, not new receipts or network mutations. A checkpoint contains the
+existing immutable Index/art headers and exactly one immutable `_studio/seed` bytes field.
+It contains no authored operation records or intent markers. P1's raw-change hash verification
+is followed by a typed canonical rebuild; a matching owner signature alone does not admit extra
+fields, trailing bytes or a noncanonical seed. Two golden vectors pin the entire raw change.
+
+The private codec uses the existing wire encoder: unsigned big-endian integers, u32 byte-length
+prefixes (including fixed-size ids), u32 collection counts, and one-byte option tags 0/1. Payload
+headers are version byte 1, server bytes, document tag as u64, logical-key bytes, channel[16], and
+epoch u64. Sources are full author[32] and nonce[16], plus asserted timestamp u64 for art;
+operation ids are derived, never encoded as trusted ids. A register writes selected source/value
+first, then conflicts in ascending derived-id order. Selected values are not reselected by hash.
+Index creation values contain kind byte (0 flipnote, 1 score), UTF-8 title, creator[32], timestamp
+u64 and expiry (0 absent, 1 never, 2 followed by timestamp u64). Index payloads encode ordered
+objects, overflow, deleted objects, then ordered tombstones with all deletion sources. Each entry
+has ordered creation values followed by title and expiry registers.
+
+Art payloads encode optional title/fps registers, ordered frame entries, then ordered tombstones.
+Each frame has ordered insertion values and its pixel register. Insertions carry a checkpoint
+0/1 flag, optional after[16]/anchor[32]/before[32], and a blob (CID[32], bytes u64). FPS is one
+byte. Compact seeds keep only the admitted object/playable-frame prefix, no tombstones, selected
+values and up to three alternatives in at most 1024 fields. Art field priority is title, fps,
+then frame-id order (insertion then pixels). All retained births normalize onto the live timeline
+chain with checkpoint=true; original gaps remain in recovery. Subsequent ordinary root registers
+override baseline fallbacks and cannot cite the seed property's predecessor or reuse its sources.
+
+Recovery's generic arrays are empty except `applied_ops`. Its typed payload is version byte 1,
+receipt provenance[32], ordered operations (full author plus canonical DomainOp bytes), then a
+length-framed complete projection as above. `applied_ops` must exactly equal the operation keys.
+The complete outer envelope, not only its projection, must fit 6 MiB. Source opening close is
+absent exactly in epoch zero. Rewound provenance is the SOURCE opening receipt (zero for epoch
+zero); Excluded provenance identifies the closure-selecting receipt. The current constructor
+expects authenticated frozen-source inputs and supplies no persistence or retirement barrier.
 
 ### Creative blob seam (C0c, independent of Studio/P1 metadata)
 

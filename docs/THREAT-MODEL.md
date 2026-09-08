@@ -592,20 +592,20 @@ table with the commit that closed it.
   conflicts and removal provenance, and counts losing/deleted/over-cap content in its reader
   budget. It bounds already-parsed CRDT work (128,192 primitive ops, 6 MiB of visible keys/values),
   not wire parsing or retained signed history. Its asserted authors are still untrusted until
-  the future delta validator binds them to signed changes or a receipt-verified checkpoint.
+  a delta validator binds them to signed changes or a receipt-verified checkpoint.
   It cannot prove an immutable record was never causally overwritten, that a rename saw its
-  target at the author's frontier, or that a missing tombstone was never deleted. No live Studio
-  admission is enabled, and no checkpoint-size or typed recovery completeness claim is added.
+  target at the author's frontier, or that a missing tombstone was never deleted. The reader
+  alone is neither signed admission nor checkpoint-size/recovery completeness verification.
   The art-only Flipnote frame reader uses the same unauthenticated-claims boundary, with
   caller-supplied server scope and object/channel/epoch/dimension header checks, 188,192 primitive
   and 6 MiB reader bounds,
   and iterative cycle/missing-origin checks. Insertion op-id origins retain losing/deleted nodes;
-  the future signed causal validator must independently derive those origins and validate every
+  the signed causal validator must independently derive those origins and validate every
   property predecessor. Timestamp metadata is author-asserted, not an independent signed clock;
   it never orders frames or grants freshness. Over-cap/deleted frames retain all live CID evidence.
   Sound/score/export state rejects rather than being silently omitted. The frame reader does not
   implement PIX verification, retention, signed admission or a checkpoint/recovery persistence path.
-  A separate `validate_index_change` now checks epoch-zero Index deltas against the canonical
+  A separate `validate_index_change` checks Index deltas against the canonical
   domain operation and the author's complete dependency frontier. It binds record bytes to the
   change actor, requires fresh markers and immutable insertion/deletion/header writes, rejects
   deleted-id reuse and unknown targets, and requires exact same-property predecessor sets for
@@ -613,11 +613,9 @@ table with the commit that closed it.
   Overflow objects remain valid targets; receiver-only creations do not. Concurrent deletion
   cannot invalidate a mutation justified by its own causal view. This callback assumes already
   authenticated accepted history; P1 still owns the signed actor/member/server/physical binding.
-  It refuses checkpoint epochs until their real typed seed representation is implemented. No
-  production Studio writer or ingest adapter is enabled; tests deliberately isolate the semantic
-  callback with reader-only preflight and separately prove rollback on a preflight refusal.
-  Those tests are not proof of exact checkpoint capacity, durable intent retirement or Save/Load.
-  The corresponding epoch-zero art callback `validate_frame_change` now binds exact frame record
+  It accepts checkpoint epochs only with the typed seed at the sender's dependency frontier;
+  seedless epochs and mutation/reuse of immutable baseline provenance are rejected.
+  The corresponding art callback `validate_frame_change` binds exact frame record
   bytes to the full change actor/domain envelope and derives insertion origins independently from
   a private historical projection at the complete dependency frontier. It includes hidden/deleted
   insertion nodes when selecting the first direct right child and never borrows a receiver-only
@@ -628,10 +626,24 @@ table with the commit that closed it.
   empty-head view can represent the empty past of a nonempty receiver, with unknown heads rejected.
   Historical queries retain the same byte/primitive bounds but repeat Automerge clock work;
   maximum-source latency is unmeasured and remains required before production scheduling. This
-  callback adds no cap-edit policy, typed checkpoint/recovery or publication authority. Over-cap
-  frames remain semantic targets so trimming is possible; production admission must still enforce
-  aggregate caps and the specified edit/refusal policy. Sound/score/export and rotated epochs
-  refuse pending their stateful support. Exact retry recognition belongs to the retained signed
+  callback alone grants no cap-edit policy or publication authority. Over-cap frames remain
+  semantic targets so trimming is possible. `StudioTarget` now combines both validators with
+  local cap policy and exact aggregate preflight through existing P1 gated edit/ingest. Concurrent
+  ingress can retain a deterministic over-cap suffix; local edits cannot grow beyond its cap.
+  Both paths encode the actual prospective 2 MiB Automerge checkpoint and complete 6 MiB recovery
+  envelope including current operation bodies; refusal leaves document/log/gate unchanged.
+  Borrowed value/count/aggregate checks precede cloning caller-mutable projections for topology
+  reconstruction or compaction. The seed omits markers/tombstones/history and bounds conflicts
+  to four values per field and 1024 fields without changing selected values. Whole-source recovery
+  retains all alternatives/deletion authors/original positions and superseded operation bodies.
+  Normalized seed positions are labelled, not misrepresented as original authored placement.
+  The owner receipt/hash and canonical typed seed verifier remain independent requirements.
+  Typed recovery validates source epoch/base-close consistency and uses source-stable opening
+  provenance for Rewound, so retargeting cannot reset recovery ids and warning lifetimes. These
+  codecs do not authenticate caller-invented provenance, persist evidence, retire intents or
+  authorize pruning. Accounted storage/settlement and actor/native Save/Load are still unwired.
+  Sound/score/export state continues to refuse pending its typed support.
+  Exact retry recognition belongs to the retained signed
   envelope/gate, not timestamps or marker-only success.
   Vault restoration tests dependency and duplicate presence using metadata from Automerge's
   applied graph, not a saved or peer-asserted index; unresolved queued changes do not count.

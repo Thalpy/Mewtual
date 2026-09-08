@@ -1,4 +1,4 @@
-//! Epoch-zero art mutations, not the complete Studio admission/persistence adapter.
+//! Open-epoch art mutations, including typed checkpoint baselines; not persistence ownership.
 
 use automerge::legacy::{Key, ObjectId, OpId as AmOpId, OpType};
 use automerge::{Change, ObjId};
@@ -12,11 +12,12 @@ use super::*;
 /// `before` is previously authenticated accepted history, NOT a peer-supplied snapshot. This
 /// semantic callback alone grants no membership, blob availability or publication authority.
 ///
-/// Supported operations are insert/remove/replace frame and title/fps. Rotated epochs and all
-/// sound/score/export operations refuse pending their real typed checkpoint/stateful support.
+/// Supported operations are insert/remove/replace frame and title/fps. Checkpoint epochs require
+/// the typed immutable seed at the causal frontier; sound/score/export operations still refuse.
 /// Aggregate editing/cap policy and exact checkpoint/recovery preflight remain separate required
 /// callbacks; the mere presence of an over-cap frame does not make it an unknown target here.
-/// No live writer is enabled. Exact signed retries are handled by P1's retained-envelope dedup,
+/// `StudioTarget` provides those core callbacks, not a durable actor/native Save. Exact signed
+/// retries are handled by P1's retained-envelope dedup,
 /// not by accepting a fabricated new change with an old marker. Timestamps are author assertions.
 pub fn validate_frame_change(
     document: &LogicalDocument,
@@ -26,9 +27,6 @@ pub fn validate_frame_change(
     change: &Change,
     before: &AutoCommit,
 ) -> Result<(), ReplError> {
-    if epoch != 0 {
-        return Err(ReplError::EpochScope);
-    }
     let actor: [u8; 32] = change
         .actor_id()
         .to_bytes()
@@ -43,6 +41,23 @@ pub fn validate_frame_change(
         return Err(ReplError::EpochBound);
     }
     let causal = FlipnoteFrameProjection::read_at(document, channel, epoch, before, change.deps())?;
+    if epoch > 0 {
+        let seed = before
+            .get_all_at(ROOT, crate::studio::snapshot::SEED_KEY, change.deps())
+            .map_err(am_error)?;
+        if seed.len() != 1 {
+            return Err(ReplError::Malformed);
+        }
+        let baseline = FlipnoteFrameProjection::decode_baseline(
+            document,
+            channel,
+            epoch,
+            record_bytes(&seed[0].0)?,
+        )?;
+        if baseline.source_ids().contains(&domain.id(&author)) {
+            return Err(ReplError::IntentConflict);
+        }
+    }
     let (anchor, right) = placement(&causal, &operation)?;
     let marker = format!("_p1/op/{}", hex(&domain.id(&author)));
     if !before
@@ -200,6 +215,22 @@ fn encode_record(
     }
     bytes.extend_from_slice(&domain.encode()?);
     Ok(bytes)
+}
+
+pub(in crate::studio) fn prepare(
+    projection: &FlipnoteFrameProjection,
+    domain: &DomainOp,
+    author: &DeviceId,
+    ts: u64,
+) -> Result<crate::studio::admission::PreparedEdit, ReplError> {
+    let operation = FlipnoteOp::decode_domain(projection.document(), domain)?;
+    let (anchor, right) = placement(projection, &operation)?;
+    let (key, _) = entry(&operation, &domain.id(author))?;
+    let bytes = encode_record(domain, author, ts, anchor, right)?;
+    Ok(crate::studio::admission::PreparedEdit {
+        headers: header(projection.document(), projection.channel, projection.epoch),
+        entry: (key, bytes),
+    })
 }
 
 #[cfg(test)]

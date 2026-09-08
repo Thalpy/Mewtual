@@ -8,7 +8,7 @@
 //! Insertions reference insertion OP ids for their resolved left and right origins, not mutable
 //! winning frame ids. Losing and deleted insertions remain anchors. See `order` for the stable
 //! gap-ordering rule; none of these fields are authenticated by merely reading a projection.
-//! A separate epoch-zero causal validator derives origins from the author's dependency frontier
+//! A separate open-epoch causal validator derives origins from the author's dependency frontier
 //! and checks mutations. P1 authentication and exact seed preflight are still separate requirements.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,6 +24,8 @@ use crate::registry::hex;
 use crate::{DomainOp, LogicalDocument, ReplError, MAX_CHECKPOINT_BYTES};
 
 mod change;
+mod snapshot;
+pub(super) use change::prepare;
 pub use change::validate_frame_change;
 
 /// List-length ceiling, separate from the sum of declared selected-frame sizes.
@@ -79,9 +81,13 @@ pub struct FrameBlob {
     pub bytes: u64,
 }
 
-/// Immutable insertion evidence, including its original stable-id request and resolved gap.
+/// Immutable insertion position. Ordinary changes retain the authored gap; a checkpoint
+/// normalizes positions to its live timeline and labels them explicitly below.
 #[derive(Clone, PartialEq, Eq)]
 pub struct FrameInsertion {
+    /// True only for the normalized baseline position established by a verified checkpoint.
+    /// Attribution remains original; this position is not the author's original gap claim.
+    pub checkpoint: bool,
     pub after: Option<ElementId>,
     /// Insertion op id of the predecessor; None is the beginning, not the append position.
     pub anchor: Option<OpId>,
@@ -263,6 +269,30 @@ impl FlipnoteFrameProjection {
         let mut title = None;
         let mut fps = None;
         let mut operations = BTreeMap::new();
+        let seed = match heads {
+            Some(heads) => doc.get_all_at(ROOT, super::snapshot::SEED_KEY, heads),
+            None => doc.get_all(ROOT, super::snapshot::SEED_KEY),
+        }
+        .map_err(am_error)?;
+        let mut inherited_ids = BTreeSet::new();
+        if epoch > 0 {
+            if seed.len() != 1 {
+                return Err(ReplError::Malformed);
+            }
+            let baseline =
+                Self::decode_baseline(document, channel, epoch, record_bytes(&seed[0].0)?)?;
+            inherited_ids = baseline.source_ids();
+            title = baseline.title;
+            fps = baseline.fps;
+            for (frame, entry) in baseline.frames {
+                for insertion in entry.insertions {
+                    nodes.insert(insertion.source.op_id, Node { frame, insertion });
+                }
+                replacements.insert(frame, entry.pixels);
+            }
+        } else if !seed.is_empty() {
+            return Err(ReplError::Malformed);
+        }
         let keys = match heads {
             Some(heads) => doc.keys_at(ROOT, heads),
             None => doc.keys(ROOT),
@@ -280,6 +310,10 @@ impl FlipnoteFrameProjection {
                 None => doc.get_all(ROOT, &key),
             }
             .map_err(am_error)?;
+            if key == super::snapshot::SEED_KEY {
+                budget.add(record_bytes(&values[0].0)?.len())?;
+                continue;
+            }
             for (value, _) in &values {
                 budget.value(value)?;
             }
@@ -325,6 +359,9 @@ impl FlipnoteFrameProjection {
                 let bytes = record_bytes(&value)?;
                 let record = decode_record(document, bytes)?;
                 let id = record.source.op_id;
+                if inherited_ids.contains(&id) {
+                    return Err(ReplError::IntentConflict);
+                }
                 // op ids exclude the body AND derived metadata; only byte-identical retries
                 // collapse. Same-id equivocation must never become a second insertion/node.
                 let digest = *blake3::hash(bytes).as_bytes();
@@ -355,6 +392,7 @@ impl FlipnoteFrameProjection {
                                 insertion: FrameValue {
                                     source,
                                     value: FrameInsertion {
+                                        checkpoint: false,
                                         after,
                                         anchor: record.anchor,
                                         before: record.before,
@@ -420,6 +458,32 @@ impl FlipnoteFrameProjection {
         if header_count != expected.len() && !pristine {
             return Err(ReplError::Malformed);
         }
+        Self::from_parts(
+            document,
+            channel,
+            epoch,
+            title,
+            fps,
+            nodes,
+            replacements,
+            deletions
+                .into_iter()
+                .map(|(id, sources)| (id, sources.into_values().collect()))
+                .collect(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        document: &LogicalDocument,
+        channel: ElementId,
+        epoch: u64,
+        title: Option<FrameRegister<String>>,
+        fps: Option<FrameRegister<u8>>,
+        nodes: BTreeMap<OpId, Node>,
+        mut replacements: BTreeMap<ElementId, FrameRegister<FrameBlob>>,
+        tombstones: BTreeMap<ElementId, Vec<FrameSource>>,
+    ) -> Result<Self, ReplError> {
         let insertion_order = order(&nodes)?;
         let mut insertions: BTreeMap<ElementId, Vec<FrameValue<FrameInsertion>>> = BTreeMap::new();
         // BTreeMap iteration supplies smallest-op-id winner and deterministic conflict order.
@@ -451,10 +515,6 @@ impl FlipnoteFrameProjection {
         if !replacements.is_empty() {
             return Err(ReplError::Malformed);
         }
-        let tombstones: BTreeMap<_, Vec<_>> = deletions
-            .into_iter()
-            .map(|(id, sources)| (id, sources.into_values().collect()))
-            .collect();
         let mut timeline = Vec::new();
         for op_id in &insertion_order {
             let node = &nodes[op_id];

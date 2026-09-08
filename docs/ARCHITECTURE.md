@@ -43,18 +43,27 @@ evidence. Stable insertion-node origins and a right-origin forest preserve seque
 and same-gap concurrent ordering without rewiring losing/deleted anchors. All live alternatives
 remain available even when a frame is deleted or beyond the 999-frame / 8 MiB playable prefix.
 Sound/score/export state rejects until its projection support lands. Neither reader authenticates
-its records. A separate epoch-zero Index delta validator now checks canonical record/actor
+its records. A separate Index delta validator checks canonical record/actor
 binding, the sender's dependency-frontier target existence, immutable headers/evidence and exact
 same-property predecessors for mutable registers. It is a pure semantic callback: P1 must still
 authenticate membership/server/physical scope and preflight the exact checkpoint. The art/frame
-callback now supplies the corresponding epoch-zero checks, deriving left/right insertion origins
+callback supplies corresponding checks, deriving left/right insertion origins
 from the sender's full causal projection, including hidden nodes. Its private historical reader
 uses one frontier for keys, all values and register winners; the public current reader retains
-its original pristine-history rule. Neither callback is a production write adapter. Typed
-checkpoint/recovery encoding and aggregate preflight remain necessary before live Studio writes;
-both callbacks refuse checkpoint epochs until their real seed formats exist. Historical reads
-still repeat Automerge clock work; boundedness is not measured production latency.
-No backend/runtime or user-interface binding is added.
+its original pristine-history rule. `StudioTarget` combines these callbacks with existing P1
+gated edit/ingest and exact next-checkpoint AND complete recovery preflight. It supports epoch
+zero and verified typed seeds; it does not own durable intents, storage, publication or settlement.
+The compact baseline is one immutable `_studio/seed` bytes property alongside the original
+headers, not a new operation log. It preserves selected values/authorship and up to four values
+per conflict field across 1024 fields. Frame origins normalize to the live playable chain and
+are explicitly marked `checkpoint`; all original/hidden/losing evidence and current operation
+bodies remain in typed recovery. Ordinary post-seed registers override fallback values, with
+same-property predecessors only; inherited provenance ids are not reusable operations/markers.
+No user operations, markers or tombstones enter the compact seed. Generic P1 hash/receipt
+verification and canonical typed rebuilding both run before installation. Recovery uses the
+existing bounded envelope with a complete typed payload, not the lossy generic summary arrays.
+Historical reads still repeat Automerge clock work; boundedness is not measured production
+latency. No actor/native or user-interface binding is added.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
 even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.

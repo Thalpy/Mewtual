@@ -8,6 +8,73 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote Index/art checkpoint and P1 core consumer (2026-09-08).**
+  `studio::StudioTarget` now owns the typed core edit/ingest composition for Index and art:
+  canonical mutation preparation, causal validation, local 64-object/999-frame/8 MiB refusal
+  policy, and exact prospective checkpoint AND complete recovery preflight through existing
+  P1 gates. Signed membership/physical scope, operation-id dedup and atomic rollback remain
+  existing P1 responsibilities. Concurrent remote work can materialize explicit overflow;
+  trimming remains possible. Sound/score/export mutations still fail closed.
+
+  `StudioIndexProjection::checkpoint/verify_checkpoint` and the corresponding art methods
+  reuse `CheckpointSeed::build/verify` and `EncryptedDoc::from_checkpoint`. Each seed has the
+  original headers plus one immutable `_studio/seed` bytes baseline, no synthetic user ops,
+  marker map or tombstones. It preserves the actual selected values and original attribution,
+  with at most four values per field and 1024 conflict fields. Only admitted objects/playable
+  frames enter the seed. Frame insertion origins normalize to a live chain and carry
+  `FrameInsertion::checkpoint = true`; original gaps are not falsely attributed to that chain.
+  Ordinary post-seed registers override fallback values; baseline provenance ids cannot be
+  reused as new operations, and first mutable puts cannot cite the seed property's predecessor.
+  Both causal validators now support verified baseline epochs, not just epoch zero.
+
+  `StudioRecovery` specializes the existing 6 MiB recovery envelope with a complete typed
+  projection plus full supplied current-epoch operation bodies. This retains fifth-and-later
+  conflicts, all insertion/deletion authors, hidden/overflow positions and superseded bodies;
+  generic summary arrays are empty and applied ids exactly match the payload operations.
+  It validates source epoch/base-close coherence and uses the SOURCE opening receipt for
+  Rewound (zero in epoch zero), so retargeting does not change frozen-source ids or warnings.
+  Construction verifies canonical bounded content, not arbitrary provenance or receipt currency.
+  Borrowed count/value/aggregate checks precede projection clones; exact complete envelope
+  size, including bodies and metadata, is preflighted before a core change is committed.
+
+  Twelve new regression tests cover real P1 edit/checkpoint/owner verification/reopen/post-seed
+  concurrency, both delivery orders, generic encrypted-document snapshot/reopen and retry,
+  forty successive seed builds without accumulated operation history, exact raw seed hash/length
+  golden vectors, expected-hash plus typed malformed seed rejection, causal/seed predecessor
+  and source-id attacks, local cap refusal versus admitted signed concurrent overflow, complete
+  recovery metadata/body/byte bounds, public-field mutation guards, and 999 playable frames
+  with 1024 conflict fields. The maximal codec fixture uses typed nodes, not a thousands-write
+  Automerge transaction; it preserves the size assertions without claiming an inadmissible
+  multi-write change is a real edit. Existing causal and large-history tests remain in place.
+
+  Adversarial actual-diff review found two Mediums (cloning before bounds and incoherent recovery
+  source metadata); both are fixed with regressions. Source-stable Rewound semantics are explicit.
+  Re-review found no Blocker/High/Medium; its Low retirement wording drift is fixed too. No new
+  receipt, succession, catch-up, storage or finality protocol is introduced.
+
+  Final verification (all passed):
+
+  - `cargo test --all --all-features` (rerun after lint fixes; replication unit suite: 153).
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 native tests).
+  - `npm.cmd --prefix apps/desktop test` (1144 frontend tests).
+  - `cargo fmt --all -- --check`.
+  - `cargo clippy --all-targets --all-features -- -D warnings`.
+  - `bash scripts/check-no-ambient.sh` (Git Bash on Windows).
+  - `git diff --check` and `git diff --cached --check`.
+
+  No newly ignored/skipped tests. No UI/native source changed; no screenshot, frontend build
+  or extra native `cargo check` was required. Local commit only: the prior remote-destination
+  approval remains outstanding. Unrelated release workflow and RELEASING edits are excluded.
+
+  **Boundary / next task:** this is a core consumer, NOT a durable Studio Save or completed
+  gate 1. There is no owned Studio epoch restore/save, accounted vault adapter, actor/native
+  create/list/read/apply, live publication or automatic recovery installation yet. Callers must
+  persist an intent before `edit`, then save document/log/gate before publishing; `NoChange`
+  is not durable success and exact retry needs retained-log body checking/reseal. Start gate 2's
+  art Save/Load integration with those ownership/restore seams, reusing Registry/P1 patterns.
+  Do not postpone it for sound/export or reopen the platform design. All seven full product
+  gates remain open; UI remains user-owned and game/avatar work paused.
+
 - **Flipnote gate 1, epoch-zero art/frame causal validator (2026-09-08; verified).**
   `studio::validate_frame_change` checks insert/remove/replace frame and title/fps mutations.
   Exact record bytes bind the full actor, canonical domain envelope and independently derived

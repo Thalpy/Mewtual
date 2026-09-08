@@ -10,8 +10,9 @@
 //! body checks internal consistency, NOT authorship: a separate delta validator must bind the
 //! record to the signed change, validate its causal predecessors, forbid replacing insertions
 //! or deleting evidence, and run checkpoint preflight. A checkpoint needs separate receipt
-//! verification. `validate_index_change` checks epoch-zero causal mutations, but no production
-//! writer, checkpoint builder, actor command or publication path is enabled here.
+//! verification. `validate_index_change` checks epoch-zero and typed checkpoint causal mutations;
+//! `StudioTarget` supplies the writer/exact preflight. Actor/storage/publication ownership is
+//! still required before the application can expose a successful Save.
 
 use std::collections::BTreeMap;
 
@@ -26,6 +27,8 @@ use crate::registry::hex;
 use crate::{DomainOp, LogicalDocument, ReplError, MAX_CHECKPOINT_BYTES};
 
 mod change;
+mod snapshot;
+pub(super) use change::prepare;
 pub use change::validate_index_change;
 
 /// Visible objects in a channel index. Concurrent excess remains explicit recovery evidence.
@@ -193,6 +196,32 @@ impl StudioIndexProjection {
         // An op id excludes the body. Reject conflicting nonce reuse rather than treating two
         // unrelated payloads as one idempotent operation. Keep digests, not a second body copy.
         let mut operations = BTreeMap::new();
+        let seed = doc
+            .get_all(ROOT, super::snapshot::SEED_KEY)
+            .map_err(am_error)?;
+        let mut inherited_ids = std::collections::BTreeSet::new();
+        if epoch > 0 {
+            if seed.len() != 1 {
+                return Err(ReplError::Malformed);
+            }
+            let bytes = record_bytes(&seed[0].0)?;
+            let baseline = Self::decode_baseline(document, epoch, bytes)?;
+            inherited_ids = baseline.source_ids();
+            for (id, entry) in baseline.objects {
+                creations.insert(
+                    id,
+                    entry
+                        .creations
+                        .into_iter()
+                        .map(|v| (v.source.op_id, v))
+                        .collect(),
+                );
+                titles.insert(id, entry.title);
+                expiries.insert(id, entry.expiry);
+            }
+        } else if !seed.is_empty() {
+            return Err(ReplError::Malformed);
+        }
         for key in doc.keys(ROOT) {
             key_count += 1;
             if key.len() > MAX_ROOT_KEY_BYTES {
@@ -200,6 +229,12 @@ impl StudioIndexProjection {
             }
             budget.add(key.len())?;
             let values = doc.get_all(ROOT, &key).map_err(am_error)?;
+            if key == super::snapshot::SEED_KEY {
+                // A seed may exceed an ordinary DomainOp's 64-KiB record bound. Charge it
+                // separately without weakening that bound for any ordinary scalar.
+                budget.add(record_bytes(&values[0].0)?.len())?;
+                continue;
+            }
             for (value, _) in &values {
                 budget.value(value)?;
             }
@@ -242,6 +277,9 @@ impl StudioIndexProjection {
             for (value, am_id) in values {
                 let bytes = record_bytes(&value)?;
                 let (source, operation) = decode_record(document, bytes)?;
+                if inherited_ids.contains(&source.op_id) {
+                    return Err(ReplError::IntentConflict);
+                }
                 let digest = *blake3::hash(bytes).as_bytes();
                 if operations
                     .insert(source.op_id, digest)

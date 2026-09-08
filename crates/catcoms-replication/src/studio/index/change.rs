@@ -11,7 +11,7 @@ use automerge::{Change, ObjId};
 
 use super::*;
 
-/// Check that one epoch-zero change implements exactly its canonical StudioIndex operation.
+/// Check that one open-epoch change implements exactly its canonical StudioIndex operation.
 ///
 /// Intended as the semantic callback of P1's `*_domain_preflight_gated` methods: those methods
 /// independently bind the change actor to the full signed author and current member key, check
@@ -19,9 +19,9 @@ use super::*;
 /// Calling this function alone verifies NONE of those external authentication/lifecycle facts.
 /// `before` must be trusted accepted history, not an arbitrary peer-supplied Automerge snapshot.
 ///
-/// The caller must ALSO preflight the exact prospective checkpoint/recovery encoding. This is
-/// not a production Studio writer; no such adapter is enabled while that serializer is missing.
-/// Checkpoint epochs deliberately refuse until their retired-state representation is specified.
+/// The caller must ALSO preflight the exact prospective checkpoint/recovery encoding, as
+/// `StudioTarget` does. Checkpoint epochs require their immutable typed baseline at the sender's
+/// causal frontier; a generic snapshot or seedless rotated document cannot substitute for it.
 /// Exact sealed retries belong to P1/log dedup, not marker-only changes fabricated by this API.
 pub fn validate_index_change(
     document: &LogicalDocument,
@@ -35,7 +35,7 @@ pub fn validate_index_change(
         .as_slice()
         .try_into()
         .map_err(|_| ReplError::EpochScope)?;
-    if epoch != 0 || *document != studio_index_document(&document.server_id, channel)? {
+    if *document != studio_index_document(&document.server_id, channel)? {
         return Err(ReplError::EpochScope);
     }
     let actor: [u8; 32] = change
@@ -87,6 +87,25 @@ pub fn validate_index_change(
     let deletion_prefix = format!("d/{}/", hex(object));
     let mut created = false;
     let mut deleted = false;
+    let seed = before
+        .get_all_at(ROOT, crate::studio::snapshot::SEED_KEY, change.deps())
+        .map_err(am_error)?;
+    if epoch > 0 {
+        if seed.len() != 1 {
+            return Err(ReplError::EpochScope);
+        }
+        if !required.is_empty() {
+            return Err(ReplError::Malformed);
+        }
+        let baseline =
+            StudioIndexProjection::decode_baseline(document, epoch, record_bytes(&seed[0].0)?)?;
+        created = baseline.objects.contains_key(object);
+        if baseline.source_ids().contains(&domain.id(&author)) {
+            return Err(ReplError::IntentConflict);
+        }
+    } else if !seed.is_empty() {
+        return Err(ReplError::Malformed);
+    }
     let mut has_keys = false;
     // Scan at the author's full dependency frontier, never the receiver's current keys. This
     // preserves legitimate concurrent insertions/deletions without admitting a sequential reuse.
@@ -163,7 +182,7 @@ pub fn validate_index_change(
     Ok(())
 }
 
-// Internal canonical record constructor shared with this module's TEST-ONLY writer. It does
+// Internal canonical record constructor shared with the typed core writer and tests. It does
 // not write an Automerge document or mint publication authority.
 fn record(
     domain: &DomainOp,
@@ -181,6 +200,19 @@ fn record(
     bytes.extend_from_slice(author.as_bytes());
     bytes.extend_from_slice(&domain.encode()?);
     Ok((key, bytes))
+}
+
+pub(in crate::studio) fn prepare(
+    logical: &LogicalDocument,
+    epoch: u64,
+    domain: &DomainOp,
+    author: &DeviceId,
+) -> Result<crate::studio::admission::PreparedEdit, ReplError> {
+    let operation = IndexOp::decode_domain(logical, domain, author)?;
+    Ok(crate::studio::admission::PreparedEdit {
+        headers: header(logical, epoch),
+        entry: record(domain, author, &operation)?,
+    })
 }
 
 #[cfg(test)]
