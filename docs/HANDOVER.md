@@ -8,7 +8,7 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
-- **Flipnote gate 3, prepared registry page sources (2026-09-08).** The existing page adapter now
+- **Flipnote gate 3, prepared registry page sources (2026-09-08, `cf7c8f4`).** The existing page adapter now
   reuses a verified read-only source instead of replaying its entire saved history per request.
   Begin captures authenticated bytes under current store/server custody; the opaque job rebuilds
   off-executor without those borrows or authority keys; finish rechecks current membership,
