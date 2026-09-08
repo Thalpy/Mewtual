@@ -47,8 +47,8 @@ legacy serialization. A proof additionally requires complete inventory agreement
 saved registry, and exact equality with the pending-preferred owner journal. Source flush and
 journal re-save precede signing. Disagreement/stale preparation remains a hint; lost indexed
 files, faults and corruption refuse. A selected receipt is not proof its seed is available or
-verified. Expected-seed fetching now uses additive kind 22; newcomer installation and automatic
-actor scheduling remain unwired.
+verified. Expected-seed fetching uses additive kind 22. Explicit recovery-first registry
+installation is now connected to that scoped selection; automatic actor scheduling remains unwired.
 
 Checkpoint fetching keeps discovery provenance rather than converting public receipt fields into
 authority. The private selection is minted only while checking the fresh kind-21 owner response;
@@ -64,17 +64,28 @@ identities, current MLS, actual transports and the exact query/answer. Raw seeds
 512-byte to 1-MiB padding ladder inside group AEAD; above that ceiling the encoded size remains
 visible. The receipt's exact Automerge hash is checked before parsing, then the canonical registry
 schema. Fetching never writes the receiver's vault, retires intents or replaces provisional work.
-The future newcomer installer must enforce recovery/high-water/mount checks under its durable gate.
-Its registry core now has explicit checkpoint-adoption state: a distant selected receipt seals
+The registry core has explicit checkpoint-adoption state: a distant selected receipt seals
 the entire held source, with no pruning, and a typed plan preserves the whole previous version.
 Retargets keep the same content-derived recovery id; seed-only and terminal-epoch versions count.
 The outer restart v2 / adoption-only receipt-book v3 keep nonadjacent selections separate from
 ordinary adjacent settlement. Opening/prior-target equivocation is checked before stale filtering.
-Fault is a successful typed outcome which the future store transaction must save before reporting
-failure; bad seed or recovery must not suppress that evidence. Constructing a separate successor
+Fault is a successful typed outcome which the store transaction saves before seed or recovery work;
+bad seed or recovery must not suppress that evidence. Constructing a separate successor
 does not install it, retire intents, or provide a transferable network-authority permit.
 
-The registry's store-level checkpoint transaction now orders durable barriers as source flush,
+`Server::install_registry_seed_step` now performs this explicit newcomer transaction under exclusive
+sync/store borrows. It rechecks runtime, MLS, full local identity, owner/tenure, superseding selection,
+receiver-clock expiry and physical mount/server at entry. The accounted store saves the full source
+Closing (or Fault) even before a seed is available, then validates and saves whole-source typed
+recovery before atomically selecting the successor. Invalid inventory or uncertain I/O fails closed;
+an indexed source cannot be replaced by invented epoch zero. Recovery warnings keep their original
+ids/deadlines across retargets and restart. Resuming after expiry requires fresh discovery, not a
+receipt reconstructed into a permit. Adoption retires no intents; exact installation retries flush
+the actual successor and preserve later edits. Old concrete watches/queued pages are not rebound:
+the caller explicitly watches the installed epoch before normal paged catch-up. This is cooperative
+registry integration, not an actor worker, current-head lease or universal progress at full quota.
+
+The registry's adjacent, locally proved checkpoint transaction orders durable barriers as source flush,
 typed recovery, included-only intent retirement, then atomic successor selection. Until selection
 the complete Closing source remains the restart proof; afterward the verified seed and preserved
 receipt book do. Exact retries flush the actual successor without replacing newer work. Local
@@ -122,7 +133,7 @@ an interrupted subscribe/unsubscribe and establishes it as unsubscribed before r
 after the same topic was rewatched. Revoking a watch needs only its exact generation, so an old
 mount can discard its own queued traffic without gaining permission to ingest. Desired
 watch installation itself never awaits. Actor/native ownership, automatic scheduling of the
-cooperative discovery/catch-up paths and newcomer checkpoint installation remain next.
+cooperative discovery/catch-up/installation paths remain next.
 
 Registry catch-up has a cooperative read-only page provider over checked vault history.
 Its HMAC cursor freezes the provider's dependency-complete accepted-log prefix
@@ -144,7 +155,7 @@ one accounted all-or-none page save. Independent unknown heads permit one empty-
 verified seed, provider and charged limits stay fixed. Four watch-bound passes each retain at most
 one page and expire on the receiver's monotonic clock. Duplicate and terminal-empty pages still
 cross the storage/inventory barrier; a receipt seal or MLS advance cannot turn them into stale
-success. Automatic actor/native scheduling and newcomer checkpoint installation remain; the adapters
+success. Automatic actor/native scheduling remains; the adapters
 do not move vault ownership into sync or change the legacy document map.
 
 The naive "one group, every device commits, replay old ciphertext to latecomers" design

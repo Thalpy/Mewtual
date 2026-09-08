@@ -1271,8 +1271,8 @@ the ephemeral whole-source fingerprint, quarantine and quota-owner metadata. The
 6-MiB cap is checked before payload allocation/persistence; decoding validates the full wrapper,
 scope, canonical ordering, disjoint key sets, bounds and excluded-id membership in `applied_ops`.
 `RecoverySnapshot` Debug now redacts content even when nested in a generic Option/Result. These are
-vault-local records, not independently signed replay requests. Rewound whole-version records now
-exist in the adoption core. Pointer verification, Restore, the recovery-first adoption installer,
+vault-local records, not independently signed replay requests. Rewound whole-version records are
+saved by the scoped registry adoption installer below. Pointer verification, Restore,
 repair-specific typed records and actor/bridge integration remain unwired.
 
 Local editing uses two ordered barriers under the exclusive store borrow: validate the canonical
@@ -1481,8 +1481,8 @@ Missing removed-author operations in the REMAINING page range produce
 positions and initial ancestors are claimed held history, so author removal after delivery need
 not block later descendants. These are not possession proofs: a conforming requester derives its
 heads/seed from verified state and continues only after persisting a dependency-complete page.
-Historical authority transfer, automatic receiver scheduling and newcomer checkpoint installation
-remain unwired. Cooperative durable receive and keyed head/seed exchange are described below.
+Historical authority transfer and automatic receiver scheduling remain unwired. Cooperative durable
+receive, keyed head/seed exchange and explicit registry installation are described below.
 
 The direct trusted-local page API imposes no aggregate call-rate limit. One call rebuilds at most
 the bounded saved epoch, then walks its bounded change index/ancestor sets. It grants no delivery
@@ -1597,9 +1597,32 @@ currently authoritative. False means unsupported/refused/unavailable, never an e
 `registry_seed_ready(store, server, pass)` additionally checks runtime/MLS/owner/supersession,
 expiry and exact mount/server now; it is not a settlement chip or a lease. The sync-only trusted
 `with_registry_seed(pass, callback)` rechecks context and lends the immutable receipt, verified
-seed, bucket and tenure under exclusive sync ownership. A future installer must additionally
-enforce local high-water/fault/inventory/recovery ordering; this callback alone is not a store API.
-No receiver epoch or recovery record is created by discovery/fetch.
+seed, bucket and tenure under exclusive sync ownership. `with_registry_seed_selection` performs
+the same check but permits absent seed bytes, so receipt/fault persistence need not wait on a
+provider. Neither callback alone is a store API. Discovery/fetch creates no receiver epoch or recovery.
+
+`Server::install_registry_seed_step(store, server, pass, budget)` is the explicit accounted vault
+transaction. It rechecks the physical mount/numeric server and fresh selection at entry, then holds
+exclusive sync/store borrows throughout synchronous persistence. The receiver's injected runtime
+Clock supplies recovery time; caller or peer timestamps cannot extend freshness. It returns
+`(RegistryAdoptionOutcome, EpochRegistryState)` only after the corresponding save/flush barrier:
+
+- `AwaitingSeed`: full source and selected receipt saved Closing; expected seed still absent.
+- `RecoveryPending`: full source remains Closing while a staged eviction warning waits.
+- `Fault`: conflicting receipt evidence saved independently of missing/invalid seed or recovery.
+- `Stale`: an older same-tenure selection did not replace local high-water evidence.
+- `Installed`: typed whole-source recovery saved before atomic successor replacement.
+- `AlreadyInstalled`: actual successor flushed without reseeding, even if it has newer edits.
+
+Invalid inventory (including a missing indexed source), wrong typed seed or failed/uncertain I/O
+returns an error, not a success label. Recovery must be typed and inventory-matched; existing
+warnings are never reset by retargeting. A restarted/expired pass requires fresh head discovery
+and seed fetch to resume. Exact opening retries need no seed bytes and do not touch recovery.
+Adoption retires no intents: a seed value alone is not evidence an author's operation was final.
+The caller must explicitly watch the installed concrete epoch and begin a fresh receive pass;
+old watches and already queued old-epoch pages cannot save into its successor. This is neither a
+lease nor automatic scheduling. Existing conservative per-record/reserve limits still apply;
+settlement progress at the full server quota is not yet guaranteed.
 
 Query v1: `v:u8=1, type:u16=18, logical_key:bytes32, concrete_id:u128, seed_hash:bytes32` (91 bytes,
 cap 256). Integers are big-endian and bytes u32-length framed. The authenticated request binds
@@ -1624,8 +1647,7 @@ Provider limits: 256 logical watches, eight five-second metadata requests, one p
 Watch replacement does not reset rate debt. Crypto/parser temporaries and a bounded source rebuild
 are additional to the four retained raw-seed bodies. Provider responder handoff is not delivery;
 the four outgoing client slots do not account for provider transport response buffers.
-Automatic actor/lock scheduling, source
-latency acceptance and recovery-first newcomer installation remain unfinished.
+Automatic actor/lock scheduling and source latency acceptance remain unfinished.
 
 ### Authenticated registry page exchange (cooperative, kind 20)
 
@@ -1741,8 +1763,8 @@ explicit cleanup before reconciliation. Unresolved ownership still blocks server
 
 These APIs require the caller's sole complete server budget; inventory is not a continuing write
 lease. Checked installation/retirement and single-intent replay are implemented at the store layer.
-The cooperative adapters supply live gossip, durable paged catch-up and keyed registry head/seed
-exchange, not newcomer checkpoint installation, autonomous scheduling or actor/Studio wiring.
+The cooperative adapters supply live gossip, durable paged catch-up, keyed registry head/seed
+exchange and recovery-first registry installation, not autonomous scheduling or actor/Studio wiring.
 Each mutation rebuilds a
 bounded saved graph (local editing also checks the source before journaling); the receiver applies
 the ingress rails above, while aggregate actor-owned scheduling remains to be integrated.

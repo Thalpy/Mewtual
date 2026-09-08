@@ -151,6 +151,38 @@ fn registry_seed_wire_exact_query_caps_padding_and_authenticated_bad_frames() {
 }
 
 #[tokio::test]
+async fn registry_seed_selection_without_bytes_is_scoped_superseded_and_expiring() {
+    let (mut owner, mut client, clock) = pair().await;
+    let (receipt, _) = seed(&owner, 4);
+    let pass = discover(&mut owner, &mut client, &receipt, 4).await;
+    client
+        .with_registry_seed_selection(&pass, |group, device, _, selected| {
+            assert_eq!(selected.receipt, &receipt);
+            assert!(selected.checkpoint.is_none());
+            assert_eq!(selected.bucket, 4);
+            selected
+                .receipt
+                .verify_current_owner(group, selected.tenure)
+                .unwrap();
+            assert!(group.member_signature_key(&device.device_id()).is_some());
+        })
+        .unwrap();
+    assert!(client
+        .with_registry_seed(&pass, |_, _, _, _| panic!("not fetched"))
+        .is_err());
+    clock.advance_ms(1000);
+    let current = discover(&mut owner, &mut client, &receipt, 4).await;
+    assert!(client
+        .with_registry_seed_selection(&pass, |_, _, _, _| panic!("superseded"))
+        .is_err());
+    clock.advance_ms(60_001);
+    assert!(client
+        .with_registry_seed_selection(&current, |_, _, _, _| panic!("expired"))
+        .is_err());
+    assert!(client.docs.is_empty());
+}
+
+#[tokio::test]
 async fn registry_seed_joined_member_fetches_only_exact_typed_seed_without_installing() {
     let (mut owner, mut client, _) = pair().await;
     let (receipt, seed) = seed(&owner, 4);

@@ -20,9 +20,10 @@ Opt-in authenticated registry gossip and kind-20 paged requests use cooperative 
 adapters; bounded provider cursors and durable receiver continuation are implemented. Independent
 owner-tenure observations persist with MLS, and keyed registry receipt-head queries/proofs now
 use explicit local snapshot preparation plus checked source/decision barriers. Expected-seed
-discovery/installation is not complete. Automatic wakeups/global replay scheduling, other
+fetch and recovery-first registry installation now connect that selection to the vault and a
+fresh open-epoch catch-up pass. Automatic wakeups/global replay scheduling, other
 managed-file families and production orchestration are not wired yet. Studio
-materializers, settlement orchestration, sync discovery, complete storage integration and app/UI events
+materializers, settlement orchestration, all-family discovery, complete storage integration and app/UI events
 remain later slices and the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
 five remaining lifecycle corrections: adoption is folded into the first crash-safe receipt of
@@ -208,15 +209,18 @@ flush the actual successor without rerunning predecessor retirement or replacing
 Save retries retain their original concrete document id; deliberate replay explicitly targets the
 new one. Full-quota capacity orchestration and automatic replay are not live-wired yet.
 
-Newcomer core implementation: a discovered checkpoint need not close the epoch held locally.
+Newcomer registry implementation: a discovered checkpoint need not close the epoch held locally.
 Explicit adoption state freezes that whole source and retains the selected high-water plus one
 prior target. Delayed conflicts with that target or the original seed-opening receipt fault
 before stale filtering. A typed Rewound plan conservatively keeps the complete previous version,
 including seed-only pointers; no intent is retired merely because a seed has a matching value.
 Recovery identity depends on source content, not the destination receipt or late quarantine, so
-retargeting reuses the same warning. The bounded core can construct a separate successor, but the
-recovery-first vault installer is still pending. It must save Fault outcomes even when no seed
-can be installed, and reacquire fresh discovery after restart or an expired fetch handle.
+retargeting reuses the same warning. The scoped Server installer now saves the full source/receipt
+before seed work, then saves typed whole-source recovery before atomically selecting the successor.
+Fault outcomes are durable even without a seed. Restart or an expired fetch handle requires fresh
+discovery. Exact installed retries flush the actual successor and preserve later edits; no intents
+are retired by adoption. The caller explicitly re-watches the installed epoch for paged catch-up.
+This cooperative registry path is not automatic actor scheduling or a generic Studio installer.
 
 An intent is **final** when inside a receipted closure. Until then it is retained, vault-sealed,
 and replayed wherever the document is next `Open`.
@@ -248,8 +252,8 @@ The receiver's private selection is minted during fresh kind-21 owner-proof veri
 rechecked against runtime, MLS, owner and superseding discovery. Four retained passes hold one
 seed each with three paced attempts and a 60-second lifetime; transport capacity survives caller
 cancellation until driver termination. Only installed opening seeds are served, not a latest
-receipt's unavailable next seed. Fetching writes no receiver state. Recovery-first newcomer
-installation, combined automatic scheduling and the other managed types remain unfinished;
+receipt's unavailable next seed. Fetching writes no receiver state; explicit registry installation
+uses the recovery-first transaction above. Combined automatic scheduling and other managed types remain unfinished;
 INTERFACES specifies the exact wire framing and bounds. These resource lifetimes are not leases.
 
 **Retirement.** The checkpoint carries the canonical projection of the receipted heads plus
@@ -548,8 +552,8 @@ rebuilds the DAG, validates typed changes and matches complete gate metadata and
 Receipt admission only closes editing and retains the full source. The store now attaches it to
 vault persistence/inventory for inbound edits and receipt seals, returning outcomes only after
 the save/flush barrier. Local edits now join intent preparation and registry persistence;
-cooperative gossip, paged receive and keyed registry head/seed discovery exist, but automatic
-orchestration and recovery-first newcomer installation remain unwired.
+cooperative gossip, paged receive, keyed registry head/seed discovery and explicit recovery-first
+newcomer installation exist, but automatic orchestration remains unwired.
 The store installation transaction now saves recovery
 and receipt-covered intent retirement before atomically replacing the source. The core successor
 builder alone leaves the predecessor untouched and gives no authority to discard it.
@@ -574,8 +578,8 @@ descendants. No authority check on live ingestion is relaxed. Kind 20 now provid
 rate-limited network page exchange, and a bounded cooperative receiver saves complete pages before
 advancing continuation. It permits one initial empty-head fallback for divergent history while
 retaining the verified seed and all charged limits. This proves no remote currency; automatic
-runtime scheduling, newcomer seed installation and historical-authority transfer remain to be
-integrated. Cooperative registry receipt-head and expected-seed exchanges are implemented.
+runtime scheduling and historical-authority transfer remain to be integrated. Cooperative registry
+receipt-head, expected-seed and recovery-first installation are implemented.
 `INTERFACES.md` records the implemented contracts. Rebuilds changing prefix bytes invalidate
 continuation, not arbitrary read-only reloads of byte-identical history.
 
@@ -690,8 +694,8 @@ attempts), so an orphan at the content ceiling may require explicit cleanup befo
 The opt-in Server gossip receiver now connects actual network ticks to this durable admission
 path for explicitly watched registry epochs. Its compact inbox, authentication and rate rails
 are documented in `INTERFACES.md` under "Opt-in registry gossip receive". This is still not a
-sole all-family coordinator: actor-owned scheduling, lifecycle cancellation, automatic catch-up
-and newcomer checkpoint installation remain unwired. Registry head/seed exchange is cooperative.
+sole all-family coordinator: actor-owned scheduling, lifecycle cancellation and automatic catch-up
+remain unwired. Registry head/seed exchange and newcomer installation are cooperative.
 
 Local `edit_registry_epoch` now performs canonical/scope/current-author and Open checks before
 journaling, including a full-envelope comparison against any retained operation with the same id.
@@ -709,8 +713,9 @@ membership/MLS epoch and the retained document's Open lifecycle; this API sends 
 `AppEvent::SettlementChanged { doc type tag, logical key, state }` on every change of a
 document's settlement state: `Open`, `Closing`, `AwaitingReceipt`, `Settled`,
 `HeldForStorage`, `Fault`, `Repairing`, `AwaitingTenureReceipt`, `RecoveryAvailable`,
-`RecoveryEvictionPending`, `StorageRefused`. The desktop bridge forwards it with the same shape
-as `StatusUpdated` (tested).
+`RecoveryEvictionPending`, `StorageRefused`. The desktop bridge must forward it with the same shape
+as `StatusUpdated`, with contract tests. This is a required interface, not present implementation:
+the actor event and bridge forwarding are still pending; local typed outcomes do not emit it.
 
 ## 14. Tests
 

@@ -332,7 +332,7 @@ table with the commit that closed it.
   Conservative per-record content reserves and physical intent replacement headroom can still
   refuse at full quota. No live actor/discovery, repair or automatic replay is wired. The existing
   file-sync/Unix-parent-sync durability and local-path threat boundary apply.
-- **Newcomer adoption planning is not durable installation.** The registry core can now seal a
+- **Newcomer adoption preserves the whole source before replacement.** The registry core can seal a
   whole source against a distant or new-tenure checkpoint, retaining every signed operation.
   Ordinary restart remains v1; explicit adoption v2 contains an adoption-only bounded receipt
   book v3. Its decoder is not accepted by the ordinary book entry point. Restart still checks
@@ -344,12 +344,20 @@ table with the commit that closed it.
 
   Whole-source Rewound recovery includes seed-only pointers and terminal epoch 4096; exact outer
   caps still apply. Its identity excludes the destination receipt and quarantine, so retargets
-  cannot reset eviction deadlines. The core never persists recovery, retires intents or replaces
-  the source. The forthcoming store transaction must durably save a successful typed Fault
-  outcome independently of seed/recovery errors, and save recovery before replacement. A seven-
+  cannot reset eviction deadlines. The core alone never persists recovery, retires intents or
+  replaces the source. The explicit Server/store installer now saves the source and successful
+  typed Fault outcome independently of optional seed/recovery work, then saves typed recovery
+  before atomic replacement. The physical mount/server, current full local member, MLS/owner/tenure,
+  selection supersession and receiver-clock expiry are rechecked at admission under exclusive
+  sync/store borrows; this is not a lease. Invalid/missing indexed records or uncertain I/O fail
+  closed, never bypassing accounting even to save Fault. Recovery must be typed and inventoried;
+  exact installed retries flush the actual successor without replacing newer edits. No intent is
+  retired based on seed values. Old concrete watches and queued pages cannot save into the new
+  epoch; the caller explicitly watches it and begins a fresh catch-up pass. A seven-
   day warning can outlive the 60-second fetch pass: resumption needs freshly scoped discovery,
   never a reconstructed permit from the saved receipt. Bounded historical evidence is not a
-  complete owner audit chain; automatic installation, fault repair and runtime scheduling remain.
+  complete owner audit chain; fault repair, automatic scheduling and universal full-quota
+  settlement progress remain unfinished.
 - **Registry replay preserves original authorship and exact retry identity.** The store's single-step
   replay accepts only a saved intent id plus a captured concrete epoch, never a supplied body or
   author. It verifies the actual current member is the saved author, the existing epoch is Open,
@@ -432,9 +440,9 @@ table with the commit that closed it.
   never repaired by trusting the candidate receipt's tenure or substituting the current epoch.
   This is local evidence, not a durability grant. Runtime integration must flush the matching
   MLS snapshot/owner decision and recheck current membership, fault and tenure before signing
-  a head proof. The cooperative kind-21 adapter now implements this boundary; actor scheduling
-  and recovery-first newcomer installation remain unwired. Cooperative registry expected-seed
-  fetching is implemented below, without creating durable replacement authority.
+  a head proof. The cooperative kind-21 adapter implements this boundary; actor scheduling remains
+  unwired. Cooperative registry expected-seed fetching is implemented below; explicit installation
+  rechecks its private selection and follows the recovery-first transaction above.
 - **Keyed head hints are not checkpoint installation or editing leases.** Kind 21 authenticates
   full current requester/provider identities and binds its logical key and internally minted
   request nonce before any source work. Fresh proof requires the current owner's endpoint and
@@ -447,8 +455,8 @@ table with the commit that closed it.
   or validity. Source/intent/publication state is unchanged. Eight fixed-lifetime queued requests,
   full-identity rates, four driver-owned outbound slots and source service rails bound resources;
   rate debt is process-local and Sybils still reach aggregate caps. Signed repair bytes are not
-  served yet. Registry seed fetching is implemented below; newcomer recovery-first installation
-  remains incomplete.
+  served yet. Registry seed fetching and explicit recovery-first installation are implemented;
+  head hints alone still authorize neither replacement nor an editing lease.
 - **Registry page cursors are continuation claims, not remote possession or currency proofs.**
   Cooperative page serving binds an ephemeral HMAC-SHA256 key to the exact provider/requester,
   full group/logical/concrete scope, initial heads/seed, fixed accepted-log prefix and monotonic
@@ -477,7 +485,7 @@ table with the commit that closed it.
   requests charged until the driver terminates them. Requester cancellation may not suppress an
   already queued provider read; responder handoff proves no delivery. No source is mutated or
   intent retired by paging. The receiver adapter below performs durable admission; runtime
-  scheduling and recovery-first newcomer seed installation remain separate integration requirements.
+  scheduling remains a separate integration requirement.
 - **Receiver continuation advances only over saved pages, not provider assertions.** Four
   watch-bound passes per sync instance retain at most one 512-KiB page each, pinned to physical
   mount, requester and proven provider full identities. A detached batch validates every op
@@ -538,8 +546,8 @@ table with the commit that closed it.
   the four client slots do not account for bytes retained by the provider's transport driver.
   Withholding/flooding still harms bounded
   availability; fair scheduling and maximum-source latency remain acceptance work. A successful
-  fetch is not finality, delivery acknowledgement or permission to prune. Native vault-lock
-  scheduling and recovery-first newcomer installation are still separate integration requirements.
+  fetch is not finality, delivery acknowledgement or permission to prune. Explicit installation
+  follows the source/recovery/replacement barriers above. Native vault-lock scheduling remains.
 - **P1 bounds decoded changes as well as wire bytes.** Its v2 codec rejects compressed deltas
   and scans raw RLE columns without expansion before Automerge parsing. Action, cell, predecessor
   and expanded-string caps prevent small signed packets from declaring unbounded parser work.

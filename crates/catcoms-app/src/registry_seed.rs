@@ -1,6 +1,7 @@
-//! Cooperative seed transport. Fetching does not create or replace a local epoch; the future
-//! newcomer installer must preserve existing provisional content under its recovery-first gate.
+//! Cooperative discovery, fetch and recovery-first newcomer installation. Fetching alone never
+//! changes the vault. Installation uses fresh scope and saves the entire provisional source first.
 use crate::store::epoch_budget::EpochStorageBudget;
+use crate::store::{EpochRegistryState, RegistryAdoptionOutcome};
 use crate::{AppError, Server, ServerStore};
 use catcoms_rt::{CryptoRngCore, MeshTransport, PeerId};
 use catcoms_sync::{
@@ -47,6 +48,45 @@ impl std::fmt::Debug for ServerRegistrySeedDiscovery {
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    /// Save the freshly selected head and, when fetched, install its checkpoint recovery-first.
+    /// May be called before fetching: AwaitingSeed means Closing is durable, while Fault means
+    /// conflicting signed evidence is saved even without a seed. Exact installed retries flush
+    /// the actual edited successor. No intent is retired, no packet sent, and no worker started.
+    ///
+    /// This finite synchronous transaction holds both runtime and vault exclusively. Context
+    /// expiry is checked at admission, not an irrevocable editing lease. A later retry after
+    /// expiry/restart/warning requires fresh discovery; saved receipt bytes are not a permit.
+    pub fn install_registry_seed_step(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        pass: &ServerRegistrySeedFetch,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<(RegistryAdoptionOutcome, EpochRegistryState), AppError> {
+        if pass.server != server || !Arc::ptr_eq(&pass.mount, &store.registry_mount()) {
+            return Err(AppError::Invalid(
+                "registry seed selection belongs to a replaced mount or server".into(),
+            ));
+        }
+        // Use the same injected runtime clock as discovery, never caller/peer wall time.
+        let clock = self.runtime_clock();
+        self.sync
+            .with_registry_seed_selection(&pass.inner, |group, device, rng, selected| {
+                store.adopt_registry_checkpoint(
+                    server,
+                    group,
+                    selected.bucket,
+                    device,
+                    selected.receipt,
+                    selected.checkpoint.map(|seed| seed.bytes()),
+                    selected.tenure,
+                    clock.as_ref(),
+                    rng,
+                    budget,
+                )
+            })?
+    }
+
     pub fn watch_registry_seed(
         &mut self,
         store: &ServerStore,

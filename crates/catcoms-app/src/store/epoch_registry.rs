@@ -30,7 +30,9 @@ pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
 // and AEAD tag. Bound the public struct before SealedOp::open can allocate plaintext.
 const MAX_INBOUND_CIPHERTEXT: usize = MAX_SIGNED_EPOCH_OP_BYTES + 4 + 16;
 
+mod adoption;
 mod head;
+pub use adoption::RegistryAdoptionOutcome;
 mod installation;
 mod pass;
 mod receive;

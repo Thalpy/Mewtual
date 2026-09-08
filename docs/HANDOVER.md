@@ -8,6 +8,50 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 scoped recovery-first registry installation (2026-09-08).**
+  `Server::install_registry_seed_step` connects the private kind-21/22 selection to accounted
+  vault adoption. Runtime, MLS, full local member, current owner/tenure, superseding discovery,
+  receiver-clock expiry and physical mount/server are checked before synchronous persistence
+  under exclusive sync/store borrows. The optional-seed callback lets the full source and receipt
+  cross their own save barrier before seed availability or recovery parsing; saved Fault cannot
+  be suppressed by a withholding seed provider. Invalid inventory still fails closed.
+
+  Whole-source typed recovery is durable before atomic successor replacement. Pending eviction
+  warnings preserve their ids/deadlines across retarget and restart; acknowledgment or seven-day
+  advancement is explicit, and an expired fetch handle requires fresh discovery. Exact installed
+  retries flush the actual successor without reseeding newer edits or rewriting recovery. Adoption
+  never retires author intents. Uncertain writes require inventory reconciliation before retry.
+  Old watches and actual queued old-epoch pages cannot save into the successor; a new watch/pass
+  catches up the installed epoch through the normal kind-20 route.
+
+  Focused verification: six store tests (including seven write/flush failure points, post-rename
+  restart plus a new edit, warning retarget/restart/ack/timeout, invalid inventory, missing seed
+  and corrupt recovery); four app seed tests (including actual joined discovery/fetch/install/
+  catch-up); thirteen sync seed tests. Read-only actual-diff review found no blocker/high or
+  production defect. Its Low finding was a vacuous queued-page test; the fixture now retains a
+  real PageReady epoch-zero response and checks rejection, unchanged successor/recovery and no
+  saved-page advancement after installation. Static re-review is clear with no remaining findings.
+  Required verification passed:
+
+  - `cargo test --all --all-features` (app 371 passed / 4 existing ignored; replication 76;
+    sync 212; all workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings` (after removing a test-only
+    unnecessary clone of a Copy value)
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No runtime code changed after these checks. Frontend static/build/visual checks and separate
+  native `cargo check` were not needed: neither frontend nor native bridge source changed.
+
+  **Remaining:** automatic actor/native lifecycle ownership and aggregate scheduling, all-family
+  Studio materializers/discovery/events, durable repair and complete full-quota settlement handling.
+  This is a cooperative backend transaction, not a lease or a complete product. Overall backend
+  estimate is about 25% versus about 65% for P1 (each ±10 percentage points), UI excluded. The
+  acceptance checklist remains open; canonical UI and unrelated release files are untouched.
+
 - **P1 distant-checkpoint adoption core (2026-09-08).** Registry epochs can now freeze a whole
   source against a freshly selected distant checkpoint, including a new-owner rewind. No accepted
   source operation is dropped. Explicit outer restart v2 embeds adoption-only receipt-book v3;

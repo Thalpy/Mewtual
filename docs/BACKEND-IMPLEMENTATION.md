@@ -6,8 +6,10 @@ helper exists. Scope is the Creative Suite backend, including P1, unless the use
 
 ## Current evidence
 
-P1 is approximately **65% complete, with a ten-percentage-point uncertainty**. This estimate
-does not describe the whole Creative Suite. Initial baseline: `cce0528` on `Create-suite-2`;
+The **whole Creative Suite backend is approximately 25% complete; P1 alone is approximately 65%**
+(2026-09-08), each with roughly ten-percentage-point uncertainty. These are engineering estimates,
+not file counts or acceptance-test coverage; both exclude the user-owned UI. Initial baseline:
+`cce0528` on `Create-suite-2`;
 HANDOVER records subsequent verified slices and their test/review evidence.
 The protocol/store foundations have substantially more coverage than the runtime integration.
 
@@ -27,17 +29,19 @@ The protocol/store foundations have substantially more coverage than the runtime
       Keyed authenticated registry head queries and checked durable owner-selection proofs are
       implemented cooperatively. Kind-22 expected-seed fetch now retains exact typed bytes
       behind a fresh kind-21/runtime/MLS/owner-bound handle. Joined members exercise both routes
-      and the installed vault source. Recovery-first newcomer installation still remains;
-      fetching creates no local epoch and does not settle, prune or replay provisional edits.
-      The explicit adoption core now retains the whole source across distant selections,
-      restarts and faults, and produces destination-independent whole-version recovery. Its
-      successor builder is not the accounted vault installer; that integration remains open.
-      The installer must recheck this context, mount, high-water and recovery; raw mutable
+      and the installed vault source. The explicit accounted registry installer now saves the
+      selected receipt/full source before optional seed work, typed whole-version recovery before
+      replacement, and never retires intents. Restart, warning retarget, crash boundaries and
+      an actual queued old-epoch page are covered. A fresh watch/pass catches up the successor.
+      Fetch alone still creates no receiver files. The installer rechecks fresh context, mount,
+      high-water and recovery; raw mutable
       `ReceiptHeadAnswer.proof: Some` is not an admission permit or proof the seed is available.
       Independently observed owner-tenure evidence is saved with MLS; unknown tenure must
       not authorize a fresh head proof by copying a restored receipt's claimed tenure. The
       proof publisher uses explicit local snapshot preparation and source/journal barriers. Legacy or
       newly joined owners may stay Unknown; do not substitute the current MLS epoch.
+      This milestone remains open for automatic runtime ownership, other managed document types
+      and production newcomer acceptance; cooperative registry integration is not the whole feature.
 - [ ] Runtime ownership, scheduling, cancellation, vault lifecycle and complete storage accounting.
       Before automatic scheduling, measure maximum-epoch page-source rebuild time and set the
       cooperative work budget from that evidence; fixed memory/rate caps alone do not prove latency.

@@ -119,6 +119,21 @@ impl fmt::Debug for RegistrySeedUse<'_> {
     }
 }
 
+/// The actual fresh owner selection, even before its seed becomes available. A durable receiver
+/// needs to seal/save conflicting receipt evidence without depending on an honest seed provider.
+/// This is still a scoped synchronous borrow, not a value that can mint a deferred install pass.
+pub struct RegistrySeedSelectionUse<'a> {
+    pub receipt: &'a Receipt,
+    pub checkpoint: Option<&'a VerifiedCheckpoint>,
+    pub tenure: u64,
+    pub bucket: u8,
+}
+impl fmt::Debug for RegistrySeedSelectionUse<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RegistrySeedSelectionUse { .. }")
+    }
+}
+
 fn transcript(
     group: &[u8],
     key: &[u8],
@@ -486,17 +501,40 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         pass: &RegistrySeedFetch,
         use_seed: impl FnOnce(&ServerGroup, &MlsDevice, &mut R, RegistrySeedUse<'_>) -> V,
     ) -> Result<V, SyncError> {
+        self.with_registry_seed_selection(pass, |group, device, rng, selected| {
+            let checkpoint = selected.checkpoint.ok_or(SyncError::Malformed)?;
+            Ok(use_seed(
+                group,
+                device,
+                rng,
+                RegistrySeedUse {
+                    receipt: selected.receipt,
+                    checkpoint,
+                    tenure: selected.tenure,
+                    bucket: selected.bucket,
+                },
+            ))
+        })?
+    }
+
+    /// Current selection may be used before fetching. The caller must persist verified Fault
+    /// evidence independently of seed availability. Same runtime/MLS/member/expiry checks as
+    /// seed use; no public receipt/answer fields can create the required private pass.
+    pub fn with_registry_seed_selection<V>(
+        &mut self,
+        pass: &RegistrySeedFetch,
+        use_selection: impl FnOnce(&ServerGroup, &MlsDevice, &mut R, RegistrySeedSelectionUse<'_>) -> V,
+    ) -> Result<V, SyncError> {
         if !self.registry_seed_fetch_is_current(pass) {
             return Err(SyncError::Unauthorized);
         }
-        let checkpoint = pass.seed.as_ref().ok_or(SyncError::Malformed)?;
-        Ok(use_seed(
+        Ok(use_selection(
             &self.group,
             &self.device,
             &mut self.rng,
-            RegistrySeedUse {
+            RegistrySeedSelectionUse {
                 receipt: &pass.selection.receipt,
-                checkpoint,
+                checkpoint: pass.seed.as_ref(),
                 tenure: pass.selection.tenure,
                 bucket: pass.selection.bucket,
             },

@@ -5,6 +5,7 @@ use catcoms_wire::DocType;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod adoption;
 mod head;
 mod installation;
 mod local;
