@@ -25,8 +25,11 @@ The protocol/store foundations have substantially more coverage than the runtime
       divergence, duplicate, cancellation, rotation and uncertain-storage regressions.
 - [ ] Keyed receipt-head and expected-seed discovery, including a newcomer after rotation.
       Keyed authenticated registry head queries and checked durable owner-selection proofs are
-      implemented cooperatively; expected-seed fetch/recovery-first newcomer install remain.
-      The installer must capture/recheck runtime, MLS and discovery authority; raw mutable
+      implemented cooperatively. Kind-22 expected-seed fetch now retains exact typed bytes
+      behind a fresh kind-21/runtime/MLS/owner-bound handle. Joined members exercise both routes
+      and the installed vault source. Recovery-first newcomer installation still remains;
+      fetching creates no local epoch and does not settle, prune or replay provisional edits.
+      The installer must recheck this context, mount, high-water and recovery; raw mutable
       `ReceiptHeadAnswer.proof: Some` is not an admission permit or proof the seed is available.
       Independently observed owner-tenure evidence is saved with MLS; unknown tenure must
       not authorize a fresh head proof by copying a restored receipt's claimed tenure. The

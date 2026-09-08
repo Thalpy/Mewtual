@@ -65,6 +65,7 @@ pub mod receipt_head;
 pub mod registry_catchup;
 mod registry_ingress;
 mod registry_publication;
+pub mod registry_seed;
 mod roles;
 pub use blob_fetch::{CompletedBlobFetch, PendingBlobFetch, MAX_BLOB_FETCH_PEERS};
 pub use registry_ingress::RegistryWatch;
@@ -167,6 +168,8 @@ const KIND_CATCHUP_SINCE: u8 = 19;
 const KIND_REGISTRY_PAGE: u8 = 20;
 /// Keyed P1 receipt-head discovery; no concrete epoch or legacy fallback.
 const KIND_RECEIPT_HEAD: u8 = 21;
+/// Exact expected-hash checkpoint seed, distinct from user operations and file CIDs.
+const KIND_REGISTRY_SEED: u8 = 22;
 /// Frontier entries one incremental catch-up may name. A document's frontier is one hash per
 /// concurrent writer and normally one or two; this is a bound on the walk a requester can ask a
 /// serving peer to perform, not a limit anyone reaches.
@@ -1084,7 +1087,8 @@ fn catchup_auth_transcript(
 /// the server reconstructs it from where the bytes actually arrived, so a relayed request simply
 /// fails to verify.
 ///
-/// New incremental catch-up, registry-page and receipt-head kinds opt into this binding.
+/// New incremental catch-up, registry-page, receipt-head and checkpoint-seed kinds opt into
+/// this binding. Existing released transcripts below remain unchanged.
 ///
 /// The transcript is what a signature is over, so adding a field to it changes what an older
 /// build computes and breaks both directions of a mixed pair. `KIND_PEX` and `KIND_COMMIT_CATCHUP`
@@ -1101,7 +1105,7 @@ fn catchup_auth_transcript(
 fn kind_binds_requester_peer(kind: u8) -> bool {
     matches!(
         kind,
-        KIND_CATCHUP_SINCE | KIND_REGISTRY_PAGE | KIND_RECEIPT_HEAD
+        KIND_CATCHUP_SINCE | KIND_REGISTRY_PAGE | KIND_RECEIPT_HEAD | KIND_REGISTRY_SEED
     )
 }
 
@@ -3765,6 +3769,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     registry_ingress: registry_ingress::RegistryIngress,
     registry_pages: registry_catchup::RegistryRequests,
     receipt_heads: receipt_head::HeadRequests,
+    registry_seeds: registry_seed::SeedRequests,
     // A cancelled subscribe/unsubscribe may already have reached the transport. Reconcile this uncertain
     // topic before calculating the next routing diff; never lose unsubscribe ownership.
     routing_subscription_pending: Option<Topic>,
@@ -4198,6 +4203,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             registry_ingress: registry_ingress::RegistryIngress::default(),
             registry_pages: registry_catchup::RegistryRequests::default(),
             receipt_heads: receipt_head::HeadRequests::default(),
+            registry_seeds: registry_seed::SeedRequests::default(),
             routing_subscription_pending: None,
             owner_tenure: owner_tenure::OwnerTenure::new(&group),
             group,
@@ -5368,6 +5374,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 }
                 if data.first() == Some(&KIND_RECEIPT_HEAD) {
                     self.queue_receipt_head(from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_REGISTRY_SEED) {
+                    self.queue_registry_seed(from, &data[1..], responder);
                     return Ok(true);
                 }
                 let response = match data.split_first() {

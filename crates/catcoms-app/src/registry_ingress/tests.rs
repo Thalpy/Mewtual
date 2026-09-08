@@ -11,6 +11,7 @@ use rand_core::SeedableRng;
 
 mod head;
 mod page_receive;
+mod seed;
 
 const SERVER: u64 = 91;
 fn rng() -> ChaCha20Rng {

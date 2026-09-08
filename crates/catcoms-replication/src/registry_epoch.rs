@@ -151,6 +151,25 @@ impl RegistryEpoch {
         }
         Ok(self.receipts.latest())
     }
+    /// Read only the installed opening seed, never the latest receipt's prospective successor.
+    /// Closing can hold a newer head whose seed is not installed yet; that exact request is
+    /// unavailable rather than permission to generate/substitute a root. Fault serves nothing.
+    pub fn checkpoint_bytes_by_hash(
+        &mut self,
+        expected_doc_id: u128,
+        expected_hash: [u8; 32],
+    ) -> Result<Option<Vec<u8>>, ReplError> {
+        self.receipt_head()?;
+        if self.doc_id() != expected_doc_id
+            || self
+                .opening
+                .as_ref()
+                .is_none_or(|r| r.seed_change_hash != expected_hash)
+        {
+            return Ok(None);
+        }
+        self.doc.checkpoint_bytes()
+    }
     /// Complete accepted-log count. Receipt admission does not reduce it.
     pub fn op_count(&self) -> usize {
         self.doc.op_count()
@@ -566,6 +585,65 @@ mod tests {
         group: ServerGroup,
         rng: ChaCha20Rng,
         key: PointerKey,
+    }
+
+    #[test]
+    fn registry_seed_serving_uses_opening_origin_through_closing_restart_and_fault() {
+        let mut f = Fixture::new();
+        let mut epoch = f.empty();
+        f.edit(&mut epoch, 1);
+        let receipt = f.receipt(&epoch, 7);
+        let seed = epoch.projection().unwrap().checkpoint([7; 32]).unwrap();
+        assert!(epoch
+            .checkpoint_bytes_by_hash(seed.origin().doc_id(), seed.change_hash())
+            .unwrap()
+            .is_none());
+        let mut successor = RegistryEpoch::from_checkpoint(
+            &f.group,
+            f.key.bucket(),
+            f.owner.device_id(),
+            receipt,
+            0,
+            seed.bytes(),
+        )
+        .unwrap();
+        let id = successor.doc_id();
+        assert_eq!(
+            successor
+                .checkpoint_bytes_by_hash(id, seed.change_hash())
+                .unwrap()
+                .unwrap(),
+            seed.bytes()
+        );
+        assert!(successor
+            .checkpoint_bytes_by_hash(id ^ 1, seed.change_hash())
+            .unwrap()
+            .is_none());
+        assert!(successor
+            .checkpoint_bytes_by_hash(id, [0; 32])
+            .unwrap()
+            .is_none());
+        let next = f.receipt(&successor, 8);
+        successor.seal(next, &f.group, 0).unwrap();
+        let next_seed = successor.projection().unwrap().checkpoint([8; 32]).unwrap();
+        assert!(successor
+            .checkpoint_bytes_by_hash(next_seed.origin().doc_id(), next_seed.change_hash())
+            .unwrap()
+            .is_none());
+        let mut restored = f.restore(&successor.snapshot().unwrap()).unwrap();
+        assert_eq!(restored.phase(), EpochPhase::Closing);
+        assert_eq!(
+            restored
+                .checkpoint_bytes_by_hash(id, seed.change_hash())
+                .unwrap()
+                .unwrap(),
+            seed.bytes()
+        );
+        restored.seal(f.receipt(&restored, 9), &f.group, 0).unwrap();
+        assert_eq!(restored.phase(), EpochPhase::Fault);
+        assert!(restored
+            .checkpoint_bytes_by_hash(id, seed.change_hash())
+            .is_err());
     }
     impl Fixture {
         fn new() -> Self {

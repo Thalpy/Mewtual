@@ -60,6 +60,7 @@ pub mod registry_catchup;
 pub mod registry_head;
 pub mod registry_ingress;
 pub mod registry_replay;
+pub mod registry_seed;
 pub mod store;
 pub use actor::{spawn, AppCommand, AppEvent, Envelope, ServerActor, Trace, TracedEvent};
 pub use moderation::{

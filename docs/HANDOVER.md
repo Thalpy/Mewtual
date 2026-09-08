@@ -8,6 +8,67 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 expected-hash registry seed fetch (2026-09-08).** Additive kind 22 now fetches the exact
+  owner-selected Automerge seed from any independently proven current-member endpoint. The
+  cooperative vault provider serves only the installed opening seed, not the latest receipt's
+  potentially unavailable successor. Closing can still serve its installed opening; Fault
+  refuses. Reads verify the complete registry inventory, including absence, and never create,
+  rewrite, prune or publish a source. The actual joined-Server test covers unavailable-before-
+  installation, then fetching the durably installed checkpoint through both network routes.
+
+  Private discovery provenance is minted only inside the fresh kind-21 response/proof check.
+  Runtime, MLS, full requester/owner, tenure and bucket supersession accompany the receipt.
+  Public mutable answer fields cannot mint a fetch pass. New authenticated owner discovery for
+  a bucket (even the same hash), any MLS transition or runtime replacement revokes older passes.
+  App passes also capture mount/server, rechecked by `registry_seed_ready`; discovery still holds
+  a shared store borrow across await, while seed fetch itself borrows no vault. There are no
+  actor/native entry points or automatic lifecycle workers for this path yet.
+
+  Four non-Clone retained passes are charged before discovery and each holds at most one 2-MiB
+  verified seed, three one-second-paced attempts and a fixed 60-second lifetime. Revocation or
+  expiry does not refund retained memory until Drop. Four independent outbound permits stay
+  charged until driver termination after cancellation. Kind 22 binds full identities, current
+  MLS, actual transports and complete query/response; its ten-second deadline is checked even
+  after a ready response or expensive validation. Raw seeds use the existing 512-byte to 1-MiB
+  padding ladder inside group AEAD. Above 1 MiB, encoded size remains visible. The 2,097,312-byte
+  response cap includes all framing and is enforced after transport buffering, before copies
+  and decryption. Exact hash/checksum, raw change shape, then typed registry validation must pass.
+
+  Eight five-second metadata-only provider requests, one per full identity, use independent
+  preauth/requester/source rails. Provider responder handoff is not delivery, and the client
+  permits do not account for provider-driver response buffers. A fetched seed is not installed
+  state, a lease, receipt advancement or permission to discard provisional edits.
+
+  Read-only design review identified the opening-vs-latest distinction, discovery provenance,
+  complete framing overhead and existing 512-byte padding floor; implementation preserves them.
+  Actual-diff review found no blocker/high or production defect. Both low findings are fixed:
+  the matching-receipt-hash/invalid-registry-schema regression and old threat-model wording.
+  Static re-review has no remaining findings. Focused coverage passes: 12 sync, one replication
+  lifecycle test, and two app tests (real joined vault/network path plus restart/lost-source).
+
+  Required verification passed; the final root run includes the added review regression:
+
+  - `cargo test --all --all-features` (app 363 passed / 4 existing ignored; replication 67;
+    workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No runtime code changed after the native/frontend suite runs. No frontend static/build/visual
+  checks or separate native `cargo check` were needed for this core/sync/app-only slice.
+  UI/native source and unrelated release work are untouched.
+
+  **Next:** recovery-first newcomer installation from the scoped fetched seed, preserving
+  provisional epoch-zero edits. `with_registry_seed` is only a trusted-local synchronous borrow:
+  copied receipt/checkpoint values must not become an unchecked deferred install permit. The
+  installer still needs exact mount, local high-water/fault/inventory checks and recovery-before-
+  replacement. Automatic actor/lock scheduling, maximum-source latency, provider response-buffer
+  acceptance, durable signed repairs and the wider Creative backend checklist remain incomplete.
+  No final UI guide or 100% claim is issued for this transport prerequisite.
+
 - **P1 keyed registry receipt-head discovery (2026-09-08).** Kind 21 now answers by logical
   bucket key, without requiring the requester's knowledge of the provider's concrete epoch.
   The cooperative Server adapter returns provisional hints or a nonce-bound current-owner

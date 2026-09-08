@@ -1421,8 +1421,9 @@ invalid/stale packets and unregistered traffic are dropped. Past/future MLS epoc
 legacy catch-up or past-key paths. Retrying the original author's saved operation or future managed
 catch-up must recover drops; neither is automatically scheduled yet. Watches/inboxes/rate debt are
 process-local and reset on sync restore; no wire or persistence format changes. Live actor/native
-store ownership, lifecycle cancellation, registry/receipt-head discovery and managed catch-up remain
-unimplemented. A rotated persisted epoch needs a newly installed watch, never a retargeted old handle.
+store ownership, lifecycle cancellation and automatic discovery/catch-up scheduling remain
+unimplemented; the cooperative network adapters are described below. A rotated persisted epoch
+needs a newly installed watch, never a retargeted old handle.
 
 ### Cooperative registry catch-up page serving
 
@@ -1466,8 +1467,8 @@ Missing removed-author operations in the REMAINING page range produce
 positions and initial ancestors are claimed held history, so author removal after delivery need
 not block later descendants. These are not possession proofs: a conforming requester derives its
 heads/seed from verified state and continues only after persisting a dependency-complete page.
-Historical authority transfer, automatic durable receiver continuation and checkpoint/head/seed
-discovery remain unwired.
+Historical authority transfer, automatic receiver scheduling and newcomer checkpoint installation
+remain unwired. Cooperative durable receive and keyed head/seed exchange are described below.
 
 The direct trusted-local page API imposes no aggregate call-rate limit. One call rebuilds at most
 the bounded saved epoch, then walks its bounded change index/ancestor sets. It grants no delivery
@@ -1552,6 +1553,65 @@ cancellation. The receiver deadline is ten seconds and is checked even if a read
 the timer race. These limits are separate from registry-page limits and reset on process restart.
 The saved registry rebuild is bounded by its existing epoch cap, not a constant-time operation;
 maximum-source latency remains an acceptance check before automatic scheduling.
+
+### Expected-hash registry seed exchange (cooperative, kind 22)
+
+`Server::watch_registry_seed(store, server, bucket)` / `unwatch_registry_seed(watch)` register
+logical buckets with runtime/watch-generation/mount/server binding, independently of head and
+operation watches. `serve_registry_seed_step(store, watch, budget)` drains at most one bounded
+authenticated request through the checked vault source. A missing bucket or mismatched concrete
+id/hash returns unavailable. A lost indexed file, corruption or Fault is an error. The provider
+reads the installed opening seed, even during Closing; the latest next receipt is not evidence
+that its seed is installed. No generation from close candidates, fallback lookup, source write,
+head advancement or owner-journal publication occurs.
+
+`Server::discover_registry_seed(store, server, peer, bucket).await` first reserves retained capacity,
+then performs fresh keyed head discovery. It returns None for unsupported/refused transport,
+`ServerRegistrySeedDiscovery::Hint(ReceiptHeadAnswer)` for provisional records, or
+`Selected(ServerRegistrySeedFetch)` for a current owner's verified selection. The opaque non-Clone
+pass contains immutable verified receipt provenance minted inside actual kind-21 verification;
+there is no constructor accepting public receipt/proof fields. It captures runtime, current MLS,
+full requester/owner, tenure, per-bucket supersession token, mount and numeric server. Another
+fresh owner selection for that bucket revokes prior passes, including one selecting the same hash.
+Raw `request_registry_head` calls participate in this supersession too. Hints do not revoke.
+This cooperative discovery API still holds its `&ServerStore` borrow across the await, although
+it reads only the mount token. It is not yet a detached actor job; fetch itself borrows no store.
+
+`fetch_registry_seed_step(pass, peer).await` attempts a fetch from a separately proven current
+member endpoint. True means exact typed seed bytes are retained in memory, not installed or
+currently authoritative. False means unsupported/refused/unavailable, never an empty seed.
+`registry_seed_ready(store, server, pass)` additionally checks runtime/MLS/owner/supersession,
+expiry and exact mount/server now; it is not a settlement chip or a lease. The sync-only trusted
+`with_registry_seed(pass, callback)` rechecks context and lends the immutable receipt, verified
+seed, bucket and tenure under exclusive sync ownership. A future installer must additionally
+enforce local high-water/fault/inventory/recovery ordering; this callback alone is not a store API.
+No receiver epoch or recovery record is created by discovery/fetch.
+
+Query v1: `v:u8=1, type:u16=18, logical_key:bytes32, concrete_id:u128, seed_hash:bytes32` (91 bytes,
+cap 256). Integers are big-endian and bytes u32-length framed. The authenticated request binds
+kind 22, group, current MLS, timestamp, nonce, requester key and actual requester transport.
+The expected hash is an Automerge change hash, NOT a blob CID. The signed response uses
+`catcoms/registry-seed-response/v1`, binding request auth, actual provider transport, exact query
+and sealed body. The standard `key:bytes32, signature:bytes64, body:bytes` envelope costs 108 bytes.
+An empty signed body means unavailable. Otherwise it is existing `encode_sealed`: nonce:bytes24
+and ciphertext:bytes, with plaintext padded via `OP_PAD_FLOOR=512` / `OP_PAD_CEILING=1048576`.
+The raw seed cap is 2,097,152 bytes; sealed body cap 2,097,204 and response cap 2,097,312. Limits
+apply after transport frame buffering, before copying or decrypting the body. Canonical padding
+and expected raw hash/checksum reject before Automerge parsing; exact change metadata and typed
+registry projection validation follow. Other members can re-seal the same seed in current MLS.
+
+There are four retained passes per runtime, acquired before head discovery. Each owns at most
+one seed, has a fixed 60-second receiver-monotonic lifetime and at most three attempts spaced
+one second apart. Invalid replies and cancellation spend attempts. Revocation/expiry does not
+free capacity while a caller holds the old pass. Four independent outgoing transport slots follow
+driver termination, not caller cancellation, and each request expires after at most ten seconds.
+Provider limits: 256 logical watches, eight five-second metadata requests, one per full identity,
+10/s burst-20 preauth, 1/s burst-2 per requester (4096 debt rows), 1/s burst-2 aggregate source work.
+Watch replacement does not reset rate debt. Crypto/parser temporaries and a bounded source rebuild
+are additional to the four retained raw-seed bodies. Provider responder handoff is not delivery;
+the four outgoing client slots do not account for provider transport response buffers.
+Automatic actor/lock scheduling, source
+latency acceptance and recovery-first newcomer installation remain unfinished.
 
 ### Authenticated registry page exchange (cooperative, kind 20)
 
@@ -1667,8 +1727,9 @@ explicit cleanup before reconciliation. Unresolved ownership still blocks server
 
 These APIs require the caller's sole complete server budget; inventory is not a continuing write
 lease. Checked installation/retirement and single-intent replay are implemented at the store layer.
-The cooperative adapters supply live gossip and durable paged catch-up, not receipt-head/seed
-discovery, autonomous scheduling or actor/Studio wiring. Each mutation rebuilds a
+The cooperative adapters supply live gossip, durable paged catch-up and keyed registry head/seed
+exchange, not newcomer checkpoint installation, autonomous scheduling or actor/Studio wiring.
+Each mutation rebuilds a
 bounded saved graph (local editing also checks the source before journaling); the receiver applies
 the ingress rails above, while aggregate actor-owned scheduling remains to be integrated.
 

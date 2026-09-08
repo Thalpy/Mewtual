@@ -47,7 +47,24 @@ legacy serialization. A proof additionally requires complete inventory agreement
 saved registry, and exact equality with the pending-preferred owner journal. Source flush and
 journal re-save precede signing. Disagreement/stale preparation remains a hint; lost indexed
 files, faults and corruption refuse. A selected receipt is not proof its seed is available or
-verified. Expected-seed fetching/installation and automatic actor scheduling remain unwired.
+verified. Expected-seed fetching now uses additive kind 22; newcomer installation and automatic
+actor scheduling remain unwired.
+
+Checkpoint fetching keeps discovery provenance rather than converting public receipt fields into
+authority. The private selection is minted only while checking the fresh kind-21 owner response;
+runtime, MLS, requester, owner and a per-bucket supersession token accompany it. Four non-Clone
+handles retain at most one verified 2-MiB seed each for bounded attempts. Any newer authenticated
+owner selection for that bucket, MLS transition, runtime replacement or receiver timeout revokes
+use without refunding memory still held by a handle. This is not a current-head lease.
+
+The independently proven seed provider may be any current member. It serves the installed
+opening seed from a checked, inventory-matched vault unit, not the latest receipt's prospective
+successor; during Closing the latter is normally unavailable. Fault refuses. Kind 22 binds full
+identities, current MLS, actual transports and the exact query/answer. Raw seeds use the existing
+512-byte to 1-MiB padding ladder inside group AEAD; above that ceiling the encoded size remains
+visible. The receipt's exact Automerge hash is checked before parsing, then the canonical registry
+schema. Fetching never writes the receiver's vault, retires intents or replaces provisional work.
+The future newcomer installer must enforce recovery/high-water/mount checks under its durable gate.
 
 The registry's store-level checkpoint transaction now orders durable barriers as source flush,
 typed recovery, included-only intent retirement, then atomic successor selection. Until selection
@@ -96,7 +113,8 @@ not promise per-peer fairness. Subscription reconciliation retains a single unce
 an interrupted subscribe/unsubscribe and establishes it as unsubscribed before retry, including
 after the same topic was rewatched. Revoking a watch needs only its exact generation, so an old
 mount can discard its own queued traffic without gaining permission to ingest. Desired
-watch installation itself never awaits. Actor/native ownership, discovery and catch-up remain next.
+watch installation itself never awaits. Actor/native ownership, automatic scheduling of the
+cooperative discovery/catch-up paths and newcomer checkpoint installation remain next.
 
 Registry catch-up has a cooperative read-only page provider over checked vault history.
 Its HMAC cursor freezes the provider's dependency-complete accepted-log prefix
@@ -118,7 +136,7 @@ one accounted all-or-none page save. Independent unknown heads permit one empty-
 verified seed, provider and charged limits stay fixed. Four watch-bound passes each retain at most
 one page and expire on the receiver's monotonic clock. Duplicate and terminal-empty pages still
 cross the storage/inventory barrier; a receipt seal or MLS advance cannot turn them into stale
-success. Automatic actor/native scheduling and checkpoint/head discovery remain; the adapters
+success. Automatic actor/native scheduling and newcomer checkpoint installation remain; the adapters
 do not move vault ownership into sync or change the legacy document map.
 
 The naive "one group, every device commits, replay old ciphertext to latecomers" design

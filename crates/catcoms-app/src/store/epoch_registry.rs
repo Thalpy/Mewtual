@@ -34,6 +34,7 @@ mod head;
 mod installation;
 mod pass;
 mod receive;
+mod seed;
 pub use receive::RegistryPageAdmission;
 mod recovery;
 mod replay;

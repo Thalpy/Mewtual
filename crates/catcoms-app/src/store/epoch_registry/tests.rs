@@ -12,6 +12,7 @@ mod pass;
 mod receive;
 mod recovery;
 mod replay;
+mod seed;
 mod settlement;
 
 const SERVER: u64 = 73;

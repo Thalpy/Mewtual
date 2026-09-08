@@ -2,7 +2,7 @@
 //! logical registry buckets are served. This is cooperative networking, not checkpoint admission.
 use super::*;
 use catcoms_replication::{
-    registry::registry_document, LogicalDocument, Receipt, ReceiptHeadProof,
+    registry::registry_document, LogicalDocument, Receipt, ReceiptHeadProof, VerifiedReceipt,
 };
 use catcoms_rt::Responder;
 use registry_ingress::Rate;
@@ -49,6 +49,22 @@ pub(super) struct HeadRequests {
     requesters: BTreeMap<DeviceId, Rate>,
     now: u64,
     outbound: [std::sync::Weak<()>; 4],
+    // A newly authenticated owner selection revokes older discovery contexts for this bucket.
+    selections: BTreeMap<u8, Arc<()>>,
+}
+
+/// Created only while validating the actual fresh head response, never from public answer
+/// fields. Consumers must recheck the runtime/MLS/selection before using the borrowed authority.
+pub(super) struct HeadSelection {
+    instance: RegistrySyncInstance,
+    epoch: u64,
+    owner: DeviceId,
+    requester: DeviceId,
+    generation: Arc<()>,
+    pub(super) bucket: u8,
+    pub(super) receipt: Receipt,
+    pub(super) verified: VerifiedReceipt,
+    pub(super) tenure: u64,
 }
 impl HeadRequests {
     fn expire(&mut self, now: u64) -> u64 {
@@ -403,6 +419,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: PeerId,
         bucket: u8,
     ) -> Result<Option<ReceiptHeadAnswer>, SyncError> {
+        Ok(self
+            .request_registry_head_scoped(peer, bucket)
+            .await?
+            .map(|(answer, _)| answer))
+    }
+
+    pub(super) fn head_selection_is_current(&self, selection: &HeadSelection) -> bool {
+        self.matches_registry_instance(&selection.instance)
+            && self.group.epoch() == selection.epoch
+            && self.group.designated_committer() == Some(selection.owner)
+            && self.device.device_id() == selection.requester
+            && self.head_member(&self.device.public_key_bytes())
+            && self
+                .receipt_heads
+                .selections
+                .get(&selection.bucket)
+                .is_some_and(|g| Arc::ptr_eq(g, &selection.generation))
+    }
+
+    pub(super) async fn request_registry_head_scoped(
+        &mut self,
+        peer: PeerId,
+        bucket: u8,
+    ) -> Result<Option<(ReceiptHeadAnswer, Option<HeadSelection>)>, SyncError> {
         if !self.head_member(&self.device.public_key_bytes()) {
             return Err(SyncError::Unauthorized);
         }
@@ -474,7 +514,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(SyncError::Unauthorized);
         }
         let outcome = decode_answer(answer, &document)?;
-        if let Some(proof) = &outcome.proof {
+        let selection = if let Some(proof) = &outcome.proof {
             if self.group.designated_committer() != Some(expected)
                 || self
                     .observed_owner_tenure_start()
@@ -482,15 +522,36 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             {
                 return Err(SyncError::Unauthorized);
             }
-            proof.verify(
+            let verified = proof.verify(
                 &self.group,
                 outcome.receipt.as_ref().ok_or(SyncError::Malformed)?,
                 self.device.device_id(),
                 &nonce,
             )?;
-        }
+            let generation = Arc::new(());
+            self.receipt_heads
+                .selections
+                .insert(bucket, generation.clone());
+            Some(HeadSelection {
+                instance: self.registry_instance(),
+                epoch: self.group.epoch(),
+                owner: expected,
+                requester: self.device.device_id(),
+                generation,
+                bucket,
+                receipt: outcome
+                    .receipt
+                    .as_ref()
+                    .expect("proof receipt checked")
+                    .clone(),
+                verified,
+                tenure: proof.tenure_start_group_epoch,
+            })
+        } else {
+            None
+        };
         // Even a valid current proof is a one-shot selection, never a lease or pruning grant.
-        Ok(Some(outcome))
+        Ok(Some((outcome, selection)))
     }
 }
 

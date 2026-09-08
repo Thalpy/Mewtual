@@ -398,7 +398,8 @@ table with the commit that closed it.
   Quarantined/RejectedQuarantineFull; no legacy success statistic, network ack or receiver-authored
   intent is created. Errors or unwind consume volatile input only, not saved history. Drops due to
   quota, stale MLS, storage refusal or unknown watches require author retry or future catch-up.
-  Past/future MLS reception, catch-up/discovery and actor/native lifecycle ownership remain unwired.
+  Past/future MLS reception and actor/native lifecycle ownership remain unwired. Current-MLS
+  paged catch-up and registry discovery now have cooperative adapters, not automatic scheduling.
   Watches and rate debt are process-local, not restart-stable security policy or native lock leases.
 - **Current owner identity alone is not current tenure.** Sync now independently tracks the
   owner transition it actually observed, saving it with the exact MLS group in one authenticated
@@ -414,7 +415,8 @@ table with the commit that closed it.
   This is local evidence, not a durability grant. Runtime integration must flush the matching
   MLS snapshot/owner decision and recheck current membership, fault and tenure before signing
   a head proof. The cooperative kind-21 adapter now implements this boundary; actor scheduling
-  and expected-seed discovery/installation remain unwired.
+  and recovery-first newcomer installation remain unwired. Cooperative registry expected-seed
+  fetching is implemented below, without creating durable replacement authority.
 - **Keyed head hints are not checkpoint installation or editing leases.** Kind 21 authenticates
   full current requester/provider identities and binds its logical key and internally minted
   request nonce before any source work. Fresh proof requires the current owner's endpoint and
@@ -427,7 +429,8 @@ table with the commit that closed it.
   or validity. Source/intent/publication state is unchanged. Eight fixed-lifetime queued requests,
   full-identity rates, four driver-owned outbound slots and source service rails bound resources;
   rate debt is process-local and Sybils still reach aggregate caps. Signed repair bytes are not
-  served yet, and newcomer recovery-first seed installation remains incomplete.
+  served yet. Registry seed fetching is implemented below; newcomer recovery-first installation
+  remains incomplete.
 - **Registry page cursors are continuation claims, not remote possession or currency proofs.**
   Cooperative page serving binds an ephemeral HMAC-SHA256 key to the exact provider/requester,
   full group/logical/concrete scope, initial heads/seed, fixed accepted-log prefix and monotonic
@@ -456,7 +459,7 @@ table with the commit that closed it.
   requests charged until the driver terminates them. Requester cancellation may not suppress an
   already queued provider read; responder handoff proves no delivery. No source is mutated or
   intent retired by paging. The receiver adapter below performs durable admission; runtime
-  scheduling and receipt/seed discovery remain separate integration requirements.
+  scheduling and recovery-first newcomer seed installation remain separate integration requirements.
 - **Receiver continuation advances only over saved pages, not provider assertions.** Four
   watch-bound passes per sync instance retain at most one 512-KiB page each, pinned to physical
   mount, requester and proven provider full identities. A detached batch validates every op
@@ -487,10 +490,38 @@ table with the commit that closed it.
   guarantee gossip accepts that size. This is a local API, not a new peer-controlled message kind.
 - **Large checkpoints disclose their encoded size above the padding ceiling.** A P1 seed can be
   2 MiB. Once transported through the existing sealed-frame codec, a seed above 1 MiB receives
-  no power-of-two padding bucket; group peers can estimate its size. Checkpoint transport remains
-  to be wired, but this disclosure is part of its accepted contract. Seed parsing rejects compressed
+  no power-of-two padding bucket; group peers can estimate its size. The cooperative kind-22
+  registry transport now uses that codec; it has no unpadded fallback below the ceiling.
+  Seed parsing rejects compressed
   changes/document chunks before decode and checks the exact owner-receipted hash before loading
   Automerge. Registry pointer epochs remain hints: a large number authorizes no seed or history.
+- **Checkpoint transport does not establish durable replacement authority.** Kind 22 requires
+  a proven current full-member provider endpoint before disclosing the query. Its complete query,
+  group, current MLS, requester and actual provider transport bind the signed response; the seed
+  is separately group-encrypted under its concrete document key. A provider is not necessarily
+  the selected owner. The client accepts a retained seed only through a private context minted
+  within fresh kind-21 owner-proof verification, not public mutable receipt/proof fields. New
+  authenticated owner discovery for that bucket, any MLS advance and runtime replacement revoke
+  old contexts. Four retained non-Clone handles stay charged until Drop, even when stale; each
+  has one 2-MiB seed, three attempts paced at one second, and a fixed 60-second lifetime beginning
+  before discovery. Four separate network permits remain charged until the transport terminates
+  after cancellation; each request has a ten-second deadline, checked after decode/validation too.
+  These are resource/admission lifetimes, not leases or a promise that the owner cannot rotate.
+
+  A provider retains eight metadata-only requests, one per full identity, for five seconds. Its
+  independent global preauth (10/s burst 20), requester (1/s burst 2, 4096 debt rows), and source
+  work (1/s burst 2) rails bound repeated reads. The source read verifies the complete registry
+  inventory including absence and rejects corrupt/faulted units. Only the installed opening seed
+  can be returned; a latest head whose successor is not installed is unavailable. No owner record,
+  source, intent or receiver file is mutated. The response cap is 2,097,312 bytes after transport
+  buffering but before body copies/decryption; it includes both sealed-blob length fields, nonce,
+  tag, padding footer and signed-response framing. Temporary crypto/parser copies and one bounded
+  source rebuild are additional to retained seed memory. Provider response handoff is not delivery;
+  the four client slots do not account for bytes retained by the provider's transport driver.
+  Withholding/flooding still harms bounded
+  availability; fair scheduling and maximum-source latency remain acceptance work. A successful
+  fetch is not finality, delivery acknowledgement or permission to prune. Native vault-lock
+  scheduling and recovery-first newcomer installation are still separate integration requirements.
 - **P1 bounds decoded changes as well as wire bytes.** Its v2 codec rejects compressed deltas
   and scans raw RLE columns without expansion before Automerge parsing. Action, cell, predecessor
   and expanded-string caps prevent small signed packets from declaring unbounded parser work.

@@ -231,6 +231,17 @@ a separate document whose user-operation log excludes the seed; its optional vau
 extension retains the logical scope, checkpoint epoch, close hash and seed hash. Every accepted
 checkpoint edit descends from that seed. Existing seedless vault snapshots retain their encoding.
 
+Implementation note (2026-09-08): registry seeds now have cooperative authenticated kind-22
+expected-hash fetch and installed-vault-source serving. It uses the existing 512-byte to 1-MiB
+padding ladder inside group AEAD; the above-ceiling disclosure is recorded in THREAT-MODEL.
+The receiver's private selection is minted during fresh kind-21 owner-proof verification and
+rechecked against runtime, MLS, owner and superseding discovery. Four retained passes hold one
+seed each with three paced attempts and a 60-second lifetime; transport capacity survives caller
+cancellation until driver termination. Only installed opening seeds are served, not a latest
+receipt's unavailable next seed. Fetching writes no receiver state. Recovery-first newcomer
+installation, combined automatic scheduling and the other managed types remain unfinished;
+INTERFACES specifies the exact wire framing and bounds. These resource lifetimes are not leases.
+
 **Retirement.** The checkpoint carries the canonical projection of the receipted heads plus
 bounded conflict data and nothing else. Markers are never carried. Tombstones are never carried
 (closed-epoch operations cannot enter a checkpoint, element ids are random, and replay consults
@@ -527,7 +538,8 @@ rebuilds the DAG, validates typed changes and matches complete gate metadata and
 Receipt admission only closes editing and retains the full source. The store now attaches it to
 vault persistence/inventory for inbound edits and receipt seals, returning outcomes only after
 the save/flush barrier. Local edits now join intent preparation and registry persistence;
-cooperative gossip send/receive exists, but automatic orchestration/discovery remain unwired.
+cooperative gossip, paged receive and keyed registry head/seed discovery exist, but automatic
+orchestration and recovery-first newcomer installation remain unwired.
 The store installation transaction now saves recovery
 and receipt-covered intent retirement before atomically replacing the source. The core successor
 builder alone leaves the predecessor untouched and gives no authority to discard it.
@@ -552,7 +564,8 @@ descendants. No authority check on live ingestion is relaxed. Kind 20 now provid
 rate-limited network page exchange, and a bounded cooperative receiver saves complete pages before
 advancing continuation. It permits one initial empty-head fallback for divergent history while
 retaining the verified seed and all charged limits. This proves no remote currency; automatic
-runtime scheduling and receipt-head/seed/historical-authority discovery remain to be integrated.
+runtime scheduling, newcomer seed installation and historical-authority transfer remain to be
+integrated. Cooperative registry receipt-head and expected-seed exchanges are implemented.
 `INTERFACES.md` records the implemented contracts. Rebuilds changing prefix bytes invalidate
 continuation, not arbitrary read-only reloads of byte-identical history.
 
@@ -667,8 +680,8 @@ attempts), so an orphan at the content ceiling may require explicit cleanup befo
 The opt-in Server gossip receiver now connects actual network ticks to this durable admission
 path for explicitly watched registry epochs. Its compact inbox, authentication and rate rails
 are documented in `INTERFACES.md` under "Opt-in registry gossip receive". This is still not a
-sole all-family coordinator: actor-owned scheduling, lifecycle cancellation, managed catch-up
-and newcomer receipt-head/seed discovery remain unwired.
+sole all-family coordinator: actor-owned scheduling, lifecycle cancellation, automatic catch-up
+and newcomer checkpoint installation remain unwired. Registry head/seed exchange is cooperative.
 
 Local `edit_registry_epoch` now performs canonical/scope/current-author and Open checks before
 journaling, including a full-envelope comparison against any retained operation with the same id.
