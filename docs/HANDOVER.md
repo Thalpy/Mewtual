@@ -8,6 +8,54 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 1, read-only art/frame projection (2026-09-08; verified).**
+  `studio::FlipnoteFrameProjection` adds deterministic frame order, Automerge pixel/title/fps
+  register winners with all live alternatives, provenance-bearing deletions and explicit
+  999-frame / cumulative 8 MiB cap flags. All insertion records remain ordering anchors, even
+  when their frame is deleted or another insertion of the same id wins. The full frame map keeps
+  hidden/over-cap CID evidence for later recovery/reference consumers; this is not retention
+  integration. Root object/channel/epoch/dimensions are checked against every concurrent value.
+  Server provenance remains caller-supplied until the signed admission boundary is implemented.
+
+  Design review refined the sequence contract in creative section 2.9 and P1 section 4, without
+  changing P1 finality: recorded left/right origins preserve immediate sequential placement;
+  op ids break ties in the same gap, not arbitrary concurrent pairs that observed different gaps.
+  A right-origin forest avoids the confirmed generic-Kahn ordering defect (X,Y plus later C
+  before X must give C,X,Y, not Y,C,X). The walk is iterative and rejects missing/wrong-parent/
+  cyclic origins. `after:null` means prepend, matching the current fixture's code despite its
+  stale append comment; missing-predecessor Restore chooses the current last live frame before
+  preparing a new intent. No UI code changed. Origin metadata still needs causal-delta validation.
+
+  Fourteen new frame tests pass via focused runs: real 1000-frame and exact-byte boundaries,
+  concurrent same/different gaps in both delivery orders, collision/deletion anchors, replacement
+  conflicts, erased root history, strict unsupported-state rejection, metadata framing/scope,
+  valid-in-isolation anchor equivocation, deep 5000-node chains, restart and redacted diagnostics.
+  Actual-diff review's two Low findings are fixed: server-scope wording and a stronger anchor
+  equivocation regression. The optional same-parent/different-right-origin test was added too.
+  Read-only re-review reports no remaining findings. Final verification passed:
+
+  - Focused `studio::frames::` tests and the subsequent framing/concurrency/equivocation regressions
+  - `cargo test --all --all-features` (app 380 passed / 8 existing ignored; replication 120;
+    sync 214; all workspace integration/doc suites passed; other existing ignored tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1144 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check` and staged diff checks
+
+  No runtime or test bytes changed after that verification. No frontend/native source changed,
+  so frontend static/build, native `cargo check` and visual screenshots were not required.
+  This slice is locally committed only; destination approval for pushing remains outstanding.
+  The user's release workflow/documentation changes are preserved and excluded.
+
+  This is an art-only reader: unsupported sound/score/export records reject, including score:null.
+  It supplies no signed delta validator, exact checkpoint/recovery encoding, actor/native command,
+  production Save/Load or playback/export capability. Timestamps are author assertions, never
+  freshness/ordering authority. Gate 1 remains open; next is signed causal admission and exact
+  checkpoint/recovery preflight for the art path. Other operation families remain unavailable
+  until their stateful support lands. Games/avatar work stays paused; UI stays user-owned.
+
 - **Flipnote gate 1, read-only StudioIndex projection (2026-09-08; verified).**
   `studio::StudioIndexProjection` reads the channel's object list from actual Automerge state.
   It keeps immutable insertion candidates by derived operation id, chooses the smallest for

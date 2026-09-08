@@ -1,4 +1,4 @@
-//! Typed Studio operations and read-only index state for future edits, ingest and durable intents.
+//! Typed Studio operations and read-only projections for future edits, ingest and durable intents.
 //!
 //! This is the schema boundary, NOT document admission: decoding proves neither authorship nor
 //! that an Automerge delta implements this operation. The live Studio consumer must additionally
@@ -20,6 +20,11 @@ mod index;
 pub use index::{
     studio_index_document, IndexCreation, IndexEntry, IndexRegister, IndexSource, IndexValue,
     StudioIndexProjection, MAX_INDEX_OBJECTS,
+};
+mod frames;
+pub use frames::{
+    flipnote_document, FlipnoteFrameProjection, FrameBlob, FrameEntry, FrameInsertion, FrameLimits,
+    FrameRegister, FrameSource, FrameValue, FLIPNOTE_FRAME_BYTES, FLIPNOTE_MAX_FRAMES,
 };
 #[cfg(test)]
 mod tests;

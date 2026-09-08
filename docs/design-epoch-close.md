@@ -128,8 +128,13 @@ op_id = H("catcoms-domain-op:v1", logical key, verified outer author identity, n
 
 `op_id` is derived only, recomputed by every receiver from the verified outer `SignedOp`
 author. Every collection element has a stable 32-hex element id chosen at creation; collections
-project as ordered sets by element id; concurrent insertions of different ids after one
-predecessor order by ascending `op_id`; insertions of the same id with different payloads
+project as ordered sets by element id. Sequence consumers retain a causally resolved insertion
+gap: predecessor insertion op id and right-origin insertion op id, with null at the beginning
+or when no right origin exists. Concurrent insertions into the same gap order by ascending
+`op_id`; recorded placement constraints take precedence over that tie-break (the exact frame
+traversal is specified in creative section 2.9). This does not promise hash order for all pairs
+of concurrent inserts after one predecessor when they observed different right origins.
+Insertions of the same id with different payloads
 resolve to the smallest `op_id` with others shown as conflicts; a tombstone wins over any
 insertion of its id; scalars project by Automerge's concurrent-put rule within an epoch and by
 the checkpoint's bounded conflict data across one; the envelope is at most 64 KiB; delivery

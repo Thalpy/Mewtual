@@ -596,6 +596,15 @@ table with the commit that closed it.
   It cannot prove an immutable record was never causally overwritten, that a rename saw its
   target at the author's frontier, or that a missing tombstone was never deleted. No live Studio
   admission is enabled, and no checkpoint-size or typed recovery completeness claim is added.
+  The art-only Flipnote frame reader uses the same unauthenticated-claims boundary, with
+  caller-supplied server scope and object/channel/epoch/dimension header checks, 188,192 primitive
+  and 6 MiB reader bounds,
+  and iterative cycle/missing-origin checks. Insertion op-id origins retain losing/deleted nodes;
+  the future signed causal validator must independently derive those origins and validate every
+  property predecessor. Timestamp metadata is author-asserted, not an independent signed clock;
+  it never orders frames or grants freshness. Over-cap/deleted frames retain all live CID evidence.
+  Sound/score/export state rejects rather than being silently omitted. The frame reader does not
+  implement PIX verification, retention, signed admission or a checkpoint/recovery persistence path.
   Vault restoration tests dependency and duplicate presence using metadata from Automerge's
   applied graph, not a saved or peer-asserted index; unresolved queued changes do not count.
   It can use indexed current-view reads only when an authenticated change's

@@ -293,7 +293,7 @@ generic rules; these refine them):
 | Type | Operations | Element ids | Restore refinement |
 |---|---|---|---|
 | score | `set_cell(step,row,value)`, `clear_cell(step,row)`, `set_patch(patch id, descriptor)`, `remove_patch(patch id)`, `set_header(field, value)` for `title`, `bpm`, `bpb`, `steps` | cells are keyed by `(step,row)`, which is stable by construction; patches by descriptor hash | a cell is restored only if empty in the target, else shown as a conflict; a patch is restored if absent and the 64 cap allows, else flagged; a cleared cell on the fork is shown as "cleared on the fork" with a Clear action; headers are conflicts, never restored automatically |
-| flipnote | `insert_frame(frame id, after frame id or none, cid, bytes)`, `remove_frame(frame id)`, `replace_frame(frame id, cid, bytes)`, `set_sfx(sfx id, frame id, patch id, note)`, `remove_sfx(sfx id)`, `set_patch`, `remove_patch`, `set_export(export id, ...)`, `remove_export(export id)`, `set_header(field, value)` for `title`, `fps`, `score` | frames, sfx and exports by random 32-hex id | a frame absent in the target is inserted after its recorded predecessor if present, else at the end; concurrent inserts after one predecessor order by ascending `op_id`; a frame present in both with a different `cid` is a conflict shown with both authors; a removed frame on the fork is shown with a Delete action; sfx and exports restore by id if absent; the patch union rule (2.10) applies after restore and can flag |
+| flipnote | `insert_frame(frame id, after frame id or none, cid, bytes)`, `remove_frame(frame id)`, `replace_frame(frame id, cid, bytes)`, `set_sfx(sfx id, frame id, patch id, note)`, `remove_sfx(sfx id)`, `set_patch`, `remove_patch`, `set_export(export id, ...)`, `remove_export(export id)`, `set_header(field, value)` for `title`, `fps`, `score` | frames, sfx and exports by random 32-hex id | a frame absent in the target is inserted after its recorded predecessor if present, else at the end; concurrent inserts into the same resolved gap order by ascending `op_id`, subject to the placement rule below; a frame present in both with a different `cid` is a conflict shown with both authors; a removed frame on the fork is shown with a Delete action; sfx and exports restore by id if absent; the patch union rule (2.10) applies after restore and can flag |
 | index | `put_object(object id, kind, title, created_by, ts, expiry)`, `tombstone_object(object id)`, `set_title(object id, title)`, `set_expiry(object id, expiry)` | objects by random 32-hex id | objects restore by id if absent and the 64 cap allows; a tombstone on the fork shows a Delete action; titles and expiry are conflicts |
 | replies | `put_reply(reply id, author, cid, bytes, ts, expiry)`, `tombstone_reply(reply id)` | replies by random 32-hex id | replies restore by id if absent and the per-post and per-author caps allow |
 | registry | `put_pointer(key, epoch)`, `tombstone_pointer(key)` | by logical key | owned by P1: a pointer is re-put on Restore if its target document exists |
@@ -325,6 +325,47 @@ validation must still authenticate provenance, prevent rewriting immutable prope
 evidence, check same-property predecessors and causal target existence, and invoke exact seed
 preflight before any live write or ingest. Checkpoint and typed recovery encodings remain a later
 gate-1 substep; this representation enables neither production Save/Load nor receipt verification.
+
+**Rust frame representation (gate 1, read-only art subset).** `FlipnoteFrameProjection` has
+immutable `v=1`, `kind="flipnote"`, `id`, `channel`, `epoch`, `w=192`, `h=144` root headers.
+Every concurrent header must match the supplied scope. `i/<frame>/<op-id>` and
+`d/<frame>/<op-id>` retain immutable insertions and deletions; `r/<frame>` is the pixel-replacement
+register; `h/title` and `h/fps` are mutable registers. Unset title/fps have no fabricated source;
+a view may use the existing empty-title/12-fps defaults. The art-only reader rejects all other
+operation families/properties, including `score:null`, until their stateful support exists.
+
+A record is byte `1`, author (32 bytes), asserted timestamp (u64 big-endian, JS-safe),
+`anchor` and `before` (each byte `0`, or byte `1` plus a 32-byte insertion op id), then the existing
+encoded DomainOp. Non-insertions require both origins absent. These are signed-delta metadata,
+not new fields in the domain body. `SignedOp` has no independent clock field; timestamps are
+author claims, not ordering/freshness authority. Whole-record comparison detects visible reuse
+of one op id with changed body, timestamp or origins. Later writers must preserve retry metadata
+within an epoch and validate it against the authenticated change; the reader alone does not.
+
+**Frame placement refinement.** `after:null` inserts at the beginning, matching the existing
+fixture implementation (its append comment is stale). An explicit `after` resolves to the winning
+insertion node of that frame at the author's dependency frontier. `before` names the first child
+of that anchor in that same view, or is absent. Missing predecessors during Restore normalize
+to the current last live frame id (null only for an empty timeline) before preparing a new intent.
+The future causal validator must derive these origins, not trust caller-supplied choices.
+
+Each anchor's children form a right-origin forest. Children with no `before` sort by op id;
+before emitting a child, emit the nodes whose `before` names it, recursively under the same rule.
+Emit the child's own anchored children immediately after it. Same-gap insertions thus order by
+op id while later observed placement is preserved: siblings X,Y plus a later C before X yield
+C,X,Y, never Y,C,X. The implementation walks iteratively, rejects dangling/wrong-parent/cyclic
+origins and retains hidden insertion nodes as anchors. It emits only the smallest-op-id insertion
+of each nondeleted frame; losing/deleted insertions never rewire the graph or strand descendants.
+This deliberately refines the earlier blanket concurrent-op-id sentence: arbitrary pairwise hash
+ordering cannot also preserve observed sequential insertion when peers saw different gaps.
+
+Replacement pixels use the actual Automerge winner; every live alternative and insertion blob
+declaration remains in the frame map, even for deleted/over-cap frames. The timeline includes all
+nondeleted frames; cap flags apply once list position reaches 999 or cumulative selected declared
+bytes exceed 8 MiB. Later small frames are not packed around excess. This is neither a retention
+policy nor the later `creative_pinned_cids()` integration. Reader bounds are 188,192 primitives
+and 6 MiB of visible key/value bytes, independent of exact checkpoint admission. No live write,
+checkpoint/recovery serialization or Save/Load is enabled by this frame-reader slice.
 
 **What the studio requires of P1**, so a change to P1 that breaks one of these is caught here:
 

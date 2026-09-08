@@ -38,8 +38,13 @@ title/expiry registers use Automerge's actual winner with all concurrent alterna
 The smallest insertion op id wins a same-object collision; the first 64 live object ids are
 visible, with explicit overflow and deleted content kept for later typed recovery. Every live
 root value is checked, including losing headers; primitive and value-byte limits bound the reader.
-This projection grants no authenticity to its records. Flipnote projection, Studio causal delta
-validators and exact checkpoint preflight remain necessary before any live edit or ingest path.
+The art-only Flipnote frame projection now likewise retains insertion/replacement/deletion
+evidence. Stable insertion-node origins and a right-origin forest preserve sequential placement
+and same-gap concurrent ordering without rewiring losing/deleted anchors. All live alternatives
+remain available even when a frame is deleted or beyond the 999-frame / 8 MiB playable prefix.
+Sound/score/export state rejects until its projection support lands. Neither reader authenticates
+its records; Studio causal delta validators and exact checkpoint preflight remain necessary
+before any live edit or ingest path. No backend/runtime or user-interface binding is added.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
 even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.

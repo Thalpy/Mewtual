@@ -456,7 +456,7 @@ pub struct CheckpointOrigin; // logical scope, epoch, close and seed hashes reta
 // Both checked P1 paths preflight the prospective materialization before gate admission/state swap:
 EncryptedDoc::edit_domain_preflight_gated(..., typed_change_validator, projection_preflight);
 EncryptedDoc::ingest_domain_preflight_gated(..., typed_change_validator, projection_preflight);
-// catcoms_replication::studio (codecs + read-only index projection; NOT a gated consumer yet):
+// catcoms_replication::studio (codecs + read-only projections; NOT a gated consumer yet):
 pub enum IndexOp;       // put_object, tombstone_object, set_title, set_expiry
   encode() -> Result<Vec<u8>>; decode(canonical_body) -> Result<Self>;
   decode_domain(&LogicalDocument, &DomainOp, verified_outer_author:&DeviceId) -> Result<Self>;
@@ -473,6 +473,20 @@ pub struct IndexEntry; // creations sorted by op id, mutable title/expiry IndexR
 pub struct IndexRegister<T>; // selected IndexValue<T> + concurrent conflicts sorted by op id
 pub struct IndexValue<T>; // value + IndexSource (derived op id, asserted full author, nonce)
 pub struct IndexCreation; // kind/title/created_by/ts/three-state expiry, before any mutable writes
+flipnote_document(server_id:&[u8], object:[u8;16]) -> Result<LogicalDocument>;
+pub struct FlipnoteFrameProjection; // art subset: all frames/tombstones, live timeline, cap flags
+  read(&LogicalDocument, channel:[u8;16], epoch:u64, &AutoCommit) -> Result<Self>;
+  document() -> &LogicalDocument; insertion_order() -> &[[u8;32]]; // includes hidden anchor nodes
+pub struct FrameEntry; // insertion candidates + pixel-replacement register (actual AM winner)
+pub struct FrameInsertion; // after stable frame id, resolved anchor/before insertion op ids, blob
+pub struct FrameBlob; // cid:[u8;32], bytes:u64; declarations, not available/valid PIX proof
+pub struct FrameSource; // derived op id, asserted full author/nonce/timestamp (safe integer ms)
+pub struct FrameValue<T>; pub struct FrameRegister<T>; // source/value and selected/conflicts
+pub struct FrameLimits; // count/bytes flags; cumulative over-cap suffix remains in timeline
+// Title/fps registers are optional until set; no fabricated author for empty-title/12-fps defaults.
+// Art-only reader rejects unsupported sound/score/export state, including an explicit score:null.
+// Frames includes deleted/over-cap entries and all live CID alternatives. No reference expiry or
+// retention policy is applied, and the later creative_pinned_cids() integration is still missing.
 // Index record provenance is internally consistent, not independently authenticated. Read checks
 // every live concurrent value and returns all deletion/overflow evidence, but cannot detect hidden
 // historical deletion/forgery by inspecting current state alone. It is not an admission callback.

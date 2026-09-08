@@ -49,7 +49,8 @@ Gate 1 substeps (not extra product gates):
 
 - [x] Static IndexOp/FlipnoteOp body codec, complete-envelope checks and shared frontend vectors.
 - [ ] Deterministic Studio projections with stable ids, ordering, conflict and deletion evidence.
-      StudioIndex now has a read-only Automerge projection; Flipnote's frame timeline is next.
+      StudioIndex and the Flipnote art/frame subset now have read-only Automerge projections.
+      Sound/score/export projection support remains separate; unsupported state rejects.
 - [ ] Causal Automerge-change validation and aggregate admission through the actual P1 gate.
 - [ ] Exact checkpoint-size preflight and typed checkpoint/recovery representation.
 
@@ -70,8 +71,14 @@ the channel's object list from actual Automerge state: stable-id ordering, small
 creation conflicts, Automerge rename/expiry winners, provenance-bearing tombstones, and explicit
 overflow beyond 64 visible objects. It checks all live concurrent values, including hidden and
 deleted content, and has primitive/byte reader bounds. This does not authenticate record claims.
-Flipnote's frame projection, signed causal delta validation, exact checkpoint/recovery encoding
-and P1 preflight remain gate-1 work. No Studio live write path is installed and no gate is closed.
+The subsequent `FlipnoteFrameProjection` reads stable insertion-node order, pixel replacements,
+title/fps registers and provenance-bearing deletions. It retains every live alternative/hidden
+frame and flags the 999-frame / 8 MiB over-cap suffix without fetching blobs. Same-gap op-id
+ordering respects captured placement; deleted/losing insertions remain ordering anchors.
+It rejects sound/score/export state rather than return an incomplete successful view.
+Signed causal delta validation, exact checkpoint/recovery encoding and P1 preflight remain gate-1
+work; sound/score/export projections must land before those operation families can be admitted.
+No Studio live write path is installed and no gate is closed.
 The fixture's numeric-only expiry view still needs an explicit absent/null/timestamp adapter at
 gate 2; zero remains a timestamp and must never be used as a Never sentinel.
 
