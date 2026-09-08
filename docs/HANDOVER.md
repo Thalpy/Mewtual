@@ -8,7 +8,7 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
-- **Flipnote gate 3, initial publication from normal Save (2026-09-08).** Successful native/actor
+- **Flipnote gate 3, initial publication from normal Save (2026-09-08, `cafb221`).** Successful native/actor
   Apply and Create now automatically attempt one-shot publication of their actual store-returned
   packets. The private batch is at most two packets and leaves the worker only after complete
   transaction success, including the final projection read. The worker returns the same sole
