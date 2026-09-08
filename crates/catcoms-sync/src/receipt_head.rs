@@ -186,6 +186,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             && self.group.designated_committer() == Some(permit.owner)
             && self.observed_owner_tenure_start() == Some(permit.tenure)
     }
+    /// Admit a finite local owner transaction under the exact persisted MLS/tenure snapshot.
+    /// An observed tenure alone is insufficient: a restart must not restore authority behind
+    /// a newly irrevocable decision. The app additionally binds the physical mount and server.
+    pub fn with_durable_owner_snapshot<V>(
+        &mut self,
+        permit: &DurableOwnerSnapshot,
+        use_owner: impl FnOnce(&ServerGroup, &MlsDevice, &mut R, u64) -> V,
+    ) -> Result<V, SyncError> {
+        if !self.head_snapshot_is_current(permit)
+            || !self.head_member(&self.device.public_key_bytes())
+        {
+            return Err(SyncError::Unauthorized);
+        }
+        Ok(use_owner(
+            &self.group,
+            &self.device,
+            &mut self.rng,
+            permit.tenure,
+        ))
+    }
     pub fn watch_registry_head(&mut self, bucket: u8) -> RegistryHeadWatch {
         let generation = Arc::new(());
         self.receipt_heads

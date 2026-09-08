@@ -1097,13 +1097,45 @@ pending decision and re-save; a strictly newer verified tenure can replace an ol
 but same-tenure conflicting choices reject. `OwnerReceiptJournal::published()` exposes the latest
 high-water receipt; the journal wire encoding is unchanged.
 
+The outer owner-vault record now has an optional v2 decision extension after its existing framed
+journal: `u8=2, receipt_hash:bytes32, close_record:bytes` (u32 length framing). It retains one exact
+close for the pending-preferred receipt, including after publication completion until a newer
+decision replaces it. No-extension legacy records retain their bytes; older readers reject the
+extension. Decode checks the exact selected receipt hash, close hash/epoch/server/type, canonical
+close bounds, and no trailing fields. Current authority, close signature and closure/seed eligibility
+are rechecked before use, not inferred from inventory. The plaintext record cap is 8,448 bytes;
+the sealed physical cap is 8,488 bytes. These protocol bytes and replacement peak stay accounted.
+`EpochOwnerReceiptState::close_for(receipt)` returns historical provenance only. Re-saving the same
+receipt or completing its publication keeps its close; a genuinely different selected legacy
+receipt cannot inherit old heads.
+
+`Server::rotate_registry_owner_step(store, server, bucket, snapshot, budget, intents)` requires the
+current mount/server-bound `ServerOwnerSnapshot`. Sync's `with_durable_owner_snapshot` checks the
+actual runtime/MLS/full owner/observed tenure before lending exclusive context; Unknown or stale
+snapshots never reach disk mutation. The store flushes its complete source and verifies both
+inventories, then uses `RegistryEpoch::{new_owner_decision,resume_owner_decision}`. A new decision
+requires Open, no fault/adoption, epoch below 4096 and at most 64 complete heads; normal close and
+typed seed validation establish eligibility. Inheritance derives from the actual installed opening
+at succession and repeats the owner's published baseline within its tenure.
+
+The exact close and receipt are saved together before sealing; the existing recovery-first adjacent
+installer then runs. A pending choice (or published-but-not-installed choice) resumes from its saved
+heads, never current heads. Results are `Installed { publication_pending }`,
+`AlreadyInstalled { publication_pending }`, `RecoveryPending`, `Fault`, or `DecisionNeedsClose`
+for a legacy irrevocable choice without close provenance. Errors do not grant progress. Exact
+installed retries preserve newer edits, and post-journal/pre-seal edits are included in recovery.
+This explicit step is not a publisher: kind-21 serving still does not mark completion. The exact
+publication-completion handoff must be wired before automatic repeated rotations; a pending decision
+continues to block a different one. No actor/native scheduling or new command/event is added yet.
+
 The bounded sealed `.owner-receipts` record binds local server/group/type/key. Permanent bytes
 charge protocol allowance; replacement copies borrow the same logical-document settlement reserve
 as recovery records. `epoch_owner_receipt_inventory_record` observes one final file only; the combined
 inventory below covers its namespace and orphan temporaries. The sole coordinator and network
 publication remain deferred; the recovery-only scanner still excludes owner files. Before actual sending,
 the publisher must re-prepare/re-save the exact choice and recheck current owner, tenure and session.
-It must validate the close and deterministic seed before signing in the first place. File-sync and
+The explicit registry rotation path now validates the close and deterministic seed before signing;
+other managed types still need their own adapters. File-sync and
 atomic replacement use the existing store primitive, with parent-directory durability on Unix only.
 
 `scan_epoch_storage()` returns `EpochStorageScan`; `cleanup_epoch_storage_staging()` returns

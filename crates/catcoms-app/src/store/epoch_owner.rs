@@ -6,8 +6,9 @@ use std::io::Read;
 
 use catcoms_mls::ServerGroup;
 use catcoms_replication::{
-    epoch::{MAX_OWNER_RECEIPT_JOURNAL_BYTES, MAX_RECEIPT_BYTES},
-    LogicalDocument, OwnerReceiptJournal, Receipt,
+    epoch::{MAX_CLOSE_RECORD_BYTES, MAX_OWNER_RECEIPT_JOURNAL_BYTES, MAX_RECEIPT_BYTES},
+    registry_epoch::RegistryOwnerDecision,
+    CloseRecord, LogicalDocument, OwnerReceiptJournal, Receipt,
 };
 
 use super::epoch_budget::{
@@ -19,7 +20,7 @@ use super::*;
 
 pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-owner-store/v1";
 // Full framed local/group/type/key scope plus length framing, separate from the signed wire.
-const MAX_RECORD_BYTES: usize = MAX_OWNER_RECEIPT_JOURNAL_BYTES + 1024;
+const MAX_RECORD_BYTES: usize = MAX_OWNER_RECEIPT_JOURNAL_BYTES + MAX_CLOSE_RECORD_BYTES + 1024;
 pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
 
 /// Historical, authenticated journal view. It is not a publication permit or pruning authority.
@@ -27,6 +28,9 @@ pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
 #[derive(Default)]
 pub struct EpochOwnerReceiptState {
     journal: OwnerReceiptJournal,
+    // One exact close for the pending-preferred decision. Retained across publication completion
+    // so a crash before source installation never needs to reconstruct lost close heads.
+    decision_close: Option<([u8; 32], CloseRecord)>,
 }
 
 impl std::fmt::Debug for EpochOwnerReceiptState {
@@ -50,6 +54,15 @@ impl EpochOwnerReceiptState {
         self.journal.published()
     }
 
+    /// Historical close for this exact saved receipt, not fresh publication authority. Legacy
+    /// receipt-only journals return None: a pending choice must hold, never be regenerated.
+    pub fn close_for(&self, receipt: &Receipt) -> Option<&CloseRecord> {
+        self.decision_close
+            .as_ref()
+            .filter(|(hash, _)| *hash == receipt.hash())
+            .map(|(_, close)| close)
+    }
+
     fn check_scope(&self, document: &LogicalDocument) -> Result<(), AppError> {
         if self
             .pending()
@@ -58,6 +71,27 @@ impl EpochOwnerReceiptState {
             .any(|r| &r.document != document)
         {
             return Err(invalid("journal belongs to another logical document"));
+        }
+        if let Some((hash, close)) = &self.decision_close {
+            let receipt = self
+                .pending()
+                .or_else(|| self.published())
+                .ok_or_else(|| invalid("close without a decision"))?;
+            if close.server_id.len() > 256
+                || close.author_public_key.len() != 32
+                || close.heads.len() > 64
+            {
+                return Err(invalid("saved close exceeds its bound"));
+            }
+            CloseRecord::decode(&close.encode()).map_err(invalid)?;
+            if *hash != receipt.hash()
+                || close.hash() != receipt.close_record_hash
+                || close.closed_epoch != receipt.closed_epoch
+                || close.server_id != document.server_id
+                || close.doc_type != document.doc_type
+            {
+                return Err(invalid("saved close does not bind the selected receipt"));
+            }
         }
         Ok(())
     }
@@ -77,6 +111,13 @@ impl EpochOwnerReceiptState {
         let mut e = Encoder::new();
         e.put_bytes(scope).map_err(invalid)?;
         e.put_bytes(&journal).map_err(invalid)?;
+        if let Some((hash, close)) = &self.decision_close {
+            // Existing receipt-only records remain byte-identical. Old readers reject this
+            // explicit extension rather than silently losing irrevocable decision provenance.
+            e.put_u8(2);
+            e.put_bytes(hash).map_err(invalid)?;
+            e.put_bytes(&close.encode()).map_err(invalid)?;
+        }
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -94,8 +135,25 @@ impl EpochOwnerReceiptState {
         }
         let journal =
             OwnerReceiptJournal::decode(d.get_bytes().map_err(invalid)?).map_err(invalid)?;
+        let decision_close = if d.is_empty() {
+            None
+        } else {
+            if d.get_u8().map_err(invalid)? != 2 {
+                return Err(invalid("unsupported owner decision extension"));
+            }
+            let hash = d
+                .get_bytes()
+                .map_err(invalid)?
+                .try_into()
+                .map_err(invalid)?;
+            let close = CloseRecord::decode(d.get_bytes().map_err(invalid)?).map_err(invalid)?;
+            Some((hash, close))
+        };
         d.finish().map_err(invalid)?;
-        let state = Self { journal };
+        let state = Self {
+            journal,
+            decision_close,
+        };
         state.check_scope(document)?;
         Ok(state)
     }
@@ -135,8 +193,9 @@ impl ServerStore {
     /// returns no success and blocks the budget until complete inventory reconciliation.
     ///
     /// This checks signature/owner/tenure, not the close's closure or checkpoint materialization;
-    /// the future owner coordinator must validate those BEFORE signing. Sending must recheck
-    /// current authority/session after this call. Success alone authorizes no history pruning.
+    /// the registry owner driver validates those before signing; other callers must do so too.
+    /// Sending must recheck current authority/session after this call. Success alone authorizes
+    /// no history pruning.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_epoch_owner_receipt(
         &mut self,
@@ -219,6 +278,89 @@ impl ServerStore {
         apply: impl FnOnce(&mut OwnerReceiptJournal) -> Result<(), AppError>,
         writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
+        self.update_epoch_owner_state_with_writer(
+            server,
+            document,
+            rng,
+            budget,
+            |state| {
+                apply(&mut state.journal)?;
+                // Legacy callers may prepare a new decision without its close. Keep an existing
+                // close only for the still-selected receipt; never attach old heads to a new choice.
+                if state.decision_close.as_ref().is_some_and(|(hash, _)| {
+                    state
+                        .pending()
+                        .or_else(|| state.published())
+                        .is_none_or(|r| r.hash() != *hash)
+                }) {
+                    state.decision_close = None;
+                }
+                Ok(())
+            },
+            writer,
+        )
+    }
+
+    /// Save both halves of a validated registry decision in one accounted atomic record. This
+    /// remains crate-private: production callers derive it from the checked, gated source.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_registry_owner_decision(
+        &mut self,
+        server: u64,
+        decision: &RegistryOwnerDecision,
+        group: &ServerGroup,
+        tenure: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
+        self.prepare_registry_owner_decision_with_writer(
+            server,
+            decision,
+            group,
+            tenure,
+            rng,
+            budget,
+            atomic_write,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_registry_owner_decision_with_writer(
+        &mut self,
+        server: u64,
+        decision: &RegistryOwnerDecision,
+        group: &ServerGroup,
+        tenure: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
+        self.update_epoch_owner_state_with_writer(
+            server,
+            &decision.receipt().document,
+            rng,
+            budget,
+            |state| {
+                state
+                    .journal
+                    .prepare(decision.receipt().clone(), group, tenure)
+                    .map_err(invalid)?;
+                state.decision_close = Some((decision.receipt().hash(), decision.close().clone()));
+                Ok(())
+            },
+            writer,
+        )
+    }
+
+    fn update_epoch_owner_state_with_writer(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        apply: impl FnOnce(&mut EpochOwnerReceiptState) -> Result<(), AppError>,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
         let (mut state, size) = match self.read_epoch_owner_record(&scope, document) {
@@ -234,7 +376,7 @@ impl ServerStore {
         budget
             .verify_record(&storage_scope, *blake3::hash(&scope).as_bytes(), observed)
             .map_err(invalid)?;
-        apply(&mut state.journal)?;
+        apply(&mut state)?;
         let plain = state.encode(&scope, document)?;
         let record = storage_record(server, document, &scope, plain.len() as u64 + 40)?;
         let reservation = budget
@@ -365,6 +507,9 @@ fn invalid(error: impl std::fmt::Display) -> AppError {
 mod inventory_tests;
 
 #[cfg(test)]
+mod decision_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use catcoms_mls::MlsDevice;
@@ -438,6 +583,95 @@ mod tests {
         store
             .prepare_epoch_owner_receipt(SERVER, r, group, group.epoch(), &mut rng(), budget)
             .unwrap()
+    }
+
+    #[test]
+    fn owner_close_provenance_survives_stale_completion_but_not_a_different_prepare() {
+        let root = tempfile::tempdir().unwrap();
+        let (owner, group, doc) = fixture();
+        let mut store = open(root.path());
+        let mut budget = budget(&store, &doc);
+        let decisions: Vec<_> = (0..2)
+            .map(|epoch| {
+                let close =
+                    CloseRecord::sign(&doc, 4, epoch, vec![[epoch as u8; 32]], &owner).unwrap();
+                let receipt = Receipt::sign(
+                    doc.clone(),
+                    epoch,
+                    close.hash(),
+                    [17; 32],
+                    group.epoch(),
+                    InheritedCheckpoint::EpochZero,
+                    &owner,
+                )
+                .unwrap();
+                (receipt, close)
+            })
+            .collect();
+        for (receipt, close) in &decisions {
+            // Install an authenticated close-bearing fixture through the real accounted writer.
+            // Closure eligibility belongs to the core builder tests; this regression targets the
+            // generic public prepare/completion wrapper's preservation and replacement rules.
+            store
+                .update_epoch_owner_state_with_writer(
+                    SERVER,
+                    &doc,
+                    &mut rng(),
+                    &mut budget,
+                    |state| {
+                        state
+                            .journal
+                            .prepare(receipt.clone(), &group, group.epoch())
+                            .map_err(invalid)?;
+                        state.decision_close = Some((receipt.hash(), close.clone()));
+                        Ok(())
+                    },
+                    atomic_write,
+                )
+                .unwrap();
+            // Repeating completion of epoch zero while epoch one is pending must preserve the
+            // selected epoch-one close, not clear it or reattach the published epoch-zero close.
+            store
+                .mark_epoch_owner_receipt_published(
+                    SERVER,
+                    &doc,
+                    decisions[0].0.hash(),
+                    &mut rng(),
+                    &mut budget,
+                )
+                .unwrap();
+            drop(store);
+            store = open(root.path());
+            budget = super::tests::budget(&store, &doc);
+            let saved = store.load_epoch_owner_receipts(SERVER, &doc).unwrap();
+            assert_eq!(saved.published(), Some(&decisions[0].0));
+            assert_eq!(saved.close_for(receipt).unwrap().encode(), close.encode());
+            assert_eq!(
+                saved.pending(),
+                (receipt.closed_epoch == 1).then_some(receipt)
+            );
+        }
+        let (second, _) = &decisions[1];
+        store
+            .mark_epoch_owner_receipt_published(
+                SERVER,
+                &doc,
+                second.hash(),
+                &mut rng(),
+                &mut budget,
+            )
+            .unwrap();
+        let third = receipt(&owner, &group, &doc, 2);
+        prepare(&mut store, third.clone(), &group, &mut budget);
+        drop(store);
+        let saved = open(root.path())
+            .load_epoch_owner_receipts(SERVER, &doc)
+            .unwrap();
+        assert_eq!(saved.pending(), Some(&third));
+        assert_eq!(saved.published(), Some(second));
+        assert!(saved.close_for(second).is_none());
+        assert!(saved.close_for(&third).is_none());
+        assert!(saved.decision_close.is_none());
     }
 
     #[test]

@@ -31,6 +31,46 @@ impl std::fmt::Debug for ServerRegistryHeadWatch {
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    /// Explicitly drive one owner rotation from the checked saved source, preserving the exact
+    /// close/receipt across crashes. This does not publish: pending publication must be completed
+    /// separately before a later decision can replace it. No native scheduler is started here.
+    pub fn rotate_registry_owner_step(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        bucket: u8,
+        snapshot: &ServerOwnerSnapshot,
+        budget: &mut EpochStorageBudget,
+        intents: &mut crate::store::EpochIntentBudget,
+    ) -> Result<
+        (
+            crate::store::RegistryOwnerRotationOutcome,
+            crate::store::EpochRegistryState,
+        ),
+        AppError,
+    > {
+        if snapshot.server != server || !Arc::ptr_eq(&snapshot.mount, &store.registry_mount()) {
+            return Err(AppError::Invalid(
+                "owner snapshot belongs to another mount/server".into(),
+            ));
+        }
+        let clock = self.runtime_clock();
+        self.sync
+            .with_durable_owner_snapshot(&snapshot.inner, |group, device, rng, tenure| {
+                store.rotate_registry_owner(
+                    server,
+                    group,
+                    bucket,
+                    device,
+                    tenure,
+                    clock.as_ref(),
+                    rng,
+                    budget,
+                    intents,
+                )
+            })?
+    }
+
     /// Explicit local save of whole-server MLS/tenure evidence. This is not a remote-request
     /// callback: legacy whole-server serialization is outside the small discovery work budget.
     /// Call from local persistence lifecycle and re-prepare after membership changes, not per query.

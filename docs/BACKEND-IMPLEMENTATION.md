@@ -46,6 +46,11 @@ The protocol/store foundations have substantially more coverage than the runtime
       Before automatic scheduling, measure maximum-epoch page-source rebuild time and set the
       cooperative work budget from that evidence; fixed memory/rate caps alone do not prove latency.
 - [ ] Owner receipt issuance, succession, fault/repair and settlement driven end to end.
+      Explicit registry owner rotation now derives an eligible close/seed from its checked source,
+      journals that exact close with the receipt, and seals/installs recovery-first under a durable
+      MLS/tenure snapshot permit. Restart resumes the same choice even after later Open edits.
+      Publication completion is still separate/pending; automatic driving, durable repair and
+      all managed document types remain acceptance work.
 - [ ] Recovery listing, Restore/Copy/Export actions and settlement events over the actor/bridge.
 - [ ] Multi-peer, restart, partition, capacity and owner-offline acceptance scenarios through the
       production adapters rather than direct calls to protocol helpers.

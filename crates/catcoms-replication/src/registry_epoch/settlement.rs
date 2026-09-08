@@ -216,4 +216,4 @@ impl RegistryEpoch {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

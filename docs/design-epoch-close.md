@@ -316,9 +316,14 @@ and durably records completion; an exact completion retry cannot clear a later p
 A verified strictly newer tenure can replace an unfinished old-tenure decision under the same
 write barrier, preventing a returning owner from being stranded. The scope-sealed record charges
 protocol bytes and shares recovery's logical-document reserve owner. This is not yet a publisher:
-the future coordinator must validate closure/seed before signing, re-save/reverify before sending,
-and integrate the combined namespace/orphan inventory and cleanup with the other managed types.
-Reads are historical only.
+the explicit registry owner driver now validates the actual eligible closure and typed seed before
+signing. It requires the current durable MLS/tenure snapshot permit, derives inheritance from the
+installed opening, and saves the exact close with the decision in one bounded owner-record extension.
+An interrupted seal resumes those heads, not newer live heads; later Open edits enter recovery.
+Legacy pending receipts without close provenance hold explicitly. The driver then seals and invokes
+the adjacent recovery-first installer. Results retain publication-pending status: an actual checked
+handoff must still drive the existing exact completion API before another decision can be issued.
+Automatic scheduling, other managed types and repair remain unfinished. Reads are historical only.
 
 ## 9. Intents and markers
 

@@ -25,7 +25,9 @@ use crate::{
 
 mod adoption;
 pub mod catchup;
+mod owner;
 pub use adoption::RegistryAdoptionPlan;
+pub use owner::RegistryOwnerDecision;
 mod settlement;
 pub use settlement::RegistrySettlementPlan;
 

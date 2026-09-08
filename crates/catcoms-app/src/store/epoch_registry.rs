@@ -32,7 +32,9 @@ const MAX_INBOUND_CIPHERTEXT: usize = MAX_SIGNED_EPOCH_OP_BYTES + 4 + 16;
 
 mod adoption;
 mod head;
+mod owner;
 pub use adoption::RegistryAdoptionOutcome;
+pub use owner::RegistryOwnerRotationOutcome;
 mod installation;
 mod pass;
 mod receive;

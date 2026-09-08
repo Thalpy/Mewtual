@@ -240,14 +240,29 @@ table with the commit that closed it.
   choice within the same tenure. Corruption does not reset the journal. Failed/uncertain writes and
   caught writer panics block accounting until full reconciliation. Loading visible bytes alone
   grants no publication authority: re-save and recheck current owner/tenure/session at send. The
-  future coordinator must validate closure/seed before signing and must discover/clean this separate
+  registry rotation adapter now validates closure/seed before signing; the coordinator must discover/clean this separate
   namespace before constructing production budgets. The combined storage inventory/cleanup now
   covers that namespace alongside recovery. A temporary's ownership requires a verified destination
   with both the same namespace and digest, and owner bodies keep their own small pre-read cap.
   Cleanup can remove unpublished attempts only; saved pending/high-water decisions are never targets.
-  No actor, startup or network path invokes it
-  yet. Durability remains file-sync/atomic replacement plus Unix parent sync, not protection from
+  The explicit registry owner driver and checked head-response preparation invoke it, but no
+  automatic actor/startup scheduler owns those paths yet. Durability remains file-sync/atomic replacement plus Unix parent sync, not protection from
   device failure or restoration of an older vault backup.
+- **Owner issuance resumes exact heads, not a new decision from changed content.** The explicit
+  registry driver requires the current physical mount/server and a durable runtime/MLS/full-owner/
+  tenure snapshot permit, not merely an observed tenure number. It validates and flushes the source
+  plus owner inventory before deriving a close. All current heads participate (over 64 refuses),
+  closure eligibility counts real signed user content, and the canonical typed seed derives from
+  those heads before signing. Inheritance comes from the installed opening, not caller/UI fields.
+  A bounded v2 extension in the owner vault record atomically binds one close to the selected receipt;
+  old no-extension records are unchanged and old readers reject new extensions. The physical record
+  cap grows to 8,488 bytes, still charged as protocol/reserve space. Decode proves structure/binding,
+  not current authority; resume rechecks signature and exact receipted seed against the retained source.
+  A crash after journaling but before sealing may leave later Open edits: the saved close is resumed
+  byte-for-byte and excluded edits enter recovery. A legacy pending decision without that close holds,
+  never regenerates. Exact installed retries preserve newer content. Installation labels publication
+  pending rather than claiming a handoff or delivery; completion and automatic scheduling remain
+  unfinished, and universal progress at full quota is not claimed.
 - **Saved local intents are replay data, not completion or impersonation authority.** The
   prepare-only vault adapter binds the local mount id and full group/type/key, checks the actual
   local device's current roster signing key, and saves before reporting success. It bounds public

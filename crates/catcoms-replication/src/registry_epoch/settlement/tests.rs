@@ -10,7 +10,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn fill_close(
+pub(in crate::registry_epoch) fn fill_close(
     source: &mut RegistryEpoch,
     owner: &MlsDevice,
     group: &ServerGroup,

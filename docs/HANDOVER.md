@@ -8,6 +8,49 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 explicit owner registry rotation (2026-09-08).**
+  `Server::rotate_registry_owner_step` requires the current mount/server-bound durable owner
+  snapshot permit. Under exclusive sync/store borrows it flushes the checked source, verifies
+  both inventories, derives a new eligible close/seed/receipt or resumes the exact saved choice,
+  journals close and receipt together, seals, and runs the existing recovery-first adjacent
+  installer. The private core builder rejects wrong owners, Fault/adoption, Closing new issuance,
+  terminal epochs, malformed public receipt fields and over-64-head sources without truncation.
+  Inheritance comes from the installed opening at succession and repeats the journal baseline.
+
+  The owner vault wrapper gains an explicit optional v2 extension containing the selected receipt
+  hash and one bounded close; no-extension records and inner journal v1 are unchanged. The 8,488-
+  byte physical cap stays accounted as protocol/reserve space; old readers reject new extensions.
+  Pending receipts without a close hold as `DecisionNeedsClose`, never regenerate against newer
+  heads. Re-saving/completing a matching receipt retains its close. A crash after journal save but
+  before sealing resumes identical bytes and sends later Open edits into recovery. Installed retry
+  preserves subsequent edits. Publication is explicitly pending: the current query path does not
+  mark completion, and a different decision waits for a real publication-completion driver.
+
+  Focused tests pass: five core owner-decision regressions (real 65-head cap and A-to-B-to-A
+  ownership included); three store rotation tests (post-barrier crashes, uncertain combined write,
+  legacy hold); one actual joined owner-generation/head-proof/seed-fetch/newcomer-install test;
+  sixteen owner store/inventory tests including the new extension codec; snapshot-permit callback
+  revocation coverage. Read-only actual-diff review found no blocker/high/medium or production
+  defect. Its Low coverage finding is fixed: an actual accounted prepare/completion/reload test
+  pins preservation of a newer pending close on old completion and removal of stale close
+  provenance on a different generic prepare. Static re-review has no remaining findings.
+  Required verification passed after that regression:
+
+  - `cargo test --all --all-features` (app 377 passed / 4 existing ignored; replication 81;
+    sync 212; all workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No runtime code changed after these checks. Frontend static/build/visual checks and separate
+  native `cargo check` were not needed: neither frontend nor native bridge source changed.
+  Canonical UI, native bridge, and unrelated release files are untouched. No overall completion
+  increase is claimed for this explicit integration step; automatic scheduling, publication
+  completion, durable repair and all-family Studio acceptance remain open.
+
 - **P1 scoped recovery-first registry installation (2026-09-08).**
   `Server::install_registry_seed_step` connects the private kind-21/22 selection to accounted
   vault adoption. Runtime, MLS, full local member, current owner/tenure, superseding discovery,

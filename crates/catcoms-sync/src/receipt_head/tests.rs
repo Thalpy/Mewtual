@@ -116,6 +116,14 @@ async fn receipt_head_snapshot_barrier_watch_expiry_and_stale_permits_fail_close
         })
         .unwrap()
         .unwrap();
+    assert_eq!(
+        node.with_durable_owner_snapshot(&permit, |group, device, _, tenure| {
+            assert_eq!(group.designated_committer(), Some(device.device_id()));
+            tenure
+        })
+        .unwrap(),
+        0
+    );
     assert!(!saved.is_empty());
     let r = receipt(&node, 4);
     let rx = enqueue(&mut node, 4);
@@ -147,6 +155,11 @@ async fn receipt_head_snapshot_barrier_watch_expiry_and_stale_permits_fail_close
     })
     .unwrap();
     assert!(!node.head_snapshot_is_current(&permit));
+    assert!(node
+        .with_durable_owner_snapshot(&permit, |_, _, _, _| panic!(
+            "stale snapshot must not enter owner transaction"
+        ))
+        .is_err());
     let rx = enqueue(&mut node, 4);
     assert!(node
         .serve_receipt_head(&replacement, Some(&permit), |_, _, _, s| {
@@ -163,7 +176,7 @@ async fn receipt_head_snapshot_barrier_watch_expiry_and_stale_permits_fail_close
         .serve_receipt_head(&replacement, None, |_, _, _, _| selection(r.clone(), true))
         .is_err());
     assert!(rx.recv().await.is_none());
-    let restored = Node::restore(
+    let mut restored = Node::restore(
         &saved,
         Hub::new().join(PeerId::from_u64(2)),
         ChaCha20Rng::seed_from_u64(8),
@@ -171,6 +184,11 @@ async fn receipt_head_snapshot_barrier_watch_expiry_and_stale_permits_fail_close
     )
     .unwrap();
     assert!(!restored.head_snapshot_is_current(&permit));
+    assert!(restored
+        .with_durable_owner_snapshot(&permit, |_, _, _, _| panic!(
+            "replaced runtime must not enter owner transaction"
+        ))
+        .is_err());
 }
 
 #[tokio::test]

@@ -39,6 +39,18 @@ This supplies local evidence only: fresh owner proofs require the publication ba
 below. An upgraded or newly joined owner with Unknown tenure may remain
 unable to authorize rotation until independent evidence or a witnessed transition is available.
 
+Explicit owner registry rotation now uses that same durable MLS/tenure snapshot permit. Under
+exclusive sync/store borrows it flushes the checked source, checks the owner inventory, and either
+resumes the exact saved decision or derives a new close from all current heads. More than 64 heads
+refuses without truncation. The actual authenticated closure must meet the lower/upper budgets and
+typed checkpoint validation before signing; a live projection alone is insufficient. First-of-tenure
+inheritance comes from the installed opening seed, and later decisions repeat the journal baseline.
+The owner vault record saves the exact close alongside the selected receipt in one atomic replacement,
+so a crash before sealing cannot change the decision when more Open edits arrive. Such later edits
+enter recovery through the existing adjacent installer. Legacy pending receipts without a saved close
+hold explicitly. Installation returns publication-pending status and does not mark the receipt
+published: the actual handoff/completion driver, automatic scheduling and durable repair remain open.
+
 Keyed registry receipt-head discovery is now a cooperative authenticated kind-21 exchange.
 It registers logical buckets, not concrete epochs, and returns provisional hints or a one-shot
 current-owner selection proof. Explicit local preparation saves the whole-server MLS/tenure
