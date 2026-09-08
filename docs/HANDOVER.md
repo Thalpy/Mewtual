@@ -8,6 +8,43 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 3, initial publication from normal Save (2026-09-08).** Successful native/actor
+  Apply and Create now automatically attempt one-shot publication of their actual store-returned
+  packets. The private batch is at most two packets and leaves the worker only after complete
+  transaction success, including the final projection read. The worker returns the same sole
+  Server and native lease; the actor keeps source/persistence/UI/incarnation custody through
+  one shared two-second injected-clock send window, then drops guards before reply/event waits.
+  No duplicate save/retry pass, ciphertext outbox, new protocol or journal is introduced.
+
+  Native cancellation and the operation-slot keepalive travel with that lease. Pre-cancelled
+  work refuses; a save already running can complete but cancelled/stale replies and later sends
+  are suppressed. Send NoPeers/error/timeout/Duplicate cannot undo Save or retire intents.
+  `publication: "local"` / `provisional: true` still acknowledge only local saved state, not
+  delivery. Create's two packets are not remote atomicity/discovery; an unwatched object can
+  miss its first packet. Read is not a send trigger, and no automatic reconnect retry is added.
+
+  Eight new app regressions exercise real joined-member actor Create and PIX Apply without an
+  explicit send call, exact retry/Read behavior, no-subscriber Save, partial Create with a closed
+  Index, pre/post-save cancellation, paused-publication cancellation with retained custody, and
+  the aggregate two-packet deadline, caller drop and actor abort during publication. One native
+  regression checks cancellation and release of
+  actual native fences without saving. Existing native Save/restart tests retain their unchanged
+  local/provisional result contract. UI source and canonical mockups remain untouched.
+
+  Verification passed: `cargo test --all --all-features`, native Cargo tests (198), frontend
+  tests (1144), root and native formatting checks, root Clippy all targets/features with
+  `-D warnings`, native `cargo check`, the Git Bash ambient-dependency gate, and diff checks.
+  Actual-diff adversarial review found two Low issues (caller/actor-drop coverage and the lease
+  lifetime comment), both fixed; re-review reports no remaining Blocker/High/Medium/Low. The
+  final eight-test app module, formatting and Clippy passed again after those test/comment-only
+  fixes. Existing ignored tests are unchanged. No frontend build or screenshot was needed.
+
+  **Next:** automatic watched receive and remote-update events, then saved-op retry/catch-up and
+  joining. Reuse the existing inbox, typed store, leases, snapshot ordering and prepared registry
+  jobs. This does not close Gate 3. The reuse audit and older runtime dependencies are recorded
+  in `BACKEND-IMPLEMENTATION.md`; no confirmed duplicated completed feature was found in the
+  compared commits, but this is not a whole-history zero-rework claim.
+
 - **Flipnote gate 3, prepared registry page sources (2026-09-08, `cf7c8f4`).** The existing page adapter now
   reuses a verified read-only source instead of replaying its entire saved history per request.
   Begin captures authenticated bytes under current store/server custody; the opaque job rebuilds

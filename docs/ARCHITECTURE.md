@@ -117,6 +117,15 @@ Server adapters bind channel, source, mount and current membership. These are co
 calls with two-member persistence tests, not automatic actor scheduling, catch-up, discovery,
 source reuse or remote UI events. Synchronous reconstruction and native lifecycle custody still
 need integration before live background use; current native Save remains local/provisional.
+Initial publication is now integrated into that existing Save arm. Its private bounded batch
+contains only the packets returned by successful durable edits, exposed after the final view
+read; partial Create errors expose no batch. The worker returns the sole Server and lease, and
+the actor keeps the same native/source custody through at most two one-shot attempts under one
+two-second injected-clock deadline. No duplicate save/reseal pass is performed for this initial
+send. Native cancellation/operation accounting follow the actual worker/lease; interruption or
+send failure cannot retire an intent or undo Save. Guards drop before reply/event backpressure.
+The response remains a local/provisional acknowledgement, not a delivery claim. Automatic receive,
+watch/discovery management and retry scheduling remain separate Gate 3 integration work.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
 even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.

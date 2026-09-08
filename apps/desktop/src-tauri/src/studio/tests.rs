@@ -340,6 +340,35 @@ fn native_studio_contract_rejects_bad_ids_bodies_and_preserves_expiry_states() {
     assert!(!format!("{:?}", create()).contains("moon cat"));
 }
 
+#[tokio::test]
+async fn native_studio_cancelled_lease_releases_native_fences_without_a_save() {
+    let (_root, state, actor, task, drain) = fixture().await;
+    let generation = unlocked_ui_session_generation(&state).await.unwrap();
+    let ready = actor.studio_begin(create()).await.unwrap();
+    let (slot, signal) = claim_internal_inline_download(&state).unwrap();
+    let cancellation = RequestCancellation::new(signal, Some(slot.request_keepalive()));
+    let lease = authorize(&state, 7, 1, generation)
+        .unwrap()
+        .with_cancellation(cancellation);
+    // Native cancellation is the same live signal the actor now owns, not just a reply filter.
+    cancel_all_inline_downloads(&state);
+    assert!(ready.execute(lease).await.is_err());
+    assert!(state.store.try_lock().is_ok());
+    assert!(state.servers.try_lock().is_ok());
+    assert!(state.ui_session_commit.try_lock().is_ok());
+    assert!(state
+        .store
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .load_server(7)
+        .is_err());
+    actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
+}
+
 struct Pause {
     armed: AtomicBool,
     entered: StdMutex<Option<tokio::sync::oneshot::Sender<()>>>,

@@ -1,5 +1,6 @@
 //! Explicit local Studio transactions. The actor supplies live membership while its caller lends
-//! the sole mounted vault and lifecycle guards. No Studio packet is gossiped by this module.
+//! the sole mounted vault and lifecycle guards. Successful actor saves make a bounded one-shot
+//! publication attempt; saved state is never reported as delivered or settled.
 
 use crate::{AppError, Server, ServerStore};
 use catcoms_replication::studio::{
@@ -9,6 +10,9 @@ use catcoms_replication::{epoch_zero_id, DomainOp};
 pub use catcoms_replication::{studio as types, EpochPhase};
 use catcoms_rt::{CryptoRngCore, MeshTransport};
 use tokio::sync::{oneshot, OwnedMutexGuard};
+
+mod publication;
+pub(crate) use publication::StudioSavedTransaction;
 
 /// Bounded before entering the actor queue. Bodies are the existing canonical Studio JSON,
 /// not renderer-authored Automerge changes. Keep ids/nonces/bodies stable across retries.
@@ -150,12 +154,14 @@ pub struct StudioView {
 }
 
 /// Caller-created, trusted-local custody only. `ordering` MUST retain the native numeric-server,
-/// UI commit and registry-incarnation guards until the synchronous transaction ends. No locks
+/// UI commit and registry-incarnation guards through the synchronous transaction AND bounded
+/// initial publication, until lease destruction. No locks
 /// may be awaited after the actor is Ready: use fail-fast acquisition and retry on contention.
 pub struct StudioVaultLease {
     pub(crate) store: OwnedMutexGuard<Option<ServerStore>>,
     pub(crate) server: u64,
     _ordering: Box<dyn Send>,
+    cancellation: Option<catcoms_rt::RequestCancellation>,
 }
 impl std::fmt::Debug for StudioVaultLease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -172,7 +178,19 @@ impl StudioVaultLease {
             store,
             server,
             _ordering: Box::new(ordering),
+            cancellation: None,
         }
+    }
+
+    /// Transfer native cancellation AND its operation-slot keepalive to the actual worker/send
+    /// lifetime. Dropping the invoke must not refund capacity while its finite save still runs.
+    pub fn with_cancellation(mut self, cancellation: catcoms_rt::RequestCancellation) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancellation.as_ref().is_some_and(|c| c.is_cancelled())
     }
 }
 
@@ -195,14 +213,28 @@ impl StudioReady {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
-    /// Synchronous under actor+vault+lifecycle custody. Full scans are bounded, but accepted-size
-    /// latency remains unqualified; this explicit operation is not automatic network serving.
+    /// Local-only test helper. Production actor saves retain the exact durable packets instead
+    /// of reconstructing/re-saving the same operations immediately for their initial send.
+    #[cfg(test)]
     pub(crate) fn studio_transaction(
         &mut self,
         store: &mut ServerStore,
         server: u64,
         request: StudioRequest,
     ) -> Result<Option<StudioView>, AppError> {
+        self.studio_transaction_with_publication(store, server, request)
+            .map(|saved| saved.view)
+    }
+
+    /// Synchronous under actor+vault+lifecycle custody. Full scans are bounded, but accepted-size
+    /// latency remains unqualified; this explicit operation is not automatic network serving.
+    pub(crate) fn studio_transaction_with_publication(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        request: StudioRequest,
+    ) -> Result<StudioSavedTransaction, AppError> {
+        let mut packets = Vec::new();
         request.validate()?;
         let target = request.target();
         if !self
@@ -342,7 +374,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             self.sync
                 .with_registry_context(|_, _, _, rng| store.save_server(server, &snapshot, rng))?;
         }
-        self.sync
+        let view = self
+            .sync
             .with_registry_context(|group, device, clock, rng| {
                 if group.member_signature_key(&device.device_id()).as_deref()
                     != Some(device.public_key_bytes().as_slice())
@@ -390,9 +423,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                             logical_key: logical.logical_key,
                             body,
                         };
-                        // Ciphertext is deliberately not sent: automatic sharing is gate 3. The durable
-                        // full signed log and intent, rather than an in-memory packet, retain the edit.
-                        store.edit_studio_epoch(
+                        // Only actual saved output can enter the private batch. No second mutation
+                        // or reconstructed body is needed for the initial publication. The full
+                        // signed log and intent remain the durable retry authority, not this packet.
+                        if packets.len() >= 2 {
+                            return Err(invalid("Studio save packet cap"));
+                        }
+                        let (sealed, _) = store.edit_studio_epoch(
                             server,
                             group,
                             target,
@@ -403,6 +440,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                             rng,
                             &mut budget,
                         )?;
+                        packets.push(publication::StudioSavedPacket {
+                            target,
+                            epoch_id,
+                            sealed,
+                        });
                         Ok(())
                     };
                 match request {
@@ -447,7 +489,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     StudioRequest::Read { .. } => unreachable!(),
                 }
                 read(store, target)
-            })
+            })?;
+        // A partial Create or failed final read returns Err above: none of its temporary packets
+        // escape for automatic publication. Already saved local content/intents remain retryable.
+        Ok(StudioSavedTransaction { view, packets })
     }
 }
 fn invalid(error: impl std::fmt::Display) -> AppError {

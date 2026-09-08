@@ -3913,18 +3913,25 @@ where
                         // Worker-owned native guards survive cancellation/abort of this waiter.
                         let worked = tokio::task::spawn_blocking(move || {
                             let mut lease = lease;
+                            let cancelled = lease.is_cancelled();
                             let result = match lease.store.as_mut() {
-                                Some(store) if !reply.is_closed() => server.studio_transaction(store, lease.server, request).map_err(|e| e.to_string()),
+                                Some(store) if !reply.is_closed() && !cancelled => server.studio_transaction_with_publication(store, lease.server, request).map_err(|e| e.to_string()),
                                 _ => Err("Studio request cancelled or vault closed".into()),
                             };
-                            drop(lease); // BEFORE reply and any bounded event-channel await.
-                            (server, reply, result)
+                            (server, lease, reply, result)
                         }).await;
-                        let (returned, reply, result) = match worked {
+                        let (returned, mut lease, mut reply, result) = match worked {
                             Ok(value) => value,
                             Err(_) => { tracing::error!("Studio worker panicked; stopping actor with unavailable state"); return; }
                         };
                         server = returned;
+                        let result = match result {
+                            Ok(saved) => Ok(server.publish_studio_save(&mut lease, &mut reply, saved).await),
+                            Err(error) => Err(error),
+                        };
+                        // Keep custody through the bounded initial send, but never through replies
+                        // or bounded event backpressure. A send result cannot change Save success.
+                        drop(lease);
                         let notify = changed && result.is_ok();
                         let _ = reply.send(result);
                         if notify {

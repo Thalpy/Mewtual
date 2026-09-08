@@ -70,10 +70,14 @@ async fn invoke(
         _ = clock.sleep(std::time::Duration::from_secs(5)) => return Err("Studio actor busy; retry".into()),
         result = actor.studio_begin(request) => result?,
     };
-    let lease = authorize(state, server, instance, generation)?;
+    let lease =
+        authorize(state, server, instance, generation)?.with_cancellation(cancellation.clone());
     // After lease transfer the finite worker owns ALL fences, even if this invoke is dropped.
     // Cancellation can suppress its result, not roll back a save that already began.
     let response = ready.execute(lease).await?;
+    if cancellation.is_cancelled() {
+        return Err("Studio request cancelled; its local save may have completed".into());
+    }
     let _commit = require_ui_session_generation(state, generation).await?;
     let servers = state.servers.lock().await;
     if servers

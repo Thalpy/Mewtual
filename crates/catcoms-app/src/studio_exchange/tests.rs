@@ -15,6 +15,7 @@ use rand_core::SeedableRng;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Waker};
+mod actor_save;
 
 const SERVER: u64 = 83;
 fn rng() -> ChaCha20Rng {
@@ -58,6 +59,10 @@ struct Net {
     inner: MemNetwork,
     pause: Arc<AtomicBool>,
     attempts: Arc<AtomicUsize>,
+    // Optional deterministic test-control permits, used only by the automatic Save regressions.
+    release: Arc<tokio::sync::Semaphore>,
+    controlled: Arc<AtomicBool>,
+    started: Arc<tokio::sync::Notify>,
 }
 impl Net {
     fn new(inner: MemNetwork) -> Self {
@@ -65,6 +70,9 @@ impl Net {
             inner,
             pause: Arc::new(AtomicBool::new(false)),
             attempts: Arc::new(AtomicUsize::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+            controlled: Arc::new(AtomicBool::new(false)),
+            started: Arc::new(tokio::sync::Notify::new()),
         }
     }
 }
@@ -88,6 +96,10 @@ impl MeshTransport for Net {
         b: Bytes,
     ) -> Result<PublishSubmission, PublishOnceError> {
         self.attempts.fetch_add(1, Ordering::SeqCst);
+        self.started.notify_one();
+        if self.controlled.load(Ordering::SeqCst) {
+            self.release.acquire().await.unwrap().forget();
+        }
         if self.pause.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
@@ -132,17 +144,19 @@ struct Pair {
     b_store: ServerStore,
     wire: Net,
     watch: ServerStudioWatch,
+    clock: ManualClock,
 }
 impl Pair {
     async fn new() -> Self {
         let hub = Hub::new();
         let wire = Net::new(hub.join(PeerId::from_u64(1)));
         let bob_wire = Net::new(hub.join(PeerId::from_u64(2)));
+        let clock = ManualClock::new(1000);
         let mut alice = Server::found(
             wire.clone(),
             MlsDevice::generate().unwrap(),
             rng(),
-            Box::new(ManualClock::new(1000)),
+            Box::new(clock.clone()),
             "alice",
         )
         .unwrap();
@@ -177,6 +191,7 @@ impl Pair {
             b_store,
             wire,
             watch,
+            clock,
         }
     }
     fn save(&mut self, op: &DomainOp) -> u128 {

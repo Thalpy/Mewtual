@@ -778,7 +778,9 @@ Every successful view has this envelope (read/apply use the same shape):
 
 `epochId` is opaque; carry it from the read into Apply. The epoch **number** is a string to avoid
 JS precision loss. Phase is the stored P1 gate phase, not proof that every displayed edit has an
-owner receipt or reached a peer. This adapter does not gossip, retire intents or drive settlement.
+owner receipt or reached a peer. Successful mutations now attempt initial one-shot publication
+as described below; `publication: "local"` remains a local durability acknowledgement, not a
+delivery claim. This adapter does not retire intents or drive settlement.
 IPC encoding over 32 MiB rejects rather than silently dropping conflict evidence.
 
 Index `content` has `kind: "index"`, maps `objects`, `overflow`, `deletedObjects`, and `tombstones`
@@ -810,9 +812,29 @@ registry-incarnation guards. The actor moves its sole live Server into a finite 
 checks current channel/membership and saves its current server snapshot before intent/source
 writes. The worker retains custody across invoke/actor cancellation; a running save may finish,
 but UI/session/incarnation checks suppress stale responses. Panic stops the actor. Guards drop
-before reply/event waits. Bounded scans/restores are not a measured latency promise. The shared
+after the bounded initial send and before reply/event waits. Bounded scans/restores are not a measured latency promise. The shared
 reference guard above protects saved pixels from existing cache-reclamation paths, not disk
 corruption, arbitrary external filesystem edits or expiry enforcement. No UI adapter is installed.
+
+Successful Apply saves one private packet returned by `edit_studio_epoch`; successful Create
+saves at most two (object then Index). Only complete transaction success, including the final
+projection read, permits the batch to leave the blocking worker. The actor retains the same
+Server/store/native lease while calling the existing `publish_local_studio_once`, with fresh
+full-author/MLS/routing checks and one aggregate two-second injected-clock deadline. No second
+save, durable packet outbox or new retry journal is introduced. Read never triggers publication.
+The explicit saved-op retry adapter below remains for later retries, not the just-finished Save.
+
+Native cancellation and its operation-slot keepalive now travel in `StudioVaultLease`.
+Pre-cancelled work refuses; a save already running can finish, but cancellation/reply closure
+suppresses later sends and interrupts pending publication. Native then suppresses cancelled or
+stale responses. Send failure/NoPeers/Duplicate/timeout never turn successful local Save into
+failure or retire an intent. A cancelled response can be uncertain: reread and retry the SAME
+operation. Transport admission may already have happened; cancellation does not prove no bytes
+escaped. Residual lower-driver work uses existing transport slots after the native lease drops.
+
+Two Create sends are not remote atomicity or discovery: a peer not yet watching the object can
+miss its first packet. Automatic receive, remote events, catch-up/discovery and reconnect retries
+remain unwired. This is initial send integration, not complete shared Studio.
 
 ### Studio operation exchange (gate 3, cooperative Index/art adapter)
 

@@ -36,7 +36,7 @@ for unrelated document types. Tests and review accompany each slice, not only ga
 |---|---|---|
 | 1. Typed Flipnote documents | Rust StudioIndex/Flipnote domain-op validation, deterministic projection, conflict/Restore data and exact checkpoint preflight; frame, byte, sfx and patch caps. Unsupported linked-score behavior stays unavailable until gate 6, never silently accepted. | Tests exercise valid edits, malformed/cross-document operations, both concurrent delivery orders and cap boundaries through the real P1 gate. |
 | 2. Durable one-device Save/Load | **Index/art milestone implemented:** accounted vault/lifecycle ownership, native commands, real PIX CIDs, sealed intents, conservative source/seed/recovery reference protection and three-state expiry. Extend these same seams to actual sound/export records in gate 6. No UI edits. | Actor/native create/edit/restart/reopen uses real CIDs. Failure cases preserve durable state. Fileshare unlisting/upload cleanup cannot delete referenced pixels; full scans/restart include superseded seed/history, pending intents and retained/staged recovery. Open edits remain provisional. |
-| 3. Two-member collaboration and joining | **Cooperative saved-operation send/receive implemented** for Index/art; explicit bounded registry source preparation/reuse is now available. Still: runtime ownership/driving, automatic catch-up/gossip, keyed discovery/Studio seed installation and remote events. Fence whole-server snapshots and cancellation/authority changes. | Two members must exchange edits automatically; a newcomer must find epoch-0 and prepared rotated objects by logical key. Explicit send/durable-receive/reopen and warm registry page serving pass, but do not close scheduling, joining or all accepted-size latency evidence. |
+| 3. Two-member collaboration and joining | **Initial actor/native Save publication integrated.** Cooperative saved-operation receive and bounded registry preparation/reuse exist. Still: automatic receive/watch management, reconnect retry/catch-up, keyed discovery/Studio seed installation and remote events. Reuse current native snapshot/cancellation custody. | Actor Save now reaches a manually watched second member without an explicit send call. Automatic bidirectional receive and newcomer joining remain open; warm page serving does not close those or all accepted-size latency evidence. |
 | 4. Rotation and recovery in the running app | Drive owner receipts without needing another member's query; atomic sealing, recovery-first settlement, own-intent replay, owner succession, fault/repair and recovery actions/events for the active types. | Production-adapter scenarios cover rotation, restart, owner offline/return, excluded edits, Restore/Copy/Export, storage exhaustion and staged-snapshot warnings. No pruning before the receipt and durable recovery barriers. |
 | 5. Collaborative frame claims | Required full-identity signalling and shared channel admission; bounded capability/session-bound claim, Ask and Pass messages with receiver-observed expiry. No game/avatar path or standalone drawing feature. | Two members observe advisory claim/Ask/Pass/expiry; collision, replay and disconnect tests pass. Claims never become edit locks. |
 | 6. Sound and export | Linked-score typed operations/preflight/recovery, sfx/emoji patch sources, 64-patch union, deterministic valid-take export and byte-exact `.pixa` publication with durable export records. Cover the specified local GIF export contract without taking over UI design. | No-score and linked-score golden vectors, maximal accepted exports and malformed/over-cap rejection pass; exported bytes can be read back and validated. Playback-facing contracts preserve Deafen and membership teardown. |
@@ -120,6 +120,21 @@ Paths below use `rep/` = `crates/catcoms-replication/src/`, `app/` = `crates/cat
 | Cooperative saved-operation exchange / 3 | `dda1fad` | [app/studio_exchange.rs](../crates/catcoms-app/src/studio_exchange.rs), [sync/studio_exchange.rs](../crates/catcoms-sync/src/studio_exchange.rs), [two-member tests](../crates/catcoms-app/src/studio_exchange/tests.rs) | Saved-only own send, bounded authenticated watches/inbox and durable typed receive work in both directions, including reopen. Automatic runtime scheduling, Studio source ownership, catch-up/discovery and remote UI events remain open. |
 
 ### Keeping this ledger useful
+
+Related runtime foundations (reuse references, **not extra Flipnote progress**):
+
+| Existing work | Commit | Extend here |
+|---|---|---|
+| Numeric-server snapshot ordering and incarnation checks | `c3bd3b2` | Native `persist_captured` / `persist_lock_for` in [lib.rs](../apps/desktop/src-tauri/src/lib.rs). Studio already holds the same persistence guard; do not add another snapshot owner. |
+| Detached prepare/worker/current-state completion pattern | `5cf2f56` | [actor/file_transfers.rs](../crates/catcoms-app/src/actor/file_transfers.rs) and the existing actor completion arm. Reuse the lifecycle pattern for future long read-only jobs; do not park the actor through registry reconstruction. |
+
+The 2026-09-08 reuse audit found no confirmed accidentally reimplemented completed feature in
+the compared registry/Studio store and exchange commits. They share P1 admission, budgets,
+reconciliation and one-shot transport, with different typed validators. Similar adapter shapes
+are maintenance duplication, not proof of interchangeable finished features. `cf7c8f4` replaces
+the slow per-page restore path and removes its old forwarding method; it still uses the same
+core page provider. The earlier regression-counter finding concerned test precision, not a
+second paging protocol. This is a scoped audit, not a whole-history guarantee of zero rework.
 
 Before a slice, find its row, read the current entry points and nearby tests, then name the missing
 integration or failing acceptance case. Extend the existing path unless a concrete incompatibility
@@ -209,6 +224,10 @@ adapters, then automatic catch-up/discovery and remote events.** Do not rebuild 
 saved-only send, persistence or preparation paths. No automatic service may hold actor/vault
 locks through reconstruction. The [performance report](P1-PERFORMANCE.md) separates cold
 preparation from warm serving; neither larger deadlines nor skipped validation are used.
+Initial actor/native Save now attempts bounded one-shot publication directly from successful
+durable output under the same lease, without another save/retry pass. Local/provisional remains
+the acknowledgement; failed sharing never erases Save. The next missing observable behavior is
+automatic watched receive and remote-update events, followed by retry/catch-up and joining.
 The one-device art Save/Reopen/reference-protection milestone is now implemented. Sound/export
 writers and their actual record coverage remain gate 6, not another prerequisite to art progress.
 The user-owned frontend must adapt these documented results instead of the fixture's numeric-only

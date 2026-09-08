@@ -682,7 +682,19 @@ table with the commit that closed it.
   object on index refusal. A cancelled operation already running may finish durably; cancellation
   suppresses stale results, not committed content. Finite scans/restores run off-executor but
   retain lifecycle locks and have no accepted-size latency guarantee. Views say local/provisional;
-  automatic gossip, owner settlement, expiry enforcement and UI wiring remain separate gates.
+  automatic receive, owner settlement, expiry enforcement and UI wiring remain separate gates.
+  Successful native saves now attempt initial publication of at most two actual store-returned
+  packets. Complete Save plus final-view success is required; partial Create exposes no batch.
+  The same sole Server/store/native guards remain held from save through one-shot dispatch, so
+  gate/membership/snapshot changes cannot interleave. Each packet still passes current full-author,
+  MLS and routing checks. A shared two-second injected-clock deadline bounds added network wait,
+  not save latency. Native cancellation/keepalive travel with the lease, preserving capacity while
+  a cancelled worker finishes privately. Cancellation and reply closure are checked before/during
+  sending; already admitted bytes cannot be retracted. After lease cancellation, residual driver
+  work remains covered by existing transport publication slots. NoPeers/error/timeout/Duplicate
+  do not erase local state or retire intents. Local/provisional views remain truthful because no
+  delivery is claimed. Two Create packets do not make remote creation atomic or discover objects;
+  unwatched/lost packets still need later catch-up, which is not automatically driven yet.
   The new mount-shared persistent blob guard separately protects all retained Studio source and
   verified seed-only CIDs, pending intents and retained/staged typed recovery. A seed's hidden
   replacement value remains required even after a successor overwrites it. Writes union holds
