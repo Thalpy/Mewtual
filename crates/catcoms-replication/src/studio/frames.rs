@@ -8,12 +8,12 @@
 //! Insertions reference insertion OP ids for their resolved left and right origins, not mutable
 //! winning frame ids. Losing and deleted insertions remain anchors. See `order` for the stable
 //! gap-ordering rule; none of these fields are authenticated by merely reading a projection.
-//! The future causal delta validator must derive origins from the author's dependency frontier,
-//! bind record provenance to the signature, forbid evidence deletion and run exact seed preflight.
+//! A separate epoch-zero causal validator derives origins from the author's dependency frontier
+//! and checks mutations. P1 authentication and exact seed preflight are still separate requirements.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use automerge::{AutoCommit, ReadDoc, ScalarValue, Value, ROOT};
+use automerge::{AutoCommit, ChangeHash, ReadDoc, ScalarValue, Value, ROOT};
 use catcoms_crypto::DeviceId;
 use catcoms_wire::DocType;
 
@@ -22,6 +22,9 @@ use crate::checkpoint::am_error;
 use crate::epoch::{MAX_DOMAIN_OP_BYTES, MAX_EPOCH_BYTES, MAX_EPOCH_OPERATIONS};
 use crate::registry::hex;
 use crate::{DomainOp, LogicalDocument, ReplError, MAX_CHECKPOINT_BYTES};
+
+mod change;
+pub use change::validate_frame_change;
 
 /// List-length ceiling, separate from the sum of declared selected-frame sizes.
 pub const FLIPNOTE_MAX_FRAMES: usize = 999;
@@ -183,6 +186,58 @@ impl FlipnoteFrameProjection {
         primitive_limit: u64,
         byte_limit: usize,
     ) -> Result<Self, ReplError> {
+        Self::read_view(
+            document,
+            channel,
+            epoch,
+            doc,
+            None,
+            (primitive_limit, byte_limit),
+        )
+    }
+
+    /// Private causal view for delta validation, never a peer-selected shortcut to current state.
+    /// All supplied dependencies must exist before historical queries; empty heads mean the
+    /// pristine graph even if the receiver already holds unrelated concurrent roots.
+    fn read_at(
+        document: &LogicalDocument,
+        channel: ElementId,
+        epoch: u64,
+        doc: &AutoCommit,
+        heads: &[ChangeHash],
+    ) -> Result<Self, ReplError> {
+        if heads.len() > MAX_EPOCH_OPERATIONS {
+            return Err(ReplError::EpochBound);
+        }
+        if heads
+            .iter()
+            .any(|hash| doc.get_change_by_hash(hash).is_none())
+        {
+            return Err(ReplError::EpochScope);
+        }
+        Self::read_view(
+            document,
+            channel,
+            epoch,
+            doc,
+            Some(heads),
+            (MAX_PRIMITIVES, MAX_READ_BYTES),
+        )
+    }
+
+    // One materializer for current and historical state: keys, ALL values and the actual register
+    // winner must use the same frontier. Mixing any current read into the historical branch lets
+    // receiver-only state alter the position/authority of a perfectly valid concurrent insertion.
+    // Automerge's `_at` getters recompute historical clocks: this avoids randomized/replayed
+    // forks, not repeated clock work. Fixed reader bounds are not a measured latency guarantee.
+    fn read_view(
+        document: &LogicalDocument,
+        channel: ElementId,
+        epoch: u64,
+        doc: &AutoCommit,
+        heads: Option<&[ChangeHash]>,
+        (primitive_limit, byte_limit): (u64, usize),
+    ) -> Result<Self, ReplError> {
         let object = document
             .logical_key
             .as_slice()
@@ -208,7 +263,11 @@ impl FlipnoteFrameProjection {
         let mut title = None;
         let mut fps = None;
         let mut operations = BTreeMap::new();
-        for key in doc.keys(ROOT) {
+        let keys = match heads {
+            Some(heads) => doc.keys_at(ROOT, heads),
+            None => doc.keys(ROOT),
+        };
+        for key in keys {
             key_count += 1;
             if key.len() > MAX_KEY_BYTES {
                 return Err(ReplError::EpochBound);
@@ -216,7 +275,11 @@ impl FlipnoteFrameProjection {
             budget.add(key.len())?;
             // stats bounds the result count before get_all allocates. Budget every losing,
             // deleted and over-cap value before decoding/cloning any retained domain content.
-            let values = doc.get_all(ROOT, &key).map_err(am_error)?;
+            let values = match heads {
+                Some(heads) => doc.get_all_at(ROOT, &key, heads),
+                None => doc.get_all(ROOT, &key),
+            }
+            .map_err(am_error)?;
             for (value, _) in &values {
                 budget.value(value)?;
             }
@@ -247,11 +310,13 @@ impl FlipnoteFrameProjection {
                 "h" if matches!(suffix, "title" | "fps") => (None, None),
                 _ => return Err(ReplError::Malformed),
             };
-            let winner = doc
-                .get(ROOT, &key)
-                .map_err(am_error)?
-                .ok_or(ReplError::Malformed)?
-                .1;
+            let winner = match heads {
+                Some(heads) => doc.get_at(ROOT, &key, heads),
+                None => doc.get(ROOT, &key),
+            }
+            .map_err(am_error)?
+            .ok_or(ReplError::Malformed)?
+            .1;
             let mut selected = None;
             let mut pixels = BTreeMap::new();
             let mut titles = BTreeMap::new();
@@ -347,7 +412,11 @@ impl FlipnoteFrameProjection {
                 _ => {}
             }
         }
-        let pristine = epoch == 0 && key_count == 0 && stats.num_ops == 0 && stats.num_changes == 0;
+        let empty_history = match heads {
+            Some(heads) => heads.is_empty(),
+            None => stats.num_ops == 0 && stats.num_changes == 0,
+        };
+        let pristine = epoch == 0 && key_count == 0 && empty_history;
         if header_count != expected.len() && !pristine {
             return Err(ReplError::Malformed);
         }

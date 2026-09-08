@@ -617,6 +617,22 @@ table with the commit that closed it.
   production Studio writer or ingest adapter is enabled; tests deliberately isolate the semantic
   callback with reader-only preflight and separately prove rollback on a preflight refusal.
   Those tests are not proof of exact checkpoint capacity, durable intent retirement or Save/Load.
+  The corresponding epoch-zero art callback `validate_frame_change` now binds exact frame record
+  bytes to the full change actor/domain envelope and derives insertion origins independently from
+  a private historical projection at the complete dependency frontier. It includes hidden/deleted
+  insertion nodes when selecting the first direct right child and never borrows a receiver-only
+  smaller collision winner, creation, replacement predecessor or newly inserted sibling. Frame
+  targets must be known and nondeleted at that frontier; observed-id reuse refuses, concurrent
+  deletion remains compatible. Title/fps and pixel registers require exact predecessor sets.
+  The existing public reader's erased-history rejection remains unchanged; only the private
+  empty-head view can represent the empty past of a nonempty receiver, with unknown heads rejected.
+  Historical queries retain the same byte/primitive bounds but repeat Automerge clock work;
+  maximum-source latency is unmeasured and remains required before production scheduling. This
+  callback adds no cap-edit policy, typed checkpoint/recovery or publication authority. Over-cap
+  frames remain semantic targets so trimming is possible; production admission must still enforce
+  aggregate caps and the specified edit/refusal policy. Sound/score/export and rotated epochs
+  refuse pending their stateful support. Exact retry recognition belongs to the retained signed
+  envelope/gate, not timestamps or marker-only success.
   Vault restoration tests dependency and duplicate presence using metadata from Automerge's
   applied graph, not a saved or peer-asserted index; unresolved queued changes do not count.
   It can use indexed current-view reads only when an authenticated change's

@@ -489,6 +489,13 @@ pub struct FrameBlob; // cid:[u8;32], bytes:u64; declarations, not available/val
 pub struct FrameSource; // derived op id, asserted full author/nonce/timestamp (safe integer ms)
 pub struct FrameValue<T>; pub struct FrameRegister<T>; // source/value and selected/conflicts
 pub struct FrameLimits; // count/bytes flags; cumulative over-cap suffix remains in timeline
+validate_frame_change(&LogicalDocument, channel:[u8;16], epoch:u64, &DomainOp, &Change, before:&AutoCommit) -> Result<()>;
+// Pure epoch-zero art callback: insert/remove/replace frame, title/fps only. Derives both origins
+// at change.deps(), including hidden direct children; full actor and canonical envelope/metadata
+// must match the record. Fresh markers and exact same-property predecessors are mandatory.
+// Assumes authenticated accepted history plus P1 signed actor/member/server/physical checks.
+// Over-cap targets still exist semantically (notably for trimming); this is not aggregate edit
+// policy, checkpoint preflight, blob validation or a production Studio edit/ingest adapter.
 // Title/fps registers are optional until set; no fabricated author for empty-title/12-fps defaults.
 // Art-only reader rejects unsupported sound/score/export state, including an explicit score:null.
 // Frames includes deleted/over-cap entries and all live CID alternatives. No reference expiry or

@@ -8,6 +8,54 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 1, epoch-zero art/frame causal validator (2026-09-08; verified).**
+  `studio::validate_frame_change` checks insert/remove/replace frame and title/fps mutations.
+  Exact record bytes bind the full actor, canonical domain envelope and independently derived
+  left/right origins; timestamps remain bounded author assertions. Origins use the sender's
+  complete dependency-frontier projection and the first direct child, including hidden/deleted
+  insertion nodes. A receiver-only smaller collision winner or newly inserted sibling cannot
+  change a valid old placement. Existing observed IDs cannot be reused; remove/replace and an
+  explicit predecessor require nondeleted causal targets. Immutable headers/evidence, fresh
+  markers and all-and-only same-property mutable predecessors follow the Index contract.
+
+  One private historical path reuses the bounded frame materializer with keys/all values/winner
+  read at the same heads. The public current reader retains its zero-operation/zero-change
+  pristine check; private empty heads mean empty causal past, and unknown/nonempty erased heads
+  reject. There is no randomized/replayed fork, but Automerge still repeats historical clock
+  work. Bounds are not latency qualification; accepted-size profiling remains necessary before
+  production scheduling. This slice adds no performance/finality promise.
+
+  All 25 frame tests pass (11 new causal tests), including hidden-child descendants,
+  old/proper-subset frontiers, collision origins, metadata/record/identity tampering, predecessor
+  omissions/duplicates/cross-key hiding, signed ordering/concurrent deletion, restart and full
+  doc/log/gate rollback on rejection. An independent-root retry hits Automerge's duplicate actor
+  sequence rejection; a distinct fresh causal retry proves the marker conflict path. Neither is
+  confused with the accepted exact sealed-envelope retry. Actual-diff adversarial review found
+  no blocker/high/medium and one Low regression gap: a losing birth already known to the author
+  was not separately tested as the first direct child. The added test pins both delivery orders,
+  rejects omitted/descendant origins, and closes the Low on re-review. No findings remain.
+
+  Verification passed after that test was added: `cargo test --all --all-features` (including
+  all 141 replication unit tests; existing ignored probes unchanged),
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192),
+  `npm.cmd --prefix apps/desktop test` (1144), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` via Git Bash, and `git diff --check`.
+  Focused callback tests and `cargo check -p catcoms-replication` also pass.
+
+  This remains a pure epoch-zero semantic callback with a TEST-ONLY writer/reader-preflight
+  harness. P1 must authenticate the signed actor/member/server/physical scope; prior history
+  must already be trusted. Aggregate edit/cap policy, exact typed checkpoint/recovery preflight,
+  durable intent/blob/reference plumbing and production Studio commands are still required.
+  Over-cap frames remain semantic targets so trimming is possible, not so production editing
+  can ignore the cap policy. Sound/score/export operations and checkpoint epochs refuse.
+
+  Next is typed checkpoint/recovery representation and exact aggregate preflight for the Index
+  and art path, including extending the validators against real verified seeds. Gate 1 and all
+  seven product gates remain open; no production Save/Load, UI or game/avatar work is included.
+  User release workflow/releasing-document edits remain excluded. Local commit only; remote
+  push still awaits destination approval.
+
 - **Flipnote gate 1, epoch-zero Index causal validator (2026-09-08; verified).**
   `studio::validate_index_change` now checks the exact root mutation for an Index domain op:
   full change-actor record binding, fresh marker, immutable headers/insertion/deletion evidence,

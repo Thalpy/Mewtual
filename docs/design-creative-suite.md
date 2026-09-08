@@ -386,6 +386,25 @@ policy nor the later `creative_pinned_cids()` integration. Reader bounds are 188
 and 6 MiB of visible key/value bytes, independent of exact checkpoint admission. No live write,
 checkpoint/recovery serialization or Save/Load is enabled by this frame-reader slice.
 
+**Epoch-zero art mutation contract.** `validate_frame_change` checks the exact root mutation
+against the canonical DomainOp and full change actor. P1 independently authenticates the signed
+member/server/physical context. The private historical reader uses `keys_at`, `get_all_at` and
+`get_at` at the complete known dependency frontier; it cannot substitute the receiver's current
+winner or first visible frame. Origins are derived by the placement rule above: the first direct
+child includes losing/deleted insertion nodes. Existing observed frame ids cannot be reused;
+replace/remove and an explicit `after` require nondeleted targets in the causal view. New roots
+initialize all seven immutable headers; later changes cannot rewrite them. Every change writes
+exactly its frame/title/fps record and a fresh marker, with exact same-property predecessor sets
+for mutable registers. Timestamp metadata is an author assertion bounded to safe integer ms.
+
+This semantic callback admits neither unsupported operation families nor checkpoint epochs.
+It supplies no production writer or exact checkpoint/recovery preflight. Over-cap frames still
+exist as semantic targets (especially for trimming); production aggregate/edit policy is a
+separate required check. Historical reader budgets match the current reader, and public empty
+state still requires genuinely pristine history. Empty private heads represent the empty causal
+past, not a way to validate an erased snapshot. Automerge repeats historical-clock work for these
+queries; this design does not claim measured maximum-source latency or readiness for scheduling.
+
 **What the studio requires of P1**, so a change to P1 that breaks one of these is caught here:
 
 1. Bounded retained state per logical document and per server, with a preflight admission

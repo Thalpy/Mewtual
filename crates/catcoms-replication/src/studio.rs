@@ -23,8 +23,9 @@ pub use index::{
 };
 mod frames;
 pub use frames::{
-    flipnote_document, FlipnoteFrameProjection, FrameBlob, FrameEntry, FrameInsertion, FrameLimits,
-    FrameRegister, FrameSource, FrameValue, FLIPNOTE_FRAME_BYTES, FLIPNOTE_MAX_FRAMES,
+    flipnote_document, validate_frame_change, FlipnoteFrameProjection, FrameBlob, FrameEntry,
+    FrameInsertion, FrameLimits, FrameRegister, FrameSource, FrameValue, FLIPNOTE_FRAME_BYTES,
+    FLIPNOTE_MAX_FRAMES,
 };
 #[cfg(test)]
 mod tests;

@@ -46,9 +46,14 @@ Sound/score/export state rejects until its projection support lands. Neither rea
 its records. A separate epoch-zero Index delta validator now checks canonical record/actor
 binding, the sender's dependency-frontier target existence, immutable headers/evidence and exact
 same-property predecessors for mutable registers. It is a pure semantic callback: P1 must still
-authenticate membership/server/physical scope and preflight the exact checkpoint. Frame delta
-validation and typed checkpoint/recovery encoding remain necessary before any live Studio edit
-or ingest path. Checkpoint-epoch Index validation refuses until its real seed format exists.
+authenticate membership/server/physical scope and preflight the exact checkpoint. The art/frame
+callback now supplies the corresponding epoch-zero checks, deriving left/right insertion origins
+from the sender's full causal projection, including hidden nodes. Its private historical reader
+uses one frontier for keys, all values and register winners; the public current reader retains
+its original pristine-history rule. Neither callback is a production write adapter. Typed
+checkpoint/recovery encoding and aggregate preflight remain necessary before live Studio writes;
+both callbacks refuse checkpoint epochs until their real seed formats exist. Historical reads
+still repeat Automerge clock work; boundedness is not measured production latency.
 No backend/runtime or user-interface binding is added.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
