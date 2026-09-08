@@ -413,7 +413,21 @@ table with the commit that closed it.
   never repaired by trusting the candidate receipt's tenure or substituting the current epoch.
   This is local evidence, not a durability grant. Runtime integration must flush the matching
   MLS snapshot/owner decision and recheck current membership, fault and tenure before signing
-  a head proof. That publication/discovery path remains unwired.
+  a head proof. The cooperative kind-21 adapter now implements this boundary; actor scheduling
+  and expected-seed discovery/installation remain unwired.
+- **Keyed head hints are not checkpoint installation or editing leases.** Kind 21 authenticates
+  full current requester/provider identities and binds its logical key and internally minted
+  request nonce before any source work. Fresh proof requires the current owner's endpoint and
+  any independently known tenure; an old proof wrapped in a new member response cannot upgrade
+  a hint. Explicit LOCAL whole-server snapshot preparation creates a lifecycle-bound permit;
+  remote requests never trigger unbounded legacy snapshot serialization. Serving checks both
+  inventories, rejects saved faults/corruption/lost indexed sources, and requires pending-preferred
+  journal/source-head equality before bounded flush/re-save and signing. Missing/stale permits
+  or disagreement yield hints only. One-shot proof establishes owner selection, not seed availability
+  or validity. Source/intent/publication state is unchanged. Eight fixed-lifetime queued requests,
+  full-identity rates, four driver-owned outbound slots and source service rails bound resources;
+  rate debt is process-local and Sybils still reach aggregate caps. Signed repair bytes are not
+  served yet, and newcomer recovery-first seed installation remains incomplete.
 - **Registry page cursors are continuation claims, not remote possession or currency proofs.**
   Cooperative page serving binds an ephemeral HMAC-SHA256 key to the exact provider/requester,
   full group/logical/concrete scope, initial heads/seed, fixed accepted-log prefix and monotonic

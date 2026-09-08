@@ -18,8 +18,9 @@ successor selection. One saved author-owned intent can be replayed through a che
 store step, now driven by a cooperative one-ledger replay pass and one-shot network sender.
 Opt-in authenticated registry gossip and kind-20 paged requests use cooperative saved-state
 adapters; bounded provider cursors and durable receiver continuation are implemented. Independent
-owner-tenure observations now persist with the MLS snapshot; keyed receipt/seed discovery and
-the proof publication barrier are not complete. Automatic wakeups/global replay scheduling, other
+owner-tenure observations persist with MLS, and keyed registry receipt-head queries/proofs now
+use explicit local snapshot preparation plus checked source/decision barriers. Expected-seed
+discovery/installation is not complete. Automatic wakeups/global replay scheduling, other
 managed-file families and production orchestration are not wired yet. Studio
 materializers, settlement orchestration, sync discovery, complete storage integration and app/UI events
 remain later slices and the feature is not usable yet. Revision 4

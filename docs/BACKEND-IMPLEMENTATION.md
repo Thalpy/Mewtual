@@ -24,9 +24,13 @@ The protocol/store foundations have substantially more coverage than the runtime
 - [x] Bounded receiver continuation that saves complete pages before advancing; joined-member
       divergence, duplicate, cancellation, rotation and uncertain-storage regressions.
 - [ ] Keyed receipt-head and expected-seed discovery, including a newcomer after rotation.
-      Independently observed owner-tenure evidence is now saved with MLS; unknown tenure must
+      Keyed authenticated registry head queries and checked durable owner-selection proofs are
+      implemented cooperatively; expected-seed fetch/recovery-first newcomer install remain.
+      The installer must capture/recheck runtime, MLS and discovery authority; raw mutable
+      `ReceiptHeadAnswer.proof: Some` is not an admission permit or proof the seed is available.
+      Independently observed owner-tenure evidence is saved with MLS; unknown tenure must
       not authorize a fresh head proof by copying a restored receipt's claimed tenure. The
-      proof publisher still needs the matching snapshot/decision durability barrier. Legacy or
+      proof publisher uses explicit local snapshot preparation and source/journal barriers. Legacy or
       newly joined owners may stay Unknown; do not substitute the current MLS epoch.
 - [ ] Runtime ownership, scheduling, cancellation, vault lifecycle and complete storage accounting.
       Before automatic scheduling, measure maximum-epoch page-source rebuild time and set the

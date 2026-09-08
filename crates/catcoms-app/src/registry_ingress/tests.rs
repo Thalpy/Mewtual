@@ -9,6 +9,7 @@ use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod head;
 mod page_receive;
 
 const SERVER: u64 = 91;

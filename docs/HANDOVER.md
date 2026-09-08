@@ -8,6 +8,60 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 keyed registry receipt-head discovery (2026-09-08).** Kind 21 now answers by logical
+  bucket key, without requiring the requester's knowledge of the provider's concrete epoch.
+  The cooperative Server adapter returns provisional hints or a nonce-bound current-owner
+  selection proof; it neither installs a seed nor claims that seed is available/verified.
+  Full requester/provider identities, actual transport, current MLS and the complete query are
+  bound. Request nonces are minted internally; a non-owner relay or replayed inner proof cannot
+  become fresh owner authority. Replies remain raw records, not durable admission permits.
+
+  Explicit LOCAL preparation saves the whole-server MLS/tenure snapshot and mints an opaque
+  runtime/MLS/owner/mount/server-bound permit. Remote queries never initiate that uncapped legacy
+  serialization. Serving checks source and owner-journal inventories, rejects faults/corruption/
+  lost indexed files, and prefers pending owner decisions over published ones. Fresh proofs
+  require exact source-head/journal equality plus a current snapshot permit. Disagreement or
+  stale preparation produces hints, not an older fallback proof. Source/parent flush and journal
+  re-save precede signing. No source edit, intent retirement, pruning or mark-published occurs.
+
+  At most eight five-second requests are queued, one per full identity, with separate preauth,
+  requester and source service rails. Four outbound permits remain charged until actual transport
+  termination after cancellation. Synchronous source work rechecks the deadline before replying;
+  the client also rejects a ready response processed at/after its ten-second deadline. Logical
+  watches survive rotation but are revoked on exact watch/runtime/mount replacement.
+
+  Design review caught the remote-triggered whole-server snapshot cost and the need for exact
+  source/journal/inventory agreement; both are addressed. Actual-diff review found no production
+  defect. Its low-priority rejection-coverage gaps are fixed, and re-review is clear. Ten sync
+  tests cover canonical bounds, independent outer bindings, fresh nonces/inner replay, non-owner
+  relays, actual member removal while queued, rates, deadlines and driver-owned cancellation.
+  Four app tests cover joined-member network discovery, restart, journal lag/faults, a lost indexed
+  source and uncertain flush/reconciliation. The existing owner-journal crash tests cover its
+  reused durable rewrite primitive. UI/native source and unrelated release work remain untouched.
+
+  Required verification passed (the final workspace run includes the review's added regressions):
+
+  - `cargo test -p catcoms-sync receipt_head_ --lib` (10 passed)
+  - `cargo test -p catcoms-app registry_head_ --lib` (4 passed)
+  - `cargo test --all --all-features` (app 361 passed / 4 existing ignored, replication 66,
+    sync 199; remaining workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No frontend static/build/visual checks or separate native `cargo check` were needed for this
+  Rust core/app/sync-only slice. No runtime code changed after the native/frontend suite runs.
+
+  **Next:** expected-hash seed fetch and recovery-first newcomer installation. Capture/recheck
+  runtime, MLS and discovery authority there: public `ReceiptHeadAnswer.proof: Some` is not an
+  installation permit. Automatic actor/vault lifecycle scheduling, maximum-source latency
+  measurement and durable signed repair retention/serving remain incomplete. Unknown owner
+  tenure remains the previous slice's honest availability limitation. The final UI guide is
+  still deferred until the full backend acceptance checklist is actually complete.
+
 - **P1 independently observed owner tenure (2026-09-08).** Sync now records the start of the
   current owner's tenure from actual applied MLS transitions and saves that observation in the
   same authenticated snapshot as the group. This distinguishes A-to-B-to-A ownership without

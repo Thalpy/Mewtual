@@ -1494,9 +1494,64 @@ not downgrade compatibility. Existing peer-address extraction stops before this 
 Welcome joins start Unknown, even if the new device fills the lowest leaf and becomes owner.
 Legacy upgrades and such owners may remain Unknown indefinitely across same-owner commits.
 Do not recover availability by assigning the current epoch or copying a receipt's own tenure.
-The observation is not a publication permit: a future proof publisher must flush this exact
+The observation is not a publication permit: a proof publisher must flush this exact
 MLS snapshot and the irrevocable owner decision, check fault/current membership, and recheck
-tenure at signing/submission. No new head proof, editing lease or wire request is issued here.
+tenure at signing/submission. The cooperative publisher below implements that boundary; the
+getter alone issues no proof or editing lease.
+
+### Keyed registry receipt-head discovery (cooperative, kind 21)
+
+`Server::watch_registry_head(store, server, bucket)` registers a logical registry bucket without
+loading/creating a file or subscribing to an epoch topic. `unwatch_registry_head` revokes its
+exact runtime/generation even after a mount closes. A watch binds the physical mount and captured
+numeric server. It survives registry rotation; replacement drops its queued requests, not rate debt.
+
+`Server::request_registry_head(peer, bucket)` requires an already bound current full-member
+endpoint before disclosing the key. Sync derives the logical key and mints a fresh nonce from
+the injected RNG on EVERY request. The inner bytes are `v:u8=1, type:u16=18, key:bytes32,
+nonce:bytes16` (59 bytes, hard pre-parse cap 256); integers are big-endian and bytes are u32-length
+framed. Existing authenticated-request framing binds kind 21, group, current MLS epoch, actual
+transport requester, signature key, timestamp, nonce and entire inner query. No concrete epoch
+id is required. Unsupported/refused empty responses mean None, not an empty document or fallback.
+
+`ReceiptHeadAnswer { receipt, repair, proof }` encodes `v:u8=1` then three length-framed optional
+records in that order; empty fields mean None and each non-empty canonical record is at most
+1024 bytes. The answer cap is 3085 bytes, plus 108 bytes for the signed response envelope. The
+`catcoms/receipt-head-response/v1` transcript binds the complete query, requester auth, group,
+provider transport and answer. Caps apply after transport frame buffering, before copying or
+parsing records. Scope, trailing bytes and proof/receipt hash mismatch reject. Fresh proof
+acceptance also requires the response signer to be the current owner, the exact internally minted
+nonce/full requester, and independently known tenure when available. Repair records remain hints;
+the current provider sends None because durable signed repair retention/serving is not wired.
+
+`Server::prepare_owner_head_snapshot(store, server)` is EXPLICIT LOCAL persistence work: it saves
+the current whole-server snapshot and returns `ServerOwnerSnapshot` only after its durable write.
+Never invoke it as a consequence of a remote query: legacy whole-server serialization is not
+bounded by P1's per-query budget. The permit binds runtime, MLS epoch, full owner, independently
+observed tenure, mount and numeric server. It can be reused across buckets until any of these
+changes. Unknown tenure or save failure yields no permit. Runtime/lock ownership must discard it
+on lifecycle replacement; automatic lifecycle scheduling is still a later integration step.
+
+`serve_registry_head_step(store, watch, optional_snapshot, budget)` drains one authenticated
+request. It never serializes or writes the whole-server snapshot. Source/journal reads check the
+complete inventory; a disappeared indexed file or corrupt/faulted source cannot turn into None.
+The owner prefers its pending decision over published state. A fresh proof requires a current
+snapshot permit and EXACT agreement with the checked source head; otherwise the selection is only
+a hint, never a fresh proof of an older fallback. Before signing, the source file and parent flush
+and the exact journal choice is re-saved through accounted persistence. Failed/uncertain writes
+send no success and require budget reconciliation. Signing/handoff recheck request lifetime and
+authority after synchronous I/O. Discovery never clears pending publication, changes the source,
+retires intents, prunes history or installs a checkpoint. The proof says which receipt the owner
+selected now, not that its seed is available/verified, and provides no lease.
+
+Per runtime, head discovery independently retains at most eight requests, one per full requester,
+with a fixed five-second queue lifetime; preauth is 10/s burst 20, requester service 1/s burst 2
+with at most 4096 debt rows, and aggregate source work 2/s burst 4. Registrations are at most 256.
+Four outbound request permits remain charged until transport actually releases them after
+cancellation. The receiver deadline is ten seconds and is checked even if a ready response wins
+the timer race. These limits are separate from registry-page limits and reset on process restart.
+The saved registry rebuild is bounded by its existing epoch cap, not a constant-time operation;
+maximum-source latency remains an acceptance check before automatic scheduling.
 
 ### Authenticated registry page exchange (cooperative, kind 20)
 

@@ -35,9 +35,19 @@ low leaf slots. Same-owner commits preserve Unknown rather than inventing a star
 synchronous mutation seam observes the actual group before propagating a helper result, including
 an error after a successful merge. The observation is saved in the same strict snapshot as MLS,
 not in a separately advanced sidecar. A received receipt never establishes its own tenure.
-This supplies local evidence only: fresh owner proofs still require the actor/store publication
-barrier and discovery wiring. An upgraded or newly joined owner with Unknown tenure may remain
+This supplies local evidence only: fresh owner proofs require the publication barrier described
+below. An upgraded or newly joined owner with Unknown tenure may remain
 unable to authorize rotation until independent evidence or a witnessed transition is available.
+
+Keyed registry receipt-head discovery is now a cooperative authenticated kind-21 exchange.
+It registers logical buckets, not concrete epochs, and returns provisional hints or a one-shot
+current-owner selection proof. Explicit local preparation saves the whole-server MLS/tenure
+snapshot and mints a runtime/epoch/mount-bound permit; remote queries never trigger that large
+legacy serialization. A proof additionally requires complete inventory agreement, a nonfault
+saved registry, and exact equality with the pending-preferred owner journal. Source flush and
+journal re-save precede signing. Disagreement/stale preparation remains a hint; lost indexed
+files, faults and corruption refuse. A selected receipt is not proof its seed is available or
+verified. Expected-seed fetching/installation and automatic actor scheduling remain unwired.
 
 The registry's store-level checkpoint transaction now orders durable barriers as source flush,
 typed recovery, included-only intent retirement, then atomic successor selection. Until selection

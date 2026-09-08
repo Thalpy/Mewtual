@@ -143,6 +143,14 @@ impl RegistryEpoch {
     pub fn phase(&self) -> EpochPhase {
         self.gate.phase()
     }
+    /// Historical receipt selected in this saved unit, not current-owner authority or proof
+    /// that its seed is available. Fault must never be presented as an absent/ordinary head.
+    pub fn receipt_head(&self) -> Result<Option<&Receipt>, ReplError> {
+        if self.phase() == EpochPhase::Fault || self.receipts.is_faulted() {
+            return Err(ReplError::ReceiptConflict);
+        }
+        Ok(self.receipts.latest())
+    }
     /// Complete accepted-log count. Receipt admission does not reduce it.
     pub fn op_count(&self) -> usize {
         self.doc.op_count()

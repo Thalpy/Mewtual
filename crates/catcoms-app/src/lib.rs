@@ -57,6 +57,7 @@ mod file_resolution;
 mod moderation;
 pub mod pairing;
 pub mod registry_catchup;
+pub mod registry_head;
 pub mod registry_ingress;
 pub mod registry_replay;
 pub mod store;

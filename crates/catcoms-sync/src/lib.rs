@@ -61,6 +61,7 @@ use zeroize::Zeroizing;
 
 mod blob_fetch;
 mod owner_tenure;
+pub mod receipt_head;
 pub mod registry_catchup;
 mod registry_ingress;
 mod registry_publication;
@@ -164,6 +165,8 @@ const KIND_DELIVERY_RECEIPT: u8 = 18;
 const KIND_CATCHUP_SINCE: u8 = 19;
 /// P1 registry pages; deliberately no legacy full-history fallback.
 const KIND_REGISTRY_PAGE: u8 = 20;
+/// Keyed P1 receipt-head discovery; no concrete epoch or legacy fallback.
+const KIND_RECEIPT_HEAD: u8 = 21;
 /// Frontier entries one incremental catch-up may name. A document's frontier is one hash per
 /// concurrent writer and normally one or two; this is a bound on the walk a requester can ask a
 /// serving peer to perform, not a limit anyone reaches.
@@ -1081,7 +1084,7 @@ fn catchup_auth_transcript(
 /// the server reconstructs it from where the bytes actually arrived, so a relayed request simply
 /// fails to verify.
 ///
-/// Only new kinds `KIND_CATCHUP_SINCE` and `KIND_REGISTRY_PAGE` opt into this binding.
+/// New incremental catch-up, registry-page and receipt-head kinds opt into this binding.
 ///
 /// The transcript is what a signature is over, so adding a field to it changes what an older
 /// build computes and breaks both directions of a mixed pair. `KIND_PEX` and `KIND_COMMIT_CATCHUP`
@@ -1096,7 +1099,10 @@ fn catchup_auth_transcript(
 /// somebody's behalf and re-authenticates the original bytes at the far end. A delivery receipt is
 /// built once and sent to several targets. Binding either would be wrong rather than safer.
 fn kind_binds_requester_peer(kind: u8) -> bool {
-    matches!(kind, KIND_CATCHUP_SINCE | KIND_REGISTRY_PAGE)
+    matches!(
+        kind,
+        KIND_CATCHUP_SINCE | KIND_REGISTRY_PAGE | KIND_RECEIPT_HEAD
+    )
 }
 
 /// A **responder's** signature transcript over a served bundle (commit catch-up or
@@ -2028,7 +2034,7 @@ struct ProvenMemberPeer {
     /// Whether the exchange that produced this proof was bound at **both** ends: the request
     /// carrying the peer it was sent from, and the answer carrying the peer that produced it.
     ///
-    /// New kinds `KIND_CATCHUP_SINCE` and `KIND_REGISTRY_PAGE` are. Released PEX/commit transcripts do
+    /// New incremental catch-up, registry-page and receipt-head kinds are. Released PEX/commit transcripts do
     /// not bind the requester's peer and cannot start doing so without breaking every mixed pair,
     /// so an endpoint can forward somebody's live request to a real member and hand back the
     /// answer: valid, and no evidence at all about the endpoint. Those proofs are good enough to
@@ -3758,6 +3764,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     registry_instance: RegistrySyncInstance,
     registry_ingress: registry_ingress::RegistryIngress,
     registry_pages: registry_catchup::RegistryRequests,
+    receipt_heads: receipt_head::HeadRequests,
     // A cancelled subscribe/unsubscribe may already have reached the transport. Reconcile this uncertain
     // topic before calculating the next routing diff; never lose unsubscribe ownership.
     routing_subscription_pending: Option<Topic>,
@@ -4190,6 +4197,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             registry_instance: RegistrySyncInstance::new(),
             registry_ingress: registry_ingress::RegistryIngress::default(),
             registry_pages: registry_catchup::RegistryRequests::default(),
+            receipt_heads: receipt_head::HeadRequests::default(),
             routing_subscription_pending: None,
             owner_tenure: owner_tenure::OwnerTenure::new(&group),
             group,
@@ -5356,6 +5364,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // A bounded responder is retained on self, never across a cancellable await
                     // in this stack frame. Durable source I/O belongs to the app's explicit drain.
                     self.queue_registry_page_request(from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_RECEIPT_HEAD) {
+                    self.queue_receipt_head(from, &data[1..], responder);
                     return Ok(true);
                 }
                 let response = match data.split_first() {
