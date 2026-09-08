@@ -473,6 +473,12 @@ pub struct IndexEntry; // creations sorted by op id, mutable title/expiry IndexR
 pub struct IndexRegister<T>; // selected IndexValue<T> + concurrent conflicts sorted by op id
 pub struct IndexValue<T>; // value + IndexSource (derived op id, asserted full author, nonce)
 pub struct IndexCreation; // kind/title/created_by/ts/three-state expiry, before any mutable writes
+validate_index_change(&LogicalDocument, epoch:u64, &DomainOp, &Change, before:&AutoCommit) -> Result<()>;
+// Pure epoch-zero semantic callback; epoch > 0 refuses pending the real typed seed format.
+// The change actor must be independently bound to the signed current author by P1. `before`
+// is accepted authenticated history, never a peer-supplied snapshot. Targets/predecessors are
+// checked at change.deps(), including overflow/deleted evidence, not the receiver's merged view.
+// This is not a typed edit/ingest adapter: exact checkpoint/recovery preflight is still required.
 flipnote_document(server_id:&[u8], object:[u8;16]) -> Result<LogicalDocument>;
 pub struct FlipnoteFrameProjection; // art subset: all frames/tombstones, live timeline, cap flags
   read(&LogicalDocument, channel:[u8;16], epoch:u64, &AutoCommit) -> Result<Self>;

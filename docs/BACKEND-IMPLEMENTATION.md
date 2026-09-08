@@ -52,6 +52,9 @@ Gate 1 substeps (not extra product gates):
       StudioIndex and the Flipnote art/frame subset now have read-only Automerge projections.
       Sound/score/export projection support remains separate; unsupported state rejects.
 - [ ] Causal Automerge-change validation and aggregate admission through the actual P1 gate.
+      The epoch-zero StudioIndex semantic callback is tested through signed P1 edit/ingest,
+      including causal target/predecessor attacks and rollback. Frame validation and production
+      aggregate admission remain; no typed write adapter substitutes reader bounds for preflight.
 - [ ] Exact checkpoint-size preflight and typed checkpoint/recovery representation.
 
 Progress reports name the gate, the observable behavior proved, tests/review evidence and the
@@ -76,8 +79,12 @@ title/fps registers and provenance-bearing deletions. It retains every live alte
 frame and flags the 999-frame / 8 MiB over-cap suffix without fetching blobs. Same-gap op-id
 ordering respects captured placement; deleted/losing insertions remain ordering anchors.
 It rejects sound/score/export state rather than return an incomplete successful view.
-Signed causal delta validation, exact checkpoint/recovery encoding and P1 preflight remain gate-1
-work; sound/score/export projections must land before those operation families can be admitted.
+Epoch-zero `validate_index_change` now supplies the Index semantic callback: canonical signed-actor
+record binding, causal target existence (including overflow), immutable evidence and exact register
+predecessors. Signed gate tests prove rejection leaves the document/log/gate unchanged. It is not
+a production adapter: frame causal validation, exact checkpoint/recovery encoding and P1 preflight
+remain gate-1 work; sound/score/export projections must land before those families can be admitted.
+Checkpoint-epoch Index validation refuses pending its actual typed seed format.
 No Studio live write path is installed and no gate is closed.
 The fixture's numeric-only expiry view still needs an explicit absent/null/timestamp adapter at
 gate 2; zero remains a timestamp and must never be used as a Never sentinel.

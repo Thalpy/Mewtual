@@ -7,10 +7,11 @@
 //! with their provenance, even when more than one author deletes the same id.
 //!
 //! A record is `1 || author[32] || DomainOp::encode()`. Recomputing its id and decoding its
-//! body checks internal consistency, NOT authorship: the future delta validator must bind the
+//! body checks internal consistency, NOT authorship: a separate delta validator must bind the
 //! record to the signed change, validate its causal predecessors, forbid replacing insertions
 //! or deleting evidence, and run checkpoint preflight. A checkpoint needs separate receipt
-//! verification. No writer, checkpoint builder, actor command or publication path is enabled here.
+//! verification. `validate_index_change` checks epoch-zero causal mutations, but no production
+//! writer, checkpoint builder, actor command or publication path is enabled here.
 
 use std::collections::BTreeMap;
 
@@ -23,6 +24,9 @@ use crate::checkpoint::am_error;
 use crate::epoch::{MAX_DOMAIN_OP_BYTES, MAX_EPOCH_BYTES, MAX_EPOCH_OPERATIONS};
 use crate::registry::hex;
 use crate::{DomainOp, LogicalDocument, ReplError, MAX_CHECKPOINT_BYTES};
+
+mod change;
+pub use change::validate_index_change;
 
 /// Visible objects in a channel index. Concurrent excess remains explicit recovery evidence.
 pub const MAX_INDEX_OBJECTS: usize = 64;

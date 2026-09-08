@@ -18,8 +18,8 @@ mod patch;
 pub use patch::StudioPatch;
 mod index;
 pub use index::{
-    studio_index_document, IndexCreation, IndexEntry, IndexRegister, IndexSource, IndexValue,
-    StudioIndexProjection, MAX_INDEX_OBJECTS,
+    studio_index_document, validate_index_change, IndexCreation, IndexEntry, IndexRegister,
+    IndexSource, IndexValue, StudioIndexProjection, MAX_INDEX_OBJECTS,
 };
 mod frames;
 pub use frames::{

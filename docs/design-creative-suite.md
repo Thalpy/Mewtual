@@ -326,6 +326,25 @@ evidence, check same-property predecessors and causal target existence, and invo
 preflight before any live write or ingest. Checkpoint and typed recovery encodings remain a later
 gate-1 substep; this representation enables neither production Save/Load nor receipt verification.
 
+**Epoch-zero Index mutation contract.** The pure Rust `validate_index_change` callback derives
+the entire permitted delta from the canonical DomainOp and full change actor. P1 independently
+binds that actor to the signed current member and the server/physical document. Each expected
+header is either already present (all causal values must match, no rewrite allowed) or initialized
+in the first root change. Every operation writes exactly its record and a fresh constant marker.
+Immutable creation/deletion keys cannot be overwritten; mutable title/expiry puts consume exactly
+all currently visible predecessors of that property at the author's dependency frontier.
+
+`put_object` requires no creation or tombstone of its id in that frontier. Rename, expiry and
+delete require an existing nondeleted target, including an object beyond the 64-item display cap.
+Thus same-id concurrent creations remain legal, sequential reuse after deletion does not, and a
+concurrent deletion does not invalidate an independently justified edit. No receiver-only target
+or predecessor is usable. Exact signed retries are deduplicated by P1; a newly fabricated causal
+retry cannot replace its marker/evidence. Local marker-based NoChange alone does not authenticate
+an intent retry: the future durable adapter must resolve it against the retained signed envelope.
+This callback trusts previously authenticated accepted history and does not validate arbitrary
+saved snapshots. Checkpoint epochs refuse until the typed seed contract exists. No production
+writer/ingest wrapper is exposed before exact checkpoint/recovery preflight is implemented.
+
 **Rust frame representation (gate 1, read-only art subset).** `FlipnoteFrameProjection` has
 immutable `v=1`, `kind="flipnote"`, `id`, `channel`, `epoch`, `w=192`, `h=144` root headers.
 Every concurrent header must match the supplied scope. `i/<frame>/<op-id>` and

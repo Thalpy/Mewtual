@@ -8,6 +8,56 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 1, epoch-zero Index causal validator (2026-09-08; verified).**
+  `studio::validate_index_change` now checks the exact root mutation for an Index domain op:
+  full change-actor record binding, fresh marker, immutable headers/insertion/deletion evidence,
+  and all-and-only same-property predecessors for a mutable register. It checks targets at the
+  author's dependency frontier, including overflow and deletion evidence. Receiver-only targets
+  and predecessors cannot authorize an edit; a genuinely concurrent deletion does not reject it.
+  Same-id concurrent creations remain legal; observed-id reuse and resurrection are refused.
+
+  Ten focused tests pass, including two admitted signed authors in both delivery orders,
+  empty/partial/duplicate/foreign-property predecessors, header/marker/record tampering, causal
+  unknown targets, overflow mutation, exact sealed retry, restart and rollback of the entire
+  document/log/gate on semantic or preflight failure. The retry regression deliberately forges a
+  fresh causal change: identical Automerge puts alone create no change and return the original
+  delta, which transport dedup is meant to accept. Actual-diff review found no blocker/high/medium
+  and one Low test gap: the duplicate-predecessor case also omitted a required predecessor. It
+  now includes the complete expected set plus a duplicate, asserts serialization retains it, and
+  independently proves duplicate rejection. The focused all-features rerun passes and re-review
+  has no remaining findings.
+
+  Verification passed:
+
+  - `cargo test -p catcoms-replication studio::index::change::` (10 passed)
+  - `cargo test -p catcoms-replication --all-features studio::index::change::`
+    (10 passed after the review regression was strengthened)
+  - `cargo test --all --all-features` (app 380 passed / 8 existing ignored; replication 130;
+    sync 214; all workspace integration/doc suites passed; existing ignored tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1144 passed)
+  - `cargo check -p catcoms-replication`
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check` and staged diff checks
+
+  Production code was unchanged while the full suites ran; the review strengthened a test only,
+  verified by the focused rerun above. No frontend/native source changed, so frontend static/build,
+  native `cargo check` and screenshots were not required. This slice is locally committed only;
+  destination approval for pushing remains outstanding. The user's release changes are excluded.
+
+  This is a pure semantic callback, not production admission. Tests use a TEST-ONLY writer and
+  reader-only preflight to isolate the boundary; no checkpoint-size guarantee follows. P1 must
+  independently authenticate the signed actor/member/server/physical scope and run exact typed
+  checkpoint/recovery preflight. `before` must already be accepted authenticated history, not a
+  peer snapshot. Epochs above zero refuse pending the real seed representation. Exact local retry
+  handling must resolve the retained signed envelope, not treat marker-only NoChange as equality.
+
+  Gate 1 remains open: frame causal validation and typed checkpoint/recovery encoding/preflight
+  are next. All seven product gates remain open; the tested helper count is not a percentage.
+  No UI, game/avatar, native command, live Studio write or P1 finality guarantee changed.
+
 - **Flipnote gate 1, read-only art/frame projection (2026-09-08; verified).**
   `studio::FlipnoteFrameProjection` adds deterministic frame order, Automerge pixel/title/fps
   register winners with all live alternatives, provenance-bearing deletions and explicit

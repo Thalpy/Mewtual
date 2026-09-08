@@ -43,8 +43,13 @@ evidence. Stable insertion-node origins and a right-origin forest preserve seque
 and same-gap concurrent ordering without rewiring losing/deleted anchors. All live alternatives
 remain available even when a frame is deleted or beyond the 999-frame / 8 MiB playable prefix.
 Sound/score/export state rejects until its projection support lands. Neither reader authenticates
-its records; Studio causal delta validators and exact checkpoint preflight remain necessary
-before any live edit or ingest path. No backend/runtime or user-interface binding is added.
+its records. A separate epoch-zero Index delta validator now checks canonical record/actor
+binding, the sender's dependency-frontier target existence, immutable headers/evidence and exact
+same-property predecessors for mutable registers. It is a pure semantic callback: P1 must still
+authenticate membership/server/physical scope and preflight the exact checkpoint. Frame delta
+validation and typed checkpoint/recovery encoding remain necessary before any live Studio edit
+or ingest path. Checkpoint-epoch Index validation refuses until its real seed format exists.
+No backend/runtime or user-interface binding is added.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
 even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.

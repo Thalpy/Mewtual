@@ -605,6 +605,18 @@ table with the commit that closed it.
   it never orders frames or grants freshness. Over-cap/deleted frames retain all live CID evidence.
   Sound/score/export state rejects rather than being silently omitted. The frame reader does not
   implement PIX verification, retention, signed admission or a checkpoint/recovery persistence path.
+  A separate `validate_index_change` now checks epoch-zero Index deltas against the canonical
+  domain operation and the author's complete dependency frontier. It binds record bytes to the
+  change actor, requires fresh markers and immutable insertion/deletion/header writes, rejects
+  deleted-id reuse and unknown targets, and requires exact same-property predecessor sets for
+  mutable registers (including empty/partial/duplicate and cross-key predecessor rejection).
+  Overflow objects remain valid targets; receiver-only creations do not. Concurrent deletion
+  cannot invalidate a mutation justified by its own causal view. This callback assumes already
+  authenticated accepted history; P1 still owns the signed actor/member/server/physical binding.
+  It refuses checkpoint epochs until their real typed seed representation is implemented. No
+  production Studio writer or ingest adapter is enabled; tests deliberately isolate the semantic
+  callback with reader-only preflight and separately prove rollback on a preflight refusal.
+  Those tests are not proof of exact checkpoint capacity, durable intent retirement or Save/Load.
   Vault restoration tests dependency and duplicate presence using metadata from Automerge's
   applied graph, not a saved or peer-asserted index; unresolved queued changes do not count.
   It can use indexed current-view reads only when an authenticated change's
