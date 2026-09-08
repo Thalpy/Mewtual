@@ -96,6 +96,30 @@ impl fmt::Debug for DurableOwnerSnapshot {
     }
 }
 
+/// One successful local reply-channel handoff of an owner proof. Private fields prevent a raw
+/// receipt or constructed proof becoming completion authority. Deliberately not Clone or durable:
+/// dropping this before recording completion requires an exact re-handoff after restart.
+pub struct ReceiptHeadHandoff {
+    snapshot: DurableOwnerSnapshot,
+    bucket: u8,
+    generation: Arc<()>,
+    receipt: Box<Receipt>,
+    expires: u64,
+}
+impl fmt::Debug for ReceiptHeadHandoff {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ReceiptHeadHandoff { .. }")
+    }
+}
+
+/// A served response is either a provisional hint or a checked owner-proof handoff. Neither
+/// variant acknowledges network delivery; only Owner can drive exact journal completion.
+#[derive(Debug)]
+pub enum ReceiptHeadServed {
+    Hint,
+    Owner(ReceiptHeadHandoff),
+}
+
 /// Trusted synchronous source context. `tenure` is present only with a still-current durable
 /// snapshot permit. The source must separately persist its selected irrevocable decision and
 /// check its registry/inventory before asking sync to sign a fresh proof.
@@ -205,6 +229,33 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             &mut self.rng,
             permit.tenure,
         ))
+    }
+
+    /// Consume a short-lived handoff immediately under exclusive runtime ownership. The app
+    /// retains its mount/server/store borrow from serving through the accounted journal write.
+    /// Failure here cannot unsend a reply already accepted by the local forwarding channel.
+    pub fn with_receipt_head_handoff<V>(
+        &mut self,
+        handoff: ReceiptHeadHandoff,
+        complete: impl FnOnce(&Receipt, &mut R) -> V,
+    ) -> Result<V, SyncError> {
+        if self.clock.monotonic_ms() >= handoff.expires
+            || !self.head_snapshot_is_current(&handoff.snapshot)
+            || !self.head_member(&self.device.public_key_bytes())
+            || !self
+                .receipt_heads
+                .watches
+                .get(&handoff.bucket)
+                .is_some_and(|g| Arc::ptr_eq(g, &handoff.generation))
+            || handoff.receipt.document
+                != registry_document(&self.group.group_id(), handoff.bucket)?
+        {
+            return Err(SyncError::Unauthorized);
+        }
+        handoff
+            .receipt
+            .verify_current_owner(&self.group, handoff.snapshot.tenure)?;
+        Ok(complete(&handoff.receipt, &mut self.rng))
     }
     pub fn watch_registry_head(&mut self, bucket: u8) -> RegistryHeadWatch {
         let generation = Arc::new(());
@@ -330,6 +381,25 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ReceiptHeadSource<'_>,
         ) -> Result<ReceiptHeadSelection, E>,
     ) -> Result<Option<Result<(), E>>, SyncError> {
+        Ok(self
+            .serve_receipt_head_with_handoff(watch, snapshot, serve)?
+            .map(|result| result.map(|_| ())))
+    }
+
+    /// Same bounded serving transaction, retaining exact completion evidence for the trusted
+    /// caller. Only a successful checked local-channel send of an owner proof yields a handoff.
+    /// Source errors, hints, expired requests and dropped receivers cannot complete a journal.
+    pub fn serve_receipt_head_with_handoff<E>(
+        &mut self,
+        watch: &RegistryHeadWatch,
+        snapshot: Option<&DurableOwnerSnapshot>,
+        serve: impl FnOnce(
+            &ServerGroup,
+            &MlsDevice,
+            &mut R,
+            ReceiptHeadSource<'_>,
+        ) -> Result<ReceiptHeadSelection, E>,
+    ) -> Result<Option<Result<ReceiptHeadServed, E>>, SyncError> {
         if !self.registry_head_watch_is_current(watch) {
             return Err(SyncError::NoSuchDoc);
         }
@@ -400,29 +470,41 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         } else {
             None
         };
-        let answer = encode_answer(
-            &ReceiptHeadAnswer {
-                receipt,
-                repair: None,
-                proof,
-            },
-            &document,
-        )?;
+        let answer = ReceiptHeadAnswer {
+            receipt,
+            repair: None,
+            proof,
+        };
+        let bytes = encode_answer(&answer, &document)?;
         let signature = self.device.sign(&transcript(
             &self.group.group_id(),
             &item.key,
             &item.auth,
             self.transport.local_peer(),
             &item.inner,
-            &answer,
+            &bytes,
         ))?;
+        if !self.head_request_current(&item) || self.clock.monotonic_ms() >= item.expires {
+            return Err(SyncError::Unauthorized);
+        }
         item.responder
-            .respond(Bytes::from(encode_signed_commit_resp(
+            .try_respond(Bytes::from(encode_signed_commit_resp(
                 &self.device.public_key_bytes(),
                 &signature,
-                &answer,
-            )));
-        Ok(Some(Ok(())))
+                &bytes,
+            )))?;
+        let served = if answer.proof.is_some() {
+            ReceiptHeadServed::Owner(ReceiptHeadHandoff {
+                snapshot: snapshot.expect("proved durable snapshot").clone(),
+                bucket: watch.bucket,
+                generation: watch.generation.clone(),
+                receipt: Box::new(answer.receipt.expect("proved receipt")),
+                expires: item.expires,
+            })
+        } else {
+            ReceiptHeadServed::Hint
+        };
+        Ok(Some(Ok(served)))
     }
     fn head_request_current(&self, item: &Pending) -> bool {
         item.auth.epoch == self.group.epoch()

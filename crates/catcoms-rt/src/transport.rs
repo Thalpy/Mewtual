@@ -263,7 +263,14 @@ pub struct Responder {
 impl Responder {
     /// Send the reply back to the requester.
     pub fn respond(self, data: Bytes) {
-        let _ = self.reply.send(data);
+        let _ = self.try_respond(data);
+    }
+
+    /// Hand the reply to the local forwarding channel, refusing a dropped receiver.
+    /// Success means the channel accepted the bytes, even if they have not been read yet.
+    /// It does NOT prove the transport driver sent them or that the remote peer received them.
+    pub fn try_respond(self, data: Bytes) -> Result<(), TransportError> {
+        self.reply.send(data).map_err(|_| TransportError::Closed)
     }
 
     /// Create a responder paired with its receiver. A transport implementation
@@ -787,6 +794,26 @@ pub trait MeshTransport: Send + Sync {
     /// authenticated group event, and elapsed time is not evidence of anything.
     async fn unevict_peer(&self, _peer: PeerId) -> Result<(), TransportError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn checked_response_accepts_an_unread_channel_but_refuses_a_dropped_receiver() {
+        let bytes = Bytes::from_static(b"exact response");
+        let (tx, rx) = Responder::channel();
+        assert!(tx.try_respond(bytes.clone()).is_ok());
+        assert_eq!(rx.recv().await, Some(bytes.clone()));
+        let (tx, rx) = Responder::channel();
+        drop(rx);
+        assert!(matches!(tx.try_respond(bytes), Err(TransportError::Closed)));
+        // The legacy fire-and-forget API keeps its existing dropped-receiver behavior.
+        let (tx, rx) = Responder::channel();
+        drop(rx);
+        tx.respond(Bytes::new());
     }
 }
 

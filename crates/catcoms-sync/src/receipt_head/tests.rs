@@ -50,6 +50,109 @@ fn selection(receipt: Receipt, prove: bool) -> Result<ReceiptHeadSelection, ()> 
     })
 }
 
+#[tokio::test]
+async fn receipt_head_handoff_requires_an_accepted_owner_proof_not_a_hint_or_dropped_reply() {
+    let (mut n, clock) = node();
+    let watch = n.watch_registry_head(4);
+    let permit = n
+        .prepare_receipt_head_snapshot(|_, _| Ok::<_, ()>(()))
+        .unwrap()
+        .unwrap();
+    let receipt = receipt(&n, 4);
+    let rx = enqueue(&mut n, 4);
+    let served = n
+        .serve_receipt_head_with_handoff(&watch, Some(&permit), |_, _, _, _| {
+            selection(receipt.clone(), true)
+        })
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let ReceiptHeadServed::Owner(handoff) = served else {
+        panic!("owner handoff");
+    };
+    // Acceptance is observable before the receiver reads; this deliberately is not a delivery ACK.
+    assert_eq!(
+        n.with_receipt_head_handoff(handoff, |r, _| r.hash())
+            .unwrap(),
+        receipt.hash()
+    );
+    assert!(rx.recv().await.is_some());
+    clock.advance_ms(1000);
+    let rx = enqueue(&mut n, 4);
+    drop(rx);
+    assert!(matches!(
+        n.serve_receipt_head_with_handoff(&watch, Some(&permit), |_, _, _, _| {
+            selection(receipt.clone(), true)
+        }),
+        Err(SyncError::Transport(TransportError::Closed))
+    ));
+    clock.advance_ms(1000);
+    let rx = enqueue(&mut n, 4);
+    assert!(matches!(
+        n.serve_receipt_head_with_handoff(&watch, None, |_, _, _, _| { selection(receipt, false) })
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        ReceiptHeadServed::Hint
+    ));
+    assert!(rx.recv().await.is_some());
+}
+
+#[tokio::test]
+async fn receipt_head_handoff_completion_rechecks_expiry_watch_membership_and_runtime() {
+    for change in ["expiry", "watch", "membership", "runtime"] {
+        let (mut n, clock) = node();
+        let watch = n.watch_registry_head(4);
+        let permit = n
+            .prepare_receipt_head_snapshot(|_, _| Ok::<_, ()>(()))
+            .unwrap()
+            .unwrap();
+        let receipt = receipt(&n, 4);
+        let rx = enqueue(&mut n, 4);
+        let served = n
+            .serve_receipt_head_with_handoff(&watch, Some(&permit), |_, _, _, _| {
+                selection(receipt, true)
+            })
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ReceiptHeadServed::Owner(handoff) = served else {
+            panic!("owner handoff");
+        };
+        match change {
+            "expiry" => {
+                clock.advance_ms(QUEUE_MS);
+            }
+            "watch" => {
+                n.watch_registry_head(4);
+            }
+            "membership" => {
+                let peer = MlsDevice::generate().unwrap();
+                n.with_observed_mls_transition(|n| {
+                    n.group.add_member(&n.device, peer.key_package().unwrap())
+                })
+                .unwrap();
+            }
+            "runtime" => {
+                n = Node::restore(
+                    &n.snapshot().unwrap(),
+                    Hub::new().join(PeerId::from_u64(2)),
+                    ChaCha20Rng::seed_from_u64(8),
+                    Box::new(clock.clone()),
+                )
+                .unwrap();
+                n.watch_registry_head(4);
+            }
+            _ => unreachable!(),
+        }
+        assert!(n
+            .with_receipt_head_handoff(handoff, |_, _| panic!("stale completion"))
+            .is_err());
+        // Refusing completion does not retract an already accepted response.
+        assert!(rx.recv().await.is_some());
+    }
+}
+
 #[test]
 fn receipt_head_wire_is_exact_bounded_and_scope_checked() {
     let document = LogicalDocument::new(vec![3; 16], DocType::DocRegistry, vec![7; 32]).unwrap();

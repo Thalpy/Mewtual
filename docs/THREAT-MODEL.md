@@ -261,8 +261,14 @@ table with the commit that closed it.
   A crash after journaling but before sealing may leave later Open edits: the saved close is resumed
   byte-for-byte and excluded edits enter recovery. A legacy pending decision without that close holds,
   never regenerates. Exact installed retries preserve newer content. Installation labels publication
-  pending rather than claiming a handoff or delivery; completion and automatic scheduling remain
-  unfinished, and universal progress at full quota is not claimed.
+  pending rather than claiming a handoff or delivery. Kind-21 serving now records exact completion
+  after the local reply channel accepts a freshly authorized owner proof. The private non-Clone
+  token binds receipt, scope, runtime, MLS/full owner/tenure, watch and expiry; the Server consumes
+  it synchronously with its original mount/server/store/budget. Dropped receivers and hints do not
+  count. Channel acceptance proves neither transport-driver admission nor peer delivery; a later
+  completion failure may follow an already visible reply. Uncertain writes block accounting and
+  exact republication repairs restart. Automatic scheduling and universal full-quota progress
+  remain unfinished; publication completion is not permission to bypass recovery-first retirement.
 - **Saved local intents are replay data, not completion or impersonation authority.** The
   prepare-only vault adapter binds the local mount id and full group/type/key, checks the actual
   local device's current roster signing key, and saves before reporting success. It bounds public

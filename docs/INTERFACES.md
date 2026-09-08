@@ -1124,9 +1124,20 @@ heads, never current heads. Results are `Installed { publication_pending }`,
 `AlreadyInstalled { publication_pending }`, `RecoveryPending`, `Fault`, or `DecisionNeedsClose`
 for a legacy irrevocable choice without close provenance. Errors do not grant progress. Exact
 installed retries preserve newer edits, and post-journal/pre-seal edits are included in recovery.
-This explicit step is not a publisher: kind-21 serving still does not mark completion. The exact
-publication-completion handoff must be wired before automatic repeated rotations; a pending decision
-continues to block a different one. No actor/native scheduling or new command/event is added yet.
+This explicit rotation step is not a publisher. Kind-21 `serve_registry_head_step` now completes
+the exact journal attempt after a checked owner-proof handoff, permitting a later eligible rotation.
+`Responder::try_respond` returns the actual local reply-channel send result; legacy `respond`
+continues to discard it. Success means accepted by that channel, not driver admission or delivery.
+Sync's additive `serve_receipt_head_with_handoff` returns `ReceiptHeadServed::{Hint, Owner}`;
+only a successful fresh proof response mints the private, non-Clone `ReceiptHeadHandoff`. Its
+receipt/bucket, runtime, MLS epoch, full owner, observed tenure, watch generation and request expiry
+are rechecked by `with_receipt_head_handoff` before lending the exact receipt to completion.
+The Server consumes it immediately, retaining its mount/server/store/budget borrow without await.
+A hint, expired authority or dropped reply channel cannot complete publication. A later completion
+write error cannot retract the reply; uncertain writes invalidate accounting, and restart/retry
+re-hands off the same decision before durably recording completion. The legacy sync serving wrapper
+discards handoff evidence and never completes a store by itself. No actor/native scheduler or new
+command/event is added yet; a pending decision still blocks a different one until checked completion.
 
 The bounded sealed `.owner-receipts` record binds local server/group/type/key. Permanent bytes
 charge protocol allowance; replacement copies borrow the same logical-document settlement reserve
@@ -1587,8 +1598,9 @@ snapshot permit and EXACT agreement with the checked source head; otherwise the 
 a hint, never a fresh proof of an older fallback. Before signing, the source file and parent flush
 and the exact journal choice is re-saved through accounted persistence. Failed/uncertain writes
 send no success and require budget reconciliation. Signing/handoff recheck request lifetime and
-authority after synchronous I/O. Discovery never clears pending publication, changes the source,
-retires intents, prunes history or installs a checkpoint. The proof says which receipt the owner
+authority after synchronous I/O. A checked owner-proof handoff now durably completes that exact
+publication attempt; a failure in this later completion cannot retract the response. Discovery
+never changes the source, retires intents, prunes history or installs a checkpoint. The proof says which receipt the owner
 selected now, not that its seed is available/verified, and provides no lease.
 
 Per runtime, head discovery independently retains at most eight requests, one per full requester,

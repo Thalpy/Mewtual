@@ -321,8 +321,13 @@ signing. It requires the current durable MLS/tenure snapshot permit, derives inh
 installed opening, and saves the exact close with the decision in one bounded owner-record extension.
 An interrupted seal resumes those heads, not newer live heads; later Open edits enter recovery.
 Legacy pending receipts without close provenance hold explicitly. The driver then seals and invokes
-the adjacent recovery-first installer. Results retain publication-pending status: an actual checked
-handoff must still drive the existing exact completion API before another decision can be issued.
+the adjacent recovery-first installer. Rotation results retain publication-pending status. Kind-21
+serving now drives the exact completion API only after a fresh current-owner proof is accepted by
+the local reply-forwarding channel, under the same synchronous Server/store gate. This completes
+a saved publication attempt, not peer delivery or transport-driver admission. A dropped receiver
+does not complete it; a crash or disk failure after handoff can require exact retry. Uncertain
+writes block the live budget until inventory reconciliation. Only durable completion permits
+another eligible owner decision.
 Automatic scheduling, other managed types and repair remain unfinished. Reads are historical only.
 
 ## 9. Intents and markers

@@ -267,6 +267,38 @@ impl ServerStore {
         )
     }
 
+    /// Deterministic test seam for a completion write which fails before or after replacement.
+    /// Production completion has no caller-supplied writer and always uses atomic_write.
+    #[cfg(test)]
+    pub(crate) fn mark_epoch_owner_with_test_failure(
+        &mut self,
+        server: u64,
+        receipt: &Receipt,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        after_rename: bool,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
+        self.update_epoch_owner_with_writer(
+            server,
+            &receipt.document,
+            rng,
+            budget,
+            |journal| journal.mark_published(receipt.hash()).map_err(invalid),
+            |path, bytes| {
+                if after_rename {
+                    atomic_write_with_hook_and_sync(
+                        path,
+                        bytes,
+                        |_, _| {},
+                        |_| Err(std::io::Error::other("injected completion flush failure")),
+                    )
+                } else {
+                    Err(AppError::Io("injected completion before write".into()))
+                }
+            },
+        )
+    }
+
     // Reload + transition + reservation + durable replacement share the exclusive store borrow.
     // There is deliberately no public unaccounted owner-journal save or caller-provided writer.
     fn update_epoch_owner_with_writer(

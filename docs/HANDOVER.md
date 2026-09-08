@@ -8,6 +8,51 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **P1 checked receipt publication completion (2026-09-08).**
+  Kind-21 owner-proof serving now connects an accepted local reply-channel handoff to the exact
+  accounted owner-journal completion, under the same synchronous Server/store/mount/server gate.
+  `Responder::try_respond` is additive; success is channel acceptance, not driver admission or
+  peer delivery. Hints, dropped receivers, expired requests and stale owner evidence cannot
+  mint completion authority. Sync's private non-Clone handoff rechecks runtime, MLS/full owner,
+  observed tenure, logical bucket, watch generation and request expiry before use. Existing
+  fire-and-forget reply callers retain their behavior; the legacy sync wrapper drops the token.
+
+  A completion write can fail after a peer already received the proof. The owner reports error,
+  invalidates uncertain accounting, and re-hands off exactly the same receipt after restart/rescan.
+  No response is retracted and no delivery guarantee is inferred. The actual joined fixture now
+  generates, installs, serves/completes, edits the seeded successor and rotates a second time with
+  unchanged tenure inheritance. Recovery-first retirement remains a separate mandatory barrier.
+
+  Focused checks pass: checked responder regression, twelve sync receipt-head tests, five app/store
+  head tests including before-write/after-rename completion failure and restart, and the two-rotation
+  joined fixture. Read-only actual-diff adversarial review found no remaining actionable findings.
+  Required verification passed:
+
+  - `cargo test --all --all-features` (app 378 passed / 4 existing ignored; replication 81;
+    sync 214; runtime 20; all workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings` (after boxing the receipt inside
+    the private handoff to keep its enum small)
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No runtime code changed after these checks. Frontend static/build/visual checks and separate
+  native `cargo check` were not needed: neither frontend nor native bridge source changed.
+  Completion currently requires serving an eligible kind-21 query; quiet/solo owner progress
+  still needs orchestration. Automatic scheduling, durable repair, all managed document types
+  and UI integration remain open; no overall
+  completion percentage increase is claimed. The previous owner-rotation slice is committed/pushed
+  as `fd2943f`; unrelated release files and the canonical UI remain untouched.
+
+  Next lifecycle prerequisite: native `persist_captured` captures an actor snapshot before its
+  later store write. Automatic P1 owner preparation must share that numeric-server persistence
+  ordering (or an equivalent exact-incarnation write fence), so an older captured snapshot cannot
+  overwrite the newer durable MLS/tenure state after a receipt is issued. Also measure the maximal
+  registry source rebuild before assigning an aggregate work budget; current fixed memory/rate
+  caps do not establish actor latency. Neither prerequisite is enabled or solved by this slice.
+
 - **P1 explicit owner registry rotation (2026-09-08).**
   `Server::rotate_registry_owner_step` requires the current mount/server-bound durable owner
   snapshot permit. Under exclusive sync/store borrows it flushes the checked source, verifies

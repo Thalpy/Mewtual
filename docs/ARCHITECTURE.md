@@ -49,7 +49,12 @@ The owner vault record saves the exact close alongside the selected receipt in o
 so a crash before sealing cannot change the decision when more Open edits arrive. Such later edits
 enter recovery through the existing adjacent installer. Legacy pending receipts without a saved close
 hold explicitly. Installation returns publication-pending status and does not mark the receipt
-published: the actual handoff/completion driver, automatic scheduling and durable repair remain open.
+published. Kind-21 serving now records exact completion only after a current-owner proof is
+accepted by the local reply-forwarding channel. Its private one-shot handoff is consumed under
+the same synchronous Server/store borrow with fresh authority and accounted journal persistence.
+This is not transport-driver admission or peer delivery. A crash or write failure after handoff
+can require exact republication; uncertain disk state blocks accounting until reconciliation.
+Automatic scheduling and durable repair remain open.
 
 Keyed registry receipt-head discovery is now a cooperative authenticated kind-21 exchange.
 It registers logical buckets, not concrete epochs, and returns provisional hints or a one-shot

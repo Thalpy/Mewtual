@@ -43,14 +43,19 @@ The protocol/store foundations have substantially more coverage than the runtime
       This milestone remains open for automatic runtime ownership, other managed document types
       and production newcomer acceptance; cooperative registry integration is not the whole feature.
 - [ ] Runtime ownership, scheduling, cancellation, vault lifecycle and complete storage accounting.
+      Whole-server snapshot publication must share the native numeric-server persistence ordering
+      or an exact-incarnation fence: an older asynchronously captured snapshot must not overwrite
+      newer P1 MLS/tenure evidence. The separate store mutex alone does not establish this ordering.
       Before automatic scheduling, measure maximum-epoch page-source rebuild time and set the
       cooperative work budget from that evidence; fixed memory/rate caps alone do not prove latency.
 - [ ] Owner receipt issuance, succession, fault/repair and settlement driven end to end.
       Explicit registry owner rotation now derives an eligible close/seed from its checked source,
       journals that exact close with the receipt, and seals/installs recovery-first under a durable
       MLS/tenure snapshot permit. Restart resumes the same choice even after later Open edits.
-      Publication completion is still separate/pending; automatic driving, durable repair and
-      all managed document types remain acceptance work.
+      Kind-21 serving now records exact completion after an accepted local reply-channel handoff
+      of a fresh owner proof (not transport-driver admission or delivery), allowing the next eligible
+      rotation. Quiet/solo owner progress still needs orchestration because this path requires a query.
+      Automatic driving, durable repair and all managed document types remain acceptance work.
 - [ ] Recovery listing, Restore/Copy/Export actions and settlement events over the actor/bridge.
 - [ ] Multi-peer, restart, partition, capacity and owner-offline acceptance scenarios through the
       production adapters rather than direct calls to protocol helpers.

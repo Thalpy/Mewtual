@@ -341,8 +341,10 @@ async fn fetched_fixture_mode(queue_epoch_zero: bool, owner_generated: bool) -> 
 async fn registry_owner_rotation_server_generates_then_serves_exact_decision_to_joiner() {
     let SeedFixture {
         mut p,
+        key,
         receipt,
         document,
+        seed,
         pass,
         ..
     } = fetched_fixture_mode(false, true).await;
@@ -356,15 +358,97 @@ async fn registry_owner_rotation_server_generates_then_serves_exact_decision_to_
         .alice_store
         .load_epoch_owner_receipts(SERVER, &document)
         .unwrap();
-    assert_eq!(
-        journal.pending(),
-        Some(&receipt),
-        "query handoff is not yet wired to publication completion"
-    );
+    assert!(journal.pending().is_none());
+    assert_eq!(journal.published(), Some(&receipt));
     assert!(
         journal.close_for(&receipt).is_some(),
         "head-proof re-save retains decision provenance"
     );
+    // Advance the actual installed successor to another eligible signed closure. Loading only
+    // its seed pins the no-cross-epoch-DAG invariant; no arbitrary receipt is prepared here.
+    let bucket = key.bucket();
+    p.alice.sync.with_registry_context(|g, d, _, r| {
+        let mut writer =
+            AutoCommit::new().with_actor(ActorId::from(d.device_id().as_bytes().to_vec()));
+        writer
+            .apply_changes([automerge::Change::from_bytes(seed.bytes().to_vec()).unwrap()])
+            .unwrap();
+        for n in 20..30u8 {
+            let op = RegistryOp::Put {
+                key: key.clone(),
+                epoch: u64::from(n),
+            }
+            .domain_op(&g.group_id(), [n; 16])
+            .unwrap();
+            writer
+                .put(
+                    ROOT,
+                    format!("p/0010/{}", hex::encode(key.logical_key())),
+                    u64::from(n),
+                )
+                .unwrap();
+            writer
+                .put(
+                    ROOT,
+                    format!("_p1/op/{}", hex::encode(op.id(&d.device_id()))),
+                    1u64,
+                )
+                .unwrap();
+            writer.commit_with(CommitOptions::default().with_message("x".repeat(220_000)));
+            let signed = SignedOp::sign_domain(
+                d,
+                DocType::DocRegistry,
+                seed.origin().doc_id(),
+                writer.get_last_local_change().unwrap().raw_bytes().to_vec(),
+                &op,
+            )
+            .unwrap();
+            let sealed = SealedOp::seal(&signed, g, d, r).unwrap();
+            p.alice_store
+                .ingest_registry_epoch(SERVER, g, bucket, d, &sealed, r, &mut p.alice_budget)
+                .unwrap();
+        }
+    });
+    let permit = p
+        .alice
+        .prepare_owner_head_snapshot(&p.alice_store, SERVER)
+        .unwrap();
+    let (outcome, next) = p
+        .alice
+        .rotate_registry_owner_step(
+            &mut p.alice_store,
+            SERVER,
+            bucket,
+            &permit,
+            &mut p.alice_budget,
+            &mut p.alice_intents,
+        )
+        .unwrap();
+    assert_eq!(
+        outcome,
+        crate::store::RegistryOwnerRotationOutcome::Installed {
+            publication_pending: true
+        }
+    );
+    assert_eq!(next.epoch(), 2);
+    let journal = p
+        .alice_store
+        .load_epoch_owner_receipts(SERVER, &document)
+        .unwrap();
+    let next_receipt = journal.pending().unwrap().clone();
+    assert_eq!(next_receipt.closed_epoch, 1);
+    assert_eq!(next_receipt.inherited, receipt.inherited);
+    assert_eq!(
+        next_receipt.tenure_start_group_epoch,
+        receipt.tenure_start_group_epoch
+    );
+    let _selected = rediscover(&mut p, bucket).await;
+    let journal = p
+        .alice_store
+        .load_epoch_owner_receipts(SERVER, &document)
+        .unwrap();
+    assert!(journal.pending().is_none());
+    assert_eq!(journal.published(), Some(&next_receipt));
 }
 
 #[tokio::test]
