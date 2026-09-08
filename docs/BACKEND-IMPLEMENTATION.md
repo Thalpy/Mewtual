@@ -70,6 +70,64 @@ Do not expand P1's guarantees or implement a deferred feature without asking the
 performance/refactor slice must identify the failing gate and the acceptance evidence it enables;
 micro-optimization alone is not a reason to postpone Studio integration.
 
+## Completed-work ledger: reuse before adding
+
+Audited against this branch's committed history through `bf1b64b` (2026-09-08). This groups
+the P1/Flipnote `feat` and `perf` commits from `57e51ad` onward, plus the original P1 commit
+`a67e284` and the performance probe. It is not a repository-wide release changelog: unrelated
+voice, files, release and user-owned UI work is not marked as Flipnote progress. Commit subjects
+are discovery aids, not proof of completion; the current contracts and limitations below govern.
+
+Use this ledger for **what exists and where to extend it**, [INTERFACES](INTERFACES.md) for
+the exact API contract, and [HANDOVER](HANDOVER.md) for test/review evidence and historical
+limitations. The file column names primary entry points, not every touched test or supporting
+file. `git show --stat <commit>` and `git show --name-status <commit>` provide the full change map.
+An implemented helper or cooperative adapter does not close an end-to-end delivery gate.
+
+### Existing P1 foundations and registry adapters
+
+Paths below use `rep/` = `crates/catcoms-replication/src/`, `app/` = `crates/catcoms-app/src/`,
+`sync/` = `crates/catcoms-sync/src/`, and `native/` = `apps/desktop/src-tauri/src/`.
+
+| Reusable work / gates | Commits | Primary files | Implemented boundary; still to connect |
+|---|---|---|---|
+| P1 records, gates, checkpoints and registry / 1-4 | `a67e284`, `57e51ad` | [rep/epoch.rs](../crates/catcoms-replication/src/epoch.rs), [rep/checkpoint.rs](../crates/catcoms-replication/src/checkpoint.rs), [rep/registry.rs](../crates/catcoms-replication/src/registry.rs) | Signed operations, owner receipts/faults, bounded recovery and verified seeds are existing core machinery. Extend typed consumers; do not rebuild finality. |
+| Recovery persistence, inventory, capacity and temp cleanup / 2, 4 | `40d8aa6`, `4a4b603`, `efaffc4`, `b7c6af2` | [app/store/epoch_recovery.rs](../crates/catcoms-app/src/store/epoch_recovery.rs), [app/store/epoch_recovery/](../crates/catcoms-app/src/store/epoch_recovery/), [app/store/epoch_budget.rs](../crates/catcoms-app/src/store/epoch_budget.rs) | Sealed transitions and replacement-space accounting exist. They are not the Studio runtime settlement driver or recovery UI commands. |
+| Durable owner decisions and intent ledgers / 2, 4 | `5262409`, `17e6694`, `fc6d32e` | [app/store/epoch_owner.rs](../crates/catcoms-app/src/store/epoch_owner.rs), [app/store/epoch_intents.rs](../crates/catcoms-app/src/store/epoch_intents.rs) | Existing persist-before-publish journal, bounded local intents and inventory. Studio already reuses these storage foundations; no second journal is needed. |
+| Checked registry restart, ingress, seals and exact local retries / 2-4 | `6655c2c`, `e26a3ae`, `b497e30` | [rep/registry_epoch.rs](../crates/catcoms-replication/src/registry_epoch.rs), [app/store/epoch_registry.rs](../crates/catcoms-app/src/store/epoch_registry.rs) | Owned registry source and accounted durable writes exist. Registry-specific semantics are not interchangeable with Studio validators. |
+| Receipt-bound settlement and recovery-first installation / 4 | `a09eb1e`, `6d55c25`, `9bc9ec4` | [rep/registry_epoch/settlement.rs](../crates/catcoms-replication/src/registry_epoch/settlement.rs), [app/store/epoch_registry/recovery.rs](../crates/catcoms-app/src/store/epoch_registry/recovery.rs), [app/store/epoch_registry/installation.rs](../crates/catcoms-app/src/store/epoch_registry/installation.rs) | Explicit registry settlement saves recovery before replacement and retires only covered intents. Automatic Studio settlement/actions remain gate 4. |
+| Durable replay and one-shot publication / 3-4 | `0d053dc`, `eea698d`, `cd6270e`, `fc508f1` | [app/store/epoch_registry/replay.rs](../crates/catcoms-app/src/store/epoch_registry/replay.rs), [app/registry_replay.rs](../crates/catcoms-app/src/registry_replay.rs), [sync/registry_publication.rs](../crates/catcoms-sync/src/registry_publication.rs), [transport.rs](../crates/catcoms-rt/src/transport.rs) | Checked saved-intent replay and driver-acknowledged send exist. Caller still owns scheduling/lifecycle; send admission is not delivery or settlement. |
+| Watched registry gossip / 3 | `fc777ef` | [app/registry_ingress.rs](../crates/catcoms-app/src/registry_ingress.rs), [sync/registry_ingress.rs](../crates/catcoms-sync/src/registry_ingress.rs) | Opt-in authenticated receive with durable admission. Not automatic Studio gossip. |
+| Paged catch-up and durable receiver continuation / 3 | `cce0528`, `81fb91b`, `3a8928c` | [rep/registry_epoch/catchup.rs](../crates/catcoms-replication/src/registry_epoch/catchup.rs), [app/registry_catchup.rs](../crates/catcoms-app/src/registry_catchup.rs), [sync/registry_catchup.rs](../crates/catcoms-sync/src/registry_catchup.rs) | Bound cursors, authenticated exchanges and save-before-advance exist for registry. Automatic serving still needs bounded off-executor source reuse and authority/version fences. |
+| Observed tenure, keyed receipt heads and expected-hash seed fetch / 3-4 | `1cb161b`, `4084c50`, `2a40b2b` | [sync/owner_tenure.rs](../crates/catcoms-sync/src/owner_tenure.rs), [app/registry_head.rs](../crates/catcoms-app/src/registry_head.rs), [app/registry_seed.rs](../crates/catcoms-app/src/registry_seed.rs) | Cooperative authenticated registry discovery exists; fetching alone installs nothing. Reuse the checked handles, not raw proof fields, for runtime joining. |
+| Recovery-first adoption of discovered registry checkpoints / 3-4 | `a765bdb`, `9f779d1` | [rep/registry_epoch/adoption.rs](../crates/catcoms-replication/src/registry_epoch/adoption.rs), [app/store/epoch_registry/adoption.rs](../crates/catcoms-app/src/store/epoch_registry/adoption.rs), [app/registry_seed.rs](../crates/catcoms-app/src/registry_seed.rs) | Explicit installer preserves the source and recovery before replacement. Studio installation and automatic newcomer orchestration remain open. |
+| Owner rotation and reply-handoff completion / 4 | `fd2943f`, `022bbc9` | [app/store/epoch_registry/owner.rs](../crates/catcoms-app/src/store/epoch_registry/owner.rs), [app/store/epoch_owner.rs](../crates/catcoms-app/src/store/epoch_owner.rs), [app/registry_head.rs](../crates/catcoms-app/src/registry_head.rs) | Durable exact owner decisions and checked reply-channel completion exist. Quiet/solo progress and Studio orchestration remain; handoff is not remote delivery. |
+| Measured restore-query optimization / 3 | `c6092c1` (probe), `db979dd` | [rep/doc.rs](../crates/catcoms-replication/src/doc.rs), [rep/registry.rs](../crates/catcoms-replication/src/registry.rs), [app/store/epoch_registry/tests/performance.rs](../crates/catcoms-app/src/store/epoch_registry/tests/performance.rs) | Redundant history queries were removed without relaxing checks. Dense saved-source service still exceeds deadlines: reuse the [measurements](P1-PERFORMANCE.md), not a claim that latency is solved. |
+
+### Flipnote-specific work already integrated
+
+| Reusable work / gates | Commits | Primary files | Implemented boundary; still to connect |
+|---|---|---|---|
+| Real PIX publication and bounded fetch / 2, 6 | `19e75d4` | [app/creative.rs](../crates/catcoms-app/src/creative.rs), [native/creative_blobs.rs](../apps/desktop/src-tauri/src/creative_blobs.rs), [sync/lib.rs](../crates/catcoms-sync/src/lib.rs) | Actor/native `publish_pix` and `request_blob_bounded` exist. Use these for real CIDs; do not add another publication primitive. Export packaging remains gate 6. |
+| Closed operation codec and shared vectors / 1 | `f77b8f9` | [rep/studio.rs](../crates/catcoms-replication/src/studio.rs), [rep/studio/patch.rs](../crates/catcoms-replication/src/studio/patch.rs), [shared vectors](../crates/catcoms-replication/tests/fixtures/studio-ops-v1.json) | Static Index/Flipnote bodies, full envelope checks and patch validation exist. A recognized audio/export body is not an implemented materializer or writer. |
+| Deterministic Index/art projections / 1 | `c383cde`, `8718328` | [rep/studio/index.rs](../crates/catcoms-replication/src/studio/index.rs), [rep/studio/frames.rs](../crates/catcoms-replication/src/studio/frames.rs) | Stable ordering, conflicts/deletions and cap flags exist. Sound/score/export projection is the remaining extension, not a reason to rebuild art. |
+| Causal Index/art mutation validation / 1 | `20d4c17`, `327883c` | [rep/studio/index/change.rs](../crates/catcoms-replication/src/studio/index/change.rs), [rep/studio/frames/change.rs](../crates/catcoms-replication/src/studio/frames/change.rs) | Signed-actor records, causal targets/origins and exact predecessor checks exist. All consumers must retain these callbacks. |
+| Typed checkpoints, recovery and P1 admission / 1, 4 | `9902e49` | [rep/studio/admission.rs](../crates/catcoms-replication/src/studio/admission.rs), [rep/studio/snapshot.rs](../crates/catcoms-replication/src/studio/snapshot.rs), [rep/studio/recovery.rs](../crates/catcoms-replication/src/studio/recovery.rs) | Index/art exact seed/recovery preflight, verified checkpoint edits and bounded rotations are core-tested. Running-app receipt/settlement/recovery control remains gate 4. |
+| Accounted Index/art vault Save/Reopen / 2 | `7fbd683` | [rep/studio/epoch.rs](../crates/catcoms-replication/src/studio/epoch.rs), [app/store/epoch_studio.rs](../crates/catcoms-app/src/store/epoch_studio.rs) | Complete signed sources, sealed intents, exact retries, five-family inventory and restart exist. Reuse this owned source rather than a parallel persistence format. |
+| Actor/native local Save/Reopen and local events / 2 | `1a0ad9d` | [app/studio.rs](../crates/catcoms-app/src/studio.rs), [app/actor.rs](../crates/catcoms-app/src/actor.rs), [native/studio.rs](../apps/desktop/src-tauri/src/studio.rs) | Five Studio commands, lifecycle custody and real PIX save/restart tests exist. Local/provisional results are not shared edits; UI adaptation is user-owned. |
+| Reference protection at existing cache deletion paths / 2 | `bf1b64b` | [rep/studio/references.rs](../crates/catcoms-replication/src/studio/references.rs), [app/store/creative_references.rs](../crates/catcoms-app/src/store/creative_references.rs), [app/store/epoch_recovery/inventory.rs](../crates/catcoms-app/src/store/epoch_recovery/inventory.rs) | Saved art, seed/history, intents and retained/staged recovery hold their pixels. Reuse the shared guard/enumerator; expiry enforcement and actual export-record coverage are not included. |
+
+### Keeping this ledger useful
+
+Before a slice, find its row, read the current entry points and nearby tests, then name the missing
+integration or failing acceptance case. Extend the existing path unless a concrete incompatibility
+requires replacement. After a slice, add its commit, primary files and verified capability or update
+the matching row; keep the outstanding boundary explicit. Record relevant `fix`, `test`, refactor
+and non-conventional commits too when they change that boundary, not just `feat`/`perf` titles.
+If work supersedes an earlier approach, mark which implementation replaces it instead of leaving
+two apparently active solutions. Use the full diff for file history; do not duplicate INTERFACES
+or infer percentages from commit counts. **Next remains gate 3, not another foundation pass.**
+
 ## Current evidence
 
 Gate 1 now has the static Rust `studio::IndexOp`/`FlipnoteOp` codec: the closed operation set,
