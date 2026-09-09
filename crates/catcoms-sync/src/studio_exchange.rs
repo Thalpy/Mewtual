@@ -36,7 +36,9 @@ impl fmt::Debug for StudioWatch {
     }
 }
 impl StudioWatch {
-    pub(super) fn copy_binding(&self) -> Self {
+    /// Capture only the existing subscription incarnation for deferred current-state checks.
+    /// This creates no subscription, queue slot or new generation; replacement revokes both.
+    pub fn copy_binding(&self) -> Self {
         Self {
             target: self.target,
             doc_id: self.doc_id,

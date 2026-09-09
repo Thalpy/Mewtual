@@ -10,6 +10,7 @@ use catcoms_storage::pad::{self, OP_PAD_CEILING, OP_PAD_FLOOR};
 use receipt_head::{HeadSelection, ReceiptHeadAnswer};
 use registry_ingress::Rate;
 mod detached;
+mod service;
 mod wire;
 pub use detached::{
     CompletedCheckpointDiscovery, CompletedCheckpointSeed, PendingCheckpointDiscovery,
@@ -30,6 +31,7 @@ pub struct RegistrySeedWatch {
     instance: RegistrySyncInstance,
     target: CheckpointTarget,
     generation: Arc<()>,
+    request: Option<Arc<()>>,
 }
 impl fmt::Debug for RegistrySeedWatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -37,6 +39,8 @@ impl fmt::Debug for RegistrySeedWatch {
     }
 }
 struct Pending {
+    id: Arc<()>,
+    preparing: bool,
     query: ScopedQuery,
     inner: Vec<u8>,
     generation: Arc<()>,
@@ -232,15 +236,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             instance: self.registry_instance(),
             target,
             generation,
+            request: None,
         })
     }
     pub fn registry_seed_watch_is_current(&self, watch: &RegistrySeedWatch) -> bool {
         self.matches_registry_instance(&watch.instance)
-            && self
+            && (self
                 .registry_seeds
                 .watches
                 .get(&watch.target)
                 .is_some_and(|g| Arc::ptr_eq(g, &watch.generation))
+                || (watch.request.is_some()
+                    && self.epoch_service_generation_is_current(&watch.generation)))
     }
     pub fn unwatch_registry_seed(&mut self, watch: &RegistrySeedWatch) -> Result<(), SyncError> {
         if !self.registry_seed_watch_is_current(watch) {
@@ -264,7 +271,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) {
         let now = self.registry_seeds.expire(self.clock.monotonic_ms());
         if data.len() > MAX_QUERY + 144
-            || self.registry_seeds.watches.is_empty()
+            || (self.registry_seeds.watches.is_empty() && self.epoch_service.generation.is_none())
             || self.registry_seeds.pending.len() >= MAX_PENDING
             || !self
                 .registry_seeds
@@ -286,7 +293,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let Ok(query) = decode_scoped_query(kind, &inner, &self.group.group_id()) else {
             return;
         };
-        let Some(generation) = self.registry_seeds.watches.get(&query.target).cloned() else {
+        let Some(generation) = self
+            .registry_seeds
+            .watches
+            .get(&query.target)
+            .or(self.epoch_service.generation.as_ref())
+            .cloned()
+        else {
             return;
         };
         let requester = DeviceId::from_public_key_bytes(&key);
@@ -317,6 +330,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         };
         self.registry_seeds.pending.push_back(Pending {
+            id: Arc::new(()),
+            preparing: false,
             query,
             inner,
             generation,
@@ -345,19 +360,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(SyncError::NoSuchDoc);
         }
         let now = self.registry_seeds.expire(self.clock.monotonic_ms());
-        let Some(index) = self
-            .registry_seeds
-            .pending
-            .iter()
-            .position(|p| p.query.target == watch.target)
-        else {
+        let Some(index) = self.registry_seeds.pending.iter().position(|p| {
+            p.query.target == watch.target
+                && watch
+                    .request
+                    .as_ref()
+                    .is_none_or(|id| Arc::ptr_eq(id, &p.id))
+        }) else {
             return Ok(None);
         };
-        if !self
-            .registry_seeds
-            .service
-            .get_or_insert_with(|| Rate::full(now, 2))
-            .charge(now, 1, 2)
+        if watch.request.is_none()
+            && !self
+                .registry_seeds
+                .service
+                .get_or_insert_with(|| Rate::full(now, 2))
+                .charge(now, 1, 2)
         {
             return Ok(None);
         }

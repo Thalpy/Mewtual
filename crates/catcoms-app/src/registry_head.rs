@@ -33,6 +33,19 @@ impl std::fmt::Debug for ServerRegistryHeadWatch {
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    pub(crate) fn owner_head_snapshot_is_current(
+        &mut self,
+        store: &ServerStore,
+        server: u64,
+        snapshot: &ServerOwnerSnapshot,
+    ) -> bool {
+        snapshot.server == server
+            && Arc::ptr_eq(&snapshot.mount, &store.registry_mount())
+            && self
+                .sync
+                .with_durable_owner_snapshot(&snapshot.inner, |_, _, _, _| ())
+                .is_ok()
+    }
     /// Explicitly drive one owner rotation from the checked saved source, preserving the exact
     /// close/receipt across crashes. This does not publish: pending publication must be completed
     /// separately before a later decision can replace it. No native scheduler is started here.

@@ -61,6 +61,7 @@ use zeroize::Zeroizing;
 
 mod blob_fetch;
 pub mod checkpoint_exchange;
+pub mod epoch_service;
 mod owner_tenure;
 pub mod receipt_head;
 pub mod registry_catchup;
@@ -3785,6 +3786,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     registry_pages: registry_catchup::RegistryRequests,
     receipt_heads: receipt_head::HeadRequests,
     registry_seeds: registry_seed::SeedRequests,
+    epoch_service: epoch_service::EpochService,
     // A cancelled subscribe/unsubscribe may already have reached the transport. Reconcile this uncertain
     // topic before calculating the next routing diff; never lose unsubscribe ownership.
     routing_subscription_pending: Option<Topic>,
@@ -4220,6 +4222,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             registry_pages: registry_catchup::RegistryRequests::default(),
             receipt_heads: receipt_head::HeadRequests::default(),
             registry_seeds: registry_seed::SeedRequests::default(),
+            epoch_service: epoch_service::EpochService::default(),
             routing_subscription_pending: None,
             owner_tenure: owner_tenure::OwnerTenure::new(&group),
             group,

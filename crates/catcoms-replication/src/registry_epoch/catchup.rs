@@ -37,6 +37,21 @@ impl std::fmt::Debug for RegistryPageSource {
 }
 
 impl RegistryPageSource {
+    /// Read the same verified held head used by ordinary Registry restore. This remains a
+    /// local source fact: a network owner proof additionally requires durable journal agreement.
+    pub fn receipt_head(&self) -> Result<Option<&Receipt>, ReplError> {
+        self.0.receipt_head()
+    }
+    pub fn checkpoint_bytes_by_hash(
+        &mut self,
+        id: u128,
+        hash: [u8; 32],
+    ) -> Result<Option<Vec<u8>>, ReplError> {
+        self.0.checkpoint_bytes_by_hash(id, hash)
+    }
+    pub fn storage_protocol_bytes(&self) -> Result<usize, ReplError> {
+        self.0.storage_protocol_bytes()
+    }
     /// Verify exactly the same signed history, receipt book and gate as ordinary vault restore.
     /// The caller must bind the saved bytes to this server/bucket and recheck their currency
     /// before serving. Current provider/requester/author membership is checked at page time.

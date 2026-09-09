@@ -146,13 +146,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .into_iter()
             .map(|c| c.peer)
             .collect();
-        self.member_peers
+        let mut peers: Vec<_> = self
+            .member_peers
             .iter()
             .rev()
             .filter(|p| p.bound && live.contains(&p.peer) && self.group.contains_device(&p.device))
-            .map(|p| p.peer)
-            .take(4)
-            .collect()
+            .collect();
+        // Select the proven connected owner BEFORE the four-peer rail. Otherwise a fifth
+        // owner can never be asked for a current head while non-owner hints loop forever.
+        let owner = self.group.designated_committer();
+        peers.sort_by_key(|p| Some(p.device) != owner);
+        peers.into_iter().map(|p| p.peer).take(4).collect()
     }
     pub fn serve_studio_request<E>(
         &mut self,

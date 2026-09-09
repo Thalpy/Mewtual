@@ -4,6 +4,36 @@ use super::*;
 use catcoms_sync::receipt_head::ReceiptHeadSelection;
 
 impl ServerStore {
+    pub(crate) fn complete_registry_studio_handoff(
+        &mut self,
+        server: u64,
+        receipt: &Receipt,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        self.mark_epoch_owner_receipt_published(
+            server,
+            &receipt.document,
+            receipt.hash(),
+            rng,
+            &mut budget.storage,
+        )?;
+        Ok(())
+    }
+    /// Narrow checked status used after detached source preparation. No cold restore, no
+    /// mutation and no inferred checkpoint: absence must agree with the inventory as usual.
+    pub(crate) fn prepared_studio_status(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<Option<(u128, EpochPhase)>, AppError> {
+        self.with_studio_checkpoint_source(server, group, target, device, budget, |state| {
+            Ok((state.doc_id(), state.phase()))
+        })
+    }
     fn with_studio_checkpoint_source<V>(
         &mut self,
         server: u64,

@@ -4,6 +4,34 @@ use super::*;
 
 impl ServerStore {
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn read_registry_seed_prepared(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        id: u128,
+        hash: [u8; 32],
+        prepared: Option<(
+            &super::RegistrySourceStamp,
+            &mut catcoms_replication::registry_epoch::catchup::RegistryPageSource,
+        )>,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        self.checked_registry_checkpoint_source(
+            server,
+            group,
+            bucket,
+            device,
+            prepared.as_ref().map(|(stamp, source)| (*stamp, &**source)),
+            budget,
+        )?;
+        prepared
+            .map(|(_, source)| source.checkpoint_bytes_by_hash(id, hash).map_err(invalid))
+            .transpose()
+            .map(Option::flatten)
+    }
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn read_registry_seed(
         &mut self,
         server: u64,

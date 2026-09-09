@@ -102,6 +102,37 @@ impl ServerStudioReceive {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    /// Service-only counterpart: exact private request custody replaces the UI watch, while
+    /// the same provider, source checks and signed page engine remain the enforcement path.
+    pub(crate) fn serve_studio_page_interest(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        provider: &mut ServerStudioPageProvider,
+        interest: &catcoms_sync::epoch_service::EpochServiceInterest,
+    ) -> Result<Option<()>, AppError> {
+        let catcoms_sync::checkpoint_exchange::CheckpointTarget::Studio(target) = interest.target()
+        else {
+            return Err(invalid("Studio service requires Studio target"));
+        };
+        self.check_studio_channel(target)?;
+        if !self.studio_page_provider_is_current(store, server, provider) {
+            return Err(invalid("page provider was replaced"));
+        }
+        self.sync
+            .serve_epoch_page_interest(interest, |group, device, rng, request| {
+                store.serve_studio_page(
+                    server,
+                    group,
+                    target,
+                    device,
+                    &mut provider.inner,
+                    request,
+                    rng,
+                )
+            })?
+            .transpose()
+    }
     /// Reserve bounded ownership, verify and flush the checked starting state, then capture its
     /// frontier. No file is created when epoch zero is absent. The watch must already be installed
     /// and the provider endpoint proven. No vault borrow survives into a network request.

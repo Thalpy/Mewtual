@@ -9,6 +9,7 @@ use catcoms_rt::Responder;
 use registry_ingress::Rate;
 
 mod detached;
+mod service;
 mod wire;
 pub use detached::{CompletedCheckpointHead, PendingCheckpointHead};
 pub use wire::ReceiptHeadAnswer;
@@ -27,6 +28,8 @@ pub struct RegistryHeadWatch {
     instance: RegistrySyncInstance,
     target: CheckpointTarget,
     generation: Arc<()>,
+    // Present only for a private service token; never a receive/UI registration.
+    request: Option<Arc<()>>,
 }
 impl fmt::Debug for RegistryHeadWatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -34,6 +37,8 @@ impl fmt::Debug for RegistryHeadWatch {
     }
 }
 struct Pending {
+    id: Arc<()>,
+    preparing: bool,
     target: CheckpointTarget,
     generation: Arc<()>,
     inner: Vec<u8>,
@@ -110,6 +115,7 @@ pub struct ReceiptHeadHandoff {
     snapshot: DurableOwnerSnapshot,
     target: CheckpointTarget,
     generation: Arc<()>,
+    service: bool,
     receipt: Box<Receipt>,
     expires: u64,
 }
@@ -261,11 +267,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if self.clock.monotonic_ms() >= handoff.expires
             || !self.head_snapshot_is_current(&handoff.snapshot)
             || !self.head_member(&self.device.public_key_bytes())
-            || !self
+            || !(self
                 .receipt_heads
                 .watches
                 .get(&handoff.target)
                 .is_some_and(|g| Arc::ptr_eq(g, &handoff.generation))
+                || (handoff.service
+                    && self.epoch_service_generation_is_current(&handoff.generation)))
             || handoff.receipt.document != handoff.target.document(&self.group.group_id())?
         {
             return Err(SyncError::Unauthorized);
@@ -306,15 +314,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             instance: self.registry_instance(),
             target,
             generation,
+            request: None,
         })
     }
     pub fn registry_head_watch_is_current(&self, watch: &RegistryHeadWatch) -> bool {
         self.matches_registry_instance(&watch.instance)
-            && self
+            && (self
                 .receipt_heads
                 .watches
                 .get(&watch.target)
                 .is_some_and(|g| Arc::ptr_eq(g, &watch.generation))
+                || (watch.request.is_some()
+                    && self.epoch_service_generation_is_current(&watch.generation)))
     }
     pub fn unwatch_registry_head(&mut self, watch: &RegistryHeadWatch) -> Result<(), SyncError> {
         if !self.registry_head_watch_is_current(watch) {
@@ -344,7 +355,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) {
         let now = self.receipt_heads.expire(self.clock.monotonic_ms());
         if data.len() > MAX_QUERY + 144
-            || self.receipt_heads.watches.is_empty()
+            || (self.receipt_heads.watches.is_empty() && self.epoch_service.generation.is_none())
             || self.receipt_heads.pending.len() >= MAX_PENDING
             || !self
                 .receipt_heads
@@ -368,7 +379,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         // At most 256 fixed-size hashes, after authentication and the global preauth rail.
         // No untrusted key triggers a disk lookup or a concrete-epoch walk.
-        let Some(generation) = self.receipt_heads.watches.get(&target) else {
+        let Some(generation) = self
+            .receipt_heads
+            .watches
+            .get(&target)
+            .or(self.epoch_service.generation.as_ref())
+        else {
             return;
         };
         let generation = generation.clone();
@@ -400,6 +416,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         };
         self.receipt_heads.pending.push_back(Pending {
+            id: Arc::new(()),
+            preparing: false,
             target,
             generation,
             inner,
@@ -449,19 +467,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(SyncError::NoSuchDoc);
         }
         let now = self.receipt_heads.expire(self.clock.monotonic_ms());
-        let Some(index) = self
-            .receipt_heads
-            .pending
-            .iter()
-            .position(|p| p.target == watch.target)
-        else {
+        let Some(index) = self.receipt_heads.pending.iter().position(|p| {
+            p.target == watch.target
+                && watch
+                    .request
+                    .as_ref()
+                    .is_none_or(|id| Arc::ptr_eq(id, &p.id))
+        }) else {
             return Ok(None);
         };
-        if !self
-            .receipt_heads
-            .service
-            .get_or_insert_with(|| Rate::full(now, 4))
-            .charge(now, 2, 4)
+        if watch.request.is_none()
+            && !self
+                .receipt_heads
+                .service
+                .get_or_insert_with(|| Rate::full(now, 4))
+                .charge(now, 2, 4)
         {
             return Ok(None);
         }
@@ -544,6 +564,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 snapshot: snapshot.expect("proved durable snapshot").clone(),
                 target: watch.target,
                 generation: watch.generation.clone(),
+                service: watch.request.is_some(),
                 receipt: Box::new(answer.receipt.expect("proved receipt")),
                 expires: item.expires,
             })

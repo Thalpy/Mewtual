@@ -7,6 +7,72 @@ fn target() -> StudioTarget {
     }
 }
 
+#[test]
+fn studio_page_peers_prioritizes_connected_proven_owner_before_four_peer_cap() {
+    let hub = Hub::new();
+    let owner = MlsDevice::generate().unwrap();
+    let mut group = ServerGroup::create(&owner).unwrap();
+    let members: Vec<_> = (0..4).map(|_| MlsDevice::generate().unwrap()).collect();
+    for member in &members {
+        group
+            .add_member(&owner, member.key_package().unwrap())
+            .unwrap();
+    }
+    let mut node = ChannelSync::new(
+        hub.join(PeerId::from_u64(9)),
+        group,
+        owner,
+        ChaCha20Rng::seed_from_u64(19),
+        Box::new(ManualClock::new(1000)),
+    );
+    let owner_peer = PeerId::from_u64(10);
+    let _owner_net = hub.join(owner_peer);
+    node.promote_member_peer_bound(owner_peer, node.device.device_id(), true);
+    let mut nets = Vec::new();
+    for (i, member) in members.iter().enumerate() {
+        let peer = PeerId::from_u64(11 + i as u64);
+        nets.push(hub.join(peer));
+        node.promote_member_peer_bound(peer, member.device_id(), true);
+    }
+    let peers = node.studio_page_peers();
+    assert_eq!(peers.len(), 4);
+    assert_eq!(peers[0], owner_peer, "owner was fifth in recency order");
+    node.member_peers
+        .iter_mut()
+        .find(|p| p.peer == owner_peer)
+        .unwrap()
+        .bound = false;
+    assert!(
+        !node.studio_page_peers().contains(&owner_peer),
+        "priority never upgrades an unproven endpoint"
+    );
+}
+
+#[tokio::test]
+async fn epoch_service_unopened_page_does_not_create_or_replace_receive_watches() {
+    let (mut node, _, _, _) = setup();
+    let user = node.watch_studio(target(), 42).unwrap();
+    node.enable_epoch_service();
+    // Another concrete epoch is a service request, never a request to retarget the user's inbox.
+    let bytes = encode_scoped_query(PageScope::Studio(target()), 99, &[], None, None).unwrap();
+    let (bytes, _) = node.build_authed_request(KIND_STUDIO_PAGE, &bytes).unwrap();
+    let (tx, rx) = Responder::channel();
+    node.queue_epoch_page_request(KIND_STUDIO_PAGE, node.local_peer(), &bytes[1..], tx);
+    let interest = node.reserve_epoch_service_interest().unwrap();
+    assert_eq!(interest.doc_id(), Some(99));
+    assert!(node.studio_watch_is_current(&user));
+    assert!(node.reserve_epoch_service_interest().is_none());
+    node.serve_epoch_page_interest(&interest, |_, _, _, _| {
+        Ok::<_, ()>(RegistryPageOutcome::CheckpointRequired)
+    })
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert!(rx.recv().await.is_some());
+    assert!(node.studio_watch_is_current(&user));
+    assert_eq!(node.studio_exchange.watches.len(), 1);
+}
+
 #[tokio::test]
 async fn studio_page_transport_shares_registry_debt_and_rejects_watch_scope_replay() {
     let (mut node, _, registry, clock) = setup();

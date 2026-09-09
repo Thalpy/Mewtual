@@ -488,24 +488,38 @@ impl ServerStore {
         &self,
         scope: &[u8],
     ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        self.read_registry_record_bounded(scope, MAX_SEALED_BYTES)
+    }
+    fn read_registry_record_bounded(
+        &self,
+        scope: &[u8],
+        maximum: usize,
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
         let metadata = fs::symlink_metadata(self.dir.join("servers"))
             .map_err(|e| AppError::Io(e.to_string()))?;
         if !metadata.is_dir() || is_link(&metadata) {
             return Err(invalid("parent is not a regular directory"));
         }
-        self.read_epoch_registry_plain(&self.registry_epoch_path(scope))
+        self.read_epoch_registry_plain_bounded(&self.registry_epoch_path(scope), maximum)
     }
 
     pub(super) fn read_epoch_registry_plain(
         &self,
         path: &Path,
     ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        self.read_epoch_registry_plain_bounded(path, MAX_SEALED_BYTES)
+    }
+    fn read_epoch_registry_plain_bounded(
+        &self,
+        path: &Path,
+        maximum: usize,
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
         let metadata = match fs::symlink_metadata(path) {
             Ok(value) => value,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(AppError::Io(e.to_string())),
         };
-        if !regular_file(&metadata) || metadata.len() > MAX_SEALED_BYTES as u64 {
+        if !regular_file(&metadata) || metadata.len() > maximum as u64 {
             return Err(invalid("file is not bounded and regular"));
         }
         let file = File::open(path).map_err(|e| AppError::Io(e.to_string()))?;
@@ -513,10 +527,10 @@ impl ServerStore {
             return Err(invalid("opened file is not regular"));
         }
         let mut bytes = Vec::new();
-        file.take(MAX_SEALED_BYTES as u64 + 1)
+        file.take(maximum as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| AppError::Io(e.to_string()))?;
-        if bytes.len() > MAX_SEALED_BYTES {
+        if bytes.len() > maximum {
             return Err(invalid("file exceeds its bound"));
         }
         Ok(Some(AuthenticatedEpochFileBytes {

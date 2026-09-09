@@ -20,6 +20,29 @@ pub(crate) struct StudioReceiver {
     gossip_runs: usize,
 }
 impl StudioReceiver {
+    #[cfg(test)]
+    pub(crate) fn retaining_registry_for_test(
+        provider: crate::registry_catchup::ServerRegistryPageProvider,
+        until: u64,
+    ) -> Self {
+        let mut receiver = Self::default();
+        receiver.catchup.registry_cache_for_test(provider, until);
+        receiver
+    }
+    fn catchup_step<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+    ) -> Result<Option<StudioTarget>, AppError> {
+        let updated = self.catchup.run(server, store, id, &self.watches)?;
+        if let Some((target, epoch)) = self.catchup.take_binding() {
+            // Retarget only AFTER the saved source has crossed recovery/install barriers.
+            // The old subscription and queued concrete-epoch packets are revoked together.
+            self.observe(server, store, id, target, epoch)?;
+        }
+        Ok(updated)
+    }
     /// Notify before any bounded event-channel await: native work never waits on the event
     /// consumer, and event backpressure must not conceal an already-queued inbox packet.
     pub(crate) fn signal<T: MeshTransport, R: CryptoRngCore>(
@@ -104,6 +127,20 @@ impl StudioReceiver {
         id: u64,
         request: Option<StudioRequest>,
     ) -> Result<(StudioSavedTransaction, Option<StudioTarget>), AppError> {
+        // A background pass may not reinterpret existing watches under a different vault or
+        // numeric server, including lifecycle snapshot writes. Explicit access rebinds them.
+        if request.is_none()
+            && self
+                .watches
+                .iter()
+                .any(|(w, _)| w.server != id || !Arc::ptr_eq(&w.mount, &store.registry_mount()))
+        {
+            for (watch, _) in &self.watches {
+                let _ = server.unwatch_studio_epoch(watch);
+            }
+            return Err(invalid("Studio receive mount or numeric server changed"));
+        }
+        self.catchup.lifecycle(server, store, id);
         if let Some(request) = request {
             let updated = request.changes_state().then(|| request.target());
             let saved = server.studio_transaction_with_publication(store, id, request)?;
@@ -126,18 +163,34 @@ impl StudioReceiver {
             packets: vec![],
             observed: vec![],
         };
+        // Subscription/channel churn is not a vault fault. Revoke stale interests before
+        // catch-up can select them, without touching a newer external watch of the same key.
+        self.watches.retain(|(watch, _)| {
+            let keep = watch.server == id
+                && Arc::ptr_eq(&watch.mount, &store.registry_mount())
+                && server.sync.studio_watch_is_current(&watch.inner)
+                && server
+                    .channels()
+                    .iter()
+                    .any(|c| c.id == u128::from_be_bytes(watch.target.channel()));
+            if !keep {
+                let _ = server.unwatch_studio_epoch(watch);
+            }
+            keep
+        });
         if self.paused {
             return Ok((empty(), None));
         }
-        let serving = self
-            .watches
-            .iter()
-            .any(|(w, _)| server.sync.studio_has_page_request(&w.inner));
+        let serving = server.sync.has_epoch_service_interest()
+            || self
+                .watches
+                .iter()
+                .any(|(w, _)| server.sync.studio_has_page_request(&w.inner));
         if (serving && self.gossip_runs >= 1)
             || (self.gossip_runs >= 4 && self.catchup.pending(server, &self.watches))
         {
             self.gossip_runs = 0;
-            return match self.catchup.run(server, store, id, &self.watches) {
+            return match self.catchup_step(server, store, id) {
                 Ok(updated) => Ok((empty(), updated)),
                 Err(error) => {
                     self.paused = true;
@@ -151,7 +204,7 @@ impl StudioReceiver {
             .iter()
             .position(|(w, _)| server.sync.studio_has_inbound(&w.inner))
         else {
-            let result = self.catchup.run(server, store, id, &self.watches);
+            let result = self.catchup_step(server, store, id);
             return match result {
                 Ok(updated) => Ok((empty(), updated)),
                 Err(error) => {

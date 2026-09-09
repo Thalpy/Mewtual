@@ -104,6 +104,18 @@ impl EpochStudioState {
     }
 }
 impl ServerStore {
+    /// Use the SAME live five-family budget for a registry protocol transaction. No second
+    /// mutable accounting owner escapes; the generation and full server scope are checked first.
+    pub(crate) fn with_studio_protocol_budget<V>(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        budget: &mut EpochStudioBudget,
+        work: impl FnOnce(&mut Self, &mut EpochStorageBudget) -> Result<V, AppError>,
+    ) -> Result<V, AppError> {
+        self.enter_studio_budget(server, group, budget)?;
+        work(self, &mut budget.storage)
+    }
     /// Mint once from a completed CURRENT five-family scan. Minting again requires a new scan
     /// and supersedes the previous wrapper; reopening the vault invalidates all old handles.
     pub fn studio_storage_budget(

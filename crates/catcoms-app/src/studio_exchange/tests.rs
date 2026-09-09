@@ -20,6 +20,7 @@ mod discovery;
 mod pages;
 mod receiver;
 mod reconnect;
+mod unopened;
 
 const SERVER: u64 = 83;
 fn rng() -> ChaCha20Rng {

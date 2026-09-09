@@ -9,11 +9,27 @@ use crate::studio_exchange::discovery::{
 use catcoms_replication::{CheckpointSeed, EpochPhase, InheritedCheckpoint, Receipt};
 use catcoms_sync::checkpoint_exchange::CheckpointTarget;
 
-fn prepared_checkpoint(
+pub(super) fn prepared_checkpoint(
     p: &mut Pair,
     selected_target: StudioTarget,
 ) -> (Receipt, CheckpointSeed, u128) {
     let logical = selected_target.document(&p.alice.group_id()).unwrap();
+    let body = match selected_target {
+        StudioTarget::Flipnote { .. } => title(1, "checkpoint title").body,
+        StudioTarget::Index { .. } => IndexOp::PutObject {
+            object: [7; 16],
+            kind: StudioKind::Flipnote,
+            title: "checkpoint title".into(),
+            created_by: p
+                .alice
+                .sync
+                .with_registry_context(|_, d, _, _| d.device_id()),
+            ts: 1000,
+            expiry: StudioExpiry::Unrecorded,
+        }
+        .encode()
+        .unwrap(),
+    };
     p.alice
         .studio_transaction(
             &mut p.a_store,
@@ -22,7 +38,7 @@ fn prepared_checkpoint(
                 target: selected_target,
                 epoch_id: epoch_zero_id(logical.doc_type, &logical.logical_key),
                 nonce: [1; 16],
-                body: title(1, "checkpoint title").body,
+                body,
             },
         )
         .unwrap();
@@ -33,10 +49,10 @@ fn prepared_checkpoint(
             .unwrap()
             .unwrap();
         let mut projection = source.projection().unwrap();
-        let StudioProjection::Flipnote(ref mut art) = projection else {
-            panic!("art");
+        match &mut projection {
+            StudioProjection::Flipnote(art) => art.epoch = 0,
+            StudioProjection::Index(index) => index.epoch = 0,
         };
-        art.epoch = 0;
         let seed = projection.checkpoint([6; 32]).unwrap();
         let receipt = Receipt::sign(
             selected_target.document(&g.group_id()).unwrap(),
@@ -88,7 +104,7 @@ fn prepared_checkpoint(
     (receipt, seed, id)
 }
 
-async fn discover(
+pub(super) async fn discover(
     p: &mut Pair,
     watch: &ServerStudioCheckpointWatch,
     selected_target: StudioTarget,
@@ -127,7 +143,7 @@ async fn discover(
     pass
 }
 
-async fn fetch(
+pub(super) async fn fetch(
     p: &mut Pair,
     watch: &ServerStudioCheckpointWatch,
     pass: &mut ServerCheckpointFetch,

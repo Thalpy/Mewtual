@@ -7,6 +7,84 @@ fn cold(f: &mut Fixture) -> ServerRegistryPageProvider {
 }
 
 #[tokio::test]
+async fn registry_idle_runtime_caches_release_all_four_slots_for_another_studio_source() {
+    // Private pool keeps this resource-lifetime regression deterministic beside parallel
+    // suites. It is the same semaphore/job/source ownership used by the global process pool.
+    let pool = Arc::new(Semaphore::new(4));
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let mut f = Fixture::new();
+        f.edit(1);
+        let mut provider = cold(&mut f);
+        let job = f
+            .server
+            .begin_registry_page_preparation_with(&f.store, &mut provider, &pool)
+            .unwrap()
+            .unwrap();
+        let result = job.rebuild().await.unwrap();
+        f.server
+            .finish_registry_page_preparation(&f.store, &mut provider, result)
+            .unwrap();
+        let receiver = crate::studio::StudioReceiver::retaining_registry_for_test(provider, 31_000);
+        held.push((f, receiver));
+    }
+    assert_eq!(pool.available_permits(), 0);
+    for (f, receiver) in &mut held {
+        f.clock.advance_ms(29_999);
+        receiver
+            .run(&mut f.server, &mut f.store, SERVER, None)
+            .unwrap();
+    }
+    assert_eq!(pool.available_permits(), 0, "no premature refund");
+    for (f, receiver) in &mut held {
+        f.clock.advance_ms(1);
+        receiver
+            .run(&mut f.server, &mut f.store, SERVER, None)
+            .unwrap();
+    }
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "idle pass needs no UI access or new peer request"
+    );
+    // A fifth server can now reserve before capturing its real saved Studio graph.
+    let mut f = Fixture::new();
+    let channel = crate::channel_id("general").to_be_bytes();
+    f.server
+        .studio_transaction(
+            &mut f.store,
+            SERVER,
+            crate::studio::StudioRequest::Create {
+                channel,
+                object: [4; 16],
+                nonce: [5; 16],
+                title: "fifth".into(),
+                ts: 1000,
+            },
+        )
+        .unwrap();
+    let permit = pool.clone().try_acquire_owned().unwrap();
+    let target = catcoms_replication::studio::StudioTarget::Flipnote {
+        channel,
+        object: [4; 16],
+    };
+    let capture = f
+        .server
+        .sync
+        .with_registry_context(|g, d, _, _| f.store.capture_studio_source(SERVER, g, target, d))
+        .unwrap()
+        .unwrap();
+    let prepared = capture.rebuild().unwrap();
+    assert!(f
+        .server
+        .sync
+        .with_registry_context(|g, d, _, _| f.store.install_prepared_studio_source(g, d, prepared))
+        .unwrap());
+    drop(permit);
+    assert_eq!(pool.available_permits(), 4);
+}
+
+#[tokio::test]
 async fn registry_page_split_preparation_allows_saves_and_rejects_superseded_jobs() {
     let mut f = Fixture::new();
     f.edit(1);
@@ -21,10 +99,12 @@ async fn registry_page_split_preparation_allows_saves_and_rejects_superseded_job
     // the detached job exists; finishing that job must not install its obsolete projection.
     f.edit(2);
     let result = job.rebuild().await.unwrap();
-    assert!(f
-        .server
-        .finish_registry_page_preparation(&f.store, &mut provider, result)
-        .is_err());
+    assert!(
+        !f.server
+            .attach_registry_page_preparation_if_current(&f.store, &mut provider, result)
+            .unwrap(),
+        "healthy saved-source replacement is a discarded result, not a storage fault"
+    );
     let older = f
         .server
         .begin_registry_page_preparation_with(&f.store, &mut provider, &pool)
@@ -50,6 +130,15 @@ async fn registry_page_split_preparation_allows_saves_and_rejects_superseded_job
     assert!(provider.has_prepared_source());
     assert_eq!(f.page(&mut provider, None).operations.len(), 2);
     assert_eq!(pool.available_permits(), 3);
+    f.edit(3);
+    assert!(
+        !f.server
+            .registry_page_preparation_is_warm(&f.store, &mut provider)
+            .unwrap(),
+        "healthy rewrite of an attached graph requests preparation, not a storage pause"
+    );
+    assert!(!provider.has_prepared_source());
+    assert_eq!(pool.available_permits(), 4);
 }
 
 #[tokio::test]

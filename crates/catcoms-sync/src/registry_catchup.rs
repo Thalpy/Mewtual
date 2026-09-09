@@ -11,6 +11,7 @@ use catcoms_replication::studio::StudioTarget;
 use catcoms_rt::Responder;
 use registry_ingress::Rate;
 
+mod service;
 mod studio;
 pub use studio::{CompletedStudioPage, PendingStudioPage, StudioPageQuery, StudioReceivePermit};
 
@@ -56,6 +57,8 @@ const MAX_REQUEST: usize = MAX_SCOPED_QUERY + 144;
 const RESPONSE_DOMAIN: &str = "catcoms/registry-page-response/v1";
 
 struct Pending {
+    id: Arc<()>,
+    preparing: bool,
     query: OwnedQuery,
     inner: Vec<u8>,
     requester: DeviceId,
@@ -229,7 +232,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) {
         let now = self.registry_pages.expire(self.clock.monotonic_ms());
         if data.len() > MAX_REQUEST
-            || (self.registry_ingress.watches.is_empty() && self.studio_exchange.watches.is_empty())
+            || (self.registry_ingress.watches.is_empty()
+                && self.studio_exchange.watches.is_empty()
+                && self.epoch_service.generation.is_none())
             || self.registry_pages.pending.len() >= MAX_PENDING
             || !self
                 .registry_pages
@@ -256,7 +261,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let Ok(query) = decoded else {
             return;
         };
-        let Some((doc_id, generation)) = self.page_watch_binding(query.scope) else {
+        let Some((doc_id, generation)) = self
+            .page_watch_binding(query.scope)
+            .filter(|(id, _)| *id == query.doc_id)
+            .or_else(|| {
+                self.epoch_service
+                    .generation
+                    .clone()
+                    .map(|g| (query.doc_id, g))
+            })
+        else {
             return;
         };
         if doc_id != query.doc_id {
@@ -292,6 +306,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         };
         self.registry_pages.pending.push_back(Pending {
+            id: Arc::new(()),
+            preparing: false,
             query,
             inner,
             requester,
@@ -358,21 +374,35 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             RegistryPageRequest<'_>,
         ) -> Result<RegistryPageOutcome, E>,
     ) -> Result<Option<Result<(), E>>, SyncError> {
+        self.serve_epoch_request_bound(scope, doc_id, generation, None, serve)
+    }
+
+    fn serve_epoch_request_bound<E>(
+        &mut self,
+        scope: PageScope,
+        doc_id: u128,
+        generation: &Arc<()>,
+        request: Option<&Arc<()>>,
+        serve: impl FnOnce(
+            &ServerGroup,
+            &MlsDevice,
+            &mut R,
+            RegistryPageRequest<'_>,
+        ) -> Result<RegistryPageOutcome, E>,
+    ) -> Result<Option<Result<(), E>>, SyncError> {
         let now = self.registry_pages.expire(self.clock.monotonic_ms());
-        let Some(index) = self
-            .registry_pages
-            .pending
-            .iter()
-            .position(|item| item.query.scope == scope)
-        else {
+        let Some(index) = self.registry_pages.pending.iter().position(|item| {
+            item.query.scope == scope && request.is_none_or(|id| Arc::ptr_eq(id, &item.id))
+        }) else {
             return Ok(None);
         };
         // Leave bounded ownership on self when a service token is unavailable.
-        if !self
-            .registry_pages
-            .service
-            .get_or_insert_with(|| Rate::full(now, 4))
-            .charge(now, 2, 4)
+        if request.is_none()
+            && !self
+                .registry_pages
+                .service
+                .get_or_insert_with(|| Rate::full(now, 4))
+                .charge(now, 2, 4)
         {
             return Ok(None);
         }

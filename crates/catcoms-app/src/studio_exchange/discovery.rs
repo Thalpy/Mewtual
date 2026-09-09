@@ -28,6 +28,11 @@ pub struct CheckpointDiscoveryCompletion {
     server: u64,
     target: CheckpointTarget,
 }
+impl CheckpointDiscoveryCompletion {
+    pub(crate) fn target(&self) -> CheckpointTarget {
+        self.target
+    }
+}
 impl<T: MeshTransport> CheckpointDiscoveryAttempt<T> {
     pub async fn fetch(self) -> CheckpointDiscoveryCompletion {
         CheckpointDiscoveryCompletion {
@@ -64,6 +69,98 @@ impl std::fmt::Debug for ServerStudioCheckpointWatch {
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    pub(crate) fn install_registry_seed_for_studio(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        pass: &ServerCheckpointFetch,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<StudioAdoptionOutcome, AppError> {
+        if pass.server != server || !Arc::ptr_eq(&pass.mount, &store.registry_mount()) {
+            return Err(invalid("registry selection mount/server changed"));
+        }
+        let clock = self.runtime_clock();
+        self.sync
+            .with_registry_seed_selection(&pass.inner, |g, d, rng, selected| {
+                store.with_studio_protocol_budget(server, g, budget, |store, budget| {
+                    if !store.registry_receive_source_fits(
+                        server,
+                        &g.group_id(),
+                        selected.bucket,
+                    )? {
+                        return Err(invalid("Registry source needs local preparation"));
+                    }
+                    let (outcome, mut state) = store.adopt_registry_checkpoint(
+                        server,
+                        g,
+                        selected.bucket,
+                        d,
+                        selected.receipt,
+                        selected.checkpoint.map(|s| s.bytes()),
+                        selected.tenure,
+                        clock.as_ref(),
+                        rng,
+                        budget,
+                    )?;
+                    store.remember_installed_registry(
+                        server,
+                        &g.group_id(),
+                        selected.bucket,
+                        &mut state,
+                    )?;
+                    Ok(outcome)
+                })
+            })?
+    }
+    /// Unopened source service uses the exact prepaid request, never an implicit UI watch.
+    /// Owner snapshot is prepared by local lifecycle, not by this remote-triggered callback.
+    pub(crate) fn serve_studio_checkpoint_interest(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        interest: &catcoms_sync::epoch_service::EpochServiceInterest,
+        snapshot: Option<&ServerOwnerSnapshot>,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<Option<()>, AppError> {
+        use catcoms_sync::epoch_service::EpochServiceKind;
+        let CheckpointTarget::Studio(target) = interest.target() else {
+            return Err(invalid("Studio service target required"));
+        };
+        self.check_studio_channel(target)?;
+        match interest.kind() {
+            EpochServiceKind::Head => {
+                let snapshot = snapshot
+                    .filter(|s| {
+                        s.server == server && Arc::ptr_eq(&s.mount, &store.registry_mount())
+                    })
+                    .map(|s| &s.inner);
+                let served = self
+                    .sync
+                    .serve_epoch_head_interest(interest, snapshot, |g, d, rng, request| {
+                        store.prepare_studio_head(server, g, target, d, request.tenure, rng, budget)
+                    })?
+                    .transpose()?;
+                match served {
+                    Some(ReceiptHeadServed::Owner(handoff)) => {
+                        self.sync
+                            .with_receipt_head_handoff(handoff, |receipt, rng| {
+                                store.complete_studio_head(server, receipt, rng, budget)
+                            })??;
+                        Ok(Some(()))
+                    }
+                    Some(ReceiptHeadServed::Hint) => Ok(Some(())),
+                    None => Ok(None),
+                }
+            }
+            EpochServiceKind::Seed => self
+                .sync
+                .serve_epoch_seed_interest(interest, |g, d, id, hash| {
+                    store.read_studio_seed(server, g, target, d, id, hash, budget)
+                })?
+                .transpose(),
+            EpochServiceKind::Page => Err(invalid("page service needs its cursor provider")),
+        }
+    }
     fn check_checkpoint_target(&self, target: CheckpointTarget) -> Result<(), AppError> {
         if let CheckpointTarget::Studio(target) = target {
             self.check_studio_channel(target)?;
@@ -78,10 +175,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         peer: PeerId,
         target: CheckpointTarget,
     ) -> Result<CheckpointDiscoveryAttempt<T>, AppError> {
+        self.prepare_checkpoint_discovery_at_mount(store.registry_mount(), server, peer, target)
+    }
+    pub(crate) fn prepare_checkpoint_discovery_at_mount(
+        &mut self,
+        mount: Arc<()>,
+        server: u64,
+        peer: PeerId,
+        target: CheckpointTarget,
+    ) -> Result<CheckpointDiscoveryAttempt<T>, AppError> {
         self.check_checkpoint_target(target)?;
         Ok(CheckpointDiscoveryAttempt {
             inner: self.sync.prepare_checkpoint_discovery(peer, target)?,
-            mount: store.registry_mount(),
+            mount,
             server,
             target,
         })

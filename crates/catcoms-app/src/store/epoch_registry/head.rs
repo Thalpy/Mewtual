@@ -72,11 +72,16 @@ impl ServerStore {
                     )
                 })
                 .transpose()?;
-            let journal = self.load_epoch_owner_receipts(server, &document)?;
-            let owner_record = self.epoch_owner_receipt_inventory_record(server, &document)?;
-            Ok::<_, AppError>((unit, record, journal, owner_record))
+            let held = unit
+                .as_ref()
+                .map(RegistryEpoch::receipt_head)
+                .transpose()
+                .map_err(invalid)?
+                .flatten()
+                .cloned();
+            Ok::<_, AppError>((held, record))
         })();
-        let (unit, record, journal, owner_record) = match loaded {
+        let (held, record) = match loaded {
             Ok(value) => value,
             Err(error) => {
                 budget.invalidate();
@@ -86,6 +91,44 @@ impl ServerStore {
         budget
             .verify_record(&storage_scope, *blake3::hash(&scope).as_bytes(), record)
             .map_err(invalid)?;
+        self.finish_registry_head_source(
+            server,
+            group,
+            bucket,
+            device,
+            durable_tenure,
+            rng,
+            budget,
+            held,
+            record,
+            sync,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_registry_head_source(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        durable_tenure: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        held: Option<Receipt>,
+        record: Option<StorageRecord>,
+        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+    ) -> Result<ReceiptHeadSelection, AppError> {
+        let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        let scope = scope_bytes(server, &document)?;
+        let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
+        let (journal, owner_record) = (|| {
+            Ok::<_, AppError>((
+                self.load_epoch_owner_receipts(server, &document)?,
+                self.epoch_owner_receipt_inventory_record(server, &document)?,
+            ))
+        })()
+        .inspect_err(|_| budget.invalidate())?;
         let owner_scope = super::super::epoch_owner::scope_bytes(server, &document)?;
         budget
             .verify_record(
@@ -94,12 +137,7 @@ impl ServerStore {
                 owner_record,
             )
             .map_err(invalid)?;
-        let held = unit
-            .as_ref()
-            .map(RegistryEpoch::receipt_head)
-            .transpose()
-            .map_err(invalid)?
-            .flatten();
+        let held = held.as_ref();
         let own_choice = journal.pending().or_else(|| journal.published());
         let is_owner = group.designated_committer() == Some(device.device_id());
         let selected = if is_owner {
@@ -141,5 +179,38 @@ impl ServerStore {
             )?;
         }
         Ok(ReceiptHeadSelection { receipt, prove })
+    }
+
+    /// Same journal/flush/signing-selection barriers as the explicit cold adapter, without a
+    /// second restore of an already prepared source. The caller retains its preparation slot.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_registry_head_prepared(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        tenure: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        prepared: Option<(
+            &super::RegistrySourceStamp,
+            &catcoms_replication::registry_epoch::catchup::RegistryPageSource,
+        )>,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<ReceiptHeadSelection, AppError> {
+        let (head, record) = self
+            .checked_registry_checkpoint_source(server, group, bucket, device, prepared, budget)?;
+        self.finish_registry_head_source(
+            server,
+            group,
+            bucket,
+            device,
+            tenure,
+            rng,
+            budget,
+            head,
+            record,
+            sync_registry,
+        )
     }
 }

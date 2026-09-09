@@ -129,8 +129,151 @@ impl std::fmt::Debug for ServerRegistryPageProvider {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    pub(crate) fn remember_registry_service_inventory(
+        &mut self,
+        store: &mut ServerStore,
+        provider: &ServerRegistryPageProvider,
+    ) -> Result<(), AppError> {
+        self.check_page_provider(store, provider)?;
+        let prepared = provider
+            .prepared
+            .as_ref()
+            .ok_or_else(preparation_required)?;
+        store.cache_registry_source_footprint(provider.server, &prepared.stamp, &prepared.source)
+    }
+    pub(crate) fn registry_page_provider_matches(
+        &mut self,
+        store: &ServerStore,
+        server: u64,
+        bucket: u8,
+        provider: &ServerRegistryPageProvider,
+    ) -> bool {
+        provider.server == server
+            && provider.bucket == bucket
+            && self.check_page_provider(store, provider).is_ok()
+    }
+    pub(crate) fn registry_page_preparation_is_warm(
+        &mut self,
+        store: &ServerStore,
+        provider: &mut ServerRegistryPageProvider,
+    ) -> Result<bool, AppError> {
+        self.check_page_provider(store, provider)?;
+        if provider.prepared.is_none() {
+            return Ok(false);
+        }
+        // A valid rewrite is normal supersession, not corruption. Drop first so failures
+        // never leave a fallback graph; only actual I/O/authentication errors propagate.
+        let prepared = provider.prepared.take().expect("checked source");
+        if !store.registry_page_source_is_current(&prepared.stamp)? {
+            return Ok(false);
+        }
+        provider.prepared = Some(prepared);
+        Ok(true)
+    }
+    /// Head/seed/page service from the existing one prepared Registry source. Its semaphore
+    /// permit follows the graph's actual lifetime, including cancellation and queued results.
+    pub(crate) fn serve_registry_interest(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        provider: &mut ServerRegistryPageProvider,
+        interest: &catcoms_sync::epoch_service::EpochServiceInterest,
+        snapshot: Option<&crate::registry_head::ServerOwnerSnapshot>,
+        budget: &mut crate::store::EpochStudioBudget,
+    ) -> Result<Option<()>, AppError> {
+        use catcoms_sync::epoch_service::EpochServiceKind;
+        use catcoms_sync::receipt_head::ReceiptHeadServed;
+        let catcoms_sync::checkpoint_exchange::CheckpointTarget::Registry(bucket) =
+            interest.target()
+        else {
+            return Err(preparation_required());
+        };
+        if !self.registry_page_provider_matches(store, server, bucket, provider) {
+            return Err(preparation_required());
+        }
+        match interest.kind() {
+            EpochServiceKind::Head => {
+                let snapshot = snapshot
+                    .filter(|s| {
+                        s.server == server && Arc::ptr_eq(&s.mount, &store.registry_mount())
+                    })
+                    .map(|s| &s.inner);
+                let served = self
+                    .sync
+                    .serve_epoch_head_interest(interest, snapshot, |g, d, rng, request| {
+                        store.with_studio_protocol_budget(server, g, budget, |store, budget| {
+                            store.prepare_registry_head_prepared(
+                                server,
+                                g,
+                                bucket,
+                                d,
+                                request.tenure,
+                                rng,
+                                provider.prepared.as_ref().map(|p| (&p.stamp, &p.source)),
+                                budget,
+                            )
+                        })
+                    })?
+                    .transpose()?;
+                if let Some(ReceiptHeadServed::Owner(handoff)) = served {
+                    self.sync
+                        .with_receipt_head_handoff(handoff, |receipt, rng| {
+                            // The source/journal were just checked under the same exclusive gate;
+                            // native custody and this budget remain held through completion.
+                            store.complete_registry_studio_handoff(server, receipt, rng, budget)
+                        })??;
+                    return Ok(Some(()));
+                }
+                Ok(served.map(|_| ()))
+            }
+            EpochServiceKind::Seed => self
+                .sync
+                .serve_epoch_seed_interest(interest, |g, d, id, hash| {
+                    store.with_studio_protocol_budget(server, g, budget, |store, budget| {
+                        store.read_registry_seed_prepared(
+                            server,
+                            g,
+                            bucket,
+                            d,
+                            id,
+                            hash,
+                            provider
+                                .prepared
+                                .as_mut()
+                                .map(|p| (&p.stamp, &mut p.source)),
+                            budget,
+                        )
+                    })
+                })?
+                .transpose(),
+            EpochServiceKind::Page => self
+                .sync
+                .serve_epoch_page_interest(interest, |g, d, rng, request| {
+                    if !provider
+                        .inner
+                        .preflight_request(g, d, bucket, &request)
+                        .map_err(|e| AppError::Invalid(e.to_string()))?
+                    {
+                        return Ok(RegistryPageOutcome::Restart);
+                    }
+                    provider.check_source(store)?;
+                    provider
+                        .inner
+                        .page_prepared(
+                            &provider.prepared.as_ref().expect("checked").source,
+                            g,
+                            d,
+                            request,
+                            rng,
+                        )
+                        .map_err(|e| AppError::Invalid(e.to_string()))
+                })?
+                .transpose(),
+        }
+    }
     /// Capture a saved source under lifecycle/store custody, then release that custody BEFORE
-    /// awaiting the job's `rebuild`. No network request triggers preparation. None means actual
+    /// awaiting the job's `rebuild`. Synchronous responders never rebuild; the bounded runtime
+    /// may capture only after local need or exact prepaid request admission. None means actual
     /// absence, not a proof of empty history. Capacity/corruption are errors. Refresh drops the
     /// old cache but keeps the cursor MAC; any previously captured completion is superseded.
     pub fn begin_registry_page_preparation(
@@ -154,6 +297,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let permit = pool.clone().try_acquire_owned().map_err(|_| {
             AppError::Invalid("registry page preparation capacity exhausted".into())
         })?;
+        self.begin_registry_page_preparation_reserved(store, provider, permit)
+    }
+
+    /// Runtime owns a permit from the shared pool before capture. Passing it explicitly lets
+    /// local discovery distinguish capacity contention from actual file/verification errors.
+    pub(crate) fn begin_registry_page_preparation_reserved(
+        &mut self,
+        store: &ServerStore,
+        provider: &mut ServerRegistryPageProvider,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<Option<ServerRegistryPagePreparation>, AppError> {
+        self.check_page_provider(store, provider)?;
+        provider.prepared = None;
+        provider.preparation_generation = Arc::new(());
         let capture = store.capture_registry_page_source(
             provider.server,
             &self.group_id(),
@@ -183,11 +340,32 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "registry page preparation was replaced".into(),
             ));
         }
+        if self.attach_registry_page_preparation_if_current(store, provider, prepared)? {
+            Ok(())
+        } else {
+            Err(preparation_required())
+        }
+    }
+
+    /// A detached result can lose a normal lifecycle/source race. False distinguishes that
+    /// discard from I/O/authentication failure; neither grants source or inventory authority.
+    pub(crate) fn attach_registry_page_preparation_if_current(
+        &mut self,
+        store: &ServerStore,
+        provider: &mut ServerRegistryPageProvider,
+        prepared: ServerPreparedRegistryPageSource,
+    ) -> Result<bool, AppError> {
+        if self.check_page_provider(store, provider).is_err() {
+            return Ok(false);
+        }
+        if !Arc::ptr_eq(&provider.preparation_generation, &prepared.generation) {
+            return Ok(false);
+        }
         if !store.registry_page_source_is_current(&prepared.inner.stamp)? {
-            return Err(preparation_required());
+            return Ok(false);
         }
         provider.prepared = Some(prepared.inner);
-        Ok(())
+        Ok(true)
     }
 
     // Convenience only for tests without actor/store mutexes. Production uses the split API
