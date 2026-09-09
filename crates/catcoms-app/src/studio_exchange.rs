@@ -10,6 +10,12 @@ use catcoms_rt::{CryptoRngCore, MeshTransport, PublishSubmission};
 use catcoms_sync::{StudioWatch, SyncError};
 use std::sync::Arc;
 
+mod pages;
+pub use pages::{
+    ServerStudioPageProvider, ServerStudioReceive, StudioPageAttempt, StudioPageCompletion,
+    StudioReceiveProgress, StudioReceiveState,
+};
+
 /// Scope is captured, not supplied again at drain. Dropping this handle alone does not revoke
 /// its desired transport subscription; explicitly unwatch before replacing lifecycle custody.
 pub struct ServerStudioWatch {

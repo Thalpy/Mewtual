@@ -18,7 +18,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 // Process-wide, not per Server/mount: dropping a cancelled caller or remounting must not refund
 // a worker that still owns plaintext. A permit covers capture, queued/running work AND retention.
 const MAX_PREPARED_REGISTRY_SOURCES: usize = 4;
-fn preparation_pool() -> &'static Arc<Semaphore> {
+pub(crate) fn preparation_pool() -> &'static Arc<Semaphore> {
     static POOL: OnceLock<Arc<Semaphore>> = OnceLock::new();
     POOL.get_or_init(|| Arc::new(Semaphore::new(MAX_PREPARED_REGISTRY_SOURCES)))
 }

@@ -3368,6 +3368,7 @@ where
     let (studio_signal, studio_pending) = tokio::sync::watch::channel(false);
     let handle = tokio::spawn(async move {
         let mut studio_receiver = crate::studio::StudioReceiver::default();
+        let mut studio_jobs = tokio::task::JoinSet::<crate::studio::StudioBackgroundResult>::new();
         // Per open channel: a content signature of its messages, topic and jukebox (see
         // `channel_delta`), so an edit/delete/add all surface a `ChannelUpdated` that says which
         // of the three it was.
@@ -3955,7 +3956,10 @@ where
                         };
                         // Keep custody through the bounded initial send, but never through replies
                         // or bounded event backpressure. A send result cannot change Save success.
+                        let background = if result.is_ok() && !lease.is_cancelled() { studio_receiver.detach(&mut server) } else { None };
+                        let cancellation = lease.background_cancellation();
                         drop(lease);
+                        if let Some(job) = background { studio_jobs.spawn(job.run(cancellation)); }
                         studio_receiver.signal(&server, &studio_signal);
                         let _ = reply.send(result);
                         if let Some(target) = updated {
@@ -4705,6 +4709,14 @@ where
                     event_tx.idle();
                     if let Some(completed) = completed {
                         file_transfers.complete(&mut server, completed);
+                    }
+                },
+                completed = studio_jobs.join_next(), if !studio_jobs.is_empty() => {
+                    event_tx.idle();
+                    match completed {
+                        Some(Ok(result)) => studio_receiver.complete(&mut server, result),
+                        Some(Err(_)) => { tracing::error!("Studio background task panicked; stopping actor"); return; },
+                        None => {}
                     }
                 },
                 // A receipt may be the final network event in a quiet room. Wake from the same

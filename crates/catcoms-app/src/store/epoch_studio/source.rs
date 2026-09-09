@@ -6,7 +6,7 @@ use catcoms_crypto::DeviceId;
 
 /// Encoded input bound, NOT a resident-heap promise. Existing graph/operation/projection limits
 /// still bound the parsed unit, the transient preflight draft, and serialization allocations.
-const MAX_RETAINED_BYTES: u64 = 8 * 1024 * 1024;
+pub(super) const MAX_RETAINED_BYTES: u64 = 8 * 1024 * 1024;
 
 #[cfg(test)]
 thread_local! {
@@ -34,6 +34,23 @@ pub(super) struct SourceVersion {
     digest: blake3::Hash,
     record: StorageRecord,
     bytes: u64,
+}
+impl SourceVersion {
+    pub(super) fn prepared(
+        mount: Arc<()>,
+        server: u64,
+        digest: blake3::Hash,
+        record: StorageRecord,
+        bytes: u64,
+    ) -> Self {
+        Self {
+            mount,
+            server,
+            digest,
+            record,
+            bytes,
+        }
+    }
 }
 impl std::fmt::Debug for SourceVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -148,7 +165,10 @@ impl ServerStore {
         Ok(result)
     }
 
-    fn studio_source_bytes_match(&self, state: &EpochStudioState) -> Result<bool, AppError> {
+    pub(super) fn studio_source_bytes_match(
+        &self,
+        state: &EpochStudioState,
+    ) -> Result<bool, AppError> {
         let Some(version) = state.source.as_ref() else {
             return Ok(false);
         };

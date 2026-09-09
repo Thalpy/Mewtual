@@ -25,9 +25,9 @@ fn key(target: StudioTarget) -> Key {
 /// Exact local watch, not a wire or UI capability. Replacement drops queued packets immediately.
 /// Callers derive the concrete epoch from their verified source, never from incoming traffic.
 pub struct StudioWatch {
-    target: StudioTarget,
-    doc_id: u128,
-    generation: Arc<()>,
+    pub(super) target: StudioTarget,
+    pub(super) doc_id: u128,
+    pub(super) generation: Arc<()>,
     instance: RegistrySyncInstance,
 }
 impl fmt::Debug for StudioWatch {
@@ -35,10 +35,20 @@ impl fmt::Debug for StudioWatch {
         f.write_str("StudioWatch { .. }")
     }
 }
+impl StudioWatch {
+    pub(super) fn copy_binding(&self) -> Self {
+        Self {
+            target: self.target,
+            doc_id: self.doc_id,
+            generation: self.generation.clone(),
+            instance: self.instance.clone(),
+        }
+    }
+}
 pub(super) struct Watched {
-    target: StudioTarget,
+    pub(super) target: StudioTarget,
     pub(super) doc_id: u128,
-    generation: Arc<()>,
+    pub(super) generation: Arc<()>,
 }
 struct Incoming {
     key: Key,
@@ -68,6 +78,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(SyncError::Malformed);
         }
         let generation = Arc::new(());
+        if let Some(old) = self.studio_exchange.watches.get(&key) {
+            self.registry_pages.drop_studio(old.target);
+        }
         self.studio_exchange.queue.retain(|item| item.key != key);
         self.studio_exchange.watches.insert(
             key,
@@ -131,6 +144,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(SyncError::NoSuchDoc);
         }
         let key = key(watch.target);
+        self.registry_pages.drop_studio(watch.target);
         self.studio_exchange.watches.remove(&key);
         self.studio_exchange.queue.retain(|item| item.key != key);
         self.needs_resync = true;

@@ -7,6 +7,7 @@ use rand_core::SeedableRng;
 mod inventory_cache;
 mod pages;
 pub(crate) mod performance;
+mod preparation;
 mod source;
 
 const SERVER: u64 = 73;

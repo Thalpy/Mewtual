@@ -6,6 +6,8 @@ use crate::studio_exchange::ServerStudioWatch;
 use catcoms_replication::Admission;
 use std::collections::VecDeque;
 use std::sync::Arc;
+mod catchup;
+pub(crate) use catchup::StudioBackgroundResult;
 
 /// Recently accessed targets, bounded by the existing sync watch rail. Reopening the same exact
 /// source preserves its inbox; eviction explicitly revokes the old subscription and queued work.
@@ -14,6 +16,8 @@ pub(crate) struct StudioReceiver {
     watches: VecDeque<(ServerStudioWatch, u128)>,
     paused: bool,
     pause_notice: bool,
+    catchup: catchup::CatchupRuntime,
+    gossip_runs: usize,
 }
 impl StudioReceiver {
     /// Notify before any bounded event-channel await: native work never waits on the event
@@ -38,10 +42,10 @@ impl StudioReceiver {
         server: &Server<T, R>,
     ) -> bool {
         !self.paused
-            && self
-                .watches
-                .iter()
-                .any(|(watch, _)| server.sync.studio_has_inbound(&watch.inner))
+            && (self.watches.iter().any(|(watch, _)| {
+                server.sync.studio_has_inbound(&watch.inner)
+                    || server.sync.studio_has_page_request(&watch.inner)
+            }) || self.catchup.pending(server, &self.watches))
     }
     pub(crate) fn take_pause_notice(&mut self) -> bool {
         std::mem::take(&mut self.pause_notice)
@@ -106,6 +110,8 @@ impl StudioReceiver {
             // Only explicit successful access retries a failed/over-budget background pass.
             // More inbound traffic cannot repeatedly restart expensive failed disk work.
             self.paused = false;
+            self.catchup
+                .explicit_retry(server.runtime_clock().monotonic_ms());
             for &(target, epoch) in &saved.observed {
                 // A trusted cooperative caller can occupy the sync watch rail separately. A
                 // watch refusal must not misreport an already-durable Save as failed.
@@ -123,14 +129,40 @@ impl StudioReceiver {
         if self.paused {
             return Ok((empty(), None));
         }
+        let serving = self
+            .watches
+            .iter()
+            .any(|(w, _)| server.sync.studio_has_page_request(&w.inner));
+        if (serving && self.gossip_runs >= 1)
+            || (self.gossip_runs >= 4 && self.catchup.pending(server, &self.watches))
+        {
+            self.gossip_runs = 0;
+            return match self.catchup.run(server, store, id, &self.watches) {
+                Ok(updated) => Ok((empty(), updated)),
+                Err(error) => {
+                    self.paused = true;
+                    self.pause_notice = true;
+                    Err(error)
+                }
+            };
+        }
         let Some(index) = self
             .watches
             .iter()
             .position(|(w, _)| server.sync.studio_has_inbound(&w.inner))
         else {
-            return Ok((empty(), None));
+            let result = self.catchup.run(server, store, id, &self.watches);
+            return match result {
+                Ok(updated) => Ok((empty(), updated)),
+                Err(error) => {
+                    self.paused = true;
+                    self.pause_notice = true;
+                    Err(error)
+                }
+            };
         };
         let (watch, epoch) = self.watches.remove(index).expect("pending watch index");
+        self.gossip_runs = self.gossip_runs.saturating_add(1);
         // Round-robin work selection: one busy document cannot monopolize every receive pass.
         self.watches.push_back((watch, epoch));
         let watch = &self.watches.back().expect("selected watch").0;
@@ -152,6 +184,19 @@ impl StudioReceiver {
             return Ok((empty(), None));
         }
         let received = (|| {
+            // Serving another watched target can displace this graph. Prepare the existing
+            // source off-actor before draining; a healthy cold target is not a storage failure.
+            // Actual absence needs no rebuild; inventory still verifies that fact before Save.
+            let large_cold = server.sync.with_registry_context(|g, d, _, _| {
+                if store.studio_source_is_warm(id, g, watch.target, d) {
+                    Ok(false)
+                } else {
+                    store.studio_receive_needs_preparation(id, &g.group_id(), watch.target)
+                }
+            })?;
+            if large_cold && !self.catchup.prepare(server, store, id, watch.target)? {
+                return Ok(None);
+            }
             // A warm candidate permits only bounded authentication, not stale-source use.
             // The store takes ownership and checks exact bytes again before actual ingest.
             server.sync.with_registry_context(|group, device, _, _| {

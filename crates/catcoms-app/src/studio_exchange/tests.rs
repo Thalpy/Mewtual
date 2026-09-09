@@ -16,7 +16,9 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Waker};
 mod actor_save;
+mod pages;
 mod receiver;
+mod reconnect;
 
 const SERVER: u64 = 83;
 fn rng() -> ChaCha20Rng {
@@ -82,6 +84,20 @@ impl MeshTransport for Net {
     fn local_peer(&self) -> PeerId {
         self.inner.local_peer()
     }
+    fn connection_snapshot(&self) -> Vec<catcoms_rt::PeerConnectionSnapshot> {
+        self.inner.connection_snapshot()
+    }
+    async fn request_connected_cancellable(
+        &self,
+        p: PeerId,
+        proto: ProtocolId,
+        b: Bytes,
+        c: RequestCancellation,
+    ) -> Result<Bytes, TransportError> {
+        self.inner
+            .request_connected_cancellable(p, proto, b, c)
+            .await
+    }
     async fn subscribe(&self, t: Topic) -> Result<(), TransportError> {
         self.inner.subscribe(t).await
     }
@@ -137,6 +153,7 @@ fn budget(node: &mut Node, store: &mut ServerStore) -> EpochStudioBudget {
         .unwrap()
 }
 struct Pair {
+    hub: Arc<Hub>,
     _a_root: tempfile::TempDir,
     b_root: tempfile::TempDir,
     alice: Node,
@@ -168,7 +185,7 @@ impl Pair {
                 bob_wire,
                 MlsDevice::generate().unwrap(),
                 rng(),
-                Box::new(ManualClock::new(1000)),
+                Box::new(clock.clone()),
                 "bob",
                 alice.local_peer(),
                 &invite
@@ -184,6 +201,7 @@ impl Pair {
         let watch = bob.watch_studio_epoch(&b_store, SERVER, target()).unwrap();
         bob.flush_studio_subscriptions().await.unwrap();
         Self {
+            hub,
             _a_root: a_root,
             b_root,
             alice,

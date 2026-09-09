@@ -36,7 +36,7 @@ for unrelated document types. Tests and review accompany each slice, not only ga
 |---|---|---|
 | 1. Typed Flipnote documents | Rust StudioIndex/Flipnote domain-op validation, deterministic projection, conflict/Restore data and exact checkpoint preflight; frame, byte, sfx and patch caps. Unsupported linked-score behavior stays unavailable until gate 6, never silently accepted. | Tests exercise valid edits, malformed/cross-document operations, both concurrent delivery orders and cap boundaries through the real P1 gate. |
 | 2. Durable one-device Save/Load | **Index/art milestone implemented:** accounted vault/lifecycle ownership, native commands, real PIX CIDs, sealed intents, conservative source/seed/recovery reference protection and three-state expiry. Extend these same seams to actual sound/export records in gate 6. No UI edits. | Actor/native create/edit/restart/reopen uses real CIDs. Failure cases preserve durable state. Fileshare unlisting/upload cleanup cannot delete referenced pixels; full scans/restart include superseded seed/history, pending intents and retained/staged recovery. Open edits remain provisional. |
-| 3. Two-member collaboration and joining | **Live sharing, one prepared source and cooperative Studio page serving/atomic page saving implemented.** Still: authenticated Studio page transport, cursor/retry owner and reconnect scheduling; keyed discovery/Studio seed installation; retained cold-source performance limits. Reuse native snapshot/cancellation custody. | Live commands exchange durable edits/events and reopen after restart. Distinct-member Index/art tests now transfer 70 operations across pages and reopen identical projections; real >256-KiB provider/receiver fixtures reuse prepared graphs. Page tests cover invalid middle operations, crash uncertainty and exact retry. These are core/vault adapters, not automatic reconnect or newcomer joining. One slot permits 8 MiB encoded input; cold sources still cap at 256 KiB, inventory at 8 MiB read / 256 KiB cold. |
+| 3. Two-member collaboration and joining | **Live sharing and automatic same-epoch catch-up implemented:** authenticated Studio pages share Registry transport budgets, detached attempts leave actors available, and cold watched sources reuse the one prepared graph. Still: service for unopened keys, keyed discovery/Studio seed installation and newcomer acceptance. Reuse native snapshot/cancellation custody. | Distinct-member transport tests transfer 70 operations over three durable pages and reopen. Two real actors repair missed independent edits simultaneously without further Read/Save. Regressions cover cancellation, channel/member changes, fair service and displaced >256-KiB source preparation. Native idle wakes repair silent reconnect. This does not close newcomer joining. One slot permits 8 MiB encoded input; inventory retains 8 MiB read / 256 KiB cold rails. |
 | 4. Rotation and recovery in the running app | Drive owner receipts without needing another member's query; atomic sealing, recovery-first settlement, own-intent replay, owner succession, fault/repair and recovery actions/events for the active types. | Production-adapter scenarios cover rotation, restart, owner offline/return, excluded edits, Restore/Copy/Export, storage exhaustion and staged-snapshot warnings. No pruning before the receipt and durable recovery barriers. |
 | 5. Collaborative frame claims | Required full-identity signalling and shared channel admission; bounded capability/session-bound claim, Ask and Pass messages with receiver-observed expiry. No game/avatar path or standalone drawing feature. | Two members observe advisory claim/Ask/Pass/expiry; collision, replay and disconnect tests pass. Claims never become edit locks. |
 | 6. Sound and export | Linked-score typed operations/preflight/recovery, sfx/emoji patch sources, 64-patch union, deterministic valid-take export and byte-exact `.pixa` publication with durable export records. Cover the specified local GIF export contract without taking over UI design. | No-score and linked-score golden vectors, maximal accepted exports and malformed/over-cap rejection pass; exported bytes can be read back and validated. Playback-facing contracts preserve Deafen and membership teardown. |
@@ -123,6 +123,8 @@ Paths below use `rep/` = `crates/catcoms-replication/src/`, `app/` = `crates/cat
 | Authenticated inventory-validation reuse / 3 | `ee67ad2` | [inventory/cache.rs](../crates/catcoms-app/src/store/epoch_recovery/inventory/cache.rs), [inventory.rs](../crates/catcoms-app/src/store/epoch_recovery/inventory.rs), [epoch_studio.rs](../crates/catcoms-app/src/store/epoch_studio.rs), [receiver regression](../crates/catcoms-app/src/studio_exchange/tests/receiver.rs), [profiling harness](../crates/catcoms-app/src/store/epoch_registry/tests/performance.rs) | Existing scanner memoizes pure validated footprints in a 64-entry mount-local LRU after fresh full-wrapper authentication/digest matching. Small targets receive beside warm larger unrelated histories under 8 MiB read / 256 KiB cold rails. Dense ~4.9-MiB inventory measured 10,646 ms cold versus 11/11/11 ms warm; full accounting/reference checks remain. Its cold-only active target policy is superseded only for the one prepared source below. This LRU is not a document cache, storage owner or receiver. |
 | One owned active Studio source / 3 | `0d74190` | [epoch_studio/source.rs](../crates/catcoms-app/src/store/epoch_studio/source.rs), [app/studio.rs](../crates/catcoms-app/src/studio.rs), [receiver.rs](../crates/catcoms-app/src/studio/receiver.rs), [source regressions](../crates/catcoms-app/src/store/epoch_studio/tests/source.rs), [two-member regression](../crates/catcoms-app/src/studio_exchange/tests/receiver.rs), [Studio probe](../crates/catcoms-app/src/store/epoch_studio/tests/performance.rs) | The mounted store moves one verified source through warm read/receive, with actual full-wrapper/context/budget checks and the existing typed ingest/durable save. Index refresh preserves art. A 6,939-op Studio fixture received three new durable edits without a full restore; diagnostic cold 142,337 ms / warm 192/193/184 ms, with exclusions in the performance report. Encoded slot cap 8 MiB, cold source cap 256 KiB; not all-watch service or a heap promise. Reconnect/catch-up and newcomer discovery/seed installation remain; do not rebuild the live path. |
 | Studio same-epoch operation pages / 3 | `86ed32a` | [rep/studio/epoch/catchup.rs](../crates/catcoms-replication/src/studio/epoch/catchup.rs), [shared page engine](../crates/catcoms-replication/src/registry_epoch/catchup.rs), [store/epoch_studio/receive.rs](../crates/catcoms-app/src/store/epoch_studio/receive.rs), [source.rs](../crates/catcoms-app/src/store/epoch_studio/source.rs), [page regressions](../crates/catcoms-app/src/store/epoch_studio/tests/pages.rs) | Reuses the existing bounded prefix/cursor algorithm, with a separate Studio domain/channel binding and unchanged Registry golden. Warm-only saved-source serving and all-or-none typed page admission use the same owned graph/save/flush path. 70-op distinct-member Index/art and >256-KiB provider/receiver tests pass; failure can leave only old or whole-new durable state. No transport route, provider lifecycle/rates, cursor owner or reconnect driver is added. Next: bind these to authenticated transport and existing native custody; no new paging engine/store is needed. |
+
+| Automatic same-epoch Studio catch-up / 3 | 2026-09-09 runtime milestone | [sync page exchange](../crates/catcoms-sync/src/registry_catchup/studio.rs), [app cursor owner](../crates/catcoms-app/src/studio_exchange/pages.rs), [receiver runtime](../crates/catcoms-app/src/studio/receiver/catchup.rs), [detached source preparation](../crates/catcoms-app/src/store/epoch_studio/preparation.rs), [native idle wake](../apps/desktop/src-tauri/src/studio.rs), [actor regressions](../crates/catcoms-app/src/studio_exchange/tests/reconnect.rs) | Kind 23 shares Registry queue/rates/capacity; detached authenticated attempts and the existing native worker repair missed watched edits without more user actions. Both real actors can request and serve concurrently. Save-before-cursor, cancellation, channel/MLS supersession, fairness and cold-art/small-Index regressions pass. Reuses the previous two rows rather than replacing their store/page algorithm. Unopened-key service, current-owner checkpoint discovery and Studio adoption remain Gate 3. |
 
 ### Keeping this ledger useful
 
@@ -225,8 +227,9 @@ worker without store/Server borrows, then install only if runtime/mount/member/j
 exact saved record still match. Four process-wide slots include cancelled workers and retained
 results. Warm pages recheck the full saved record without replaying it; cold/stale pages require
 local preparation. Receipt faults invalidate caches even when the source operations are unchanged.
-**Next implementation target: gate 3 authenticated Studio page exchange and receiver cursor/
-retry ownership, then reconnect scheduling, keyed discovery and Studio seed installation.**
+**Next implementation target: gate 3 unopened-provider service, keyed discovery and Studio seed
+installation.** Authenticated page transport, cursor/retry ownership and reconnect scheduling
+now reuse the completed page/native/source machinery (see the runtime entry below).
 The typed page engine and atomic vault adapters now exist; do not rebuild their inbox,
 saved-only send, persistence or preparation paths. Automatic work must not repeat unrestricted
 history reconstruction under actor/vault locks. The initial receiver uses a conservative local
@@ -239,8 +242,8 @@ durable output under the same lease, without another save/retry pass. Local/prov
 the acknowledgement; failed sharing never erases Save. Automatic recent-target receive now reuses
 the SAME native lease and typed store, and emits remote updates only after accepted persistence.
 The native two-member test includes real frame CIDs, both edit directions, paced receive and
-restart. At most 16 recent targets are watched; closed/unwatched/missed objects still need discovery
-and catch-up. The automatic scanner now memoizes pure Registry/Studio footprint validation in a
+restart. At most 16 recent targets are watched; missed edits on those targets now catch up
+automatically. Closed/unwatched objects still need discovery. The scanner memoizes pure Registry/Studio footprint validation in a
 mount-local 64-entry LRU, matching freshly authenticated complete wrapper bytes on every hit.
 Its LOCAL rails are 1024 directory entries, 64 records, 8 MiB authenticated P1 bytes and 256 KiB
 cold validation across the vault. Normal Save/full scans warm it; Read warms its actual Studio
@@ -249,23 +252,27 @@ use stale metadata. The mounted store also retains one owned verified active Stu
 rather than cloned into another slot. Warm views and receive reauthenticate its exact full wrapper;
 receive also checks current context and the fresh inventory/budget before normal typed ingest/save.
 Index/list refreshes preserve opened art while keeping only verified Index footprint metadata.
-The slot permits up to 8 MiB encoded input, not heap; other cold targets still refuse above 256 KiB
-before reconstruction. A cold large Index beside art is not made warm by its footprint cache.
-Failures pause until explicit successful Studio access.
+The slot permits up to 8 MiB encoded input, not heap; large watched sources now prepare outside
+the actor under the shared four-process-slot pool. Small cold Index gossip keeps the bounded
+ingest path so it cannot evict warm art. Unrelated cold inventory still obeys its original rail.
+Storage/admission failures pause until explicit access; network/context supersession retries.
 This does not lower document acceptance caps or authorize skipped validation. The pause event
 is bridged but its warning UI is user-owned. The actual dense Studio probe measured 142,337 ms
 cold reconstruction and 192/193/184 ms warm inventory/ingest/save, with exclusions documented in
 [P1-PERFORMANCE](P1-PERFORMANCE.md). Cold first-open and local Save can remain slow. Recovery of
-missed packets and newcomer joining remain Gate 3 work, not a rebuild of the completed live path.
+missed packets on watched same-epoch sources is implemented; newcomer joining remains Gate 3 work.
 The new Studio page wrapper shares Registry's existing walk and constants, adding only typed
 scope/channel cursor binding. Registry's published cursor golden remains unchanged. Cooperative
 store serving refuses a cold/stale source, and batch receive validates an entire page under the
 same owned gate before one durable write/flush. Invalid input saves no prefix; write-after-rename
 uncertainty permits only old or whole-new state and requires reconciled exact retry. Saved results
 provide counts/frontier, not cursor ownership or finality. Distinct-member 70-op Index/art tests
-and real >256-KiB prepared provider/receiver tests exercise these seams. No Studio network handler,
-provider mount/runtime wrapper, request rates, receiver continuation/retry loop or automatic
-reconnect has been added. Original heads/seed must stay fixed until that pass finishes.
+and real >256-KiB prepared provider/receiver tests exercise these seams. Additive kind 23 now
+shares Registry's request queue, rates and capacity. Detached attempts, current mount/runtime
+wrappers and the native five-second idle wake drive automatic paced retries without another
+user action. Two real actors repair independently missed edits in both directions. Original
+heads/seed remain fixed until a pass finishes; no page result installs a checkpoint or retires
+an intent. Service currently requires exact local watches; keyed discovery is the next boundary.
 The one-device art Save/Reopen/reference-protection milestone is now implemented. Sound/export
 writers and their actual record coverage remain gate 6, not another prerequisite to art progress.
 The user-owned frontend must adapt these documented results instead of the fixture's numeric-only

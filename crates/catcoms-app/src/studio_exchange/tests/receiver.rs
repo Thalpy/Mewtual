@@ -2,6 +2,89 @@ use super::*;
 use crate::studio::StudioReceiver;
 
 #[tokio::test]
+async fn studio_receiver_displaced_large_art_prepares_off_actor_and_keeps_its_gossip() {
+    let mut p = Pair::new().await;
+    let history = p.alice.sync.with_registry_context(|g, d, _, _| {
+        crate::store::save_studio_source_fixture(&mut p.a_store, SERVER, g, d, target())
+    });
+    for sealed in history {
+        p.alice
+            .sync
+            .publish_local_studio_once(target(), sealed.doc_id, sealed)
+            .await
+            .unwrap();
+        p.bob.sync_once().await.unwrap();
+        p.receive().unwrap().unwrap();
+    }
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            Some(StudioRequest::Read { target: target() }),
+        )
+        .unwrap();
+    // Another real art source displaces the sole installed graph. Its small footprint and the
+    // old verified footprint remain reusable by inventory, but neither is a second graph.
+    let other = StudioTarget::Flipnote {
+        channel: channel(),
+        object: [8; 16],
+    };
+    let logical = other.document(&p.bob.group_id()).unwrap();
+    receiver
+        .run(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            Some(StudioRequest::Apply {
+                target: other,
+                epoch_id: epoch_zero_id(logical.doc_type, &logical.logical_key),
+                nonce: [61; 16],
+                body: title(61, "other art").body,
+            }),
+        )
+        .unwrap();
+    assert!(!p
+        .bob
+        .sync
+        .with_registry_context(|g, d, _, _| p.b_store.studio_source_is_warm(
+            SERVER,
+            g,
+            target(),
+            d
+        )));
+    let op = title(4, "remote after displacement");
+    p.save(&op);
+    p.send(op).await.unwrap();
+    p.bob.sync_once().await.unwrap();
+    assert_eq!(
+        receiver
+            .run(&mut p.bob, &mut p.b_store, SERVER, None)
+            .unwrap()
+            .1,
+        None
+    );
+    let preparation = receiver.detach(&mut p.bob).expect("detached cold source");
+    assert!(!receiver.take_pause_notice());
+    let result = preparation.run(None).await;
+    receiver.complete(&mut p.bob, result);
+    let mut updated = None;
+    for _ in 0..6 {
+        updated = updated.or(receiver
+            .run(&mut p.bob, &mut p.b_store, SERVER, None)
+            .unwrap()
+            .1);
+        if updated.is_some() {
+            break;
+        }
+    }
+    assert_eq!(updated, Some(target()));
+    assert!(!receiver.take_pause_notice());
+    assert_eq!(p.state().unwrap().op_count(), 4);
+}
+
+#[tokio::test]
 async fn studio_receiver_reuses_large_active_source_across_successive_remote_edits() {
     let mut p = Pair::new().await;
     let history = p.alice.sync.with_registry_context(|group, device, _, _| {
@@ -55,6 +138,70 @@ async fn studio_receiver_reuses_large_active_source_across_successive_remote_edi
         )
         .unwrap();
     p.bob.flush_studio_subscriptions().await.unwrap();
+    // A REMOTE edit of the already-saved small Index must take the old bounded cold path,
+    // preserving the large art graph. Explicit local Index reads alone do not cover this.
+    let author = p
+        .alice
+        .sync
+        .with_registry_context(|_, d, _, _| d.device_id());
+    let op = domain(
+        index,
+        IndexOp::PutObject {
+            object: [9; 16],
+            kind: StudioKind::Flipnote,
+            title: "remote index entry".into(),
+            created_by: author,
+            ts: 1000,
+            expiry: StudioExpiry::Never,
+        }
+        .encode()
+        .unwrap(),
+        18,
+    );
+    let index_id = epoch_zero_id(logical.doc_type, &logical.logical_key);
+    p.alice
+        .studio_transaction(
+            &mut p.a_store,
+            SERVER,
+            StudioRequest::Apply {
+                target: index,
+                epoch_id: index_id,
+                nonce: op.nonce,
+                body: op.body.clone(),
+            },
+        )
+        .unwrap();
+    let mut index_budget = budget(&mut p.alice, &mut p.a_store);
+    p.alice
+        .send_saved_studio_once(
+            &mut p.a_store,
+            SERVER,
+            index,
+            index_id,
+            op,
+            &mut index_budget,
+        )
+        .await
+        .unwrap();
+    p.bob.sync_once().await.unwrap();
+    assert_eq!(
+        receiver
+            .run(&mut p.bob, &mut p.b_store, SERVER, None)
+            .unwrap()
+            .1,
+        Some(index)
+    );
+    assert!(
+        p.bob
+            .sync
+            .with_registry_context(|g, d, _, _| p.b_store.studio_source_is_warm(
+                SERVER,
+                g,
+                target(),
+                d
+            )),
+        "small remote Index ingress preserves art"
+    );
     for n in 4..=5 {
         let (view, _) = receiver
             .run(
@@ -67,7 +214,7 @@ async fn studio_receiver_reuses_large_active_source_across_successive_remote_edi
         let StudioProjection::Index(view) = view.view.unwrap().projection else {
             panic!("expected independently verified Index view");
         };
-        assert_eq!(view.objects.len(), 1);
+        assert_eq!(view.objects.len(), 2);
         let op = title(n, &format!("remote after large history {n}"));
         p.save(&op);
         p.send(op).await.unwrap();

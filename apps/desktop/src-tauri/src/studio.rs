@@ -160,10 +160,12 @@ async fn drive_receiver(
             break;
         }
         if !*pending.borrow_and_update() {
-            if pending.changed().await.is_err() {
+            // A disconnected peer can miss the LAST edit: no later gossip edge is guaranteed.
+            // Poll the existing coordinator occasionally without adding an actor select timer
+            // that would cancel legacy sync_once/outbox work. No vault guard survives this wait.
+            if !idle_receiver_wake(&mut pending, clock).await {
                 break;
             }
-            continue;
         }
         if state
             .servers
@@ -180,6 +182,18 @@ async fn drive_receiver(
         // Even repeated false/true edges cannot reset the throttle. No locks/slots remain
         // held during this delay; actor closure is noticed on its next bounded iteration.
         clock.sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+/// An idle catch-up check is needed even without another gossip edge. The peer's last edit
+/// may have happened while disconnected; actor closure still stops the native worker promptly.
+async fn idle_receiver_wake(
+    pending: &mut tokio::sync::watch::Receiver<bool>,
+    clock: &dyn Clock,
+) -> bool {
+    tokio::select! {
+        result = pending.changed() => result.is_ok(),
+        _ = clock.sleep(std::time::Duration::from_secs(5)) => true,
     }
 }
 

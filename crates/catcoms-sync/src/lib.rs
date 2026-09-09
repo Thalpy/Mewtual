@@ -172,6 +172,8 @@ const KIND_REGISTRY_PAGE: u8 = 20;
 const KIND_RECEIPT_HEAD: u8 = 21;
 /// Exact expected-hash checkpoint seed, distinct from user operations and file CIDs.
 const KIND_REGISTRY_SEED: u8 = 22;
+/// Typed Studio history pages. No legacy catch-up fallback is permitted.
+const KIND_STUDIO_PAGE: u8 = 23;
 /// Frontier entries one incremental catch-up may name. A document's frontier is one hash per
 /// concurrent writer and normally one or two; this is a bound on the walk a requester can ask a
 /// serving peer to perform, not a limit anyone reaches.
@@ -1107,7 +1109,11 @@ fn catchup_auth_transcript(
 fn kind_binds_requester_peer(kind: u8) -> bool {
     matches!(
         kind,
-        KIND_CATCHUP_SINCE | KIND_REGISTRY_PAGE | KIND_RECEIPT_HEAD | KIND_REGISTRY_SEED
+        KIND_CATCHUP_SINCE
+            | KIND_REGISTRY_PAGE
+            | KIND_RECEIPT_HEAD
+            | KIND_REGISTRY_SEED
+            | KIND_STUDIO_PAGE
     )
 }
 
@@ -5376,6 +5382,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // A bounded responder is retained on self, never across a cancellable await
                     // in this stack frame. Durable source I/O belongs to the app's explicit drain.
                     self.queue_registry_page_request(from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_STUDIO_PAGE) {
+                    self.queue_epoch_page_request(KIND_STUDIO_PAGE, from, &data[1..], responder);
                     return Ok(true);
                 }
                 if data.first() == Some(&KIND_RECEIPT_HEAD) {

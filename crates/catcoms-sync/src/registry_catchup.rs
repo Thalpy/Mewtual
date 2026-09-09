@@ -7,8 +7,41 @@ use catcoms_replication::registry_epoch::catchup::{
     RegistryOpPage, RegistryPageCursor, RegistryPageOutcome, RegistryPageRequest,
     MAX_REGISTRY_PAGE_BYTES, MAX_REGISTRY_PAGE_HEADS, MAX_REGISTRY_PAGE_OPS,
 };
+use catcoms_replication::studio::StudioTarget;
 use catcoms_rt::Responder;
 use registry_ingress::Rate;
+
+mod studio;
+pub use studio::{CompletedStudioPage, PendingStudioPage, StudioPageQuery, StudioReceivePermit};
+
+/// Shared scheduling scope. Separate wire kinds/domains preserve Registry v1 compatibility,
+/// while Studio uses the SAME request queues, rate debt and outbound/receiver capacity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageScope {
+    Registry(u8),
+    Studio(StudioTarget),
+}
+impl PageScope {
+    fn kind(self) -> u8 {
+        match self {
+            Self::Registry(_) => KIND_REGISTRY_PAGE,
+            Self::Studio(_) => KIND_STUDIO_PAGE,
+        }
+    }
+    fn doc_type(self) -> DocType {
+        match self {
+            Self::Registry(_) => DocType::DocRegistry,
+            Self::Studio(StudioTarget::Index { .. }) => DocType::StudioIndex,
+            Self::Studio(StudioTarget::Flipnote { .. }) => DocType::StudioObject,
+        }
+    }
+    fn domain(self) -> &'static str {
+        match self {
+            Self::Registry(_) => RESPONSE_DOMAIN,
+            Self::Studio(_) => "catcoms/studio-page-response/v1",
+        }
+    }
+}
 
 mod wire;
 pub use wire::RegistryPageQuery;
@@ -19,7 +52,7 @@ const MAX_REQUESTERS: usize = 4096;
 const QUEUE_TTL_MS: u64 = 5_000;
 const REQUEST_MS: u64 = 10_000;
 // Auth framing adds 144 bytes; cap before decode_authed_request makes any Vec copies.
-const MAX_REQUEST: usize = MAX_QUERY + 144;
+const MAX_REQUEST: usize = MAX_SCOPED_QUERY + 144;
 const RESPONSE_DOMAIN: &str = "catcoms/registry-page-response/v1";
 
 struct Pending {
@@ -71,7 +104,12 @@ impl Drop for CancelOnDrop {
 }
 impl RegistryRequests {
     pub(super) fn drop_bucket(&mut self, bucket: u8) {
-        self.pending.retain(|item| item.query.bucket != bucket);
+        self.pending
+            .retain(|item| item.query.scope != PageScope::Registry(bucket));
+    }
+    pub(super) fn drop_studio(&mut self, target: StudioTarget) {
+        self.pending
+            .retain(|item| item.query.scope != PageScope::Studio(target));
     }
     fn expire(&mut self, now: u64) -> u64 {
         self.now = self.now.max(now);
@@ -88,6 +126,26 @@ fn response_transcript(
     query: &[u8],
     answer: &[u8],
 ) -> Vec<u8> {
+    scoped_response_transcript(
+        RESPONSE_DOMAIN,
+        group,
+        requester,
+        auth,
+        provider_peer,
+        query,
+        answer,
+    )
+}
+
+fn scoped_response_transcript(
+    domain: &str,
+    group: &[u8],
+    requester: &[u8],
+    auth: &RequestAuth,
+    provider_peer: PeerId,
+    query: &[u8],
+    answer: &[u8],
+) -> Vec<u8> {
     let mut bound = Encoder::new();
     bound
         .put_bytes(provider_peer.as_bytes())
@@ -95,7 +153,7 @@ fn response_transcript(
     bound.put_bytes(query).expect("bounded query");
     bound.put_bytes(answer).expect("bounded answer");
     signed_resp_transcript(
-        RESPONSE_DOMAIN,
+        domain,
         group,
         requester,
         auth.ts,
@@ -159,9 +217,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         data: &[u8],
         responder: Responder,
     ) {
+        self.queue_epoch_page_request(KIND_REGISTRY_PAGE, from, data, responder);
+    }
+
+    pub(super) fn queue_epoch_page_request(
+        &mut self,
+        kind: u8,
+        from: PeerId,
+        data: &[u8],
+        responder: Responder,
+    ) {
         let now = self.registry_pages.expire(self.clock.monotonic_ms());
         if data.len() > MAX_REQUEST
-            || self.registry_ingress.watches.is_empty()
+            || (self.registry_ingress.watches.is_empty() && self.studio_exchange.watches.is_empty())
             || self.registry_pages.pending.len() >= MAX_PENDING
             || !self
                 .registry_pages
@@ -171,8 +239,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return;
         }
-        let Some((inner, key, auth)) = self.authenticate_request(KIND_REGISTRY_PAGE, data, from)
-        else {
+        let Some((inner, key, auth)) = self.authenticate_request(kind, data, from) else {
             return;
         };
         if auth.epoch != self.group.epoch()
@@ -181,16 +248,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return;
         }
-        let Ok(query) = decode_query(&inner) else {
+        let decoded = if kind == KIND_REGISTRY_PAGE {
+            decode_query(&inner)
+        } else {
+            decode_scoped_query(kind, &inner)
+        };
+        let Ok(query) = decoded else {
             return;
         };
-        let Some(watch) = self.registry_ingress.watches.get(&query.bucket) else {
+        let Some((doc_id, generation)) = self.page_watch_binding(query.scope) else {
             return;
         };
-        if watch.doc_id != query.doc_id {
+        if doc_id != query.doc_id {
             return;
         }
-        let generation = watch.generation.clone();
         let requester = DeviceId::from_public_key_bytes(&key);
         // One queued request/full identity across ALL buckets. Watch replacement cannot clear
         // identity debt. Only completely refilled rows may be evicted; Sybils hit the global rails.
@@ -251,12 +322,48 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !self.registry_watch_is_current(watch) {
             return Err(SyncError::NoSuchDoc);
         }
+        self.serve_epoch_request(
+            PageScope::Registry(watch.bucket),
+            watch.doc_id,
+            &watch.generation,
+            serve,
+        )
+    }
+
+    fn page_watch_binding(&self, scope: PageScope) -> Option<(u128, Arc<()>)> {
+        match scope {
+            PageScope::Registry(bucket) => self
+                .registry_ingress
+                .watches
+                .get(&bucket)
+                .map(|w| (w.doc_id, w.generation.clone())),
+            PageScope::Studio(target) => self
+                .studio_exchange
+                .watches
+                .values()
+                .find(|w| w.target == target)
+                .map(|w| (w.doc_id, w.generation.clone())),
+        }
+    }
+
+    fn serve_epoch_request<E>(
+        &mut self,
+        scope: PageScope,
+        doc_id: u128,
+        generation: &Arc<()>,
+        serve: impl FnOnce(
+            &ServerGroup,
+            &MlsDevice,
+            &mut R,
+            RegistryPageRequest<'_>,
+        ) -> Result<RegistryPageOutcome, E>,
+    ) -> Result<Option<Result<(), E>>, SyncError> {
         let now = self.registry_pages.expire(self.clock.monotonic_ms());
         let Some(index) = self
             .registry_pages
             .pending
             .iter()
-            .position(|item| item.query.bucket == watch.bucket)
+            .position(|item| item.query.scope == scope)
         else {
             return Ok(None);
         };
@@ -274,8 +381,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .pending
             .remove(index)
             .expect("located request");
-        if !Arc::ptr_eq(&item.generation, &watch.generation)
-            || item.query.doc_id != watch.doc_id
+        if !Arc::ptr_eq(&item.generation, generation)
+            || item.query.doc_id != doc_id
             || item.auth.epoch != self.group.epoch()
             || self.clock.now_ms().abs_diff(item.auth.ts) > MAX_REQUEST_AGE_MS
             || !self.registry_page_member(&item.key)
@@ -292,8 +399,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Ok(outcome) => outcome,
             Err(error) => return Ok(Some(Err(error))),
         };
-        let answer = encode_answer(&outcome, watch.doc_id, self.group.epoch())?;
-        let transcript = response_transcript(
+        // Callback work is synchronous but may consume the remaining request lifetime.
+        // Never sign stale success merely because admission happened before disk work.
+        if self.clock.monotonic_ms() >= item.expires
+            || self.clock.now_ms().abs_diff(item.auth.ts) > MAX_REQUEST_AGE_MS
+        {
+            return Err(SyncError::Unauthorized);
+        }
+        let answer = if matches!(scope, PageScope::Registry(_)) {
+            encode_answer(&outcome, doc_id, self.group.epoch())?
+        } else {
+            encode_scoped_answer(&outcome, scope.doc_type(), doc_id, self.group.epoch())?
+        };
+        let transcript = scoped_response_transcript(
+            scope.domain(),
             &self.group.group_id(),
             &item.key,
             &item.auth,

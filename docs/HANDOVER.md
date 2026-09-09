@@ -8,6 +8,51 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 3, automatic same-epoch catch-up (2026-09-09).** Additive Studio request kind 23
+  now uses Registry's existing page queue/rates/outbound/receiver capacity with a distinct
+  Studio response domain and exact channel/type/key/full-device binding. The app retains the
+  original frontier and one page/cursor, saving the whole page before progress. Connected-only
+  signed requests detach from Server/native custody; the same actor remains available for the
+  other member's requests. One tracked network attempt and source-preparation waiter per actor
+  share the existing process-wide four preparation slots through actual worker termination.
+  Cold watched sources use bounded public-context capture/rebuild/attach into the sole source
+  slot. A small remote Index still takes bounded cold ingress and preserves large open art.
+  Native's five-second injected-clock idle wake repairs a missed last edit even without future
+  gossip; it adds no actor timer arm. Existing command-versus-legacy-outbox cancellation debt
+  remains, not a claim of cancellation-safe legacy publication.
+
+  Bounded service/client/gossip turns prevent starvation. A held page wins its next persistence
+  pass. Full wrapper/mount/server/actor/owner/MLS replacement invalidates prepared results;
+  healthy supersession retries rather than reporting a disk fault. Channel removal and MLS
+  changes between fetch and save discard unusable pages without cursor advance. Actual
+  storage/admission failure retains the existing explicit-access-only pause. Provider cursors
+  remint on runtime/mount change. UI, games and blob-fetch policy remain untouched.
+
+  Focused coverage: kind-23 golden/query tamper/shared rate and cancellation slots; distinct
+  members transfer 70 saved operations across three network pages and reopen; two real actors
+  simultaneously repair missed independent edits without additional Read/Save. Nine receiver
+  regressions include membership change after completion, sustained service/client fairness,
+  displaced >256-KiB art and a remote small Index that does not evict art. Preparation tests
+  cover exact wrapper edits, remount, MLS and corruption. Native tests pin the no-gossip idle wake.
+  Verification: root `cargo test --all --all-features` passed on the first run. The final
+  post-review run passed all app (472), replication and sync unit tests but hit the existing
+  real-TCP DCUtR upgrade timeout (also documented in older handover runs). The exact unchanged
+  failing executable passed immediately on retry (0.14 s); the focused Cargo target also passed.
+  No test was weakened or skipped. Native `cargo test --manifest-path apps/desktop/src-tauri/
+  Cargo.toml` passed 201 tests; frontend `npm --prefix apps/desktop test` passed 1,144. Root and
+  native formatting, root all-target/all-feature Clippy with `-D warnings`, native `cargo check`,
+  Git Bash ambient-dependency gate and `git diff --check` passed. Logs use `logs/gate3-*`.
+
+  Read-only adversarial review inspected the actual diff and surrounding paths. All blocker/
+  high/medium findings in this milestone are resolved; current-tense roadmap/interface/threat
+  summaries have been updated. **Gate 3 remains open:** unopened-provider logical service,
+  keyed registry/Studio head discovery, expected-seed fetch and recovery-first Studio adoption
+  still need wiring and newcomer acceptance. That acceptance uses prepared current-owner
+  receipts. Gate 4 retains automatic issuance, succession and the separate provisional
+  old-owner hinted-checkpoint consumer; a hint must never be upgraded to a verified selection.
+  Inventory still has its original local 64-record / 1024-entry / 8-MiB read / 256-KiB cold
+  rails. This work grants neither a heap/latency promise nor proof of current finality.
+
 - **Flipnote gate 3, cooperative same-epoch Studio pages (2026-09-09, `86ed32a`).** Studio now reuses the
   existing Registry page walk through a thin typed wrapper, preserving Registry-v1 MAC/golden
   bytes. Studio's separate cursor domain additionally binds channel and actual document type/key.

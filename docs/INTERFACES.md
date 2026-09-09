@@ -943,7 +943,7 @@ Dropped traffic needs explicit saved-op retry or future catch-up. No pixels are 
 receipt or settlement event is produced. The native
 Save result stays `publication: "local"`; UI adapters and canonical rendering remain user-owned.
 
-### Cooperative Studio operation pages (gate 3; no network route yet)
+### Studio operation pages and automatic same-epoch catch-up (gate 3)
 
 `catcoms_replication::studio::catchup::StudioPageProvider` is a thin typed wrapper over the
 existing registry page engine, not a second continuation algorithm. `StudioFrontier`,
@@ -991,12 +991,45 @@ acknowledgement. Reconcile uncertain accounting and retry the SAME page/cursor. 
 creates or retires an own intent. The caller must not advance its cursor on error or replace the
 ORIGINAL request heads/seed with the returned frontier mid-pass; that would invalidate the MAC.
 
-These tested core/vault seams are **not automatic reconnect or newcomer joining**. No Studio
-page transport kind, responder queue/rates, authenticated provider endpoint wrapper, receiver
-cursor owner, retry loop, native scheduling/events, checkpoint discovery or installation is
-added here. Registry's existing kind-20 endpoint still serves Registry only. Transport response
-buffering must be bounded before handing decoded page objects to these APIs. No latency/heap
-guarantee follows from page/source caps; normal transient preflight work remains.
+Additive request kind **23** now carries Studio pages through the **same** kind-20 Registry
+pending queue, pre-auth/per-full-device/service rates and four outbound/four receive slots.
+Registry kinds 20-22 and their golden bytes are unchanged. Studio's query is version 1, u16
+tag (15/16), fixed 16-byte channel and object (zero for Index), then concrete u128 id and the
+existing heads/seed/cursor fields. Its response domain is `catcoms/studio-page-response/v1`.
+Request authentication binds the actual endpoint to the full current member identity; responses
+bind that exact provider, requester, group/MLS epoch, query and endpoint. Signed envelopes and
+decoded pages are bounded before typed admission. Queued requests expire after five seconds.
+
+`Server::begin_studio_receive`, `prepare_studio_receive_step`, `complete_studio_receive_step`
+and `persist_studio_receive_step` own one original frontier, cursor and retained page. Prepare
+returns a non-cloneable `StudioPageAttempt`; `fetch()` owns no Server, MLS secrets or vault lease.
+Connected-only cancellable transport uses a fixed ten-second attempt deadline, including queued
+time, and capacity follows a submitted lower-driver request through cancellation. Completion
+rechecks runtime/watch/channel/member/provider/MLS; persistence rechecks mount and current
+authority. A pass has a fixed ten-minute lifetime, one-second request/write pacing, at most
+20,001 pages / 20,000 operations / 16 MiB received work, and one empty-head restart fallback.
+The same page survives a failed save; cursor progress follows durability only.
+
+The existing actor/native Studio receiver drives these adapters automatically for its recent
+16 watches and up to four proven connected member endpoints. One tracked network attempt and
+one preparation waiter per actor leave it free to serve the other peer. Native's injected-clock
+five-second idle wake permits silent reconnect/missed-last-edit repair; it adds no actor timer
+arm (existing command-versus-legacy-outbox cancellation debt is unchanged). Bounded gossip/service/client turns prevent either direction from
+monopolizing the receiver. Accepted durable page edits emit the existing `StudioUpdated` event.
+Network/context supersession backs off for a fresh pass; real storage/admission failures retain
+the existing explicit-access-only pause and `StudioReceivePaused` diagnostic.
+
+Cold watched sources are captured under native custody with an 8-MiB encoded-input bound,
+verified off-actor, then attached to the **existing sole source slot** after exact wrapper,
+mount/server, actor, owner and MLS checks. Registry and Studio share four process preparation
+slots, held through actual blocking-worker termination and result custody even if the waiter is
+cancelled. Healthy supersession discards a result, not a sticky disk fault. The original bounded
+inventory rails still apply; unrelated uncached history may require explicit access. These are
+not latency or resident-heap promises.
+
+**Joining remains separate:** current service still requires an exact locally registered watch;
+keyed Studio receipt-head/seed discovery and recovery-first checkpoint installation are not yet
+wired. Same-epoch prefix completion does not establish currency or install a checkpoint.
 
 ### Creative blob seam (C0c, independent of Studio/P1 metadata)
 

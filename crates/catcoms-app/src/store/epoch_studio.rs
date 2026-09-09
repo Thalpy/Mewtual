@@ -19,7 +19,9 @@ use catcoms_replication::{
 use std::io::Read;
 use std::sync::Arc;
 
+mod preparation;
 mod receive;
+pub(crate) use preparation::{PreparedStudioSource, StudioSourceCapture};
 pub(super) mod source;
 pub use receive::StudioPageAdmission;
 
@@ -535,6 +537,22 @@ impl ServerStore {
         group: &[u8],
         target: StudioTarget,
     ) -> Result<(), AppError> {
+        if self.studio_receive_needs_preparation(server, group, target)? {
+            return Err(invalid(
+                "automatic Studio target source exceeds cold byte limit",
+            ));
+        }
+        Ok(())
+    }
+    /// Select detached preparation by local encoded size only. Small cold Index records keep
+    /// their existing bounded ingress path, which deliberately preserves a warm art graph.
+    /// A false result is not authority: the actual later read rechecks type, bounds and bytes.
+    pub(crate) fn studio_receive_needs_preparation(
+        &self,
+        server: u64,
+        group: &[u8],
+        target: StudioTarget,
+    ) -> Result<bool, AppError> {
         let logical = target.document(group).map_err(invalid)?;
         let scope = scope_bytes(server, &logical)?;
         let parent = fs::symlink_metadata(self.dir.join("servers"))
@@ -544,17 +562,13 @@ impl ServerStore {
         }
         let metadata = match fs::symlink_metadata(self.studio_epoch_path(&scope)) {
             Ok(value) => value,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(AppError::Io(e.to_string())),
         };
-        if !regular_file(&metadata)
-            || metadata.len() > super::epoch_recovery::inventory::STUDIO_RECEIVE_COLD_BYTES
-        {
-            return Err(invalid(
-                "automatic Studio target source exceeds cold byte limit or is not regular",
-            ));
+        if !regular_file(&metadata) {
+            return Err(invalid("automatic Studio target source is not regular"));
         }
-        Ok(())
+        Ok(metadata.len() > super::epoch_recovery::inventory::STUDIO_RECEIVE_COLD_BYTES)
     }
     fn read_studio_record(
         &self,

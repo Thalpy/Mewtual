@@ -12,7 +12,7 @@ fn create() -> StudioRequest {
         ts: 1000,
     }
 }
-async fn save(
+pub(super) async fn save(
     actor: &ServerActor,
     store: &Arc<Mutex<Option<ServerStore>>>,
     request: StudioRequest,

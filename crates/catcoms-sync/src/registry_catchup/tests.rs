@@ -8,6 +8,8 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::future::Future;
 
+mod studio;
+
 fn setup() -> (
     ChannelSync<MemNetwork, ChaCha20Rng>,
     RegistryEpoch,
@@ -466,6 +468,16 @@ async fn registry_page_client_rejects_rebound_and_malformed_signed_responses() {
 }
 #[async_trait::async_trait]
 impl MeshTransport for DelayedDriver {
+    async fn request_connected_cancellable(
+        &self,
+        peer: PeerId,
+        proto: ProtocolId,
+        data: Bytes,
+        cancellation: RequestCancellation,
+    ) -> Result<Bytes, TransportError> {
+        self.request_cancellable(peer, proto, data, cancellation)
+            .await
+    }
     fn local_peer(&self) -> PeerId {
         self.inner.local_peer()
     }

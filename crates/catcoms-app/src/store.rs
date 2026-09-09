@@ -64,6 +64,7 @@ pub(crate) use epoch_studio::source::studio_full_restores_for_test;
 #[cfg(test)]
 pub(crate) use epoch_studio::tests::performance::save_studio_source_fixture;
 pub use epoch_studio::{EpochStudioBudget, EpochStudioState, StudioPageAdmission};
+pub(crate) use epoch_studio::{PreparedStudioSource, StudioSourceCapture};
 pub mod epoch_budget;
 
 /// One persisted server in the registry: enough to relist it in the UI and reload its

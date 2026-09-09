@@ -142,12 +142,12 @@ cloned. Explicit view access prepares it; warm receive and timeline reads reauth
 complete wrapper and bind current actor/group/MLS before reuse. Index refreshes keep only their
 verified footprint when art occupies the slot, so list invalidation does not evict opened art.
 The source has an 8 MiB encoded-input rail, not an 8 MiB heap promise. Cold targets retain the
-256 KiB rail; automatic work never falls back to a large cold restore. Ingest uses the same typed
+256 KiB inline rail; larger watched sources use bounded detached preparation instead. Ingest uses the same typed
 gate, fresh complete inventory/budget and durable save. Failed takes discard the owned graph;
 successful unchanged flushes preserve the physical version rather than a normalized snapshot hash.
 Failures pause until successful explicit Studio access and emit StudioReceivePaused; peer traffic
 cannot repeatedly trigger a failed scan. This is not a reduced document cap or completed large-
-vault collaboration: cold-source service, discovery and retry/catch-up remain Gate 3 limitations.
+vault collaboration: unrelated cold inventory and unopened-source/discovery integration remain.
 No new persistence, finality, blob fetch or UI implementation is introduced.
 Studio now reuses the registry's private bounded page walk through a typed provider wrapper.
 Registry-v1 cursor bytes stay unchanged; Studio adds a distinct HMAC domain and channel binding
@@ -161,10 +161,19 @@ entry through the existing typed gate and crosses one accounted save/flush barri
 entry saves no prefix. An uncertain rename may leave the old source or the entire new page; only
 successful persistence returns counts/frontier, and exact retry after reconciliation deduplicates.
 Empty pages verify the exact Open epoch and flush held bytes; actual epoch-zero absence stays
-absent. No cursor, source seed, receipt or intent is installed/retired by this seam. Studio still
-needs authenticated transport routing, provider lifecycle/rates, receiver cursor ownership and
-reconnect scheduling. The low-level provider caller must authenticate transport identity and
-remint its secret on runtime/mount restart; no native lifecycle permit is inferred from it.
+absent. No source seed, receipt or intent is installed/retired by this seam. Additive Studio kind
+23 now uses the existing Registry request pool/rates and bounded typed answer framing with a
+separate signed-response domain. The actor owns the cursor/retry state; signed connected-only
+attempts detach before network waits, so mutually reconnecting actors can serve each other.
+The native receiver wakes on its pending hint or five seconds of injected-clock idle time. This
+is outside the actor select loop, avoiding a separate continuously-ready timer arm. Native work
+still uses the existing command path; legacy command-versus-outbox cancellation debt is unchanged.
+Service/client/gossip turns are bounded; held pages win their persistence pass. A context change
+discards/retries instead of becoming a sticky storage pause. Cold watched source verification
+also detaches, sharing Registry's four process slots; full-wrapper/mount/member/MLS fences
+reattach only a current result to the same one-source owner. Provider cursors remint on runtime/
+mount changes. Keyed discovery, unopened-provider service and checkpoint installation still need
+joining integration; no native lifecycle permit or finality follows from a page result.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
 even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.

@@ -392,6 +392,18 @@ impl StudioEpoch {
     ) -> Result<Self, ReplError> {
         Self::restore_scoped(bytes, &group.group_id(), target, actor, owner(group)?)
     }
+    /// Detached vault verification with captured public context, never network bytes. The
+    /// caller must recheck current membership/owner/MLS and exact authenticated vault bytes
+    /// before attaching this result. Edits still require the ordinary live gate and signer.
+    pub fn prepare_vault_source(
+        bytes: &[u8],
+        server: &[u8],
+        target: StudioTarget,
+        actor: DeviceId,
+        owner: DeviceId,
+    ) -> Result<Self, ReplError> {
+        Self::restore_scoped(bytes, server, target, actor, owner)
+    }
     /// Inventory-only validation after removal of a server/author; returns no writable capability.
     pub fn validate_vault_snapshot(
         bytes: &[u8],

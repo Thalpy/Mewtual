@@ -3,6 +3,23 @@ use catcoms_rt::{Clock, MemNetwork};
 use std::pin::Pin;
 use std::time::Duration;
 
+#[tokio::test]
+async fn native_studio_idle_receiver_wakes_without_a_future_gossip_edge() {
+    let clock = ManualClock::new(1000);
+    let (sender, mut receiver) = tokio::sync::watch::channel(false);
+    let mut wait = Box::pin(idle_receiver_wake(&mut receiver, &clock));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(wait.as_mut().poll(&mut cx).is_pending());
+    clock.advance_ms(4999);
+    assert!(wait.as_mut().poll(&mut cx).is_pending());
+    clock.advance_ms(1);
+    assert_eq!(wait.as_mut().poll(&mut cx), std::task::Poll::Ready(true));
+    drop(wait);
+    assert!(!*receiver.borrow());
+    drop(sender);
+    assert!(!idle_receiver_wake(&mut receiver, &clock).await);
+}
+
 // Exposes the actual background pacing boundary without wall sleeps or scheduling guesses.
 #[derive(Debug, Clone)]
 struct PaceClock {

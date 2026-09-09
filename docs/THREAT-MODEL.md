@@ -694,7 +694,8 @@ table with the commit that closed it.
   work remains covered by existing transport publication slots. NoPeers/error/timeout/Duplicate
   do not erase local state or retire intents. Local/provisional views remain truthful because no
   delivery is claimed. Two Create packets do not make remote creation atomic or discover objects;
-  unwatched/lost packets still need later catch-up, which is not automatically driven yet.
+  unwatched objects still need discovery. Lost edits on watched same-epoch sources now use the
+  automatic authenticated page catch-up described below; a page does not prove current finality.
   The new mount-shared persistent blob guard separately protects all retained Studio source and
   verified seed-only CIDs, pending intents and retained/staged typed recovery. A seed's hidden
   replacement value remains required even after a successor overwrites it. Writes union holds
@@ -773,9 +774,18 @@ table with the commit that closed it.
   exact retry. Empty/duplicate pages still check accounting and flush actual held bytes; empty
   absence creates nothing. Saved counts/frontier grant no finality or intent retirement. Original
   request heads/seed must remain fixed for continuation; returned heads are for a later pass.
-  No authenticated Studio page route, provider lifecycle wrapper, cursor owner/retry scheduler,
-  or seed discovery/install is enabled. Callers must cap transport bytes before decoded page
-  admission. One-slot/cold-source limits and expensive first-open reconstruction remain.
+  Studio now uses additive authenticated page kind 23, a separate response domain and the same
+  aggregate queues/rates/outbound/receiver slots as Registry pages. Full endpoint/member identity,
+  current group/MLS, exact channel/key/watch and fixed request deadline are checked before serving
+  and again at completion. Detached connected-only requests retain lower-driver capacity on
+  cancellation; no actor/native lease is held while awaiting them. The existing native receiver
+  drives paced same-epoch catch-up on a five-second idle wake as well as work hints, with bounded
+  gossip/service/client turns and save-before-cursor progress. This is not proof of currency.
+  Cold watched source captures are capped at 8 MiB encoded input and verified outside the actor;
+  Registry and Studio share four process preparation permits through actual worker completion.
+  Installation rechecks exact authenticated wrapper/mount/actor/owner/MLS; healthy supersession
+  retries, corruption remains a sticky storage pause. The single source and bounded inventory
+  limits remain. Service of unopened keys and Studio seed discovery/install are not yet enabled.
   Exact retry recognition belongs to the retained signed
   envelope/gate, not timestamps or marker-only success.
   Vault restoration tests dependency and duplicate presence using metadata from Automerge's

@@ -14,6 +14,7 @@ use tokio::sync::{oneshot, OwnedMutexGuard};
 mod publication;
 pub(crate) use publication::StudioSavedTransaction;
 mod receiver;
+pub(crate) use receiver::StudioBackgroundResult;
 pub(crate) use receiver::StudioReceiver;
 
 /// Bounded before entering the actor queue. Bodies are the existing canonical Studio JSON,
@@ -193,6 +194,9 @@ impl StudioVaultLease {
 
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancellation.as_ref().is_some_and(|c| c.is_cancelled())
+    }
+    pub(crate) fn background_cancellation(&self) -> Option<catcoms_rt::RequestCancellation> {
+        self.cancellation.clone()
     }
 }
 

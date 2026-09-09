@@ -3,6 +3,8 @@ use super::*;
 
 // Version/bucket/id/count, 64 length-framed heads, optional seed and optional cursor.
 pub(super) const MAX_QUERY: usize = 1 + 1 + 16 + 1 + 64 * 36 + 36 + 85;
+// Studio replaces the single bucket byte with type:u16, channel:16 and object:16.
+pub(super) const MAX_SCOPED_QUERY: usize = MAX_QUERY + 33;
 // Version/status/count plus optional length-framed cursor. Signed envelope adds 108 bytes.
 pub(super) const MAX_ANSWER: usize = MAX_REGISTRY_PAGE_BYTES + 3 + 85;
 pub(super) const MAX_RESPONSE: usize = MAX_ANSWER + 108;
@@ -26,7 +28,7 @@ impl fmt::Debug for RegistryPageQuery<'_> {
 }
 
 pub(super) struct OwnedQuery {
-    pub bucket: u8,
+    pub scope: PageScope,
     pub doc_id: u128,
     heads: Vec<[u8; 32]>,
     seed: Option<[u8; 32]>,
@@ -57,8 +59,52 @@ pub(super) fn encode_query(query: &RegistryPageQuery<'_>) -> Result<Vec<u8>, Syn
     if let Some(cursor) = query.cursor {
         RegistryPageCursor::from_bytes(cursor)?;
     }
+    encode_scoped_query(
+        PageScope::Registry(query.bucket),
+        query.doc_id,
+        query.heads,
+        query.seed,
+        query.cursor,
+    )
+}
+
+pub(super) fn encode_scoped_query(
+    scope: PageScope,
+    doc_id: u128,
+    heads: &[[u8; 32]],
+    seed: Option<[u8; 32]>,
+    cursor: Option<&[u8]>,
+) -> Result<Vec<u8>, SyncError> {
+    if heads.len() > MAX_REGISTRY_PAGE_HEADS || heads.windows(2).any(|p| p[0] >= p[1]) {
+        return Err(SyncError::Malformed);
+    }
+    if let Some(cursor) = cursor {
+        RegistryPageCursor::from_bytes(cursor)?;
+    }
+    let query = RegistryPageQuery {
+        bucket: 0,
+        doc_id,
+        heads,
+        seed,
+        cursor,
+    };
     let mut e = Encoder::new();
-    e.put_u8(1).put_u8(query.bucket).put_u128(query.doc_id);
+    e.put_u8(1);
+    match scope {
+        PageScope::Registry(bucket) => {
+            e.put_u8(bucket);
+        }
+        PageScope::Studio(target) => {
+            e.put_u16(scope.doc_type().tag());
+            // Fixed-width identifiers, not renderer-controlled strings.
+            e.put_u128(u128::from_be_bytes(target.channel()));
+            e.put_u128(match target {
+                StudioTarget::Index { .. } => 0,
+                StudioTarget::Flipnote { object, .. } => u128::from_be_bytes(object),
+            });
+        }
+    }
+    e.put_u128(query.doc_id);
     e.put_u8(query.heads.len() as u8);
     for head in query.heads {
         e.put_bytes(head).expect("fixed hash");
@@ -71,14 +117,37 @@ pub(super) fn encode_query(query: &RegistryPageQuery<'_>) -> Result<Vec<u8>, Syn
 }
 
 pub(super) fn decode_query(bytes: &[u8]) -> Result<OwnedQuery, SyncError> {
-    if bytes.len() > MAX_QUERY {
+    decode_scoped_query(KIND_REGISTRY_PAGE, bytes)
+}
+
+pub(super) fn decode_scoped_query(kind: u8, bytes: &[u8]) -> Result<OwnedQuery, SyncError> {
+    if bytes.len()
+        > if kind == KIND_REGISTRY_PAGE {
+            MAX_QUERY
+        } else {
+            MAX_SCOPED_QUERY
+        }
+    {
         return Err(SyncError::Malformed);
     }
     let mut d = Decoder::new(bytes);
     if malformed(d.get_u8())? != 1 {
         return Err(SyncError::Malformed);
     }
-    let bucket = malformed(d.get_u8())?;
+    let scope = match kind {
+        KIND_REGISTRY_PAGE => PageScope::Registry(malformed(d.get_u8())?),
+        KIND_STUDIO_PAGE => {
+            let tag = malformed(d.get_u16())?;
+            let channel = malformed(d.get_u128())?.to_be_bytes();
+            let object = malformed(d.get_u128())?.to_be_bytes();
+            PageScope::Studio(match tag {
+                15 if object == [0; 16] => StudioTarget::Index { channel },
+                16 => StudioTarget::Flipnote { channel, object },
+                _ => return Err(SyncError::Malformed),
+            })
+        }
+        _ => return Err(SyncError::Malformed),
+    };
     let doc_id = malformed(d.get_u128())?;
     let count = malformed(d.get_u8())? as usize;
     if count > MAX_REGISTRY_PAGE_HEADS {
@@ -105,7 +174,7 @@ pub(super) fn decode_query(bytes: &[u8]) -> Result<OwnedQuery, SyncError> {
     };
     malformed(d.finish())?;
     Ok(OwnedQuery {
-        bucket,
+        scope,
         doc_id,
         heads,
         seed,
@@ -113,12 +182,17 @@ pub(super) fn decode_query(bytes: &[u8]) -> Result<OwnedQuery, SyncError> {
     })
 }
 
-fn checked_op(bytes: &[u8], doc_id: u128, epoch: u64) -> Result<SealedOp, SyncError> {
+fn checked_op(
+    bytes: &[u8],
+    doc_type: DocType,
+    doc_id: u128,
+    epoch: u64,
+) -> Result<SealedOp, SyncError> {
     if bytes.len() > MAX_SIGNED_EPOCH_OP_BYTES + 78 {
         return Err(SyncError::Malformed);
     }
     let op = SealedOp::decode(bytes)?;
-    if op.doc_type != DocType::DocRegistry || op.doc_id != doc_id || op.epoch != epoch {
+    if op.doc_type != doc_type || op.doc_id != doc_id || op.epoch != epoch {
         return Err(SyncError::Malformed);
     }
     Ok(op)
@@ -126,6 +200,15 @@ fn checked_op(bytes: &[u8], doc_id: u128, epoch: u64) -> Result<SealedOp, SyncEr
 
 pub(super) fn encode_answer(
     outcome: &RegistryPageOutcome,
+    doc_id: u128,
+    epoch: u64,
+) -> Result<Vec<u8>, SyncError> {
+    encode_scoped_answer(outcome, DocType::DocRegistry, doc_id, epoch)
+}
+
+pub(super) fn encode_scoped_answer(
+    outcome: &RegistryPageOutcome,
+    doc_type: DocType,
     doc_id: u128,
     epoch: u64,
 ) -> Result<Vec<u8>, SyncError> {
@@ -159,7 +242,7 @@ pub(super) fn encode_answer(
                 if total > MAX_REGISTRY_PAGE_BYTES {
                     return Err(SyncError::Malformed);
                 }
-                checked_op(&bytes, doc_id, epoch)?;
+                checked_op(&bytes, doc_type, doc_id, epoch)?;
                 e.put_bytes(&bytes).expect("bounded op");
             }
             e.put_bytes(
@@ -175,6 +258,15 @@ pub(super) fn encode_answer(
 
 pub(super) fn decode_answer(
     bytes: &[u8],
+    doc_id: u128,
+    epoch: u64,
+) -> Result<RegistryPageOutcome, SyncError> {
+    decode_scoped_answer(bytes, DocType::DocRegistry, doc_id, epoch)
+}
+
+pub(super) fn decode_scoped_answer(
+    bytes: &[u8],
+    doc_type: DocType,
     doc_id: u128,
     epoch: u64,
 ) -> Result<RegistryPageOutcome, SyncError> {
@@ -202,7 +294,7 @@ pub(super) fn decode_answer(
                 if total > MAX_REGISTRY_PAGE_BYTES {
                     return Err(SyncError::Malformed);
                 }
-                operations.push(checked_op(bytes, doc_id, epoch)?);
+                operations.push(checked_op(bytes, doc_type, doc_id, epoch)?);
             }
             let next = match malformed(d.get_bytes())? {
                 [] => None,
