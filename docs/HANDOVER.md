@@ -8,7 +8,7 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
-- **Flipnote gate 3, one owned active Studio source (2026-09-09).** The mounted store now retains
+- **Flipnote gate 3, one owned active Studio source (2026-09-09, `0d74190`).** The mounted store now retains
   one verified owned Studio restart unit, moved rather than cloned. Warm automatic ingest and
   timeline reads authenticate the exact whole physical wrapper again, checking mount, scope,
   actor/group/MLS and (for ingest) a fresh complete inventory/budget. They use the same typed
