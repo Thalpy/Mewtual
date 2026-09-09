@@ -20,7 +20,11 @@ use crate::{
 
 mod adoption;
 pub mod catchup;
+mod owner;
+mod settlement;
 pub use adoption::StudioAdoptionPlan;
+pub use owner::StudioOwnerDecision;
+pub use settlement::StudioSettlementPlan;
 
 /// One raw seed, signed content log, gate, opening receipt and receipt book. There is no second
 /// compressed Automerge save to decompress or trust. Every component also has its own bound.

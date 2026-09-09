@@ -216,6 +216,12 @@ impl StudioIndexProjection {
         })
     }
 
+    /// Settlement must preserve anything this exact checkpoint codec omits. Comparing the
+    /// existing compact projection also covers future conflict-budget changes automatically.
+    pub(in crate::studio) fn checkpoint_omits_evidence(&self) -> Result<bool, ReplError> {
+        Ok(self.compact()? != *self)
+    }
+
     fn compact(&self) -> Result<Self, ReplError> {
         self.write_snapshot(&mut Writer::measure(
             crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES,

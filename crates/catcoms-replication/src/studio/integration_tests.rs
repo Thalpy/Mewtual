@@ -1010,10 +1010,12 @@ fn studio_signed_concurrency_retains_overflow_while_local_edits_refuse_more_grow
             StudioProjection::Index(p) => {
                 assert_eq!(p.objects.len(), 64);
                 assert_eq!(p.overflow.len(), 1);
+                assert!(p.checkpoint_omits_evidence().unwrap());
             }
             StudioProjection::Flipnote(p) => {
                 assert_eq!(p.timeline.len(), 129);
                 assert_eq!(p.over_cap.len(), 1);
+                assert!(p.checkpoint_omits_evidence().unwrap());
                 assert_eq!(
                     p.declared_frame_bytes,
                     FLIPNOTE_FRAME_BYTES + MAX_FRAME_BYTES

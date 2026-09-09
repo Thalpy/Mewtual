@@ -269,6 +269,12 @@ impl FlipnoteFrameProjection {
         }
         Ok(())
     }
+    /// Original insertion gaps are evidence too: normalization into checkpoint positions must
+    /// not bypass recovery merely because every signed operation is inside the close.
+    pub(in crate::studio) fn checkpoint_omits_evidence(&self) -> Result<bool, ReplError> {
+        Ok(self.compact()? != *self)
+    }
+
     fn compact(&self) -> Result<Self, ReplError> {
         self.checked_parts()?;
         let mut budget = ConflictBudget(CONFLICT_FIELDS);
@@ -549,12 +555,14 @@ mod tests {
         .unwrap();
         assert_eq!(original.frames.len(), 1000);
         assert_eq!(original.over_cap.len(), 1);
+        assert!(original.checkpoint_omits_evidence().unwrap());
         let seed = original.checkpoint([7; 32]).unwrap();
         assert!(seed.bytes().len() < MAX_CHECKPOINT_BYTES);
         let mut next = AutoCommit::new();
         next.apply_changes([automerge::Change::from_bytes(seed.bytes().to_vec()).unwrap()])
             .unwrap();
         let compact = FlipnoteFrameProjection::read(&logical, channel, 1, &next).unwrap();
+        assert!(!compact.checkpoint_omits_evidence().unwrap());
         assert_eq!(compact.frames.len(), 999);
         assert_eq!(compact.timeline, original.timeline[..999]);
         assert_eq!(
