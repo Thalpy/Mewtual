@@ -7,6 +7,7 @@ use catcoms_replication::registry_epoch::catchup::{
     RegistryFrontier, RegistryOpPage, RegistryPageCursor,
 };
 use catcoms_sync::registry_catchup::RegistryReceivePermit;
+use catcoms_sync::registry_catchup::{CompletedRegistryPage, PendingRegistryPage};
 
 const PASS_LIFETIME_MS: u64 = 600_000;
 const REQUEST_INTERVAL_MS: u64 = 1_000;
@@ -44,6 +45,7 @@ pub struct RegistryReceiveProgress {
 /// page is retained. Drop loses only traversal: saved pages remain durable and a new pass derives
 /// its frontier from them. The provider's opaque cursor is never persisted as security state.
 pub struct ServerRegistryReceive {
+    attempt: Arc<()>,
     permit: RegistryReceivePermit,
     mount: Arc<()>,
     server: u64,
@@ -72,6 +74,10 @@ impl std::fmt::Debug for ServerRegistryReceive {
     }
 }
 impl ServerRegistryReceive {
+    /// Local physical binding for the coordinator's post-network supersession check.
+    pub(crate) fn doc_id(&self) -> u128 {
+        self.permit.doc_id()
+    }
     pub fn state(&self) -> RegistryReceiveState {
         self.state
     }
@@ -119,6 +125,74 @@ impl ServerRegistryReceive {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    /// Start background receive from the exact existing read-only prepared Registry source.
+    /// Its source/intent flush and physical accounting are checked in maintenance_hint; the
+    /// starting frontier therefore needs no second full reconstruction on each quiet poll.
+    pub(crate) fn begin_prepared_registry_receive(
+        &mut self,
+        store: &mut ServerStore,
+        watch: &ServerRegistryWatch,
+        provider_source: &mut ServerRegistryPageProvider,
+        key: &catcoms_replication::registry::PointerKey,
+        peer: PeerId,
+        budget: &mut crate::store::EpochStudioBudget,
+    ) -> Result<ServerRegistryReceive, AppError> {
+        self.check_registry_watch(store, watch)?;
+        let hint = self.registry_maintenance_hint(store, provider_source, key, budget)?;
+        let provider = self
+            .sync
+            .registry_page_peer_device(peer)
+            .ok_or_else(|| AppError::Invalid("registry provider endpoint is not proven".into()))?;
+        let permit = self.sync.begin_registry_receive(&watch.inner)?;
+        let logical =
+            catcoms_replication::registry::registry_document(&self.group_id(), watch.bucket)
+                .map_err(|e| AppError::Invalid(e.to_string()))?;
+        let expected_id = hint.map(|h| h.doc_id).unwrap_or_else(|| {
+            catcoms_replication::epoch_zero_id(logical.doc_type, &logical.logical_key)
+        });
+        if provider_source.server != watch.server
+            || provider_source.bucket != watch.bucket
+            || permit.doc_id() != expected_id
+        {
+            return Err(AppError::Invalid(
+                "Registry receive source/watch mismatch".into(),
+            ));
+        }
+        let frontier = provider_source
+            .prepared
+            .as_mut()
+            .map(|p| p.source.catchup_frontier())
+            .unwrap_or(RegistryFrontier {
+                heads: vec![],
+                seed: None,
+            });
+        let now = self.runtime_clock().monotonic_ms();
+        let expires = now
+            .checked_add(PASS_LIFETIME_MS)
+            .ok_or_else(|| AppError::Invalid("registry receive clock exhausted".into()))?;
+        let requester = self.sync.with_registry_context(|_, d, _, _| d.device_id());
+        Ok(ServerRegistryReceive {
+            attempt: Arc::new(()),
+            permit,
+            mount: store.registry_mount(),
+            server: watch.server,
+            bucket: watch.bucket,
+            requester,
+            peer,
+            provider,
+            frontier,
+            empty_fallback_used: false,
+            cursor: None,
+            pending: None,
+            pending_epoch: 0,
+            state: RegistryReceiveState::Ready,
+            progress: Default::default(),
+            now,
+            expires,
+            retry_at: now,
+            write_at: now,
+        })
+    }
     /// Reserve bounded ownership, verify and flush the checked starting state, then capture its
     /// frontier. No file is created when epoch zero is absent. The watch must already be installed
     /// and the provider endpoint proven. No vault borrow survives into a network request.
@@ -162,6 +236,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ))
         })?;
         Ok(ServerRegistryReceive {
+            attempt: Arc::new(()),
             permit,
             mount: store.registry_mount(),
             server: watch.server,
@@ -214,13 +289,25 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         &mut self,
         pass: &mut ServerRegistryReceive,
     ) -> Result<RegistryReceiveState, AppError> {
+        let Some(attempt) = self.prepare_registry_receive_step(pass)? else {
+            return Ok(pass.state);
+        };
+        self.complete_registry_receive_step(pass, attempt.fetch().await)
+    }
+
+    /// Charge one attempt under actor custody; only connected transport I/O leaves the actor.
+    /// A dropped attempt stays Paused and cannot refund rate/capacity already consumed.
+    pub fn prepare_registry_receive_step(
+        &mut self,
+        pass: &mut ServerRegistryReceive,
+    ) -> Result<Option<RegistryPageAttempt<T>>, AppError> {
         self.check_registry_receive(pass)?;
         if pass.state != RegistryReceiveState::Ready || pass.now < pass.retry_at {
-            return Ok(pass.state);
+            return Ok(None);
         }
         if pass.progress.attempts > MAX_EPOCH_OPERATIONS {
             pass.state = RegistryReceiveState::RestartRequired;
-            return Ok(pass.state);
+            return Ok(None);
         }
         pass.progress.attempts += 1;
         pass.retry_at = pass.now.saturating_add(REQUEST_INTERVAL_MS);
@@ -230,22 +317,48 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         pass.pending_epoch = self
             .sync
             .with_registry_context(|group, _, _, _| group.epoch());
-        let outcome = self
-            .request_registry_page(
-                pass.peer,
-                RegistryPageQuery {
-                    bucket: pass.bucket,
-                    doc_id: pass.permit.doc_id(),
-                    heads: &pass.frontier.heads,
-                    seed: pass.frontier.seed,
-                    cursor: pass.cursor.as_ref().map(RegistryPageCursor::as_bytes),
-                },
-            )
-            .await?;
+        pass.attempt = Arc::new(());
+        let request = self.sync.prepare_registry_receive_page(
+            &pass.permit,
+            pass.peer,
+            RegistryPageQuery {
+                bucket: pass.bucket,
+                doc_id: pass.permit.doc_id(),
+                heads: &pass.frontier.heads,
+                seed: pass.frontier.seed,
+                cursor: pass.cursor.as_ref().map(RegistryPageCursor::as_bytes),
+            },
+        )?;
+        Ok(Some(RegistryPageAttempt {
+            request,
+            attempt: pass.attempt.clone(),
+        }))
+    }
+
+    /// Recheck exact attempt, watch, membership and deadline before retaining one bounded page.
+    /// Durable progress still changes only in persist_registry_receive_step.
+    pub fn complete_registry_receive_step(
+        &mut self,
+        pass: &mut ServerRegistryReceive,
+        completed: RegistryPageCompletion,
+    ) -> Result<RegistryReceiveState, AppError> {
         self.check_registry_receive(pass)?;
+        if !Arc::ptr_eq(&pass.attempt, &completed.attempt) {
+            return Err(AppError::Invalid(
+                "Registry page attempt was superseded".into(),
+            ));
+        }
         if pass.state == RegistryReceiveState::RestartRequired {
             return Ok(pass.state);
         }
+        if pass.state != RegistryReceiveState::Paused {
+            return Err(AppError::Invalid(
+                "Registry page attempt was superseded".into(),
+            ));
+        }
+        let outcome = self
+            .sync
+            .complete_registry_receive_page(completed.completed)?;
         match outcome {
             None => {} // unsupported/refused is retryable, never prefix completion
             Some(RegistryPageOutcome::Restart) => pass.receive_restart(),
@@ -329,18 +442,28 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let page = pass.pending.as_ref().expect("PageReady retains its page");
         let counts = self.sync.with_registry_context(|group, device, _, rng| {
-            store
-                .ingest_registry_page(
+            let (counts, mut saved) = store.ingest_registry_page(
+                pass.server,
+                group,
+                pass.bucket,
+                pass.permit.doc_id(),
+                device,
+                &page.operations,
+                rng,
+                budget,
+            )?;
+            // Preserve validation of the exact new durable wrapper before dropping this graph.
+            // The next Studio turn can precede registry provider reconstruction; a stale cache
+            // would otherwise trip the cold-inventory rail for a valid large received bucket.
+            if let Some(state) = saved.as_mut() {
+                store.remember_installed_registry(
                     pass.server,
-                    group,
+                    &group.group_id(),
                     pass.bucket,
-                    pass.permit.doc_id(),
-                    device,
-                    &page.operations,
-                    rng,
-                    budget,
-                )
-                .map(|(counts, _)| counts)
+                    state,
+                )?;
+            }
+            Ok::<_, AppError>(counts)
         })?;
         let RegistryPageAdmission {
             accepted,
@@ -356,6 +479,34 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             RegistryReceiveState::PrefixComplete
         };
         Ok(pass.state)
+    }
+}
+
+/// Non-cloneable request/result pair carries only transport state, never the Server or vault.
+pub struct RegistryPageAttempt<T: MeshTransport> {
+    request: PendingRegistryPage<T>,
+    attempt: Arc<()>,
+}
+pub struct RegistryPageCompletion {
+    completed: CompletedRegistryPage,
+    attempt: Arc<()>,
+}
+impl<T: MeshTransport> std::fmt::Debug for RegistryPageAttempt<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RegistryPageAttempt { .. }")
+    }
+}
+impl std::fmt::Debug for RegistryPageCompletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RegistryPageCompletion { .. }")
+    }
+}
+impl<T: MeshTransport> RegistryPageAttempt<T> {
+    pub async fn fetch(self) -> RegistryPageCompletion {
+        RegistryPageCompletion {
+            completed: self.request.fetch().await,
+            attempt: self.attempt,
+        }
     }
 }
 

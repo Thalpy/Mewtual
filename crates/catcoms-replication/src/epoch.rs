@@ -683,11 +683,8 @@ impl CloseRecord {
         let owner = group
             .designated_committer()
             .ok_or(ReplError::EpochAuthority)?;
-        let reached_lower_bound = operations.len() >= 10_000
-            || encoded_bytes >= 2 * 1024 * 1024
-            || by_device.iter().any(|(author, (count, bytes))| {
-                *author != owner && (*count >= MAX_DEVICE_OPERATIONS || *bytes >= MAX_DEVICE_BYTES)
-            });
+        let reached_lower_bound =
+            close_lower_bound_reached(operations.len(), encoded_bytes, &by_device, owner);
         if !reached_lower_bound {
             return Err(ReplError::EpochBound);
         }
@@ -2011,6 +2008,21 @@ struct EpochGateInner {
     quarantine: VecDeque<Hash32>,
 }
 
+// Shared by exact closure validation and the local scheduler's cheap eligibility hint. The
+// hint never replaces signature/dependency/typed-seed checks when actually closing an epoch.
+fn close_lower_bound_reached(
+    count: usize,
+    bytes: usize,
+    by_device: &BTreeMap<DeviceId, (usize, usize)>,
+    owner: DeviceId,
+) -> bool {
+    count >= 10_000
+        || bytes >= 2 * 1024 * 1024
+        || by_device.iter().any(|(author, (count, bytes))| {
+            *author != owner && (*count >= MAX_DEVICE_OPERATIONS || *bytes >= MAX_DEVICE_BYTES)
+        })
+}
+
 /// One per-document mutex used by local edits, inbound ingest, and receipt settlement.
 #[derive(Debug)]
 pub struct EpochGate {
@@ -2060,6 +2072,19 @@ impl EpochGate {
     /// Current lifecycle phase.
     pub fn phase(&self) -> EpochPhase {
         self.inner.lock().expect("epoch gate poisoned").phase
+    }
+
+    /// A scheduling hint over already admitted counters. It supplies no close authority and
+    /// does not build a projection, copy history, or claim the complete head set fits its cap.
+    pub(crate) fn close_candidate_ready(&self) -> bool {
+        let inner = self.inner.lock().expect("epoch gate poisoned");
+        inner.phase == EpochPhase::Open
+            && close_lower_bound_reached(
+                inner.operations.len(),
+                inner.total_bytes,
+                &inner.by_device,
+                inner.owner,
+            )
     }
 
     /// Check the pieces of a registry restart unit together. Matching only operation hashes

@@ -254,6 +254,33 @@ impl ServerStore {
         Ok(state)
     }
 
+    /// Repair uncertainty for an unchanged authenticated ledger without replaying any intent.
+    /// The exclusive coordinator also flushes its matching saved source before claiming a
+    /// maintenance no-op. This does not retire entries or infer that an operation is receipted.
+    pub(super) fn flush_checked_epoch_intents(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+    ) -> Result<(), AppError> {
+        self.checked_epoch_replay_state(server, document, budget, intents)?;
+        let scope = scope_bytes(server, document)?;
+        let (_, bytes) = self.read_epoch_intent_record(&scope, document)?;
+        if let Some(bytes) = bytes {
+            let record = storage_record(server, document, &scope, bytes)?;
+            let reservation = budget
+                .reserve_sync(
+                    &StorageScope::new(server, &document.server_id).map_err(invalid)?,
+                    record,
+                )
+                .map_err(invalid)?;
+            sync_intent(&self.epoch_intent_path(&scope), bytes)?;
+            reservation.commit();
+        }
+        Ok(())
+    }
+
     /// Save one local intent before applying or gossiping the edit. The actual local MLS device,
     /// not a payload identity, supplies its author; it must still belong to the document's group.
     /// Type-specific semantic validation must run before calling this envelope-storage adapter.

@@ -30,6 +30,16 @@ const PAYLOAD_BYTES: usize = REGISTRY_CURSOR_BYTES - 32;
 /// caller may move reconstruction to a worker without giving it device keys or live MLS state.
 pub struct RegistryPageSource(RegistryEpoch);
 
+/// Local scheduling facts from one verified source, not authority to edit or install it.
+#[derive(Clone, Copy, Debug)]
+pub struct RegistryMaintenanceHint {
+    pub doc_id: u128,
+    pub phase: EpochPhase,
+    pub close_candidate_ready: bool,
+    pub pointer_epoch: Option<u64>,
+    pub pointer_deleted: bool,
+}
+
 impl std::fmt::Debug for RegistryPageSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("RegistryPageSource { .. }")
@@ -37,6 +47,30 @@ impl std::fmt::Debug for RegistryPageSource {
 }
 
 impl RegistryPageSource {
+    /// Original accepted frontier from this same verified graph; no mutable source escapes.
+    pub fn catchup_frontier(&mut self) -> RegistryFrontier {
+        self.0.catchup_frontier()
+    }
+    pub fn maintenance_hint(
+        &self,
+        key: &crate::registry::PointerKey,
+    ) -> Result<RegistryMaintenanceHint, ReplError> {
+        if key.bucket() != self.0.bucket {
+            return Err(ReplError::EpochScope);
+        }
+        let projection = self.0.projection()?;
+        Ok(RegistryMaintenanceHint {
+            doc_id: self.0.doc_id(),
+            phase: self.0.phase(),
+            close_candidate_ready: self.0.close_candidate_ready(),
+            pointer_epoch: projection
+                .pointers
+                .get(key)
+                .or_else(|| projection.overflow.get(key))
+                .copied(),
+            pointer_deleted: projection.tombstones.contains(key),
+        })
+    }
     /// Read the same verified held head used by ordinary Registry restore. This remains a
     /// local source fact: a network owner proof additionally requires durable journal agreement.
     pub fn receipt_head(&self) -> Result<Option<&Receipt>, ReplError> {

@@ -21,6 +21,27 @@ pub(crate) struct StudioReceiver {
 }
 impl StudioReceiver {
     #[cfg(test)]
+    pub(crate) fn hold_registry_page_for_test(
+        &mut self,
+        target: StudioTarget,
+        pass: crate::registry_catchup::ServerRegistryReceive,
+    ) {
+        self.catchup.hold_registry_page_for_test(target, pass);
+    }
+    #[cfg(test)]
+    pub(crate) fn has_registry_page_for_test(&self) -> bool {
+        self.catchup.has_registry_page_for_test()
+    }
+    /// Test scheduling with a page obtained through the real authenticated fetch adapters.
+    #[cfg(test)]
+    pub(crate) fn hold_page_for_test(
+        &mut self,
+        target: StudioTarget,
+        pass: crate::studio_exchange::ServerStudioReceive,
+    ) {
+        self.catchup.hold_page_for_test(target, pass);
+    }
+    #[cfg(test)]
     pub(crate) fn retaining_registry_for_test(
         provider: crate::registry_catchup::ServerRegistryPageProvider,
         until: u64,

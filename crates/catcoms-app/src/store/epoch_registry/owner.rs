@@ -27,6 +27,96 @@ pub(super) enum OwnerRotationStep {
 }
 
 impl ServerStore {
+    /// Locally paced Studio maintenance composes the existing Registry rotation and discovery
+    /// barriers. No query from another peer is necessary to finish an installed decision.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn maintain_registry_owner(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        tenure: u64,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+    ) -> Result<Option<(RegistryOwnerRotationOutcome, EpochRegistryState)>, AppError> {
+        let Some(state) = self.load_registry_epoch(server, group, bucket, device)? else {
+            return Ok(None);
+        };
+        let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        if state.phase() == EpochPhase::Fault
+            || (state.phase() == EpochPhase::Open
+                && !state.unit.close_candidate_ready()
+                && self
+                    .load_epoch_owner_receipts(server, &document)?
+                    .pending()
+                    .is_none())
+        {
+            return Ok(None);
+        }
+        drop(state);
+        let (mut outcome, mut state) = self.rotate_registry_owner(
+            server, group, bucket, device, tenure, clock, rng, budget, intents,
+        )?;
+        if matches!(
+            outcome,
+            RegistryOwnerRotationOutcome::Installed { .. }
+                | RegistryOwnerRotationOutcome::AlreadyInstalled { .. }
+        ) {
+            let receipt = state
+                .unit
+                .receipt_head()
+                .map_err(invalid)?
+                .cloned()
+                .ok_or_else(|| invalid("installed Registry receipt missing"))?;
+            let id = state.doc_id();
+            if state.phase() != EpochPhase::Open
+                || !state.unit.opened_by(&receipt)
+                || state
+                    .unit
+                    .checkpoint_bytes_by_hash(id, receipt.seed_change_hash)
+                    .map_err(invalid)?
+                    .is_none()
+            {
+                return Err(invalid("Registry head is not an installed checkpoint"));
+            }
+            // Recheck actual saved source/journal and flush both before freeing the decision
+            // slot. Completion is availability, never a claim of transport or peer delivery.
+            let selection = self.prepare_registry_head(
+                server,
+                group,
+                bucket,
+                device,
+                Some(tenure),
+                rng,
+                budget,
+            )?;
+            if !selection.prove || selection.receipt.as_ref() != Some(&receipt) {
+                return Err(invalid("installed Registry source and journal disagree"));
+            }
+            self.mark_epoch_owner_receipt_published(
+                server,
+                &document,
+                receipt.hash(),
+                rng,
+                budget,
+            )?;
+            outcome = match outcome {
+                RegistryOwnerRotationOutcome::Installed { .. } => {
+                    RegistryOwnerRotationOutcome::Installed {
+                        publication_pending: false,
+                    }
+                }
+                _ => RegistryOwnerRotationOutcome::AlreadyInstalled {
+                    publication_pending: false,
+                },
+            };
+        }
+        self.remember_installed_registry(server, &group.group_id(), bucket, &mut state)?;
+        Ok(Some((outcome, state)))
+    }
     /// Trusted entry from the Server's current durable-owner-snapshot callback only.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn rotate_registry_owner(

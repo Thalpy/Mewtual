@@ -234,6 +234,11 @@ pub enum AppCommand {
         request: Option<crate::studio::StudioRequest>,
         ready: oneshot::Sender<crate::studio::StudioReady>,
     },
+    /// Historical content controls use the exact same Ready/vault custody as document work.
+    StudioControl {
+        request: crate::studio::StudioControlRequest,
+        ready: oneshot::Sender<crate::studio::StudioControlReady>,
+    },
     /// Store an immutable PIX blob; no Studio metadata is changed. Cancellation also owns the
     /// native concurrency slot while the command is queued or executing.
     PublishPix {
@@ -1052,6 +1057,8 @@ pub enum AppEvent {
 pub struct ServerActor {
     cmd_tx: CommandSender,
     studio_pending: tokio::sync::watch::Receiver<bool>,
+    #[cfg(test)]
+    studio_preparing: tokio::sync::watch::Receiver<bool>,
 }
 
 impl ServerActor {
@@ -1069,9 +1076,33 @@ impl ServerActor {
     pub async fn studio_receive_begin(&self) -> Result<crate::studio::StudioReady, String> {
         self.studio_ready(None).await
     }
+    /// Fixed-size local recovery requests; no renderer-supplied snapshot or vault guard is queued.
+    pub async fn studio_control_begin(
+        &self,
+        request: crate::studio::StudioControlRequest,
+    ) -> Result<crate::studio::StudioControlReady, String> {
+        let (ready, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::StudioControl { request, ready })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await
+            .map_err(|_| "server stopped or Studio control expired".to_string())
+    }
     /// Coalesced scheduling hint with no content; the actor closing terminates its receiver.
     pub fn studio_pending(&self) -> tokio::sync::watch::Receiver<bool> {
         self.studio_pending.clone()
+    }
+
+    /// Let deterministic fixtures finish detached CPU work without advancing their network
+    /// clock. This never waits for network I/O: both actors remain free to serve requests.
+    #[cfg(test)]
+    pub(crate) async fn wait_studio_preparation(&self) {
+        self.studio_preparing
+            .clone()
+            .wait_for(|preparing| !*preparing)
+            .await
+            .expect("Studio actor stopped during preparation");
     }
     async fn studio_ready(
         &self,
@@ -1097,6 +1128,8 @@ impl ServerActor {
     pub fn with_trace(&self, trace: u64) -> ServerActor {
         ServerActor {
             studio_pending: self.studio_pending.clone(),
+            #[cfg(test)]
+            studio_preparing: self.studio_preparing.clone(),
             cmd_tx: CommandSender {
                 tx: self.cmd_tx.tx.clone(),
                 trace: Trace(trace),
@@ -3366,6 +3399,8 @@ where
     let (raw_events, event_rx) = mpsc::channel::<TracedEvent>(256);
     let event_tx = EventSink::new(raw_events);
     let (studio_signal, studio_pending) = tokio::sync::watch::channel(false);
+    #[cfg(test)]
+    let (studio_preparation_signal, studio_preparing) = tokio::sync::watch::channel(false);
     let handle = tokio::spawn(async move {
         let mut studio_receiver = crate::studio::StudioReceiver::default();
         let mut studio_jobs = tokio::task::JoinSet::<crate::studio::StudioBackgroundResult>::new();
@@ -3476,6 +3511,8 @@ where
         let mut file_transfers = file_transfers::FileTransfers::new();
         loop {
             studio_receiver.signal(&server, &studio_signal);
+            #[cfg(test)]
+            studio_preparation_signal.send_replace(studio_receiver.preparing_for_test());
             let delivery_clock = server.runtime_clock();
             let delivery_delay =
                 next_delivery_delay(delivery_clock.monotonic_ms(), &delivery, &delivery_dirty);
@@ -3490,6 +3527,17 @@ where
             tokio::pin!(delivery_wake);
             tokio::select! {
                 biased;
+                // Consume an already-completed bounded Studio job before granting another
+                // native lease. A continuously ready command queue must not leave a fetched
+                // page/preparation marked in-flight forever. Pending work never blocks commands.
+                completed = studio_jobs.join_next(), if !studio_jobs.is_empty() => {
+                    event_tx.idle();
+                    match completed {
+                        Some(Ok(result)) => studio_receiver.complete(&mut server, result),
+                        Some(Err(_)) => { tracing::error!("Studio background task panicked; stopping actor"); return; },
+                        None => {}
+                    }
+                },
                 // `begin` unwraps the envelope and adopts the caller's operation for as long as
                 // this arm runs, so every event the arm emits is attributed to the command that
                 // caused it without any of the fifty arms below having to mention it.
@@ -3919,10 +3967,24 @@ where
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
                     }
-                    Some(AppCommand::Studio { request, ready }) => {
+                    Some(command @ (AppCommand::Studio { .. } | AppCommand::StudioControl { .. })) => {
+                        use crate::studio::{StudioDispatch, StudioReply, StudioResponse};
                         let (lease_tx, lease_rx) = oneshot::channel::<crate::studio::StudioVaultLease>();
-                        let (reply, result) = oneshot::channel();
-                        if ready.send(crate::studio::StudioReady { lease: lease_tx, result }).is_err() { continue; }
+                        // Only reply routing differs. Both APIs enter the SAME custody, worker,
+                        // cancellation and panic path; historical reads never clone the Server.
+                        let (request, reply) = match command {
+                            AppCommand::Studio { request, ready } => {
+                                let (reply, result) = oneshot::channel();
+                                if ready.send(crate::studio::StudioReady { lease: lease_tx, result }).is_err() { continue; }
+                                (StudioDispatch::Document(request), StudioReply::Document(reply))
+                            }
+                            AppCommand::StudioControl { request, ready } => {
+                                let (reply, result) = oneshot::channel();
+                                if ready.send(crate::studio::StudioControlReady { lease: lease_tx, result }).is_err() { continue; }
+                                (StudioDispatch::Control(request), StudioReply::Control(reply))
+                            }
+                            _ => unreachable!(),
+                        };
                         let clock = server.runtime_clock();
                         let deadline = clock.monotonic_ms().saturating_add(5_000);
                         let lease = tokio::select! {
@@ -3939,7 +4001,12 @@ where
                             let mut lease = lease;
                             let cancelled = lease.is_cancelled();
                             let result = match lease.store.as_mut() {
-                                Some(store) if !reply.is_closed() && !cancelled => studio_receiver.run(&mut server, store, lease.server, request).map_err(|e| e.to_string()),
+                                Some(store) if !reply.is_closed() && !cancelled => match request {
+                                    StudioDispatch::Document(request) => studio_receiver.run(&mut server, store, lease.server, request)
+                                        .map(|(saved, updated)| (saved, updated, None)),
+                                    StudioDispatch::Control(request) => server.studio_control_transaction(store, lease.server, request)
+                                        .map(|response| (crate::studio::StudioSavedTransaction::empty(), None, Some(response))),
+                                }.map_err(|e| e.to_string()),
                                 _ => Err("Studio request cancelled or vault closed".into()),
                             };
                             (server, studio_receiver, lease, reply, result)
@@ -3951,7 +4018,10 @@ where
                         server = returned;
                         studio_receiver = returned_receiver;
                         let (result, updated) = match result {
-                            Ok((saved, updated)) => (Ok(server.publish_studio_save(&mut lease, &mut reply, saved).await), updated),
+                            Ok((saved, updated, control)) => {
+                                let view = server.publish_studio_save(&mut lease, &mut reply, saved).await;
+                                (Ok(match control { Some(response) => StudioResponse::Control(response), None => StudioResponse::Document(view) }), updated)
+                            },
                             Err(error) => (Err(error), None),
                         };
                         // Keep custody through the bounded initial send, but never through replies
@@ -3961,7 +4031,9 @@ where
                         drop(lease);
                         if let Some(job) = background { studio_jobs.spawn(job.run(cancellation)); }
                         studio_receiver.signal(&server, &studio_signal);
-                        let _ = reply.send(result);
+                        #[cfg(test)]
+                        studio_preparation_signal.send_replace(studio_receiver.preparing_for_test());
+                        reply.send(result);
                         if let Some(target) = updated {
                             let object = match target { catcoms_replication::studio::StudioTarget::Index { .. } => None,
                                 catcoms_replication::studio::StudioTarget::Flipnote { object, .. } => Some(object) };
@@ -4711,14 +4783,6 @@ where
                         file_transfers.complete(&mut server, completed);
                     }
                 },
-                completed = studio_jobs.join_next(), if !studio_jobs.is_empty() => {
-                    event_tx.idle();
-                    match completed {
-                        Some(Ok(result)) => studio_receiver.complete(&mut server, result),
-                        Some(Err(_)) => { tracing::error!("Studio background task panicked; stopping actor"); return; },
-                        None => {}
-                    }
-                },
                 // A receipt may be the final network event in a quiet room. Wake from the same
                 // injected clock used to start the throttle so the last coalesced state is still
                 // surfaced without waiting for unrelated traffic.
@@ -4944,6 +5008,8 @@ where
     (
         ServerActor {
             studio_pending,
+            #[cfg(test)]
+            studio_preparing,
             cmd_tx: CommandSender {
                 tx: cmd_tx,
                 trace: Trace::NONE,
@@ -5660,6 +5726,7 @@ mod tests {
         drop(rx);
         let actor = ServerActor {
             studio_pending: tokio::sync::watch::channel(false).1,
+            studio_preparing: tokio::sync::watch::channel(false).1,
             cmd_tx: CommandSender {
                 tx,
                 trace: Trace::NONE,

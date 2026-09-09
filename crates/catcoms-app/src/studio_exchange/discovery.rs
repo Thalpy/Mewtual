@@ -74,22 +74,32 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         store: &mut ServerStore,
         server: u64,
         pass: &ServerCheckpointFetch,
+        prepared: Option<&mut crate::registry_catchup::ServerRegistryPageProvider>,
         budget: &mut EpochStudioBudget,
     ) -> Result<StudioAdoptionOutcome, AppError> {
         if pass.server != server || !Arc::ptr_eq(&pass.mount, &store.registry_mount()) {
             return Err(invalid("registry selection mount/server changed"));
         }
+        let CheckpointTarget::Registry(bucket) = pass.inner.target() else {
+            return Err(invalid("Registry checkpoint selection required"));
+        };
+        if !store.registry_receive_source_fits(server, &self.group_id(), bucket)? {
+            let source =
+                prepared.ok_or_else(|| invalid("Registry source needs local preparation"))?;
+            if !self.registry_page_provider_matches(store, server, bucket, source)
+                || !self.registry_page_preparation_is_warm(store, source)?
+            {
+                return Err(invalid("Registry source preparation changed"));
+            }
+            self.remember_registry_service_inventory(store, source)?;
+        }
         let clock = self.runtime_clock();
         self.sync
             .with_registry_seed_selection(&pass.inner, |g, d, rng, selected| {
                 store.with_studio_protocol_budget(server, g, budget, |store, budget| {
-                    if !store.registry_receive_source_fits(
-                        server,
-                        &g.group_id(),
-                        selected.bucket,
-                    )? {
-                        return Err(invalid("Registry source needs local preparation"));
-                    }
+                    // The existing bounded recovery-first transaction rechecks actual source,
+                    // receipt and budgets. Large history was prepared before native custody;
+                    // this one installation is not a cold per-query/page reconstruction.
                     let (outcome, mut state) = store.adopt_registry_checkpoint(
                         server,
                         g,

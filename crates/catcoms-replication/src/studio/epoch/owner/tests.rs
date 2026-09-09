@@ -265,6 +265,7 @@ fn studio_owner_settlement_repeated_rotations_preserve_baseline_and_installed_ed
 fn studio_owner_settlement_rejects_bad_authority_close_seed_fault_and_stale_plan() {
     for art in [false, true] {
         let mut f = Fixture::new(art);
+        let incomplete = f.source.snapshot().unwrap();
         f.fill();
         let other = MlsDevice::generate().unwrap();
         assert!(f
@@ -276,6 +277,21 @@ fn studio_owner_settlement_rejects_bad_authority_close_seed_fault_and_stale_plan
             .new_owner_decision(&f.group, &f.owner, 1, None)
             .is_err());
         let decision = f.decide(None);
+        let mut missing =
+            StudioEpoch::restore(&incomplete, &f.group, f.source.target, f.owner.device_id())
+                .unwrap();
+        missing
+            .seal(decision.receipt().clone(), &f.group, 0)
+            .unwrap();
+        let before_missing = missing.snapshot().unwrap();
+        assert!(missing
+            .prepare_settlement(decision.close(), &f.group, 0)
+            .is_err());
+        assert_eq!(
+            missing.snapshot().unwrap(),
+            before_missing,
+            "a valid receipt cannot substitute for unavailable closure heads"
+        );
         let mut bad_close = decision.close().clone();
         bad_close.signature[0] ^= 1;
         assert!(f

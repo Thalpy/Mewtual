@@ -3,6 +3,20 @@
 use super::*;
 use catcoms_app::studio::{types::*, EpochPhase, StudioRequest, StudioVaultLease, StudioView};
 use serde_json::{json, Value};
+pub(crate) mod recovery;
+
+enum InvokeRequest {
+    Document(StudioRequest),
+    Control(catcoms_app::studio::StudioControlRequest),
+}
+enum InvokeReady {
+    Document(catcoms_app::studio::StudioReady),
+    Control(catcoms_app::studio::StudioControlReady),
+}
+enum InvokeResponse {
+    Document(Option<StudioView>),
+    Control(catcoms_app::studio::StudioControlResponse),
+}
 
 fn id(s: &str) -> Result<[u8; 16], String> {
     if s.len() != 32
@@ -57,7 +71,29 @@ async fn invoke(
     server: u64,
     request: StudioRequest,
 ) -> Result<Option<Value>, String> {
-    request.validate().map_err(|e| e.to_string())?;
+    invoke_custody(
+        state,
+        server,
+        InvokeRequest::Document(request),
+        |response| match response {
+            InvokeResponse::Document(response) => response.map(view).transpose(),
+            _ => Err("mismatched Studio response".into()),
+        },
+    )
+    .await
+}
+
+/// The one Ready/lease/session fence used by both live document and historical recovery IPC.
+/// Export keeps its returned bytes private until the same final generation/instance recheck.
+async fn invoke_custody<V>(
+    state: &AppState,
+    server: u64,
+    request: InvokeRequest,
+    convert: impl FnOnce(InvokeResponse) -> Result<V, String>,
+) -> Result<V, String> {
+    if let InvokeRequest::Document(request) = &request {
+        request.validate().map_err(|e| e.to_string())?;
+    }
     let generation = unlocked_ui_session_generation(state).await?;
     // Reuse the existing four bounded native operation slots and cancellation-on-lock seam.
     let (slot, signal) = claim_internal_inline_download(state)?;
@@ -68,13 +104,19 @@ async fn invoke(
         biased;
         _ = cancellation.cancelled() => return Err("Studio request cancelled".into()),
         _ = clock.sleep(std::time::Duration::from_secs(5)) => return Err("Studio actor busy; retry".into()),
-        result = actor.studio_begin(request) => result?,
+        result = async { match request {
+            InvokeRequest::Document(request) => actor.studio_begin(request).await.map(InvokeReady::Document),
+            InvokeRequest::Control(request) => actor.studio_control_begin(request).await.map(InvokeReady::Control),
+        }} => result?,
     };
     let lease =
         authorize(state, server, instance, generation)?.with_cancellation(cancellation.clone());
     // After lease transfer the finite worker owns ALL fences, even if this invoke is dropped.
     // Cancellation can suppress its result, not roll back a save that already began.
-    let response = ready.execute(lease).await?;
+    let response = match ready {
+        InvokeReady::Document(ready) => InvokeResponse::Document(ready.execute(lease).await?),
+        InvokeReady::Control(ready) => InvokeResponse::Control(ready.execute(lease).await?),
+    };
     if cancellation.is_cancelled() {
         return Err("Studio request cancelled; its local save may have completed".into());
     }
@@ -86,7 +128,17 @@ async fn invoke(
     {
         return Err("server changed during Studio operation".into());
     }
-    response.map(view).transpose()
+    // Conversion can be substantial (base64 and full conflict-preserving JSON). Keep the
+    // completion fences until it is finished, and suppress even a lock request that arrived
+    // during conversion before the actual lock task can acquire this commit guard.
+    let value = convert(response)?;
+    if cancellation.is_cancelled()
+        || state.session_lock_requested.load(Ordering::Acquire)
+        || state.ui_session_generation.load(Ordering::Acquire) != generation
+    {
+        return Err("Studio response belongs to a locked or changed UI session".into());
+    }
+    Ok(value)
 }
 
 fn authorize(
@@ -371,7 +423,14 @@ fn blob(v: &FrameBlob) -> Value {
     json!({"cid":hex::encode(v.cid),"bytes":v.bytes})
 }
 fn view(v: StudioView) -> Result<Value, String> {
-    let content = match &v.projection {
+    let content = projection_content(&v.projection);
+    let value = json!({"v":1,"epochId":format!("{:032x}",v.epoch_id),"epoch":v.epoch.to_string(),
+        "channel":u128::from_be_bytes(v.projection.channel()).to_string(),"publication":"local", "provisional":true,
+        "phase":match v.phase {EpochPhase::Open=>"open",EpochPhase::Closing=>"closing",EpochPhase::Settled=>"settled",EpochPhase::Fault=>"fault"},"content":content});
+    bounded_view(value)
+}
+fn projection_content(projection: &StudioProjection) -> Value {
+    match projection {
         StudioProjection::Index(p) => {
             json!({"kind":"index","objects":objects(&p.objects),"overflow":objects(&p.overflow),
             "deletedObjects":objects(&p.deleted_objects),"tombstones":p.tombstones.iter().map(|(id,vs)|(hex::encode(id),vs.iter().map(isource).collect::<Vec<_>>())).collect::<std::collections::BTreeMap<_,_>>() })
@@ -385,10 +444,9 @@ fn view(v: StudioView) -> Result<Value, String> {
                 "source":fsource(&v.source),"value":{"checkpoint":v.value.checkpoint,"after":v.value.after.map(hex::encode),"anchor":v.value.anchor.map(hex::encode),"before":v.value.before.map(hex::encode),"blob":blob(&v.value.blob)}
             })).collect::<Vec<_>>()}))).collect::<std::collections::BTreeMap<_,_>>() })
         }
-    };
-    let value = json!({"v":1,"epochId":format!("{:032x}",v.epoch_id),"epoch":v.epoch.to_string(),
-        "channel":u128::from_be_bytes(v.projection.channel()).to_string(),"publication":"local", "provisional":true,
-        "phase":match v.phase {EpochPhase::Open=>"open",EpochPhase::Closing=>"closing",EpochPhase::Settled=>"settled",EpochPhase::Fault=>"fault"},"content":content});
+    }
+}
+fn bounded_view(value: Value) -> Result<Value, String> {
     // Typed source/recovery caps bound construction; also refuse an oversized IPC encoding rather
     // than silently dropping conflict evidence to fit a UI payload.
     if serde_json::to_vec(&value).map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {

@@ -391,6 +391,15 @@ fn studio_pages_wide_frontier_finishes_without_advancing_initial_heads() {
         );
     }
     assert_eq!(f.source.doc.heads().len(), 65);
+    let before = f.source.snapshot().unwrap();
+    assert!(
+        matches!(
+            f.source.new_owner_decision(&f.group, &f.owner, 0, None),
+            Err(ReplError::EpochBound)
+        ),
+        "owner must refuse, never truncate, a real wide head set"
+    );
+    assert_eq!(f.source.snapshot().unwrap(), before);
     let frontier = f.source.catchup_frontier();
     assert!(frontier.heads.is_empty());
     assert!(frontier.seed.is_none());

@@ -4,6 +4,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::future::Future;
 mod receiver;
+mod recovery;
 
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(81)

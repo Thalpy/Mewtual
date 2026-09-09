@@ -13,7 +13,10 @@ use registry_ingress::Rate;
 
 mod service;
 mod studio;
-pub use studio::{CompletedStudioPage, PendingStudioPage, StudioPageQuery, StudioReceivePermit};
+pub use studio::{
+    CompletedRegistryPage, CompletedStudioPage, PendingRegistryPage, PendingStudioPage,
+    StudioPageQuery, StudioReceivePermit,
+};
 
 /// Shared scheduling scope. Separate wire kinds/domains preserve Registry v1 compatibility,
 /// while Studio uses the SAME request queues, rate debt and outbound/receiver capacity.

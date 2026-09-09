@@ -1,6 +1,6 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-09, backend through `5f24262` (Gate 3 Index/art).
+Last checked: 2026-09-10, Gate 4 integration worktree (not yet committed/accepted).
 This is the maintained frontend integration map, not a replacement UI design. The user's
 canonical HTML/mockups remain authoritative for layout and interaction. Update this guide in
 the same slice that adds or changes a native command, event or returned state.
@@ -28,6 +28,10 @@ are 64 lowercase hex. A four-byte display fingerprint is never an authority key.
 | Edit sidebar entry | `studio_apply_index({server, channel, epochId, nonce, body})` | Updated Index view |
 | Publish pixels | `publish_pix({server, bytesB64})` | `{cid: string, bytes: number}` after validated PIX persistence/promotion |
 | Fetch referenced blob | `request_blob_bounded({server, cid, maxBytes})` | `{bytes_b64: string, bytes: number}` or `null` if unavailable |
+| List recovery versions | `studio_recovery_list({server, channel, object?})` | Metadata for at most two retained versions plus one staged version; omit `object` for the Index |
+| Inspect one recovery version | `studio_recovery_read({server, channel, object?, snapshot})` | Historical typed content, not a current Studio view |
+| Export a recovery backup | `studio_recovery_export({server, channel, object?, snapshot})` | Bounded `{format:"p1-recovery-v1", bytes, bytesB64, snapshot}` |
+| Accept an eviction warning | `studio_recovery_acknowledge({server, channel, object?, oldestSnapshot, stagedSnapshot})` | Updated recovery listing after exact-pair durable acknowledgement |
 
 `body` is a **canonical JSON string**, not an object or a full signed P1 envelope. Use
 `canonicalJson` from [studio-contract.ts](../apps/desktop/src/studio-contract.ts).
@@ -138,10 +142,40 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 |---|---|
 | Settlement chip / rotation progress | `phase` is available; a dedicated settlement-status event/view is not. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
 | Local overlay while rotating | Keep editor work separately. Persisted overlay/replay orchestration is not yet a native command. Shared apply may refuse Closing/Fault. |
-| Recovery rail: Restore / Copy / Export | Typed recovery storage exists; native list/actions and warning acknowledgement are pending Gate 4. No callable command names are promised yet. |
-| Eviction warning / countdown | Two retained plus one staged snapshot machinery exists. Backend-provided warning state/deadline/action hooks are pending; do not use fixture deadlines as real data. |
+| Recovery rail: Restore / Copy / Export | List, inspect and recovery-backup export are callable above. Restore/Copy application and automatic intent replay are still pending Gate 4; backup export is not `.pixa`. |
+| Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Dedicated settlement-change events are still pending; refresh after the action. |
 | Claims, Ask, Pass, countdown | Pending Gate 5. Local fixture claims are not peer claims and never locks. |
 | Sound, linked Music, `.pixa` export | Pending Gate 6. Do not infer availability from the contract's type definitions. |
 
 Implementation progress and reuse evidence live in [BACKEND-IMPLEMENTATION](BACKEND-IMPLEMENTATION.md).
 UI hooks will be marked callable here only once their actor/native path and tests exist.
+
+## Recovery read/export/ack contract (Gate 4 worktree)
+
+Snapshot ids are 64 lowercase hex characters. Listing returns `kind:"recoveryList"`, `v:1`,
+`channel`, `object`, `source`, `versions`, `evictionPending` and `pendingIntents`.
+`source` is null for local absence, otherwise `{epochId, epoch, phase, provisional:true}`.
+Each version is `{snapshot, epoch, staged, bytes, reason}`; retained entries are newest-first,
+then the optional staged entry. Reasons are `excluded`, `rewound`, `conflictOverflow`, `repair`.
+Epochs are decimal strings. A pending intent can be an ordinary provisional Save; the count is
+**not** a count of lost or excluded edits. An unreadable live source currently makes List fail;
+Read/Export of a known retained snapshot do not depend on the live source being readable.
+
+`evictionPending` is null or `{oldestSnapshot, stagedSnapshot, deadlineMs}`. The deadline is a
+lossless decimal u64 string from the persisted receiver clock, not a locally invented countdown.
+Show the warning before acknowledging. The exact pair is retryable; a changed/stale pair refuses.
+Acknowledgement returns `kind:"recoveryAcknowledged"` with the same listing fields. It changes
+local recovery slots only: it neither retires intents nor installs/prunes a document. Ordinary
+background settlement must still finish its own barriers afterward.
+
+Read returns `kind:"recoveryVersion"`, `historical:true`, `version` metadata and `content` in the
+same conflict-preserving projection shape as current views. Never replace the current view's
+epoch/phase with this historical projection. Inspect and export remain usable in Closing/Fault.
+Every retained/staged slot is authenticated and type/channel checked before an action; a corrupt
+unselected slot fails rather than being quietly discarded.
+
+Export returns `kind:"recoveryExport"`, `v:1`, `snapshot`, `format:"p1-recovery-v1"`, `bytes` and
+`bytesB64`. This is the existing canonical P1 recovery envelope: private historical content and
+operation evidence, **not** playable media, a published share, an archive of PIX blobs, or an
+implemented import command. All controls reuse Save's native operation cap, actor lease and
+session/incarnation fences. Do not retry on navigation/lock as though the original session survived.

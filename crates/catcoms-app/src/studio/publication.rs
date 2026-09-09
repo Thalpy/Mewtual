@@ -17,6 +17,16 @@ pub(crate) struct StudioSavedTransaction {
     // Checked by the just-finished transaction, including actual absence. Never peer-supplied.
     pub(super) observed: Vec<(StudioTarget, u128)>,
 }
+impl StudioSavedTransaction {
+    /// No publication or implicit watch change for metadata-only recovery controls.
+    pub(crate) fn empty() -> Self {
+        Self {
+            view: None,
+            packets: Vec::new(),
+            observed: Vec::new(),
+        }
+    }
+}
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Consume at most two already-durable packets under the SAME source/Server/native custody
@@ -29,7 +39,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     pub(crate) async fn publish_studio_save(
         &mut self,
         lease: &mut StudioVaultLease,
-        reply: &mut oneshot::Sender<Result<Option<StudioView>, String>>,
+        reply: &mut StudioReply,
         saved: StudioSavedTransaction,
     ) -> Option<StudioView> {
         let clock = self.runtime_clock();

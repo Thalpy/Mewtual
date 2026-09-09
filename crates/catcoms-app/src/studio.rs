@@ -7,12 +7,19 @@ use catcoms_replication::studio::{
     FlipnoteHeader, FlipnoteOp, IndexOp, StudioExpiry, StudioKind, StudioProjection, StudioTarget,
 };
 use catcoms_replication::{epoch_zero_id, DomainOp};
-pub use catcoms_replication::{studio as types, EpochPhase};
+pub use catcoms_replication::{studio as types, EpochPhase, RecoveryReason, RecoveryTransition};
 use catcoms_rt::{CryptoRngCore, MeshTransport};
 use tokio::sync::{oneshot, OwnedMutexGuard};
 
 mod publication;
 pub(crate) use publication::StudioSavedTransaction;
+mod control;
+pub use control::{
+    StudioControlAction, StudioControlReady, StudioControlRequest, StudioControlResponse,
+    StudioRecoveryListing, StudioRecoverySummary, StudioRecoveryVersion, StudioSettlementSource,
+};
+mod dispatch;
+pub(crate) use dispatch::{StudioDispatch, StudioReply, StudioResponse};
 mod receiver;
 pub(crate) use receiver::StudioBackgroundResult;
 pub(crate) use receiver::StudioReceiver;

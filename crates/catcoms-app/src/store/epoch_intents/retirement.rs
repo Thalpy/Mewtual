@@ -46,7 +46,55 @@ impl ServerStore {
         writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
         sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        let document = &plan.receipt().document;
+        self.retire_included_with_io(
+            server,
+            &plan.receipt().document,
+            plan.included_operations(),
+            rng,
+            budget,
+            intents,
+            writer,
+            sync,
+        )
+    }
+
+    /// Typed Studio counterpart of Registry retirement. Only a verified settlement plan may
+    /// select envelopes; callers cannot supply arbitrary ids to the common private writer.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn retire_studio_intents_with_io(
+        &mut self,
+        server: u64,
+        plan: &catcoms_replication::studio::StudioSettlementPlan,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        self.retire_included_with_io(
+            server,
+            &plan.receipt().document,
+            plan.included_operations(),
+            rng,
+            budget,
+            intents,
+            writer,
+            sync,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn retire_included_with_io(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        included: &BTreeMap<[u8; 32], catcoms_replication::LocalIntent>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
         let (mut state, old) = match self.read_epoch_intent_record(&scope, document) {
@@ -68,17 +116,15 @@ impl ServerStore {
         // A derived id binds author + nonce, NOT body. A held conflicting envelope is not
         // proof that this local intent was receipted; fail without deleting it or the source.
         for (id, held) in state.pending() {
-            if plan
-                .included_operations()
-                .get(id)
-                .is_some_and(|included| included != held)
-            {
+            if included.get(id).is_some_and(|included| included != held) {
                 return Err(invalid(
                     "receipted intent envelope conflicts with local replay data",
                 ));
             }
         }
-        let removed = state.ledger.remove_receipted(plan.included_operation_ids());
+        let removed = state
+            .ledger
+            .remove_receipted(&included.keys().copied().collect());
         if removed == 0 {
             intents.preflight(&self.intent_generation, id, old, old.unwrap_or(0), true)?;
             if let Some(record) = observed {

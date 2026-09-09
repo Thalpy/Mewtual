@@ -267,8 +267,14 @@ table with the commit that closed it.
   it synchronously with its original mount/server/store/budget. Dropped receivers and hints do not
   count. Channel acceptance proves neither transport-driver admission nor peer delivery; a later
   completion failure may follow an already visible reply. Uncertain writes block accounting and
-  exact republication repairs restart. Automatic scheduling and universal full-quota progress
-  remain unfinished; publication completion is not permission to bypass recovery-first retirement.
+  exact republication repairs restart. Gate 4 also completes an exact installed Open head locally,
+  but only after current durable-owner authorization, matching journal/seed and actual source and
+  journal flushes. This is discoverable local availability, not handoff or delivery; solo servers
+  can therefore make the next decision without inventing an acknowledgement. The existing idle
+  worker now drives watched Studio owner rotations and Registry maintenance. Universal full-quota
+  progress remains unfinished; completion never bypasses recovery-first retirement. Valid Registry
+  Fault state is accounted independently of its refusal to serve a head or receive a tail, so one
+  faulted bucket cannot masquerade as corrupt inventory and pause unrelated Studio documents.
 - **Saved local intents are replay data, not completion or impersonation authority.** The
   prepare-only vault adapter binds the local mount id and full group/type/key, checks the actual
   local device's current roster signing key, and saves before reporting success. It bounds public

@@ -22,7 +22,10 @@ use std::sync::Arc;
 mod adoption;
 mod discovery;
 mod preparation;
+mod registry;
+mod rotation;
 pub use adoption::StudioAdoptionOutcome;
+pub use rotation::StudioRotationOutcome;
 mod receive;
 pub(crate) use preparation::{PreparedStudioSource, StudioSourceCapture};
 pub(super) mod source;
@@ -116,6 +119,18 @@ impl ServerStore {
         self.enter_studio_budget(server, group, budget)?;
         work(self, &mut budget.storage)
     }
+    /// Scope-only custody adapter for callbacks that themselves borrow the live Server and
+    /// recheck membership. This grants accounting access, never group/receipt authority.
+    pub(crate) fn with_studio_protocol_scope<V>(
+        &mut self,
+        server: u64,
+        group_id: &[u8],
+        budget: &mut EpochStudioBudget,
+        work: impl FnOnce(&mut Self, &mut EpochStorageBudget) -> Result<V, AppError>,
+    ) -> Result<V, AppError> {
+        self.enter_studio_budget_scope(server, group_id, budget)?;
+        work(self, &mut budget.storage)
+    }
     /// Mint once from a completed CURRENT five-family scan. Minting again requires a new scan
     /// and supersedes the previous wrapper; reopening the vault invalidates all old handles.
     pub fn studio_storage_budget(
@@ -152,7 +167,15 @@ impl ServerStore {
         group: &ServerGroup,
         budget: &mut EpochStudioBudget,
     ) -> Result<(), AppError> {
-        if budget.scope != StorageScope::new(server, &group.group_id()).map_err(invalid)?
+        self.enter_studio_budget_scope(server, &group.group_id(), budget)
+    }
+    fn enter_studio_budget_scope(
+        &mut self,
+        server: u64,
+        group_id: &[u8],
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        if budget.scope != StorageScope::new(server, group_id).map_err(invalid)?
             || !Arc::ptr_eq(&budget.generation, &self.studio_generation)
         {
             budget.storage.invalidate();

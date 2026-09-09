@@ -37,9 +37,29 @@ impl fmt::Debug for StudioReceivePermit {
     }
 }
 
+// Both managed types share one detached transport lifetime; the exact typed watch still
+// determines wire kind/domain and completion authority. Registry v1 bytes are unchanged.
+enum PageBinding {
+    Studio(StudioWatch),
+    Registry(RegistryWatch),
+}
+impl PageBinding {
+    fn scope(&self) -> PageScope {
+        match self {
+            Self::Studio(w) => PageScope::Studio(w.target),
+            Self::Registry(w) => PageScope::Registry(w.bucket),
+        }
+    }
+    fn doc_id(&self) -> u128 {
+        match self {
+            Self::Studio(w) => w.doc_id,
+            Self::Registry(w) => w.doc_id,
+        }
+    }
+}
 struct Context {
     instance: RegistrySyncInstance,
-    watch: StudioWatch,
+    watch: PageBinding,
     peer: PeerId,
     provider: DeviceId,
     requester: Vec<u8>,
@@ -62,6 +82,16 @@ pub struct CompletedStudioPage {
     context: Context,
     response: Result<Bytes, TransportError>,
     _capacity: Arc<()>,
+}
+/// Registry-specific wrapper prevents completing one kind as the other at the public seam.
+#[derive(Debug)]
+pub struct PendingRegistryPage<T: MeshTransport>(PendingStudioPage<T>);
+#[derive(Debug)]
+pub struct CompletedRegistryPage(CompletedStudioPage);
+impl<T: MeshTransport> PendingRegistryPage<T> {
+    pub async fn fetch(self) -> CompletedRegistryPage {
+        CompletedRegistryPage(self.0.fetch().await)
+    }
 }
 impl<T: MeshTransport> fmt::Debug for PendingStudioPage<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -193,12 +223,51 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return Err(SyncError::Unauthorized);
         }
+        self.prepare_bound_page(
+            PageBinding::Studio(watch.copy_binding()),
+            peer,
+            query.heads,
+            query.seed,
+            query.cursor,
+        )
+    }
+    /// Registry tail fetch uses the existing receive permit and the same connected-only
+    /// detached I/O engine as Studio, including cancellation-retained capacity.
+    pub fn prepare_registry_receive_page(
+        &mut self,
+        permit: &RegistryReceivePermit,
+        peer: PeerId,
+        query: RegistryPageQuery<'_>,
+    ) -> Result<PendingRegistryPage<T>, SyncError> {
+        if !self.registry_receive_is_current(permit)
+            || permit.watch.bucket != query.bucket
+            || permit.watch.doc_id != query.doc_id
+            || !self.registry_page_member(&self.device.public_key_bytes())
+        {
+            return Err(SyncError::Unauthorized);
+        }
+        self.prepare_bound_page(
+            PageBinding::Registry(permit.watch.copy_binding()),
+            peer,
+            query.heads,
+            query.seed,
+            query.cursor,
+        )
+        .map(PendingRegistryPage)
+    }
+    fn prepare_bound_page(
+        &mut self,
+        watch: PageBinding,
+        peer: PeerId,
+        heads: &[[u8; 32]],
+        seed: Option<[u8; 32]>,
+        cursor: Option<&[u8]>,
+    ) -> Result<PendingStudioPage<T>, SyncError> {
         let provider = self
             .registry_page_peer_device(peer)
             .ok_or(SyncError::Unauthorized)?;
-        let scope = PageScope::Studio(query.target);
-        let inner =
-            encode_scoped_query(scope, query.doc_id, query.heads, query.seed, query.cursor)?;
+        let scope = watch.scope();
+        let inner = encode_scoped_query(scope, watch.doc_id(), heads, seed, cursor)?;
         let (request, auth) = self.build_authed_request(scope.kind(), &inner)?;
         let slot = self
             .registry_pages
@@ -220,7 +289,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             capacity,
             context: Context {
                 instance: self.registry_instance(),
-                watch: watch.copy_binding(),
+                watch,
                 peer,
                 provider,
                 requester: self.device.public_key_bytes(),
@@ -237,9 +306,28 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &mut self,
         completed: CompletedStudioPage,
     ) -> Result<Option<RegistryPageOutcome>, SyncError> {
+        if !matches!(&completed.context.watch, PageBinding::Studio(_)) {
+            return Err(SyncError::Unauthorized);
+        }
+        self.complete_bound_page(completed)
+    }
+    pub fn complete_registry_receive_page(
+        &mut self,
+        completed: CompletedRegistryPage,
+    ) -> Result<Option<RegistryPageOutcome>, SyncError> {
+        self.complete_bound_page(completed.0)
+    }
+    fn complete_bound_page(
+        &mut self,
+        completed: CompletedStudioPage,
+    ) -> Result<Option<RegistryPageOutcome>, SyncError> {
         let c = completed.context;
+        let current = match &c.watch {
+            PageBinding::Studio(w) => self.studio_watch_is_current(w),
+            PageBinding::Registry(w) => self.registry_watch_is_current(w),
+        };
         if !self.matches_registry_instance(&c.instance)
-            || !self.studio_watch_is_current(&c.watch)
+            || !current
             || self.group.group_id() != c.group
             || self.group.epoch() != c.auth.epoch
             || self.device.public_key_bytes() != c.requester
@@ -257,7 +345,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if DeviceId::from_public_key_bytes(key) != c.provider || !self.registry_page_member(key) {
             return Err(SyncError::Unauthorized);
         }
-        let scope = PageScope::Studio(c.watch.target);
+        let scope = c.watch.scope();
         let transcript = scoped_response_transcript(
             scope.domain(),
             &c.group,
@@ -273,7 +361,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(Some(decode_scoped_answer(
             answer,
             scope.doc_type(),
-            c.watch.doc_id,
+            c.watch.doc_id(),
             c.auth.epoch,
         )?))
     }

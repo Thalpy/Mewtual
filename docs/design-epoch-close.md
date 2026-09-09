@@ -337,9 +337,12 @@ serving now drives the exact completion API only after a fresh current-owner pro
 the local reply-forwarding channel, under the same synchronous Server/store gate. This completes
 a saved publication attempt, not peer delivery or transport-driver admission. A dropped receiver
 does not complete it; a crash or disk failure after handoff can require exact retry. Uncertain
-writes block the live budget until inventory reconciliation. Only durable completion permits
-another eligible owner decision.
-Automatic scheduling, other managed types and repair remain unfinished. Reads are historical only.
+writes block the live budget until inventory reconciliation. Gate 4 additionally permits local
+completion after verifying the exact installed Open checkpoint, expected seed and matching durable
+current-owner journal and flushing both records. This records head/seed availability, never remote
+delivery, and allows a solo owner to rotate repeatedly. Only durable completion permits another
+eligible owner decision. Recently watched Studio and associated Registry maintenance now use the
+existing idle worker; complete replay, recovery controls and repair remain unfinished.
 
 ## 9. Intents and markers
 

@@ -367,17 +367,66 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
+        self.prepare_owner_pair_with_writer(
+            server,
+            decision.receipt(),
+            decision.close(),
+            group,
+            tenure,
+            rng,
+            budget,
+            writer,
+        )
+    }
+
+    /// Same atomic record as Registry, reachable only with a privately constructed typed
+    /// Studio decision. Do not expose raw receipt/close pairs as publication authority.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn prepare_studio_owner_decision_with_writer(
+        &mut self,
+        server: u64,
+        decision: &catcoms_replication::studio::StudioOwnerDecision,
+        group: &ServerGroup,
+        tenure: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
+        self.prepare_owner_pair_with_writer(
+            server,
+            decision.receipt(),
+            decision.close(),
+            group,
+            tenure,
+            rng,
+            budget,
+            writer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_owner_pair_with_writer(
+        &mut self,
+        server: u64,
+        receipt: &Receipt,
+        close: &CloseRecord,
+        group: &ServerGroup,
+        tenure: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
         self.update_epoch_owner_state_with_writer(
             server,
-            &decision.receipt().document,
+            &receipt.document,
             rng,
             budget,
             |state| {
                 state
                     .journal
-                    .prepare(decision.receipt().clone(), group, tenure)
+                    .prepare(receipt.clone(), group, tenure)
                     .map_err(invalid)?;
-                state.decision_close = Some((decision.receipt().hash(), decision.close().clone()));
+                state.decision_close = Some((receipt.hash(), close.clone()));
                 Ok(())
             },
             writer,

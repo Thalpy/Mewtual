@@ -4,6 +4,81 @@ use crate::studio_exchange::discovery::ServerCheckpointDiscovery;
 use catcoms_sync::checkpoint_exchange::CheckpointTarget;
 
 #[tokio::test]
+async fn studio_registry_preparation_outliving_head_needs_a_fresh_request() {
+    let mut p = super::pages::proven_pair().await;
+    super::discovery::prepared_checkpoint(&mut p, target());
+    let bucket = prepared_registry(&mut p, target(), false);
+    drop(p.a_store);
+    p.a_store = open(p._a_root.path());
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(&mut p.alice, &mut p.a_store, SERVER, None)
+        .unwrap();
+    let attempt = p
+        .bob
+        .prepare_checkpoint_discovery(
+            &p.b_store,
+            SERVER,
+            p.alice.local_peer(),
+            CheckpointTarget::Registry(bucket),
+        )
+        .unwrap();
+    let (completed, job) = tokio::join!(attempt.fetch(), async {
+        p.alice.sync_once().await.unwrap();
+        receiver
+            .run(&mut p.alice, &mut p.a_store, SERVER, None)
+            .unwrap();
+        let job = receiver
+            .detach(&mut p.alice)
+            .expect("cold paid preparation");
+        assert!(job.is_preparation_for_test());
+        // Deliberately withhold CPU completion beyond the ORIGINAL request deadline.
+        p.clock.advance_ms(10_001);
+        job
+    });
+    assert!(!matches!(
+        p.bob
+            .complete_checkpoint_discovery(&mut p.b_store, SERVER, completed),
+        Ok(Some(ServerCheckpointDiscovery::Selected(_)))
+    ));
+    receiver.complete(&mut p.alice, job.run(None).await);
+    for _ in 0..3 {
+        receiver
+            .run(&mut p.alice, &mut p.a_store, SERVER, None)
+            .unwrap();
+        assert!(
+            receiver.detach(&mut p.alice).is_none(),
+            "expired request cannot recapture"
+        );
+    }
+    let fresh = p
+        .bob
+        .prepare_checkpoint_discovery(
+            &p.b_store,
+            SERVER,
+            p.alice.local_peer(),
+            CheckpointTarget::Registry(bucket),
+        )
+        .unwrap();
+    let (completed, ()) = tokio::join!(fresh.fetch(), async {
+        p.alice.sync_once().await.unwrap();
+        receiver
+            .run(&mut p.alice, &mut p.a_store, SERVER, None)
+            .unwrap();
+        assert!(
+            receiver.detach(&mut p.alice).is_none(),
+            "new request uses checked warm source"
+        );
+    });
+    assert!(matches!(
+        p.bob
+            .complete_checkpoint_discovery(&mut p.b_store, SERVER, completed),
+        Ok(Some(ServerCheckpointDiscovery::Selected(_)))
+    ));
+    assert!(!receiver.take_pause_notice());
+}
+
+#[tokio::test]
 async fn studio_unopened_cancelled_preparation_cannot_reuse_its_paid_interest() {
     let mut p = super::pages::proven_pair().await;
     p.save(&title(1, "cold source"));
@@ -386,9 +461,14 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
             step(a.clone(), a_store.clone()),
             step(b.clone(), b_store.clone())
         );
-        if count.load(Ordering::SeqCst) >= 3 {
-            break;
-        }
+        // Parsing a retained closure runs on a real blocking worker, not the ManualClock.
+        // Do not spend three synthetic network deadlines while that CPU task is still running.
+        // This barrier excludes network jobs, so both actors keep serving one another.
+        tokio::join!(a.wait_studio_preparation(), b.wait_studio_preparation());
+        // Registry bootstrap is deliberately optional before the known Studio key can make
+        // progress. Three Studio repaint edges alone therefore do not finish this fixture:
+        // keep driving its ORIGINAL bounded window so the independent Registry maintenance
+        // path also gets a turn. The final assertions still require BOTH durable outcomes.
     }
     assert!(
         count.load(Ordering::SeqCst) >= 3,

@@ -16,10 +16,12 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Waker};
 mod actor_save;
+mod controls;
 mod discovery;
 mod pages;
 mod receiver;
 mod reconnect;
+mod registry_runtime;
 mod unopened;
 
 const SERVER: u64 = 83;

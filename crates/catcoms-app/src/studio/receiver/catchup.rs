@@ -20,6 +20,8 @@ use catcoms_sync::registry_seed::{CompletedCheckpointSeed, PendingCheckpointSeed
 use tokio::sync::OwnedSemaphorePermit;
 mod discovery;
 mod registry;
+mod registry_runtime;
+mod rotation;
 use discovery::DiscoveryPlan;
 
 /// Keep failure classification across detached work. A peer's bad service key must never
@@ -44,6 +46,7 @@ type PreparedRegistryResult = Result<Box<ServerPreparedRegistryPageSource>, AppE
 /// Thus all running, queued and result-holding preparations together still occupy at most
 /// four slots process-wide. A ready result retains its permit until native custody.
 pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
+    RegistryPage(crate::registry_catchup::RegistryPageAttempt<T>),
     Page(StudioPageAttempt<T>),
     Head(CheckpointDiscoveryAttempt<T>),
     Seed(PendingCheckpointSeed<T>),
@@ -55,6 +58,7 @@ pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
     PrepareRegistry(ServerRegistryPagePreparation, Option<Arc<()>>),
 }
 pub(crate) enum StudioBackgroundResult {
+    RegistryPage(Box<crate::registry_catchup::RegistryPageCompletion>),
     Page(Box<StudioPageCompletion>),
     Head(Box<CheckpointDiscoveryCompletion>),
     Seed(Box<CompletedCheckpointSeed>),
@@ -85,10 +89,13 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
         };
         let work = async move {
             match self {
-                Self::PrepareRegistry(job, generation) => StudioBackgroundResult::PreparedRegistry(
-                    generation,
-                    job.rebuild().await.map(Box::new),
-                ),
+                Self::RegistryPage(attempt) => {
+                    StudioBackgroundResult::RegistryPage(Box::new(attempt.fetch().await))
+                }
+                Self::PrepareRegistry(job, generation) => {
+                    let result = job.rebuild().await.map(Box::new);
+                    StudioBackgroundResult::PreparedRegistry(generation, result)
+                }
                 Self::Head(attempt) => {
                     StudioBackgroundResult::Head(Box::new(attempt.fetch().await))
                 }
@@ -154,8 +161,46 @@ pub(super) struct CatchupRuntime {
     registry_retained_until: u64,
     registry_preparation: Option<(ServerRegistryPagePreparation, Option<Arc<()>>)>,
     registry_prepared: Option<(Option<Arc<()>>, PreparedRegistryResult)>,
+    owner_next_at: u64,
+    owner_selection: usize,
+    owner_target: Option<StudioTarget>,
+    // Bounded one-at-a-time failure state, surfaced by the settlement view/event adapter.
+    owner_failure: Option<(StudioTarget, String)>,
+    registry_watch: Option<crate::registry_ingress::ServerRegistryWatch>,
+    registry_watch_id: Option<u128>,
+    registry_pass: Option<crate::registry_catchup::ServerRegistryReceive>,
+    registry_target: Option<StudioTarget>,
+    registry_next_at: u64,
+    registry_selection: usize,
 }
 impl CatchupRuntime {
+    #[cfg(test)]
+    pub(in crate::studio::receiver) fn hold_registry_page_for_test(
+        &mut self,
+        target: StudioTarget,
+        pass: crate::registry_catchup::ServerRegistryReceive,
+    ) {
+        assert_eq!(
+            pass.state(),
+            crate::registry_catchup::RegistryReceiveState::PageReady
+        );
+        self.registry_target = Some(target);
+        self.registry_pass = Some(pass);
+    }
+    #[cfg(test)]
+    pub(in crate::studio::receiver) fn has_registry_page_for_test(&self) -> bool {
+        self.registry_pass.is_some()
+    }
+    #[cfg(test)]
+    pub(in crate::studio::receiver) fn hold_page_for_test(
+        &mut self,
+        target: StudioTarget,
+        pass: ServerStudioReceive,
+    ) {
+        assert_eq!(pass.state(), StudioReceiveState::PageReady);
+        self.target = Some(target);
+        self.pass = Some(pass);
+    }
     fn drop_service_preparation(&mut self, context: &PreparationContext) {
         if self.service.as_ref().is_some_and(|work| {
             context
@@ -345,6 +390,11 @@ impl CatchupRuntime {
             }
         }
         self.next_at = now;
+        // Registry publication is paced idle maintenance, not part of the Read/Save result.
+        // Do not turn the first local watch into immediate work on every quiet native pass.
+        if self.registry_next_at == 0 {
+            self.registry_next_at = now.saturating_add(5_000);
+        }
     }
     pub(super) fn pending<T: MeshTransport, R: CryptoRngCore>(
         &self,
@@ -365,7 +415,10 @@ impl CatchupRuntime {
         {
             return true;
         }
-        if watches.is_empty() {
+        if !watches
+            .iter()
+            .any(|(w, _)| server.sync.studio_watch_is_current(&w.inner))
+        {
             return false;
         }
         if self.in_flight || self.preparing || self.preparation.is_some() {
@@ -377,6 +430,14 @@ impl CatchupRuntime {
         }
         if let Some(pass) = &self.pass {
             return now >= pass.retry_at_ms();
+        }
+        if let Some(pass) = &self.registry_pass {
+            return now >= pass.retry_at_ms();
+        }
+        if (self.owner_snapshot.is_some() && now >= self.owner_next_at)
+            || now >= self.registry_next_at
+        {
+            return true;
         }
         let peers = server.sync.studio_page_peers();
         !peers.is_empty() && (now >= self.next_at || peers != self.peers)
@@ -529,6 +590,22 @@ impl CatchupRuntime {
                 .then_some(self.target)
                 .flatten());
         }
+        if self.persist_registry_page(server, store, id)? {
+            // A Registry hint is not a Studio edit. Only a subsequent actual source update
+            // may emit StudioUpdated; otherwise timeline/acceptance observers see false work.
+            return Ok(None);
+        }
+        // Owner work also uses the sole prepared source. It must never displace a fetched
+        // page before that page has crossed its save-before-cursor barrier.
+        if !self.in_flight
+            && !self.preparing
+            && self.checkpoint.is_none()
+            && self.discovery_plan.is_none()
+        {
+            if let Some(updated) = self.rotate_owner(server, store, id, watches)? {
+                return Ok(Some(updated));
+            }
+        }
         // Answer requests even during our own detached fetch; symmetric reconnect must not
         // wait for one side's client pass to finish before serving its counterpart.
         let serve_now = self.in_flight
@@ -566,6 +643,9 @@ impl CatchupRuntime {
         }
         let peers = server.sync.studio_page_peers();
         if watches.is_empty() || peers.is_empty() || (now < self.next_at && peers == self.peers) {
+            // Registry maintenance uses the intentional gap between Studio page passes.
+            // It cannot consume the client turn promised by the existing service alternation.
+            self.work_registry(server, store, id, watches)?;
             return Ok(None);
         }
         self.peers = peers;
@@ -626,6 +706,11 @@ impl CatchupRuntime {
 #[cfg(test)]
 mod tests;
 impl StudioReceiver {
+    #[cfg(test)]
+    pub(crate) fn preparing_for_test(&self) -> bool {
+        self.catchup.preparing
+    }
+
     /// Called under the successful native custody window, then run after releasing that lease.
     pub(crate) fn detach<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
@@ -680,6 +765,25 @@ impl StudioReceiver {
                     }
                 }
             }
+        } else if self.catchup.registry_pass.as_ref().is_some_and(|p| {
+            p.state() == crate::registry_catchup::RegistryReceiveState::Ready
+                && server.runtime_clock().monotonic_ms() >= p.retry_at_ms()
+        }) {
+            let pass = self
+                .catchup
+                .registry_pass
+                .as_mut()
+                .expect("ready Registry pass");
+            match server.prepare_registry_receive_step(pass) {
+                Ok(Some(attempt)) => Some(StudioBackgroundJob::RegistryPage(attempt)),
+                Ok(None) => None,
+                Err(_) => {
+                    self.catchup.registry_pass = None;
+                    self.catchup.registry_next_at =
+                        server.runtime_clock().monotonic_ms().saturating_add(5_000);
+                    None
+                }
+            }
         } else if let Some(pass) = &mut self.catchup.pass {
             match server.prepare_studio_receive_step(pass) {
                 Ok(Some(attempt)) => Some(StudioBackgroundJob::Page(attempt)),
@@ -697,7 +801,9 @@ impl StudioReceiver {
         match &work {
             Some(StudioBackgroundJob::Prepare(..)) => self.catchup.preparing = true,
             Some(StudioBackgroundJob::PrepareRegistry(..)) => self.catchup.preparing = true,
-            Some(StudioBackgroundJob::Page(..)) => self.catchup.in_flight = true,
+            Some(StudioBackgroundJob::Page(..) | StudioBackgroundJob::RegistryPage(..)) => {
+                self.catchup.in_flight = true
+            }
             Some(StudioBackgroundJob::Head(..) | StudioBackgroundJob::Seed(..)) => {
                 self.catchup.in_flight = true
             }
@@ -711,6 +817,19 @@ impl StudioReceiver {
         result: StudioBackgroundResult,
     ) {
         match result {
+            StudioBackgroundResult::RegistryPage(completed) => {
+                self.catchup.in_flight = false;
+                if let Some(pass) = &mut self.catchup.registry_pass {
+                    if server
+                        .complete_registry_receive_step(pass, *completed)
+                        .is_err()
+                    {
+                        self.catchup.registry_pass = None;
+                        self.catchup.registry_next_at =
+                            server.runtime_clock().monotonic_ms().saturating_add(5_000);
+                    }
+                }
+            }
             StudioBackgroundResult::PreparedRegistry(generation, result) => {
                 self.catchup.preparing = false;
                 self.catchup.registry_prepared = Some((generation, result));
@@ -765,6 +884,7 @@ impl StudioReceiver {
                 } else {
                     self.catchup.in_flight = false;
                     self.catchup.pass = None;
+                    self.catchup.registry_pass = None;
                     self.catchup
                         .retry_discovery(server.runtime_clock().monotonic_ms());
                 }

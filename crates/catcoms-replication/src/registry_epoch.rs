@@ -155,6 +155,10 @@ impl RegistryEpoch {
     pub fn phase(&self) -> EpochPhase {
         self.gate.phase()
     }
+    /// Cheap local scheduling hint; signing still validates the complete named closure.
+    pub fn close_candidate_ready(&self) -> bool {
+        self.gate.close_candidate_ready()
+    }
     /// Historical receipt selected in this saved unit, not current-owner authority or proof
     /// that its seed is available. Fault must never be presented as an absent/ordinary head.
     pub fn receipt_head(&self) -> Result<Option<&Receipt>, ReplError> {

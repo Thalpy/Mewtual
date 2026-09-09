@@ -4,6 +4,64 @@ use super::*;
 use catcoms_sync::receipt_head::ReceiptHeadSelection;
 
 impl ServerStore {
+    pub(crate) fn prepared_studio_maintenance_state(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<Option<(u64, EpochPhase)>, AppError> {
+        self.with_studio_checkpoint_source(server, group, target, device, budget, |state| {
+            Ok((state.epoch(), state.phase()))
+        })
+    }
+    /// Local publication means the exact checkpoint is durably available to keyed discovery,
+    /// not that a remote member received it. Only the Server's current durable-owner callback
+    /// may use this path. A merely decided/Closing source cannot complete an in-flight choice.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn complete_studio_installed_head(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        tenure: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        let installed = self
+            .with_studio_checkpoint_source(server, group, target, device, budget, |state| {
+                let receipt = state
+                    .unit
+                    .receipt_head()
+                    .map_err(invalid)?
+                    .cloned()
+                    .ok_or_else(|| invalid("installed receipt missing"))?;
+                if state.phase() != EpochPhase::Open || !state.unit.opened_by(&receipt) {
+                    return Err(invalid("owner head is not an installed open checkpoint"));
+                }
+                let doc_id = state.doc_id();
+                if state
+                    .unit
+                    .checkpoint_bytes_by_hash(doc_id, receipt.seed_change_hash)
+                    .map_err(invalid)?
+                    .is_none()
+                {
+                    return Err(invalid("installed owner seed missing"));
+                }
+                Ok(receipt)
+            })?
+            .ok_or_else(|| invalid("installed owner source missing"))?;
+        // Reuse source+journal equality, current owner/tenure, inventory and exact flush barriers.
+        // No async work can interleave between these checks and the completion write.
+        let selected =
+            self.prepare_studio_head(server, group, target, device, Some(tenure), rng, budget)?;
+        if !selected.prove || selected.receipt.as_ref() != Some(&installed) {
+            return Err(invalid("installed owner source and journal disagree"));
+        }
+        self.complete_studio_head(server, &installed, rng, budget)
+    }
     pub(crate) fn complete_registry_studio_handoff(
         &mut self,
         server: u64,
@@ -34,7 +92,7 @@ impl ServerStore {
             Ok((state.doc_id(), state.phase()))
         })
     }
-    fn with_studio_checkpoint_source<V>(
+    pub(super) fn with_studio_checkpoint_source<V>(
         &mut self,
         server: u64,
         group: &ServerGroup,
@@ -207,8 +265,9 @@ impl ServerStore {
         }
         Ok(ReceiptHeadSelection { receipt, prove })
     }
-    /// Completes only a checked sync reply handoff, under the same exclusive store transaction.
-    /// A failure cannot retract the reply and requires exact republication after reconciliation.
+    /// Complete either a checked reply handoff or exact durable installed-head availability,
+    /// under the same exclusive transaction. Neither outcome attests remote delivery. A failed
+    /// write requires exact retry after inventory reconciliation.
     pub(crate) fn complete_studio_head(
         &mut self,
         server: u64,

@@ -28,6 +28,16 @@ promotion and flush; saving a Studio reference is a separate subsequent operatio
 Automerge or sync: it adds permission to retire their retained history into owner-receipted,
 verifiable checkpoints with bounded recovery. Existing snapshots alone do not provide that.
 
+Gate 4's current worktree connects Studio's typed owner decision to the same durable P1 journal,
+recovery store and exact-envelope intent retirement used by Registry. Recently watched targets
+share the existing native idle worker for owner rotation and Registry pointer/tail maintenance.
+An installed, flushed checkpoint with an exactly matching current-owner journal can complete
+that journal's pending publication slot locally: it is available through keyed head/seed service,
+not claimed delivered to another member. This lets a solo owner keep rotating. A Registry Fault
+remains a per-bucket hold; it does not invalidate otherwise authenticated storage accounting.
+Actual changed Registry wrappers refresh the existing inventory-validation cache before the next
+Studio turn. No second mutable document cache, budget owner or network protocol is introduced.
+
 Studio's first Rust schema layer (`catcoms_replication::studio`) decodes the closed IndexOp and
 FlipnoteOp bodies, preserving stable element ids and the frontend's canonical JSON bytes.
 Contextual decoding checks the whole P1 envelope and expected type/key; Index creation additionally

@@ -1,6 +1,110 @@
 use super::*;
 
-fn prepared(f: &Fixture, store: &mut ServerStore) -> Receipt {
+#[test]
+fn studio_installed_availability_refuses_uninstalled_faulted_and_mismatched_choices() {
+    for art in [false, true] {
+        for case in [
+            "missing",
+            "epoch_zero",
+            "closing",
+            "fault",
+            "journal",
+            "tenure",
+            "installed",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut store = open(root.path());
+            let f = Fixture::new(art);
+            let mut receipt = None;
+            if case != "missing" {
+                if case == "epoch_zero" {
+                    let mut b = budget(&mut store, &f);
+                    let (_, state) = f.edit(&mut store, &mut b, f.insert());
+                    store.retain_studio_source(&f.group, &f.device, state);
+                } else {
+                    receipt = Some(prepared(&f, &mut store));
+                    if matches!(case, "closing" | "fault") {
+                        let state = f.load(&store).unwrap();
+                        let next = if case == "fault" {
+                            let held = receipt.as_ref().unwrap();
+                            Receipt::sign(
+                                f.logical.clone(),
+                                held.closed_epoch,
+                                [8; 32],
+                                [9; 32],
+                                0,
+                                InheritedCheckpoint::EpochZero,
+                                &f.device,
+                            )
+                            .unwrap()
+                        } else {
+                            f.receipt(&state, 8)
+                        };
+                        let mut b = budget(&mut store, &f);
+                        let (_, state) = store
+                            .seal_studio_epoch(
+                                SERVER,
+                                &f.group,
+                                f.target,
+                                &f.device,
+                                next,
+                                0,
+                                &mut rng(),
+                                &mut b,
+                            )
+                            .unwrap();
+                        store.retain_studio_source(&f.group, &f.device, state);
+                    } else if case == "journal" {
+                        // A newer irrevocable choice cannot be completed using the old installed seed.
+                        let mut b = budget(&mut store, &f);
+                        store
+                            .complete_studio_head(
+                                SERVER,
+                                receipt.as_ref().unwrap(),
+                                &mut rng(),
+                                &mut b,
+                            )
+                            .unwrap();
+                        let next = f.receipt(&f.load(&store).unwrap(), 8);
+                        let mut b = budget(&mut store, &f);
+                        store
+                            .prepare_epoch_owner_receipt(
+                                SERVER,
+                                next,
+                                &f.group,
+                                0,
+                                &mut rng(),
+                                &mut b.storage,
+                            )
+                            .unwrap();
+                    }
+                }
+            }
+            let before = store.load_epoch_owner_receipts(SERVER, &f.logical).unwrap();
+            let mut b = budget(&mut store, &f);
+            let result = store.complete_studio_installed_head(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                u64::from(case == "tenure"),
+                &mut rng(),
+                &mut b,
+            );
+            assert_eq!(result.is_ok(), case == "installed", "{case}: {result:?}");
+            let after = store.load_epoch_owner_receipts(SERVER, &f.logical).unwrap();
+            if case == "installed" {
+                assert!(after.pending().is_none());
+                assert_eq!(after.published(), receipt.as_ref());
+            } else {
+                assert_eq!(after.pending(), before.pending());
+                assert_eq!(after.published(), before.published());
+            }
+        }
+    }
+}
+
+pub(super) fn prepared(f: &Fixture, store: &mut ServerStore) -> Receipt {
     let mut b = budget(store, f);
     let (_, source) = f.edit(store, &mut b, f.insert());
     let receipt = f.receipt(&source, 7);

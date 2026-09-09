@@ -133,6 +133,69 @@ pub(crate) fn save_studio_source_fixture(
     operations
 }
 
+/// Fill the actual current epoch (including a receipt-opened successor) with accepted signed
+/// edits. Only initial fixture disk writes are batched; normal typed admission and production
+/// close limits still apply. This allows runtime tests to rotate repeatedly without 10,000 ops.
+pub(crate) fn fill_studio_epoch_fixture(
+    store: &mut ServerStore,
+    server: u64,
+    group: &ServerGroup,
+    device: &MlsDevice,
+    target: StudioTarget,
+) {
+    let inv = inventory(store);
+    let mut budget = store.studio_storage_budget(server, group, &inv).unwrap();
+    let (mut unit, observed, before) = store
+        .checked_studio_source(server, group, target, device, true, &mut budget.storage)
+        .unwrap();
+    let logical = unit.document().clone();
+    for n in 0..10 {
+        let mut op = title_op(target, n);
+        op.nonce[8..].copy_from_slice(&unit.epoch().to_be_bytes());
+        let mut copy =
+            StudioEpoch::restore(&unit.snapshot().unwrap(), group, target, device.device_id())
+                .unwrap();
+        let packet = copy
+            .edit_or_reseal(device, group, &mut rng(), &op, 100)
+            .unwrap();
+        let key = group
+            .channel_secret(device, packet.doc_type, packet.doc_id)
+            .unwrap();
+        let mut change = Change::from_bytes(packet.open(&key).unwrap().delta)
+            .unwrap()
+            .decode();
+        change.message = Some("x".repeat(220_000));
+        let signed = SignedOp::sign_domain(
+            device,
+            logical.doc_type,
+            unit.doc_id(),
+            Change::from(change).raw_bytes().to_vec(),
+            &op,
+        )
+        .unwrap();
+        let packet = SealedOp::seal(&signed, group, device, &mut rng()).unwrap();
+        assert_eq!(
+            unit.ingest(&packet, group, device).unwrap(),
+            Admission::Accepted
+        );
+    }
+    assert!(unit.close_candidate_ready());
+    let state = store
+        .save_studio_source(
+            server,
+            unit,
+            observed,
+            &before,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut budget.storage,
+            atomic_write,
+            sync_studio,
+        )
+        .unwrap();
+    store.retain_studio_source(group, device, state);
+}
+
 fn measure(count: usize, clock: &dyn Clock) {
     let f = Fixture::new(true);
     let start = clock.monotonic_ms();

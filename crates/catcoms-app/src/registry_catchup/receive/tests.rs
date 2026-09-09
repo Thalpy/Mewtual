@@ -5,6 +5,30 @@ use catcoms_sync::ChannelSync;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+#[tokio::test]
+async fn registry_detached_matching_expiry_restarts_but_stale_attempt_rejects() {
+    for stale in [false, true] {
+        let (mut server, mut pass, clock) = bound_pass().await;
+        let attempt = server
+            .prepare_registry_receive_step(&mut pass)
+            .unwrap()
+            .unwrap();
+        clock.advance_ms(PASS_LIFETIME_MS);
+        let result = attempt.fetch().await; // Already expired: no socket work is attempted.
+        if stale {
+            pass.attempt = Arc::new(());
+        }
+        let completed = server.complete_registry_receive_step(&mut pass, result);
+        if stale {
+            assert!(completed.is_err());
+        } else {
+            assert_eq!(completed.unwrap(), RegistryReceiveState::RestartRequired);
+        }
+        assert!(pass.pending.is_none());
+        assert_eq!(pass.progress.saved_pages, 0);
+    }
+}
+
 async fn bound_pass() -> (
     Server<MemNetwork, ChaCha20Rng>,
     ServerRegistryReceive,
@@ -44,6 +68,7 @@ async fn bound_pass() -> (
         .sync
         .with_registry_context(|_, device, _, _| device.device_id());
     let pass = ServerRegistryReceive {
+        attempt: Arc::new(()),
         permit: server.sync.begin_registry_receive(&watch).unwrap(),
         mount: Arc::new(()),
         server: 1,
@@ -158,6 +183,7 @@ fn registry_receiver_retry_never_reopens_a_terminal_or_held_state() {
             // Only retry's pure state transition is under test. Network authority and real saved
             // frontiers are exercised by the joined-member tests, not fabricated by this setup.
             let mut pass = ServerRegistryReceive {
+                attempt: Arc::new(()),
                 permit: sync.begin_registry_receive(&watch).unwrap(),
                 mount: Arc::new(()),
                 server: 1,

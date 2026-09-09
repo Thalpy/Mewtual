@@ -135,15 +135,9 @@ impl CatchupRuntime {
             let CheckpointTarget::Registry(bucket) = pass.inner.target() else {
                 unreachable!()
             };
-            if !store.registry_receive_source_fits(id, &server.group_id(), bucket)? {
-                if !self.prepare_registry_inventory(server, store, id, bucket)? {
-                    return Ok(None);
-                }
-                // Registry bootstrap is optional for a key already learned from StudioIndex.
-                // A healthy large saved bucket needs a prepared receiver (Gate 4); do not
-                // confuse this local work rail with corruption and globally pause Studio.
-                self.checkpoint = None;
-                self.discovery_plan = self.after_registry.take();
+            if !store.registry_receive_source_fits(id, &server.group_id(), bucket)?
+                && !self.prepare_registry_inventory(server, store, id, bucket)?
+            {
                 return Ok(None);
             }
             let mut budget = Self::budget(server, store, id)?;
@@ -151,8 +145,19 @@ impl CatchupRuntime {
                 store,
                 id,
                 self.checkpoint.as_ref().expect("pass"),
+                self.registry_provider.as_mut(),
                 &mut budget,
             )?;
+            // A verified receipt/installation supersedes any tail selected before discovery.
+            // Old concrete-epoch pages must never enter the newly Open checkpoint even when
+            // their transport watch and peer credentials are otherwise still current.
+            self.registry_pass = None;
+            if let Some(old) = self.registry_watch.take() {
+                let _ = server.unwatch_registry_epoch(&old);
+            }
+            self.registry_watch_id = None;
+            self.registry_target = None;
+            self.registry_next_at = now.saturating_add(5_000);
             if outcome == StudioAdoptionOutcome::AwaitingSeed {
                 self.checkpoint_sealed = true;
                 self.checkpoint_retry = now;
@@ -189,6 +194,10 @@ impl CatchupRuntime {
             _ => {
                 self.checkpoint = None;
                 self.discovery_needed = None;
+                // Installation intentionally replaces the old concrete-epoch watch. Its
+                // completed discovery binding must not cancel the new epoch's first tail
+                // pass or give unrelated maintenance a turn before that pass can start.
+                self.discovery_watch = None;
                 self.next_at = now;
             }
         }

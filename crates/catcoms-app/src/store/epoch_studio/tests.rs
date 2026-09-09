@@ -10,6 +10,8 @@ mod inventory_cache;
 mod pages;
 pub(crate) mod performance;
 mod preparation;
+mod registry;
+mod rotation;
 mod source;
 
 const SERVER: u64 = 73;

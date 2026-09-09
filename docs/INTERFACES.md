@@ -1776,8 +1776,20 @@ The Server consumes it immediately, retaining its mount/server/store/budget borr
 A hint, expired authority or dropped reply channel cannot complete publication. A later completion
 write error cannot retract the reply; uncertain writes invalidate accounting, and restart/retry
 re-hands off the same decision before durably recording completion. The legacy sync serving wrapper
-discards handoff evidence and never completes a store by itself. No actor/native scheduler or new
-command/event is added yet; a pending decision still blocks a different one until checked completion.
+discards handoff evidence and never completes a store by itself. A pending decision still blocks a
+different one until checked completion.
+
+Gate 4 adds a second, local completion route: the current owner's exact installed Open checkpoint
+must match the durable journal, provide the expected seed, and cross unchanged source/journal flush
+barriers before completing that same pending slot. `published` thus means checked reply handoff OR
+checked local installed-head availability, never remote possession. Studio's
+`Server::{rotate_studio_owner_step,complete_studio_owner_availability}` uses the same current
+`ServerOwnerSnapshot`; the existing native idle worker drives recent watched targets at a local
+five-second cadence. Registry maintenance refreshes pointers from actual source epoch numbers and
+uses the existing signed kind-20 page format through detached, connected-only requests. A changed
+saved Registry wrapper is memoized in the existing exact authenticated inventory LRU before another
+Studio turn. Fault/Closing never admits an ordinary operation-tail pass; held pages recheck that
+phase before storage. These are Rust/runtime hooks, not new renderer commands or completed Gate 4.
 
 The bounded sealed `.owner-receipts` record binds local server/group/type/key. Permanent bytes
 charge protocol allowance; replacement copies borrow the same logical-document settlement reserve

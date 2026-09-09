@@ -1,6 +1,111 @@
 use super::*;
 use crate::studio_exchange::{ServerStudioReceive, StudioReceiveState};
 
+#[tokio::test]
+async fn studio_ready_page_saves_before_due_owner_prepares_another_source() {
+    for preparation_delay in [0, 6_000] {
+        let mut p = proven_pair().await;
+        let (proof, tick) = tokio::join!(
+            p.alice
+                .sync
+                .request_catchup(p.bob.local_peer(), catcoms_wire::DocType::Wiki, 43),
+            p.bob.sync_once(),
+        );
+        proof.unwrap();
+        tick.unwrap();
+        let other = StudioTarget::Flipnote {
+            channel: channel(),
+            object: [8; 16],
+        };
+        p.alice.sync.with_registry_context(|g, d, _, _| {
+            crate::store::save_studio_source_fixture(&mut p.a_store, SERVER, g, d, other)
+        });
+        let mut receiver = crate::studio::StudioReceiver::default();
+        receiver
+            .run(
+                &mut p.alice,
+                &mut p.a_store,
+                SERVER,
+                Some(StudioRequest::Read { target: other }),
+            )
+            .unwrap();
+        let op = title(91, "held page wins");
+        let logical = target().document(&p.bob.group_id()).unwrap();
+        p.bob
+            .studio_transaction(
+                &mut p.b_store,
+                SERVER,
+                StudioRequest::Apply {
+                    target: target(),
+                    epoch_id: epoch_zero_id(logical.doc_type, &logical.logical_key),
+                    nonce: op.nonce,
+                    body: op.body,
+                },
+            )
+            .unwrap();
+        // Save/read A displaces B, so an incorrectly prioritized owner turn would capture B.
+        p.save(&title(92, "local source"));
+        receiver
+            .run(
+                &mut p.alice,
+                &mut p.a_store,
+                SERVER,
+                Some(StudioRequest::Read { target: target() }),
+            )
+            .unwrap();
+        let watch = p
+            .alice
+            .watch_studio_epoch(&p.a_store, SERVER, target())
+            .unwrap();
+        let mut budget = budget(&mut p.alice, &mut p.a_store);
+        let mut pass = p
+            .alice
+            .begin_studio_receive(&mut p.a_store, &watch, p.bob.local_peer(), &mut budget)
+            .unwrap();
+        let mut provider = p.bob.studio_page_provider(&p.b_store, SERVER);
+        // Independent frontiers first restart, then request the complete bounded prefix.
+        for _ in 0..2 {
+            let job = p
+                .alice
+                .prepare_studio_receive_step(&mut pass)
+                .unwrap()
+                .unwrap();
+            let (result, ()) = tokio::join!(job.fetch(), async {
+                p.bob.sync_once().await.unwrap();
+                p.bob
+                    .serve_studio_request_step(&mut p.b_store, &mut provider, &p.watch)
+                    .unwrap();
+            });
+            if p.alice
+                .complete_studio_receive_step(&mut pass, result)
+                .unwrap()
+                == StudioReceiveState::PageReady
+            {
+                break;
+            }
+            p.clock.advance_ms(1000);
+        }
+        receiver.hold_page_for_test(target(), pass);
+        p.clock.advance_ms(preparation_delay);
+        let (_, updated) = receiver
+            .run(&mut p.alice, &mut p.a_store, SERVER, None)
+            .unwrap();
+        assert_eq!(updated, Some(target()));
+        assert!(
+            receiver.detach(&mut p.alice).is_none(),
+            "no owner capture before held page save"
+        );
+        assert!(!receiver.take_pause_notice());
+        let state = p
+            .alice
+            .sync
+            .with_registry_context(|g, d, _, _| p.a_store.load_studio_epoch(SERVER, g, target(), d))
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.op_count(), 2);
+    }
+}
+
 pub(super) async fn proven_pair() -> Pair {
     let mut p = Pair::new().await;
     let (proof, tick) = tokio::join!(

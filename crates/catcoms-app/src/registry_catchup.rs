@@ -90,7 +90,10 @@ fn preparation_required() -> AppError {
 }
 
 mod receive;
-pub use receive::{RegistryReceiveProgress, RegistryReceiveState, ServerRegistryReceive};
+pub use receive::{
+    RegistryPageAttempt, RegistryPageCompletion, RegistryReceiveProgress, RegistryReceiveState,
+    ServerRegistryReceive,
+};
 
 /// One provider-local key tied to an exact Server, physical vault mount, captured local server
 /// id and registry bucket. At most one prepared read-only source is retained; all providers and
@@ -129,6 +132,38 @@ impl std::fmt::Debug for ServerRegistryPageProvider {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    pub(crate) fn registry_maintenance_hint(
+        &mut self,
+        store: &mut ServerStore,
+        provider: &mut ServerRegistryPageProvider,
+        key: &catcoms_replication::registry::PointerKey,
+        budget: &mut crate::store::EpochStudioBudget,
+    ) -> Result<
+        Option<catcoms_replication::registry_epoch::catchup::RegistryMaintenanceHint>,
+        AppError,
+    > {
+        self.check_page_provider(store, provider)?;
+        if key.bucket() != provider.bucket {
+            return Err(AppError::Invalid(
+                "Registry maintenance bucket mismatch".into(),
+            ));
+        }
+        if provider.prepared.is_some() {
+            provider.check_source(store)?;
+        }
+        let prepared = provider.prepared.as_ref().map(|p| (&p.stamp, &p.source));
+        self.sync.with_registry_context(|g, d, _, _| {
+            store.studio_registry_maintenance_hint(
+                provider.server,
+                g,
+                provider.bucket,
+                d,
+                key,
+                prepared,
+                budget,
+            )
+        })
+    }
     pub(crate) fn remember_registry_service_inventory(
         &mut self,
         store: &mut ServerStore,

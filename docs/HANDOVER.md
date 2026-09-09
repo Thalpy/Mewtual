@@ -6,7 +6,38 @@ Authoritative current-state document. Read this first, then
 [`THREAT-MODEL.md`](THREAT-MODEL.md) tracks what a modified ("hacked") client can/can't do;
 the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
-## Status (latest entry: 2026-09-09)
+## Status (latest entry: 2026-09-10)
+
+- **Gate 4 integration checkpoint, not gate completion (2026-09-10).** Studio now reuses the
+  existing accounted owner journal, exact-envelope intent retirement and recovery-first separate
+  successor replacement. The existing recently watched idle worker drives owner rotation,
+  installed-head availability, Registry pointer refresh and authenticated Registry open-tail
+  paging; no new finality system or mutable cache was added. Solo owner three-rotation/reopen,
+  Index/art crash boundaries, actual two-member Registry pages, per-bucket Fault isolation and
+  superseded-page rejection have focused tests. New native `studio_recovery_list/read/export/
+  acknowledge` commands share ordinary Save custody. Export is a bounded historical backup,
+  not `.pixa`, a blob archive or an import promise. All retained/staged slots validate before
+  acknowledgement, exact warning ids bind retries, and JSON/base64 conversion stays inside
+  the final UI/server generation guard. Actual Closing/Fault inspection and late lock/generation
+  regressions pass. The UI-hook guide is updated; no UI component or canonical mockup changed.
+  Read-only review's conversion-fence high and superseded Registry-page medium were fixed and
+  re-reviewed. Residual focused gaps: large Registry replacement/restart with stale prepared
+  source, and explicit actor ready-completion fairness. Corrupt live source metadata can refuse
+  recovery List, while known snapshot Read/Export remain independent of that source.
+  Verification so far: the integration baseline root suite had 498 app passes, two Registry
+  joining fixture failures and nine existing ignored tests; it did NOT pass the full workspace.
+  Those failures were traced to ManualClock outrunning detached CPU preparation. A test-only
+  tracked-preparation barrier leaves actors runnable and changes no production deadline; all
+  six unopened fixtures then passed, as did an explicit expired-head/fresh-request regression.
+  The baseline native suite (201), frontend suite (1,144), native check, Clippy, formatting and
+  ambient dependency check passed. Subsequent focused recovery app/native suites each passed
+  three tests. Final full suites must be rerun after the remaining Gate 4 work; no complete-gate
+  claim is made here. Logs: `logs/gate4-runtime-*.log`, `gate4-unopened-preparation.log`,
+  `gate4-registry-expired-preparation.log`, `gate4-controls-focused.log` and
+  `gate4-native-controls-focused.log` (all under `logs/`).
+  Remaining: own-intent replay, running-app succession and signed repair, Restore/Copy,
+  settlement events, then acceptance/review/full verification. User-owned package/version edits
+  remain separate and untouched. No push destination has been assumed.
 
 - **Flipnote Gate 4 started: typed Studio owner/settlement core (`9799c6f`, 2026-09-09).** Index/art now
   prepare and resume an exact owner close/receipt pair through existing P1 verification, then

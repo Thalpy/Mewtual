@@ -33,6 +33,48 @@ impl RegistrySourceCapture {
 }
 
 impl ServerStore {
+    /// A local maintenance no-op still flushes the exact source and intent ledger: after a
+    /// crash, visible post-rename bytes alone do not prove the failed durability barrier ran.
+    /// Reuse the verified prepared graph; unchanged history is never reconstructed here.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn registry_maintenance_hint(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        key: &catcoms_replication::registry::PointerKey,
+        prepared: Option<(&RegistrySourceStamp, &RegistryPageSource)>,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+    ) -> Result<
+        Option<catcoms_replication::registry_epoch::catchup::RegistryMaintenanceHint>,
+        AppError,
+    > {
+        // A valid per-document Fault is still valid stored/accounted state. Only network
+        // checkpoint service needs a selectable receipt; maintenance must be able to observe
+        // Fault without poisoning the shared Studio inventory or stopping healthy documents.
+        let record =
+            self.checked_registry_prepared_record(server, group, bucket, device, prepared, budget)?;
+        let logical = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        self.flush_checked_epoch_intents(server, &logical, budget, intents)?;
+        if let Some(record) = record {
+            let reservation = budget
+                .reserve_sync(
+                    &StorageScope::new(server, &logical.server_id).map_err(invalid)?,
+                    record,
+                )
+                .map_err(invalid)?;
+            sync_registry(
+                &self.registry_epoch_path(&scope_bytes(server, &logical)?),
+                record.footprint.total().map_err(invalid)?,
+            )?;
+            reservation.commit();
+        }
+        prepared
+            .map(|(_, source)| source.maintenance_hint(key).map_err(invalid))
+            .transpose()
+    }
     /// The Studio bootstrap just durably installed this typed Registry state. Reauthenticate
     /// and match its exact snapshot before memoizing validation; unrelated Registry writes keep
     /// their existing cold-inventory behavior. Normalized-but-different states grant no hit.
@@ -179,6 +221,27 @@ impl ServerStore {
         prepared: Option<(&RegistrySourceStamp, &RegistryPageSource)>,
         budget: &mut EpochStorageBudget,
     ) -> Result<(Option<Receipt>, Option<StorageRecord>), AppError> {
+        let record =
+            self.checked_registry_prepared_record(server, group, bucket, device, prepared, budget)?;
+        let head = prepared
+            .map(|(_, source)| source.receipt_head().map(|r| r.cloned()).map_err(invalid))
+            .transpose()
+            .inspect_err(|_| budget.invalidate())?
+            .flatten();
+        Ok((head, record))
+    }
+
+    /// Authenticate the physical source and its inventory independently of whether its
+    /// receipt book currently permits serving a checkpoint (Fault deliberately does not).
+    fn checked_registry_prepared_record(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        prepared: Option<(&RegistrySourceStamp, &RegistryPageSource)>,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<Option<StorageRecord>, AppError> {
         let result = (|| {
             if group.member_signature_key(&device.device_id()).as_deref()
                 != Some(device.public_key_bytes().as_slice())
@@ -187,26 +250,23 @@ impl ServerStore {
             }
             let logical = registry_document(&group.group_id(), bucket).map_err(invalid)?;
             let scope = scope_bytes(server, &logical)?;
-            let (head, record) = if let Some((stamp, source)) = prepared {
+            let record = if let Some((stamp, source)) = prepared {
                 if stamp.logical != logical
                     || stamp.scope != scope
                     || !self.registry_page_source_is_current(stamp)?
                 {
                     return Err(invalid("prepared registry source changed"));
                 }
-                (
-                    source.receipt_head().map_err(invalid)?.cloned(),
-                    Some(storage_record(
-                        server,
-                        &logical,
-                        &scope,
-                        stamp.physical_bytes,
-                        source.storage_protocol_bytes().map_err(invalid)?,
-                    )?),
-                )
+                Some(storage_record(
+                    server,
+                    &logical,
+                    &scope,
+                    stamp.physical_bytes,
+                    source.storage_protocol_bytes().map_err(invalid)?,
+                )?)
             } else {
                 self.read_registry_record_bounded(&scope, 0)?;
-                (None, None)
+                None
             };
             budget
                 .verify_record(
@@ -215,7 +275,7 @@ impl ServerStore {
                     record,
                 )
                 .map_err(invalid)?;
-            Ok((head, record))
+            Ok(record)
         })();
         result.inspect_err(|_| budget.invalidate())
     }

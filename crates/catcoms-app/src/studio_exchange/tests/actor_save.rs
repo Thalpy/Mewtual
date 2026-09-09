@@ -379,7 +379,8 @@ async fn studio_save_cancelled_after_commit_does_not_publish() {
     let (_cancel, signal) = tokio::sync::watch::channel(true);
     let mut lease = StudioVaultLease::new(store.clone().try_lock_owned().unwrap(), SERVER, ())
         .with_cancellation(RequestCancellation::new(signal, None));
-    let (mut reply, _receive) = oneshot::channel();
+    let (reply, _receive) = oneshot::channel();
+    let mut reply = crate::studio::StudioReply::Document(reply);
     assert!(alice
         .publish_studio_save(&mut lease, &mut reply, saved)
         .await

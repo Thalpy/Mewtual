@@ -167,6 +167,10 @@ impl StudioEpoch {
     pub fn phase(&self) -> EpochPhase {
         self.gate.phase()
     }
+    /// Cheap local scheduling hint; owner decision validation remains the authority boundary.
+    pub fn close_candidate_ready(&self) -> bool {
+        self.gate.close_candidate_ready()
+    }
     /// Highest held receipt is a hint until current-owner discovery proves it. Fault refuses
     /// service rather than returning an older apparently healthy opening receipt.
     pub fn receipt_head(&self) -> Result<Option<&Receipt>, ReplError> {
