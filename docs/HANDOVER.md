@@ -8,7 +8,7 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
-- **Flipnote gate 3, cooperative same-epoch Studio pages (2026-09-09).** Studio now reuses the
+- **Flipnote gate 3, cooperative same-epoch Studio pages (2026-09-09, `86ed32a`).** Studio now reuses the
   existing Registry page walk through a thin typed wrapper, preserving Registry-v1 MAC/golden
   bytes. Studio's separate cursor domain additionally binds channel and actual document type/key.
   Counts/bytes/cursor expiry, prefix freezing, wide-head fallback, current-author resealing and
