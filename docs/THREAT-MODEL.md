@@ -710,6 +710,19 @@ table with the commit that closed it.
   mutation, storage corruption, a new blob quota or remote possession. Expiry/tombstones alone
   do not override still-retained recovery/history. No new durable format, finality or expiry policy
   is introduced; kept-copy release and non-held staging cleanup keep their separate semantics.
+  Studio's owner-close and adjacent settlement preparation now reuse the existing P1 validators
+  over its private typed-admitted source. Owner/group/full-key/independently observed tenure
+  checks precede signing; an exact resumed decision uses the named dependency closure, never
+  later live content. Malformed public Rust close/receipt fields are bounded before encoding.
+  A settlement plan requires the exact held current-owner receipt in ordinary Closing, not
+  adoption or Fault, and fingerprints the whole restart unit including quarantined input and
+  repair state. It retains complete included/excluded author envelopes; nonce-derived ids alone
+  are not enough to retire an intent. Recovery includes compaction omissions even when every
+  operation was included, including deletions, overflow conflicts and original frame gaps.
+  Constructing a separate successor preserves repair anti-replay state but grants no durable
+  replacement, pruning, retirement or publication permission. The accounted owner journal,
+  recovery-before-replacement barrier and runtime driving are still to be connected for Studio.
+  No new wire/vault format, live rotation path or native recovery control is added by this slice.
   The explicit Studio exchange adapter now sends only an exact OWN operation already in the
   saved Open source, through current-member checks, both retry durability barriers, fresh MLS
   sealing and one-shot dispatch. It cannot create an unsaved edit or bypass native PIX ordering.

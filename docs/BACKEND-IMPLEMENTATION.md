@@ -5,6 +5,10 @@ canonical Flipnote mockups remain user-owned. No item is complete merely because
 helper exists. As of 2026-09-09, the active scope is **Flipnote and the P1 paths it requires**,
 not completion of the entire Creative Suite.
 
+Frontend integration is tracked separately in [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md): actual
+native commands/events, retry rules and explicitly unavailable controls. Update it alongside
+every bridge-facing slice; UI layout and rendering remain user-owned.
+
 ## Scope reset (2026-09-08)
 
 The user paused games and asked to focus on Flipnote. Game-only avatar consent, avatar-profile
@@ -38,7 +42,7 @@ for unrelated document types. Tests and review accompany each slice, not only ga
 | 1. Typed Flipnote documents | Rust StudioIndex/Flipnote domain-op validation, deterministic projection, conflict/Restore data and exact checkpoint preflight; frame, byte, sfx and patch caps. Unsupported linked-score behavior stays unavailable until gate 6, never silently accepted. | Tests exercise valid edits, malformed/cross-document operations, both concurrent delivery orders and cap boundaries through the real P1 gate. |
 | 2. Durable one-device Save/Load | **Index/art milestone implemented:** accounted vault/lifecycle ownership, native commands, real PIX CIDs, sealed intents, conservative source/seed/recovery reference protection and three-state expiry. Extend these same seams to actual sound/export records in gate 6. No UI edits. | Actor/native create/edit/restart/reopen uses real CIDs. Failure cases preserve durable state. Fileshare unlisting/upload cleanup cannot delete referenced pixels; full scans/restart include superseded seed/history, pending intents and retained/staged recovery. Open edits remain provisional. |
 | 3. Two-member collaboration and joining | **Index/art milestone implemented:** live sharing, automatic same-epoch repair, unopened saved-key service, keyed Registry/Studio checkpoint discovery and recovery-first Studio adoption through the existing actor/native worker. | Actual actors join after the fixture receipt, install Registry plus Index/art checkpoints, persist the Studio open tail and reopen. Provider restart needs no UI watch. Closing survives expired selection and restart; ordinary Read reestablishes the volatile watch, then no further action is needed. Existing cancellation/authority/durability tests and 70-op paging remain. The 8-MiB input/inventory and 256-KiB unrelated-cold rails remain; this is not arbitrary-size latency qualification. |
-| 4. Rotation and recovery in the running app | **Next:** drive owner receipts without needing another member's query; Registry pointer publication/refresh and Registry open-tail receive; atomic sealing, recovery-first settlement, own-intent replay, owner succession, fault/repair and recovery actions/events for the active types. | Production-adapter scenarios cover rotation, restart, owner offline/return, excluded edits, Restore/Copy/Export, storage exhaustion and staged-snapshot warnings. No pruning before the receipt and durable recovery barriers. Registry checkpoint bootstrap from Gate 3 is not a current pointer projection. |
+| 4. Rotation and recovery in the running app | **Active:** Studio typed owner-close/resume and adjacent settlement preparation are implemented at core level. Next connect the existing durable journal and recovery-first installation, then drive owner receipts without another member's query; Registry pointer publication/refresh and open-tail receive; own-intent replay, succession, fault/repair and recovery actions/events. | Core regressions cover exact closure/restart, excluded and compacted-away evidence, stale plans and succession. Gate completion still needs production-adapter rotation, restart, owner offline/return, Restore/Copy/Export, storage exhaustion and staged warnings. No pruning before receipt and durable recovery. Registry checkpoint bootstrap is not a current pointer projection. |
 | 5. Collaborative frame claims | Required full-identity signalling and shared channel admission; bounded capability/session-bound claim, Ask and Pass messages with receiver-observed expiry. No game/avatar path or standalone drawing feature. | Two members observe advisory claim/Ask/Pass/expiry; collision, replay and disconnect tests pass. Claims never become edit locks. |
 | 6. Sound and export | Linked-score typed operations/preflight/recovery, sfx/emoji patch sources, 64-patch union, deterministic valid-take export and byte-exact `.pixa` publication with durable export records. Cover the specified local GIF export contract without taking over UI design. | No-score and linked-score golden vectors, maximal accepted exports and malformed/over-cap rejection pass; exported bytes can be read back and validated. Playback-facing contracts preserve Deafen and membership teardown. |
 | 7. Flipnote backend acceptance and UI handoff | Run the complete create/save/restart/share/join/rotate/recover/export flow through production adapters, including failure paths. Publish Markdown for the real commands, events, limits and recovery behavior. | Backend acceptance tests and mandatory suites pass, adversarial blocker/high findings are resolved, and every canonical UI dependency maps to a working command/event or explicitly user-owned rendering work. |
@@ -129,6 +133,36 @@ Paths below use `rep/` = `crates/catcoms-replication/src/`, `app/` = `crates/cat
 
 | Cooperative Studio checkpoint discovery/adoption / 3 | `b6f137b` | [shared scopes](../crates/catcoms-sync/src/checkpoint_exchange.rs), [head attempts](../crates/catcoms-sync/src/receipt_head/detached.rs), [seed attempts](../crates/catcoms-sync/src/registry_seed/detached.rs), [Studio installer](../crates/catcoms-app/src/store/epoch_studio/adoption.rs), [source service](../crates/catcoms-app/src/store/epoch_studio/discovery.rs), [app custody](../crates/catcoms-app/src/studio_exchange/discovery.rs), [joined-member regressions](../crates/catcoms-app/src/studio_exchange/tests/discovery.rs) | Kinds 24/25 reuse the existing head/seed engine, all its budgets and owner-proof rules. Source Closing/Fault, typed recovery and separate successor use the same store/gate/inventory, not a new replication system. Ordinary Studio restart v1 is unchanged; adoption v2 and the Registry-only lineage ceiling are regression-tested. Explicit discovery/install/tail/reopen works after real endpoint bootstrap; service/runtime orchestration follows in the closure below. |
 
+### Gate 4 active slice: Studio owner settlement preparation (`9799c6f`)
+
+Studio now has the missing typed core adapter in
+[owner.rs](../crates/catcoms-replication/src/studio/epoch/owner.rs) and
+[settlement.rs](../crates/catcoms-replication/src/studio/epoch/settlement.rs), with regressions in
+[owner/tests.rs](../crates/catcoms-replication/src/studio/epoch/owner/tests.rs). This reuses P1's
+close validation, receipts, dependency projection and the existing Studio checkpoint/recovery
+codecs. It does not replace the Registry implementation or add another finality protocol.
+
+Implemented: immutable owner close/receipt preparation and exact restart/resume; typed seed from
+the selected closure; complete included/excluded envelopes; recovery for excluded content AND
+compactor omissions; exact-source-fenced construction of a separate successor. Seven focused
+tests cover Index/art, later edits, restart, same-tenure retries, A-to-B-to-A succession, epochs
+above Registry's product ceiling, malformed/stale plans, deletions and fifth conflict values.
+Existing cap regressions also check the actual compactor's omission predicate.
+
+Next, in order (work areas within Gate 4, not new gates):
+
+1. Connect this adapter to the existing accounted owner journal, recovery-first store
+   installation and covered-intent retirement; exercise crash and capacity boundaries there.
+2. Drive owner rotation and Registry pointer/tail updates through the existing runtime worker.
+3. Connect own-intent replay, succession and fault/repair to those same running-app paths.
+4. Expose recovery and settlement state/actions through actor/native commands and events, and
+   update [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md) with tested callable names.
+
+No automatic Studio rotation or new native hook is claimed by the first core slice.
+Full root/native/frontend suites, root formatting and Clippy, native check, ambient-dependency
+and diff checks passed. Final read-only adversarial review found no remaining findings; the
+HANDOVER entry records commands, evidence and two focused coverage follow-ups for integration.
+
 ### Keeping this ledger useful
 
 Gate 3 Index/art closure (`5f24262`, 2026-09-09; extends `b6f137b`, does not replace it):
@@ -173,7 +207,7 @@ the matching row; keep the outstanding boundary explicit. Record relevant `fix`,
 and non-conventional commits too when they change that boundary, not just `feat`/`perf` titles.
 If work supersedes an earlier approach, mark which implementation replaces it instead of leaving
 two apparently active solutions. Use the full diff for file history; do not duplicate INTERFACES
-or infer percentages from commit counts. **Next is gate 4, reusing the completed Gate 3 paths.**
+or infer percentages from commit counts. **Gate 4 is active, reusing the completed Gate 3 paths.**
 
 ## Current evidence
 

@@ -8,6 +8,40 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (latest entry: 2026-09-09)
 
+- **Flipnote Gate 4 started: typed Studio owner/settlement core (`9799c6f`, 2026-09-09).** Index/art now
+  prepare and resume an exact owner close/receipt pair through existing P1 verification, then
+  prepare recovery-bound adjacent settlement and construct a separate checked successor.
+  Closure heads, not the later live projection, determine the seed. Complete author/envelopes
+  distinguish included/excluded operations; the whole restart-unit fingerprint fences plans.
+  The actual compactor decides whether even a fully included source loses evidence: deletions,
+  conflict overflow and original art insertion gaps still require recovery. Successors preserve
+  repair anti-replay bookkeeping. No new wire/vault format, store owner or native API is added.
+  Seven focused regressions cover Index/art exact resume/restart/newer edits, installed retry,
+  malformed inputs, quarantine invalidation, included deletions/conflicts, epochs above 4096 and
+  A-to-B-to-A owner tenure; existing overflow/maximal-seed tests exercise omission detection.
+  Read-only adversarial review found no remaining blocker/high/medium/low. Carry forward two
+  focused coverage cases with the store integration: a real greater-than-64-head new-decision
+  refusal and a missing-closure-head preparation refusal (public-record bounds and shared
+  validator coverage exist). Journal/recovery/intent crash tests belong at that new store path.
+  Verification passed: `cargo test --all --all-features` (including 483 app tests and 178
+  replication unit tests; existing ignored tests unchanged),
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (201 tests),
+  `npm.cmd --prefix apps/desktop test` (1,144 tests), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`,
+  `bash scripts/check-no-ambient.sh` and staged/unstaged diff checks. Evidence:
+  `logs/gate4-studio-owner-focused.log`, `logs/gate4-owner-root-final.log`,
+  `logs/gate4-owner-native-final.log`, `logs/gate4-owner-frontend-final.log`,
+  `logs/gate4-owner-clippy-final.log` and `logs/gate4-owner-native-check.log`.
+  An interrupted root run was rerun to completion; no test was skipped or weakened.
+  This is a core-only slice, not Gate 4 acceptance. No frontend source changed, so frontend
+  static/build and visual checks were not run; the full frontend unit suite did run.
+  Next: reuse the accounted owner journal and recovery-first installation for Studio, then
+  runtime rotation, Registry pointer/tail driving, replay/succession and recovery commands.
+  [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md) is now the maintained frontend integration map:
+  actual current commands/events, lossless ids, Save/retry semantics, projection adaptation and
+  explicitly pending controls. The canonical UI remains user-owned and was not edited.
+
 - **Flipnote Gate 3 Index/art runtime integration complete (`5f24262`, 2026-09-09).** Extends
   `b6f137b` and the existing native receiver rather than adding a second replication system.
   Unopened saved-key service uses exact prepaid head/seed/page interests in the existing queues,

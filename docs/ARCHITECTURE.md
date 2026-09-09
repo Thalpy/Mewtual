@@ -250,6 +250,18 @@ verifier no longer mistakes Registry's 4,096-epoch product ceiling for a limit o
 Joined-member tests use the desktop's normal authenticated channel-index bootstrap, then actual
 head/seed requests, recovery-first installation, open-tail paging and disk reopen.
 
+Gate 4 now also has Studio's typed owner-close and adjacent settlement preparation, matching
+the existing Registry flow without introducing another finality protocol. The privately owned
+Studio source validates the exact signed dependency closure and builds its typed seed. An
+immutable close/receipt decision resumes unchanged after newer Open edits or restart; only the
+future durable owner-journal adapter can make it publishable. Adjacent plans distinguish complete
+included/excluded author envelopes and preserve the full source projection when compaction loses
+evidence, even without excluded operations (conflict overflow, deletions and original frame gaps).
+Whole-restart-unit fingerprints fence plans; the separate successor preserves repair bookkeeping.
+There is no new wire/vault format and no runtime rotation, pruning, intent retirement or UI hook
+in this core slice. The next connection is the existing accounted journal/recovery/store gate,
+then the actor/native driver; do not rebuild those storage primitives.
+
 Additive Studio kinds 24/25 reuse Registry's head/seed queues, rates and retained capacity, while
 separately binding type/channel/object and response domains. Detached prepare/I/O/complete phases
 leave the actor free; private runtime/MLS/endpoint/attempt context is checked again on return.

@@ -642,7 +642,53 @@ checks scope, current local membership, open phase, exact retained-envelope equa
 work) causal/cap/exact checkpoint-plus-recovery preflight. `edit_or_reseal` requires a preceding
 durable intent and a subsequent whole-unit save before publication. `ingest` and `seal` share its
 exclusive ownership; a delayed conflicting opening receipt cannot hide behind a newer high-water.
-There is no mutable document/gate escape and no settlement/replacement method.
+There is no mutable document/gate escape or arbitrary replacement method. The adjacent
+settlement preparation methods below construct a separate successor but never install it.
+
+### Studio owner-close and adjacent settlement preparation (Gate 4, core only)
+
+`StudioEpoch` now exposes these typed consumers of the existing P1 close/receipt machinery:
+
+```rust
+new_owner_decision(&mut self, &ServerGroup, &MlsDevice, tenure:u64, previous:Option<&Receipt>)
+  -> Result<StudioOwnerDecision, ReplError>;
+resume_owner_decision(&mut self, &ServerGroup, &MlsDevice, tenure:u64, &Receipt, &CloseRecord)
+  -> Result<StudioOwnerDecision, ReplError>;
+prepare_settlement(&mut self, &CloseRecord, &ServerGroup, tenure:u64)
+  -> Result<StudioSettlementPlan, ReplError>;
+checkpoint_successor(&mut self, &StudioSettlementPlan, &ServerGroup, tenure:u64)
+  -> Result<StudioEpoch, ReplError>;
+```
+
+These methods accept only the privately owned, typed-admitted Studio source. The new decision
+uses every current head (more than 64 refuses), the existing authenticated dependency closure
+and lower/hard budgets, then the existing typed canonical checkpoint builder. It never signs
+the current projection as a substitute for the named closure. Tenure is independently supplied
+by the caller. First-tenure inheritance comes from the installed opening; later decisions must
+repeat the checked journal baseline. Studio does not inherit Registry's 4096-epoch ceiling.
+
+`StudioOwnerDecision` exposes only the immutable `receipt()` and `close()`. The store integration
+must atomically persist this exact pair before sealing/publishing. A resumed pair is revalidated,
+not regenerated after newer Open edits; an installed retry cannot reseed subsequent edits.
+
+`StudioSettlementPlan` requires ordinary Closing, not adoption/Fault, and the exact held receipt.
+It exposes the verified checkpoint, full source projection, complete included/excluded
+author-plus-domain envelopes, optional bounded recovery snapshot and `matches_source`.
+The local source fingerprint covers the whole normalized restart unit, including quarantine,
+gate and receipt state, and is not a wire id or storage permission. Retirement must compare
+included full envelopes, not only nonce-derived ids. Excluded envelopes grant no authority to
+replay as their authors. Recovery is required for excluded operations OR evidence omitted by
+the actual typed compactor, including deleted/over-cap content, fifth conflict alternatives and
+original art insertion gaps. Thus a fully included art close may still need a recovery slot.
+
+`checkpoint_successor` rechecks that entire source and current receipt authority and carries
+the receipt book's repair anti-replay state into a **separate** unit. It does not replace or
+prune the source. Durable owner journaling, recovery-first replacement, included-intent retirement,
+publication, automatic scheduling and native recovery commands still require Gate 4 integration.
+This slice changes no wire/seed/vault format or native command/event. Frontend availability is
+tracked in [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md).
+
+### Studio vault representation (Index/art)
 
 The version-1 plaintext snapshot is: `u8(1)`, length-framed channel[16], opening receipt (or empty),
 raw checkpoint (or empty), receipt book, gate, then u32 operation count and each length-framed
