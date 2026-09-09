@@ -36,6 +36,9 @@ pub(super) struct SourceVersion {
     bytes: u64,
 }
 impl SourceVersion {
+    pub(super) fn record(&self) -> StorageRecord {
+        self.record
+    }
     pub(super) fn prepared(
         mount: Arc<()>,
         server: u64,
@@ -148,19 +151,19 @@ impl ServerStore {
         group: &ServerGroup,
         target: StudioTarget,
         device: &MlsDevice,
-        read: impl FnOnce(&EpochStudioState) -> Result<V, AppError>,
+        read: impl FnOnce(&mut EpochStudioState) -> Result<V, AppError>,
     ) -> Result<V, AppError> {
         current_member(group, device)?;
         if !self.studio_source_is_warm(server, group, target, device) {
             return Err(invalid("Studio page source requires explicit preparation"));
         }
-        let held = self.studio_source.take().expect("matched source");
+        let mut held = self.studio_source.take().expect("matched source");
         if !self.studio_source_bytes_match(&held.state)? {
             return Err(invalid(
                 "prepared Studio page source changed; explicitly reopen",
             ));
         }
-        let result = read(&held.state)?;
+        let result = read(&mut held.state)?;
         self.retain_studio_source(group, device, held.state);
         Ok(result)
     }

@@ -65,6 +65,75 @@ pub(super) fn decode_query(
     ))
 }
 
+// Studio queries include the channel even for an object whose logical key is the object id.
+// Exact lengths/zero index object prevent alternate encodings and cross-channel confusion.
+pub(super) fn encode_scoped_query(
+    target: CheckpointTarget,
+    group: &[u8],
+    nonce: [u8; 16],
+) -> Result<Vec<u8>, SyncError> {
+    match target {
+        CheckpointTarget::Registry(_) => encode_query(&target.document(group)?, nonce),
+        CheckpointTarget::Studio(target) => {
+            use catcoms_replication::studio::StudioTarget;
+            let mut e = Encoder::new();
+            e.put_u8(1);
+            match target {
+                StudioTarget::Index { channel } => {
+                    e.put_u16(DocType::StudioIndex.tag());
+                    wire(e.put_bytes(&channel))?;
+                    wire(e.put_bytes(&[0; 16]))?;
+                }
+                StudioTarget::Flipnote { channel, object } => {
+                    e.put_u16(DocType::StudioObject.tag());
+                    wire(e.put_bytes(&channel))?;
+                    wire(e.put_bytes(&object))?;
+                }
+            }
+            wire(e.put_bytes(&nonce))?;
+            Ok(e.finish())
+        }
+    }
+}
+pub(super) fn decode_scoped_query(
+    kind: u8,
+    bytes: &[u8],
+    group: &[u8],
+) -> Result<(CheckpointTarget, [u8; 16]), SyncError> {
+    if kind == KIND_RECEIPT_HEAD {
+        let (document, nonce) = decode_query(bytes, group)?;
+        let bucket = (0..=255u8)
+            .find(|b| registry_document(group, *b).is_ok_and(|d| d == document))
+            .ok_or(SyncError::NoSuchDoc)?;
+        return Ok((CheckpointTarget::Registry(bucket), nonce));
+    }
+    if kind != KIND_STUDIO_HEAD || bytes.len() > MAX_QUERY {
+        return Err(SyncError::Malformed);
+    }
+    use catcoms_replication::studio::StudioTarget;
+    let mut d = Decoder::new(bytes);
+    if wire(d.get_u8())? != 1 {
+        return Err(SyncError::Malformed);
+    }
+    let tag = wire(d.get_u16())?;
+    let channel: [u8; 16] = wire(d.get_bytes())?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let object: [u8; 16] = wire(d.get_bytes())?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let nonce = wire(d.get_bytes())?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    wire(d.finish())?;
+    let target = match tag {
+        15 if object == [0; 16] => StudioTarget::Index { channel },
+        16 => StudioTarget::Flipnote { channel, object },
+        _ => return Err(SyncError::Malformed),
+    };
+    Ok((CheckpointTarget::Studio(target), nonce))
+}
+
 pub(super) fn encode_answer(
     answer: &ReceiptHeadAnswer,
     document: &LogicalDocument,

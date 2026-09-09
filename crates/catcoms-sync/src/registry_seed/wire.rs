@@ -14,6 +14,12 @@ pub(super) struct Query {
     pub doc_id: u128,
     pub hash: [u8; 32],
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ScopedQuery {
+    pub target: CheckpointTarget,
+    pub doc_id: u128,
+    pub hash: [u8; 32],
+}
 fn wire<V>(value: Result<V, catcoms_wire::WireError>) -> Result<V, SyncError> {
     value.map_err(|_| SyncError::Malformed)
 }
@@ -49,6 +55,76 @@ pub(super) fn decode_query(bytes: &[u8], group: &[u8]) -> Result<Query, SyncErro
         .ok_or(SyncError::NoSuchDoc)?;
     Ok(Query {
         bucket,
+        doc_id,
+        hash,
+    })
+}
+
+pub(super) fn encode_scoped_query(q: &ScopedQuery, group: &[u8]) -> Result<Vec<u8>, SyncError> {
+    match q.target {
+        CheckpointTarget::Registry(bucket) => encode_query(
+            &Query {
+                bucket,
+                doc_id: q.doc_id,
+                hash: q.hash,
+            },
+            group,
+        ),
+        CheckpointTarget::Studio(target) => {
+            let mut e = Encoder::new();
+            e.put_u8(1).put_u16(q.target.doc_type().tag());
+            wire(e.put_bytes(&target.channel()))?;
+            let object = match target {
+                catcoms_replication::studio::StudioTarget::Index { .. } => [0; 16],
+                catcoms_replication::studio::StudioTarget::Flipnote { object, .. } => object,
+            };
+            wire(e.put_bytes(&object))?;
+            e.put_u128(q.doc_id);
+            wire(e.put_bytes(&q.hash))?;
+            Ok(e.finish())
+        }
+    }
+}
+pub(super) fn decode_scoped_query(
+    kind: u8,
+    bytes: &[u8],
+    group: &[u8],
+) -> Result<ScopedQuery, SyncError> {
+    if kind == KIND_REGISTRY_SEED {
+        let q = decode_query(bytes, group)?;
+        return Ok(ScopedQuery {
+            target: CheckpointTarget::Registry(q.bucket),
+            doc_id: q.doc_id,
+            hash: q.hash,
+        });
+    }
+    if kind != KIND_STUDIO_SEED || bytes.len() > MAX_QUERY {
+        return Err(SyncError::Malformed);
+    }
+    use catcoms_replication::studio::StudioTarget;
+    let mut d = Decoder::new(bytes);
+    if wire(d.get_u8())? != 1 {
+        return Err(SyncError::Malformed);
+    }
+    let tag = wire(d.get_u16())?;
+    let channel: [u8; 16] = wire(d.get_bytes())?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let object: [u8; 16] = wire(d.get_bytes())?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let doc_id = wire(d.get_u128())?;
+    let hash = wire(d.get_bytes())?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    wire(d.finish())?;
+    let target = match tag {
+        15 if object == [0; 16] => StudioTarget::Index { channel },
+        16 => StudioTarget::Flipnote { channel, object },
+        _ => return Err(SyncError::Malformed),
+    };
+    Ok(ScopedQuery {
+        target: CheckpointTarget::Studio(target),
         doc_id,
         hash,
     })

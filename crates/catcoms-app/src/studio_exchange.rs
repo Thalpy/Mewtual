@@ -10,6 +10,7 @@ use catcoms_rt::{CryptoRngCore, MeshTransport, PublishSubmission};
 use catcoms_sync::{StudioWatch, SyncError};
 use std::sync::Arc;
 
+pub mod discovery;
 mod pages;
 pub use pages::{
     ServerStudioPageProvider, ServerStudioReceive, StudioPageAttempt, StudioPageCompletion,

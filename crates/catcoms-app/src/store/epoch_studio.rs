@@ -19,7 +19,10 @@ use catcoms_replication::{
 use std::io::Read;
 use std::sync::Arc;
 
+mod adoption;
+mod discovery;
 mod preparation;
+pub use adoption::StudioAdoptionOutcome;
 mod receive;
 pub(crate) use preparation::{PreparedStudioSource, StudioSourceCapture};
 pub(super) mod source;

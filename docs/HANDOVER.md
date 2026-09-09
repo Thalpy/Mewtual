@@ -8,6 +8,44 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 3, cooperative Studio checkpoint joining (2026-09-09).** Studio now extends
+  the existing Registry head/seed engine using additive kinds 24/25, typed channel/object scopes
+  and separate signature domains. All pending/rate/outbound/retained limits are shared. Detached
+  prepare/fetch/complete keeps the live Server available and rechecks exact attempt/selection,
+  full endpoint identity, MLS and fixed deadlines. Cancelled lower-driver work retains both
+  outbound and seed slots. Arbitrary logical-key generations are weak/reaped; Studio head/seed
+  registrations are each capped at sixteen. Registry 21/22 wire bytes remain unchanged, but its
+  cooperative request wrappers now also use connected-only I/O, not implicit dialing.
+  `studio_exchange/discovery.rs` binds the private selection to physical mount, numeric server
+  and channel. The existing Studio source/gate/budget now saves Closing or Fault before optional
+  seed work, typed whole-source recovery before the separate successor, and never retires intents
+  from a checkpoint alone. Exact retries preserve later edits; staged warnings and failed writes
+  survive restart. Ordinary Studio restart v1 is unchanged; adoption has explicit v2 state.
+  Warm-only head/seed service uses exact source/journal agreement, source flush and journal re-save
+  before proof; post-handoff publication failure requires exact republication. Missing indexed,
+  corrupt or cold state never becomes an authoritative empty result. No remote request prepares
+  the whole-server owner snapshot.
+  Adversarial review found and fixed Registry's 4,096-epoch ceiling leaking into shared adoption
+  restart validation. A regression failed before the correction; Index/art Closing/Fault and
+  source-only crash tests now cover epochs 4096/4097 while Registry retains its own bound.
+  Review/re-review found no remaining blocker/high/medium in these cooperative adapters. The
+  low cancellation-test masking gap was fixed with an independent retained-slot assertion.
+  Focused evidence: 18 Studio sync tests, six app/store discovery tests and five Studio store
+  adoption tests pass. The actual joined-member path uses `request_channel_index_catchup`, not
+  a fixture-only endpoint promotion: owner proof → Closing → seed → durable recovery/install →
+  open-tail page → disk reopen. Further cases cover remount/server/channel changes after head
+  or seed, source/journal durability failures and post-handoff exact retry.
+  Verification: full root `cargo test --all --all-features` passed; native tests passed 201
+  and frontend tests passed 1,144. The final retained-slot assertion also passes in the
+  focused 18-test Studio sync rerun. Root/native formatting, root all-target/all-feature
+  Clippy (`-D warnings`), native `cargo check`, ambient-dependency gate and diff checks passed.
+  Evidence is in `logs/gate3-checkpoint-*` and `logs/gate3-studio-sync-final.log`.
+  **Gate 3 is not closed:** this is explicit adapter integration. Next is service for saved keys
+  without a provider UI watch, automatic Registry/Studio discovery and source preparation under
+  the native actor lifecycle, including restart/expiry while Closing. Do not rebuild these
+  completed protocol/store adapters. Gate 4 still owns automatic receipt issuance, succession,
+  replay/recovery actions and old-owner provisional-view consumption; UI remains user-owned.
+
 - **Flipnote gate 3, automatic same-epoch catch-up (2026-09-09).** Additive Studio request kind 23
   now uses Registry's existing page queue/rates/outbound/receiver capacity with a distinct
   Studio response domain and exact channel/type/key/full-device binding. The app retains the

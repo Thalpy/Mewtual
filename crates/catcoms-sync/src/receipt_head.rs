@@ -1,13 +1,16 @@
 //! Keyed P1 discovery before a requester knows a concrete epoch. Only explicitly registered
 //! logical registry buckets are served. This is cooperative networking, not checkpoint admission.
 use super::*;
+use crate::checkpoint_exchange::CheckpointTarget;
 use catcoms_replication::{
     registry::registry_document, LogicalDocument, Receipt, ReceiptHeadProof, VerifiedReceipt,
 };
 use catcoms_rt::Responder;
 use registry_ingress::Rate;
 
+mod detached;
 mod wire;
+pub use detached::{CompletedCheckpointHead, PendingCheckpointHead};
 pub use wire::ReceiptHeadAnswer;
 use wire::*;
 
@@ -15,13 +18,14 @@ const MAX_PENDING: usize = 8;
 const MAX_REQUESTERS: usize = 4096;
 const QUEUE_MS: u64 = 5_000;
 const REQUEST_MS: u64 = 10_000;
+#[cfg(test)]
 const RESPONSE_DOMAIN: &str = "catcoms/receipt-head-response/v1";
 
 /// Exact logical registration. Unlike an operation watch it intentionally survives rotations;
 /// replacing/unregistering it revokes queued requests, without resetting rate debt.
 pub struct RegistryHeadWatch {
     instance: RegistrySyncInstance,
-    bucket: u8,
+    target: CheckpointTarget,
     generation: Arc<()>,
 }
 impl fmt::Debug for RegistryHeadWatch {
@@ -30,7 +34,7 @@ impl fmt::Debug for RegistryHeadWatch {
     }
 }
 struct Pending {
-    bucket: u8,
+    target: CheckpointTarget,
     generation: Arc<()>,
     inner: Vec<u8>,
     nonce: [u8; 16],
@@ -42,7 +46,7 @@ struct Pending {
 }
 #[derive(Default)]
 pub(super) struct HeadRequests {
-    watches: BTreeMap<u8, Arc<()>>,
+    watches: BTreeMap<CheckpointTarget, Arc<()>>,
     pending: VecDeque<Pending>,
     preauth: Option<Rate>,
     service: Option<Rate>,
@@ -50,7 +54,10 @@ pub(super) struct HeadRequests {
     now: u64,
     outbound: [std::sync::Weak<()>; 4],
     // A newly authenticated owner selection revokes older discovery contexts for this bucket.
-    selections: BTreeMap<u8, Arc<()>>,
+    selections: BTreeMap<CheckpointTarget, std::sync::Weak<()>>,
+    // Preparing a later attempt invalidates an earlier in-flight completion, but not an
+    // already authenticated selection. A hint/failed attempt must not revoke that selection.
+    attempts: BTreeMap<CheckpointTarget, std::sync::Weak<()>>,
 }
 
 /// Created only while validating the actual fresh head response, never from public answer
@@ -60,8 +67,8 @@ pub(super) struct HeadSelection {
     epoch: u64,
     owner: DeviceId,
     requester: DeviceId,
-    generation: Arc<()>,
-    pub(super) bucket: u8,
+    pub(super) generation: Arc<()>,
+    pub(super) target: CheckpointTarget,
     pub(super) receipt: Receipt,
     pub(super) verified: VerifiedReceipt,
     pub(super) tenure: u64,
@@ -101,7 +108,7 @@ impl fmt::Debug for DurableOwnerSnapshot {
 /// dropping this before recording completion requires an exact re-handoff after restart.
 pub struct ReceiptHeadHandoff {
     snapshot: DurableOwnerSnapshot,
-    bucket: u8,
+    target: CheckpointTarget,
     generation: Arc<()>,
     receipt: Box<Receipt>,
     expires: u64,
@@ -153,7 +160,19 @@ impl fmt::Debug for ReceiptHeadSelection {
     }
 }
 
+#[cfg(test)]
 fn transcript(
+    group: &[u8],
+    key: &[u8],
+    auth: &RequestAuth,
+    peer: PeerId,
+    query: &[u8],
+    answer: &[u8],
+) -> Vec<u8> {
+    scoped_transcript(RESPONSE_DOMAIN, group, key, auth, peer, query, answer)
+}
+fn scoped_transcript(
+    domain: &str,
     group: &[u8],
     key: &[u8],
     auth: &RequestAuth,
@@ -166,7 +185,7 @@ fn transcript(
     e.put_bytes(query).expect("query fits");
     e.put_bytes(answer).expect("answer fits");
     signed_resp_transcript(
-        RESPONSE_DOMAIN,
+        domain,
         group,
         key,
         auth.ts,
@@ -245,10 +264,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             || !self
                 .receipt_heads
                 .watches
-                .get(&handoff.bucket)
+                .get(&handoff.target)
                 .is_some_and(|g| Arc::ptr_eq(g, &handoff.generation))
-            || handoff.receipt.document
-                != registry_document(&self.group.group_id(), handoff.bucket)?
+            || handoff.receipt.document != handoff.target.document(&self.group.group_id())?
         {
             return Err(SyncError::Unauthorized);
         }
@@ -258,33 +276,54 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(complete(&handoff.receipt, &mut self.rng))
     }
     pub fn watch_registry_head(&mut self, bucket: u8) -> RegistryHeadWatch {
+        self.watch_checkpoint_head(CheckpointTarget::Registry(bucket))
+            .expect("fixed registry bucket count")
+    }
+    /// Register a logical checkpoint service independently of the concrete operation watch.
+    /// Studio registrations have sixteen slots; replacing one never refunds request rate debt.
+    pub fn watch_checkpoint_head(
+        &mut self,
+        target: CheckpointTarget,
+    ) -> Result<RegistryHeadWatch, SyncError> {
+        if matches!(target, CheckpointTarget::Studio(_))
+            && !self.receipt_heads.watches.contains_key(&target)
+            && self
+                .receipt_heads
+                .watches
+                .keys()
+                .filter(|t| matches!(t, CheckpointTarget::Studio(_)))
+                .count()
+                >= 16
+        {
+            return Err(SyncError::Malformed);
+        }
         let generation = Arc::new(());
         self.receipt_heads
             .watches
-            .insert(bucket, generation.clone());
-        self.receipt_heads.pending.retain(|p| p.bucket != bucket);
-        RegistryHeadWatch {
+            .insert(target, generation.clone());
+        self.receipt_heads.pending.retain(|p| p.target != target);
+        Ok(RegistryHeadWatch {
             instance: self.registry_instance(),
-            bucket,
+            target,
             generation,
-        }
+        })
     }
     pub fn registry_head_watch_is_current(&self, watch: &RegistryHeadWatch) -> bool {
         self.matches_registry_instance(&watch.instance)
             && self
                 .receipt_heads
                 .watches
-                .get(&watch.bucket)
+                .get(&watch.target)
                 .is_some_and(|g| Arc::ptr_eq(g, &watch.generation))
     }
     pub fn unwatch_registry_head(&mut self, watch: &RegistryHeadWatch) -> Result<(), SyncError> {
         if !self.registry_head_watch_is_current(watch) {
             return Err(SyncError::NoSuchDoc);
         }
-        self.receipt_heads.watches.remove(&watch.bucket);
+        self.receipt_heads.watches.remove(&watch.target);
         self.receipt_heads
             .pending
-            .retain(|p| p.bucket != watch.bucket);
+            .retain(|p| p.target != watch.target);
         Ok(())
     }
     fn head_member(&self, key: &[u8]) -> bool {
@@ -294,6 +333,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             == Some(key)
     }
     pub(super) fn queue_receipt_head(&mut self, from: PeerId, data: &[u8], responder: Responder) {
+        self.queue_checkpoint_head(KIND_RECEIPT_HEAD, from, data, responder);
+    }
+    pub(super) fn queue_checkpoint_head(
+        &mut self,
+        kind: u8,
+        from: PeerId,
+        data: &[u8],
+        responder: Responder,
+    ) {
         let now = self.receipt_heads.expire(self.clock.monotonic_ms());
         if data.len() > MAX_QUERY + 144
             || self.receipt_heads.watches.is_empty()
@@ -306,8 +354,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return;
         }
-        let Some((inner, key, auth)) = self.authenticate_request(KIND_RECEIPT_HEAD, data, from)
-        else {
+        let Some((inner, key, auth)) = self.authenticate_request(kind, data, from) else {
             return;
         };
         if auth.epoch != self.group.epoch()
@@ -316,14 +363,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return;
         }
-        let Ok((document, nonce)) = decode_query(&inner, &self.group.group_id()) else {
+        let Ok((target, nonce)) = decode_scoped_query(kind, &inner, &self.group.group_id()) else {
             return;
         };
         // At most 256 fixed-size hashes, after authentication and the global preauth rail.
         // No untrusted key triggers a disk lookup or a concrete-epoch walk.
-        let Some((&bucket, generation)) = self.receipt_heads.watches.iter().find(|(b, _)| {
-            registry_document(&self.group.group_id(), **b).is_ok_and(|d| d == document)
-        }) else {
+        let Some(generation) = self.receipt_heads.watches.get(&target) else {
             return;
         };
         let generation = generation.clone();
@@ -355,7 +400,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         };
         self.receipt_heads.pending.push_back(Pending {
-            bucket,
+            target,
             generation,
             inner,
             nonce,
@@ -408,7 +453,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .receipt_heads
             .pending
             .iter()
-            .position(|p| p.bucket == watch.bucket)
+            .position(|p| p.target == watch.target)
         else {
             return Ok(None);
         };
@@ -428,7 +473,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !Arc::ptr_eq(&item.generation, &watch.generation) || !self.head_request_current(&item) {
             return Err(SyncError::Unauthorized);
         }
-        let document = registry_document(&self.group.group_id(), watch.bucket)?;
+        let document = watch.target.document(&self.group.group_id())?;
         let tenure = snapshot
             .filter(|p| self.head_snapshot_is_current(p))
             .map(|p| p.tenure);
@@ -476,7 +521,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             proof,
         };
         let bytes = encode_answer(&answer, &document)?;
-        let signature = self.device.sign(&transcript(
+        let signature = self.device.sign(&scoped_transcript(
+            watch.target.head_domain(),
             &self.group.group_id(),
             &item.key,
             &item.auth,
@@ -496,7 +542,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let served = if answer.proof.is_some() {
             ReceiptHeadServed::Owner(ReceiptHeadHandoff {
                 snapshot: snapshot.expect("proved durable snapshot").clone(),
-                bucket: watch.bucket,
+                target: watch.target,
                 generation: watch.generation.clone(),
                 receipt: Box::new(answer.receipt.expect("proved receipt")),
                 expires: item.expires,
@@ -536,8 +582,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             && self
                 .receipt_heads
                 .selections
-                .get(&selection.bucket)
-                .is_some_and(|g| Arc::ptr_eq(g, &selection.generation))
+                .get(&selection.target)
+                .and_then(std::sync::Weak::upgrade)
+                .is_some_and(|g| Arc::ptr_eq(&g, &selection.generation))
     }
 
     pub(super) async fn request_registry_head_scoped(
@@ -545,115 +592,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: PeerId,
         bucket: u8,
     ) -> Result<Option<(ReceiptHeadAnswer, Option<HeadSelection>)>, SyncError> {
-        if !self.head_member(&self.device.public_key_bytes()) {
-            return Err(SyncError::Unauthorized);
-        }
-        let expected = self
-            .registry_page_peer_device(peer)
-            .ok_or(SyncError::Unauthorized)?;
-        let document = registry_document(&self.group.group_id(), bucket)?;
-        let mut nonce = [0; 16];
-        self.rng.fill_bytes(&mut nonce);
-        let inner = encode_query(&document, nonce)?;
-        let (request, auth) = self.build_authed_request(KIND_RECEIPT_HEAD, &inner)?;
-        let slot = self
-            .receipt_heads
-            .outbound
-            .iter_mut()
-            .find(|s| s.strong_count() == 0)
-            .ok_or(SyncError::Transport(TransportError::Unreachable(peer)))?;
-        let permit = Arc::new(());
-        *slot = Arc::downgrade(&permit);
-        let (signal, cancelled) = tokio::sync::watch::channel(false);
-        let _cancel = CancelOnDrop(signal);
-        let expires = self
-            .clock
-            .monotonic_ms()
-            .checked_add(REQUEST_MS)
-            .ok_or(SyncError::Malformed)?;
-        let answer = self.transport.request_cancellable(
-            peer,
-            ProtocolId(RR_PROTOCOL),
-            Bytes::from(request),
-            RequestCancellation::new(cancelled, Some(permit)),
-        );
-        let deadline = self
-            .clock
-            .sleep(std::time::Duration::from_millis(REQUEST_MS));
-        futures::pin_mut!(answer, deadline);
-        let response = match futures::future::select(answer, deadline).await {
-            futures::future::Either::Left((answer, _)) => answer?,
-            futures::future::Either::Right(_) => {
-                return Err(SyncError::Transport(TransportError::Unreachable(peer)))
-            }
-        };
-        // A ready response can win select's first branch after local scheduling was delayed
-        // beyond the timer. Its authority still expires at the original receiver deadline.
-        if self.clock.monotonic_ms() >= expires {
-            return Err(SyncError::Unauthorized);
-        }
-        if response.is_empty() {
-            return Ok(None);
-        }
-        let (key, signature, answer) = decode_response(&response)?;
-        if auth.epoch != self.group.epoch()
-            || DeviceId::from_public_key_bytes(key) != expected
-            || !self.head_member(key)
-            || !self.head_member(&self.device.public_key_bytes())
-            || !verify_with_public_bytes(
-                key,
-                &transcript(
-                    &self.group.group_id(),
-                    &self.device.public_key_bytes(),
-                    &auth,
-                    peer,
-                    &inner,
-                    answer,
-                ),
-                &signature,
-            )
-        {
-            return Err(SyncError::Unauthorized);
-        }
-        let outcome = decode_answer(answer, &document)?;
-        let selection = if let Some(proof) = &outcome.proof {
-            if self.group.designated_committer() != Some(expected)
-                || self
-                    .observed_owner_tenure_start()
-                    .is_some_and(|t| t != proof.tenure_start_group_epoch)
-            {
-                return Err(SyncError::Unauthorized);
-            }
-            let verified = proof.verify(
-                &self.group,
-                outcome.receipt.as_ref().ok_or(SyncError::Malformed)?,
-                self.device.device_id(),
-                &nonce,
-            )?;
-            let generation = Arc::new(());
-            self.receipt_heads
-                .selections
-                .insert(bucket, generation.clone());
-            Some(HeadSelection {
-                instance: self.registry_instance(),
-                epoch: self.group.epoch(),
-                owner: expected,
-                requester: self.device.device_id(),
-                generation,
-                bucket,
-                receipt: outcome
-                    .receipt
-                    .as_ref()
-                    .expect("proof receipt checked")
-                    .clone(),
-                verified,
-                tenure: proof.tenure_start_group_epoch,
-            })
-        } else {
-            None
-        };
-        // Even a valid current proof is a one-shot selection, never a lease or pruning grant.
-        Ok(Some((outcome, selection)))
+        let pending = self.prepare_checkpoint_head(peer, CheckpointTarget::Registry(bucket))?;
+        let completed = pending.fetch().await;
+        self.complete_checkpoint_head_scoped(completed)
     }
 }
 

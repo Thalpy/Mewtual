@@ -4,6 +4,8 @@ use catcoms_replication::{epoch_zero_id, InheritedCheckpoint, SignedOp};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod adoption;
+mod discovery;
 mod inventory_cache;
 mod pages;
 pub(crate) mod performance;

@@ -1,16 +1,20 @@
 //! Expected-hash checkpoint transport. Receiving owns one bounded seed under a fresh head
 //! selection, not an installed epoch or a pruning grant. The durable recovery gate is separate.
 use super::*;
+use crate::checkpoint_exchange::CheckpointTarget;
 use catcoms_replication::{
-    epoch_id,
-    registry::{registry_document, RegistryProjection},
-    Receipt, VerifiedCheckpoint, MAX_CHECKPOINT_BYTES,
+    epoch_id, registry::registry_document, Receipt, VerifiedCheckpoint, MAX_CHECKPOINT_BYTES,
 };
 use catcoms_rt::Responder;
 use catcoms_storage::pad::{self, OP_PAD_CEILING, OP_PAD_FLOOR};
 use receipt_head::{HeadSelection, ReceiptHeadAnswer};
 use registry_ingress::Rate;
+mod detached;
 mod wire;
+pub use detached::{
+    CompletedCheckpointDiscovery, CompletedCheckpointSeed, PendingCheckpointDiscovery,
+    PendingCheckpointSeed,
+};
 use wire::*;
 
 const MAX_PENDING: usize = 8;
@@ -18,12 +22,13 @@ const MAX_REQUESTERS: usize = 4096;
 const QUEUE_MS: u64 = 5_000;
 const REQUEST_MS: u64 = 10_000;
 const FETCH_MS: u64 = 60_000;
+#[cfg(test)]
 const RESPONSE_DOMAIN: &str = "catcoms/registry-seed-response/v1";
 
 /// Logical bucket registration. Dropping is not revocation: explicitly unwatch on vault lock.
 pub struct RegistrySeedWatch {
     instance: RegistrySyncInstance,
-    bucket: u8,
+    target: CheckpointTarget,
     generation: Arc<()>,
 }
 impl fmt::Debug for RegistrySeedWatch {
@@ -32,7 +37,7 @@ impl fmt::Debug for RegistrySeedWatch {
     }
 }
 struct Pending {
-    query: Query,
+    query: ScopedQuery,
     inner: Vec<u8>,
     generation: Arc<()>,
     requester: DeviceId,
@@ -43,7 +48,7 @@ struct Pending {
 }
 #[derive(Default)]
 pub(super) struct SeedRequests {
-    watches: BTreeMap<u8, Arc<()>>,
+    watches: BTreeMap<CheckpointTarget, Arc<()>>,
     pending: VecDeque<Pending>,
     preauth: Option<Rate>,
     service: Option<Rate>,
@@ -90,6 +95,7 @@ pub struct RegistrySeedFetch {
     attempts: u8,
     next_at: u64,
     seed: Option<VerifiedCheckpoint>,
+    attempt: Option<Arc<()>>,
 }
 impl fmt::Debug for RegistrySeedFetch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -100,6 +106,9 @@ impl fmt::Debug for RegistrySeedFetch {
     }
 }
 impl RegistrySeedFetch {
+    pub fn target(&self) -> CheckpointTarget {
+        self.selection.target
+    }
     /// Bytes have been checked; this says nothing about current authority, durability or editing.
     pub fn is_fetched(&self) -> bool {
         self.seed.is_some()
@@ -128,13 +137,39 @@ pub struct RegistrySeedSelectionUse<'a> {
     pub tenure: u64,
     pub bucket: u8,
 }
+
+/// Generic form of the same current-scope borrow. Target remains privately selected by an
+/// actual fresh head response; this struct itself is not a deferred installation capability.
+pub struct CheckpointSeedSelectionUse<'a> {
+    pub receipt: &'a Receipt,
+    pub checkpoint: Option<&'a VerifiedCheckpoint>,
+    pub tenure: u64,
+    pub target: CheckpointTarget,
+}
+impl fmt::Debug for CheckpointSeedSelectionUse<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CheckpointSeedSelectionUse { .. }")
+    }
+}
 impl fmt::Debug for RegistrySeedSelectionUse<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("RegistrySeedSelectionUse { .. }")
     }
 }
 
+#[cfg(test)]
 fn transcript(
+    group: &[u8],
+    key: &[u8],
+    auth: &RequestAuth,
+    peer: PeerId,
+    query: &[u8],
+    body: &[u8],
+) -> Vec<u8> {
+    scoped_transcript(RESPONSE_DOMAIN, group, key, auth, peer, query, body)
+}
+fn scoped_transcript(
+    domain: &str,
     group: &[u8],
     key: &[u8],
     auth: &RequestAuth,
@@ -147,7 +182,7 @@ fn transcript(
     e.put_bytes(query).expect("query fits");
     e.put_bytes(body).expect("body bounded");
     signed_resp_transcript(
-        RESPONSE_DOMAIN,
+        domain,
         group,
         key,
         auth.ts,
@@ -165,38 +200,68 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             == Some(key)
     }
     pub fn watch_registry_seed(&mut self, bucket: u8) -> RegistrySeedWatch {
+        self.watch_checkpoint_seed(CheckpointTarget::Registry(bucket))
+            .expect("fixed registry bucket count")
+    }
+    /// Logical service registration independent of user receive watches. Studio has at most
+    /// sixteen local registrations; both kinds still share all pending/rate/seed capacity.
+    pub fn watch_checkpoint_seed(
+        &mut self,
+        target: CheckpointTarget,
+    ) -> Result<RegistrySeedWatch, SyncError> {
+        if matches!(target, CheckpointTarget::Studio(_))
+            && !self.registry_seeds.watches.contains_key(&target)
+            && self
+                .registry_seeds
+                .watches
+                .keys()
+                .filter(|t| matches!(t, CheckpointTarget::Studio(_)))
+                .count()
+                >= 16
+        {
+            return Err(SyncError::Malformed);
+        }
         let generation = Arc::new(());
         self.registry_seeds
             .watches
-            .insert(bucket, generation.clone());
+            .insert(target, generation.clone());
         self.registry_seeds
             .pending
-            .retain(|p| p.query.bucket != bucket);
-        RegistrySeedWatch {
+            .retain(|p| p.query.target != target);
+        Ok(RegistrySeedWatch {
             instance: self.registry_instance(),
-            bucket,
+            target,
             generation,
-        }
+        })
     }
     pub fn registry_seed_watch_is_current(&self, watch: &RegistrySeedWatch) -> bool {
         self.matches_registry_instance(&watch.instance)
             && self
                 .registry_seeds
                 .watches
-                .get(&watch.bucket)
+                .get(&watch.target)
                 .is_some_and(|g| Arc::ptr_eq(g, &watch.generation))
     }
     pub fn unwatch_registry_seed(&mut self, watch: &RegistrySeedWatch) -> Result<(), SyncError> {
         if !self.registry_seed_watch_is_current(watch) {
             return Err(SyncError::NoSuchDoc);
         }
-        self.registry_seeds.watches.remove(&watch.bucket);
+        self.registry_seeds.watches.remove(&watch.target);
         self.registry_seeds
             .pending
-            .retain(|p| p.query.bucket != watch.bucket);
+            .retain(|p| p.query.target != watch.target);
         Ok(())
     }
     pub(super) fn queue_registry_seed(&mut self, from: PeerId, data: &[u8], responder: Responder) {
+        self.queue_checkpoint_seed(KIND_REGISTRY_SEED, from, data, responder);
+    }
+    pub(super) fn queue_checkpoint_seed(
+        &mut self,
+        kind: u8,
+        from: PeerId,
+        data: &[u8],
+        responder: Responder,
+    ) {
         let now = self.registry_seeds.expire(self.clock.monotonic_ms());
         if data.len() > MAX_QUERY + 144
             || self.registry_seeds.watches.is_empty()
@@ -209,8 +274,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return;
         }
-        let Some((inner, key, auth)) = self.authenticate_request(KIND_REGISTRY_SEED, data, from)
-        else {
+        let Some((inner, key, auth)) = self.authenticate_request(kind, data, from) else {
             return;
         };
         if auth.epoch != self.group.epoch()
@@ -219,10 +283,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return;
         }
-        let Ok(query) = decode_query(&inner, &self.group.group_id()) else {
+        let Ok(query) = decode_scoped_query(kind, &inner, &self.group.group_id()) else {
             return;
         };
-        let Some(generation) = self.registry_seeds.watches.get(&query.bucket).cloned() else {
+        let Some(generation) = self.registry_seeds.watches.get(&query.target).cloned() else {
             return;
         };
         let requester = DeviceId::from_public_key_bytes(&key);
@@ -285,7 +349,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .registry_seeds
             .pending
             .iter()
-            .position(|p| p.query.bucket == watch.bucket)
+            .position(|p| p.query.target == watch.target)
         else {
             return Ok(None);
         };
@@ -315,9 +379,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Err(error) => return Ok(Some(Err(error))),
         };
         let body = if let Some(seed) = seed {
-            let key =
-                self.group
-                    .channel_secret(&self.device, DocType::DocRegistry, item.query.doc_id)?;
+            let key = self.group.channel_secret(
+                &self.device,
+                item.query.target.doc_type(),
+                item.query.doc_id,
+            )?;
             seal_seed(&seed, &key, &mut self.rng)?
         } else {
             Vec::new()
@@ -327,7 +393,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !self.seed_request_current(&item) || self.clock.monotonic_ms() >= item.expires {
             return Err(SyncError::Unauthorized);
         }
-        let signature = self.device.sign(&transcript(
+        let signature = self.device.sign(&scoped_transcript(
+            watch.target.seed_domain(),
             &self.group.group_id(),
             &item.key,
             &item.auth,
@@ -351,34 +418,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: PeerId,
         bucket: u8,
     ) -> Result<Option<RegistrySeedDiscovery>, SyncError> {
-        let slot = self
-            .registry_seeds
-            .retained
-            .iter_mut()
-            .find(|s| s.strong_count() == 0)
-            .ok_or(SyncError::Malformed)?;
-        let capacity = Arc::new(());
-        *slot = Arc::downgrade(&capacity);
-        let expires = self
-            .clock
-            .monotonic_ms()
-            .checked_add(FETCH_MS)
-            .ok_or(SyncError::Malformed)?;
-        let Some((answer, selection)) = self.request_registry_head_scoped(peer, bucket).await?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(match selection {
-            None => RegistrySeedDiscovery::Hint(answer),
-            Some(selection) => RegistrySeedDiscovery::Selected(RegistrySeedFetch {
-                selection,
-                _capacity: capacity,
-                expires,
-                attempts: 0,
-                next_at: 0,
-                seed: None,
-            }),
-        }))
+        let pending =
+            self.prepare_checkpoint_discovery(peer, CheckpointTarget::Registry(bucket))?;
+        let completed = pending.fetch().await;
+        self.complete_checkpoint_discovery(completed)
     }
     pub fn registry_seed_fetch_is_current(&self, pass: &RegistrySeedFetch) -> bool {
         self.head_selection_is_current(&pass.selection) && self.clock.monotonic_ms() < pass.expires
@@ -390,108 +433,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         pass: &mut RegistrySeedFetch,
         peer: PeerId,
     ) -> Result<bool, SyncError> {
-        let now = self.clock.monotonic_ms();
-        if !self.registry_seed_fetch_is_current(pass) {
-            return Err(SyncError::Unauthorized);
-        }
-        if pass.seed.is_some() {
+        let Some(pending) = self.prepare_checkpoint_seed(pass, peer)? else {
             return Ok(true);
-        }
-        if pass.attempts >= 3 || now < pass.next_at {
-            return Err(SyncError::Malformed);
-        }
-        let expected = self
-            .registry_page_peer_device(peer)
-            .ok_or(SyncError::Unauthorized)?;
-        let verified = &pass.selection.verified;
-        let query = Query {
-            bucket: pass.selection.bucket,
-            doc_id: epoch_id(
-                DocType::DocRegistry,
-                &verified.document().logical_key,
-                verified
-                    .closed_epoch()
-                    .checked_add(1)
-                    .ok_or(SyncError::Malformed)?,
-                &verified.close_record_hash(),
-            ),
-            hash: verified.seed_change_hash(),
         };
-        let inner = encode_query(&query, &self.group.group_id())?;
-        let slot = self
-            .registry_seeds
-            .outbound
-            .iter_mut()
-            .find(|s| s.strong_count() == 0)
-            .ok_or(SyncError::Malformed)?;
-        let permit = Arc::new(());
-        *slot = Arc::downgrade(&permit);
-        pass.attempts += 1;
-        pass.next_at = now.checked_add(1000).ok_or(SyncError::Malformed)?;
-        let (request, auth) = self.build_authed_request(KIND_REGISTRY_SEED, &inner)?;
-        let expires = now
-            .checked_add(REQUEST_MS)
-            .ok_or(SyncError::Malformed)?
-            .min(pass.expires);
-        let (signal, cancelled) = tokio::sync::watch::channel(false);
-        let _cancel = CancelOnDrop(signal);
-        let answer = self.transport.request_cancellable(
-            peer,
-            ProtocolId(RR_PROTOCOL),
-            Bytes::from(request),
-            RequestCancellation::new(cancelled, Some(permit)),
-        );
-        let deadline = self.clock.sleep(std::time::Duration::from_millis(
-            expires.saturating_sub(now),
-        ));
-        futures::pin_mut!(answer, deadline);
-        let response = match futures::future::select(answer, deadline).await {
-            futures::future::Either::Left((answer, _)) => answer?,
-            futures::future::Either::Right(_) => {
-                return Err(SyncError::Transport(TransportError::Unreachable(peer)))
-            }
-        };
-        if !self.registry_seed_fetch_is_current(pass) || self.clock.monotonic_ms() >= expires {
-            return Err(SyncError::Unauthorized);
-        }
-        if response.is_empty() {
-            return Ok(false);
-        }
-        let (key, signature, body) = decode_response(&response)?;
-        if auth.epoch != self.group.epoch()
-            || DeviceId::from_public_key_bytes(key) != expected
-            || !self.seed_member(key)
-            || !verify_with_public_bytes(
-                key,
-                &transcript(
-                    &self.group.group_id(),
-                    &self.device.public_key_bytes(),
-                    &auth,
-                    peer,
-                    &inner,
-                    body,
-                ),
-                &signature,
-            )
-        {
-            return Err(SyncError::Unauthorized);
-        }
-        if body.is_empty() {
-            return Ok(false);
-        }
-        let key = self
-            .group
-            .channel_secret(&self.device, DocType::DocRegistry, query.doc_id)?;
-        let raw = open_seed(body, &key)?;
-        // This checks the receipted hash/checksum BEFORE Automerge decode, then exact raw
-        // change shape and the registry schema. A fileshare hash is deliberately not accepted.
-        let seed =
-            RegistryProjection::verify_checkpoint(&pass.selection.verified, query.bucket, &raw)?;
-        if !self.registry_seed_fetch_is_current(pass) || self.clock.monotonic_ms() >= expires {
-            return Err(SyncError::Unauthorized);
-        }
-        pass.seed = Some(seed);
-        Ok(true)
+        let completed = pending.fetch().await;
+        self.complete_checkpoint_seed(pass, completed)
     }
 
     /// Exclusive, current-context use of a fetched seed. This local callback is NOT a storage
@@ -525,6 +471,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         pass: &RegistrySeedFetch,
         use_selection: impl FnOnce(&ServerGroup, &MlsDevice, &mut R, RegistrySeedSelectionUse<'_>) -> V,
     ) -> Result<V, SyncError> {
+        // Legacy Registry entry points cannot accidentally consume a Studio selection.
+        pass.selection.target.bucket()?;
+        self.with_checkpoint_seed_selection(pass, |group, device, rng, selected| {
+            use_selection(
+                group,
+                device,
+                rng,
+                RegistrySeedSelectionUse {
+                    receipt: selected.receipt,
+                    checkpoint: selected.checkpoint,
+                    tenure: selected.tenure,
+                    bucket: selected.target.bucket().expect("checked registry"),
+                },
+            )
+        })
+    }
+    pub fn with_checkpoint_seed_selection<V>(
+        &mut self,
+        pass: &RegistrySeedFetch,
+        use_selection: impl FnOnce(
+            &ServerGroup,
+            &MlsDevice,
+            &mut R,
+            CheckpointSeedSelectionUse<'_>,
+        ) -> V,
+    ) -> Result<V, SyncError> {
         if !self.registry_seed_fetch_is_current(pass) {
             return Err(SyncError::Unauthorized);
         }
@@ -532,11 +504,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             &self.group,
             &self.device,
             &mut self.rng,
-            RegistrySeedSelectionUse {
+            CheckpointSeedSelectionUse {
                 receipt: &pass.selection.receipt,
                 checkpoint: pass.seed.as_ref(),
                 tenure: pass.selection.tenure,
-                bucket: pass.selection.bucket,
+                target: pass.selection.target,
             },
         ))
     }

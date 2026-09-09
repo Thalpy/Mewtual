@@ -1027,9 +1027,67 @@ cancelled. Healthy supersession discards a result, not a sticky disk fault. The 
 inventory rails still apply; unrelated uncached history may require explicit access. These are
 not latency or resident-heap promises.
 
-**Joining remains separate:** current service still requires an exact locally registered watch;
-keyed Studio receipt-head/seed discovery and recovery-first checkpoint installation are not yet
-wired. Same-epoch prefix completion does not establish currency or install a checkpoint.
+**Automatic joining remains separate:** service still requires a local registration. The
+cooperative keyed discovery/installation adapters below now work; the native discovery scheduler
+and service of unopened keys remain Gate 3 work. A prefix alone never establishes currency.
+
+### Studio checkpoint discovery and installation (cooperative, kinds 24/25)
+
+`CheckpointTarget::{Registry(bucket), Studio(target)}` extends the existing head/seed engine,
+not its finality model. Registry kind 21/22 wire bytes and signature domains are unchanged.
+Studio uses kind 24 (`catcoms/studio-head-response/v1`) and kind 25
+(`catcoms/studio-seed-response/v1`). Its head query is `v:u8=1, type:u16=15|16,
+channel:bytes16, object:bytes16, nonce:bytes16` (63 bytes); its seed query replaces nonce with
+`concrete_id:u128, expected_change_hash:bytes32` (95 bytes). Bytes are u32-length framed,
+integers big-endian, and Index object bytes must all be zero. Both queries retain the 256-byte
+pre-parse inner cap and authenticated outer framing; replies reuse the bounded Registry answer
+envelopes. Seed AEAD uses the actual Studio type and concrete epoch, not DocRegistry. Exact
+Automerge hash verification precedes decoding; typed validation then checks root and channel.
+
+`Server::prepare_checkpoint_discovery` captures target, mount and numeric server; its returned
+`CheckpointDiscoveryAttempt::fetch` holds no Server or vault. `complete_checkpoint_discovery`
+checks the same mount/server/channel plus sync's runtime, MLS, full identities, proven endpoint,
+deadline and newest prepared attempt. Only an actual fresh current-owner proof yields the opaque
+`ServerCheckpointFetch`; `Hint` is never an installation or seed-fetch grant. Unknown requester
+tenure can be learned from the verified owner's proof, but unknown provider tenure cannot mint
+an owner snapshot. A later failed/hint request does not revoke an already verified selection;
+preparing a later same-target attempt does revoke the older in-flight completion. Another valid
+owner selection revokes the old seed handle even when the receipt hash is equal.
+
+`prepare_checkpoint_seed_fetch` / `complete_checkpoint_seed_fetch` similarly detach expected-hash
+I/O, with immutable selection and attempt identities. All these detached calls are connected-only;
+the existing cooperative Registry request wrappers now also use that narrower policy instead of
+implicitly dialing a previously proven endpoint. Current-member proof is still required BEFORE
+disclosing any logical key. Four head-outbound, four seed-outbound and four retained seed slots
+are shared across Registry and Studio. Unpolled jobs, completed results and cancelled lower-driver
+streams keep their slots. Seed handles retain the original 60-second lifetime, three attempts and
+one-second spacing; each request has a fixed ten-second deadline starting at preparation. Weak
+generation maps are reaped on preparation/selection so arbitrary Studio keys cannot grow them
+forever. The same pending queues and per-identity/global debt are reused, with at most sixteen
+Studio logical head/seed registrations in addition to the 256 fixed Registry buckets.
+
+`watch_studio_checkpoint` registers head/seed service without changing the concrete receive watch.
+`serve_studio_head_step` reads only the sole prepared, authenticated, inventory-matched Studio
+source, checks the pending-preferred owner journal, flushes the source and re-saves the exact
+journal decision before signing. The reusable `ServerOwnerSnapshot` must already have been
+prepared by local persistence work. It is never created by a remote query. Only checked reply
+handoff completes publication; a later write failure cannot retract the reply and exact retry
+republishes the same receipt. Missing indexed/corrupt/faulted state refuses; real absent state
+can return a hint with no receipt, never an authoritative empty document. Cold service refuses
+before body allocation and requires separate preparation, not per-request history rebuilding.
+`serve_studio_seed_step` serves only the installed opening's exact seed, even during Closing;
+a selected newer receipt is not evidence that its successor seed exists.
+
+`install_studio_seed_step` accepts only that private current selection under exclusive runtime
+and vault custody. It uses the existing five-family `EpochStudioBudget` and returns the same
+`Installed`, `AlreadyInstalled`, `AwaitingSeed`, `RecoveryPending`, `Fault` and `Stale` outcomes
+as Registry. Full source Closing/Fault is saved first, typed whole-version recovery second,
+separate successor last. No intent retires on adoption. Source-only crashes, failed writes and
+third-snapshot warnings resume safely; exact installed retries preserve later edits. Studio
+adoption uses restart version 2 while ordinary Studio version 1 remains unchanged. Registry's
+4,096-epoch lineage ceiling applies only to Registry, not to Studio restart verification.
+The caller retains the returned source, replaces its concrete watch only after durable success,
+then pages the open tail. No actor/native scheduler or UI command is added by these adapters.
 
 ### Creative blob seam (C0c, independent of Studio/P1 metadata)
 

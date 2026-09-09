@@ -18,7 +18,9 @@ use crate::{
     ReceiptBook, ReceiptIngest, SealedOp, SignedOp, MAX_CHECKPOINT_BYTES,
 };
 
+mod adoption;
 pub mod catchup;
+pub use adoption::StudioAdoptionPlan;
 
 /// One raw seed, signed content log, gate, opening receipt and receipt book. There is no second
 /// compressed Automerge save to decompress or trust. Every component also has its own bound.
@@ -40,6 +42,10 @@ pub struct StudioEpoch {
     gate: EpochGate,
     receipts: ReceiptBook,
     opening: Option<Receipt>,
+    // Version 2 is used ONLY while accepting a discovered checkpoint without its predecessor
+    // closure. Ordinary restart bytes stay v1. Its receipt-book/gate validation must use the
+    // existing P1 adoption mode or a crash after sealing would strand the whole source.
+    adopting: bool,
     // Derived from the VERIFIED seed-only projection before any successor edits. Current
     // registers can hide an inherited replacement CID even though the retained seed needs it.
     // Recomputed on restore; never trusted from a separate persisted pin list.
@@ -78,6 +84,7 @@ impl StudioEpoch {
             logical,
             receipts: ReceiptBook::default(),
             opening: None,
+            adopting: false,
             seed_blob_cids: Default::default(),
         })
     }
@@ -137,6 +144,7 @@ impl StudioEpoch {
             gate,
             receipts,
             opening: Some(receipt),
+            adopting: false,
             seed_blob_cids,
         })
     }
@@ -154,6 +162,32 @@ impl StudioEpoch {
     }
     pub fn phase(&self) -> EpochPhase {
         self.gate.phase()
+    }
+    /// Highest held receipt is a hint until current-owner discovery proves it. Fault refuses
+    /// service rather than returning an older apparently healthy opening receipt.
+    pub fn receipt_head(&self) -> Result<Option<&Receipt>, ReplError> {
+        if self.phase() == EpochPhase::Fault || self.receipts.is_faulted() {
+            return Err(ReplError::ReceiptConflict);
+        }
+        Ok(self.receipts.latest())
+    }
+    /// Only the installed opening's exact expected seed is served. A newer Closing receipt
+    /// does not authorize generating or substituting its not-yet-installed successor bytes.
+    pub fn checkpoint_bytes_by_hash(
+        &mut self,
+        expected_id: u128,
+        expected_hash: [u8; 32],
+    ) -> Result<Option<Vec<u8>>, ReplError> {
+        self.receipt_head()?;
+        if self.doc_id() != expected_id
+            || self
+                .opening
+                .as_ref()
+                .is_none_or(|r| r.seed_change_hash != expected_hash)
+        {
+            return Ok(None);
+        }
+        self.doc.checkpoint_bytes()
     }
     pub fn op_count(&self) -> usize {
         self.doc.op_count()
@@ -326,7 +360,7 @@ impl StudioEpoch {
             .ingest(&mut self.doc, &self.gate, sealed, group, device)
     }
     /// Seals the entire held source under the same exclusive borrow as edit/ingest. No pruning.
-    /// Nonadjacent adoption/repair is intentionally unavailable until its recovery adapter exists.
+    /// Nonadjacent discovery uses explicit adoption mode; durable repair remains a separate API.
     pub fn seal(
         &mut self,
         receipt: Receipt,
@@ -334,6 +368,9 @@ impl StudioEpoch {
         tenure_start: u64,
     ) -> Result<ReceiptIngest, ReplError> {
         self.refresh_owner(group)?;
+        if self.adopting {
+            return self.begin_checkpoint_adoption(receipt, group, tenure_start);
+        }
         if let Some(opening) = &self.opening {
             if receipt.closed_epoch == opening.closed_epoch {
                 return self.receipts.check_opening_receipt(
@@ -353,7 +390,7 @@ impl StudioEpoch {
     /// restart identity even though an object's globally unique logical key is just its id.
     pub fn snapshot(&mut self) -> Result<Vec<u8>, ReplError> {
         let mut e = Encoder::new();
-        e.put_u8(1);
+        e.put_u8(if self.adopting { 2 } else { 1 });
         e.put_bytes(&self.target.channel())
             .map_err(|_| ReplError::EpochBound)?;
         for bytes in [
@@ -362,7 +399,7 @@ impl StudioEpoch {
                 .map(Receipt::encode)
                 .unwrap_or_default(),
             self.doc.checkpoint_bytes()?.unwrap_or_default(),
-            self.receipts.encode()?,
+            self.receipt_book_bytes()?,
             self.gate.encode()?,
         ] {
             e.put_bytes(&bytes).map_err(|_| ReplError::EpochBound)?;
@@ -428,8 +465,7 @@ impl StudioEpoch {
     /// seeds, admission metadata and quarantine hashes cannot spend the settlement allowance.
     pub fn storage_protocol_bytes(&self) -> Result<usize, ReplError> {
         let book = self
-            .receipts
-            .encode()?
+            .receipt_book_bytes()?
             .len()
             .checked_sub(ReceiptBook::default().encode()?.len())
             .ok_or(ReplError::Malformed)?;
@@ -452,15 +488,22 @@ impl StudioEpoch {
             return Err(ReplError::EpochBound);
         }
         let mut d = Decoder::new(bytes);
-        if d.get_u8().map_err(|_| ReplError::Malformed)? != 1 {
-            return Err(ReplError::Malformed);
-        }
+        let adopting = match d.get_u8().map_err(|_| ReplError::Malformed)? {
+            1 => false,
+            2 => true,
+            _ => return Err(ReplError::Malformed),
+        };
         if d.get_bytes().map_err(|_| ReplError::Malformed)? != target.channel() {
             return Err(ReplError::EpochScope);
         }
         let opening = field(&mut d, MAX_RECEIPT_BYTES)?;
         let seed = field(&mut d, MAX_CHECKPOINT_BYTES)?;
-        let receipts = ReceiptBook::decode(field(&mut d, MAX_RECEIPT_BOOK_BYTES)?)?;
+        let book = field(&mut d, MAX_RECEIPT_BOOK_BYTES)?;
+        let receipts = if adopting {
+            ReceiptBook::decode_adoption(book)?
+        } else {
+            ReceiptBook::decode(book)?
+        };
         let gate = EpochGate::decode(field(&mut d, MAX_EPOCH_GATE_BYTES)?)?;
         let count = d.get_u32().map_err(|_| ReplError::Malformed)? as usize;
         if count > MAX_EPOCH_OPERATIONS {
@@ -504,15 +547,27 @@ impl StudioEpoch {
                 target.validate(&result.logical, epoch, domain, change, before)
             },
         )?;
-        gate.verify_restart(&metadata, &receipts, result.opening.as_ref())?;
+        if adopting {
+            gate.verify_adoption_restart(&metadata, &receipts, result.opening.as_ref())?;
+        } else {
+            gate.verify_restart(&metadata, &receipts, result.opening.as_ref())?;
+        }
         recovery::preflight(
             result.projection()?,
             &recovery::current_operations(&result.doc)?,
         )?;
         result.gate = gate;
         result.receipts = receipts;
+        result.adopting = adopting;
         result.gate.update_owner(owner);
         Ok(result)
+    }
+    fn receipt_book_bytes(&self) -> Result<Vec<u8>, ReplError> {
+        if self.adopting {
+            self.receipts.encode_adoption()
+        } else {
+            self.receipts.encode()
+        }
     }
 }
 fn owner(group: &ServerGroup) -> Result<DeviceId, ReplError> {

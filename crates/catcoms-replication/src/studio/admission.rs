@@ -29,7 +29,7 @@ impl PreparedEdit {
 
 /// Caller-selected logical object/channel binding. A registry pointer or UI scalar is not
 /// sufficient authority; P1 still binds this target to the signed group and physical epoch.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StudioTarget {
     Index {
         channel: ElementId,

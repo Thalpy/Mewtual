@@ -12,9 +12,9 @@ use std::sync::Arc;
 /// Reusable across logical buckets, never across membership, runtime or mount replacement.
 #[derive(Clone)]
 pub struct ServerOwnerSnapshot {
-    inner: DurableOwnerSnapshot,
-    mount: Arc<()>,
-    server: u64,
+    pub(crate) inner: DurableOwnerSnapshot,
+    pub(crate) mount: Arc<()>,
+    pub(crate) server: u64,
 }
 impl std::fmt::Debug for ServerOwnerSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

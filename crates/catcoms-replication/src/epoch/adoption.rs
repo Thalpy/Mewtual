@@ -83,7 +83,10 @@ impl ReceiptBook {
             .chain(self.fault.iter().flat_map(|(a, b)| [a, b]))
         {
             if &receipt.document != document
-                || receipt.closed_epoch >= crate::registry::MAX_REGISTRY_EPOCH
+                // The registry's lineage ceiling is a registry product rule, not a shared
+                // receipt-format limit. Studio epochs accepted live must remain reopenable.
+                || (document.doc_type == DocType::DocRegistry
+                    && receipt.closed_epoch >= crate::registry::MAX_REGISTRY_EPOCH)
             {
                 return Err(ReplError::EpochScope);
             }

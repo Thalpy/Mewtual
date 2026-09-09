@@ -785,7 +785,23 @@ table with the commit that closed it.
   Registry and Studio share four process preparation permits through actual worker completion.
   Installation rechecks exact authenticated wrapper/mount/actor/owner/MLS; healthy supersession
   retries, corruption remains a sticky storage pause. The single source and bounded inventory
-  limits remain. Service of unopened keys and Studio seed discovery/install are not yet enabled.
+  limits remain. Service of unopened keys and automatic Studio checkpoint discovery are not yet
+  enabled. Cooperative kinds 24/25 now share Registry's authenticated head/seed engine and all
+  its pending/rate/outbound/retained limits. Type, channel, object, full endpoint identities and
+  exact request are bound separately from Registry; expected Automerge hash precedes typed
+  seed decode. Only a fresh current-owner response mints private selection authority, never a
+  public Hint or registry pointer. Completion checks runtime, mount/server, MLS, channel and
+  attempt/selection freshness. A cancelled job retains both outbound and seed capacity in the
+  driver, not just while its caller exists. Generations for arbitrary object keys are weak and
+  reclaimed, with sixteen Studio service registrations per head/seed family. These and the older
+  cooperative Registry wrappers now use connected-only requests, not implicit endpoint dialing.
+  Studio adoption first saves the full Closing/Fault source, then typed recovery, then its
+  separate successor. No intent retires from seed values. A staged third snapshot still holds
+  settlement, failed I/O requires accounting reconciliation, and exact installed retry preserves
+  newer edits. Normal restart v1 is unchanged; adoption v2 accepts legitimate Studio epochs above
+  Registry's separate lineage ceiling. Owner proofs additionally require the prepared local MLS
+  snapshot, exact saved source/journal agreement and both durability barriers. Warm-only source
+  service cannot turn missing indexed files, corruption or a cold source into a valid empty head.
   Exact retry recognition belongs to the retained signed
   envelope/gate, not timestamps or marker-only success.
   Vault restoration tests dependency and duplicate presence using metadata from Automerge's

@@ -63,7 +63,9 @@ pub use epoch_registry::{
 pub(crate) use epoch_studio::source::studio_full_restores_for_test;
 #[cfg(test)]
 pub(crate) use epoch_studio::tests::performance::save_studio_source_fixture;
-pub use epoch_studio::{EpochStudioBudget, EpochStudioState, StudioPageAdmission};
+pub use epoch_studio::{
+    EpochStudioBudget, EpochStudioState, StudioAdoptionOutcome, StudioPageAdmission,
+};
 pub(crate) use epoch_studio::{PreparedStudioSource, StudioSourceCapture};
 pub mod epoch_budget;
 

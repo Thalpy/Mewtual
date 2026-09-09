@@ -218,7 +218,7 @@ impl ServerStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_epoch_owner_with_writer(
+    pub(in crate::store) fn prepare_epoch_owner_with_writer(
         &mut self,
         server: u64,
         receipt: Receipt,

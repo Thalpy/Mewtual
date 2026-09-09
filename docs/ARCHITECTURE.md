@@ -240,6 +240,24 @@ Fault is a successful typed outcome which the store transaction saves before see
 bad seed or recovery must not suppress that evidence. Constructing a separate successor
 does not install it, retire intents, or provide a transferable network-authority permit.
 
+Studio Index/art now consume this same adoption model through a typed whole-version recovery
+plan and the existing sole prepared source/five-family budget. Source Closing or Fault is saved
+before optional seed work; recovery is durable before selecting the separate successor. Normal
+Studio restart v1 is unchanged, with v2 reserved for an in-progress adoption. The shared adoption
+verifier no longer mistakes Registry's 4,096-epoch product ceiling for a limit on Studio receipts.
+Joined-member tests use the desktop's normal authenticated channel-index bootstrap, then actual
+head/seed requests, recovery-first installation, open-tail paging and disk reopen.
+
+Additive Studio kinds 24/25 reuse Registry's head/seed queues, rates and retained capacity, while
+separately binding type/channel/object and response domains. Detached prepare/I/O/complete phases
+leave the actor free; private runtime/MLS/endpoint/attempt context is checked again on return.
+The old cooperative Registry wrappers also become connected-only; wire compatibility is preserved,
+but they no longer implicitly dial a proven endpoint. Weak generation maps follow the bounded
+live handles. Both outbound and retained seed capacity follow cancelled lower-driver work.
+Studio service is warm-only and shares the owner snapshot/journal durability barriers; no remote
+query can cause whole-server serialization. The adapters do not yet automatically discover keys,
+serve an unopened document, schedule rotation, or grant authority to old-owner hints.
+
 `Server::install_registry_seed_step` now performs this explicit newcomer transaction under exclusive
 sync/store borrows. It rechecks runtime, MLS, full local identity, owner/tenure, superseding selection,
 receiver-clock expiry and physical mount/server at entry. The accounted store saves the full source

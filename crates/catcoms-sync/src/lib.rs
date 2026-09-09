@@ -60,6 +60,7 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 mod blob_fetch;
+pub mod checkpoint_exchange;
 mod owner_tenure;
 pub mod receipt_head;
 pub mod registry_catchup;
@@ -174,6 +175,9 @@ const KIND_RECEIPT_HEAD: u8 = 21;
 const KIND_REGISTRY_SEED: u8 = 22;
 /// Typed Studio history pages. No legacy catch-up fallback is permitted.
 const KIND_STUDIO_PAGE: u8 = 23;
+// Additive Studio logical-head and expected-hash checkpoint routes; Registry 21/22 stay v1.
+const KIND_STUDIO_HEAD: u8 = 24;
+const KIND_STUDIO_SEED: u8 = 25;
 /// Frontier entries one incremental catch-up may name. A document's frontier is one hash per
 /// concurrent writer and normally one or two; this is a bound on the walk a requester can ask a
 /// serving peer to perform, not a limit anyone reaches.
@@ -1114,6 +1118,8 @@ fn kind_binds_requester_peer(kind: u8) -> bool {
             | KIND_RECEIPT_HEAD
             | KIND_REGISTRY_SEED
             | KIND_STUDIO_PAGE
+            | KIND_STUDIO_HEAD
+            | KIND_STUDIO_SEED
     )
 }
 
@@ -5392,8 +5398,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     self.queue_receipt_head(from, &data[1..], responder);
                     return Ok(true);
                 }
+                if data.first() == Some(&KIND_STUDIO_HEAD) {
+                    self.queue_checkpoint_head(KIND_STUDIO_HEAD, from, &data[1..], responder);
+                    return Ok(true);
+                }
                 if data.first() == Some(&KIND_REGISTRY_SEED) {
                     self.queue_registry_seed(from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_STUDIO_SEED) {
+                    self.queue_checkpoint_seed(KIND_STUDIO_SEED, from, &data[1..], responder);
                     return Ok(true);
                 }
                 let response = match data.split_first() {

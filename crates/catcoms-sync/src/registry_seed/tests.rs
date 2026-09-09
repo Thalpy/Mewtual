@@ -6,6 +6,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
+mod studio;
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(819)
 }
@@ -72,7 +73,7 @@ async fn fetch(
     pass: &mut RegistrySeedFetch,
     raw: Option<Vec<u8>>,
 ) -> Result<bool, SyncError> {
-    let watch = owner.watch_registry_seed(pass.selection.bucket);
+    let watch = owner.watch_registry_seed(pass.selection.target.bucket().unwrap());
     let (answer, ()) = tokio::join!(
         client.fetch_registry_seed(pass, owner.local_peer()),
         async {

@@ -13,6 +13,27 @@ struct Fixture {
     source: RegistryEpoch,
     rng: ChaCha20Rng,
 }
+
+#[test]
+fn registry_adoption_still_rejects_its_lineage_ceiling_without_mutating_source() {
+    let mut f = Fixture::new();
+    let before = f.source.snapshot().unwrap();
+    let receipt = Receipt::sign(
+        f.source.logical.clone(),
+        MAX_REGISTRY_EPOCH,
+        [7; 32],
+        [8; 32],
+        0,
+        InheritedCheckpoint::EpochZero,
+        &f.owner,
+    )
+    .unwrap();
+    assert!(matches!(
+        f.source.begin_checkpoint_adoption(receipt, &f.group, 0),
+        Err(ReplError::EpochBound)
+    ));
+    assert_eq!(f.source.snapshot().unwrap(), before);
+}
 impl Fixture {
     fn new() -> Self {
         let owner = MlsDevice::generate().unwrap();
