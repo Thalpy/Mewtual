@@ -24,10 +24,11 @@ connection to any existing reclamation path are required before promising retain
 
 ## Fixed delivery gates
 
-These are ordered integration milestones, not equal-sized percentages. All seven remain open.
+These are ordered integration milestones, not equal-sized percentages. Index/art milestones
+through Gate 3 are implemented; wider sound/export coverage still belongs to Gate 6.
 The first user-observable target is gate 2: **create, save, restart, reopen** through real backend
 commands. Its Index/art native-path and reference-protection tests now pass; that art milestone
-is implemented and the next active work is gate 3. Wider sound/export families remain gate 6
+is implemented and the next active work is gate 4. Wider sound/export families remain gate 6
 work, so this does not close every family in the seven full gates. Gate 1 begins with typed Studio
 operations; it does not wait for P1 support
 for unrelated document types. Tests and review accompany each slice, not only gate 7.
@@ -36,8 +37,8 @@ for unrelated document types. Tests and review accompany each slice, not only ga
 |---|---|---|
 | 1. Typed Flipnote documents | Rust StudioIndex/Flipnote domain-op validation, deterministic projection, conflict/Restore data and exact checkpoint preflight; frame, byte, sfx and patch caps. Unsupported linked-score behavior stays unavailable until gate 6, never silently accepted. | Tests exercise valid edits, malformed/cross-document operations, both concurrent delivery orders and cap boundaries through the real P1 gate. |
 | 2. Durable one-device Save/Load | **Index/art milestone implemented:** accounted vault/lifecycle ownership, native commands, real PIX CIDs, sealed intents, conservative source/seed/recovery reference protection and three-state expiry. Extend these same seams to actual sound/export records in gate 6. No UI edits. | Actor/native create/edit/restart/reopen uses real CIDs. Failure cases preserve durable state. Fileshare unlisting/upload cleanup cannot delete referenced pixels; full scans/restart include superseded seed/history, pending intents and retained/staged recovery. Open edits remain provisional. |
-| 3. Two-member collaboration and joining | **Live sharing, automatic same-epoch catch-up and cooperative checkpoint adoption implemented.** Studio now shares Registry's detached head/seed engine and recovery-first store transaction. Still: automatic keyed discovery, service for unopened saved keys, and newcomer acceptance through the running actor/native lifecycle. | Existing 70-op durable page and simultaneous actor-reconnect tests pass. New joined-member test uses the real channel-index bootstrap, owner head, typed seed, durable recovery, open-tail page and reopen. Cancellation/response ordering, scope changes, failed source/journal/recovery writes and Studio epochs above 4095 are covered. These explicit adapters do not close automatic newcomer joining. Existing 8-MiB input/inventory and 256-KiB cold rails remain. |
-| 4. Rotation and recovery in the running app | Drive owner receipts without needing another member's query; atomic sealing, recovery-first settlement, own-intent replay, owner succession, fault/repair and recovery actions/events for the active types. | Production-adapter scenarios cover rotation, restart, owner offline/return, excluded edits, Restore/Copy/Export, storage exhaustion and staged-snapshot warnings. No pruning before the receipt and durable recovery barriers. |
+| 3. Two-member collaboration and joining | **Index/art milestone implemented:** live sharing, automatic same-epoch repair, unopened saved-key service, keyed Registry/Studio checkpoint discovery and recovery-first Studio adoption through the existing actor/native worker. | Actual actors join after the fixture receipt, install Registry plus Index/art checkpoints, persist the Studio open tail and reopen. Provider restart needs no UI watch. Closing survives expired selection and restart; ordinary Read reestablishes the volatile watch, then no further action is needed. Existing cancellation/authority/durability tests and 70-op paging remain. The 8-MiB input/inventory and 256-KiB unrelated-cold rails remain; this is not arbitrary-size latency qualification. |
+| 4. Rotation and recovery in the running app | **Next:** drive owner receipts without needing another member's query; Registry pointer publication/refresh and Registry open-tail receive; atomic sealing, recovery-first settlement, own-intent replay, owner succession, fault/repair and recovery actions/events for the active types. | Production-adapter scenarios cover rotation, restart, owner offline/return, excluded edits, Restore/Copy/Export, storage exhaustion and staged-snapshot warnings. No pruning before the receipt and durable recovery barriers. Registry checkpoint bootstrap from Gate 3 is not a current pointer projection. |
 | 5. Collaborative frame claims | Required full-identity signalling and shared channel admission; bounded capability/session-bound claim, Ask and Pass messages with receiver-observed expiry. No game/avatar path or standalone drawing feature. | Two members observe advisory claim/Ask/Pass/expiry; collision, replay and disconnect tests pass. Claims never become edit locks. |
 | 6. Sound and export | Linked-score typed operations/preflight/recovery, sfx/emoji patch sources, 64-patch union, deterministic valid-take export and byte-exact `.pixa` publication with durable export records. Cover the specified local GIF export contract without taking over UI design. | No-score and linked-score golden vectors, maximal accepted exports and malformed/over-cap rejection pass; exported bytes can be read back and validated. Playback-facing contracts preserve Deafen and membership teardown. |
 | 7. Flipnote backend acceptance and UI handoff | Run the complete create/save/restart/share/join/rotate/recover/export flow through production adapters, including failure paths. Publish Markdown for the real commands, events, limits and recovery behavior. | Backend acceptance tests and mandatory suites pass, adversarial blocker/high findings are resolved, and every canonical UI dependency maps to a working command/event or explicitly user-owned rendering work. |
@@ -126,9 +127,29 @@ Paths below use `rep/` = `crates/catcoms-replication/src/`, `app/` = `crates/cat
 
 | Automatic same-epoch Studio catch-up / 3 | `443c5f0` | [sync page exchange](../crates/catcoms-sync/src/registry_catchup/studio.rs), [app cursor owner](../crates/catcoms-app/src/studio_exchange/pages.rs), [receiver runtime](../crates/catcoms-app/src/studio/receiver/catchup.rs), [detached source preparation](../crates/catcoms-app/src/store/epoch_studio/preparation.rs), [native idle wake](../apps/desktop/src-tauri/src/studio.rs), [actor regressions](../crates/catcoms-app/src/studio_exchange/tests/reconnect.rs) | Kind 23 shares Registry queue/rates/capacity; detached authenticated attempts and the existing native worker repair missed watched edits without more user actions. Both real actors can request and serve concurrently. Save-before-cursor, cancellation, channel/MLS supersession, fairness and cold-art/small-Index regressions pass. Reuses the previous two rows rather than replacing their store/page algorithm. Unopened-key service, current-owner checkpoint discovery and Studio adoption remain Gate 3. |
 
-| Cooperative Studio checkpoint discovery/adoption / 3 | 2026-09-09 checkpoint milestone | [shared scopes](../crates/catcoms-sync/src/checkpoint_exchange.rs), [head attempts](../crates/catcoms-sync/src/receipt_head/detached.rs), [seed attempts](../crates/catcoms-sync/src/registry_seed/detached.rs), [Studio installer](../crates/catcoms-app/src/store/epoch_studio/adoption.rs), [source service](../crates/catcoms-app/src/store/epoch_studio/discovery.rs), [app custody](../crates/catcoms-app/src/studio_exchange/discovery.rs), [joined-member regressions](../crates/catcoms-app/src/studio_exchange/tests/discovery.rs) | Kinds 24/25 reuse the existing head/seed engine, all its budgets and owner-proof rules. Source Closing/Fault, typed recovery and separate successor use the same store/gate/inventory, not a new replication system. Ordinary Studio restart v1 is unchanged; adoption v2 and the Registry-only lineage ceiling are regression-tested. Explicit discovery/install/tail/reopen works after real endpoint bootstrap; service/runtime orchestration is still next. |
+| Cooperative Studio checkpoint discovery/adoption / 3 | `b6f137b` | [shared scopes](../crates/catcoms-sync/src/checkpoint_exchange.rs), [head attempts](../crates/catcoms-sync/src/receipt_head/detached.rs), [seed attempts](../crates/catcoms-sync/src/registry_seed/detached.rs), [Studio installer](../crates/catcoms-app/src/store/epoch_studio/adoption.rs), [source service](../crates/catcoms-app/src/store/epoch_studio/discovery.rs), [app custody](../crates/catcoms-app/src/studio_exchange/discovery.rs), [joined-member regressions](../crates/catcoms-app/src/studio_exchange/tests/discovery.rs) | Kinds 24/25 reuse the existing head/seed engine, all its budgets and owner-proof rules. Source Closing/Fault, typed recovery and separate successor use the same store/gate/inventory, not a new replication system. Ordinary Studio restart v1 is unchanged; adoption v2 and the Registry-only lineage ceiling are regression-tested. Explicit discovery/install/tail/reopen works after real endpoint bootstrap; service/runtime orchestration follows in the closure below. |
 
 ### Keeping this ledger useful
+
+Gate 3 Index/art closure (`5f24262`, 2026-09-09; extends `b6f137b`, does not replace it):
+
+| Reused implementation | Added integration | Files |
+|---|---|---|
+| Existing bounded head/seed/page queues and debt | Exact prepaid unopened-key interests; no implicit UI subscriptions | [sync/epoch_service.rs](../crates/catcoms-sync/src/epoch_service.rs), existing families' `service.rs` |
+| Existing native worker, Ready/vault lease and Studio source | Owner-lifecycle snapshot, automatic discovery, Closing retries, source service and watch-safe remote updates | [receiver/catchup.rs](../crates/catcoms-app/src/studio/receiver/catchup.rs), [discovery](../crates/catcoms-app/src/studio/receiver/catchup/discovery.rs) |
+| Existing Registry prepared page source and inventory LRU | Prepared head/seed service, fixed cache-slot expiry, associated large-Registry footprint preparation | [registry_catchup.rs](../crates/catcoms-app/src/registry_catchup.rs), [runtime adapter](../crates/catcoms-app/src/studio/receiver/catchup/registry.rs), [source footprint](../crates/catcoms-app/src/store/epoch_registry/page_source.rs) |
+| Existing typed adoption and save-before-cursor | Actual post-checkpoint newcomer Index/art, unopened provider restart, Closing restart and larger-data regression | [unopened tests](../crates/catcoms-app/src/studio_exchange/tests/unopened.rs), [pool lifetime regression](../crates/catcoms-app/src/registry_catchup/tests/preparation.rs) |
+
+No new replication format, persistence owner, UI component or owner-issuance protocol was added
+by this closure. Registry checkpoint bootstrap is deliberately narrower than its current tail;
+Gate 4 must implement pointer publication/refresh and Registry tail receive, plus automatic
+rotation/succession/replay/recovery controls. Existing unrelated cold-inventory and retained-source
+rails remain; this milestone does not promise bounded latency for every accepted history shape.
+
+Verification: full root and native Cargo test suites and all 1,144 frontend tests passed.
+Root formatting, all-target/all-feature Clippy with warnings denied, native Cargo check and the
+ambient-dependency gate passed. Final read-only adversarial review found no remaining
+blocker/high/medium in this boundary. See the latest HANDOVER entry for commands and evidence.
 
 Related runtime foundations (reuse references, **not extra Flipnote progress**):
 
@@ -152,7 +173,7 @@ the matching row; keep the outstanding boundary explicit. Record relevant `fix`,
 and non-conventional commits too when they change that boundary, not just `feat`/`perf` titles.
 If work supersedes an earlier approach, mark which implementation replaces it instead of leaving
 two apparently active solutions. Use the full diff for file history; do not duplicate INTERFACES
-or infer percentages from commit counts. **Next remains gate 3, not another foundation pass.**
+or infer percentages from commit counts. **Next is gate 4, reusing the completed Gate 3 paths.**
 
 ## Current evidence
 
@@ -229,9 +250,9 @@ worker without store/Server borrows, then install only if runtime/mount/member/j
 exact saved record still match. Four process-wide slots include cancelled workers and retained
 results. Warm pages recheck the full saved record without replaying it; cold/stale pages require
 local preparation. Receipt faults invalidate caches even when the source operations are unchanged.
-**Next implementation target: gate 3 unopened-provider service, keyed discovery and Studio seed
-installation.** Authenticated page transport, cursor/retry ownership and reconnect scheduling
-now reuse the completed page/native/source machinery (see the runtime entry below).
+**Next implementation target: Gate 4 rotation and recovery runtime.** Unopened-provider service,
+keyed discovery and Studio seed installation now reuse the completed page/native/source machinery.
+Authenticated transport, cursor/retry ownership and reconnect scheduling are already integrated.
 The typed page engine and atomic vault adapters now exist; do not rebuild their inbox,
 saved-only send, persistence or preparation paths. Automatic work must not repeat unrestricted
 history reconstruction under actor/vault locks. The initial receiver uses a conservative local
@@ -262,7 +283,7 @@ This does not lower document acceptance caps or authorize skipped validation. Th
 is bridged but its warning UI is user-owned. The actual dense Studio probe measured 142,337 ms
 cold reconstruction and 192/193/184 ms warm inventory/ingest/save, with exclusions documented in
 [P1-PERFORMANCE](P1-PERFORMANCE.md). Cold first-open and local Save can remain slow. Recovery of
-missed packets on watched same-epoch sources is implemented; newcomer joining remains Gate 3 work.
+missed packets and automatic Index/art newcomer joining are implemented under those rails.
 The new Studio page wrapper shares Registry's existing walk and constants, adding only typed
 scope/channel cursor binding. Registry's published cursor golden remains unchanged. Cooperative
 store serving refuses a cold/stale source, and batch receive validates an entire page under the
@@ -274,7 +295,7 @@ shares Registry's request queue, rates and capacity. Detached attempts, current 
 wrappers and the native five-second idle wake drive automatic paced retries without another
 user action. Two real actors repair independently missed edits in both directions. Original
 heads/seed remain fixed until a pass finishes; no page result installs a checkpoint or retires
-an intent. Service currently requires exact local watches; keyed discovery is the next boundary.
+an intent. Unopened-key service and keyed discovery now extend this same bounded runtime.
 The one-device art Save/Reopen/reference-protection milestone is now implemented. Sound/export
 writers and their actual record coverage remain gate 6, not another prerequisite to art progress.
 The user-owned frontend must adapt these documented results instead of the fixture's numeric-only
@@ -284,7 +305,8 @@ At `db979dd` on `Create-suite-2`, native `publish_pix` and `request_blob_bounded
 the actor. They publish/fetch immutable bytes, not a Studio document. `studio-store.ts` still
 uses an in-memory object/blob map and placeholder CIDs; the new native commands provide the
 durable Index/art replacement, but the frontend has not been switched over. P1 has tested protocol/store and cooperative
-registry discovery/settlement adapters, but not automatic production orchestration for Studio.
+registry discovery/settlement adapters, with automatic Studio joining now integrated. Automatic
+owner rotation, Registry tail/pointer publication and recovery orchestration remain Gate 4.
 The earlier dense probe spent about 11 seconds rebuilding each source per page. That work now
 belongs to explicit preparation, not each warm page; runtime integration and broader accepted-size
 measurements remain separate from the cache primitive.

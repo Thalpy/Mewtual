@@ -1027,9 +1027,29 @@ cancelled. Healthy supersession discards a result, not a sticky disk fault. The 
 inventory rails still apply; unrelated uncached history may require explicit access. These are
 not latency or resident-heap promises.
 
-**Automatic joining remains separate:** service still requires a local registration. The
-cooperative keyed discovery/installation adapters below now work; the native discovery scheduler
-and service of unopened keys remain Gate 3 work. A prefix alone never establishes currency.
+**Automatic Index/art joining is now driven by this same receiver.** Recently accessed targets
+discover a Registry checkpoint and then the current owner's Studio head/seed and open tail.
+The actor/native command/event surface is unchanged. A prefix alone never establishes currency.
+
+`ChannelSync::enable_epoch_service` is a local unlocked-lifecycle opt-in, independent of receive
+watches. `reserve_epoch_service_interest` prepays one exact queued head/seed/page request using
+that family's existing service bucket. Its opaque, non-cloneable token binds runtime, enable
+generation, request identity, scope and fixed queue expiry. Preparation leaves the request in
+its original bounded queue; cancellation cannot refund debt or capture it twice. Disabling clears
+pending service authority, not rate debt. `serve_epoch_{head,seed,page}_interest` reuses the same
+authenticated responders, owner-proof checks and completion barriers without charging twice.
+Neither source lookup nor background preparation creates/retargets a user's receive watch.
+
+The existing idle worker can prepare unopened saved keys. Registry preparation reuses its owned
+page provider and warms only the existing exact-wrapper inventory metadata LRU; no second graph
+or accounting owner is added. Installed Registry graphs release their process permit at a fixed
+30-second local deadline. Owner snapshot persistence runs once per mount/MLS observation and
+retries failures every 30 seconds, independent of incoming queries. Discovery copies the original
+Studio watch generation and discards late work after supersession/channel removal. A saved
+Closing source re-enters discovery after ordinary Read on restart; expired proof reacquisition
+requires no additional action. A large local Registry is prepared for accounting, but adoption
+of that large bucket and automatic Registry operation-tail replay remain Gate 4. Its checkpoint
+is not labelled a current pointer projection. Unrelated cold inventory retains the existing rail.
 
 ### Studio checkpoint discovery and installation (cooperative, kinds 24/25)
 

@@ -6,9 +6,47 @@ Authoritative current-state document. Read this first, then
 [`THREAT-MODEL.md`](THREAT-MODEL.md) tracks what a modified ("hacked") client can/can't do;
 the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
-## Status (as of 2026-08-22)
+## Status (latest entry: 2026-09-09)
 
-- **Flipnote gate 3, cooperative Studio checkpoint joining (2026-09-09).** Studio now extends
+- **Flipnote Gate 3 Index/art runtime integration complete (`5f24262`, 2026-09-09).** Extends
+  `b6f137b` and the existing native receiver rather than adding a second replication system.
+  Unopened saved-key service uses exact prepaid head/seed/page interests in the existing queues,
+  with original full-identity, membership, rate, expiry and owner-proof checks. Requests never
+  add/retarget UI receive watches. Local owner snapshot persistence is lifecycle-driven with
+  30-second failed-save retries. Detached Registry/Studio verification shares the existing four
+  process slots; Registry graph retention has a fixed 30-second local-clock deadline.
+  Automatic recently accessed Index/art discovery now joins through Registry checkpoint, current
+  owner Studio head, expected seed, recovery-first install and saved open-tail pages. Original
+  watch generations fence late work. Closing survives expired selection and Server/vault restart;
+  ordinary Read restores the volatile watch, then retries need no further action. Associated
+  large Registry records use detached footprint preparation before accounting; exact bootstrap
+  installation results and checked prepared sources warm the same full-wrapper inventory LRU.
+  Unrelated Registry writes retain their cold behavior. Adoption of an already-large
+  local Registry is deferred, not permission to treat its pointer projection as current.
+  Tests include actual actors whose new device joins after the fixture receipt (Index and art),
+  unopened provider restart, Closing restart, cancellation/debt, failed owner-snapshot retry and
+  four idle Registry caches releasing slots for a fifth Studio source. A larger saved Registry
+  test also covers a competing bucket request during local preparation without pausing joining.
+  The first root run caught seven compatibility regressions in cache behavior, preparation error
+  text and remount handling; these were fixed without loosening the existing cold-work rails or
+  tests. Focused regressions and the final full run pass. Final read-only adversarial re-review
+  found no remaining blocker/high/medium in this boundary. Verification passed:
+  `cargo test --all --all-features` (including 483 app tests; nine existing app tests remain ignored,
+  including profiling/child-process entries and the previously documented membership harness flake),
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (201 tests),
+  `npm.cmd --prefix apps/desktop test` (1,144 tests), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`,
+  `bash scripts/check-no-ambient.sh` and diff checks. Evidence: `logs/gate3-runtime-root-final.log`,
+  `logs/gate3-runtime-native-final.log`, `logs/gate3-runtime-frontend.log`,
+  `logs/gate3-runtime-clippy-final.log`, `logs/gate3-runtime-native-check.log` and
+  `logs/gate3-final-*.log`. No new ignored tests. UI and unrelated version/package edits remain
+  untouched. Next Gate 4: owner receipt/rotation driving, Registry pointer publication and
+  tail receive, succession, intent replay and recovery actions/events. No automatic owner issuance
+  or broader Creative Suite completion is claimed.
+
+- **Flipnote gate 3, cooperative Studio checkpoint joining (2026-09-09; historical milestone,
+  extended by the runtime entry above).** Studio now extends
   the existing Registry head/seed engine using additive kinds 24/25, typed channel/object scopes
   and separate signature domains. All pending/rate/outbound/retained limits are shared. Detached
   prepare/fetch/complete keeps the live Server available and rechecks exact attempt/selection,
@@ -40,7 +78,8 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   focused 18-test Studio sync rerun. Root/native formatting, root all-target/all-feature
   Clippy (`-D warnings`), native `cargo check`, ambient-dependency gate and diff checks passed.
   Evidence is in `logs/gate3-checkpoint-*` and `logs/gate3-studio-sync-final.log`.
-  **Gate 3 is not closed:** this is explicit adapter integration. Next is service for saved keys
+  **At this milestone Gate 3 was not closed:** this was explicit adapter integration. The runtime
+  entry above now completes service for saved keys
   without a provider UI watch, automatic Registry/Studio discovery and source preparation under
   the native actor lifecycle, including restart/expiry while Closing. Do not rebuild these
   completed protocol/store adapters. Gate 4 still owns automatic receipt issuance, succession,

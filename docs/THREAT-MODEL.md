@@ -757,7 +757,8 @@ table with the commit that closed it.
   Explicit Save warms inventory; Read warms only its actual Studio record and resumes a paused
   watch. The pause event has no user-owned UI listener yet.
   No pixels are fetched, no intent is retired, and no update is emitted for duplicate/quarantined
-  input. Catch-up/seed discovery and general cold-source service remain gate 3 integration work.
+  input. Catch-up/seed discovery and bounded unopened-key service now use this same coordinator;
+  automatic owner rotation and Registry tail/pointer publication remain Gate 4.
   Sound/score/export state continues to refuse pending its typed support.
   Studio's cooperative page adapter now shares the existing prefix/ancestor walk rather than
   copying the registry protocol. A distinct cursor domain binds the actual Studio type/key and
@@ -785,8 +786,23 @@ table with the commit that closed it.
   Registry and Studio share four process preparation permits through actual worker completion.
   Installation rechecks exact authenticated wrapper/mount/actor/owner/MLS; healthy supersession
   retries, corruption remains a sticky storage pause. The single source and bounded inventory
-  limits remain. Service of unopened keys and automatic Studio checkpoint discovery are not yet
-  enabled. Cooperative kinds 24/25 now share Registry's authenticated head/seed engine and all
+  limits remain. Unopened saved-key service and automatic Index/art discovery now run through
+  that same unlocked actor/native receiver. An authenticated request remains in its original
+  capped queue while one private exact-request interest prepays source work. Cancellation,
+  expiry, enable-generation replacement or same-key request replacement cannot reuse that right;
+  shared rate debt survives re-enable. Source work creates no receive watch or new authorization.
+  Registry source graphs have a fixed 30-second retention deadline to free shared preparation
+  slots on idle servers; running/queued workers and held results keep their permits until actual
+  release. Prepared Registry sources and exact Studio-bootstrap installation results enter only
+  the existing full-wrapper/digest/physical-size inventory LRU; unrelated Registry writes do not
+  gain cache credit. A large local Registry can be prepared for accounting while its
+  adoption is deferred; no size-only check credits storage or asserts content validity.
+  Local owner snapshot failures retry on 30-second Clock cadence, never per query. Discovery
+  prefers the proven connected owner before the four-peer cap, rechecks the original UI watch,
+  and drops late work after watch/channel replacement. Fixed-expiry proof is reacquired for a
+  saved Closing state, not extended. Recently accessed watches themselves remain volatile.
+  Registry bootstrap is checkpoint-only; Registry tail/pointer publication, automatic owner
+  rotation, succession and recovery controls remain Gate 4. Kinds 24/25 share Registry's authenticated head/seed engine and all
   its pending/rate/outbound/retained limits. Type, channel, object, full endpoint identities and
   exact request are bound separately from Registry; expected Automerge hash precedes typed
   seed decode. Only a fresh current-owner response mints private selection authority, never a

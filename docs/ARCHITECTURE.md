@@ -147,7 +147,8 @@ gate, fresh complete inventory/budget and durable save. Failed takes discard the
 successful unchanged flushes preserve the physical version rather than a normalized snapshot hash.
 Failures pause until successful explicit Studio access and emit StudioReceivePaused; peer traffic
 cannot repeatedly trigger a failed scan. This is not a reduced document cap or completed large-
-vault collaboration: unrelated cold inventory and unopened-source/discovery integration remain.
+vault collaboration: unrelated cold inventory still needs explicit preparation. Unopened-source
+service and Index/art discovery now use the bounded coordinator described below.
 No new persistence, finality, blob fetch or UI implementation is introduced.
 Studio now reuses the registry's private bounded page walk through a typed provider wrapper.
 Registry-v1 cursor bytes stay unchanged; Studio adds a distinct HMAC domain and channel binding
@@ -215,7 +216,8 @@ saved registry, and exact equality with the pending-preferred owner journal. Sou
 journal re-save precede signing. Disagreement/stale preparation remains a hint; lost indexed
 files, faults and corruption refuse. A selected receipt is not proof its seed is available or
 verified. Expected-seed fetching uses additive kind 22. Explicit recovery-first registry
-installation is now connected to that scoped selection; automatic actor scheduling remains unwired.
+installation is connected to that scoped selection. The Studio coordinator now schedules Registry
+checkpoint bootstrap and Studio joining; automatic Registry tail receive/rotation remains Gate 4.
 
 Checkpoint fetching keeps discovery provenance rather than converting public receipt fields into
 authority. The private selection is minted only while checking the fresh kind-21 owner response;
@@ -254,9 +256,26 @@ leave the actor free; private runtime/MLS/endpoint/attempt context is checked ag
 The old cooperative Registry wrappers also become connected-only; wire compatibility is preserved,
 but they no longer implicitly dial a proven endpoint. Weak generation maps follow the bounded
 live handles. Both outbound and retained seed capacity follow cancelled lower-driver work.
-Studio service is warm-only and shares the owner snapshot/journal durability barriers; no remote
-query can cause whole-server serialization. The adapters do not yet automatically discover keys,
-serve an unopened document, schedule rotation, or grant authority to old-owner hints.
+Studio service shares the owner snapshot/journal durability barriers; no remote query can cause
+whole-server serialization. The existing Studio receiver now drives unopened saved-key service
+and automatic checkpoint discovery for recently accessed Index/art targets. Sync prepays each
+exact authenticated queued request before source capture; it neither adds a UI watch nor grants
+receive authority. Detached work reuses the four-slot preparation pool and the existing owned
+Studio/Registry graphs. Registry graphs release their retained slots after a fixed 30 seconds
+on the local idle pass, without extending the deadline per query. Verified prepared Registry
+sources and exact Studio-bootstrap installation results warm the existing exact-wrapper
+inventory LRU, not another cache or budget. Unrelated Registry writes retain their cold behavior.
+Local owner snapshot failures retry after 30 seconds; queries cannot accelerate that cadence.
+
+Joining tries the known key's Registry bucket, then the current owner's Studio head, expected
+seed, recovery-first install and open-tail pages. Registry cold-request expiry allows at most
+three fresh, charged head requests five seconds apart; a hint/refusal never authorizes installation.
+A large already-saved Registry is prepared for accounting but its automatic adoption is deferred;
+the known Studio key remains directly discoverable. Registry checkpoint bootstrap is not a claim
+of current Registry operation-tail state. Rotation, pointer publication/refresh and Registry tail
+receive, owner succession, own-intent replay and recovery controls remain Gate 4. Old-owner hints
+still grant no authority. Recent-target watches are volatile: ordinary Read after restart resumes
+the persisted Closing state, then expiry/retries need no further UI action.
 
 `Server::install_registry_seed_step` now performs this explicit newcomer transaction under exclusive
 sync/store borrows. It rechecks runtime, MLS, full local identity, owner/tenure, superseding selection,
