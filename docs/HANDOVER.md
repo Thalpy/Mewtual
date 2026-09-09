@@ -8,7 +8,7 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
-- **Flipnote gate 3, bounded inventory-validation reuse (2026-09-09).** The existing complete
+- **Flipnote gate 3, bounded inventory-validation reuse (2026-09-09, `ee67ad2`).** The existing complete
   scanner now memoizes pure Registry/Studio record footprints in a mount-local 64-entry LRU.
   A hit still requires an actual bounded read/unseal, filename/scope binding and exact complete
   authenticated-wrapper digest plus physical size. No mutable document, complete inventory,

@@ -2,7 +2,7 @@
 
 This is an acceptance checklist, not a count of source files. UI layout, components and the
 canonical Flipnote mockups remain user-owned. No item is complete merely because its core
-helper exists. As of 2026-09-08, the active scope is **Flipnote and the P1 paths it requires**,
+helper exists. As of 2026-09-09, the active scope is **Flipnote and the P1 paths it requires**,
 not completion of the entire Creative Suite.
 
 ## Scope reset (2026-09-08)
@@ -72,7 +72,7 @@ micro-optimization alone is not a reason to postpone Studio integration.
 
 ## Completed-work ledger: reuse before adding
 
-Audited against this branch's committed history through `4a6c3a7` (2026-09-09). This groups
+Audited against this branch's committed history through `ee67ad2` (2026-09-09). This groups
 the P1/Flipnote `feat` and `perf` commits from `57e51ad` onward, plus the original P1 commit
 `a67e284` and the performance probe. It is not a repository-wide release changelog: unrelated
 voice, files, release and user-owned UI work is not marked as Flipnote progress. Commit subjects
@@ -119,7 +119,8 @@ Paths below use `rep/` = `crates/catcoms-replication/src/`, `app/` = `crates/cat
 | Reference protection at existing cache deletion paths / 2 | `bf1b64b` | [rep/studio/references.rs](../crates/catcoms-replication/src/studio/references.rs), [app/store/creative_references.rs](../crates/catcoms-app/src/store/creative_references.rs), [app/store/epoch_recovery/inventory.rs](../crates/catcoms-app/src/store/epoch_recovery/inventory.rs) | Saved art, seed/history, intents and retained/staged recovery hold their pixels. Reuse the shared guard/enumerator; expiry enforcement and actual export-record coverage are not included. |
 | Cooperative saved-operation exchange / 3 | `dda1fad` | [app/studio_exchange.rs](../crates/catcoms-app/src/studio_exchange.rs), [sync/studio_exchange.rs](../crates/catcoms-sync/src/studio_exchange.rs), [two-member tests](../crates/catcoms-app/src/studio_exchange/tests.rs) | Saved-only own send, bounded authenticated watches/inbox and durable typed receive work in both directions, including reopen. Automatic runtime scheduling, Studio source ownership, catch-up/discovery and remote UI events remain open. |
 | Initial publication from ordinary actor/native Save / 3 | `cafb221` | [app/studio/publication.rs](../crates/catcoms-app/src/studio/publication.rs), [app/studio.rs](../crates/catcoms-app/src/studio.rs), [app/actor.rs](../crates/catcoms-app/src/actor.rs), [native/studio.rs](../apps/desktop/src-tauri/src/studio.rs), [actor Save regressions](../crates/catcoms-app/src/studio_exchange/tests/actor_save.rs) | Successful Create/Apply retains at most two actual store-returned packets and attempts existing one-shot publication under the same native/source custody and one aggregate two-second budget. Local Save survives send refusal/cancellation. No duplicate save or outbox; automatic watched receive, remote events, retry/catch-up and newcomer discovery remain open. |
-| Bounded automatic receive and remote updates / 3 | `4a6c3a7` | [app/studio/receiver.rs](../crates/catcoms-app/src/studio/receiver.rs), [native/studio.rs](../apps/desktop/src-tauri/src/studio.rs), [app/actor.rs](../crates/catcoms-app/src/actor.rs), [inventory.rs](../crates/catcoms-app/src/store/epoch_recovery/inventory.rs), [native two-member regressions](../apps/desktop/src-tauri/src/studio/tests/receiver.rs) | Recent-target watches, one paced native worker, same Ready/lease/typed ingest and incarnation-fenced remote events now work through ordinary commands. Existing inventory gains a conservative LOCAL 256 KiB automatic rail and fail-closed pause, not a lower document cap. Larger-vault reuse, missed-packet retry/catch-up and keyed discovery remain; do not rebuild this inbox or coordinator. |
+| Bounded automatic receive and remote updates / 3 | `4a6c3a7` | [app/studio/receiver.rs](../crates/catcoms-app/src/studio/receiver.rs), [native/studio.rs](../apps/desktop/src-tauri/src/studio.rs), [app/actor.rs](../crates/catcoms-app/src/actor.rs), [inventory.rs](../crates/catcoms-app/src/store/epoch_recovery/inventory.rs), [native two-member regressions](../apps/desktop/src-tauri/src/studio/tests/receiver.rs) | Recent-target watches, one paced native worker, same Ready/lease/typed ingest and incarnation-fenced remote events work through ordinary commands. Its initial LOCAL 256 KiB whole-vault rail is superseded by the warm/cold split below; the inbox, coordinator, pacing and fail-closed pause remain. |
+| Authenticated inventory-validation reuse / 3 | `ee67ad2` | [inventory/cache.rs](../crates/catcoms-app/src/store/epoch_recovery/inventory/cache.rs), [inventory.rs](../crates/catcoms-app/src/store/epoch_recovery/inventory.rs), [epoch_studio.rs](../crates/catcoms-app/src/store/epoch_studio.rs), [receiver regression](../crates/catcoms-app/src/studio_exchange/tests/receiver.rs), [profiling harness](../crates/catcoms-app/src/store/epoch_registry/tests/performance.rs) | Existing scanner memoizes pure validated footprints in a 64-entry mount-local LRU after fresh full-wrapper authentication/digest matching. Small targets receive beside warm larger unrelated histories under 8 MiB read / 256 KiB cold rails. Dense ~4.9-MiB inventory measured 10,646 ms cold versus 11/11/11 ms warm; full accounting/reference checks remain. Active mutable targets still cap at 256 KiB; their source reuse, missed-packet catch-up and keyed discovery remain. This is not a second document cache, storage owner or receiver. |
 
 ### Keeping this ledger useful
 
