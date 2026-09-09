@@ -8,6 +8,47 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 3, cooperative same-epoch Studio pages (2026-09-09).** Studio now reuses the
+  existing Registry page walk through a thin typed wrapper, preserving Registry-v1 MAC/golden
+  bytes. Studio's separate cursor domain additionally binds channel and actual document type/key.
+  Counts/bytes/cursor expiry, prefix freezing, wide-head fallback, current-author resealing and
+  explicit checkpoint/historical-authority holds remain the existing bounded algorithm.
+
+  `ServerStore::serve_studio_page` checks membership/MAC before I/O and serves only the exact
+  prepared owned source after authenticated-wrapper/context rechecks. It never cold-restores
+  inside a page request. `ingest_studio_page` shares the live receiver's checked ownership transfer
+  and existing typed gate/save path: validate all entries, save once, then return counts/frontier.
+  Bad middle input writes no prefix. A rename followed by an I/O error can leave the whole new
+  page; no success is returned, accounting is invalidated and exact retry after reconciliation
+  deduplicates. Empty/duplicate pages check Open/current concrete target and flush held bytes;
+  truly absent epoch zero stays absent. Changed/previously warm results follow the same one-slot
+  retention policy. Original request heads/seed stay fixed throughout a cursor pass.
+
+  Focused regressions exercise distinct-member Index/art 70-op multi-page transfer and reopen,
+  duplicate resealing, append/reload, 65 independent heads, removed author in a later page,
+  seed mismatch/Fault, channel/type/key/cursor tampering and expiry/remint. A new independent .NET
+  HMAC vector pins Studio framing while the old Registry vector remains unchanged. Store tests
+  cover malformed and validly signed bad middle input, missing dependencies, empty/closed/wrong
+  epoch and page caps, before-write/after-rename/empty-and-duplicate-flush failures, and a real
+  >256-KiB saved provider/receiver avoiding full restores. Receiving creates no own intents.
+
+  Verification passed: `cargo test --all --all-features` (454 app, 166 replication and all
+  remaining workspace/integration/doc suites), the separate native suite (200), the frontend
+  suite (1144), formatting, strict workspace Clippy, the ambient-dependency gate through Git
+  Bash, and `git diff --check`. Focused page tests passed (15 replication, 5 store); this slice
+  adds 11 always-run regressions and leaves existing ignored tests unchanged. The read-only
+  adversarial review found no Blocker/High/Medium issues; its Low storage-inventory wording
+  clarification was fixed. No native/UI source changed, so no frontend build or screenshot was
+  needed. No new performance claim is made. Unrelated desktop version/config edits are preserved.
+
+  **Still not automatic reconnect:** these are tested core/vault adapters, not a Studio network
+  route, responder/rate/lifecycle wrapper or receiver cursor owner. Low-level callers must supply
+  authenticated transport identities, current actor/native custody and provider-secret restart
+  lifetime. No raw seed/receipt installation, discovery, settlement or UI code is added. Cold
+  first-open/local Save performance and the one-slot/256-KiB cold limits remain unchanged.
+  **Next:** authenticated Studio page exchange and receiver continuation/retry ownership, then
+  reconnect scheduling and keyed discovery/seed installation, using the existing adapters.
+
 - **Flipnote gate 3, one owned active Studio source (2026-09-09, `0d74190`).** The mounted store now retains
   one verified owned Studio restart unit, moved rather than cloned. Warm automatic ingest and
   timeline reads authenticate the exact whole physical wrapper again, checking mount, scope,

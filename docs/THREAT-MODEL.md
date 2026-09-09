@@ -758,6 +758,24 @@ table with the commit that closed it.
   No pixels are fetched, no intent is retired, and no update is emitted for duplicate/quarantined
   input. Catch-up/seed discovery and general cold-source service remain gate 3 integration work.
   Sound/score/export state continues to refuse pending its typed support.
+  Studio's cooperative page adapter now shares the existing prefix/ancestor walk rather than
+  copying the registry protocol. A distinct cursor domain binds the actual Studio type/key and
+  channel as well as full group/provider/requester/concrete epoch/initial heads/seed. Registry
+  MAC bytes are unchanged. Page service checks authority/MAC/expiry before source I/O, then
+  authenticates the full prepared wrapper without cold reconstruction. The low-level caller
+  still owns requester transport authentication, provider mount/runtime lifetime, aggregate
+  rates/instances and native custody: this object is not a new network or unlock capability.
+  The same 32-op/512-KiB page limits, fixed expiry, current-member resealing and removed-author/
+  checkpoint holds apply. A page never transfers a raw seed or authorizes replacement.
+  Page ingest requires the exact Open target and current-MLS envelopes, moves the same checked
+  graph, validates all entries and saves once. Bad middle input saves no prefix. Write uncertainty
+  may leave old state or the complete new page; errors return no progress and require reconciled
+  exact retry. Empty/duplicate pages still check accounting and flush actual held bytes; empty
+  absence creates nothing. Saved counts/frontier grant no finality or intent retirement. Original
+  request heads/seed must remain fixed for continuation; returned heads are for a later pass.
+  No authenticated Studio page route, provider lifecycle wrapper, cursor owner/retry scheduler,
+  or seed discovery/install is enabled. Callers must cap transport bytes before decoded page
+  admission. One-slot/cold-source limits and expensive first-open reconstruction remain.
   Exact retry recognition belongs to the retained signed
   envelope/gate, not timestamps or marker-only success.
   Vault restoration tests dependency and duplicate presence using metadata from Automerge's

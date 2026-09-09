@@ -49,6 +49,15 @@ pub(in crate::store) struct RetainedSource {
     mls_epoch: u64,
 }
 
+/// Same checked ownership transfer for one gossip operation or an atomic catch-up page. The
+/// physical stamp is distinct from normalized snapshot bytes, including on duplicate flushes.
+pub(super) struct CheckedReceiveSource {
+    pub unit: StudioEpoch,
+    pub observed: Option<StorageRecord>,
+    pub before: Zeroizing<Vec<u8>>,
+    pub version: Option<SourceVersion>,
+}
+
 impl RetainedSource {
     fn matches(
         &self,
@@ -112,6 +121,31 @@ impl ServerStore {
             self.retain_studio_source(group, device, state);
         }
         Ok(Some(view))
+    }
+
+    /// Read-only service never pays a cold restore inside a request. Exact authenticated bytes
+    /// are required after taking the sole source; an error cannot put a stale graph back.
+    pub(super) fn with_prepared_studio_source<V>(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        read: impl FnOnce(&EpochStudioState) -> Result<V, AppError>,
+    ) -> Result<V, AppError> {
+        current_member(group, device)?;
+        if !self.studio_source_is_warm(server, group, target, device) {
+            return Err(invalid("Studio page source requires explicit preparation"));
+        }
+        let held = self.studio_source.take().expect("matched source");
+        if !self.studio_source_bytes_match(&held.state)? {
+            return Err(invalid(
+                "prepared Studio page source changed; explicitly reopen",
+            ));
+        }
+        let result = read(&held.state)?;
+        self.retain_studio_source(group, device, held.state);
+        Ok(result)
     }
 
     fn studio_source_bytes_match(&self, state: &EpochStudioState) -> Result<bool, AppError> {
@@ -258,21 +292,65 @@ impl ServerStore {
         writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
         sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
     ) -> Result<(Admission, EpochStudioState), AppError> {
+        if sealed.blob.ciphertext.len() > MAX_INBOUND_CIPHERTEXT {
+            return Err(invalid("inbound ciphertext too large"));
+        }
+        let CheckedReceiveSource {
+            mut unit,
+            observed,
+            before,
+            version,
+        } = self.checked_studio_receive_source(server, group, target, device, budget)?;
+        let admission = unit.ingest(sealed, group, device).map_err(invalid)?;
+        let state = self.save_studio_source_reusing(
+            server,
+            unit,
+            observed,
+            &before,
+            WritePurpose::Ordinary,
+            rng,
+            &mut budget.storage,
+            writer,
+            sync,
+            version,
+        )?;
+        Ok((admission, state))
+    }
+
+    pub(super) fn checked_studio_receive_source(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<CheckedReceiveSource, AppError> {
+        current_member(group, device)?;
         if !self.studio_source_is_warm(server, group, target, device) {
             // Caller applies the cold source rail before selecting this adapter. Repeat here so
             // an internal caller cannot accidentally fall back to a full large reconstruction.
             self.check_studio_receive_source_bound(server, &group.group_id(), target)?;
-            return self.ingest_studio_epoch(server, group, target, device, sealed, rng, budget);
+            self.enter_studio_budget(server, group, budget)?;
+            let (unit, observed, before) = self.checked_studio_source(
+                server,
+                group,
+                target,
+                device,
+                true,
+                &mut budget.storage,
+            )?;
+            return Ok(CheckedReceiveSource {
+                unit,
+                observed,
+                before,
+                version: None,
+            });
         }
         // Consume first: every subsequent failure drops the unit, never retains a mutated or
         // uncertain graph. The caller can explicitly Read/Save to prepare a fresh source.
         let retained = self.studio_source.take().expect("matched source");
         let EpochStudioState { mut unit, source } = retained.state;
         let version = source.expect("retained version");
-        current_member(group, device)?;
-        if sealed.blob.ciphertext.len() > MAX_INBOUND_CIPHERTEXT {
-            return Err(invalid("inbound ciphertext too large"));
-        }
         self.enter_studio_budget(server, group, budget)?;
         let checked = (|| {
             let scope = scope_bytes(server, unit.document())?;
@@ -300,20 +378,12 @@ impl ServerStore {
         }
         checked?;
         let before = Zeroizing::new(unit.snapshot().map_err(invalid)?);
-        let admission = unit.ingest(sealed, group, device).map_err(invalid)?;
-        let state = self.save_studio_source_reusing(
-            server,
+        Ok(CheckedReceiveSource {
             unit,
-            Some(version.record),
-            &before,
-            WritePurpose::Ordinary,
-            rng,
-            &mut budget.storage,
-            writer,
-            sync,
-            Some(version),
-        )?;
-        Ok((admission, state))
+            observed: Some(version.record),
+            before,
+            version: Some(version),
+        })
     }
 }
 

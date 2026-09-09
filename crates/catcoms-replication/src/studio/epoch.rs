@@ -18,6 +18,8 @@ use crate::{
     ReceiptBook, ReceiptIngest, SealedOp, SignedOp, MAX_CHECKPOINT_BYTES,
 };
 
+pub mod catchup;
+
 /// One raw seed, signed content log, gate, opening receipt and receipt book. There is no second
 /// compressed Automerge save to decompress or trust. Every component also has its own bound.
 pub const MAX_STUDIO_EPOCH_SNAPSHOT_BYTES: usize = MAX_CHECKPOINT_BYTES

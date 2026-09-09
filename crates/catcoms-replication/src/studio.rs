@@ -28,6 +28,7 @@ pub use recovery::{StudioProjection, StudioRecovery};
 mod admission;
 pub use admission::StudioTarget;
 mod epoch;
+pub use epoch::catchup;
 pub use epoch::{StudioEpoch, MAX_STUDIO_EPOCH_SNAPSHOT_BYTES};
 mod references;
 pub use frames::{

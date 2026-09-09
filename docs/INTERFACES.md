@@ -943,6 +943,61 @@ Dropped traffic needs explicit saved-op retry or future catch-up. No pixels are 
 receipt or settlement event is produced. The native
 Save result stays `publication: "local"`; UI adapters and canonical rendering remain user-owned.
 
+### Cooperative Studio operation pages (gate 3; no network route yet)
+
+`catcoms_replication::studio::catchup::StudioPageProvider` is a thin typed wrapper over the
+existing registry page engine, not a second continuation algorithm. `StudioFrontier`,
+`StudioPageRequest`, `StudioOpPage`, `StudioPageCursor` and `StudioPageOutcome` alias its shared
+framing/outcomes. `StudioEpoch::catchup_frontier()` returns accepted heads and verified seed;
+more than 64 heads becomes [] rather than truncating branches. `page(&StudioEpoch, group,
+device, request, rng)` reads only accepted typed history and reseals current-author operations
+under current MLS. It mutates no source or receipt and transfers no seed/vault snapshot.
+
+Studio's cursor MAC uses `catcoms/studio-page-cursor/v1`, length-framed group/logical-key/provider/
+requester, actual u16 document tag, length-framed 16-byte channel, then the existing concrete-id,
+initial-heads/seed and payload framing. Registry's domain/framing/golden bytes remain unchanged.
+The shared prefix digest retains its existing domain and length-framed signed-envelope walk.
+Bounds remain 64 sorted unique heads, 32 operations, 512 KiB summed `4 + SealedOp::encode().len()`,
+81-byte cursor and a non-renewing ten-minute monotonic lifetime. The provider checks current full
+provider/requester membership on every call. Remaining missing removed-author history produces
+`HistoricalAuthorizationRequired`; a mismatched seed produces `CheckpointRequired`, never an
+implicit installation. Unknown heads/wrong concrete epoch/expired cursor produce `Restart`.
+Fault refuses; read-only Closing history can still be paged. Prefix completion is not currency.
+
+`ServerStore::serve_studio_page(server, group, target, device, provider, request, rng)` checks
+bounded fields, full membership, MAC and expiry before source I/O, then requires the existing
+one-slot source with exact authenticated wrapper/context matching. Cold/stale/missing sources
+are local preparation errors, not empty success or a cold fallback. A successful explicit Studio
+view can prepare the slot; Index-refresh/art-priority and the 8-MiB encoded-input limit still apply.
+This API is trusted-local: its caller authenticates requester transport identity, bounds provider
+instances/rates, supplies current actor/MLS/native custody and remints the secret on runtime/mount
+restart. The provider object is not a mount-bound app capability or registered network handler.
+
+`ServerStore::ingest_studio_page(server, group, target, expected_doc_id, device, operations,
+rng, budget) -> StudioPageAdmission { accepted, duplicates, frontier }` uses the same checked
+owned source as live ingest, fresh five-family accounting and existing author/DAG/domain/projection
+preflight for every operation. The exact target must be Open, including empty or duplicate pages;
+each nonempty envelope must use the current MLS epoch. Only the whole valid page crosses one
+atomic source write. Duplicate/empty pages flush existing file/parent bytes before returning.
+Actually absent empty epoch zero remains absent; a source recorded as present in the storage
+inventory but missing on disk fails accounting. A StudioIndex listing alone is not stored history.
+The resulting frontier comes from the saved state, not the provider. Changed or previously warm
+sources return to the existing one-slot policy; an unchanged cold flush need not warm that slot.
+Cold admission still refuses sources above 256 KiB, with no large implicit preparation.
+
+An invalid middle operation leaves durable bytes unchanged and discards a consumed warm unit.
+An I/O error instead may leave either old bytes or the entire new page; it returns no saved-page
+acknowledgement. Reconcile uncertain accounting and retry the SAME page/cursor. No operation
+creates or retires an own intent. The caller must not advance its cursor on error or replace the
+ORIGINAL request heads/seed with the returned frontier mid-pass; that would invalidate the MAC.
+
+These tested core/vault seams are **not automatic reconnect or newcomer joining**. No Studio
+page transport kind, responder queue/rates, authenticated provider endpoint wrapper, receiver
+cursor owner, retry loop, native scheduling/events, checkpoint discovery or installation is
+added here. Registry's existing kind-20 endpoint still serves Registry only. Transport response
+buffering must be bounded before handing decoded page objects to these APIs. No latency/heap
+guarantee follows from page/source caps; normal transient preflight work remains.
+
 ### Creative blob seam (C0c, independent of Studio/P1 metadata)
 
 - Native `publish_pix({server, bytesB64}) -> {cid, bytes}` calls

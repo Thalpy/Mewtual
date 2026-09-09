@@ -19,7 +19,9 @@ use catcoms_replication::{
 use std::io::Read;
 use std::sync::Arc;
 
+mod receive;
 pub(super) mod source;
+pub use receive::StudioPageAdmission;
 
 pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-studio-store/v1";
 const MAX_RECORD_BYTES: usize = MAX_STUDIO_EPOCH_SNAPSHOT_BYTES + 1024;

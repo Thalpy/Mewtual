@@ -1,4 +1,6 @@
-//! Read-only, provider-local pagination of an accepted registry log. This is not a network
+//! Read-only, provider-local pagination of an accepted registry log. The private page walk is
+//! also used by Studio's typed adapter; legacy registry cursor bytes remain unchanged.
+//! This is not a network
 //! handler or admission API: callers authenticate the requesting transport and persist incoming
 //! operations through the normal gate. A continuation names an immutable prefix, not new heads.
 
@@ -149,6 +151,16 @@ pub enum RegistryPageOutcome {
     HistoricalAuthorizationRequired,
 }
 
+/// Only typed, already-verified epoch owners construct this view. It exposes no mutation and
+/// is not a way to admit peer-supplied snapshots. Studio adds channel binding to its cursor;
+/// None preserves the exact registry-v1 MAC framing for existing cursors.
+pub(crate) struct EpochPageSource<'a> {
+    pub logical: &'a LogicalDocument,
+    pub doc: &'a EncryptedDoc,
+    pub phase: EpochPhase,
+    pub channel: Option<[u8; 16]>,
+}
+
 /// Constant-sized, non-cloneable provider state. No requester rows or retained log copies. Its
 /// private random MAC key and injected monotonic clock must belong to one mounted runtime.
 /// This bounds a CALL, not aggregate request work: a live handler still needs ingress scheduling.
@@ -201,16 +213,40 @@ impl RegistryPageProvider {
         request: RegistryPageRequest<'_>,
         rng: &mut impl CryptoRngCore,
     ) -> Result<RegistryPageOutcome, ReplError> {
-        if !self.preflight_request(group, device, source.bucket, &request)? {
+        self.page_source(
+            EpochPageSource {
+                logical: &source.logical,
+                doc: &source.doc,
+                phase: source.phase(),
+                channel: None,
+            },
+            group,
+            device,
+            request,
+            rng,
+        )
+    }
+
+    /// One bounded prefix/ancestor walk shared by both typed consumers. The caller must own
+    /// the checked source and, for a prepared vault source, reauthenticate its physical version.
+    pub(crate) fn page_source(
+        &mut self,
+        source: EpochPageSource<'_>,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        request: RegistryPageRequest<'_>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<RegistryPageOutcome, ReplError> {
+        if !self.preflight_scoped(group, device, source.logical, source.channel, &request)? {
             return Ok(RegistryPageOutcome::Restart);
         }
         if source.logical.server_id != group.group_id() {
             return Err(ReplError::EpochScope);
         }
-        if request.doc_id != source.doc_id() {
+        if request.doc_id != source.doc.doc_id() {
             return Ok(RegistryPageOutcome::Restart);
         }
-        if source.phase() == EpochPhase::Fault {
+        if source.phase == EpochPhase::Fault {
             return Err(ReplError::ReceiptConflict);
         }
         let seed = source
@@ -243,7 +279,7 @@ impl RegistryPageProvider {
             return Ok(RegistryPageOutcome::Restart);
         }
 
-        // Registry admission already guarantees dependency-complete APPEND order. Bind that
+        // Both typed gates guarantee dependency-complete APPEND order. Bind that
         // provider-specific order in the digest rather than sorting it against later appends.
         // Index changes, never clone entire signed bodies or enumerate all ancestor paths.
         let mut index = BTreeMap::new();
@@ -326,7 +362,7 @@ impl RegistryPageProvider {
             bytes[5..9].copy_from_slice(&(position as u32).to_be_bytes());
             bytes[9..17].copy_from_slice(&issued.to_be_bytes());
             bytes[17..49].copy_from_slice(&digest);
-            let mut mac = self.mac(&source.logical, &request)?;
+            let mut mac = self.mac(source.logical, source.channel, &request)?;
             mac.update(&bytes[..PAYLOAD_BYTES]);
             bytes[PAYLOAD_BYTES..].copy_from_slice(&mac.finalize().into_bytes());
             Some(RegistryPageCursor(bytes))
@@ -366,6 +402,21 @@ impl RegistryPageProvider {
         bucket: u8,
         request: &RegistryPageRequest<'_>,
     ) -> Result<bool, ReplError> {
+        let logical = registry_document(&group.group_id(), bucket)?;
+        self.preflight_scoped(group, device, &logical, None, request)
+    }
+
+    pub(crate) fn preflight_scoped(
+        &mut self,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        logical: &LogicalDocument,
+        channel: Option<[u8; 16]>,
+        request: &RegistryPageRequest<'_>,
+    ) -> Result<bool, ReplError> {
+        if logical.server_id != group.group_id() {
+            return Err(ReplError::EpochScope);
+        }
         if request.heads.len() > MAX_REGISTRY_PAGE_HEADS
             || request.heads.windows(2).any(|pair| pair[0] >= pair[1])
             || request
@@ -377,8 +428,7 @@ impl RegistryPageProvider {
         self.check_authority(group, device, &request.requester)?;
         self.now_ms = self.now_ms.max(self.clock.monotonic_ms());
         if let Some(bytes) = request.cursor {
-            let logical = registry_document(&group.group_id(), bucket)?;
-            let mut mac = self.mac(&logical, request)?;
+            let mut mac = self.mac(logical, channel, request)?;
             mac.update(&bytes[..PAYLOAD_BYTES]);
             mac.verify_slice(&bytes[PAYLOAD_BYTES..])
                 .map_err(|_| ReplError::EpochAuthority)?;
@@ -402,11 +452,16 @@ impl RegistryPageProvider {
     fn mac(
         &self,
         logical: &LogicalDocument,
+        channel: Option<[u8; 16]>,
         request: &RegistryPageRequest<'_>,
     ) -> Result<Hmac<Sha256>, ReplError> {
         let mut e = Encoder::new();
         for field in [
-            b"catcoms/registry-page-cursor/v1".as_slice(),
+            if channel.is_some() {
+                b"catcoms/studio-page-cursor/v1".as_slice()
+            } else {
+                b"catcoms/registry-page-cursor/v1".as_slice()
+            },
             &logical.server_id,
             &logical.logical_key,
             self.provider.as_bytes(),
@@ -414,7 +469,10 @@ impl RegistryPageProvider {
         ] {
             e.put_bytes(field).map_err(|_| ReplError::EpochBound)?;
         }
-        e.put_u16(DocType::DocRegistry.tag());
+        e.put_u16(logical.doc_type.tag());
+        if let Some(channel) = channel {
+            e.put_bytes(&channel).map_err(|_| ReplError::EpochBound)?;
+        }
         e.put_u128(request.doc_id);
         e.put_u8(u8::from(request.seed.is_some()));
         if let Some(seed) = request.seed {

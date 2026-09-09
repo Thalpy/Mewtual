@@ -24,7 +24,7 @@ fn registry_page_mac_context_has_a_golden_vector_and_binds_every_scope_field() {
     };
     let payload = [0x77; PAYLOAD_BYTES];
     let tag = |logical: &LogicalDocument, request: &RegistryPageRequest<'_>| {
-        let mut mac = provider.mac(logical, request).unwrap();
+        let mut mac = provider.mac(logical, None, request).unwrap();
         mac.update(&payload);
         mac.finalize().into_bytes().to_vec()
     };
@@ -55,6 +55,51 @@ fn registry_page_mac_context_has_a_golden_vector_and_binds_every_scope_field() {
     request.heads = &[];
     assert_ne!(tag(&logical, &request), expected);
     assert!(!format!("{request:?}").contains("bucket"));
+}
+
+#[test]
+fn studio_page_cursor_mac_has_separate_domain_and_channel_golden_vector() {
+    let provider = RegistryPageProvider {
+        key: Zeroizing::new([0x11; 32]),
+        provider: DeviceId::from_bytes([0x22; 32]),
+        clock: Arc::new(ManualClock::new(0)),
+        now_ms: 0,
+    };
+    let logical =
+        LogicalDocument::new(b"server".to_vec(), DocType::StudioObject, vec![0x88; 16]).unwrap();
+    let request = RegistryPageRequest {
+        requester: DeviceId::from_bytes([0x33; 32]),
+        doc_id: 0x44,
+        heads: &[[0x55; 32]],
+        seed: Some([0x66; 32]),
+        cursor: None,
+    };
+    let tag = |channel, logical: &LogicalDocument| {
+        let mut mac = provider.mac(logical, channel, &request).unwrap();
+        mac.update(&[0x77; PAYLOAD_BYTES]);
+        mac.finalize().into_bytes().to_vec()
+    };
+    let expected = tag(Some([0x99; 16]), &logical);
+    // Independently reproduced with .NET HMACSHA256 and explicit big-endian length framing.
+    assert_eq!(
+        expected
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+        "ac023b3164cfdac39d648808a379fdfb4f4158471ba48793f4c985b36beecc7e"
+    );
+    assert_ne!(
+        tag(None, &logical),
+        expected,
+        "registry-v1 domain cannot replay into Studio"
+    );
+    assert_ne!(tag(Some([0x98; 16]), &logical), expected);
+    let mut wrong = logical.clone();
+    wrong.doc_type = DocType::StudioIndex;
+    assert_ne!(tag(Some([0x99; 16]), &wrong), expected);
+    wrong = logical.clone();
+    wrong.logical_key[0] ^= 1;
+    assert_ne!(tag(Some([0x99; 16]), &wrong), expected);
 }
 
 struct Fixture {
@@ -243,7 +288,7 @@ fn registry_page_cursor_binds_request_scope_key_and_fixed_expiry() {
         seed: None,
         cursor: Some(cursor.as_bytes()),
     };
-    let mut mac = f.provider.mac(&other_scope, &request).unwrap();
+    let mut mac = f.provider.mac(&other_scope, None, &request).unwrap();
     mac.update(&cursor.as_bytes()[..PAYLOAD_BYTES]);
     assert!(mac
         .verify_slice(&cursor.as_bytes()[PAYLOAD_BYTES..])

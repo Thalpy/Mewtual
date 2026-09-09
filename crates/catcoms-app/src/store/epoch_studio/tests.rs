@@ -5,6 +5,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 mod inventory_cache;
+mod pages;
 pub(crate) mod performance;
 mod source;
 

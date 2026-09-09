@@ -149,6 +149,22 @@ Failures pause until successful explicit Studio access and emit StudioReceivePau
 cannot repeatedly trigger a failed scan. This is not a reduced document cap or completed large-
 vault collaboration: cold-source service, discovery and retry/catch-up remain Gate 3 limitations.
 No new persistence, finality, blob fetch or UI implementation is introduced.
+Studio now reuses the registry's private bounded page walk through a typed provider wrapper.
+Registry-v1 cursor bytes stay unchanged; Studio adds a distinct HMAC domain and channel binding
+alongside full group/type/key/concrete epoch/provider/requester/initial-heads/seed. Both use the
+same fixed accepted-prefix continuation, 32-operation / 512-KiB page bounds, monotonic expiry,
+current-member resealing and explicit checkpoint/historical-authority holds.
+The cooperative store provider serves only its exact prepared source, with authority/MAC checks
+before I/O and full authenticated-wrapper matching afterward; it never performs a cold restore
+inside a page call. Page admission moves the same checked source as live receive, validates every
+entry through the existing typed gate and crosses one accounted save/flush barrier. A bad middle
+entry saves no prefix. An uncertain rename may leave the old source or the entire new page; only
+successful persistence returns counts/frontier, and exact retry after reconciliation deduplicates.
+Empty pages verify the exact Open epoch and flush held bytes; actual epoch-zero absence stays
+absent. No cursor, source seed, receipt or intent is installed/retired by this seam. Studio still
+needs authenticated transport routing, provider lifecycle/rates, receiver cursor ownership and
+reconnect scheduling. The low-level provider caller must authenticate transport identity and
+remint its secret on runtime/mount restart; no native lifecycle permit is inferred from it.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
 even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.
