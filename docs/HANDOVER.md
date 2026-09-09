@@ -8,6 +8,53 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 3, bounded inventory-validation reuse (2026-09-09).** The existing complete
+  scanner now memoizes pure Registry/Studio record footprints in a mount-local 64-entry LRU.
+  A hit still requires an actual bounded read/unseal, filename/scope binding and exact complete
+  authenticated-wrapper digest plus physical size. No mutable document, complete inventory,
+  write permit, authority state or plaintext is retained. Reference scans still inspect CIDs;
+  new files and staging copies still enter the complete accounting pass. Remount starts cold.
+
+  Automatic receive now permits up to 8 MiB of authenticated P1 metadata but still only 256 KiB
+  of cold validation, with the same 1024-entry/64-record rails. Unknown large records reject
+  before authentication; changed candidates over the cold rail reject before reconstruction.
+  **The active mutable target separately remains limited to 256 KiB before scan/snapshot/restore.**
+  This enables small active flipnotes beside larger unchanged histories, not accepted-size
+  active-document service. A normal Save/full scan warms metadata; Read alone only retries a
+  paused watch. Errors still pause until explicit successful access. Document/wire limits,
+  snapshot/lease ordering, events, intent durability and reference protection are unchanged.
+
+  Focused tests cover bounded LRU reuse, equal-size valid gate/receipt replacement with unchanged
+  signed history, ciphertext corruption, remount/deletion, new orphan accounting, cold refusal,
+  aggregate warm-read exhaustion, actual Studio reference enumeration and a warmed large active
+  target still refusing the separate rail. A real two-member regression starts with an unrelated
+  valid >256-KiB history: cold receive pauses, ordinary Save warms the full inventory, and the held
+  remote edit is then durably accepted without changing the unrelated history. The existing
+  release profiling harness now measures cold inventory validation and three exact warm scans.
+
+  The dense release fixture (8,002 operations; 5,122,618 physical bytes) measured 10,646 ms cold
+  inventory validation versus 11/11/11 ms warm. The byte-heavy 20-op fixture measured 33 ms cold
+  versus 11/11/12 ms warm. These are single-machine observations, not full-8-MiB, latency or
+  mutable-ingest guarantees; see [P1-PERFORMANCE](P1-PERFORMANCE.md).
+  Design and final actual-diff adversarial reviews found no remaining findings. The identified
+  Low coverage gap was fixed: a freshly authenticated changed same-size large wrapper must refuse
+  on the cold rail before inner-history validation. No existing test was loosened or removed.
+
+  Verification passed: `cargo test --all --all-features` (440 app unit tests, including seven
+  new regressions, plus all other workspace/integration/doc suites),
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (200),
+  `npm.cmd --prefix apps/desktop test` (1144), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` through Git Bash, and `git diff --check`.
+  The focused cache/receiver tests and two opt-in release probes also passed; existing ignored
+  tests are unchanged. No UI/build or native-source change was made, so no screenshot/frontend
+  production build was needed. Concurrent desktop package/config changes were left untouched.
+
+  **Next:** larger active-source reconstruction reuse, then retry/catch-up and keyed discovery.
+  Gate 3 stays open; do not duplicate the completed native receive/inbox/persistence machinery.
+  UI remains user-owned. The earlier 256-KiB whole-vault limit below is historical and superseded
+  by the warm/cold split above, not removed without replacement.
+
 - **Flipnote gate 3, bounded automatic receive and remote events (2026-09-09, `4a6c3a7`).** Ordinary native
   Read/Create/Apply now installs checked recent-target watches; same-watch reuse preserves queued
   packets and eviction explicitly revokes within the existing 16-watch rail. Reconciliation shares

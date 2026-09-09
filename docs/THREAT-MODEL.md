@@ -727,14 +727,22 @@ table with the commit that closed it.
   one paced worker per exact native incarnation avoid per-packet tasks or event-consumer cycles.
   Current channel/mount/member/MLS checks precede disk work. A delayed old-actor update cannot be
   emitted under a replacement numeric server id; the UI/incarnation fence lasts through emission.
-  Automatic inventory reuses the full verifier with LOCAL service limits of 1024 visited entries,
-  64 records and 256 KiB aggregate authenticated bytes before reconstruction, including unrelated
-  saved P1 sources. A partial scan never grants storage admission. Scan/snapshot/ingest failure
+  Automatic inventory uses LOCAL limits of 1024 visited entries, 64 records, 8 MiB aggregate
+  authenticated reads and 256 KiB aggregate cold validation bytes, including unrelated saved P1
+  sources. Its mount-local 64-entry LRU stores only context-free Registry/Studio footprint
+  validation. Every hit still authenticates the actual file and binds its scope/filename,
+  full plaintext-wrapper digest and physical size, including gate/receipts/quarantine/history.
+  No key/plaintext/doc, completed inventory, membership decision or budget authority is cached.
+  New/staged files still count; reference scans cannot skip CID enumeration. Remount clears reuse.
+  A large cold record refuses before read; a changed candidate above the cold rail refuses before
+  reconstruction. Warm metadata does not authorize a mutable target above its separate 256 KiB
+  source rail. A partial scan never grants storage admission. Scan/snapshot/ingest failure
   pauses until successful explicit access, emitting a non-settlement pause warning; inbound
   traffic cannot refund that hold. Busy/locked native access retains the bounded inbox; consumed
   bad or dropped packets still need retry/catch-up. The one-second pacing cannot be bypassed by
   pending-state churn. This bounds automatic work, not worst-case latency or full-size service;
-  larger vaults still need safe inventory reuse. The pause event has no user-owned UI listener yet.
+  larger active sources still need safe reconstruction reuse. Explicit Save warms inventory;
+  Read alone only retries. The pause event has no user-owned UI listener yet.
   No pixels are fetched, no intent is retired, and no update is emitted for duplicate/quarantined
   input. Catch-up/seed discovery and larger-source automatic service remain gate 3 integration work.
   Sound/score/export state continues to refuse pending its typed support.

@@ -497,6 +497,35 @@ impl ServerStore {
             .join("servers")
             .join(format!("{}.studio-epoch", blake3::hash(scope).to_hex()))
     }
+    /// A local background-work refusal only. Metadata can refuse expensive target restoration,
+    /// never authorize it: the later ingest still authenticates and validates the actual source.
+    pub(crate) fn check_studio_receive_source_bound(
+        &self,
+        server: u64,
+        group: &[u8],
+        target: StudioTarget,
+    ) -> Result<(), AppError> {
+        let logical = target.document(group).map_err(invalid)?;
+        let scope = scope_bytes(server, &logical)?;
+        let parent = fs::symlink_metadata(self.dir.join("servers"))
+            .map_err(|e| AppError::Io(e.to_string()))?;
+        if !parent.is_dir() || is_link(&parent) {
+            return Err(invalid("parent is not a regular directory"));
+        }
+        let metadata = match fs::symlink_metadata(self.studio_epoch_path(&scope)) {
+            Ok(value) => value,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(AppError::Io(e.to_string())),
+        };
+        if !regular_file(&metadata)
+            || metadata.len() > super::epoch_recovery::inventory::STUDIO_RECEIVE_COLD_BYTES
+        {
+            return Err(invalid(
+                "automatic Studio target source exceeds cold byte limit or is not regular",
+            ));
+        }
+        Ok(())
+    }
     fn read_studio_record(
         &self,
         scope: &[u8],

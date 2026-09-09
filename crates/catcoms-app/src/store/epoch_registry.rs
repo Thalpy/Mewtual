@@ -628,4 +628,4 @@ fn invalid(error: impl std::fmt::Display) -> AppError {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

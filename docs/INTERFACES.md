@@ -856,17 +856,26 @@ calls the existing durable receive adapter. No locks survive into reply/event aw
 The minimum delay between completed attempts and the next attempt is one injected-clock second;
 pending false/true churn cannot bypass it. Locked/busy native custody retains queued packets.
 
-Automatic inventory has a LOCAL service rail of 1024 visited directory entries, 64 P1 records
-and 256 KiB aggregate authenticated record bytes, checked before record reads/reconstruction.
-It covers the whole mounted vault, including unrelated registry records. An incomplete inventory
+Automatic inventory has LOCAL service rails of 1024 visited directory entries, 64 P1 records,
+8 MiB aggregate authenticated record bytes and 256 KiB aggregate cold validation bytes. A
+mount-local 64-entry LRU memoizes only pure Registry/Studio footprint validation. A hit needs a
+fresh bounded read/unseal, scope/filename binding, and exact complete-wrapper digest plus size;
+it never reuses a complete inventory or budget. `EpochStorageScanProgress.reused_records` and
+`uncached_bytes` report reuse and physical bytes charged to cold validation. Reference scans
+always enumerate actual CIDs, even when footprint metadata is warm. Ordinary complete scans
+(including normal Save) warm this cache; Read alone does not, and reopening the vault clears it.
+An unfamiliar oversized record rejects before authentication; a changed same-size candidate
+rejects above the cold rail before reconstruction. The selected mutable Studio source separately
+refuses above 256 KiB before inventory/snapshot/restore, even with warm metadata. These rails
+cover the whole mounted vault, including unrelated registry records. An incomplete inventory
 never authorizes a write. Scan/snapshot/ingest failure pauses background receive until successful
 explicit Studio access; new traffic cannot restart it. Pre-drain failure retains the packet;
 an ingest error may already have consumed it. `studio-receive-paused` carries `{server}` once on
 that transition; UI should warn and offer explicit reopen/retry, not call it a settlement fault
 or proof of local corruption. Authenticated missing-dependency/causal-invalid input can also pause.
 This warning event still needs the user-owned UI listener; it is not a persistent UI status query.
-The existing document/wire caps and manual Save are unchanged. Larger-vault automatic receive
-still needs safe inventory/source reuse. These are work bounds, not a latency guarantee; one
+The existing document/wire caps and manual Save are unchanged. Large active sources still need
+safe reconstruction reuse. These are work bounds, not a latency guarantee; one
 packet can still require bounded typed reconstruction. No pixels are fetched, no delivery ack
 is emitted and no intent is retired. Existing event backpressure can still stall the actor.
 

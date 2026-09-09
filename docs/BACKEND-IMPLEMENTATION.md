@@ -36,7 +36,7 @@ for unrelated document types. Tests and review accompany each slice, not only ga
 |---|---|---|
 | 1. Typed Flipnote documents | Rust StudioIndex/Flipnote domain-op validation, deterministic projection, conflict/Restore data and exact checkpoint preflight; frame, byte, sfx and patch caps. Unsupported linked-score behavior stays unavailable until gate 6, never silently accepted. | Tests exercise valid edits, malformed/cross-document operations, both concurrent delivery orders and cap boundaries through the real P1 gate. |
 | 2. Durable one-device Save/Load | **Index/art milestone implemented:** accounted vault/lifecycle ownership, native commands, real PIX CIDs, sealed intents, conservative source/seed/recovery reference protection and three-state expiry. Extend these same seams to actual sound/export records in gate 6. No UI edits. | Actor/native create/edit/restart/reopen uses real CIDs. Failure cases preserve durable state. Fileshare unlisting/upload cleanup cannot delete referenced pixels; full scans/restart include superseded seed/history, pending intents and retained/staged recovery. Open edits remain provisional. |
-| 3. Two-member collaboration and joining | **Initial Save publication and bounded recent-document automatic receive/events integrated.** Still: larger-vault inventory/source reuse, reconnect retry/catch-up, keyed discovery and Studio seed installation. Reuse current native snapshot/cancellation custody. | Two joined members use ordinary native Read/Create/Save, automatically receive durable edits/events in both directions and reopen after restart. Automatic receive currently pauses beyond its conservative 256 KiB whole-vault P1 inventory rail or on admission/storage failure; this is not full-size collaboration or newcomer joining. |
+| 3. Two-member collaboration and joining | **Initial Save publication, bounded automatic receive/events and authenticated inventory-validation reuse integrated.** Still: larger active-source reuse, reconnect retry/catch-up, keyed discovery and Studio seed installation. Reuse current native snapshot/cancellation custody. | Ordinary native Read/Create/Save exchanges durable edits/events in both directions and reopens after restart. A small target also receives beside warm unrelated histories. Automatic inventory permits 8 MiB authenticated bytes with only 256 KiB cold validation; the mutable target separately remains capped at 256 KiB. This is not full-size collaboration or newcomer joining. |
 | 4. Rotation and recovery in the running app | Drive owner receipts without needing another member's query; atomic sealing, recovery-first settlement, own-intent replay, owner succession, fault/repair and recovery actions/events for the active types. | Production-adapter scenarios cover rotation, restart, owner offline/return, excluded edits, Restore/Copy/Export, storage exhaustion and staged-snapshot warnings. No pruning before the receipt and durable recovery barriers. |
 | 5. Collaborative frame claims | Required full-identity signalling and shared channel admission; bounded capability/session-bound claim, Ask and Pass messages with receiver-observed expiry. No game/avatar path or standalone drawing feature. | Two members observe advisory claim/Ask/Pass/expiry; collision, replay and disconnect tests pass. Claims never become edit locks. |
 | 6. Sound and export | Linked-score typed operations/preflight/recovery, sfx/emoji patch sources, 64-patch union, deterministic valid-take export and byte-exact `.pixa` publication with durable export records. Cover the specified local GIF export contract without taking over UI design. | No-score and linked-score golden vectors, maximal accepted exports and malformed/over-cap rejection pass; exported bytes can be read back and validated. Playback-facing contracts preserve Deafen and membership teardown. |
@@ -221,7 +221,7 @@ worker without store/Server borrows, then install only if runtime/mount/member/j
 exact saved record still match. Four process-wide slots include cancelled workers and retained
 results. Warm pages recheck the full saved record without replaying it; cold/stale pages require
 local preparation. Receipt faults invalidate caches even when the source operations are unchanged.
-**Next implementation target: gate 3 larger-vault inventory/source reuse, then automatic
+**Next implementation target: gate 3 larger active-source reuse, then automatic
 retry/catch-up and discovery using the existing adapters.** Do not rebuild their inbox,
 saved-only send, persistence or preparation paths. Automatic work must not repeat unrestricted
 history reconstruction under actor/vault locks. The initial receiver uses a conservative local
@@ -234,11 +234,15 @@ the acknowledgement; failed sharing never erases Save. Automatic recent-target r
 the SAME native lease and typed store, and emits remote updates only after accepted persistence.
 The native two-member test includes real frame CIDs, both edit directions, paced receive and
 restart. At most 16 recent targets are watched; closed/unwatched/missed objects still need discovery
-and catch-up. The automatic scanner reuses the full validator with lower LOCAL limits: 1024
-directory entries, 64 records, 256 KiB aggregate authenticated P1 record bytes across the vault.
-It refuses before oversized reconstruction and pauses until explicit successful Studio access.
+and catch-up. The automatic scanner now memoizes pure Registry/Studio footprint validation in a
+mount-local 64-entry LRU, matching freshly authenticated complete wrapper bytes on every hit.
+Its LOCAL rails are 1024 directory entries, 64 records, 8 MiB authenticated P1 bytes and 256 KiB
+cold validation across the vault. Normal Save/full scans warm it; Read alone only retries.
+Missing/corrupt/changed records and reference enumeration cannot use stale metadata. The active
+mutable target still refuses above a separate 256 KiB source rail before reconstruction.
+Failures pause until explicit successful Studio access.
 This does not lower document acceptance caps or authorize skipped validation. The pause event
-is bridged but its warning UI is user-owned. Larger-vault service and recovery of missed packets
+is bridged but its warning UI is user-owned. Larger active-source service and recovery of missed packets
 remain real Gate 3 work, not another implementation of the completed small-source path.
 The one-device art Save/Reopen/reference-protection milestone is now implemented. Sound/export
 writers and their actual record coverage remain gate 6, not another prerequisite to art progress.

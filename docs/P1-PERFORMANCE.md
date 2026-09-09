@@ -35,6 +35,11 @@ one process when comparing this metric. No unsafe allocator instrumentation is i
   uncontrolled; this is not a cold-disk claim.
 - `restore_ms`: production snapshot decoding, history authentication, typed reconstruction and
   epoch validation. The raw snapshot and final physical file sizes are reported separately.
+- `inventory_cold_ms`: complete five-family inventory of the saved fixture with no validation
+  cache entry, including authenticated read, wrapper parsing and pure typed history validation.
+  `inventory_warm_ms` samples three automatic-rail scans after that full scan warmed the record.
+  Every sample still reads/unseals/hashes the complete wrapper, reaches directory EOF and asserts
+  identical physical accounting; no mutable source, complete inventory or write budget is reused.
 - `detached_page_ms`: production provider work on an already restored source, including authority,
   dependency traversal and fresh current-MLS resealing. This is a comparison point, not an
   implemented source cache.
@@ -169,3 +174,34 @@ Existing always-run 33-op unrotated/seeded smoke tests still fully drain their c
 It does not finish automatic catch-up, prove performance for maximal seeds/projections or measure
 durable mutation/settlement cost. Next is runtime ownership/driving of the existing split API,
 including native lifecycle and whole-server snapshot ordering—not another reconstruction path.
+
+## After exact inventory-validation reuse (2026-09-09)
+
+The complete scanner now reuses pure Registry/Studio footprint validation only after a fresh
+authenticated full-wrapper digest/size match. A mount-local 64-entry LRU retains metadata, not
+CRDTs or a completed inventory/budget. Reference scans still enumerate actual CIDs. Automatic
+receive permits 8 MiB of authenticated metadata, at most 256 KiB cold validation and 64 records;
+its active mutable Studio target separately remains limited to 256 KiB before reconstruction.
+Explicit Save/full scans warm this cache; Read alone retries and remount starts cold.
+
+Two existing release probes were run separately on the same machine, without other builds/tests
+during their measured phases. The byte-heavy case used the exact already-built release test
+executable from the dense run. No new process-memory measurement was taken. Values are ms;
+each row is a single observation, not a maximal-size or worst-case latency guarantee.
+
+| Fixture | Accepted ops | Physical file bytes | Cold inventory | Warm inventory 0 / 1 / 2 |
+|---|---|---|---|---|
+| Small operations, epoch 0 | 8,002 | 5,122,618 | 10,646 | 11 / 11 / 11 |
+| Byte-heavy, epoch 0 | 20 | 4,196,928 | 33 | 11 / 11 / 12 |
+
+Every warm pass reached EOF, reused exactly one validated record, charged zero cold bytes, and
+asserted identical physical accounting. The saved source was byte-identical after the whole
+probe. Dense setup still took 173,816 ms; standalone restore took 10,608 ms. Neither became a
+cheap cold operation. These samples cover approximately 4.9 and 4.0 MiB, not a full 8-MiB vault,
+64-record directory, maximal seed/projection or mutable-target ingest/settlement. Always-run
+regressions separately reject warm inventories above the 8-MiB rail and large changed candidates
+above the cold rail; no automatic limit silently falls back to full reconstruction.
+
+**Decision:** small active flipnotes can reuse already-validated unrelated histories within the
+bounded authentication allowance. This removes that repeated inventory replay from receive;
+it does not finish large active-document collaboration, automatic catch-up or newcomer discovery.

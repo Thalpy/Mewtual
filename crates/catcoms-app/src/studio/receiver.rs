@@ -152,6 +152,9 @@ impl StudioReceiver {
             return Ok((empty(), None));
         }
         let received = (|| {
+            // Inventory validation reuse does NOT accelerate the target's mutable source
+            // restore/ingest. Keep its separate cold-work rail until that path is qualified.
+            store.check_studio_receive_source_bound(id, &server.group_id(), watch.target)?;
             // Limit before ANY source reconstruction or snapshot write. Directory order can
             // affect which small records are inspected, never produce a partial successful budget.
             let mut scan = store.scan_studio_receive_inventory()?;

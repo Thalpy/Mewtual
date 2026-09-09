@@ -132,11 +132,15 @@ receiver per exact actor incarnation, never through an actor-awaiting event cons
 per paced pass gets the same Ready/lease/off-executor custody as Save. Current watch/mount/channel
 and membership/MLS are rechecked before disk work; snapshot persistence precedes typed ingest.
 Only newly Accepted durable edits emit remote StudioUpdated; events recheck native incarnation.
-The initial automatic inventory uses the existing scanner with local limits (1024 directory
-entries, 64 records, 256 KiB authenticated bytes), rejecting before oversized reconstruction.
+Automatic inventory uses the existing scanner with local limits (1024 directory entries,
+64 records, 8 MiB authenticated bytes and 256 KiB cold validation bytes). The mount-local
+64-entry LRU retains only pure Registry/Studio footprint validation, never a document, inventory
+or write permit. Every hit requires fresh authenticated file bytes, scope/filename binding and
+the exact complete-wrapper digest/size. Ordinary complete scans warm it; remount starts cold.
+The mutable active target still has a separate 256 KiB source rail before reconstruction.
 Failures pause until successful explicit Studio access and emit StudioReceivePaused; peer traffic
 cannot repeatedly trigger a failed scan. This is not a reduced document cap or completed large-
-vault collaboration: safe inventory/source reuse, discovery and retry/catch-up remain Gate 3.
+vault collaboration: larger active-source reuse, discovery and retry/catch-up remain Gate 3.
 No new persistence, finality, blob fetch or UI implementation is introduced.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash

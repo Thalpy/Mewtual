@@ -4,6 +4,8 @@ use catcoms_replication::{epoch_zero_id, InheritedCheckpoint, SignedOp};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod inventory_cache;
+
 const SERVER: u64 = 73;
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(123)

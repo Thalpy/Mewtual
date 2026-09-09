@@ -2,6 +2,68 @@ use super::*;
 use crate::studio::StudioReceiver;
 
 #[tokio::test]
+async fn studio_receiver_warm_large_unrelated_history_accepts_small_target() {
+    let mut p = Pair::new().await;
+    let mut receiver = StudioReceiver::default();
+    let read = || Some(StudioRequest::Read { target: target() });
+    receiver
+        .run(&mut p.bob, &mut p.b_store, SERVER, read())
+        .unwrap();
+    p.bob.flush_studio_subscriptions().await.unwrap();
+    let op = title(1, "small active flipnote");
+    let epoch_id = p.save(&op);
+    p.send(op).await.unwrap();
+    p.bob.sync_once().await.unwrap();
+    let path = crate::store::save_inventory_fixture(&mut p.b_store);
+    let before = std::fs::read(&path).unwrap();
+    assert!(receiver
+        .run(&mut p.bob, &mut p.b_store, SERVER, None)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("cold byte limit"));
+    assert!(receiver.take_pause_notice());
+    assert!(
+        p.b_store.load_server(SERVER).is_err(),
+        "cold refusal precedes snapshot write"
+    );
+
+    // Read resumes but does not inventory the whole vault. A normal explicit Save warms the
+    // exact unrelated record through its existing complete scan, preserving the held packet.
+    receiver
+        .run(&mut p.bob, &mut p.b_store, SERVER, read())
+        .unwrap();
+    let local = title(2, "local title");
+    receiver
+        .run(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            Some(StudioRequest::Apply {
+                target: target(),
+                epoch_id,
+                nonce: local.nonce,
+                body: local.body,
+            }),
+        )
+        .unwrap();
+    assert!(receiver.pending(&p.bob));
+    assert_eq!(
+        receiver
+            .run(&mut p.bob, &mut p.b_store, SERVER, None)
+            .unwrap()
+            .1,
+        Some(target())
+    );
+    assert!(p.state().is_some());
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "unrelated history remains untouched"
+    );
+}
+
+#[tokio::test]
 async fn studio_receiver_read_preserves_queue_accepts_once_and_reopens() {
     let mut p = Pair::new().await;
     let mut receiver = StudioReceiver::default();

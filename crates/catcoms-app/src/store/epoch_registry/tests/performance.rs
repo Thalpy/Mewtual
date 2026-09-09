@@ -221,6 +221,39 @@ impl Source {
     }
 }
 
+/// Reuse the real signed profiling source in receiver tests; only its initial save is batched.
+/// The unrelated group intentionally exercises whole-vault accounting, not target authority.
+pub(crate) fn save_inventory_fixture(store: &mut ServerStore) -> PathBuf {
+    save_inventory_fixture_ops(store, 2)
+}
+
+pub(super) fn save_inventory_fixture_ops(store: &mut ServerStore, count: usize) -> PathBuf {
+    let mut source = Source::new();
+    source.fill(count, 160_000, false);
+    let path = source.f.path(store);
+    let mut budget = budget(store, &source.f);
+    store
+        .update_registry_with_io(
+            SERVER,
+            &source.f.group,
+            source.f.key.bucket(),
+            &source.f.device,
+            true,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut budget,
+            |unit, _| {
+                *unit = source.f.source;
+                Ok(())
+            },
+            atomic_write,
+            sync_registry,
+        )
+        .unwrap();
+    assert!(fs::metadata(&path).unwrap().len() > 256 * 1024);
+    path
+}
+
 /// Measure independent phases, then the real app adapter on first/continuation requests. No
 /// network wait or requester authentication is measured: requester is a trusted current member.
 /// Only three pages are sampled for expensive cases; the smoke case drains all 33 operations.
@@ -273,6 +306,38 @@ fn measure(case: &str, build: impl FnOnce(&mut Source), clock: &dyn Clock, max_p
             .unwrap()
     });
     let before = fs::read(&path).unwrap();
+    let (cold, inventory_cold_ms) = timed(clock, || {
+        let mut scan = store.scan_epoch_storage_with_studio().unwrap();
+        let progress = loop {
+            let p = scan.step().unwrap();
+            if p.complete {
+                break p;
+            }
+        };
+        assert_eq!(progress.reused_records, 0);
+        scan.finish().unwrap()
+    });
+    for pass in 0..3 {
+        let (_, elapsed) = timed(clock, || {
+            let mut scan = store.scan_studio_receive_inventory().unwrap();
+            let progress = loop {
+                let p = scan.step().unwrap();
+                if p.complete {
+                    break p;
+                }
+            };
+            assert_eq!(progress.reused_records, 1);
+            assert_eq!(progress.uncached_bytes, 0);
+            let warm = scan.finish().unwrap();
+            assert_eq!(
+                warm.records_for_server(SERVER, &source.f.group.group_id())
+                    .unwrap(),
+                cold.records_for_server(SERVER, &source.f.group.group_id())
+                    .unwrap()
+            );
+        });
+        println!("P1_PROFILE inventory_cold_ms={inventory_cold_ms} inventory_warm_pass={pass} inventory_warm_ms={elapsed}");
+    }
     let (held, read_ms) = timed(clock, || {
         store.read_registry_record(&scope).unwrap().unwrap()
     });

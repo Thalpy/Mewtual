@@ -10,6 +10,11 @@ use super::*;
 use crate::store::epoch_budget::MAX_ACCOUNTED_RECORDS;
 use crate::store::{epoch_intents, epoch_owner};
 use catcoms_wire::DocType;
+pub(in crate::store) mod cache;
+
+/// Local automatic-service rails, not replicated document acceptance rules.
+pub(crate) const STUDIO_RECEIVE_COLD_BYTES: u64 = 256 * 1024;
+const STUDIO_RECEIVE_READ_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Explicit file-family coverage, carried unchanged through cleanup, scan and completed result.
 /// No variant includes blobs or future non-Studio/non-registry epoch snapshot families.
@@ -119,6 +124,10 @@ pub struct EpochStorageScanProgress {
     pub orphan_files: usize,
     /// Physical ciphertext bytes read and authenticated (no orphan bodies are read).
     pub authenticated_bytes: u64,
+    /// Successfully authenticated history records whose exact prior validation was reused.
+    pub reused_records: usize,
+    /// Physical bytes charged to fresh record parsing/validation (including non-history families).
+    pub uncached_bytes: u64,
     /// True only after reaching directory EOF without any error or exhausted rail.
     pub complete: bool,
 }
@@ -317,7 +326,8 @@ impl EpochStorageInventory {
 }
 
 /// Exclusive, incrementally scheduled inventory job. Dropping it cancels discovery; neither
-/// cancellation nor error exposes a partial inventory. No store mutation is performed.
+/// cancellation nor error exposes a partial inventory. Only mount-local validation metadata
+/// may be memoized; no durable store mutation is performed.
 pub struct EpochStorageScan<'a> {
     store: &'a mut ServerStore,
     directory: fs::ReadDir,
@@ -327,6 +337,7 @@ pub struct EpochStorageScan<'a> {
     entry_limit: usize,
     record_limit: usize,
     byte_limit: u64,
+    cold_byte_limit: Option<u64>,
     references: Option<(
         std::sync::Arc<()>,
         super::super::creative_references::CreativeReferences,
@@ -375,14 +386,16 @@ impl ServerStore {
 
     /// Conservative initial background-service rail, not a document acceptance or convergence
     /// rule. Reuse the SAME authenticated inventory, with lower limits checked before record
-    /// reads/reconstruction. Larger vaults need future inventory reuse; explicit Save is unchanged.
+    /// reads/reconstruction. Previously verified history gets a larger bounded authentication
+    /// allowance, not permission to reconstruct a cold large source. Explicit Save is unchanged.
     pub(crate) fn scan_studio_receive_inventory(
         &mut self,
     ) -> Result<EpochStorageScan<'_>, AppError> {
         let mut scan = self.scan_epoch_storage_with_studio()?;
         scan.entry_limit = 1024;
         scan.record_limit = 64;
-        scan.byte_limit = 256 * 1024;
+        scan.byte_limit = STUDIO_RECEIVE_READ_BYTES;
+        scan.cold_byte_limit = Some(STUDIO_RECEIVE_COLD_BYTES);
         Ok(scan)
     }
 
@@ -409,6 +422,7 @@ impl ServerStore {
             entry_limit: MAX_DIRECTORY_ENTRIES,
             record_limit: MAX_ACCOUNTED_RECORDS,
             byte_limit: MAX_AUTHENTICATED_BYTES,
+            cold_byte_limit: None,
             references: None,
         })
     }
@@ -527,6 +541,17 @@ impl EpochStorageScan<'_> {
                     if peak > self.byte_limit {
                         return Err(invalid("epoch storage inventory byte limit reached"));
                     }
+                    let cacheable =
+                        matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio)
+                            && self.references.is_none();
+                    let candidate = cacheable
+                        && self
+                            .store
+                            .inventory_cache
+                            .candidate((family, hash), metadata.len());
+                    if !candidate {
+                        self.check_cold_bytes(metadata.len())?;
+                    }
                     let AuthenticatedEpochFileBytes {
                         plain,
                         physical_bytes: size,
@@ -562,65 +587,97 @@ impl EpochStorageScan<'_> {
                             "epoch storage filename does not match its authenticated scope",
                         ));
                     }
-                    let record = match family {
-                        EpochRecordKind::Recovery => {
-                            let state = EpochRecoveryState::decode(&plain, scope, &document)?;
-                            if let Some((_, refs)) = self.references.as_mut() {
-                                refs.add(
-                                    &document.server_id,
-                                    super::super::creative_references::recovery_cids(
-                                        &document, &state,
-                                    )?,
-                                )?;
-                            }
-                            recovery_record(scope, state.footprint(size)?)
-                        }
-                        EpochRecordKind::OwnerReceipts => {
-                            epoch_owner::EpochOwnerReceiptState::decode(&plain, scope, &document)?;
-                            epoch_owner::storage_record(server, &document, scope, size)?
-                        }
-                        EpochRecordKind::Intents => {
-                            let state =
-                                epoch_intents::EpochIntentState::decode(&plain, scope, &document)?;
-                            if let Some((_, refs)) = self.references.as_mut() {
-                                if matches!(
-                                    document.doc_type,
-                                    DocType::StudioIndex | DocType::StudioObject
-                                ) {
-                                    for (_, intent) in state.pending() {
-                                        refs.add(
-                                            &document.server_id,
-                                            catcoms_replication::studio::operation_blob_cid(
-                                                &intent.operation,
-                                            )
-                                            .map_err(invalid)?,
-                                        )?;
-                                    }
-                                } else if document.doc_type != DocType::DocRegistry {
-                                    return Err(invalid("unsupported creative reference family"));
-                                }
-                            }
-                            epoch_intents::storage_record(server, &document, scope, size)?
-                        }
-                        EpochRecordKind::Registry => {
-                            super::super::epoch_registry::inventory_record(
-                                &plain, server, &document, scope, size,
-                            )?
-                        }
-                        EpochRecordKind::Studio => {
-                            if let Some((_, refs)) = self.references.as_mut() {
-                                let (record, cids) =
-                                    super::super::epoch_studio::inventory_references(
-                                        &plain, server, &document, scope, size,
+                    // The digest includes scope/channel, receipt book, gate, quarantine and ALL
+                    // signed history. Stat/filename/snapshot-head equality alone is insufficient.
+                    let digest = blake3::hash(&plain);
+                    let cached = cacheable
+                        .then(|| self.store.inventory_cache.get((family, hash), size, digest))
+                        .flatten();
+                    let record = if let Some(record) = cached {
+                        self.progress.reused_records += 1;
+                        record
+                    } else {
+                        self.check_cold_bytes(size)?;
+                        self.progress.uncached_bytes = self
+                            .progress
+                            .uncached_bytes
+                            .checked_add(size)
+                            .ok_or_else(|| {
+                                invalid("epoch storage inventory cold byte limit reached")
+                            })?;
+                        let record = match family {
+                            EpochRecordKind::Recovery => {
+                                let state = EpochRecoveryState::decode(&plain, scope, &document)?;
+                                if let Some((_, refs)) = self.references.as_mut() {
+                                    refs.add(
+                                        &document.server_id,
+                                        super::super::creative_references::recovery_cids(
+                                            &document, &state,
+                                        )?,
                                     )?;
-                                refs.add(&document.server_id, cids)?;
-                                record
-                            } else {
-                                super::super::epoch_studio::inventory_record(
+                                }
+                                recovery_record(scope, state.footprint(size)?)
+                            }
+                            EpochRecordKind::OwnerReceipts => {
+                                epoch_owner::EpochOwnerReceiptState::decode(
+                                    &plain, scope, &document,
+                                )?;
+                                epoch_owner::storage_record(server, &document, scope, size)?
+                            }
+                            EpochRecordKind::Intents => {
+                                let state = epoch_intents::EpochIntentState::decode(
+                                    &plain, scope, &document,
+                                )?;
+                                if let Some((_, refs)) = self.references.as_mut() {
+                                    if matches!(
+                                        document.doc_type,
+                                        DocType::StudioIndex | DocType::StudioObject
+                                    ) {
+                                        for (_, intent) in state.pending() {
+                                            refs.add(
+                                                &document.server_id,
+                                                catcoms_replication::studio::operation_blob_cid(
+                                                    &intent.operation,
+                                                )
+                                                .map_err(invalid)?,
+                                            )?;
+                                        }
+                                    } else if document.doc_type != DocType::DocRegistry {
+                                        return Err(invalid(
+                                            "unsupported creative reference family",
+                                        ));
+                                    }
+                                }
+                                epoch_intents::storage_record(server, &document, scope, size)?
+                            }
+                            EpochRecordKind::Registry => {
+                                super::super::epoch_registry::inventory_record(
                                     &plain, server, &document, scope, size,
                                 )?
                             }
+                            EpochRecordKind::Studio => {
+                                if let Some((_, refs)) = self.references.as_mut() {
+                                    let (record, cids) =
+                                        super::super::epoch_studio::inventory_references(
+                                            &plain, server, &document, scope, size,
+                                        )?;
+                                    refs.add(&document.server_id, cids)?;
+                                    record
+                                } else {
+                                    super::super::epoch_studio::inventory_record(
+                                        &plain, server, &document, scope, size,
+                                    )?
+                                }
+                            }
+                        };
+                        if matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio) {
+                            // Even an explicit reference scan may warm pure validation metadata,
+                            // but a later reference scan must still enumerate the actual CIDs.
+                            self.store
+                                .inventory_cache
+                                .put((family, hash), size, digest, record);
                         }
+                        record
                     };
                     if self
                         .inventory
@@ -673,6 +730,18 @@ impl EpochStorageScan<'_> {
             }
         }
         Ok(self.progress)
+    }
+
+    fn check_cold_bytes(&self, size: u64) -> Result<(), AppError> {
+        if self.cold_byte_limit.is_some_and(|limit| {
+            self.progress
+                .uncached_bytes
+                .checked_add(size)
+                .is_none_or(|bytes| bytes > limit)
+        }) {
+            return Err(invalid("epoch storage inventory cold byte limit reached"));
+        }
+        Ok(())
     }
 
     /// Consume only a successful EOF result. A completed result is metadata, not a storage lease;
@@ -1117,7 +1186,8 @@ mod tests {
         let mut scan = store.scan_studio_receive_inventory().unwrap();
         assert_eq!(scan.entry_limit, 1024);
         assert_eq!(scan.record_limit, 64);
-        assert_eq!(scan.byte_limit, 256 * 1024);
+        assert_eq!(scan.byte_limit, STUDIO_RECEIVE_READ_BYTES);
+        assert_eq!(scan.cold_byte_limit, Some(STUDIO_RECEIVE_COLD_BYTES));
         let error = loop {
             match scan.step() {
                 Err(error) => break error.to_string(),

@@ -35,6 +35,8 @@ mod epoch_recovery;
 mod epoch_registry;
 #[cfg(test)]
 pub(crate) use epoch_registry::registry_full_loads_for_test;
+#[cfg(test)]
+pub(crate) use epoch_registry::tests::performance::save_inventory_fixture;
 pub(crate) use epoch_registry::{RegistrySourceCapture, RegistrySourceStamp};
 mod epoch_studio;
 pub use creative_references::{CreativeReferences, MAX_CREATIVE_REFERENCES};
@@ -399,6 +401,9 @@ pub struct ServerStore {
     // Studio budget minting/write attempts and five-family cleanup invalidate captured scans.
     // Other raw P1 adapters still require the same sole coordinator/exclusive accounting owner.
     studio_generation: std::sync::Arc<()>,
+    // Pure validation metadata; every reuse requires freshly authenticated identical bytes.
+    // Never substitutes for an inventory, generation check, source load or write budget.
+    inventory_cache: epoch_recovery::inventory::cache::RecordCache,
     creative_protection: creative_references::SharedProtection,
     // Stable only for this physical mount, unlike the rotating intent-inventory token. Replay
     // passes are local work cursors, not authority across reopen or the native UI-lock boundary.
@@ -439,6 +444,7 @@ impl ServerStore {
             keys,
             intent_generation: std::sync::Arc::new(()),
             studio_generation: std::sync::Arc::new(()),
+            inventory_cache: Default::default(),
             replay_mount: std::sync::Arc::new(()),
             _session: session,
         })
