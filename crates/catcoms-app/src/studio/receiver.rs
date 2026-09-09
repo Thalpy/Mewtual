@@ -152,9 +152,14 @@ impl StudioReceiver {
             return Ok((empty(), None));
         }
         let received = (|| {
-            // Inventory validation reuse does NOT accelerate the target's mutable source
-            // restore/ingest. Keep its separate cold-work rail until that path is qualified.
-            store.check_studio_receive_source_bound(id, &server.group_id(), watch.target)?;
+            // A warm candidate permits only bounded authentication, not stale-source use.
+            // The store takes ownership and checks exact bytes again before actual ingest.
+            server.sync.with_registry_context(|group, device, _, _| {
+                if !store.studio_source_is_warm(id, group, watch.target, device) {
+                    store.check_studio_receive_source_bound(id, &group.group_id(), watch.target)?;
+                }
+                Ok::<_, AppError>(())
+            })?;
             // Limit before ANY source reconstruction or snapshot write. Directory order can
             // affect which small records are inspected, never produce a partial successful budget.
             let mut scan = store.scan_studio_receive_inventory()?;
@@ -167,7 +172,7 @@ impl StudioReceiver {
             let mut budget = server.sync.with_registry_context(|g, _, _, _| {
                 store.studio_storage_budget(id, g, &inventory)
             })?;
-            server.receive_studio_step(store, watch, &mut budget)
+            server.receive_studio_step_reusing(store, watch, &mut budget)
         })();
         let received = match received {
             Ok(received) => received,
@@ -179,9 +184,15 @@ impl StudioReceiver {
                 return Err(error);
             }
         };
-        let updated = received
-            .filter(|r| r.admission == Admission::Accepted)
-            .map(|_| watch.target);
+        let updated = if let Some(received) = received {
+            let updated = (received.admission == Admission::Accepted).then_some(watch.target);
+            server.sync.with_registry_context(|group, device, _, _| {
+                store.retain_received_studio_source(group, device, received.state);
+            });
+            updated
+        } else {
+            None
+        };
         Ok((empty(), updated))
     }
 }

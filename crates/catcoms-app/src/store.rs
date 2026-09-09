@@ -59,6 +59,10 @@ pub use epoch_registry::{
     RegistryOwnerRotationOutcome, RegistryPageAdmission, RegistryReplayHold, RegistryReplayOutcome,
     RegistryReplayPass, RegistryReplayProgress, RegistryReplayStep, RegistryReplayTicket,
 };
+#[cfg(test)]
+pub(crate) use epoch_studio::source::studio_full_restores_for_test;
+#[cfg(test)]
+pub(crate) use epoch_studio::tests::performance::save_studio_source_fixture;
 pub use epoch_studio::{EpochStudioBudget, EpochStudioState};
 pub mod epoch_budget;
 
@@ -404,6 +408,9 @@ pub struct ServerStore {
     // Pure validation metadata; every reuse requires freshly authenticated identical bytes.
     // Never substitutes for an inventory, generation check, source load or write budget.
     inventory_cache: epoch_recovery::inventory::cache::RecordCache,
+    // One owned verified Studio graph, never a cloned writable gate. Mount drop releases it.
+    // Exact authenticated bytes and live context are rechecked before automatic ingest.
+    studio_source: Option<epoch_studio::source::RetainedSource>,
     creative_protection: creative_references::SharedProtection,
     // Stable only for this physical mount, unlike the rotating intent-inventory token. Replay
     // passes are local work cursors, not authority across reopen or the native UI-lock boundary.
@@ -445,6 +452,7 @@ impl ServerStore {
             intent_generation: std::sync::Arc::new(()),
             studio_generation: std::sync::Arc::new(()),
             inventory_cache: Default::default(),
+            studio_source: None,
             replay_mount: std::sync::Arc::new(()),
             _session: session,
         })

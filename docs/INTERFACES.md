@@ -863,10 +863,11 @@ fresh bounded read/unseal, scope/filename binding, and exact complete-wrapper di
 it never reuses a complete inventory or budget. `EpochStorageScanProgress.reused_records` and
 `uncached_bytes` report reuse and physical bytes charged to cold validation. Reference scans
 always enumerate actual CIDs, even when footprint metadata is warm. Ordinary complete scans
-(including normal Save) warm this cache; Read alone does not, and reopening the vault clears it.
+(including normal Save) warm this cache; reopening the vault clears it. Explicit Read also warms
+the particular verified Studio record's footprint, not unrelated histories.
 An unfamiliar oversized record rejects before authentication; a changed same-size candidate
-rejects above the cold rail before reconstruction. The selected mutable Studio source separately
-refuses above 256 KiB before inventory/snapshot/restore, even with warm metadata. These rails
+rejects above the cold rail before reconstruction. A cold selected mutable Studio source separately
+refuses above 256 KiB before inventory/snapshot/restore, even with warm footprint metadata. These rails
 cover the whole mounted vault, including unrelated registry records. An incomplete inventory
 never authorizes a write. Scan/snapshot/ingest failure pauses background receive until successful
 explicit Studio access; new traffic cannot restart it. Pre-drain failure retains the packet;
@@ -874,9 +875,22 @@ an ingest error may already have consumed it. `studio-receive-paused` carries `{
 that transition; UI should warn and offer explicit reopen/retry, not call it a settlement fault
 or proof of local corruption. Authenticated missing-dependency/causal-invalid input can also pause.
 This warning event still needs the user-owned UI listener; it is not a persistent UI status query.
-The existing document/wire caps and manual Save are unchanged. Large active sources still need
-safe reconstruction reuse. These are work bounds, not a latency guarantee; one
-packet can still require bounded typed reconstruction. No pixels are fetched, no delivery ack
+The mounted store now retains at most one verified owned Studio source of at most 8 MiB encoded
+input. `with_studio_source` reuses it for explicit views; an independent Index/list refresh preserves
+opened art while warming only the Index footprint. `receive_studio_step_reusing` takes the unit
+and freshly reads/unseals/hashes the full actual wrapper, checking physical size, exact scope,
+mount, actor, current group/MLS and the newly inventoried footprint before normal typed ingest.
+The 8 MiB source read is additional to the inventory scan; it is not an aggregate per-pass I/O
+or resident-memory promise. The retained unit is moved, not cloned into a second slot or separately
+persisted; normal transient typed-preflight drafts are unchanged. Failed
+ingest/write/flush drops it; successful unchanged flush keeps the previous physical stamp and
+changed writes stamp exactly the successful encoded bytes. Explicit views may cold-load changed
+records; automatic receive never falls back to a large cold restore. Remount starts cold.
+Small other-target packets do not evict opened art. This is not 16 warm source slots, a new
+storage owner, or automatic checkpoint installation.
+The existing document/wire caps and manual Save are unchanged. Cold dense sources remain costly.
+These are work bounds, not a latency guarantee; fresh typed preflight and snapshot serialization
+still run per packet. No pixels are fetched, no delivery ack
 is emitted and no intent is retired. Existing event backpressure can still stall the actor.
 
 ### Studio operation exchange (gate 3, cooperative Index/art adapter)

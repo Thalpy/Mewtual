@@ -89,6 +89,23 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         watch: &ServerStudioWatch,
         budget: &mut EpochStudioBudget,
     ) -> Result<Option<StudioReceived>, AppError> {
+        self.receive_studio_step_inner(store, watch, budget, false)
+    }
+    pub(crate) fn receive_studio_step_reusing(
+        &mut self,
+        store: &mut ServerStore,
+        watch: &ServerStudioWatch,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<Option<StudioReceived>, AppError> {
+        self.receive_studio_step_inner(store, watch, budget, true)
+    }
+    fn receive_studio_step_inner(
+        &mut self,
+        store: &mut ServerStore,
+        watch: &ServerStudioWatch,
+        budget: &mut EpochStudioBudget,
+        reuse: bool,
+    ) -> Result<Option<StudioReceived>, AppError> {
         if !Arc::ptr_eq(&watch.mount, &store.registry_mount())
             || !self.sync.studio_watch_is_current(&watch.inner)
         {
@@ -99,8 +116,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.check_studio_channel(watch.target)?;
         self.sync
             .drain_studio_inbound(&watch.inner, |group, device, rng, sealed| {
-                store
-                    .ingest_studio_epoch(
+                let result = if reuse {
+                    store.ingest_studio_epoch_reusing(
                         watch.server,
                         group,
                         watch.target,
@@ -109,7 +126,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         rng,
                         budget,
                     )
-                    .map(|(admission, state)| StudioReceived { admission, state })
+                } else {
+                    store.ingest_studio_epoch(
+                        watch.server,
+                        group,
+                        watch.target,
+                        device,
+                        sealed,
+                        rng,
+                        budget,
+                    )
+                };
+                result.map(|(admission, state)| StudioReceived { admission, state })
             })?
             .transpose()
     }

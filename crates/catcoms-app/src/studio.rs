@@ -384,31 +384,36 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 {
                     return Err(invalid("Studio requires current membership"));
                 }
-                let read = |store: &ServerStore, target| -> Result<Option<StudioView>, AppError> {
-                    if let Some(state) = store.load_studio_epoch(server, group, target, device)? {
-                        return Ok(Some(StudioView {
-                            epoch_id: state.doc_id(),
-                            epoch: state.epoch(),
-                            phase: state.phase(),
-                            projection: state.projection()?,
-                        }));
-                    }
-                    if matches!(target, StudioTarget::Index { .. }) {
-                        let empty = catcoms_replication::studio::StudioEpoch::new(
-                            group,
-                            target,
-                            device.device_id(),
-                        )
-                        .map_err(invalid)?;
-                        return Ok(Some(StudioView {
-                            epoch_id: empty.doc_id(),
-                            epoch: 0,
-                            phase: EpochPhase::Open,
-                            projection: empty.projection().map_err(invalid)?,
-                        }));
-                    }
-                    Ok(None)
-                };
+                let read =
+                    |store: &mut ServerStore, target| -> Result<Option<StudioView>, AppError> {
+                        if let Some(view) =
+                            store.with_studio_source(server, group, target, device, |state| {
+                                Ok(StudioView {
+                                    epoch_id: state.doc_id(),
+                                    epoch: state.epoch(),
+                                    phase: state.phase(),
+                                    projection: state.projection()?,
+                                })
+                            })?
+                        {
+                            return Ok(Some(view));
+                        }
+                        if matches!(target, StudioTarget::Index { .. }) {
+                            let empty = catcoms_replication::studio::StudioEpoch::new(
+                                group,
+                                target,
+                                device.device_id(),
+                            )
+                            .map_err(invalid)?;
+                            return Ok(Some(StudioView {
+                                epoch_id: empty.doc_id(),
+                                epoch: 0,
+                                phase: EpochPhase::Open,
+                                projection: empty.projection().map_err(invalid)?,
+                            }));
+                        }
+                        Ok(None)
+                    };
                 if matches!(request, StudioRequest::Read { .. }) {
                     return read(store, target);
                 }

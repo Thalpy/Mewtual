@@ -732,19 +732,31 @@ table with the commit that closed it.
   sources. Its mount-local 64-entry LRU stores only context-free Registry/Studio footprint
   validation. Every hit still authenticates the actual file and binds its scope/filename,
   full plaintext-wrapper digest and physical size, including gate/receipts/quarantine/history.
-  No key/plaintext/doc, completed inventory, membership decision or budget authority is cached.
+  That metadata LRU stores no key/plaintext/doc, completed inventory, membership decision or budget authority.
   New/staged files still count; reference scans cannot skip CID enumeration. Remount clears reuse.
   A large cold record refuses before read; a changed candidate above the cold rail refuses before
-  reconstruction. Warm metadata does not authorize a mutable target above its separate 256 KiB
-  source rail. A partial scan never grants storage admission. Scan/snapshot/ingest failure
+  reconstruction. Warm footprint metadata alone does not authorize a mutable target above its
+  256 KiB cold source rail. Separately, the sole mounted store may retain one owned verified Studio
+  graph/gate after explicit access or a successful receive. It is moved, not cloned, and its
+  encoded source must be at most 8 MiB; this is NOT a resident-heap cap. Every take checks current
+  actor/group/MLS and authenticates the full actual wrapper with exact scope, mount, size and digest,
+  including gate/book/quarantine changes even when heads and file length match. Ingest still uses
+  fresh inventory/budget verification and the existing typed gate/durable save. Failed takes drop
+  the graph; unchanged flushes preserve its actual physical stamp, not normalized in-memory bytes.
+  Explicit reads can rebuild a changed source; background receive cannot make that large cold
+  fallback. Index refreshes preserve the opened art slot without retaining a second graph.
+  No vault key is added to this retained unit; it contains plaintext document state like an open
+  document. Remount drops it, and existing locked/busy/incarnation guards still govern access.
+  A partial scan never grants storage admission. Scan/snapshot/ingest failure
   pauses until successful explicit access, emitting a non-settlement pause warning; inbound
   traffic cannot refund that hold. Busy/locked native access retains the bounded inbox; consumed
   bad or dropped packets still need retry/catch-up. The one-second pacing cannot be bypassed by
   pending-state churn. This bounds automatic work, not worst-case latency or full-size service;
-  larger active sources still need safe reconstruction reuse. Explicit Save warms inventory;
-  Read alone only retries. The pause event has no user-owned UI listener yet.
+  only one prepared active source is reusable and cold dense reconstruction remains expensive.
+  Explicit Save warms inventory; Read warms only its actual Studio record and resumes a paused
+  watch. The pause event has no user-owned UI listener yet.
   No pixels are fetched, no intent is retired, and no update is emitted for duplicate/quarantined
-  input. Catch-up/seed discovery and larger-source automatic service remain gate 3 integration work.
+  input. Catch-up/seed discovery and general cold-source service remain gate 3 integration work.
   Sound/score/export state continues to refuse pending its typed support.
   Exact retry recognition belongs to the retained signed
   envelope/gate, not timestamps or marker-only success.

@@ -8,6 +8,52 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-08-22)
 
+- **Flipnote gate 3, one owned active Studio source (2026-09-09).** The mounted store now retains
+  one verified owned Studio restart unit, moved rather than cloned. Warm automatic ingest and
+  timeline reads authenticate the exact whole physical wrapper again, checking mount, scope,
+  actor/group/MLS and (for ingest) a fresh complete inventory/budget. They use the same typed
+  gate and durable save. Failed takes discard the graph; unchanged flushes preserve its actual
+  physical stamp, and changed writes stamp exactly the successfully saved bytes. This adds no
+  wire format, cloned gate, durable cache, finality or native persistence coordinator.
+
+  Explicit view access prepares the source and its pure inventory footprint. Index/list refresh
+  preserves opened art and keeps only the independently verified Index footprint. Cold small
+  other-target packets likewise do not evict art. The slot admits at most 8 MiB encoded input,
+  NOT 8 MiB heap; automatic inventory retains its separate 8 MiB read / 256 KiB cold rails.
+  Cold targets still refuse above 256 KiB with no large automatic fallback. This is one slot,
+  not one per watch: a large cold Index beside art still pauses, as do unprepared large sources.
+  Existing native lifecycle, snapshot ordering, pacing, cancellation and remote events are reused.
+
+  New tests cover successive edits, repeated duplicates, unchanged-flush stamps, remount/context
+  changes, corruption/deletion, valid same-size Closing-wrapper replacement, write/flush failure,
+  exact warm view reuse, changed-view reconstruction and the encoded-size boundary. A real
+  two-member regression receives successive edits on >256-KiB art after populated Index Save/list
+  refreshes, and checks that both remote ingest and timeline refresh avoid full reconstruction.
+  No test was removed or loosened. The read-only adversarial review's Medium Index-refresh
+  eviction and Low equal-size-regression findings were fixed and re-reviewed clear.
+
+  The new actual Studio release probe passed: 6,939 setup ops / 4,934,432 physical bytes;
+  142,337 ms cold restore versus 192/193/184 ms for warm inventory + ingest + durable save.
+  These non-isolated observations are not command latency or maximal-state guarantees; see
+  [P1-PERFORMANCE](P1-PERFORMANCE.md). **Cold first-open and local Save reconstruction remain
+  expensive.** The probe includes real typed ingress and final restart, not just a cached view.
+
+  Verification passed: `cargo test --all --all-features` (449 app unit tests; all remaining
+  workspace/integration/doc suites), `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  (200), `npm.cmd --prefix apps/desktop test` (1144), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, the ambient-dependency gate through
+  Git Bash, and `git diff --check`. Focused source/receiver tests and the opt-in release probe
+  passed. Nine always-run regressions and one opt-in profiling test were added; existing ignored
+  tests are unchanged. Clippy's test-module ordering finding was corrected without changing
+  behavior. No native/UI source changed; no frontend build or screenshot was needed. Concurrent
+  desktop package/config version changes were preserved and are not part of this slice.
+
+  **Next:** reconnect retry/catch-up and keyed receipt-head discovery/Studio seed installation.
+  Gate 3 is past basic live sharing, not complete. Reuse the existing transport, prepared registry
+  page source, native custody and storage/receipt foundations. UI remains user-owned; games and
+  other deferred creative products remain paused. The older 256-KiB active-target statements
+  below describe historical cold-only service and are superseded only for this prepared source.
+
 - **Flipnote gate 3, bounded inventory-validation reuse (2026-09-09, `ee67ad2`).** The existing complete
   scanner now memoizes pure Registry/Studio record footprints in a mount-local 64-entry LRU.
   A hit still requires an actual bounded read/unseal, filename/scope binding and exact complete

@@ -19,6 +19,8 @@ use catcoms_replication::{
 use std::io::Read;
 use std::sync::Arc;
 
+pub(super) mod source;
+
 pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-studio-store/v1";
 const MAX_RECORD_BYTES: usize = MAX_STUDIO_EPOCH_SNAPSHOT_BYTES + 1024;
 pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
@@ -60,6 +62,8 @@ impl EpochStudioBudget {
 #[derive(Debug)]
 pub struct EpochStudioState {
     unit: StudioEpoch,
+    // Exact authenticated/written wrapper, separate from the normalized restart snapshot.
+    source: Option<source::SourceVersion>,
 }
 impl EpochStudioState {
     /// Complete retained signed-envelope comparison; never use projection/marker equality to
@@ -163,9 +167,12 @@ impl ServerStore {
                 if stored != target {
                     return Err(invalid("wrong object channel"));
                 }
+                let unit = source::restore_unit(snapshot, group, target, device.device_id())?;
+                let source =
+                    self.studio_source_version(server, &unit, &bytes.plain, bytes.physical_bytes)?;
                 Ok(EpochStudioState {
-                    unit: StudioEpoch::restore(snapshot, group, target, device.device_id())
-                        .map_err(invalid)?,
+                    unit,
+                    source: Some(source),
                 })
             })
             .transpose()
@@ -393,8 +400,7 @@ impl ServerStore {
                     if stored != target {
                         return Err(invalid("wrong object channel"));
                     }
-                    StudioEpoch::restore(snapshot, group, target, device.device_id())
-                        .map_err(invalid)?
+                    source::restore_unit(snapshot, group, target, device.device_id())?
                 }
                 None => StudioEpoch::new(group, target, device.device_id()).map_err(invalid)?,
             };
@@ -432,6 +438,23 @@ impl ServerStore {
     fn save_studio_source(
         &self,
         server: u64,
+        unit: StudioEpoch,
+        observed: Option<StorageRecord>,
+        before: &[u8],
+        purpose: WritePurpose,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+    ) -> Result<EpochStudioState, AppError> {
+        self.save_studio_source_reusing(
+            server, unit, observed, before, purpose, rng, budget, writer, sync, None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn save_studio_source_reusing(
+        &self,
+        server: u64,
         mut unit: StudioEpoch,
         observed: Option<StorageRecord>,
         before: &[u8],
@@ -440,6 +463,7 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
         sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        prior: Option<source::SourceVersion>,
     ) -> Result<EpochStudioState, AppError> {
         let scope = scope_bytes(server, unit.document())?;
         // Add before either write/flush barrier, and keep holds even when persistence is uncertain.
@@ -451,12 +475,15 @@ impl ServerStore {
             StorageScope::new(server, &unit.document().server_id).map_err(invalid)?;
         let snapshot = Zeroizing::new(unit.snapshot().map_err(invalid)?);
         let path = self.studio_epoch_path(&scope);
-        if let Some(record) = observed.filter(|_| before == snapshot.as_slice()) {
+        let source = if let Some(record) = observed.filter(|_| before == snapshot.as_slice()) {
             let reservation = budget
                 .reserve_sync(&storage_scope, record)
                 .map_err(invalid)?;
             sync(&path, record.footprint.total().map_err(invalid)?)?;
             reservation.commit();
+            // Restore can normalize owner state without rewriting the file. Preserve its actual
+            // prior physical stamp, not a hash of the normalized in-memory snapshot.
+            prior
         } else {
             let mut e = Encoder::new();
             e.put_bytes(&scope).map_err(invalid)?;
@@ -489,8 +516,9 @@ impl ServerStore {
             };
             writer(&path, &frame(&sealed))?;
             reservation.commit();
-        }
-        Ok(EpochStudioState { unit })
+            Some(self.studio_source_version(server, &unit, &plain, plain.len() as u64 + 40)?)
+        };
+        Ok(EpochStudioState { unit, source })
     }
     fn studio_epoch_path(&self, scope: &[u8]) -> PathBuf {
         self.dir
@@ -530,23 +558,38 @@ impl ServerStore {
         &self,
         scope: &[u8],
     ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        self.read_studio_record_bounded(scope, MAX_SEALED_BYTES)
+    }
+    fn read_studio_record_bounded(
+        &self,
+        scope: &[u8],
+        max: usize,
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
         let metadata = fs::symlink_metadata(self.dir.join("servers"))
             .map_err(|e| AppError::Io(e.to_string()))?;
         if !metadata.is_dir() || is_link(&metadata) {
             return Err(invalid("parent is not a regular directory"));
         }
-        self.read_epoch_studio_plain(&self.studio_epoch_path(scope))
+        self.read_epoch_studio_plain_bounded(&self.studio_epoch_path(scope), max)
     }
     pub(super) fn read_epoch_studio_plain(
         &self,
         path: &Path,
     ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        self.read_epoch_studio_plain_bounded(path, MAX_SEALED_BYTES)
+    }
+    fn read_epoch_studio_plain_bounded(
+        &self,
+        path: &Path,
+        max: usize,
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        let max = max.min(MAX_SEALED_BYTES);
         let metadata = match fs::symlink_metadata(path) {
             Ok(value) => value,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(AppError::Io(e.to_string())),
         };
-        if !regular_file(&metadata) || metadata.len() > MAX_SEALED_BYTES as u64 {
+        if !regular_file(&metadata) || metadata.len() > max as u64 {
             return Err(invalid("file is not bounded and regular"));
         }
         let file = File::open(path).map_err(|e| AppError::Io(e.to_string()))?;
@@ -554,10 +597,10 @@ impl ServerStore {
             return Err(invalid("opened file not regular"));
         }
         let mut bytes = Vec::new();
-        file.take(MAX_SEALED_BYTES as u64 + 1)
+        file.take(max as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| AppError::Io(e.to_string()))?;
-        if bytes.len() > MAX_SEALED_BYTES {
+        if bytes.len() > max {
             return Err(invalid("file exceeds bound"));
         }
         Ok(Some(AuthenticatedEpochFileBytes {
@@ -699,4 +742,4 @@ fn invalid(error: impl std::fmt::Display) -> AppError {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

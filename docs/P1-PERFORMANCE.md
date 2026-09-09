@@ -205,3 +205,42 @@ above the cold rail; no automatic limit silently falls back to full reconstructi
 **Decision:** small active flipnotes can reuse already-validated unrelated histories within the
 bounded authentication allowance. This removes that repeated inventory replay from receive;
 it does not finish large active-document collaboration, automatic catch-up or newcomer discovery.
+
+## One owned active Studio source (2026-09-09)
+
+The mounted store now moves one verified Studio restart unit between explicit views and checked
+automatic receive. It does not clone the gate or replace the existing persistence/ingest path.
+Each warm pass authenticates the whole physical wrapper, checks current context and a fresh
+complete inventory/budget, then applies typed preflight and the ordinary durable save. The
+8 MiB encoded-input rail is not a heap or per-pass total I/O cap. Other cold targets still have
+the 256 KiB source rail; a large cold Index cannot receive automatically while art owns the slot.
+
+The new probe uses an actual signed Studio Flipnote history, not a registry history or a padded
+empty file. Each setup operation passes production typed ingest; only initial disk installation
+is batched through the same private save helper. Three subsequent real edits run full automatic
+inventory, fresh budget, authenticated source reuse, typed ingest and durable source replacement.
+An always-run 33-op smoke test checks the same path. The opt-in release command is:
+
+```sh
+cargo test -p catcoms-app --release --lib profile_studio_source_operations -- --ignored --nocapture --test-threads=1
+```
+
+| Fixture | Accepted setup ops | Physical file bytes | Cold restore ms | Warm inventory + ingest + save 0 / 1 / 2 ms |
+|---|---|---|---|---|
+| Dense title edits, epoch 0 | 6,939 | 4,934,432 | 142,337 | 192 / 193 / 184 |
+
+Setup took 317,251 ms. The probe passed, including a final vault reopen with all three new edits.
+Every warm pass asserted zero full restores, one reused inventory record and zero cold-validation
+bytes. These are **non-isolated diagnostic observations**, not a speedup ratio, worst-case bound
+or user-command latency promise: a focused build/tests overlapped the probe. No memory sample was
+taken. Timed warm work excludes native custody acquisition, server-snapshot persistence, event
+delivery, unrelated records and maximal projections. The later Index-refresh policy fix was not
+in this probe executable; the new populated-Index/two-member regression separately tests it.
+
+**The 142-second cold result remains an important limitation.** Explicit first-open, remount or
+changed-source reconstruction is not made fast by this change, and cold local Save paths can
+still repeat it. This slice removes repeated reconstruction from prepared remote receive and
+its timeline refresh; it does not qualify every accepted history, 16 active graphs, automatic
+catch-up or newcomer seed installation. Do not enlarge cold limits or request deadlines based
+on the warm observations. Gate 3's next integration is reconnect/catch-up using the existing
+bounded preparation/continuation paths, with cold preparation kept out of an admitted request.

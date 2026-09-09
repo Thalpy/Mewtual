@@ -40,7 +40,13 @@ impl RecordCache {
         self.0.push_back(value);
         Some(record)
     }
-    pub(super) fn put(&mut self, key: Key, size: u64, digest: blake3::Hash, record: StorageRecord) {
+    pub(in crate::store) fn put(
+        &mut self,
+        key: Key,
+        size: u64,
+        digest: blake3::Hash,
+        record: StorageRecord,
+    ) {
         self.0.retain(|v| v.key != key);
         if self.0.len() == MAX_RECORDS {
             self.0.pop_front();

@@ -115,7 +115,7 @@ Saved-only send matches the entire own operation in the current source before ex
 resealing; it cannot become another edit path bypassing native Save's PIX/snapshot ordering.
 Server adapters bind channel, source, mount and current membership. These low-level cooperative
 calls provide no scheduler, catch-up or discovery themselves. The bounded native runtime below
-now supplies scheduling/custody and remote events; larger-source reuse and joining remain open.
+now supplies scheduling/custody, remote events and one opened-source reuse slot; joining remains open.
 Native Save remains local/provisional.
 Initial publication is now integrated into that existing Save arm. Its private bounded batch
 contains only the packets returned by successful durable edits, exposed after the final view
@@ -137,10 +137,17 @@ Automatic inventory uses the existing scanner with local limits (1024 directory 
 64-entry LRU retains only pure Registry/Studio footprint validation, never a document, inventory
 or write permit. Every hit requires fresh authenticated file bytes, scope/filename binding and
 the exact complete-wrapper digest/size. Ordinary complete scans warm it; remount starts cold.
-The mutable active target still has a separate 256 KiB source rail before reconstruction.
+The sole mounted store can also retain one owned verified Studio restart unit, moved rather than
+cloned. Explicit view access prepares it; warm receive and timeline reads reauthenticate its exact
+complete wrapper and bind current actor/group/MLS before reuse. Index refreshes keep only their
+verified footprint when art occupies the slot, so list invalidation does not evict opened art.
+The source has an 8 MiB encoded-input rail, not an 8 MiB heap promise. Cold targets retain the
+256 KiB rail; automatic work never falls back to a large cold restore. Ingest uses the same typed
+gate, fresh complete inventory/budget and durable save. Failed takes discard the owned graph;
+successful unchanged flushes preserve the physical version rather than a normalized snapshot hash.
 Failures pause until successful explicit Studio access and emit StudioReceivePaused; peer traffic
 cannot repeatedly trigger a failed scan. This is not a reduced document cap or completed large-
-vault collaboration: larger active-source reuse, discovery and retry/catch-up remain Gate 3.
+vault collaboration: cold-source service, discovery and retry/catch-up remain Gate 3 limitations.
 No new persistence, finality, blob fetch or UI implementation is introduced.
 Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
 Jam descriptors are bounded/validated and retain their existing declaration-order identity hash

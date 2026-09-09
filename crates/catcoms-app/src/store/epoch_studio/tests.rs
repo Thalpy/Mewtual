@@ -5,6 +5,8 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 mod inventory_cache;
+pub(crate) mod performance;
+mod source;
 
 const SERVER: u64 = 73;
 fn rng() -> ChaCha20Rng {
@@ -451,7 +453,7 @@ fn reference_scan_keeps_an_overwritten_checkpoint_register_after_reopen() {
         )
         .unwrap();
     }
-    let source = EpochStudioState { unit };
+    let source = EpochStudioState { unit, source: None };
     let seed = source.projection().unwrap().checkpoint([7; 32]).unwrap();
     let mut next = StudioEpoch::from_checkpoint(
         &f.group,
