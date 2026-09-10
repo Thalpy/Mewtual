@@ -276,60 +276,161 @@ Proven today:
    The closest is `pex_round_trip_learns_a_third_member_through_a_second`, which is peer discovery,
    not document content.
 2. **Multi-micelle heal.** No test partitions a group into three, writes in each, kills several
-   authors, then heals in a chain and asserts identical head sets at every survivor.
-3. **A frontier wider than 64 concurrent heads.**
+   authors, then heals in a chain and asserts identical head sets at every survivor. Critically,
+   nothing asserts the *intermediate* state (that the bridge peer held the third party's op before
+   the original author died), which is what makes the relay chain unambiguous. See section 10.1.
+3. **A frontier wider than 64 concurrent heads.** See section 8, P1.
 4. **Convergence across a membership change that happened inside one partition.**
+5. **The stranded-member states.** Neither the 257-to-1024 buffered case nor the beyond-1024 silent
+   case has a test, and the latter currently produces no observable evidence to assert on.
+6. **Divergent clocks across a heal**, asserted against the read-position and presentation
+   surfaces rather than against convergence.
 
 ---
 
 ## 8. Open questions and hazards, ranked
 
-**H1. Membership and routing rotation across a long partition.** This is the biggest one and it is
-genuinely unresolved.
+Ranking agreed after review. The data plane is not the risk; the remaining uncertainty is in the
+control plane and in how two independently reasonable bounds compose.
 
-Ops are sealed under the epoch current at send time, and catch-up **re-seals under the receiver's
-current epoch**, so the durable content path is safe by construction. The exposure is routing and
-commits:
+| Priority | Concern | Assessment |
+|---|---|---|
+| P0 | Stale member stranded past the commit window, **silently** | Recovery works; the failure state is untyped |
+| P1 | >64 frontier heads vs the 8 non-progress rounds | Two DoS bounds may compose against an honest peer |
+| P1 | Epidemic relay does not extend to the P1 document family | A real limit on the micelle guarantee |
+| P2 | Membership change inside a partition | Control-plane semantics not established |
+| P3 | Timestamp ordering after a heal | Data converges; UI integrity is the exposure |
+| P3 | "Converged" means "with everyone reachable" | Correct semantics; dangerous only if overinterpreted |
+| P4 | Buffered-but-not-in-`heads()` | Regression coverage, not present evidence of a defect |
 
-- the gossip topic derives from a routing label that rotates on member **removal**, and the
-  grandfather window is only `{L, L-1, L-2}`
-  ([sync/lib.rs:6441](../crates/catcoms-sync/src/lib.rs#L6441),
-  [:6463](../crates/catcoms-sync/src/lib.rs#L6463)). A member that missed three removals is
-  subscribed to topics nobody publishes on;
-- its route back is commit catch-up, which advances the label and resubscribes, but `commit_log` is
-  bounded at `max_commit_log` (default 256,
-  [sync/lib.rs:738](../crates/catcoms-sync/src/lib.rs#L738)).
+### P0. Long-partition routing recovery (was H1). Traced; the mechanism works, the failure is silent.
 
-**Open: what happens when the commit gap exceeds every reachable member's retained commit log?**
-I have not traced that path to a conclusion. Start at
-[`do_commit_catchup`](../crates/catcoms-sync/src/lib.rs#L11490) and
-[`serve_commit_catchup`](../crates/catcoms-sync/src/lib.rs#L12323).
+The feared liveness failure **does not occur in the ordinary case**, and the design anticipated it
+explicitly:
 
-**H2. Relay coverage is document-scoped.** `on_gossip` drops ops for unopened documents, and
-`serve_catchup_since` answers `ABSENT` for them. In practice all *listed* channels are auto-opened
-at startup, so this is mostly benign; but a node that has not yet received the channel-index entry
-for a new channel cannot relay that channel, and per-document surfaces outside the index depend on
-their own open calls. Worth confirming for DMs and Studio targets specifically.
+- [`maybe_probe_for_missed_commits`](../crates/catcoms-sync/src/lib.rs#L6557) fires on every
+  `PeerConnected` for any non-committer, enqueuing a commit catch-up from this node's own epoch.
+  Its own comment states the reason: rotation made topics label-specific, so a member that has
+  fallen behind no longer receives the live topic and would have no reactive trigger, and commit
+  catch-up is point-to-point so it "recovers us regardless of how far behind we are".
+- [`authenticate_request`](../crates/catcoms-sync/src/lib.rs#L6337) checks roster membership,
+  wall-clock freshness and the signature. It binds `req_epoch` into the transcript but **never
+  compares it against the server's current epoch**. A stale-but-still-rostered member is therefore
+  not locked out of the control plane by its staleness.
 
-**H3. "Converged" is scoped to currently connected peers.**
-`unchecked_source_exists` only counts connected proven members, which is the right engineering
-answer (you cannot wait on the unreachable) but means the internal state "converged" is
-*converged with everyone I can currently reach*. Check that nothing in the UI presents it as more
-than that.
+So Alice at label `L` with the group at `L+3` heals as follows: connect to any current member,
+request commit catch-up point-to-point (topic-independent), apply the commits in order,
+`rotate_routing_secret` bumps her label once per removal commit, `needs_resync` resubscribes her to
+the current topics, and the ordinary document sweep then runs.
 
-**H4. Frontier truncation interacting with the non-progress bound.** `sync_frontier` is capped at
-64. Beyond that the requester understates what it holds, the peer replays a prefix, the round
-applies nothing, and it counts toward `MAX_NONPROGRESSING_CATCHUP_ROUNDS`. Eight such rounds
-deprioritise an honest source. Whether a real document can sustain more than 64 concurrent heads
-long enough to matter is untested.
+**The residual is narrower than feared and entirely undiagnosed.** Two bounds define a dead zone:
 
-**H5. Long-partition ordering surprise.** Section 5.1. Not a bug; a product decision that should be
-made deliberately rather than discovered by a user.
+- serving side, `max_commit_log` = 256 ([:738](../crates/catcoms-sync/src/lib.rs#L738)).
+  `serve_commit_catchup` filters `commit_epoch >= from_epoch`; if the requester's epoch predates
+  the oldest retained record, everything served starts *above* it.
+- receiving side, `max_commit_gap` = 1024 ([:740](../crates/catcoms-sync/src/lib.rs#L740)).
+  `buffer_future_commit` drops any record further ahead than that before it is buffered.
 
-**H6. Buffered changes are held but invisible.** A change whose dependencies have not arrived is
-kept in the log and re-servable, but does not appear in `heads()`, so `doc_version` (op count) and
-the frontier disagree about it briefly. I did not find a case where this is wrong; noting it
-because it is the kind of thing that becomes wrong under a later refactor.
+Which gives two distinct stranded states:
+
+| Gap behind | What happens | Evidence produced |
+|---|---|---|
+| <= 256 | Heals normally | ordinary debug logs |
+| 257 to 1024 | Records buffer, `drain_pending_commits` cannot chain them | one `tracing::warn!` |
+| > 1024 | Records dropped before buffering; `pending_commits` stays empty | **nothing at all** |
+
+The warn is at [sync/lib.rs:11587](../crates/catcoms-sync/src/lib.rs#L11587) and says "a full
+rejoin/snapshot is needed". Grep confirms it is the **only** occurrence of that condition anywhere:
+it is not a typed state, not a `SyncStats` counter, not an event, not in diagnostics, not in the
+UI. And in the `> 1024` case it does not fire, because the guard requires a non-empty
+`pending_commits`.
+
+Worse, both stranded states return `CommitCatchupOutcome::Verified { applied: 0 }`, which the drain
+at [:5703](../crates/catcoms-sync/src/lib.rs#L5703) reads as `closed` when nothing is buffered.
+That is byte-for-byte the same conclusion as an honest "you are already up to date". The
+`Empty` variant already carries a doc comment flagging exactly this class of conflation
+([:1015](../crates/catcoms-sync/src/lib.rs#L1015)); this is a second instance of it, one level up.
+
+So the accurate statement of the risk is not "she can never reach the data plane". It is: **when
+she genuinely is stranded, nothing in the system knows.** The UI will show a connected, member,
+apparently-syncing node that will never converge. That is the detectability defect, and it is worth
+fixing regardless of how rare the epoch gap is, because rarity is what makes an undiagnosed state
+expensive.
+
+### P1. Frontier truncation composing with the non-progress bound (was H4). Untested.
+
+The composition, restated:
+
+```
+frontier capped at 64 heads
+        v
+requester cannot fully describe what it holds
+        v
+serving peer legitimately resends ops behind the unnamed heads
+        v
+dedup drops them: zero newly applied
+        v
+note_nonprogressing_catchup increments
+        v
+after 8 rounds an honest source is deprioritised
+```
+
+Both halves are individually correct defences. `MAX_CATCHUP_SINCE_HEADS` bounds the graph walk a
+requester can demand; `MAX_NONPROGRESSING_CATCHUP_ROUNDS` bounds a peer that says "ask me again"
+forever. Nothing establishes that they cannot fire against each other, and the design comment on
+the non-progress bound explicitly acknowledges that an empty round is legitimate precisely because
+the frontier can understate what is held. Test this before spending time on presentation work.
+
+### P1. Epidemic relay does not extend to the P1 document family (was H2). Traced; scope confirmed.
+
+For the **v1 document types the epidemic claim holds broadly**. The actor opens, at startup:
+ChannelIndex, every listed Channel, Profile, Livery, Badges, Devices, FileIndex, Status, Calendar,
+Wiki, MemberRoles and Moderation ([actor.rs:3427-3505](../crates/catcoms-app/src/actor.rs#L3427-L3505)).
+DMs are not a separate stack at all: a DM is a two-person server
+([design-dms-friends.md](design-dms-friends.md)), so it runs the same actor startup and inherits
+the same coverage.
+
+The genuine gap is the **epoch-managed P1 types**: `StudioIndex`, `StudioObject`, `PostReplies`,
+`DocRegistry`. These never enter the legacy `docs` map, and
+[`apply_signed_tracked`](../crates/catcoms-replication/src/doc.rs#L1105) refuses them outright with
+`EpochScope`. They replicate through a different protocol (kinds 20 to 25), whose carrier set is
+deliberately bounded: at most 16 recent-target watches, installed only after successful explicit
+Studio access, and explicitly volatile across restart (see ARCHITECTURE section 2).
+
+So the precise limit on the micelle property is: **a bridge peer relays everything it holds for the
+v1 document family, and relays a Studio object only if it happened to have opened it.** That is a
+deliberate design choice, not a defect, but it means the sentence "B is the only surviving bridge,
+so B preserves everything" is true for chat and false for Create-suite content. Worth deciding
+whether that is the intended product promise.
+
+### P2. Membership change inside a partition
+
+If one micelle performs a removal while split, the two halves rotate labels independently and the
+control-plane semantics of the heal are not established anywhere I could find. Distinct from P0,
+which is about a member falling behind a *linear* commit chain. No test covers it.
+
+### P3. Ordering after a heal (was H5)
+
+Section 5.1. Sharpen this into a clock-skew test rather than a presentation change: correct clock,
+minus three days, plus one year, all three writing during a partition, then heal. Nothing should
+disappear, and I expect convergence to be clean. The exposure is everything downstream of the
+sort: unread boundary, "latest message", the latest-own-message delivery anchor, day dividers,
+pagination, scroll-to-bottom, notification previews and conversation-list ordering. A broken or
+hostile local clock should not be able to make a conversation read as active until 2027, or bury
+genuinely unread messages three days back.
+
+### P3. "Converged" is scoped to reachable peers (was H3)
+
+`unchecked_source_exists` counts only connected proven members. That is the right engineering
+answer, since you cannot wait on the unreachable. Confirm nothing in the UI or in security-relevant
+code presents it as a group-wide fact.
+
+### P4. Buffered changes are held but invisible (was H6)
+
+A change whose dependencies have not arrived is kept in the log and is re-servable, but does not
+appear in `heads()`, so `doc_version` (op count) and the frontier disagree about it briefly. No
+case found where this is wrong. Noted because it is the kind of invariant a later refactor breaks
+quietly.
 
 ---
 
@@ -353,14 +454,67 @@ old notes will otherwise re-derive them.
 
 ---
 
-## 10. Suggested next step
+## 10. Next steps, in order
 
-The single highest-value test to write is the one nothing currently covers: a three-way partition
-with concurrent writes, permanent loss of several authors, and a **chained** heal
-(B <-> C, then C <-> E, where B and E never meet), asserting identical Automerge head sets and
-identical message id sets at every survivor. It exercises transitive relay, dedup, concurrent-head
-preservation and the completion sweep in one scenario, and it is the scenario the product
-description promises.
+### 10.1 The chained three-micelle test
 
-The natural home is `crates/catcoms-sync/tests/sync.rs` over the deterministic `MemNetwork`
-transport, which already supports multi-member convergence tests.
+Home: `crates/catcoms-sync/tests/sync.rs` over the deterministic `MemNetwork`.
+
+```
+converge:   A B | C D | E F      (one group, all six at the same state)
+partition:  [A B]  [C D]  [E F]
+
+writes:     A -> a1      C -> g1      E -> e1
+            B -> b1      D -> d1      F -> f1
+
+assert intermediates BEFORE anyone dies:
+            B holds a1
+            C holds d1
+            E holds f1
+
+kill permanently: A, D, F
+
+heal 1:     B <-> C      wait for convergence
+assert:     B and C each hold exactly {a1, b1, g1, d1}
+
+disconnect B  (B and E must never communicate)
+
+heal 2:     C <-> E      wait for convergence
+assert:     C and E each hold exactly {a1, b1, g1, d1, e1, f1}
+
+reconnect:  B <- C -> E
+assert:     identical Automerge head sets AND identical message id sets everywhere
+```
+
+The intermediate assertions are the point. Establishing that C held `a1` *before* B disappeared is
+what makes E's later receipt of `a1` unambiguous evidence of the chain
+
+```
+A authored -> B relayed -> C stored third-party history -> B gone -> C re-relayed -> E received
+```
+
+rather than E having quietly obtained it from A or B. Without that assertion the test can pass for
+the wrong reason.
+
+**Second variant, same fixture:** break the B <-> C link partway through a chunked catch-up,
+reconnect it, and have C author a new message *during* reconciliation. That exercises requeue,
+dedup, the `MORE` continuation, the op-count version reset of the completion sweep, and
+concurrent-head preservation in one pass.
+
+### 10.2 The frontier-vs-non-progress test (P1)
+
+Drive a document past 64 concurrent heads and assert that an honest serving peer is not
+deprioritised by `MAX_NONPROGRESSING_CATCHUP_ROUNDS`. This is cheap to write and settles whether
+the composition in section 8 is real.
+
+### 10.3 Type the stranded-member state (P0)
+
+Not a test but a small protocol-visibility change: make the unfillable-gap condition a typed
+outcome rather than a log line, cover the `> max_commit_gap` case that currently produces no
+evidence at all, and stop it presenting as `Verified { applied: 0 }`. Detectability first; deciding
+what recovery to offer is separate.
+
+### 10.4 The clock-skew UI-integrity test (P3)
+
+Per section 8: three divergent clocks, partition, heal, then assert on the read-position and
+presentation surfaces rather than on convergence.
