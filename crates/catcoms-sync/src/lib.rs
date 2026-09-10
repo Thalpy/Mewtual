@@ -953,6 +953,10 @@ pub struct SyncStats {
     pub commits_served: u64,
     /// Commit-catch-up requests this node issued to recover missed commits.
     pub commit_catchups_requested: u64,
+    /// Times a reached source proved it could not chain this node's epoch onward, counted once
+    /// per epoch this node was stuck at rather than once per exchange. See
+    /// [`ChannelSync::membership_chain_gap`] for the detail and for whether one is current.
+    pub commit_chain_gaps_observed: u64,
     /// Live ops decrypted under the current epoch.
     pub ops_ingested: u64,
     /// Live ops recovered with a retained past-epoch key (crossed a boundary).
@@ -1015,6 +1019,36 @@ enum CatchupTask {
     Doc { doc_type: DocType, doc_id: u128 },
 }
 
+/// A membership chain this node cannot complete from any source it has reached.
+///
+/// The document data plane can repair a member from any peer that holds the history, but it can
+/// only be reached through the current routing label, and that label advances by replaying
+/// membership commits in order. A member that has missed more removals than every reachable peer
+/// still retains is therefore fully connected, still in the roster, and permanently unable to
+/// converge. Nothing in the protocol fixes that on its own, so the first requirement is that the
+/// state be nameable rather than inferred from an absence.
+///
+/// Evidence from the sources actually asked, not a claim about the group: another member may hold
+/// a longer log, which is why `lowest_available` keeps the best offer seen at this epoch and why
+/// the whole record is discarded the moment the epoch moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MembershipChainGap {
+    /// The epoch this node is stuck at.
+    pub current_epoch: u64,
+    /// The lowest commit epoch any reached source could still offer. Everything between this and
+    /// `current_epoch` has aged out of every commit log this node has seen.
+    pub lowest_available: u64,
+    /// When this was last observed, on the injected wall clock.
+    pub observed_at_ms: u64,
+}
+
+impl MembershipChainGap {
+    /// How many membership commits are missing from every log this node has reached.
+    pub fn missing_commits(&self) -> u64 {
+        self.lowest_available.saturating_sub(self.current_epoch)
+    }
+}
+
 /// What one commit catch-up exchange **established**, as distinct from how far this node happened
 /// to move while performing it.
 ///
@@ -1039,6 +1073,20 @@ enum CommitCatchupOutcome {
     /// oversized, undecodable, or not signed by a current member. A fact about the peer and the
     /// link, and evidence about the commit log in neither direction.
     Unanswered,
+    /// The peer answered with authenticated records and none of them chain onto this node's
+    /// epoch: everything it still holds begins above where this node is.
+    ///
+    /// This is the state that was invisible. `serve_commit_catchup` sends a contiguous run from
+    /// the requester's own epoch upward, so a bundle whose lowest record is higher than that says
+    /// the intervening commits have aged out of this peer's retained log. The chain cannot be
+    /// replayed from here, the routing label cannot advance, and the member stays subscribed to
+    /// topics nobody publishes on.
+    ///
+    /// Both bands of it look the same from outside and neither used to be reportable: within
+    /// `max_commit_gap` the records buffer and cannot drain, and past it they are dropped before
+    /// buffering, which produced no evidence at all. Either way the exchange previously returned
+    /// `Verified { applied: 0 }`, which is byte-for-byte what an honest up-to-date peer returns.
+    Stranded { lowest_available: u64 },
 }
 
 impl CommitCatchupOutcome {
@@ -1046,7 +1094,7 @@ impl CommitCatchupOutcome {
     fn applied(self) -> usize {
         match self {
             Self::Verified { applied } => applied,
-            Self::Empty | Self::Unanswered => 0,
+            Self::Empty | Self::Unanswered | Self::Stranded { .. } => 0,
         }
     }
 
@@ -4068,6 +4116,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Keyed by peer because a cursor from one is meaningless to another. Bounded like every
     /// other per-document ledger here; the keys are all this node's own.
     catchup_cursors: HashMap<(DocType, u128, PeerId), CatchupCursor>,
+    /// The membership chain this node could not complete, if it has met one. Never persisted, and
+    /// read through [`ChannelSync::membership_chain_gap`], which discards it once the epoch moves.
+    commit_chain_gap: Option<MembershipChainGap>,
     /// Tasks whose lack of an eligible source has already been reported. A kept task is retried
     /// on every drain, so without this the same stall is restated for as long as it lasts: one
     /// document with one checked source wrote a line a second for half an hour. Emptied whenever
@@ -4384,6 +4435,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             catchup_sources_checked: HashMap::new(),
             catchup_provider: provider,
             catchup_cursors: HashMap::new(),
+            commit_chain_gap: None,
             catchup_stall_reported: HashSet::new(),
             pending: None,
             welcome_outbox: Vec::new(),
@@ -5808,7 +5860,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     //
                     // An empty response still closes it, because that is also what an up-to-date
                     // member sends; see [`CommitCatchupOutcome::Empty`] for what that costs.
+                    //
+                    // A source that proved it cannot chain us closes nothing, however tidy its
+                    // answer looked. Until that outcome was typed it arrived as
+                    // `Verified { applied: 0 }` with an empty buffer, satisfied every term here,
+                    // and retired the recovery: the node then sat connected and permanently
+                    // behind, with nothing anywhere recording why. Falling through to the branch
+                    // below instead marks the source and re-queues, so the next drain asks
+                    // somebody whose log reaches further back.
                     let closed = outcome.answered()
+                        && !matches!(outcome, CommitCatchupOutcome::Stranded { .. })
                         && self.pending_commits.is_empty()
                         && gap_at.is_none_or(|gap| here >= gap);
                     tracing::debug!(
@@ -11716,6 +11777,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // does not carry the peer it was sent from.
         self.promote_member_peer(peer, responder);
         let mut applied = 0;
+        // The lowest epoch this peer offered above where we stood. Taken from the records as they
+        // arrive rather than from `pending_commits` afterwards, because a record further ahead
+        // than `max_commit_gap` is dropped before it is ever buffered: reading the buffer alone
+        // made the worse of the two stranded bands the invisible one.
+        let mut lowest_future: Option<u64> = None;
         for record in records {
             if record.group_id != group_id {
                 continue;
@@ -11727,27 +11793,72 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                         applied += 1;
                     }
                 }
-                Ordering::Greater => self.buffer_future_commit(record),
+                Ordering::Greater => {
+                    lowest_future = Some(
+                        lowest_future
+                            .map_or(record.commit_epoch, |low: u64| low.min(record.commit_epoch)),
+                    );
+                    self.buffer_future_commit(record);
+                }
                 Ordering::Less => {}
             }
         }
         // Buffered successors that the fetch unblocked now drain in order.
         self.drain_pending_commits();
-        if let Some((&lowest_gap, _)) = self.pending_commits.iter().next() {
-            if lowest_gap > self.group.epoch() {
-                tracing::warn!(
-                    current = self.group.epoch(),
-                    lowest_gap,
-                    "commit catch-up left an unfillable gap (source's window evicted it); a full rejoin/snapshot is needed"
-                );
-            }
+        let here = self.group.epoch();
+        tracing::debug!(applied, epoch = here, "applied commit catch-up");
+        // A peer serves a contiguous run from the epoch we named upward, so an offer that still
+        // begins above us after draining means the commits in between have left its log. That is
+        // the whole condition, and it covers both bands: buffered-but-unchainable, and dropped
+        // for being too far ahead.
+        if let Some(lowest) = lowest_future.filter(|lowest| *lowest > here) {
+            self.note_membership_chain_gap(here, lowest);
+            return Ok(CommitCatchupOutcome::Stranded {
+                lowest_available: lowest,
+            });
         }
-        tracing::debug!(
-            applied,
-            epoch = self.group.epoch(),
-            "applied commit catch-up"
-        );
         Ok(CommitCatchupOutcome::Verified { applied })
+    }
+
+    /// Record that a reached source could not chain this node's epoch onward.
+    ///
+    /// Keeps the *best* offer seen at this epoch, because a shorter gap is a better chance: two
+    /// peers with different retention tell this node how far it would have to be repaired, and
+    /// the smaller number is the one worth reporting. Any epoch advance discards the record on
+    /// read, so a node that is subsequently repaired stops claiming to be stranded without any
+    /// path needing to remember to clear it.
+    fn note_membership_chain_gap(&mut self, current_epoch: u64, lowest_available: u64) {
+        let observed_at_ms = self.clock.now_ms();
+        let lowest_available = match self.membership_chain_gap() {
+            Some(previous) => previous.lowest_available.min(lowest_available),
+            None => {
+                self.stats.commit_chain_gaps_observed += 1;
+                lowest_available
+            }
+        };
+        tracing::warn!(
+            current_epoch,
+            lowest_available,
+            missing = lowest_available.saturating_sub(current_epoch),
+            "no reached source retains the membership commits this node is missing; it cannot \
+             rejoin the current routing label without being repaired out of band"
+        );
+        self.commit_chain_gap = Some(MembershipChainGap {
+            current_epoch,
+            lowest_available,
+            observed_at_ms,
+        });
+    }
+
+    /// The membership chain this node cannot complete, if it has met one at its current epoch.
+    ///
+    /// `None` is the ordinary answer and means only that no source has yet said it cannot help:
+    /// a node that has spoken to nobody reports nothing, exactly as one that is up to date does.
+    /// The record is discarded here rather than cleared at every epoch-advance path, so a repair
+    /// through any route retires it without that route having to know about it.
+    pub fn membership_chain_gap(&self) -> Option<MembershipChainGap> {
+        self.commit_chain_gap
+            .filter(|gap| gap.current_epoch == self.group.epoch())
     }
 
     /// Read a document's materialized state.
@@ -16167,6 +16278,248 @@ mod tests {
             node.pending_commits.is_empty(),
             "a far-future commit must be rejected, not buffered"
         );
+    }
+
+    /// Ask Alice for commits from `from_epoch` and let her serve it from her real commit log.
+    ///
+    /// Deliberately not `run_once` on the serving side: that also drains her catch-up queue,
+    /// which issues a request nobody in these fixtures answers and an injected clock never times
+    /// out. Her stream also carries whatever else the fixture left on it, so this drains to the
+    /// commit request rather than assuming it is first.
+    async fn commit_catchup_between(
+        bob: &mut Member,
+        alice: &mut Member,
+        alice_peer: PeerId,
+        bob_peer: PeerId,
+        from_epoch: u64,
+    ) -> CommitCatchupOutcome {
+        let (outcome, ()) = tokio::join!(bob.do_commit_catchup(alice_peer, from_epoch), async {
+            for _ in 0..16 {
+                match alice.transport.next_event().await {
+                    Some(TransportEvent::Request {
+                        data, responder, ..
+                    }) if data.first() == Some(&KIND_COMMIT_CATCHUP) => {
+                        let served = alice
+                            .serve_commit_catchup(bob_peer, &data[1..])
+                            .expect("a member serves a member");
+                        responder.respond(Bytes::from(served));
+                        return;
+                    }
+                    Some(_) => continue,
+                    None => panic!("the transport closed before the request arrived"),
+                }
+            }
+            panic!("the commit catch-up request never arrived");
+        });
+        outcome.expect("the exchange completed")
+    }
+
+    /// One membership commit record, with opaque bytes: nothing below applies one.
+    fn stub_commit(group_id: Vec<u8>, commit_epoch: u64) -> CommitRecord {
+        CommitRecord {
+            group_id,
+            commit_epoch,
+            committer_device: [0u8; 32],
+            mls_commit: vec![7],
+            base_authenticator: [0u8; 32],
+            committer_sig: [0u8; 64],
+        }
+    }
+
+    /// A source whose retained log begins above us is reported, not read as "you are up to date".
+    ///
+    /// This is the P0 in `docs/MESSAGE-FLOW.md` section 8. A member that missed more removals than
+    /// its peers still retain is fully connected, still in the roster, and permanently unable to
+    /// advance its routing label. The exchange used to return `Verified { applied: 0 }`, which is
+    /// byte-for-byte what an honest up-to-date peer returns, so the recovery task retired itself
+    /// and nothing recorded why the node never converged.
+    ///
+    /// Both bands are covered here because only one of them left even a log line: within
+    /// `max_commit_gap` the records buffer and cannot drain, and past it they are dropped before
+    /// buffering, which produced no evidence at all.
+    #[tokio::test]
+    async fn a_source_that_cannot_chain_us_is_reported_rather_than_read_as_up_to_date() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        let gid = alice.group.group_id();
+        let here = bob.group.epoch();
+
+        // Beyond `max_commit_gap`, so the record is dropped before it is ever buffered. This is
+        // the band that used to produce no evidence whatsoever.
+        let far = here + bob.config.max_commit_gap + 5_000;
+        alice.commit_log.clear();
+        alice.commit_log.push_back(stub_commit(gid.clone(), far));
+        let outcome =
+            commit_catchup_between(&mut bob, &mut alice, alice_peer, bob_peer, here).await;
+        assert_eq!(
+            outcome,
+            CommitCatchupOutcome::Stranded {
+                lowest_available: far
+            },
+            "a bundle that begins above us is not an up-to-date answer"
+        );
+        assert!(
+            bob.pending_commits.is_empty(),
+            "and nothing was buffered, which is why this band was invisible"
+        );
+        let gap = bob
+            .membership_chain_gap()
+            .expect("the state is nameable now");
+        assert_eq!(gap.current_epoch, here);
+        assert_eq!(gap.lowest_available, far);
+        assert_eq!(gap.missing_commits(), far - here);
+        assert_eq!(bob.stats().commit_chain_gaps_observed, 1);
+
+        // Within the bound, where the records buffer and still cannot be chained. A nearer offer
+        // is a better chance of repair, so it replaces the further one.
+        let near = here + 40;
+        alice.commit_log.clear();
+        alice.commit_log.push_back(stub_commit(gid.clone(), near));
+        let outcome =
+            commit_catchup_between(&mut bob, &mut alice, alice_peer, bob_peer, here).await;
+        assert_eq!(
+            outcome,
+            CommitCatchupOutcome::Stranded {
+                lowest_available: near
+            }
+        );
+        assert!(
+            !bob.pending_commits.is_empty(),
+            "this band does buffer, and still cannot drain"
+        );
+        assert_eq!(
+            bob.membership_chain_gap().map(|gap| gap.lowest_available),
+            Some(near),
+            "the best offer any source could make is the one worth reporting"
+        );
+        assert_eq!(
+            bob.stats().commit_chain_gaps_observed,
+            1,
+            "counted once per epoch this node is stuck at, not once per exchange"
+        );
+
+        // Neither outcome may retire the recovery, and the source that proved it cannot help is
+        // set aside so the next drain asks somebody with a longer log.
+        assert_eq!(outcome.applied(), 0, "nothing was applied");
+        assert!(
+            outcome.answered(),
+            "the peer did answer; it just cannot help"
+        );
+
+        // Discarded on read once the epoch moves, so a repair through any route retires it
+        // without that route having to know this state exists.
+        bob.note_membership_chain_gap(here + 1, here + 9);
+        assert!(
+            bob.membership_chain_gap().is_none(),
+            "a gap recorded at another epoch says nothing about this one"
+        );
+    }
+
+    /// A stranded answer must not retire the recovery it failed to complete.
+    ///
+    /// This is the half of the P0 that costs something rather than merely failing to report it.
+    /// `Verified { applied: 0 }` with an empty buffer satisfied every term of the drain's
+    /// completion test, so the task was dropped, the source was left unmarked, and nothing tried
+    /// anybody else. A member with a longer log might have been one drain away.
+    #[tokio::test]
+    async fn a_stranded_source_is_set_aside_and_the_recovery_outlives_it() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        let here = bob.group.epoch();
+
+        // Deliberately the band past `max_commit_gap`, where the record is dropped before it is
+        // buffered. The nearer band leaves something in `pending_commits`, which already fails
+        // the drain's completion test on its own; only here does the outcome itself have to carry
+        // the fact, and only here did the recovery used to retire itself.
+        alice.commit_log.clear();
+        alice.commit_log.push_back(stub_commit(
+            alice.group.group_id(),
+            here + bob.config.max_commit_gap + 5_000,
+        ));
+        bob.enqueue_commit_catchup(here);
+        assert!(bob
+            .catchup_queue
+            .iter()
+            .any(|task| matches!(task, CatchupTask::Commits { .. })));
+
+        let (attempted, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            for _ in 0..16 {
+                match alice.transport.next_event().await {
+                    Some(TransportEvent::Request {
+                        data, responder, ..
+                    }) if data.first() == Some(&KIND_COMMIT_CATCHUP) => {
+                        let served = alice
+                            .serve_commit_catchup(bob_peer, &data[1..])
+                            .expect("a member serves a member");
+                        responder.respond(Bytes::from(served));
+                        return;
+                    }
+                    Some(_) => continue,
+                    None => panic!("the transport closed before the request arrived"),
+                }
+            }
+            panic!("the commit catch-up request never arrived");
+        });
+        assert!(attempted, "a source was reachable and was asked");
+        assert!(
+            bob.pending_commits.is_empty(),
+            "nothing buffered, so only the typed outcome can keep this task alive"
+        );
+
+        assert!(
+            bob.catchup_queue
+                .iter()
+                .any(|task| matches!(task, CatchupTask::Commits { .. })),
+            "the gap outlives an answer that could not fill it"
+        );
+        assert!(
+            bob.failed_catchup_peers.contains(&alice_peer),
+            "and the source that proved it cannot help is set aside for the next drain"
+        );
+        assert!(
+            bob.membership_chain_gap().is_some(),
+            "with the reason recorded rather than inferred from an absence"
+        );
+    }
+
+    /// The other half of the same claim: silence has to keep meaning silence.
+    ///
+    /// A member that is genuinely up to date answers a speculative probe with nothing, and that
+    /// must not be reported as a chain gap. A detectability signal that fires on the ordinary case
+    /// is worse than none, because the state it describes is the one nobody can act on.
+    #[tokio::test]
+    async fn an_up_to_date_source_reports_no_membership_gap() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        let here = bob.group.epoch();
+        assert_eq!(here, alice.group.epoch(), "they agree to begin with");
+
+        // Alice holds nothing at or above Bob's epoch, which is exactly what an up-to-date group
+        // looks like from a probe.
+        alice.commit_log.clear();
+        let outcome =
+            commit_catchup_between(&mut bob, &mut alice, alice_peer, bob_peer, here + 1).await;
+        assert_eq!(outcome, CommitCatchupOutcome::Empty);
+        assert!(
+            bob.membership_chain_gap().is_none(),
+            "an ordinary probe against an ordinary group reports nothing"
+        );
+        assert_eq!(bob.stats().commit_chain_gaps_observed, 0);
     }
 
     #[test]
