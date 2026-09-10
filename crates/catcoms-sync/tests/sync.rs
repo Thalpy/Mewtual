@@ -1401,3 +1401,253 @@ async fn channel_delivery_survives_a_topic_rotation_on_removal() {
     assert!(s[1].run_once().await.unwrap());
     assert_eq!(get_str(&s[1], "after").as_deref(), Some("2"));
 }
+
+// --- micelle convergence: chained heal across three partitions ---------------
+//
+// The scenario `docs/MESSAGE-FLOW.md` section 10.1 specifies. Everything else in this file tests
+// two members, or a group that stays whole. This tests the property the product actually
+// promises: that a group which splits into independent sub-groups, writes in each, loses several
+// authors outright, and is then rejoined one link at a time by members who never all meet, still
+// ends with the same history everywhere.
+//
+// The load-bearing implementation detail is that `EncryptedDoc::export_catchup_since` iterates
+// the serving node's *entire* signed-op log rather than the ops it authored, and
+// `apply_signed_tracked` pushes every accepted op into that same log. A node therefore relays
+// third-party history on the strength of holding it. This test is what turns that from a reading
+// of the code into a fact about the system.
+
+/// Peer ids, stable across every topology below.
+const P_A: u64 = 1;
+const P_B: u64 = 2;
+const P_C: u64 = 3;
+const P_D: u64 = 4;
+const P_E: u64 = 5;
+const P_F: u64 = 6;
+
+/// Move one member's durable state onto a different network topology.
+///
+/// A partition is not something `MemNetwork` can express: its `Hub` delivers every publication to
+/// every subscriber of a topic, so all six members sharing one hub would hear everything. A
+/// micelle is therefore its own hub, and a member changes micelle by snapshotting and restoring
+/// onto the new one. That is also the honest model of the real event: the member's durable state
+/// survives, its neighbourhood does not. It exercises the restore path as a bonus, which is where
+/// `first_proof_sweep_owed` lives.
+async fn relocate(
+    sync: &mut ChannelSync<MemNetwork, ChaCha20Rng>,
+    hub: &std::sync::Arc<Hub>,
+    peer: u64,
+    clock: &ManualClock,
+    seed: u64,
+) -> ChannelSync<MemNetwork, ChaCha20Rng> {
+    let snapshot = sync
+        .snapshot()
+        .expect("snapshot the member's durable state");
+    let mut moved = ChannelSync::restore(
+        &snapshot,
+        hub.join(PeerId::from_u64(peer)),
+        rng(seed),
+        Box::new(clock.clone()),
+    )
+    .expect("restore onto the new topology");
+    // Subscriptions live on the hub, not in the snapshot, so they must be re-established.
+    moved.subscribe_control().await.unwrap();
+    moved.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    moved
+}
+
+/// Pull everything `server` holds that `requester` does not, driving both sides until the
+/// exchange stops yielding. Returns the total applied.
+async fn sync_from(
+    requester: &mut ChannelSync<MemNetwork, ChaCha20Rng>,
+    server: &mut ChannelSync<MemNetwork, ChaCha20Rng>,
+    server_peer: u64,
+) -> usize {
+    let mut total = 0;
+    for _ in 0..8 {
+        let (applied, served) = tokio::join!(
+            requester.request_catchup(PeerId::from_u64(server_peer), DocType::Channel, CHANNEL),
+            server.run_once(),
+        );
+        assert!(served.expect("the serving transport stays open"));
+        let applied = applied.expect("catch-up");
+        total += applied;
+        if applied == 0 {
+            break;
+        }
+    }
+    total
+}
+
+/// The message keys this member holds, sorted. Each write below uses a distinct key, so this is
+/// the set of logical messages.
+fn held(sync: &ChannelSync<MemNetwork, ChaCha20Rng>) -> Vec<String> {
+    let doc = sync
+        .doc(DocType::Channel, CHANNEL)
+        .expect("the channel is open")
+        .doc();
+    let mut keys: Vec<String> = doc.keys(ROOT).collect();
+    keys.sort();
+    keys
+}
+
+/// The document's Automerge frontier, sorted. Cloned because `get_heads` needs `&mut`, and the
+/// public accessor hands out a shared reference.
+fn heads(sync: &ChannelSync<MemNetwork, ChaCha20Rng>) -> Vec<automerge::ChangeHash> {
+    let mut doc = sync
+        .doc(DocType::Channel, CHANNEL)
+        .expect("the channel is open")
+        .doc()
+        .clone();
+    let mut heads = doc.get_heads();
+    heads.sort();
+    heads
+}
+
+/// How many signed ops this member holds.
+fn ops(sync: &ChannelSync<MemNetwork, ChaCha20Rng>) -> usize {
+    sync.doc(DocType::Channel, CHANNEL)
+        .expect("the channel is open")
+        .op_count()
+}
+
+#[tokio::test]
+async fn three_micelles_heal_in_a_chain_and_converge_without_their_authors() {
+    catcoms_log::init_test();
+    let clock = ManualClock::new(1_000);
+
+    // --- phase 0: one group, one shared ancestor -----------------------------
+    let hub0 = Hub::new();
+    let (mut syncs, _ids) = build_members(&hub0, &clock, 6).await;
+    for s in syncs.iter_mut() {
+        s.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    }
+    syncs[0]
+        .post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "seed", "0"))
+        .await
+        .unwrap();
+    for s in syncs.iter_mut().skip(1) {
+        assert!(s.run_once().await.unwrap());
+    }
+    for s in syncs.iter() {
+        assert_eq!(held(s), vec!["seed"], "everyone starts from the same state");
+    }
+
+    // --- phase 1: split into three micelles ----------------------------------
+    // Three hubs, and no member is ever registered on two of them at once. That is what makes
+    // the isolation structural rather than a matter of which calls the test remembers to skip.
+    let hub_ab = Hub::new();
+    let hub_cd = Hub::new();
+    let hub_ef = Hub::new();
+    let mut a = relocate(&mut syncs[0], &hub_ab, P_A, &clock, 101).await;
+    let mut b = relocate(&mut syncs[1], &hub_ab, P_B, &clock, 102).await;
+    let mut c = relocate(&mut syncs[2], &hub_cd, P_C, &clock, 103).await;
+    let mut d = relocate(&mut syncs[3], &hub_cd, P_D, &clock, 104).await;
+    let mut e = relocate(&mut syncs[4], &hub_ef, P_E, &clock, 105).await;
+    let mut f = relocate(&mut syncs[5], &hub_ef, P_F, &clock, 106).await;
+    drop(syncs);
+
+    a.post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "a1", "from A"))
+        .await
+        .unwrap();
+    assert!(b.run_once().await.unwrap());
+    b.post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "b1", "from B"))
+        .await
+        .unwrap();
+    assert!(a.run_once().await.unwrap());
+
+    c.post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "g1", "from C"))
+        .await
+        .unwrap();
+    assert!(d.run_once().await.unwrap());
+    d.post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "d1", "from D"))
+        .await
+        .unwrap();
+    assert!(c.run_once().await.unwrap());
+
+    e.post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "e1", "from E"))
+        .await
+        .unwrap();
+    assert!(f.run_once().await.unwrap());
+    f.post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "f1", "from F"))
+        .await
+        .unwrap();
+    assert!(e.run_once().await.unwrap());
+
+    // The intermediate assertions, and the reason this test can only pass for the right reason.
+    // Establishing that B holds A's message *before* A dies is what later makes E's receipt of
+    // it unambiguous evidence of relay rather than of some direct contact.
+    assert_eq!(held(&b), vec!["a1", "b1", "seed"], "B holds A's message");
+    assert_eq!(held(&c), vec!["d1", "g1", "seed"], "C holds D's message");
+    assert_eq!(held(&e), vec!["e1", "f1", "seed"], "E holds F's message");
+    // And no micelle has heard any other micelle's writes.
+    assert_eq!(held(&a), vec!["a1", "b1", "seed"]);
+    assert_eq!(held(&d), vec!["d1", "g1", "seed"]);
+    assert_eq!(held(&f), vec!["e1", "f1", "seed"]);
+
+    // --- phase 2: A, D and F are gone, permanently ---------------------------
+    drop(a);
+    drop(d);
+    drop(f);
+
+    // --- heal 1: B <-> C -----------------------------------------------------
+    let hub_bc = Hub::new();
+    let mut b = relocate(&mut b, &hub_bc, P_B, &clock, 201).await;
+    let mut c = relocate(&mut c, &hub_bc, P_C, &clock, 202).await;
+    assert_eq!(
+        sync_from(&mut b, &mut c, P_C).await,
+        2,
+        "B learns C's micelle"
+    );
+    assert_eq!(
+        sync_from(&mut c, &mut b, P_B).await,
+        2,
+        "C learns B's micelle"
+    );
+
+    let after_first_heal = vec!["a1", "b1", "d1", "g1", "seed"];
+    assert_eq!(held(&b), after_first_heal);
+    assert_eq!(held(&c), after_first_heal);
+    // C now holds history authored by two members it has never exchanged a packet with, one of
+    // whom no longer exists. This is the store half of store-and-forward.
+    assert!(held(&c).contains(&"a1".to_string()));
+
+    // --- heal 2: C <-> E, with B disconnected --------------------------------
+    // B is not relocated onto `hub_ce` and is never registered on it, so B and E have no path to
+    // each other, directly or transitively, for the whole of this phase.
+    let hub_ce = Hub::new();
+    let mut c = relocate(&mut c, &hub_ce, P_C, &clock, 301).await;
+    let mut e = relocate(&mut e, &hub_ce, P_E, &clock, 302).await;
+    assert_eq!(sync_from(&mut e, &mut c, P_C).await, 4, "E learns four ops");
+    assert_eq!(
+        sync_from(&mut c, &mut e, P_E).await,
+        2,
+        "C learns E's micelle"
+    );
+
+    let everything = vec!["a1", "b1", "d1", "e1", "f1", "g1", "seed"];
+    assert_eq!(held(&c), everything);
+    assert_eq!(held(&e), everything);
+    // The whole point. `a1` was authored by A, relayed by B, stored by C, and delivered to E
+    // after A was gone and while B was unreachable from E.
+    assert!(
+        held(&e).contains(&"a1".to_string()),
+        "third-party history reached E through a relay that did not author it"
+    );
+
+    // --- phase 3: reconnect the survivors ------------------------------------
+    let hub_end = Hub::new();
+    let mut b = relocate(&mut b, &hub_end, P_B, &clock, 401).await;
+    let mut c = relocate(&mut c, &hub_end, P_C, &clock, 402).await;
+    let mut e = relocate(&mut e, &hub_end, P_E, &clock, 403).await;
+    assert_eq!(sync_from(&mut b, &mut c, P_C).await, 2, "B learns the rest");
+    // Already converged, so these must be no-ops rather than a source of duplicates.
+    assert_eq!(sync_from(&mut c, &mut e, P_E).await, 0);
+    assert_eq!(sync_from(&mut e, &mut b, P_B).await, 0);
+
+    for s in [&b, &c, &e] {
+        assert_eq!(held(s), everything, "every survivor holds every message");
+        assert_eq!(ops(s), 7, "and holds each of them exactly once");
+    }
+    assert_eq!(heads(&b), heads(&c), "B and C agree on the frontier");
+    assert_eq!(heads(&c), heads(&e), "C and E agree on the frontier");
+}
