@@ -10,7 +10,7 @@
 // function from (patch, editor state) to the next (patch, editor state), so a test can assert what
 // a button does without mounting anything.
 
-import { PATCH_CUTOFF_MAX_HZ, type JamPatch } from "./jam-contract.ts";
+import { JAM_PATCH_NAME_MAX_CHARS, JAM_SAVED_PATCHES_MAX, PATCH_CUTOFF_MAX_HZ, type JamPatch } from "./jam-contract.ts";
 
 /** Which shaping stages carry a bypass. The oscillator stack is not one: it IS the sound. */
 export type JamStage = "e" | "f" | "x";
@@ -34,7 +34,15 @@ export const EMPTY_STAGE_STASH: JamStageStash = { e: null, f: null, x: null };
 // the right lamps with no extra state to keep in step, and nudging any knob turns its stage back
 // on by itself, because the values simply stop being neutral.
 export const JAM_ENV_OFF = { a: 0, d: 0, s: 100, r: 0 } as const; // a gate: full while held
-export const JAM_FILTER_OFF = { m: 0, c: PATCH_CUTOFF_MAX_HZ, q: 0, e: 0 } as const; // wide open
+// Wide open, and the UI says WIDE rather than OFF for it, because this one is not a bypass and the
+// other two are. `jam-patch:v1` has no way to say "no filter", so the neutral setting is the
+// highest cutoff the format admits, and every voice still runs through one lowpass biquad at that
+// corner (lower still, on an output whose sample rate puts Nyquist under it). At 44.1 and 48 kHz
+// that corner is 18 kHz and near the top of hearing, but "the tone passes through whole" was a
+// claim the renderer does not keep. Making this exact tuple bypass the filter is deliberately NOT
+// done here: it would change how an existing jam-patch:v1 id sounds, which belongs to a renderer
+// contract revision and not to a tooltip fix.
+export const JAM_FILTER_OFF = { m: 0, c: PATCH_CUTOFF_MAX_HZ, q: 0, e: 0 } as const;
 export const JAM_SENDS_OFF = { c: 0, d: 0, r: 0 } as const; // nothing reaches the room
 
 // What a stage comes back as when it is switched on with nothing of its own to restore, which is
@@ -46,6 +54,7 @@ export const JAM_SENDS_ON = { c: 0, d: 20, r: 30 } as const;
 export function envOff(patch: JamPatch): boolean {
   return patch.e.a === 0 && patch.e.d === 0 && patch.e.s === 100 && patch.e.r === 0;
 }
+/** The filter at its neutral setting. Wide open, which is not the same claim as bypassed. */
 export function filterOff(patch: JamPatch): boolean {
   return patch.f.m === 0 && patch.f.c >= PATCH_CUTOFF_MAX_HZ && patch.f.q === 0 && patch.f.e === 0;
 }
@@ -105,7 +114,11 @@ export function setFilterMode(patch: JamPatch, stash: JamStageStash, mode: numbe
  * became a decision about whose recipe survives. Imports take the next free label instead. Saving
  * under a name the user typed still replaces, because that is what typing an existing name means.
  */
-export function uniqueSavedName(taken: readonly string[], base: string, limit = 12): string {
+export function uniqueSavedName(
+  taken: readonly string[],
+  base: string,
+  limit = JAM_PATCH_NAME_MAX_CHARS,
+): string {
   const stem = base.slice(0, limit).toUpperCase() || "PATCH";
   if (!taken.includes(stem)) return stem;
   for (let n = 2; n <= 99; n += 1) {
@@ -114,4 +127,30 @@ export function uniqueSavedName(taken: readonly string[], base: string, limit = 
     if (!taken.includes(candidate)) return candidate;
   }
   return stem; // ninety-nine collisions on one stem: replacing is the honest outcome
+}
+
+export type JamSavedPatch = { name: string; patch: JamPatch };
+
+/**
+ * The library with `name` holding `patch`, or null when it is full and nothing may be written.
+ *
+ * The cap used to be applied as `.slice(-12)` at the end of an append, which is a silent FIFO
+ * eviction wearing a bound's clothes: the thirteenth save destroyed the oldest recipe, and so did
+ * a shared patch arriving late enough to be kept-but-not-selected. A caller cannot even report
+ * what happened, because an eviction and a clean save look identical from the outside.
+ *
+ * Replacing an existing name is always allowed, full or not, because typing a name the library
+ * already has is a request to overwrite that one tile. Nothing else is. `uniqueSavedName` is what
+ * makes an import land on a free label rather than on someone else's, so the two rules compose:
+ * an import at the cap is refused instead of quietly taking a slot from the oldest patch.
+ */
+export function keepSavedPatch(
+  library: readonly JamSavedPatch[],
+  name: string,
+  patch: JamPatch,
+  max = JAM_SAVED_PATCHES_MAX,
+): JamSavedPatch[] | null {
+  const kept = library.filter((entry) => entry.name !== name);
+  if (kept.length >= max) return null;
+  return [...kept, { name, patch }];
 }

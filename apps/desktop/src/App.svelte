@@ -246,11 +246,11 @@
     mayFetchJamPatch, parseJamPatchJson, validateJamPatch,
   } from "./jam-patch";
   import {
-    EMPTY_STAGE_STASH, envOff, filterOff, sendsOff, setFilterMode, toggleStage, uniqueSavedName,
-    type JamEditorStep, type JamStage, type JamStageStash,
+    EMPTY_STAGE_STASH, envOff, filterOff, keepSavedPatch, sendsOff, setFilterMode, toggleStage,
+    uniqueSavedName, type JamEditorStep, type JamStage, type JamStageStash,
   } from "./jam-editor";
   import type { JamSourceChannel } from "./jam-channel";
-  import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_PATCH_EXT, JAM_PATCH_MIME, JAM_REMOTE_HOLD_MAX_MS, PATCH_CUTOFF_MAX_HZ, PATCH_OSC_WAVES, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
+  import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_PATCH_EXT, JAM_PATCH_MIME, JAM_PATCH_NAME_MAX_CHARS, JAM_REMOTE_HOLD_MAX_MS, JAM_SAVED_PATCHES_MAX, PATCH_CUTOFF_MAX_HZ, PATCH_OSC_WAVES, PATCH_PARAM, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
   import { JamClockProbeTracker, JamClockSync, JamMetronomeClock } from "./jam-clock";
   import { JamCallCuePlayer, JamClickPlayer } from "./jam-clicks";
   import {
@@ -260,8 +260,9 @@
   } from "./jam-recorder";
   import {
     decodeJamTakeBase64, jamTakePlaybackLeaseCurrent, JamTakeCache, JamTakeLoadCoordinator,
-    mayFetchJamTake, shouldApplyJamTakeProgress, shouldDispatchTakeEvent, takeDueBatchEnd,
-    takePlaybackIsRemote, takeReleaseTailMs, type JamTakePlaybackLease, type JamTakeProgressLease,
+    mayFetchJamTake, planTakeSeek, shouldApplyJamTakeProgress, shouldDispatchTakeEvent,
+    takeDueBatchEnd, takePlaybackIsRemote, takeReleaseTailMs,
+    type JamTakePlaybackLease, type JamTakeProgressLease, type JamTakeSeekVoice,
   } from "./jam-playback";
   import { JamCausalQueue, JamCausalQueueOverflow, JamInitialPublicationGate, JamLatestTaskQueue, JamOutboundEdge, JamPublicationGeneration, JamPublicationPacer, JamResettableCausalQueue, type JamPublishedFrame } from "./jam-publication";
   import { jamTakeSheetSvg } from "./jam-sheet";
@@ -12705,6 +12706,28 @@
     custom: boolean;
   }>;
   let jamPublishedPatch: PublishedJamPatch | null = null;
+  // --- What the room is actually hearing, as a thing the UI can render ---------------------------
+  //
+  // Selecting a preset or turning a knob changes the tiles at once, but synthesis keeps using the
+  // last IMMUTABLE published recipe until the new one clears the editor debounce and the
+  // receiver-safe announce interval. That barrier is correct: an announce every keystroke would
+  // exhaust a receiver's patch budget, and a local sound that ran ahead of the recipe peers hold
+  // would make everyone else's rendering wrong. What was not correct is that the screen said the
+  // new patch was the sound for up to two and a half seconds before it was, so pressing a key right
+  // after picking a preset played the previous one and the editor looked broken.
+  //
+  // The barrier stays. The UI stops lying about it: the canonical bytes of what has been published
+  // are mirrored into state here, and the chip on the instrument row compares them against the
+  // draft. Deriving from the bytes rather than tracking a flag means no publication path can leave
+  // the badge stuck; whatever happens, it reports what the room is rendering.
+  let jamPublishedCanonical = $state<string | null>(null);
+  const jamDraftCanonical = $derived.by(() => {
+    const draft = validateJamPatch(myPatch ?? legacyJamPatch(myTimbre as LegacyWave));
+    return draft.ok ? draft.canonical : null;
+  });
+  const jamPatchApplying = $derived(
+    inCall && (jamPublishedCanonical === null || jamDraftCanonical !== jamPublishedCanonical),
+  );
   const jamPublicationGeneration = new JamPublicationGeneration();
   let jamPublicationQueue = new JamLatestTaskQueue<PublishedJamPatch | null>();
   const jamPublicationPacer = new JamPublicationPacer(JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS);
@@ -13062,8 +13085,8 @@
       const raw = JSON.parse(localStorage.getItem("catcoms.jam.saved.v1") ?? "[]");
       if (!Array.isArray(raw)) return [];
       const out: { name: string; patch: JamPatch }[] = [];
-      for (const entry of raw.slice(0, 12)) {
-        const name = typeof entry?.name === "string" ? entry.name.slice(0, 12) : "";
+      for (const entry of raw.slice(0, JAM_SAVED_PATCHES_MAX)) {
+        const name = typeof entry?.name === "string" ? entry.name.slice(0, JAM_PATCH_NAME_MAX_CHARS) : "";
         const checked = validateJamPatch(entry?.patch);
         if (name && checked.ok && !out.some((s) => s.name === name)) out.push({ name, patch: checked.patch });
       }
@@ -13080,9 +13103,17 @@
     // A typed name that already exists is an intentional overwrite; a generated one must never be.
     // `PATCH ${length + 1}` was not a name, it was a collision waiting for a full library: at the
     // twelve-entry cap every unnamed save was called PATCH 13 and replaced the last one.
-    const typed = jamSaveName.trim().slice(0, 12).toUpperCase();
+    const typed = jamSaveName.trim().slice(0, JAM_PATCH_NAME_MAX_CHARS).toUpperCase();
     const name = typed || jamUniqueSavedName("PATCH");
-    jamKeepSaved(name, checked.patch);
+    if (!jamKeepSaved(name, checked.patch)) {
+      toast(
+        `Patch library full at ${JAM_SAVED_PATCHES_MAX}: delete one, or save over a name you already have`,
+        "err",
+        7000,
+      );
+      jamCustomOpen = true; // the tiles it would have to choose between
+      return;
+    }
     jamSaveName = "";
     myPatchName = name;
     jamCustomOpen = true; // show the tile it just became
@@ -13093,9 +13124,18 @@
     try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
     if (myPatchName === name) myPatchName = "CUSTOM"; // the sound keeps playing; only the label detaches
   }
-  function jamKeepSaved(name: string, patch: JamPatch) {
-    jamSaved = [...jamSaved.filter((s) => s.name !== name), { name, patch }].slice(-12);
+  /**
+   * Keep a patch under `name`. False means the library is full and nothing was written.
+   *
+   * The rule itself lives in jam-editor.ts, next to the naming rule it has to compose with; this
+   * is the binding layer that persists the result.
+   */
+  function jamKeepSaved(name: string, patch: JamPatch): boolean {
+    const next = keepSavedPatch(jamSaved, name, patch);
+    if (!next) return false;
+    jamSaved = next;
     try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
+    return true;
   }
   const jamUniqueSavedName = (base: string) => uniqueSavedName(jamSaved.map((s) => s.name), base);
   // --- Patches in the share: how a room trades sounds ------------------------------------------
@@ -13171,8 +13211,11 @@
         const text = decodeJamPatchBase64(base64);
         const late = text === null ? null : parseJamPatchJson(text);
         if (late?.ok) {
-          jamKeepSaved(jamUniqueSavedName(jamPatchFileName(file.name)), late.patch);
-          toast(`${file.name} was saved but not selected: you changed your sound while it loaded`, "info", 7000);
+          const kept = jamKeepSaved(jamUniqueSavedName(jamPatchFileName(file.name)), late.patch);
+          toast(kept
+            ? `${file.name} was saved but not selected: you changed your sound while it loaded`
+            : `${file.name} was not kept: your patch library is full at ${JAM_SAVED_PATCHES_MAX}`,
+            kept ? "info" : "err", 7000);
         }
         return;
       }
@@ -13183,10 +13226,16 @@
         return;
       }
       const name = jamUniqueSavedName(jamPatchFileName(file.name));
-      jamKeepSaved(name, checked.patch);
+      // A full library does not block playing it. Loading a sound means playing it, and refusing
+      // the whole gesture over a storage cap would make the drawer look broken; only the keeping
+      // half is refused, and the toast says which half.
+      const kept = jamKeepSaved(name, checked.patch);
       selectJamPreset(name, checked.patch); // adopt it now: loading a sound means playing it
       jamCustomOpen = true;
-      toast(`${name} loaded and kept on this device`, "ok", 5000);
+      toast(kept
+        ? `${name} loaded and kept on this device`
+        : `${name} is your sound, but not kept: your patch library is full at ${JAM_SAVED_PATCHES_MAX}`,
+        kept ? "ok" : "info", kept ? 5000 : 8000);
     } catch (e) {
       toast(`Could not load ${file.name}: ${errorText(e)}`, "err", 8000);
     } finally {
@@ -13403,7 +13452,7 @@
       for (const chan of chans) if (chan) engine.setSourceLevel(chan.source, jukeVol);
     }
     const baseMs = Math.max(0, offsetMs);
-    const firstDue = take.events.findIndex((event) => event.ms >= baseMs);
+    const plan = planTakeSeek(take, baseMs);
     jamPlay = {
       id: localId,
       deckCid,
@@ -13412,7 +13461,7 @@
       patches,
       startMs: performance.now(),
       baseMs,
-      next: firstDue === -1 ? take.events.length : firstDue,
+      next: plan.next,
       timer: setInterval(() => { void jamPlayTick(); }, 40),
       catchupTimer: undefined,
       endTimer: undefined,
@@ -13422,7 +13471,37 @@
     };
     jamPendingPlay = null;
     jamPlayingId = localId;
+    // Before the first scheduled event, whatever the take was already holding at this offset. Only
+    // the jukebox deck ever starts anywhere but zero, and joining it mid-track used to mean hearing
+    // nothing until the next attack: the note-ons were behind the start point and only their
+    // note-offs were still due. Every gate a scheduled event passes applies here too.
+    jamOpenSeekVoices(jamPlay, engine, plan.sounding);
     void jamPlayTick();
+  }
+  /** Re-open the notes a seek landed in the middle of, at the age each has already reached. */
+  function jamOpenSeekVoices(
+    pl: NonNullable<typeof jamPlay>,
+    engine: JamEngine,
+    sounding: readonly JamTakeSeekVoice[],
+  ) {
+    for (const voice of sounding) {
+      const event = pl.take.events[voice.index];
+      if (!event || "d" in event || event.on !== 1) continue;
+      if (!shouldDispatchTakeEvent(event, callDeafened)) continue;
+      const chan = pl.chans[event.lane];
+      if (!chan) continue;
+      engine.noteOn(
+        {
+          channel: chan,
+          sequence: event.q,
+          note: event.n,
+          wave: event.w,
+          remote: takePlaybackIsRemote(pl.deckCid),
+          ageMs: voice.ageMs,
+        },
+        event.p === undefined ? undefined : { patches: pl.patches, index: event.p },
+      );
+    }
   }
   function jamPlayTake(entry: { id: number; take: JamTake }) {
     void jamStartTakePlayback(entry.take, 0, entry.id, null);
@@ -13719,7 +13798,7 @@
     try { localStorage.setItem("catcoms.call.timbre", w); } catch { /* ignore */ }
     try { localStorage.removeItem("catcoms.jam.patch"); } catch { /* ignore */ }
     clearTimeout(jamAnnTimer);
-    jamAnnTimer = setTimeout(() => { void publishJamDraft(); }, 400);
+    void publishJamDraft(); // one click, one wave: ask now and let the pacer decide when
   }
   function selectJamPreset(name: string, patch: JamPatch) {
     myPatch = JSON.parse(JSON.stringify(patch)) as JamPatch;
@@ -13731,12 +13810,24 @@
     // selection boundary, and never in `jamPatchDirty`: clearing it on every edit would defeat the
     // restore this exists for.
     jamResetStageStash();
-    jamPatchDirty();
+    jamPatchDirty(true); // a whole recipe in one click: nothing more is coming to coalesce with
   }
-  function jamPatchDirty() {
+  /**
+   * Persist the draft and start it towards publication.
+   *
+   * `immediate` is for a DISCRETE change: picking a preset, a saved patch, a filter type, a wave.
+   * There is no next keystroke coming, so the 400 ms coalescing window buys nothing and costs the
+   * whole wait before the sound the tile claims is the sound the synth uses. Continuous changes
+   * (dragging a knob) keep the window, because those really do arrive dozens at a time.
+   *
+   * Either way the receiver-safe interval in `publishJamDraft` remains the authority on when a
+   * frame may leave: skipping the debounce asks earlier, it does not ask for an exemption.
+   */
+  function jamPatchDirty(immediate = false) {
     try { localStorage.setItem("catcoms.jam.patch", JSON.stringify({ name: myPatchName, patch: myPatch })); } catch { /* optional */ }
     jamPublicationGeneration.advance();
     clearTimeout(jamAnnTimer);
+    if (immediate) { void publishJamDraft(); return; }
     // Receivers cap announces at one per 2s (burst 3): coalesce a slider drag into one announce.
     jamAnnTimer = setTimeout(() => { void publishJamDraft(); }, 400);
   }
@@ -13752,7 +13843,7 @@
     myPatchName = "CUSTOM";
     jamPatchDirty();
   }
-  function jamEditOsc(index: number, key: "w" | "t" | "c" | "l", raw: string | number) {
+  function jamEditOsc(index: number, key: "w" | "t" | "c" | "l", raw: string | number, immediate = false) {
     if (!myPatch || !myPatch.o[index]) return;
     const value = Math.round(Number(raw));
     if (!Number.isFinite(value)) return;
@@ -13760,7 +13851,7 @@
     next.o[index][key] = value;
     myPatch = next;
     myPatchName = "CUSTOM";
-    jamPatchDirty();
+    jamPatchDirty(immediate);
   }
   function jamOscCount(count: number) {
     if (!myPatch) return;
@@ -13819,7 +13910,7 @@
     jamStageStash = step.stash;
     myPatch = step.patch;
     myPatchName = "CUSTOM";
-    jamPatchDirty();
+    jamPatchDirty(true); // a stage button is one decision, not the first of a drag
   }
   function jamSetFilterMode(mode: number) {
     if (!myPatch) return;
@@ -14270,6 +14361,7 @@
       // Publish atomically on this turn: wire announcement, local renderer and recorder events all
       // begin using this same immutable object only after validation, hashing and install succeed.
       jamPublishedPatch = publication;
+      jamPublishedCanonical = JSON.stringify(captured.descriptor);
       publishJamToEdges(publication);
       flushPendingJamEvents(publication);
       return publication;
@@ -17867,6 +17959,7 @@
     jamMySn = "";
     jamMyQ = 0;
     jamPublishedPatch = null;
+    jamPublishedCanonical = null; // nothing is published into a call that has ended
     jamEnsurePublication = null;
     jamPublicationPacer.reset();
     jamPublicationGeneration.advance();
@@ -22278,11 +22371,11 @@
 <!-- Loudness over time, from the four envelope values: attack up, decay down to the sustain shelf,
      a fixed hold so the shelf is always visible, then the release. The dashed rule is the key-up. -->
 {#snippet jamScopeEnv(e: JamPatch["e"])}
-  {@const x1 = (e.a / 5000) * 30}
-  {@const x2 = x1 + (e.d / 5000) * 25}
+  {@const x1 = (e.a / PATCH_PARAM.e.a.max) * 30}
+  {@const x2 = x1 + (e.d / PATCH_PARAM.e.d.max) * 25}
   {@const x3 = x2 + 18}
-  {@const x4 = x3 + (e.r / 8000) * 27}
-  {@const sy = 26 - (e.s / 100) * 20}
+  {@const x4 = x3 + (e.r / PATCH_PARAM.e.r.max) * 27}
+  {@const sy = 26 - (e.s / PATCH_PARAM.e.s.max) * 20}
   <svg class="jam-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
     <path class="jam-scope-grid" d="M0 26H100" />
     <path class="jam-scope-fill" d={`M0 26 L${x1} 6 L${x2} ${sy} L${x3} ${sy} L${x4} 26 Z`} />
@@ -22295,11 +22388,12 @@
      cutoff, taller and narrower with resonance. The dashed run along the floor is how far each note
      sweeps the cutoff, so a negative envelope amount visibly reaches the other way. -->
 {#snippet jamScopeFilter(f: JamPatch["f"])}
-  {@const xc = (Math.log2(Math.max(20, f.c) / 20) / Math.log2(900)) * 100}
-  {@const peak = 9 - (f.q / 100) * 18}
-  {@const hump = 12 - (f.q / 100) * 10}
-  {@const w = 24 - (f.q / 100) * 14}
-  {@const xe = Math.min(100, Math.max(0, xc + f.e * 0.61))}
+  {@const decades = Math.log2(PATCH_PARAM.f.c.max / PATCH_PARAM.f.c.min)}
+  {@const xc = (Math.log2(Math.max(PATCH_PARAM.f.c.min, f.c) / PATCH_PARAM.f.c.min) / decades) * 100}
+  {@const peak = 9 - (f.q / PATCH_PARAM.f.q.max) * 18}
+  {@const hump = 12 - (f.q / PATCH_PARAM.f.q.max) * 10}
+  {@const w = 24 - (f.q / PATCH_PARAM.f.q.max) * 14}
+  {@const xe = Math.min(100, Math.max(0, xc + (f.e / PATCH_PARAM.f.e.max) * 61))}
   {@const d = f.m === 1 ? `M100 9 L${xc + 6} 9 Q${xc} ${peak} ${xc - 3} 15 L${xc - 15} 26` : f.m === 2 ? `M${xc - w} 26 Q${xc} ${2 * hump - 26} ${xc + w} 26` : `M0 9 L${xc - 6} 9 Q${xc} ${peak} ${xc + 3} 15 L${xc + 15} 26`}
   {@const close = f.m === 1 ? "L100 26" : f.m === 2 ? "" : "L0 26"}
   <svg class="jam-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
@@ -22316,8 +22410,8 @@
      Off, or a depth of zero, draws flat, because that is exactly what the engine does with it. -->
 {#snippet jamScopeLfo(l: JamPatch["l"])}
   {@const on = l.t !== 0 && l.d > 0}
-  {@const cycles = 1 + (l.r / 1200) * 6}
-  {@const amp = on ? 2 + (l.d / 100) * 10 : 0}
+  {@const cycles = 1 + (l.r / PATCH_PARAM.l.r.max) * 6}
+  {@const amp = on ? 2 + (l.d / PATCH_PARAM.l.d.max) * 10 : 0}
   {@const d = Array.from({ length: 41 }, (_u, i) => `${i ? "L" : "M"}${(i * 2.5).toFixed(1)} ${(14 - amp * Math.sin((i / 40) * cycles * 2 * Math.PI)).toFixed(2)}`).join(" ")}
   <svg class="jam-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
     <path class="jam-scope-grid" d="M0 14H100" />
@@ -22329,9 +22423,9 @@
      it, the reverb's short tail behind it, and the echo's repeats spaced down the box. Heights are
      scaled to stay visible rather than measured; the shape is what the knobs change. -->
 {#snippet jamScopeSends(x: JamPatch["x"])}
-  {@const c = x.c / 100}
-  {@const dl = x.d / 100}
-  {@const rv = x.r / 100}
+  {@const c = x.c / PATCH_PARAM.x.c.max}
+  {@const dl = x.d / PATCH_PARAM.x.d.max}
+  {@const rv = x.r / PATCH_PARAM.x.r.max}
   <svg class="jam-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
     <path class="jam-scope-grid" d="M0 26H100" />
     {#if rv > 0}
@@ -22507,6 +22601,17 @@
           : "The four plain waves are not editable: they are the clean sounds. Pick a preset or a saved patch to get the knobs."}
         onclick={() => (jamEditOpen = !jamEditOpen)}
       ><span class="inst-wave-lbl">EDIT</span></button>
+      <!-- Which recipe your keys are actually being played through. A tile lights the moment it is
+           clicked, but a patch only becomes the sound once it has been hashed and announced, and
+           the announce interval belongs to the receivers. Without this the gap read as a broken
+           editor: the knob moved, the tile lit, and the note was the old sound. -->
+      {#if inCall}
+        {#if jamPatchApplying}
+          <span class="jam-met-chip warn" title="Your keys are still being played through the last announced recipe. A patch becomes the sound once it has been hashed and sent, which the room's announce interval paces to one every couple of seconds.">APPLYING</span>
+        {:else}
+          <span class="jam-met-chip ok" title="What you see is what your keys play, and what the room is rendering your notes through.">LIVE</span>
+        {/if}
+      {/if}
       <span class="stage-spacer"></span>
       <button class="ghost small inst-oct-btn" title="Register down (z)" aria-label="Register down" onclick={() => setInstOctave(instOctave - 1)}>−</button>
       <span class="inst-oct">C{instOctave}–C{instOctave + 2}</span>
@@ -22537,7 +22642,13 @@
                validates them through the same patch validator the wire uses, keeps it on this
                device and plays through it straight away. -->
           <span class="jam-custom-sep">from the share</span>
-          {#each jamSharedPatches as sp (sp.cid)}
+          <!-- Deliberately unkeyed. A CID is a content address, not a listing id: the share lists
+               one set of bytes under as many names and folders as people give it, and two patches
+               are especially likely to collide that way because a patch is the same few hundred
+               canonical bytes whenever two people build the same recipe. Keying by CID told Svelte
+               those distinct tiles were one. The list is a dozen buttons with no per-tile state,
+               so positional reconciliation is both correct and cheap. -->
+          {#each jamSharedPatches as sp}
             {@const label = jamPatchFileName(sp.name)}
             <div class="jam-custom-tile">
               <button
@@ -22578,16 +22689,16 @@
                   <div class="jam-osc">
                     {#each INST_TILES as t (t.wave)}
                       {@const wi = jamWaveIndex(t.wave)}
-                      <button class="ghost jam-osc-w" class:on={osc.w === wi} title={`Layer ${i + 1}: ${t.wave}`} onclick={() => jamEditOsc(i, "w", wi)}>{t.label}</button>
+                      <button class="ghost jam-osc-w" class:on={osc.w === wi} title={`Layer ${i + 1}: ${t.wave}`} onclick={() => jamEditOsc(i, "w", wi, true)}>{t.label}</button>
                     {/each}
                     {#if (myPatch?.o.length ?? 1) > 1}
                       <button class="ghost jam-tile-del" title="Remove this layer" aria-label="Remove this layer" onclick={() => jamOscRemove(i)}>✕</button>
                     {/if}
                   </div>
                   <div class="jam-knobs">
-                    {@render jamKnob({ label: "st", value: osc.t, min: -24, max: 24, disp: String(osc.t), bipolar: true, hint: "Transpose: shifts this layer by whole semitones. +12 is an octave up, -12 an octave down; +7 against another layer gives a fifth.", set: (v) => jamEditOsc(i, "t", v) })}
-                    {@render jamKnob({ label: "ct", value: osc.c, min: -50, max: 50, disp: String(osc.c), bipolar: true, hint: "Detune: nudges this layer slightly sharp or flat, in hundredths of a semitone. A few cents against another layer makes the sound thicker and slowly beating; 0 is dead in tune.", set: (v) => jamEditOsc(i, "c", v) })}
-                    {@render jamKnob({ label: "lvl", value: osc.l, min: 0, max: 100, disp: String(osc.l), hint: "Level: how loud this layer is in the mix against the others. 0 silences it without removing it.", set: (v) => jamEditOsc(i, "l", v) })}
+                    {@render jamKnob({ label: "st", value: osc.t, ...PATCH_PARAM.o.t, disp: String(osc.t), bipolar: true, hint: "Transpose: shifts this layer by whole semitones. +12 is an octave up, -12 an octave down; +7 against another layer gives a fifth.", set: (v) => jamEditOsc(i, "t", v) })}
+                    {@render jamKnob({ label: "ct", value: osc.c, ...PATCH_PARAM.o.c, disp: String(osc.c), bipolar: true, hint: "Detune: nudges this layer slightly sharp or flat, in hundredths of a semitone. A few cents against another layer makes the sound thicker and slowly beating; 0 is dead in tune.", set: (v) => jamEditOsc(i, "c", v) })}
+                    {@render jamKnob({ label: "lvl", value: osc.l, ...PATCH_PARAM.o.l, disp: String(osc.l), hint: "Level: how loud this layer is in the mix against the others. 0 silences it without removing it.", set: (v) => jamEditOsc(i, "l", v) })}
                   </div>
                 </div>
               {/if}
@@ -22619,10 +22730,10 @@
               <div class="jam-stage-body">
                 {@render jamScopeEnv(myPatch.e)}
                 <div class="jam-knobs">
-                  {@render jamKnob({ label: "atk", value: myPatch.e.a, min: 0, max: 5000, disp: `${(myPatch.e.a / 1000).toFixed(1)}s`, hint: "Attack: how long a note takes to reach full volume. 0 is an instant pluck; a few seconds is a slow swell.", set: (v) => jamEditNum("e", "a", v) })}
-                  {@render jamKnob({ label: "dec", value: myPatch.e.d, min: 0, max: 5000, disp: `${(myPatch.e.d / 1000).toFixed(1)}s`, hint: "Decay: after the peak, how long the note takes to fall to the sustain level. Short is a snappy bite; long is a slow settle.", set: (v) => jamEditNum("e", "d", v) })}
-                  {@render jamKnob({ label: "sus", value: myPatch.e.s, min: 0, max: 100, disp: String(myPatch.e.s), hint: "Sustain: the volume a held note settles at, as a share of the peak. 100 holds at full; 0 fades out even while the key is down.", set: (v) => jamEditNum("e", "s", v) })}
-                  {@render jamKnob({ label: "rel", value: myPatch.e.r, min: 0, max: 8000, disp: `${(myPatch.e.r / 1000).toFixed(1)}s`, hint: "Release: how long the note takes to fade after the key is let go. 0 stops dead; high leaves a tail hanging.", set: (v) => jamEditNum("e", "r", v) })}
+                  {@render jamKnob({ label: "atk", value: myPatch.e.a, ...PATCH_PARAM.e.a, disp: `${(myPatch.e.a / 1000).toFixed(1)}s`, hint: "Attack: how long a note takes to reach full volume. 0 is an instant pluck; a few seconds is a slow swell.", set: (v) => jamEditNum("e", "a", v) })}
+                  {@render jamKnob({ label: "dec", value: myPatch.e.d, ...PATCH_PARAM.e.d, disp: `${(myPatch.e.d / 1000).toFixed(1)}s`, hint: "Decay: after the peak, how long the note takes to fall to the sustain level. Short is a snappy bite; long is a slow settle.", set: (v) => jamEditNum("e", "d", v) })}
+                  {@render jamKnob({ label: "sus", value: myPatch.e.s, ...PATCH_PARAM.e.s, disp: String(myPatch.e.s), hint: "Sustain: the volume a held note settles at, as a share of the peak. 100 holds at full; 0 fades out even while the key is down.", set: (v) => jamEditNum("e", "s", v) })}
+                  {@render jamKnob({ label: "rel", value: myPatch.e.r, ...PATCH_PARAM.e.r, disp: `${(myPatch.e.r / 1000).toFixed(1)}s`, hint: "Release: how long the note takes to fade after the key is let go. 0 stops dead; high leaves a tail hanging.", set: (v) => jamEditNum("e", "r", v) })}
                 </div>
               </div>
             </div>
@@ -22631,7 +22742,7 @@
                 <span class="jam-stage-nm">filter</span>
                 <span class="jam-stage-sub">tone</span>
                 <div class="jam-stage-modes" aria-label="Filter">
-                  <button class="ghost jam-osc-w" class:on={jamFilterOff} aria-pressed={jamFilterOff} title="No filtering: the tone passes through whole. Turning cut, res or env brings the filter back." onclick={() => jamToggleStage("f")}>OFF</button>
+                  <button class="ghost jam-osc-w" class:on={jamFilterOff} aria-pressed={jamFilterOff} title="Wide open: the cutoff sits at the top of its range, well above anything you are playing, so the filter stays out of the way. It is not a bypass, because a patch has no way to say so: every note still runs through one gentle lowpass at that corner, and an output running at a low sample rate brings the corner down with it. Turning cut, res or env gives the filter a shape again." onclick={() => jamToggleStage("f")}>WIDE</button>
                   <button class="ghost jam-osc-w" class:on={!jamFilterOff && myPatch.f.m === 0} aria-pressed={!jamFilterOff && myPatch.f.m === 0} title="Lowpass: keeps the lows and rolls off everything brighter than the cutoff. Warm and rounded; the classic synth tone." onclick={() => jamSetFilterMode(0)}>LP</button>
                   <button class="ghost jam-osc-w" class:on={!jamFilterOff && myPatch.f.m === 1} aria-pressed={!jamFilterOff && myPatch.f.m === 1} title="Highpass: keeps the highs and rolls off everything below the cutoff. Thin and airy; it cuts through a busy room." onclick={() => jamSetFilterMode(1)}>HP</button>
                   <button class="ghost jam-osc-w" class:on={!jamFilterOff && myPatch.f.m === 2} aria-pressed={!jamFilterOff && myPatch.f.m === 2} title="Bandpass: keeps only a band around the cutoff and rolls off both sides. Nasal and hollow, like a small speaker." onclick={() => jamSetFilterMode(2)}>BP</button>
@@ -22640,9 +22751,9 @@
               <div class="jam-stage-body">
                 {@render jamScopeFilter(myPatch.f)}
                 <div class="jam-knobs">
-                  {@render jamKnob({ label: "cut", value: myPatch.f.c, min: 20, max: 18000, disp: myPatch.f.c >= 1000 ? `${(myPatch.f.c / 1000).toFixed(1)}k` : String(myPatch.f.c), hint: "Cutoff: where the filter starts to bite, in Hz. On lowpass, lower is darker; on highpass, higher is thinner; on bandpass it is the centre of the band.", set: (v) => jamEditNum("f", "c", v) })}
-                  {@render jamKnob({ label: "res", value: myPatch.f.q, min: 0, max: 100, disp: String(myPatch.f.q), hint: "Resonance: a peak right at the cutoff. 0 is smooth; high makes the cutoff ring and whistle, and any sweep of it turns squelchy.", set: (v) => jamEditNum("f", "q", v) })}
-                  {@render jamKnob({ label: "env", value: myPatch.f.e, min: -100, max: 100, disp: String(myPatch.f.e), bipolar: true, hint: "Envelope amount: how far each note sweeps the cutoff. Positive opens the filter on the attack and closes it through the decay (the classic wow); negative dips it instead; 0 holds it still. Full is six octaves.", set: (v) => jamEditNum("f", "e", v) })}
+                  {@render jamKnob({ label: "cut", value: myPatch.f.c, ...PATCH_PARAM.f.c, disp: myPatch.f.c >= 1000 ? `${(myPatch.f.c / 1000).toFixed(1)}k` : String(myPatch.f.c), hint: "Cutoff: where the filter starts to bite, in Hz. On lowpass, lower is darker; on highpass, higher is thinner; on bandpass it is the centre of the band.", set: (v) => jamEditNum("f", "c", v) })}
+                  {@render jamKnob({ label: "res", value: myPatch.f.q, ...PATCH_PARAM.f.q, disp: String(myPatch.f.q), hint: "Resonance: a peak right at the cutoff. 0 is smooth; high makes the cutoff ring and whistle, and any sweep of it turns squelchy.", set: (v) => jamEditNum("f", "q", v) })}
+                  {@render jamKnob({ label: "env", value: myPatch.f.e, ...PATCH_PARAM.f.e, disp: String(myPatch.f.e), bipolar: true, hint: "Envelope amount: how far each note sweeps the cutoff. Positive opens the filter on the attack and closes it through the decay (the classic wow); negative dips it instead; 0 holds it still. Full is six octaves.", set: (v) => jamEditNum("f", "e", v) })}
                 </div>
               </div>
             </div>
@@ -22659,8 +22770,8 @@
               <div class="jam-stage-body">
                 {@render jamScopeLfo(myPatch.l)}
                 <div class="jam-knobs">
-                  {@render jamKnob({ label: "rate", value: myPatch.l.r, min: 1, max: 1200, disp: `${(myPatch.l.r / 100).toFixed(2)}hz`, hint: "Rate: how fast the wobble cycles, in Hz. Under 1 is a slow drift, 5 to 7 is a vibrato, 12 is a buzz.", set: (v) => jamEditNum("l", "r", v) })}
-                  {@render jamKnob({ label: "dep", value: myPatch.l.d, min: 0, max: 100, disp: String(myPatch.l.d), hint: "Depth: how far the wobble reaches. 0 is none even with a target picked; 100 is the full sweep.", set: (v) => jamEditNum("l", "d", v) })}
+                  {@render jamKnob({ label: "rate", value: myPatch.l.r, ...PATCH_PARAM.l.r, disp: `${(myPatch.l.r / 100).toFixed(2)}hz`, hint: "Rate: how fast the wobble cycles, in Hz. Under 1 is a slow drift, 5 to 7 is a vibrato, 12 is a buzz.", set: (v) => jamEditNum("l", "r", v) })}
+                  {@render jamKnob({ label: "dep", value: myPatch.l.d, ...PATCH_PARAM.l.d, disp: String(myPatch.l.d), hint: "Depth: how far the wobble reaches. 0 is none even with a target picked; 100 is the full sweep.", set: (v) => jamEditNum("l", "d", v) })}
                 </div>
               </div>
             </div>
@@ -22675,9 +22786,9 @@
               <div class="jam-stage-body">
                 {@render jamScopeSends(myPatch.x)}
                 <div class="jam-knobs">
-                  {@render jamKnob({ label: "cho", value: myPatch.x.c, min: 0, max: 100, disp: String(myPatch.x.c), hint: "Chorus send: how much of this sound goes to the room's shared chorus, which doubles it with a slowly drifting copy. Thicker and wider; 0 is dry.", set: (v) => jamEditNum("x", "c", v) })}
-                  {@render jamKnob({ label: "del", value: myPatch.x.d, min: 0, max: 100, disp: String(myPatch.x.d), hint: "Delay send: how much goes to the room's shared echo, a repeat about a quarter of a second later that trails off. 0 is dry.", set: (v) => jamEditNum("x", "d", v) })}
-                  {@render jamKnob({ label: "rev", value: myPatch.x.r, min: 0, max: 100, disp: String(myPatch.x.r), hint: "Reverb send: how much goes to the room's shared reverb, a small space that softens the edges. 0 is dry.", set: (v) => jamEditNum("x", "r", v) })}
+                  {@render jamKnob({ label: "cho", value: myPatch.x.c, ...PATCH_PARAM.x.c, disp: String(myPatch.x.c), hint: "Chorus send: how much of this sound goes to the room's shared chorus, which doubles it with a slowly drifting copy. Thicker and wider; 0 is dry.", set: (v) => jamEditNum("x", "c", v) })}
+                  {@render jamKnob({ label: "del", value: myPatch.x.d, ...PATCH_PARAM.x.d, disp: String(myPatch.x.d), hint: "Delay send: how much goes to the room's shared echo, a repeat about a quarter of a second later that trails off. 0 is dry.", set: (v) => jamEditNum("x", "d", v) })}
+                  {@render jamKnob({ label: "rev", value: myPatch.x.r, ...PATCH_PARAM.x.r, disp: String(myPatch.x.r), hint: "Reverb send: how much goes to the room's shared reverb, a small space that softens the edges. 0 is dry.", set: (v) => jamEditNum("x", "r", v) })}
                 </div>
               </div>
             </div>

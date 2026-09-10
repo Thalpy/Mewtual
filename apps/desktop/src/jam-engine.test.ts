@@ -1086,3 +1086,72 @@ test("room construction failure stops the already-started chorus source and disc
   assert.ok(fake.sources.some((source) => source.starts.length > 0 && source.stops.length > 0));
   assert.ok(fake.nodes.slice(1).every((node) => node.disconnects > 0));
 });
+
+test("a voice a seek revives starts part-way through its envelope, not at the start of its attack", async () => {
+  // Take playback joined mid-track has to open voices for notes whose attack already happened. The
+  // envelope automation is scheduled from a back-dated origin so the AudioParam timeline evaluates
+  // to the level the voice has reached; scheduling it from now would re-attack a note that has been
+  // sounding for seconds, which is a different (and louder) sound than the take contains.
+  const { fake, engine } = contextAndEngine();
+  fake.currentTime = 40;
+  const alice = engine.openSource("alice");
+  const swell: JamPatch = { ...patch, e: { a: 4_000, d: 1_000, s: 60, r: 500 } };
+  const id = await jamPatchId(swell);
+  assert.equal(await engine.installPatch(alice, sn, id, swell), "installed");
+  const gainsBefore = fake.nodes.filter((node) => node instanceof FakeGain).length;
+  assert.equal(
+    engine.noteOn({ channel: alice, sequence: 1, note: 60, wave: "sine", patchId: id, ageMs: 3_000 }).ok,
+    true,
+  );
+  const voiceGains = fake.nodes.filter((node) => node instanceof FakeGain).slice(gainsBefore) as FakeGain[];
+  const starts = voiceGains.flatMap((g) => g.gain.events.filter(([kind, value]) => kind === "set" && value === 0));
+  assert.ok(starts.length > 0, "the voice still has an envelope origin");
+  assert.ok(starts.every(([, , time]) => time === 37),
+    "three seconds of a four-second attack are already behind the seek point");
+  // Attack plus decay is five seconds, so a three-second-old note is still climbing: its peak is
+  // scheduled ahead of now and the ramp is what carries it there.
+  const peaks = voiceGains.flatMap((g) => g.gain.events.filter(([kind, , time]) => kind === "linear" && time === 41));
+  assert.ok(peaks.length > 0, "the rest of the attack is still to come");
+});
+
+test("a revived voice older than its own envelope is clamped to the sustain shelf", async () => {
+  // Past attack plus decay every envelope holds at sustain, so backdating further is audibly
+  // identical and only pushes automation further into the past. The clamp keeps it near the now.
+  const { fake, engine } = contextAndEngine();
+  fake.currentTime = 100;
+  const alice = engine.openSource("alice");
+  const short: JamPatch = { ...patch, e: { a: 10, d: 40, s: 80, r: 200 } };
+  const id = await jamPatchId(short);
+  assert.equal(await engine.installPatch(alice, sn, id, short), "installed");
+  const gainsBefore = fake.nodes.filter((node) => node instanceof FakeGain).length;
+  assert.equal(
+    engine.noteOn({ channel: alice, sequence: 1, note: 60, wave: "sine", patchId: id, ageMs: 480_000 }).ok,
+    true,
+  );
+  const voiceGains = fake.nodes.filter((node) => node instanceof FakeGain).slice(gainsBefore) as FakeGain[];
+  const starts = voiceGains.flatMap((g) => g.gain.events.filter(([kind, value]) => kind === "set" && value === 0));
+  assert.ok(starts.length > 0);
+  assert.ok(starts.every(([, , time]) => Math.abs(time - 99.95) < 1e-9),
+    "an eight-minute-old note backdates by its own fifty-millisecond envelope, not by eight minutes");
+});
+
+test("live playing carries no age, and a nonsense age is refused rather than rendered", () => {
+  const { fake, engine } = contextAndEngine();
+  fake.currentTime = 12;
+  const alice = engine.openSource("alice");
+  engine.beginSourceSession(alice, sn);
+  const gainsBefore = fake.nodes.filter((node) => node instanceof FakeGain).length;
+  assert.equal(engine.noteOn({ channel: alice, sequence: 1, note: 60, wave: "sine" }).ok, true);
+  const voiceGains = fake.nodes.filter((node) => node instanceof FakeGain).slice(gainsBefore) as FakeGain[];
+  const starts = voiceGains.flatMap((g) => g.gain.events.filter(([kind, value]) => kind === "set" && value === 0));
+  assert.ok(starts.length > 0 && starts.every(([, , time]) => time === 12),
+    "an ordinary note begins now, exactly as it did before an age existed");
+
+  for (const ageMs of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(
+      engine.noteOn({ channel: alice, sequence: 2, note: 62, wave: "sine", ageMs }).reason,
+      "invalid",
+      `an age of ${ageMs} must not reach the graph`,
+    );
+  }
+});

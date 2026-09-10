@@ -105,6 +105,55 @@ export const PATCH_LFO_RATE_MAX_CHZ = 1_200; // 12 Hz
 export const PATCH_LFO_DESTS = ["off", "cutoff", "pitch"] as const; // index = wire value
 export const PATCH_LFO_PITCH_DEPTH_CENTS = 25; // +/- at depth 100
 
+/**
+ * Every editable patch field's inclusive bound, shaped like the patch itself.
+ *
+ * The constants above are what the validator enforces; this is the same set arranged so the knobs
+ * and the scopes can consume it. Both used to carry their own copies of 24, 50, 5000, 8000, 18000,
+ * 1200 and 100, so a control could be moved outside what the validator would admit, or a scope
+ * could keep drawing against the old ceiling, and neither would fail a test: the copies happened
+ * to agree. A knob spreads its entry (`...PATCH_PARAM.e.a`) and a scope divides by `.max`, so a
+ * bound now has exactly one place to change.
+ *
+ * The oscillator's own wave index and the two mode lists are not here: those are enumerations
+ * rendered as named buttons, not ranges, and their ceiling is the list's own length.
+ */
+export const PATCH_PARAM = {
+  o: {
+    t: { min: -PATCH_TRANSPOSE_SEMITONES, max: PATCH_TRANSPOSE_SEMITONES },
+    c: { min: -PATCH_DETUNE_CENTS, max: PATCH_DETUNE_CENTS },
+    l: { min: 0, max: PATCH_LEVEL_MAX },
+  },
+  e: {
+    a: { min: 0, max: PATCH_ENV_ATTACK_MAX_MS },
+    d: { min: 0, max: PATCH_ENV_DECAY_MAX_MS },
+    s: { min: 0, max: PATCH_LEVEL_MAX },
+    r: { min: 0, max: PATCH_ENV_RELEASE_MAX_MS },
+  },
+  f: {
+    c: { min: PATCH_CUTOFF_MIN_HZ, max: PATCH_CUTOFF_MAX_HZ },
+    q: { min: 0, max: PATCH_LEVEL_MAX },
+    e: { min: -PATCH_FILTER_ENV_RANGE, max: PATCH_FILTER_ENV_RANGE },
+  },
+  l: {
+    r: { min: PATCH_LFO_RATE_MIN_CHZ, max: PATCH_LFO_RATE_MAX_CHZ },
+    d: { min: 0, max: PATCH_LEVEL_MAX },
+  },
+  x: {
+    c: { min: 0, max: PATCH_LEVEL_MAX },
+    d: { min: 0, max: PATCH_LEVEL_MAX },
+    r: { min: 0, max: PATCH_LEVEL_MAX },
+  },
+} as const;
+
+// --- The local patch library ------------------------------------------------------------------
+// How many recipes this device keeps, and how wide the label on a tile is. Two different twelves:
+// one is a storage bound, the other is how much of a name a button can show, and they are free to
+// move apart. SAVE refuses at the cap rather than evicting: a library that silently drops the
+// oldest entry to make room for the thirteenth is not a library, and nothing in the UI said so.
+export const JAM_SAVED_PATCHES_MAX = 12;
+export const JAM_PATCH_NAME_MAX_CHARS = 12;
+
 // --- jam-patch:v1 as a shared file -------------------------------------------------------------
 // A patch put into a server's encrypted share, so a room can trade sounds rather than each person
 // rebuilding one from the knobs. The file is exactly the canonical `jam-patch:v1` JSON the wire

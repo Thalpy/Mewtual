@@ -197,6 +197,59 @@ export function takePlaybackIsRemote(deckCid: string | null): boolean {
   return deckCid !== null;
 }
 
+/** One note that a seek must bring back, and how long it has already been held when it does. */
+export type JamTakeSeekVoice = Readonly<{
+  /** Index of the note-on in `take.events`, so its lane, patch and sequence come from the log. */
+  index: number;
+  /** Milliseconds between that note-on and the seek point; the age the voice starts at. */
+  ageMs: number;
+}>;
+
+export type JamTakeSeekPlan = Readonly<{
+  /** First event index the ordinary scheduler owns: everything at or after the seek point. */
+  next: number;
+  /** Note-ons before the seek point whose note-off has not happened yet, in log order. */
+  sounding: readonly JamTakeSeekVoice[];
+}>;
+
+/**
+ * What a take sounds like at an arbitrary offset, not just what happens after it.
+ *
+ * Starting at the first event whose `ms` reaches the offset is right for the schedule and wrong
+ * for the sound. A take holding one chord from 0 ms to 10 s, joined at 5 s, has no due event at
+ * all until the key-ups arrive, so a listener who joins the jukebox deck mid-track hears silence
+ * where a chord is sounding, and then a run of note-offs for voices that were never opened. The
+ * longer the note, the longer the silence, which is exactly backwards.
+ *
+ * So the events before the offset are folded into held state rather than skipped: for each lane,
+ * the latest note-on per pitch that no note-off has closed. Those are re-opened at playback start
+ * at the age they have already reached, so a note six seconds into a slow swell arrives at the
+ * level it should be, not at the start of its attack. Emitting them in log order preserves each
+ * lane's `q` order, which the take validator has already proved is strictly increasing, so the
+ * engine's own duplicate/gap sequencing is satisfied without any renumbering here.
+ *
+ * Drums are deliberately NOT reconstructed. A pad is a one-shot: its tail is the end of a sound
+ * whose transient has already gone, and firing a whole fresh crash because its 3-second tail
+ * happens to cross the seek point would insert an attack the take does not contain.
+ */
+export function planTakeSeek(take: JamTake, offsetMs: number): JamTakeSeekPlan {
+  const baseMs = Number.isFinite(offsetMs) ? Math.max(0, offsetMs) : 0;
+  const held = new Map<string, JamTakeSeekVoice>();
+  let next = take.events.length;
+  for (let index = 0; index < take.events.length; index += 1) {
+    const event = take.events[index];
+    if (event.ms >= baseMs) { next = index; break; }
+    if ("d" in event) continue;
+    // The engine keeps at most one held voice per (source, pitch) and closes the latest on a
+    // note-off, so the same single-slot rule decides what is still sounding here.
+    const key = `${event.lane}:${event.n}`;
+    if (event.on === 1) held.set(key, { index, ageMs: baseMs - event.ms });
+    else held.delete(key);
+  }
+  const sounding = [...held.values()].sort((a, b) => a.index - b.index);
+  return { next, sounding };
+}
+
 /** Exclusive end of one bounded overdue-event scheduler pass. */
 export function takeDueBatchEnd(
   events: readonly JamTakeEvent[],

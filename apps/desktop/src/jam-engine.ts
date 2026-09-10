@@ -86,6 +86,15 @@ export type JamNoteInput = Readonly<{
   remote?: boolean;
   /** Receiver-only admission result; false advances sequencing without constructing audio. */
   render?: boolean;
+  /**
+   * How long this note has already been held, for a voice that a take seek is bringing back.
+   *
+   * Take playback joined mid-track has to open voices for notes whose attack happened before the
+   * offset. Zero, and the default, is an ordinary note starting now. Anything else back-dates the
+   * envelope's origin so the voice arrives at the level it has already reached instead of
+   * re-attacking. Live playing never sets it.
+   */
+  ageMs?: number;
 }>;
 
 export type JamNoteOffInput = Readonly<{
@@ -544,7 +553,10 @@ export class JamEngine {
     input: JamNoteInput,
     playback?: Readonly<{ patches: JamPlaybackPatchSet; index: number }>,
   ): JamPlayResult {
-    if (this.disposed || !isMidiNote(input.note) || !isLegacyWave(input.wave) || !validSequence(input.sequence)) {
+    if (
+      this.disposed || !isMidiNote(input.note) || !isLegacyWave(input.wave) || !validSequence(input.sequence) ||
+      (input.ageMs !== undefined && (!Number.isFinite(input.ageMs) || input.ageMs < 0))
+    ) {
       return { ok: false, reason: "invalid" };
     }
     const playbackTable = playback ? this.playbackPatchSets.get(playback.patches) : undefined;
@@ -1070,7 +1082,17 @@ export class JamEngine {
   ): VoiceRuntime {
     const ctx = this.context;
     if (input.remote === false && ctx.state === "suspended") void ctx.resume().catch(() => {});
-    const at = ctx.currentTime;
+    const now = ctx.currentTime;
+    const attack = patch.e.a / 1_000;
+    const decay = patch.e.d / 1_000;
+    // A voice a take seek is reviving starts with its envelope already partly run. Every automation
+    // below is scheduled from `at` rather than from now, so a back-dated origin leaves the ramps in
+    // the past and the AudioParam timeline evaluates them to the value the voice has reached. The
+    // age is clamped to the envelope's own attack-plus-decay because everything past that shelf is
+    // the sustain level: clamping is audibly identical and keeps the automation near the present
+    // instead of scheduling a ten-minute-old ramp. `startAt` stays at the real now, since a source
+    // cannot begin in the past and a free-running oscillator's phase carries no meaning here.
+    const at = now - Math.min(input.ageMs === undefined ? 0 : input.ageMs / 1_000, attack + decay);
     const sourceName = input.channel.source;
     const bus = this.sourceBus(sourceName);
     const nodes: AudioNode[] = [];
@@ -1086,8 +1108,6 @@ export class JamEngine {
     filter.frequency.setValueAtTime(Math.min(patch.f.c, ctx.sampleRate * JAM_FILTER_NYQUIST_RATIO), at);
     filter.Q.setValueAtTime(JAM_FILTER_Q_MIN + (patch.f.q / 100) * (JAM_FILTER_Q_MAX - JAM_FILTER_Q_MIN), at);
 
-    const attack = patch.e.a / 1_000;
-    const decay = patch.e.d / 1_000;
     const releaseSeconds = effectiveReleaseSeconds(patch.e.r);
     const sustain = patch.e.s / 100;
     output.gain.setValueAtTime(0, at);
@@ -1161,7 +1181,7 @@ export class JamEngine {
       params,
       releaseSeconds,
       hardHoldSeconds: JAM_REMOTE_HOLD_MAX_MS / 1_000,
-      startAt: at,
+      startAt: now,
       watchdogLevel: JAM_VOICE_PEAK_GAIN * sustain,
     });
     return runtime;
