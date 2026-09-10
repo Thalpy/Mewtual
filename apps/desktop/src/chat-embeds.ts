@@ -75,7 +75,9 @@ export const EMBED_KEEPALIVE_MARGIN_PX = 600;
 /** Everything that decides whether one card may be mounted right now. */
 export type EmbedVisibility = {
   /** The member clicked this card's chip at some point in this session. */
-  granted: boolean;
+  clicked: boolean;
+  /** The device-wide "load these automatically" preference is on (Settings, Chat & Media). */
+  autoLoad: boolean;
   /** The card's place in the document is within the keepalive margin of the viewport. */
   onScreen: boolean;
   /** The window itself is showing (not minimised, not a background tab). */
@@ -88,14 +90,22 @@ export type EmbedVisibility = {
  * Written as one function rather than as conditions spread over an observer, a visibility handler
  * and a click handler, because the failure that matters is a frame that survives one of them: a
  * card left running in a pane the reader navigated away from is exactly the passive third-party
- * connection the click gate exists to prevent, and it is invisible when it happens.
+ * connection the gate exists to prevent, and it is invisible when it happens.
  *
- * Note what is NOT here: trust policy. A card is click-only in every mode (see
- * `mayAutoLoadRemoteUrl`), so there is no policy under which `granted` could be implied rather
- * than clicked.
+ * The two halves answer different questions and only one of them is a preference. `clicked` and
+ * `autoLoad` decide **whether a card may load at all**, and either satisfies that. `onScreen` and
+ * `windowVisible` decide **whether it may still be running**, and no preference relaxes those:
+ * turning auto-load on is asking not to be interrupted by chips, not asking for frames talking to
+ * Google from a window nobody has open. Keeping the second half unconditional is what makes the
+ * setting a convenience rather than a standing leak.
+ *
+ * Note what is still NOT here: per-server trust policy. An embed's host set is fixed by the CSP,
+ * so unlike a remote image it cannot be pointed at loopback or a private LAN, and unlike a shared
+ * file it has no author attestation a policy could act on. The decision is about disclosing this
+ * device to two named companies, which is the same decision whichever server the link was in.
  */
 export function embedMayRender(v: EmbedVisibility): boolean {
-  return v.granted && v.onScreen && v.windowVisible;
+  return (v.clicked || v.autoLoad) && v.onScreen && v.windowVisible;
 }
 
 /**

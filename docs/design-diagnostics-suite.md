@@ -111,7 +111,7 @@ Default on, one click to turn off permanently. Revisit before general release, n
 | M2 | `catcoms-diagnostics`: canonical event, privacy model, store, renderers | done |
 | M3 | Correlation, typed errors, task supervision, invoke migration | done |
 | M4 | Rebuild the console on the hub | reading and capture control done; findings, checks and virtualised list outstanding |
-| M5 | Findings and checks | not started |
+| M5 | Findings and checks | route findings done; the general findings panel, the checks panel, the notes pad and virtualisation not started |
 | M6 | Export bundle and GitHub issue flow | mostly done: local Copy/Save receive native disclosure findings; public issue preparation uses a native canonical allowlist plus validation; bounded browser flow reuses the reviewed destination; richer source-typed frontend references remain |
 | M7 | Hardening, privacy property tests, performance budgets, CI gates | not started |
 
@@ -203,9 +203,17 @@ What that buys, concretely:
 * A trace filter, so pasting four characters off an error banner narrows every feed to that one
   operation.
 
-Still outstanding for M4: the findings panel, the checks panel, the notes pad, and the virtualised
-list the review asks for. The current feeds render a capped slice, which is bounded but is not the
-same thing.
+One piece of the findings work has since landed, and only one: **route findings**.
+`routeFindings` (`apps/desktop/src/debug-console.ts:1404`) turns a server's member routes into
+coded, severity-ranked conclusions, rendered above the table they were drawn from
+(`apps/desktop/src/DebugConsole.svelte:882`). They are conclusions carrying codes so they can be
+counted across reports rather than re-derived by the reader, which is the shape the rest of M5
+wants.
+
+Still outstanding: the **general** findings panel (findings over the event feeds themselves, not
+just routes), the checks panel, the notes pad, and the virtualised list the review asks for. The
+console is still six fixed sections (`DbgSection`, `debug-console.ts:1570`) and the feeds still
+render a single capped slice (`DBG_VIEW_CAP = 2000`), which is bounded but is not the same thing.
 
 **Two renderers describe the local interactive event.** `eventText` in `debug-console.ts`
 deliberately mirrors `event_line` in `render.rs`, because the console composes the local report.
@@ -486,7 +494,7 @@ can be read.
 ## 4b. Found while fixing, not yet fixed
 
 Things that turned up as neighbours of the findings above and are worth keeping in the record.
-Only the unstruck `main.ts` fetch case remains open:
+All three are now fixed:
 
 * ~~**A locked session is reported as a broken server.**~~ Fixed. `actor_of` checked the lock and
   then reported every failure alike, so a locked vault reached the user as
@@ -503,11 +511,15 @@ Only the unstruck `main.ts` fetch case remains open:
   into a `HashMap` and iterates it, so events from that producer have no stable field order. That
   undercuts the byte-identical-output property for exactly the events the console shows most. It
   belongs with P3-015.
-* **A fetch failure of `main.ts` itself still reports nothing.** P3-016 moved capture ahead of every
-  static import, which covers a module that throws while evaluating. A module that never arrives is
-  a different case and needs a first script in `index.html`; the app ships `script-src 'self'` with
-  no `'unsafe-inline'`, so the review's first-choice inline bootstrap needs a separate file and a
-  CSP decision.
+* ~~**A fetch failure of `main.ts` itself still reports nothing.**~~ Fixed. P3-016 moved capture
+  ahead of every static import, which covers a module that throws while evaluating. A module that
+  never arrives was a different case and needed a first script in `index.html`; the app ships
+  `script-src 'self'` with no `'unsafe-inline'`, so the review's first-choice inline bootstrap
+  became a separate file instead: `apps/desktop/public/boot-failure.js`, loaded as a **classic**
+  script immediately before the module (`apps/desktop/index.html:176-177`). Classic scripts in the
+  body run as the parser reaches them while module scripts are deferred to the end of parsing, so
+  its handlers are installed before the bundle gets its chance to fail; it is served from `public/`
+  and imports nothing, so it shares no fate with what it is watching.
 
 ## 5. Cooperative link test
 

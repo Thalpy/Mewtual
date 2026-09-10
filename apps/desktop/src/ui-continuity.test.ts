@@ -17,10 +17,10 @@ test("continuity sanitization keeps only bounded drafts and safe read positions"
     },
   });
   assert.deepEqual(state, {
-    version: 1, drafts: { good: "draft" }, readMarks: { good: { ts: 42, id: "m1" } }, statusCursors: {}, fileTrustPolicies: {}, latePast: {},
+    version: 1, drafts: { good: "draft" }, readMarks: { good: { ts: 42, id: "m1" } }, statusCursors: {}, fileTrustPolicies: {}, latePast: {}, embedAutoLoad: false,
   });
   assert.deepEqual(sanitizeUiContinuity({ drafts: [], readMarks: null }), {
-    version: 1, drafts: {}, readMarks: {}, statusCursors: {}, fileTrustPolicies: {}, latePast: {},
+    version: 1, drafts: {}, readMarks: {}, statusCursors: {}, fileTrustPolicies: {}, latePast: {}, embedAutoLoad: false,
   });
 });
 
@@ -143,4 +143,32 @@ test("sealed state wins over stale legacy data and malformed legacy data is pres
   );
   assert.equal(malformed.saveBeforeRemoval, false);
   assert.equal(malformed.removeLegacy, false);
+});
+
+test("auto-loading third-party cards is only ever an explicit stored yes", () => {
+  // The permissive direction of this flag starts network requests to two named companies, so it
+  // is the one that has to be asked for exactly. Everything short of a stored `true` is a no:
+  // a record from a build that predates the setting, a truthy value of the wrong type, junk.
+  assert.equal(sanitizeUiContinuity({ embedAutoLoad: true }).embedAutoLoad, true);
+  for (const notYes of [undefined, null, false, 0, 1, "true", "yes", {}, [], "1"]) {
+    assert.equal(
+      sanitizeUiContinuity({ embedAutoLoad: notYes }).embedAutoLoad,
+      false,
+      `${JSON.stringify(notYes) ?? "undefined"} must not read as permission`,
+    );
+  }
+  // An entirely absent record is the upgrade case, and it is a no.
+  assert.equal(sanitizeUiContinuity({}).embedAutoLoad, false);
+  assert.equal(sanitizeUiContinuity(null).embedAutoLoad, false);
+});
+
+test("the read-mark migration carries the card preference across rather than dropping it", () => {
+  // The migration rebuilds the whole sealed record from named fields, so anything it forgets is
+  // silently reset. Forgetting this one would turn the setting off on the one launch that adopts
+  // legacy marks, which reads as the app quietly changing its mind.
+  const current = sanitizeUiContinuity({ embedAutoLoad: true, drafts: { room: "hi" } });
+  const plan = planLegacyReadMarkMigration(current, JSON.stringify({ "server:channel": 123 }));
+  assert.equal(plan.saveBeforeRemoval, true, "the legacy marks were adopted");
+  assert.equal(plan.state.embedAutoLoad, true, "and the preference survived being rebuilt");
+  assert.deepEqual(plan.state.drafts, { room: "hi" });
 });

@@ -35,9 +35,21 @@ npm install
 npm run tauri dev
 ```
 
-To test with two members on one machine, run a second instance: launch the built exe
-directly (`./src-tauri/target/debug/mewtual-desktop`) in another terminal while the dev
-server is running.
+**Two desktop instances on one machine are not currently possible.** Every instance resolves the
+same app-data folder (there is no data-directory override), and the first one to open the vault
+takes an exclusive lock on it before it even unseals; a second instance stops at *"the vault is
+busy in another application process; try again"*. Running the built exe alongside `tauri dev`
+fails for the same reason.
+
+What does work for a two-member check:
+
+```sh
+cargo run -p catcomsctl -- demo
+```
+
+from the repository root; it drives found → invite → join → chat end to end in one process.
+[`TWO-CLIENT-TESTING.md`](TWO-CLIENT-TESTING.md) lays out the rest of the levels, including two
+real CLI processes over TCP and two isolated networks.
 
 ---
 
@@ -80,12 +92,17 @@ flow. Keep the exported folder intact until that flow lands.
 
 ## 3. Quick start
 
-1. **Found a server**; type a display name, click **Found a server**.
+1. **Found a server**; name it and pick a palette (step 1), then choose **Friend mesh** or
+   **Community node** (step 2; see §5) and click **Found server**.
 2. **Invite a friend**; right-click the server icon → **Server settings → Invites** →
    **Copy invite** (or use the invite button under the member list). Invites are single-use;
    click **Generate new invite** whenever you need another one.
-3. **They join**; your friend opens Mewtual, sets a passphrase, pastes the invite into the
-   join box, clicks **Join**.
+3. **They join**; your friend opens Mewtual, sets a passphrase and pastes the invite into the
+   join box. Pasting it reads the code back to them before anything is dialled: the signature,
+   when it expires, and how many routes it carries. If the invite offers member switchboards,
+   a checkbox asks whether they will allow that fallback, and the button says which it is;
+   **Join directly** without it, **Join with fallback** with it. Then the attempt draws itself
+   as it runs (§11).
 
 You're now in a shared, encrypted `#general` channel. Type and send.
 
@@ -106,8 +123,12 @@ You're now in a shared, encrypted `#general` channel. Type and send.
 - **Sidebar**; the server's channels and its member list (with role badges). Owners/admins also have
   a dedicated **Moderation** button. Compact **Storage** / **Connectivity** controls form one bottom
   stack immediately above your profile; DMs omit the server-governance controls.
-- **Main pane surfaces**; **Chat · Files · Announcements · Wiki · Profile · Transfers · Events**,
-  plus the operations surfaces opened from the sidebar.
+- **Main pane surfaces**; **Chat · Files · Announcements · Wiki · Events · Studio · Transfers**,
+  plus the operations surfaces (**Moderation**, **Storage**, **Connectivity**) opened from the
+  sidebar. A DM has no Announcements tab. **Profile** is *not* in the strip; open it from your own
+  name at the bottom of the sidebar (or **Settings → My Profile**). **Studio** is an early
+  in-memory preview of the shared flipnote and score editor: what you make there stays in this
+  window, is not shared with the group, and is not saved.
   Click one to switch. If that list feels like a lot, **Settings → Feature Guide** is a searchable
   map with direct **Open** buttons.
 - **Top-bar ticker**; new announcements, wiki changes, events, and messages that notify you crawl
@@ -143,8 +164,12 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   details, download, post to chat, copy address, delete), a **member** (copy fingerprint,
   make/demote admin, remove; owner), or a **server icon** (copy invite, settings, leave).
 - **Keyboard**: **Enter** sends, **Shift+Enter** adds a newline; **Esc** closes the topmost
-  menu/panel; **Ctrl/Cmd+1–7** switch surfaces; **Ctrl/Cmd+K** opens the quick switcher for
+  menu/panel; **Ctrl/Cmd+1–8** switch surfaces (1 chat, 2 files, 3 announcements, 4 wiki,
+  5 profile, 6 transfers, 7 events, 8 studio); **Ctrl/Cmd+K** opens the quick switcher for
   channels, surfaces, servers and DMs; **Ctrl/Cmd+L** locks; **Ctrl/Cmd+O** opens Server Space.
+- **Going back**; **Alt+←** / **Alt+→** walk the places you have been, the way a browser or a
+  file manager does, and a mouse's **thumb buttons** do the same thing. Inside Server Space,
+  **Ctrl/Cmd+Z** undoes a layout change and **Ctrl/Cmd+Shift+Z** redoes it.
 - The **member list** and **wiki page list** get a search box once they grow; server icons show
   an **unread badge**.
 
@@ -206,10 +231,12 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   direction, and response curve are configurable. It affects only genuinely new rows from your
   profile, not another member's posts or history when a channel opens. The side preview loops the
   draft and offers **Replay** so the short entrance can be checked immediately.
-- These choices travel with your server profile. Under **Settings → Appearance**, you can disable
-  peer frames or arrival motion locally. Flattening hides other members' frames while leaving your
-  own visible; disabling arrivals suppresses every member's entrance locally. Neither control
-  changes what other members see.
+- These choices travel with your server profile. Under **Settings → Appearance**, the local
+  **arrivals** control still works: disabling it suppresses every member's entrance on this
+  device. The **Flatten other members' custom message frames** checkbox beside it is greyed out
+  for as long as frames are paused, and reads *"Custom message frames are temporarily disabled in
+  live chats"* instead; there is nothing to flatten while nobody's frames render. It comes back
+  with the feature, and neither control ever changes what other members see.
 
 ### DMs, friends, Inbox & News
 - Open **DMs** from the left rail to create a private 1:1, redeem a friend code, sort friends by
@@ -288,25 +315,52 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   **Actual size** switches between fit-to-window and 1:1. **Right-click** an image for
   **Properties** (size, type, who shared it, where it's used), **Download**, its address, and
   the message's own actions.
-- **A Spotify or YouTube link on a line of its own** becomes a player card. It never loads by
-  itself: you get a chip naming the service, and clicking it is what contacts them. Because that
-  frame keeps talking to the service for as long as it is on screen, it unloads again when you
-  scroll away from it, switch to another tab, or minimise the window, and reloads when you come
-  back to it. A Spotify card usually plays a short preview: full tracks need that device to be
-  signed in to Spotify Premium. A link written inside a sentence stays an ordinary link.
+- **A Spotify or YouTube link on a line of its own** becomes a player card. By default it does not
+  load by itself: you get a chip naming the service, and clicking it is what contacts them.
+  **Settings → Chat & Media → Load these cards without asking** turns the chips off and lets them
+  open on sight; it applies on this device across every server, and the trade is that Spotify and
+  Google then learn your address and what you are looking at for every such link that scrolls past,
+  with no way for them to tell it was not you who chose it. Either way the frame keeps talking to
+  the service for as long as it is on screen, so it unloads when you scroll away, switch to another
+  tab, or minimise the window, and comes back when you return. A Spotify card usually plays a short
+  preview: full tracks need that device to be signed in to Spotify Premium. A link written inside a
+  sentence stays an ordinary link.
 
 ---
 
 ## 5. Connecting across a network
 
-When you found a server, open the **Network (optional)** section. How others reach you:
+### Who carries the traffic (step 2 of founding)
+
+Founding asks this and will not proceed until you have answered it. Step 2 of the found pane is a
+choice between two shapes, and neither is the safer one; they guard against different people.
+
+- **Friend mesh** (peer to peer, no server); everyone connects to everyone, and every member's
+  device keeps the encrypted history, so any one of them can catch the others up. It requires
+  nothing: no machine to run, no address to paste. Members may see each other's IP addresses, a
+  ban depends on every member's app playing fair, and catch-up waits until another member is
+  online. Works on a LAN with no internet at all. Best for friend circles and small crews.
+- **Community node** (a decentralised server you run); everyone connects through an always-on
+  machine of yours. It forwards encrypted traffic, keeps members' addresses from each other, and
+  serves signed snapshots so catch-up works when nobody else is online. It holds no group keys,
+  but its operator sees who is a member, who talks to whom, when, and how much. A removal holds
+  rather than depending on goodwill. Best for bigger communities and people you don't know.
+
+Picking **Community node** reveals **Your node's address** and the **Found server** button stays
+disabled until you fill it in; set the node up with `catcomsctl relay` (below) and paste the line
+it prints. If you don't have a node yet, the pane says so itself: pick Friend mesh instead.
+
+### Addresses (Advanced: connectivity)
+
+Under the two cards, the **Advanced: connectivity** fold holds the optional address fields.
+How others reach you:
 
 | Where the other person is | What to enter |
 |---|---|
-| **Same machine** (two windows) | Nothing; leave it blank. |
-| **Same Wi-Fi / LAN** | Your **LAN IP** (e.g. `192.168.1.5`) in *Reachable address*. |
-| **Over the internet (port-forward)** | Your **public IP** (or `host:port`) in *Reachable address*, and forward that TCP port. |
-| **Over the internet (automatic)** | Leave the network fields blank; Mewtual tries UPnP, IPv4 PCP/NAT-PMP, and IPv6 PCP firewall pinholes on its stable port. |
+| **Same machine** (a second app window) | Not possible; one machine holds one vault, one process (§1). |
+| **Same Wi-Fi / LAN** | Your **LAN IP** (e.g. `192.168.1.5`) in *Known address*. |
+| **Over the internet (port-forward)** | Your **public IP** (or `host:port`) in *Known address*, and forward that TCP port. |
+| **Over the internet (automatic)** | Leave the fold's fields blank; Mewtual tries UPnP, IPv4 PCP/NAT-PMP, and IPv6 PCP firewall pinholes on its stable port. |
 | **Over the internet (mapping unavailable)** | A **relay**; see below. |
 
 Find your LAN IP with `ipconfig` (Windows) / `ip addr` (Linux). The invite carries every
@@ -353,9 +407,10 @@ cannot discover a new address from nothing.
 
 If none of the inviter's routes answers, the join screen can produce a
 `mewtual-reply-v1:` code for the next 60 seconds. Send it back through the same human chat and keep
-both applications open. The named inviter can paste it under **Server settings → Connectivity →
-One-time connection help**; an eligible current member that is already connected to that inviter
-can do the same. Mewtual validates at most four public TCP/QUIC candidates and repeatedly dials
+both applications open. The named inviter pastes it into **One-time connection help**, in the
+**Connectivity assistant** (the sidebar's **Connect** button, under the channel list); the same
+box also sits under **Server settings → Invites**, as *"If their join fails: meet in the middle"*.
+An eligible current member that is already connected to that inviter can do the same. Mewtual validates at most four public TCP/QUIC candidates and repeatedly dials
 them. Every callback must prove possession of the code before the joiner sends its bearer invite or
 KeyPackage, and only the invite's named inviter can sign the Welcome.
 
@@ -367,8 +422,11 @@ active joiner requires explicit confirmation.
 ### Member switchboards
 
 An established group can use a reachable current member as a short admission bridge without a
-Mewtual-operated server. Hosting is **off by default** and is enabled per device/server under
-**Server settings → Connectivity → Group hosting**. A standing host publishes a two-minute signed
+Mewtual-operated server. Hosting is **off by default** and is enabled per device/server in the
+**Connectivity assistant** (the sidebar's **Connect** button), under **GROUP HOSTING**: the
+button reads **Offer to host from this device**, and **Stop hosting** once it is on. It is greyed
+out on a device whose own routes don't qualify, and says why when you hover it. A standing host
+publishes a two-minute signed
 candidate offer. Fresh assisted invites can endorse up to three such members; when a recipient
 pastes one, Mewtual previews the fallback and asks permission before contacting any member after
 the direct attempt fails.
@@ -392,13 +450,16 @@ peers behind NATs. It is **zero-knowledge**; it only routes ciphertext.
 
 1. On a reachable host, run `cargo run -p catcomsctl -- relay --port 4000`. It prints its
    address, e.g. `/ip4/203.0.113.9/tcp/4000/p2p/12D3KooW…`.
-2. When founding, paste that into the **Relay address** field.
+2. When founding, paste that line into **Relay node** (inside **Advanced: connectivity**) if you
+   chose Friend mesh, or into **Your node's address** if you chose Community node. The field the
+   pane shows follows the choice you made in step 2.
 3. Share the invite as usual; your friend joins **through the relay from anywhere**.
 
 ### Using rendezvous discovery
 
 A rendezvous node helps members find one another without putting a member's hard-coded address in
-the invite. Set a default under **Settings → Network**, or provide one while founding. The desktop
+the invite. Set a default under **Settings → Network**, or paste one into **Introducer node**
+under **Advanced: connectivity** while founding (which is also saved as your default). The desktop
 registers the founder, discovers them when a valid invite is pasted, and keeps re-registering after
 the join so members can reconnect after a restart. The rendezvous sees opaque namespaces and
 network metadata, not group keys or plaintext. It is not a public directory: the invite is still
@@ -431,6 +492,31 @@ The **Files** tab is a folder browser:
 
 **Custom emoji** live in the `emoji/` folder. Add one in **Server settings → Emoji & Stickers**:
 type a `code`, choose its display size and upload an image. Then anyone types `:code:` to use it.
+
+### What loads by itself, and how big it may be
+
+**Server settings → File Trust** carries two separate things that both answer "what may files do
+here". The first is a **server** rule, the second is **yours alone**.
+
+- **Largest file members may share**; the owner or an admin sets a per-server cap, and everyone
+  is held to it. The page names the current figure and the range the protocol can carry. Raising
+  it lets members commit each other to bigger downloads. Lowering it does not withdraw files that
+  were already shared. Members who can't change it are simply told what the limit is.
+- **Automatic fetch and decoding on this device**; three modes decide what a surface may fetch
+  and hand to a decoder *without a click*:
+  - **On demand**; nothing loads until you click it.
+  - **Media only**; pictures, audio and video from the group load, and everything else waits.
+    **This is the default**, because it is what most people mean by "show me the pictures".
+  - **Everyone**; every member's shared file loads. External URLs stay click-only regardless.
+- **Per-person overrides** sit under the modes and beat whichever mode is set: **Always load**
+  fetches that person's files even under On demand, **Never load** keeps them click-only even
+  under Everyone. Both are addressed to a full device identity, not a display name.
+- This choice is local and vault-sealed. It does not endorse anyone to anybody else, nobody is
+  told what you picked, and it never blocks an explicit Load, Play, Open or Download.
+- Be aware what the default buys: an allowlisted type, a matching container signature, an
+  authenticated ciphertext and a verified content id together prove the bytes are the ones the
+  sender meant to send. None of them prove that *decoding* them is safe, and a current member can
+  mean to send something hostile. Move to **On demand** if that trade isn't one you want.
 
 ---
 
@@ -496,9 +582,28 @@ type a `code`, choose its display size and upload an image. Then anyone types `:
 - Choose **Join voice** in a chat channel's header. Voice rooms belong to channels and remain
   active while you move around the app. The call stage provides mute/deafen, per-person volume,
   input/output device selection, camera and screen sharing.
+- **Push to talk** is under **Settings → Voice & Calls → Microphone**. **Open** keeps the
+  microphone live whenever you are unmuted; **Push to talk** opens it only while a key is held.
+  Set the **Talk key** first (the mode can't be picked without one) and **Clear** returns you to
+  Open. It works while Mewtual has focus and deliberately does *not* register a system-wide
+  shortcut, so a key you hold while playing something stays that game's key. Muting still
+  silences the microphone whatever the key is doing.
 - **Instruments** opens Keys and Pads surfaces that also accept computer-keyboard or Web MIDI
   input; notes and drum hits are shared live with the room. In Pads mode, MIDI uses the General
-  MIDI drum notes for kick, snare, rim, clap, hats, toms, ride and crash. The **Jukebox** queues
+  MIDI drum notes for kick, snare, rim, clap, hats, toms, ride and crash. A shared **metronome**
+  gives the room one grid to play against, and a patch editor shapes your own sound (oscillator,
+  filter, ADSR envelope) and announces the recipe so everyone hears you the same way.
+- **Takes**; the **TAKES** fold on the instrument panel records what the room is playing. A take
+  is the note events everyone is already hearing, not audio. Pressing **REC** *arms* it and waits
+  for the room: it shows **waiting for the room** until every participant's app has consented,
+  and an older build can never consent, so it will not start behind anyone's back. The whole room
+  sees that it is recording. **STOP · KEEP** keeps a take and **DISCARD** throws it away; a
+  **N lost** chip is shown when events went missing in transit, and the take keeps the holes
+  rather than hiding them. Kept takes can be renamed, replayed locally through your own synth
+  (nothing is re-sent), saved as **sheet music** (an SVG in your Downloads folder), or shared into
+  the encrypted fileshare as a `.jamtake` that the Jukebox can then queue. **Anything you do not
+  share dies with the call**; the fold says so, as *"N kept · end with the call"*.
+- The **Jukebox** queues
   audio or saved jam takes already circulating in the server's Files area, so it does not upload a
   second copy. Its local volume slider applies equally to ordinary media and synthesized jam-take
   playback. Whoever pressed last is the DJ and
@@ -558,9 +663,18 @@ The two compact operations buttons above your profile provide local, evidence-ba
   or corrupt chunks through the authenticated, content-address-checked member path and replaces the
   cached report after verifying again. It cannot invent bytes when no reachable member holds them
   or repair an invalid manifest. The same health summary is explicitly available in **Transfers**.
-- **Connectivity** explains what this device can actually observe: connected members, the current
-  path evidence and existing network settings. It does not promise global reachability from a
-  local observation. **Copy diagnostic** provides the same bounded report for troubleshooting.
+- **Connectivity** opens the **Connectivity assistant**, which explains what this device can
+  actually observe: connected members, the current path evidence and existing network settings. It
+  does not promise global reachability from a local observation. **Copy diagnostic** provides the
+  same bounded report for troubleshooting, and **Retry group routes now** redials by hand. This is
+  also where **GROUP HOSTING** and **One-time connection help** live (§5).
+
+**Settings → Diagnostics → Open debug console** opens the in-app console: the frontend and native
+log as it happens, in sections (network, voice, storage and the rest) you can filter by level and
+by text, with **Copy report** for the view on screen. Its **capture mode** decides how much is kept
+in the first place; **Safe** destroys literal addresses before they are ever recorded, and the more
+revealing modes say what they add before you turn them on. Prefer the console to the raw log file,
+which is not filtered at all (§10).
 
 Right-click the server icon and open **Server settings**:
 
@@ -576,6 +690,20 @@ Right-click the server icon and open **Server settings**:
   Everyone in a server can read everything in it (they hold the group key); a role does not
   restrict what a member can see. Treat roles as **trusted designation + moderation controls**,
   not a hard content-permission wall.
+- **Livery** is the server's published look: its icon, a base palette, and (under the same panel)
+  banner, accent, tint, corners, typography, background pattern and a cursor. An owner or admin
+  edits it and presses **Publish livery**; **Remove livery** takes it back off. It is step 1 of
+  founding, so most servers have one from the start. Whatever the palette, **green, gold and red
+  keep their jobs** (presence, mentions, danger). Any member can decline it for themselves under
+  **Settings → Appearance → Livery** by unticking *Follow this server's livery*; that is yours
+  alone and nobody is told.
+- **Badges** are small chips an owner or admin pins beside a member's name; role names are
+  reserved, so a badge can never impersonate *owner* or *admin*.
+- **Join Log** records every join request *this device* answered since it started, newest first,
+  and why each one was refused, matched to the invite you sent by its invite code. The person
+  joining is only ever told "rejected", deliberately: the reason is never put on the wire, so
+  nobody can probe your invites. It is the other half of that, and it is the page the app tells a
+  stuck joiner to ask you to open. Nothing in it survives closing the app.
 
 ---
 
@@ -584,7 +712,8 @@ Right-click the server icon and open **Server settings**:
 You can be in **several servers at once**; the left **rail** shows them.
 
 - **Found** or **Join** adds one and switches to it; **＋** opens the form again.
-- A **dot** on an icon means new activity. **⚙ Settings → Leave this server** removes one.
+- A **dot** on an icon means new activity. **Server settings → Leave Server** removes one (the
+  server icon's own right-click menu has **Leave** as a shortcut).
 
 Each server is a separate encrypted group with its own channels, members, profiles, files,
 wiki, and roles; they share nothing.
@@ -621,9 +750,21 @@ wiki, and roles; they share nothing.
   separate minimized report.
 - **Remote images contact their host.** An HTTP(S) image pasted into chat is lazy-loaded with no
   referrer, but its host can still see your IP and request timing. Files shared through Mewtual's
-  encrypted fileshare do not make that third-party request.
+  encrypted fileshare do not make that third-party request. External URLs stay click-only under
+  every **File Trust** mode (§6); what that setting changes is what *members'* shared files may
+  fetch and decode without a click, and its default (**Media only**) hands pictures, audio and
+  video to the platform decoders with no gesture from you. Choose **On demand** if you would
+  rather that never happened.
+- **A jam take is the room's playing, and the room is asked first.** Recording arms rather than
+  starts: it waits until every participant's app consents, and shows that it is recording to
+  everyone. A take holds note events, not audio, and unless you share it into the fileshare it
+  dies with the call (§7).
 - **Display names aren't identities.** Members are cryptographically identified by their
-  **device fingerprint** (shown in the member list), not their chosen name.
+  **device fingerprint** (shown in the member list), not their chosen name. **Settings →
+  Verification** shows your own fingerprint for the open server and lists everyone you have
+  verified there. Compare fingerprints out of band (read one over a call, or in person), then mark
+  the person verified from their context menu. Fingerprints are per-server identities, and a
+  verified mark is local to you and this server: nobody is told.
 - **Roles aren't access control** (§8); being a "member" vs "admin" doesn't change what
   content you can read; everyone in the group can read the group.
 - **You trust whoever invited you** and the members already in the server.
@@ -638,6 +779,15 @@ wiki, and roles; they share nothing.
   (set a new passphrase; re-found / re-join with an invite).
 - **Can't connect over a network** → check the founder advertised a reachable address, the TCP
   port is forwarded, or use a **relay** (§5). Both peers must be running while connecting.
+- **A join that doesn't land** → the join screen shows the attempt rather than a spinner. Beside
+  the invite box, a diagram draws **YOU** and **THEM** with one line per route, each named by kind
+  (never by address or person), lit as it is tried and annotated with why it failed. When every
+  route is exhausted it turns into a verdict with what to do next, in order: the 60-second
+  **reply code** to send back through the same chat (§5), asking them to check their app is
+  actually open, and, if the invite carried switchboards and you declined them, allowing the
+  member fallback and pressing Join again. A join that reached them and was *refused* says so
+  differently: only their app knows why, and it asks you to have them open
+  **Server settings → Join Log** (§8), because the reason is deliberately never sent back to you.
 - **An unused invite stopped working** → open **Server settings → Invites** while the owner is
   online and generate a fresh one; the owner's current reachable addresses are folded into it.
 - **An avatar / file / embed shows as unavailable** → the member who has it may be offline; it

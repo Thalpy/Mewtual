@@ -18,7 +18,7 @@ const onDemand = { mode: "on-demand" as const, trustedAuthors: [], blockedAuthor
 const media = { mode: "media" as const, trustedAuthors: [], blockedAuthors: [] };
 const everyone = { mode: "everyone" as const, trustedAuthors: [], blockedAuthors: [] };
 
-test("malformed server policies fail closed to on-demand; a missing one is media only", () => {
+test("malformed server policies fail closed to on-demand, and so does a missing one", () => {
   const policies = sanitizeFileTrustPolicies({
     1: { mode: "media", trustedAuthors: ["alice", "alice", "bob"], blockedAuthors: ["bob"] },
     2: { mode: "everyone", trustedAuthors: [] },
@@ -33,15 +33,40 @@ test("malformed server policies fail closed to on-demand; a missing one is media
     3: { mode: "on-demand", trustedAuthors: ["mallory"], blockedAuthors: [] },
   });
   assert.deepEqual(fileTrustPolicyFor(policies, 99), DEFAULT_FILE_TRUST_POLICY);
+});
+
+test("SEC-DEFAULT-001: the shipped default decodes untrusted media with no gesture, knowingly", () => {
+  // This is a pin on an accepted risk, not an endorsement. Alpha ships media-only as the default,
+  // which means a current member's image reaches the platform decoders inside the webview that
+  // holds the account, before anyone clicks anything. Nothing in this file makes that safe, and
+  // nothing anywhere else does either: the native container validation establishes that the bytes
+  // are the ones the sender sent, which is a different claim.
+  //
+  // The test exists so the decision stays deliberate. Anyone narrowing it to on-demand is doing
+  // the safe thing and should edit this freely. Anyone widening it further, or restoring it after
+  // a narrowing, is making a security decision that needs a demonstrated privilege boundary
+  // around automatic decoding on the packaged Windows runtime, not an argument that it is
+  // probably fine.
   assert.equal(DEFAULT_FILE_TRUST_POLICY.mode, "media");
+  assert.deepEqual(DEFAULT_FILE_TRUST_POLICY.trustedAuthors, []);
+  assert.deepEqual(DEFAULT_FILE_TRUST_POLICY.blockedAuthors, []);
+  // The default is what an unconfigured server gets, so the two must not drift apart. Whatever
+  // the mode is, the default must never arrive pre-loaded with someone else's overrides.
+  const unconfigured = fileTrustPolicyFor({}, 7);
+  assert.deepEqual(unconfigured, DEFAULT_FILE_TRUST_POLICY);
+  // The one thing the default must still narrow, whatever it is set to: a file the renderer does
+  // not recognise as media never loads on its own. That is the difference between this mode and
+  // "everyone", and it is the half of the promise that does not depend on decoder safety.
+  assert.equal(mayAutoLoadFile(unconfigured, "alice", true, "non-media"), false);
+  assert.equal(mayAutoLoadFile(unconfigured, "mallory", false, "non-media"), false);
 });
 
 test("the retired specific mode reads as on-demand with its trusted people kept as overrides", () => {
   const policies = sanitizeFileTrustPolicies({ 1: { mode: "specific", trustedAuthors: ["alice"] } });
   assert.deepEqual(policies[1], { mode: "on-demand", trustedAuthors: ["alice"], blockedAuthors: [] });
   // Same behaviour as before the upgrade: alice loads, nobody else does.
-  assert.equal(mayAutoLoadFile(policies[1], "alice", true), true);
-  assert.equal(mayAutoLoadFile(policies[1], "bob", true), false);
+  assert.equal(mayAutoLoadFile(policies[1], "alice", true, "validated-media"), true);
+  assert.equal(mayAutoLoadFile(policies[1], "bob", true, "validated-media"), false);
 });
 
 test("a per-person override cannot authenticate a forged author on a remote URL", () => {
@@ -127,15 +152,43 @@ test("per-person overrides are exact, exclusive, removable, and bounded", () => 
 
 test("the mode decides the default and the overrides win either way", () => {
   // On demand: nothing passive, unless the person is marked always.
-  assert.equal(mayAutoLoadFile(onDemand, "alice", true, true), false);
-  assert.equal(mayAutoLoadFile({ ...onDemand, trustedAuthors: ["alice"] }, "alice", true, false), true);
-  assert.equal(mayAutoLoadFile({ ...onDemand, trustedAuthors: ["alice"] }, "alice", false, true), false, "always needs attested authorship");
+  assert.equal(mayAutoLoadFile(onDemand, "alice", true, "validated-media"), false);
+  assert.equal(mayAutoLoadFile({ ...onDemand, trustedAuthors: ["alice"] }, "alice", true, "non-media"), true);
+  assert.equal(mayAutoLoadFile({ ...onDemand, trustedAuthors: ["alice"] }, "alice", false, "validated-media"), false, "always needs attested authorship");
   // Media only: media loads, other files do not.
-  assert.equal(mayAutoLoadFile(media, "alice", true, true), true);
-  assert.equal(mayAutoLoadFile(media, "alice", true, false), false);
-  assert.equal(mayAutoLoadFile(media, "mallory", false, true), true, "like everyone, media only does not need attestation");
+  assert.equal(mayAutoLoadFile(media, "alice", true, "validated-media"), true);
+  assert.equal(mayAutoLoadFile(media, "alice", true, "non-media"), false);
+  assert.equal(mayAutoLoadFile(media, "mallory", false, "validated-media"), true, "like everyone, media only does not need attestation");
   // Everyone: all files, unless the person is marked never.
-  assert.equal(mayAutoLoadFile(everyone, "mallory", false, false), true);
-  assert.equal(mayAutoLoadFile({ ...everyone, blockedAuthors: ["mallory"] }, "mallory", false, true), false, "never holds even on a claimed name");
-  assert.equal(mayAutoLoadFile({ ...media, blockedAuthors: ["alice"] }, "alice", true, true), false);
+  assert.equal(mayAutoLoadFile(everyone, "mallory", false, "non-media"), true);
+  assert.equal(mayAutoLoadFile({ ...everyone, blockedAuthors: ["mallory"] }, "mallory", false, "validated-media"), false, "never holds even on a claimed name");
+  assert.equal(mayAutoLoadFile({ ...media, blockedAuthors: ["alice"] }, "alice", true, "validated-media"), false);
+});
+
+test("SEC-MEDIA-002: the media-only mode never passively loads a non-media file", () => {
+  // The mode's whole promise is that it is narrower than "everyone". A caller that classifies a
+  // document, an archive or an unrecognised type must get a click, whoever sent it, and a
+  // per-person always override is the only thing that widens it.
+  assert.equal(mayAutoLoadFile(media, "alice", true, "non-media"), false);
+  assert.equal(mayAutoLoadFile(media, "mallory", false, "non-media"), false);
+  assert.equal(mayAutoLoadFile({ ...media, trustedAuthors: ["alice"] }, "alice", true, "non-media"), true);
+  assert.equal(mayAutoLoadFile({ ...media, trustedAuthors: ["alice"] }, "bob", true, "non-media"), false);
+});
+
+test("a never override outranks every mode, both classifications and any claimed authorship", () => {
+  // Failing closed on a name nobody attested costs nothing, so the block does not ask for proof.
+  for (const base of [onDemand, media, everyone]) {
+    const blocked = { ...base, blockedAuthors: ["mallory"] };
+    for (const fileClass of ["validated-media", "non-media"] as const) {
+      for (const verified of [true, false]) {
+        assert.equal(
+          mayAutoLoadFile(blocked, "mallory", verified, fileClass),
+          false,
+          `${base.mode}/${fileClass}/verified=${verified}`,
+        );
+      }
+    }
+    // And the block still wins when the same person is somehow also on the trusted list.
+    assert.equal(mayAutoLoadFile({ ...blocked, trustedAuthors: ["mallory"] }, "mallory", true, "validated-media"), false);
+  }
 });

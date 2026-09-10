@@ -24,6 +24,21 @@ export type UiContinuity = {
    * thing that survived a desync must not be the thing a reboot clears.
    */
   latePast: Record<string, LatePast>;
+  /**
+   * Whether third-party player cards (Spotify, YouTube) may load without being clicked.
+   *
+   * Device-wide rather than per-server, unlike [`fileTrustPolicies`], because the thing being
+   * decided is not about a server or its members. A card discloses this device's address to
+   * Google or Spotify; which of this person's servers the link happened to be posted in changes
+   * nothing about who learns what, so a per-server answer would be finer-grained without being
+   * more meaningful.
+   *
+   * Sealed for the same reason the read marks are: "load these automatically" is a standing
+   * instruction to contact two named companies, and a preference that decides what this device
+   * reaches out to does not belong in plaintext webview storage where anything running in the
+   * window could flip it.
+   */
+  embedAutoLoad: boolean;
 };
 
 const MAX_ENTRIES = 2_000;
@@ -79,7 +94,11 @@ export function sanitizeUiContinuity(value: unknown): UiContinuity {
     const kept = ids.length > MAX_LATE_PAST ? ids.slice(ids.length - MAX_LATE_PAST) : ids;
     if (kept.length) latePast[key] = kept;
   }
-  return { version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast };
+  // Strictly `=== true`, so anything that is not an explicit stored yes reads as no: a missing
+  // field, a truthy string a future build wrote, a corrupted record. The permissive direction of
+  // this flag starts network requests, so it is the one that has to be asked for exactly.
+  const embedAutoLoad = root.embedAutoLoad === true;
+  return { version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad };
 }
 
 /**
@@ -132,6 +151,7 @@ export function planLegacyReadMarkMigration(
       statusCursors: current.statusCursors,
       fileTrustPolicies: current.fileTrustPolicies,
       latePast: current.latePast,
+      embedAutoLoad: current.embedAutoLoad,
     });
     return { state: migrated, saveBeforeRemoval: true, removeLegacy: true };
   } catch {

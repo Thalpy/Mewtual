@@ -7,9 +7,10 @@ occupies the webview or the server actor for longer than a chunk.
 
 See also: [`HANDOVER.md`](HANDOVER.md) fileshare; the 8l blob layer.
 
-## Why 16 MiB today
+## Why 16 MiB was the ceiling (the problem this solved)
 
-`MAX_FILE_BYTES` (catcoms-app/lib.rs) is exactly `MAX_BLOB_RESPONSE = 16 MiB` (catcoms-sync/lib.rs:84),
+Before chunking, `MAX_FILE_BYTES` (catcoms-app/lib.rs) was exactly
+`MAX_BLOB_RESPONSE = 16 MiB` (catcoms-sync/lib.rs:493),
 the cap on a **single** blob-fetch request/response round-trip (enforced fetch-side at ~3624 and
 serve-side at ~3961/3997). It exists because a fetch is one buffered frame and a 32-byte CID is a
 strong request amplifier. The **storage** layer has no size limit at all; `Cid::of`, `BlobStore`,
@@ -23,16 +24,20 @@ strong request amplifier. The **storage** layer has no size limit at all; `Cid::
   already-reviewed 9h primitive) → a `FileRef` + ciphertext blob; `put_blob` each. No new crypto.
 - **`FileManifest`** (new, in `catcoms-storage::filecrypto`) wraps the file: `{ mime, total_size,
   plaintext_cid, chunks: Vec<FileRef> }`, with `encode`/`decode`. It is stored **inline in `F_REF`**
-  (like a single `FileRef` is today); it's small (N × ~150 B; a 256 MiB file at 8 MiB chunks = 32
-  refs ≈ 5 KB). `plaintext_cid` is `Cid::of(whole plaintext)`; the file's stable identity.
+  (like a single `FileRef` is today); it's small (N × ~150 B; a 1 GiB file at 8 MiB chunks = 128
+  refs ≈ 19 KB). `plaintext_cid` is `Cid::of(whole plaintext)`; the file's stable identity.
 - **File identity = `plaintext_cid`.** `add_file` returns it; `files()` reports it as `UiFile.cid`;
   `download_file(cid)` matches `manifest.plaintext_cid`; embeds (`cid:HEX`) reference it. (Was the
   single ciphertext CID; a clean change; old ciphertext-cid embeds in pre-release vaults may need
   re-insert. A legacy single-`FileRef` entry is read via a fallback: decode as `FileManifest`, else
   decode as one `FileRef` and treat it as a 1-chunk manifest, so existing files still download.)
 - **`add_file`:** chunk → `seal_file` each → `put_blob` each → build + encode the manifest into
-  `F_REF`. `MAX_FILE_BYTES` becomes a (larger) **total** cap (256 MiB); the blob cap then bounds only
-  per-chunk size.
+  `F_REF`. `MAX_FILE_BYTES` becomes a (larger) **total** cap; the blob cap then bounds only
+  per-chunk size. Two numbers, not one: `MAX_FILE_BYTES` is the protocol ceiling, **1 GiB**
+  (`crates/catcoms-app/src/lib.rs:2725`, raised from 256 MiB on 2026-09-04), past which a manifest
+  does not parse; `DEFAULT_FILE_SIZE_LIMIT` (`:2733`) is the **256 MiB** policy limit a server
+  starts with and its owner may set lower (never higher). Wherever this doc says 256 MiB below,
+  read it as "what a default server accepts", not "what the format allows".
 - **`download_file`:** decode the manifest; for each chunk `FileRef` in order; if `!has_blob`,
   `request_blob_best`; `get_blob`; `open_file` → chunk plaintext; append. Verify
   `Cid::of(reassembled) == manifest.plaintext_cid` end-to-end. Keep the five precise per-chunk
@@ -62,7 +67,8 @@ was the app hanging. Sharing a ~17 MiB file stuck the progress bar at 10% and fr
 around it, because a transfer occupied **both** single-threaded surfaces end to end.
 
 - **The webview.** `add_file` took the whole file as one base64 `invoke` argument. A 17 MiB file is
-  a 23 MB JS string, serialized whole on the main thread; 256 MiB (the declared cap) is 341 MB.
+  a 23 MB JS string, serialized whole on the main thread; 256 MiB (a default server's limit) is
+  341 MB, and the 1 GiB protocol ceiling is 1.37 GB.
 - **The server actor.** `catcoms-app`'s actor is one `select!` loop over `(commands, sync_once)`,
   biased to commands, and each command runs to completion inline. Sealing every chunk inside one
   `AddFile` meant that for the whole upload the server drained no inbound sync and answered no
@@ -86,7 +92,8 @@ Both are now bounded by a chunk instead of by the file:
   listings survive. The old chunks are collected only when no live listing references them.
 - **Download.** Already one chunk per actor command (`file_download_plan` + `fetch_file_chunk`).
   What remained was the saved-file path: `download_file` returned the whole file as base64 and the
-  webview handed it straight back to `save_download`, crossing the bridge twice whole.
+  webview handed it straight back to a `save_download` command (since removed), crossing the
+  bridge twice whole.
   `save_group_file` replaces both: the bridge reserves the Downloads name, streams chunk to file,
   verifies the whole-file address, and reveals it. The plaintext never enters the webview.
   `download_file` remains for the small in-page cases (embeds, emoji, previews).
@@ -96,7 +103,7 @@ Both are now bounded by a chunk instead of by the file:
 `total_size` and `chunks` are two member-authored fields describing one thing, and originally
 nothing tied them together: the declared size bounded the file and drove the UI, while the chunk
 count decided how much a reader fetched, decrypted and wrote. A member could therefore declare one
-byte and attach 32 full chunks; the reader did 256 MiB of work for a file its own UI called one
+byte and attach a full chunk list; the reader did the whole cap's worth of work for a file its own UI called one
 byte, and the end-to-end address check did not catch it because the author simply computed that
 address over the expansion. (`MAX_CHUNKS` was 4096, so the ceiling was ~32 GiB.)
 
@@ -104,7 +111,8 @@ So the layout is an **equality**, not a range: for a file of `total_size` there 
 chunk list. `FileManifest::validate_layout` requires `chunks.len() == max(1, ceil(total_size /
 CHUNK_BYTES))`, every non-final chunk to declare exactly `CHUNK_BYTES` and the last the remainder,
 and it runs inside `FileManifest::decode` so no reader can forget it. `MAX_CHUNKS` is now the
-product's true maximum (32), static-asserted against `MAX_FILE_BYTES` in `catcoms-app`.
+product's true maximum, **128** (`crates/catcoms-storage/src/filecrypto.rs:212`; raised from 32
+alongside the 1 GiB `MAX_FILE_BYTES`), static-asserted against `MAX_FILE_BYTES` in `catcoms-app`.
 `publish_upload` validates before it posts, so this node never authors a listing its own reader
 would reject. Underneath, `open_file` holds a decrypted chunk to the length its `FileRef` declared,
 because `size` is the field the layout is made of. And both readers (`save_group_file`, the
@@ -142,8 +150,8 @@ only what the file index references, so nothing could ever find them again.
 
 The blob store now has a second namespace. `BlobStore::put_staged` writes into a `staging/`
 subdirectory that `get`, `has` and `cids` do not see, so a staged chunk is on disk without being
-*held*. `seal_upload_chunk` stages; `publish_upload` calls `promote_staged` (a rename, so a 256 MiB
-file costs a directory entry rather than a rewrite); everything else drops them. Cancelling is then
+*held*. `seal_upload_chunk` stages; `publish_upload` calls `promote_staged` (a rename, so even a
+1 GiB file costs a directory entry rather than a rewrite); everything else drops them. Cancelling is then
 safe by construction rather than by check: a staged blob is referenced by nothing, so there is no
 dedup question to get wrong.
 
@@ -169,10 +177,12 @@ file was enough.
 
 Everything visual now renders from the `catcoms-media:` protocol instead (`sharedMediaUrl`), which
 answers Range requests off the vault and fetches missing chunks from peers exactly as before, so
-the element streams and the bytes never become a JS string. `download_file` keeps one caller, the
-text reader, which genuinely needs bytes in JS; it is bounded by a 2 MiB soft cap in the UI and by
-`MAX_INLINE_DOWNLOAD_BYTES` (16 MiB) natively, so no "read it anyway" button can pull a 256 MiB
-listing into the window. The native bound is meaningful only because the manifest layout check
+the element streams and the bytes never become a JS string. `download_file` keeps exactly three
+callers, all of which genuinely need bytes in JS: the text reader, the take deck and the patch
+loader (`apps/desktop/src/inline-transfer.test.ts:102` asserts the count, so a fourth has to be
+argued for rather than slipped past). Each is bounded by a soft cap in the UI (2 MiB for the text
+reader) and by `MAX_INLINE_DOWNLOAD_BYTES` (16 MiB) natively, so no "read it anyway" button can
+pull a gigabyte listing into the window. The native bound is meaningful only because the manifest layout check
 above makes a listing's declared size trustworthy.
 
 ## Saving is staged
@@ -186,13 +196,22 @@ something that looks like the finished file.
 
 - **No transport-protocol change:** the per-blob RR codec, signing, member gate, and CID re-verify
   are unchanged; chunking is additive above them.
-- **Still one holder at a time:** multi-holder fan-out, a holder index, GB-scale files and
-  resumable-across-restart transfers are follow-ups. 256 MiB covers typical photos/video/docs.
-- **Actor latency remains:** chunk sealing, local I/O and network waits still execute on the
-  actor. Publication now verifies complete local possession and the whole-file hash before reuse
-  or success, holding only one plaintext chunk at a time but potentially occupying the actor for
-  a whole file. Queue/provider/decrypt timing instrumentation and bounded off-actor transfer tasks
-  remain follow-ups; chunked calls do not establish that slow transfers are independent.
+- **Still no parallel fan-out:** a chunk is fetched from one holder at a time. Failover across
+  holders *has* landed: a read job builds a candidate list of `(FileRef, PeerId)` pairs across
+  every blob-fetch peer and walks it, dropping a reference a provider could not authenticate
+  (`crates/catcoms-app/src/actor/file_transfers.rs:109,533,542,679`). What does not exist is
+  fetching several chunks from several holders *at once*, or a holder index. Resumable-across-
+  restart transfers are also still a follow-up, so a failed 1 GiB transfer restarts from zero.
+- **Actor latency on the write path remains:** chunk sealing, local I/O and network waits for an
+  *upload* still execute on the actor. Publication verifies complete local possession and the
+  whole-file hash before reuse or success, holding only one plaintext chunk at a time but
+  potentially occupying the actor for a whole file. Queue/provider/decrypt timing instrumentation
+  is still a follow-up.
+- **Bounded off-actor transfer tasks: done.** Reads no longer suspend on the network while
+  borrowing the `Server`. `crates/catcoms-app/src/actor/file_transfers.rs:17-25` runs each fetch
+  attempt as a worker holding an opaque signed request, admitted by two semaphores (`4` attempts
+  per server, `8` per process) with an `8s` per-attempt deadline and a `60s` read deadline; the
+  actor only prepares and commits each step.
 - **The promote/post window (small, open).** A crash between promoting an upload's chunks and
   posting its index entry leaves those chunks held but unnamed. Unlike the pre-staging behaviour
   this window includes complete local verification after promotion; it costs space rather than

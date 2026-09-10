@@ -348,8 +348,14 @@ table with the commit that closed it.
   growth charges protocol, allowing a seal at the content cap while protocol/reserve space remains.
   Four-family inventory validates historical raw snapshots without granting mutable authority;
   cleanup removes only unpublished attempts, conservatively content-charged. This is not yet a
-  production all-family budget coordinator or live ingest path. Per-mutation graph reconstruction
-  is bounded but still requires ingress scheduling/rate limits before transport integration.
+  production all-family budget coordinator, and Registry tail/pointer publication plus automatic
+  owner rotation, succession and recovery control remain Gate 4 work. Per-mutation graph
+  reconstruction is bounded, and the transport is now integrated behind the bounded, opt-in
+  registry gossip inbox and the authenticated page/head/seed exchanges, which impose the queue,
+  rate-row and packet caps (`catcoms-sync::registry_ingress`, `registry_catchup`,
+  `checkpoint_exchange`); Studio's kinds 23/24/25 share those same queues, rates and capacity
+  rather than adding their own. Enqueue is authentication, not document admission: the app still
+  drains one packet at a time through its durable typed store.
   Local registry editing now joins the intent and epoch adapters under the exclusive store borrow:
   typed/current-author validation and full retained-id comparison precede intent persistence;
   ciphertext returns only after both intent and epoch saves/flushes. An interrupted publication
@@ -1029,12 +1035,21 @@ table with the commit that closed it.
   attestation, disclose the client address, and may target loopback/private-network services.
   **Third-party player frames** (Spotify and YouTube cards in chat, and YouTube tracks on the
   jukebox deck) are the same class of exposure and are gated the same way, with one addition. Like
-  a remote image they carry no attestation, disclose the client address, and are click-only in
-  every trust mode; a queued video id is a claim by whoever queued it, and no device contacts the
-  provider on a peer's behalf to check it. Unlike an image they keep running once loaded, so the
-  click cannot be the end of the grant: a card is mounted only while it is on screen in a visible
-  window and reverts to an inert chip otherwise, and a deck frame is unmounted when the room
-  leaves the track. `frame-src` admits exactly `open.spotify.com` and `www.youtube-nocookie.com`;
+  a remote image they carry no attestation and disclose the client address; a queued video id is a
+  claim by whoever queued it, and no device contacts the provider on a peer's behalf to check it.
+  Unlike an image they keep running once loaded, so a grant to load cannot be the end of it: a card
+  is mounted only while it is on screen in a visible window and reverts to an inert chip otherwise,
+  and a deck frame is unmounted when the room leaves the track. Cards are click-only by default. A
+  device-wide, vault-sealed **Chat & Media → load these cards without asking** preference (default
+  off, and re-read as off whenever the sealed record is unreadable or the app is locked) replaces
+  that click, and replaces only that click: it does not relax the on-screen/visible-window
+  condition, because that condition is about frames running where nobody is looking rather than
+  about permission. The preference is deliberately not per-server and not part of file trust: an
+  embed's host set is fixed by the CSP so it cannot be aimed at loopback or a private LAN the way a
+  remote image can, and it has no author attestation a per-member policy could act on, so the
+  decision is only ever "may this device disclose itself to these two companies without asking".
+  Deck playback of a linked video stays a per-track explicit approval regardless of this
+  preference. `frame-src` admits exactly `open.spotify.com` and `www.youtube-nocookie.com`;
   no third-party **script** origin is admitted, so the YouTube deck drives its frame over
   postMessage rather than loading the provider's API script into this document. A frame is
   sandboxed without `allow-top-navigation`, and replies from it are evidence (position, player
@@ -1090,7 +1105,7 @@ table with the commit that closed it.
 |---|---|---|
 | Message confidentiality / integrity | MLS group encryption; only current members hold the key | `catcoms-mls`, `catcoms-replication` |
 | Membership authenticity | MLS commits; joins admitted only via a signed invite + committer | `catcoms-sync::serve_join` |
-| **Invite admission** | The admitter must be the **named inviter** *and* an **authorized committer** (leaf rank ≤ `max_committer_rank`; at rank 0 that is exactly the owner). A non-committer member **cannot get anyone admitted**, even with a self-minted invite. | `catcoms-sync/src/lib.rs:3779-3795` |
+| **Invite admission** | Two paths, both role-gated. Direct: the admitter must be the **named inviter** *and* an **authorized committer** (leaf rank ≤ `max_committer_rank`; at rank 0 that is exactly the owner). Relayed (Option C): a non-committer admin broadcasts a signed Add-request and the **owner** re-checks, before committing, that the requester **is** the invite's named inviter and that that inviter is owner/admin **right now** per the owner's local authoritative roster. A member who is neither **cannot get anyone admitted**, even with a self-minted invite. | `catcoms-sync::{serve_join_inner, on_add_request, inviter_is_authorized}` |
 | Owner identity | Owner = MLS **designated committer** = lowest leaf index; cryptographic, not stored | `catcoms-mls::designated_committer` |
 | Admin-grant authenticity | Admin = an **owner-signed** capability (`owner_pubkey ‖ sig` over `domain ‖ len(group_id) ‖ group_id ‖ target_fp`), verified at read against the *current* owner's full device id. A modified client **cannot forge** an admin grant. | `catcoms-app::read_admins` |
 | Member-removal authorization | Removal is **owner-only**: `request_remove` rejects a non-owner, and the committer ignores any inbound remove request whose requester isn't the owner (signature-verified, so a forged owner-claim fails). A modified member cannot get anyone removed. | `catcoms-sync` (on_remove_request gate + `request_remove` Unauthorized) |
@@ -1110,39 +1125,46 @@ table with the commit that closed it.
 |---|---|---|---|---|---|
 | ~~R1~~ | **Member-removal requests** |; | ~~The committer honored a removal request from any member without a role check.~~ **CLOSED:** removal is now owner-only at the protocol layer; `request_remove` rejects a non-owner, and the committer ignores any inbound remove request whose requester isn't the owner (verified by signature, so a forged owner-claim fails too). |; | **Closed**; `crates/catcoms-sync` (on_remove_request owner gate + request_remove Unauthorized) |
 | R2 | **File deletion** | `Server::delete_file` gates on owner/admin role | A modified member could post a raw `FileIndex` delete op directly, unlisting any file. Low stakes; the content-addressed blob survives on every peer that holds it; nothing is destroyed. | **Low** | **Open**; close with the same committer-side role re-check, or accept (lowest stakes) |
-| R3 | **Invite-minting permission** | `require_invite_permission` → `can_invite()` (Owner/Admin) gates `mint_invite` | A modified member can *mint* an invite token, **but it is useless**: admission is rank-gated (see the protocol table), so a non-committer can't admit the joiner. Not exploitable in the default single-committer config; the rank check backstops it. | **None today** (single-committer) / **Medium** if multi-committer is enabled | Backstopped by R-protocol; the role re-check makes it explicit for multi-committer |
+| R3 | **Invite-minting permission** | `require_invite_permission` → `can_invite()` (Owner/Admin) gates `mint_invite` | A modified member can *mint* an invite token, **but it is useless**: admission is both rank-gated and role-gated (see the protocol table), so a non-committer cannot admit the joiner itself, and the owner rejects its relayed Add-request because the named inviter is not on the owner's local roster. | **None today** (single-committer) / **Medium** if multi-committer were enabled, where a second committer reads the shared published roster rather than the owner's local one (see item 3's residual) | **Closed at the protocol layer** for the shipped single-committer config; the committer-side inviter role re-check (`inviter_is_authorized`) is shipped and tested, so minting permission is no longer the load-bearing gate. Do not enable `max_committer_rank ≥ 1` |
 | R4 | **Local role display** | `my_role()` drives which controls the UI shows | A modified client can paint itself as "admin/owner" **in its own UI**, but this grants **no real capability**; grants are owner-signed (unforgeable) and admission is rank-gated. Cosmetic only. | **Cosmetic** | Accepted; documented in-app |
 | R5 | **Invite rate-limit / server policy** (planned) | An owner-set server-settings doc, respected by honest clients | A modified admin can ignore a mint rate-limit / expiry policy. It is a guardrail against *accidental* over-sharing by honest admins, **not** a control against a malicious admin. | **Soft guardrail** | Document the limitation in the UI when shipped |
 | R6 | **Message edit / delete / react / pin** | `edit_message`/`delete_message` gate on `author == self` (own messages; delete also allows owner/admin moderation); `set_pin` gates on the owner/admin role; `toggle_reaction` keys the reaction by the caller's own fingerprint | A modified member could post a raw channel op editing/deleting/pinning **any** member's message, or forging a reaction under another member's fingerprint; the per-op inner signature signs the *delta*, not the semantic `author`/reactor/role (the same property that already lets a member forge a message's author on send). Low stakes; message content is not authenticated, by design. | **Low** | **Open**; accept (same posture as R2), or a later per-message author-binding hardening |
 | R7 | **Moderation-log semantic authorization and completeness** | Product APIs gate warning/case creation to current owner/admin, resolution to owner, bind evidence to a currently visible message and same-target warning, and readers ignore invalid/unattributed/currently unauthorized records | A modified member can still submit raw Automerge changes that delete/overwrite moderation keys. A modified current admin can sign an invented evidence snapshot because the original message is not author-signed. Signatures make alteration and attribution failures detectable, but do **not** make the CRDT an append-only audit log or prove the signer's role at the historical instant. Votes never authorize removal; owner-only MLS removal remains enforced. | **Medium** (accountability), **None** for removal authority | **Open and disclosed**; historical role certificates plus a countersigned/hash-chained append-only log are the hardening path |
 
-### Notes on the key residual (R1) and the "admin invites" entanglement
+### Notes on the roles/committer entanglement and how "admin invites" were resolved
 
-Reading the admission code surfaced a structural fact worth recording, because it reframes the
-roadmap:
+Reading the admission code surfaced a structural fact worth recording, because it shaped the
+design that shipped:
 
-- **In the default single-committer model, only the owner can effectively invite *and* admit.**
-  An admin can pass the `can_invite()` UI gate and mint a token, but when a joiner connects to
-  that admin, `serve_join` rejects the admission (the admin is not an authorized committer at
-  rank 0). So "admins can invite" is, today, a **UI affordance without a working end-to-end
-  path**; not a security hole, but a missing feature.
-- Making admin invites actually work means **connecting the roles model (Owner/Admin) to the
-  committer/admission model (leaf rank)**; i.e. letting the owner-signed admin set be the
-  authority for who may admit, which is a deliberate protocol decision (it interacts with the
-  single-committer fork-freedom guarantee; multi-committer needs the staged fork-resolution
-  path). The **committer-side role re-check ("option b")** is exactly the mechanism that makes
-  admission *role*-based rather than *rank*-based, so it is the same primitive that (a) closes
-  R1/R2 and (b) unlocks real admin invites.
+- **Only the owner ever runs the MLS Add**, and that is deliberate: a second committer is a
+  fork. So making admin invites work could not mean promoting admins to committers; it meant
+  **connecting the roles model (Owner/Admin) to the admission model** without adding committers.
+- That connection is the **committer-side inviter role re-check ("option b")**, and it is now
+  **shipped**. An admin who mints an invite no longer strands the joiner: when the joiner
+  connects to that admin, `serve_join_inner` sees the admin is above `max_committer_rank`,
+  so instead of admitting it broadcasts a **signed Add-request** on the control topic and tells
+  the joiner to wait for the pushed Welcome. The owner's `on_add_request` verifies the request
+  signature, then re-checks that the requester **is** the invite's named inviter and that that
+  inviter is owner/admin **right now** (`inviter_is_authorized`, read from the owner's local
+  authoritative roster), and only then commits the Add. "Admins can invite" is therefore a
+  working end-to-end path, not a UI affordance: `canInvite` in `App.svelte` is not gated off.
+- The admin's own pre-flight check on that path is a **liveness courtesy, not a security gate**:
+  it is reject-only against a *positively read* published roster, so a member who overwrites the
+  published-roster scalar with junk cannot disable other admins' relays, and it can never admit
+  anyone. The owner's local-roster check is the authoritative one.
 
 ## Hardening backlog (the fixes)
 
-1. **Committer-side requester/inviter role re-check (option "b")**; ✅ **done for removal**
-   (owner-only, see R1). Still **open for multi-committer invite admission (R3)**: before the
-   committer admits via an invite in any `max_committer_rank ≥ 1` config, verify the *inviter*
-   is Owner or Admin per the owner-signed roles doc and reject otherwise. The inviter's identity
-   is already cryptographically recoverable from the invite (`inviter_device_id` + signature),
-   and the roles doc is reachable at the admission layer; so it is feasible without changing
-   the invite format. This is the same mechanism that would make admin invites functional.
+1. **Committer-side requester/inviter role re-check (option "b")**; ✅ **DONE** for both removal
+   (owner-only, see R1) and invite admission (R3). Before the owner commits an Add on behalf of
+   an invite, `on_add_request` verifies the request signature, that the requester **is** the
+   invite's named `inviter_device_id`, that the invite self-authenticates and targets this group,
+   and that the inviter is authorized **right now** via `inviter_is_authorized`. It needed no
+   invite-format change: the inviter's identity was already recoverable from the invite. Tested by
+   `the_owner_admits_a_valid_admin_add_request`, `a_non_admin_add_request_is_rejected_by_the_owner`
+   and `an_admin_relays_the_owner_admit_result_so_the_joiner_accepts`. Under `max_committer_rank ≥ 1`
+   a second committer would have to re-check against the *published* roster instead of the owner's
+   local one, which reopens the replay surface in item 3's residual; do not enable it.
 2. **File-delete protocol gate (R2)**; optional; same re-check applied to `FileIndex` deletes,
    or accept the residual (lowest stakes).
 3. **Replay-proof grant revocation**; ✅ **DONE + REVIEWED** (`design-grant-revocation.md`).
@@ -1156,8 +1178,8 @@ roadmap:
    admission; under `max_committer_rank ≥ 1` a second committer would re-introduce the replay
    surface (it would need a per-reader high-water on the signed published roster). Do not enable
    concurrent committers. This **closes the GA gate** for admin invites (item 4).
-4. **Make admin invites functional (R3)**; **IMPLEMENTED (slices 2a–2d) + REVIEWED; UI gated on
-   item 3.** Design: Option C, "owner-serialized admin invites." An admin who wants to invite
+4. **Make admin invites functional (R3)**; ✅ **DONE + REVIEWED; live end to end.** Design:
+   Option C, "owner-serialized admin invites." An admin who wants to invite
    broadcasts a *signed Add-request* on the control topic (mirroring the R1 remove-request
    pattern); the **owner alone** runs the MLS Add after re-checking the inviter is Owner/Admin per
    the live roles doc. This keeps `max_committer_rank = 0` (single committer → **no fork**),
@@ -1169,7 +1191,11 @@ roadmap:
    no-substitution property holds; the admin re-signs the *identical* transcript only after
    verifying the owner's signature over it, and the joiner's `group_id` pin + MLS KeyPackage bind
    reject any substituted group; exactly-once admission across the hop). (3) actor/desktop wiring
-   is the only remaining step and is **gated off in the UI until item 3** (see the residual).
+   ✓: the Add-request queue (`add_request_queue`), the retransmit/expiry driver
+   (`drive_outgoing_add_requests` over `outgoing_add_requests`) and the owner-side drain
+   (`drain_add_request_queue`) all run on the normal tick, and the UI is **not** gated:
+   `canInvite = myRole === "owner" || myRole === "admin"` in `App.svelte` shows the invite
+   controls to admins.
    - *Rejected:* **Option A** (admins are committers / `max_committer_rank ≥ 1`); forces
      concurrent committers and the staged fork-resolution path's **I1 is still open**, so two
      admins admitting at once can permanently split the group. **Option B** (owner-admits-on-
@@ -1187,9 +1213,13 @@ roadmap:
      multi-week-to-month redesign whose failure mode is a *permanent group split* (forward-
      secrecy/PCS defeated on the losing branch). Recommended against; do **not** enable
      `max_committer_rank ≥ 1`.
-   - *Residual:* the re-check makes a *non-admin's* minted invite useless at the protocol layer,
-     but a **demoted** admin can still replay their old grant op until item 3 (grant epoch/nonce)
-     lands; so demotion is "current-doc, honest-client," not yet replay-proof.
+   - *Residual:* demotion **is** replay-proof in the shipped single-committer config: the owner's
+     admission check reads its **local** `admin_roster` (item 3), which no member can write, so a
+     demoted admin replaying or deleting its grant op in the shared CRDT cannot re-authorize
+     itself. What remains is item 3's own residual, not a weaker demotion story: under
+     `max_committer_rank ≥ 1` a second committer would have to fall back to the published roster
+     and would need a per-reader high-water mark to stay replay-proof. Do not enable concurrent
+     committers. Separately, admission still finalizes only when the owner is next online.
 5. **Invite rate-limit as server policy (R5)**; owner-set, honest-client-enforced; ship with
    the limitation stated in the UI.
 6. **Moderation-log completeness (R7)**; design a monotonic, hash-linked event log with historical

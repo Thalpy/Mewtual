@@ -21,7 +21,10 @@ winner is rejected and the loser never converges. The fix:
 - **`base_authenticator` distinguishes fork from lag.** Same `commit_epoch` + same
   `base_authenticator` ⇒ genuine same-base fork → tie-break by lowest `commit_id`.
   Same epoch number + *different* `base_authenticator` ⇒ deep divergence → refuse to
-  tie-break, route to catch-up / raise `ForkTooDeep` (remediation deferred to 6d-3).
+  tie-break, route to catch-up / raise the deep-divergence signal (remediation deferred
+  to 6d-3). That signal shipped as a **counter**, `self.stats.forks_too_deep`
+  (`crates/catcoms-sync/src/lib.rs:10464`), not an error variant; this doc's later
+  `forks_too_deep` mentions all mean that counter.
 - **Make forks rare and shallow, then resolve with `clear_pending_commit`.** Do not
   try to heal deep partition divergence in 6d-2.
 
@@ -63,14 +66,15 @@ still has the KeyPackage/Remove inline in the commit → no `MissingProposal`.
 
 Production becomes **stage → broadcast → bounded-wait → merge/abort**:
 - `serve_join` stages (does not merge), broadcasts the signed `CommitRecord`, returns
-  a `JoinPending` ack, and sends the signed Welcome **only after merge** (the
+  a pending ack (shipped as `JoinOutcome::Staged`,
+  `crates/catcoms-sync/src/lib.rs:848`), and sends the signed Welcome **only after merge** (the
   **provisional-Welcome fix**: a losing committer must not strand a joiner on a dead
   commit). The Welcome stays inviter-signed, so the inviter remains the admitter in
   6d-2a/b (committer-decoupled admission deferred to 6d-3).
 - `on_control` at `commit_epoch == current`: `authorize_committer` → if we have a
   same-base staged commit, tie-break by `commit_id` (loser `abort_staged` →
   `clear_pending_commit`, re-issue at the new epoch; winner `merge_staged_self`);
-  different `base_authenticator` ⇒ refuse (`ForkTooDeep`). A node with no staged
+  different `base_authenticator` ⇒ refuse (`forks_too_deep`). A node with no staged
   commit buffers same-epoch commits for one `stage_decision_window_ms` and applies
   the lowest `commit_id` seen, so even a non-participant records the deterministic
   winner (order/clock independent).
@@ -95,7 +99,7 @@ buffered (plain writes, no openmls call) and packed into the next epoch.
   gated by the consumed-set.
 - Double-claim handling: same-base fork → one winner (single consumption); sequential
   → second Add rejected at apply on every node (nonce already consumed); deep
-  partition → `ForkTooDeep` (detected, not remediated; honest residual).
+  partition → `forks_too_deep` (detected, not remediated; honest residual).
 - Joiner nonce reuses `MembershipCredential{device_id, group_id, invite_nonce}`
   (already in the MLS leaf, MLS-authenticated); the 6d-2 addition is all-members
   apply-time re-validation.
@@ -111,7 +115,7 @@ buffered (plain writes, no openmls call) and packed into the next epoch.
   packing, deterministic order); non-committers drive removes.
 - **6d-2c**; history-derived consumed-set + all-members apply-time binding +
   replicated revoke.
-- **6d-2d**; joiner-nonce binding hardening + `ForkTooDeep` surfacing + PCS on remove.
+- **6d-2d**; joiner-nonce binding hardening + `forks_too_deep` surfacing + PCS on remove.
 - **6d-3 (deferred):** external-commit self-heal, committer-decoupled Welcome, topic
   rotation on removal, deep-partition remediation (`fork_resolution::reboot`).
 
@@ -167,7 +171,7 @@ served).
 
 ## Honest residuals (deferred)
 
-Deep-partition single-use double-claim is **detected, not remediated** (`ForkTooDeep`;
+Deep-partition single-use double-claim is **detected, not remediated** (`forks_too_deep`;
 needs 6d-3 reboot). Committer-decoupled admission deferred (Welcome is inviter-signed).
 External-commit self-heal deferred (API present, but leaf reindex destabilizes ranking).
 Topic rotation on removal deferred. v2 is a hard wire cutover (pre-release; coordinated

@@ -41,19 +41,24 @@ pub trait MeshTransport: Send + Sync {
     async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError>;
     async fn publish_once(&self, topic: Topic, data: Bytes) -> Result<PublishSubmission, PublishOnceError>; // fail-closed default
     async fn request(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<Bytes, TransportError>;
+    async fn request_cancellable(&self, peer: PeerId, proto: ProtocolId, data: Bytes, cancellation: RequestCancellation) -> Result<Bytes, TransportError>; // NO default, deliberately
     async fn request_connected(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<Bytes, TransportError>; // fail-closed default
+    async fn request_connected_cancellable(&self, peer: PeerId, proto: ProtocolId, data: Bytes, cancellation: RequestCancellation) -> Result<Bytes, TransportError>; // fail-closed default
     async fn notify(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>;
     async fn notify_connected(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>; // fail-closed default
     async fn next_event(&self) -> Option<TransportEvent>;   // single-consumer
     async fn rendezvous_register(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
     async fn rendezvous_discover(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
     async fn dial_addr(&self, addr:&str) -> Result<(),TransportError>;
+    async fn dial_addr_outcome(&self, addr:&str) -> Result<DialSubmission,TransportError>; // dial WITH actor acknowledgement; defaults to dial_addr + Submitted
     async fn dial_permit(&self, permit:BoxedDialPermit) -> Result<DialSubmission,TransportError>;
     async fn dial_peer_batch(&self, peer:PeerId, addrs:&[String]) -> Result<Vec<DialSubmission>,TransportError>; // 1..=2, direct, terminal peer-bound
     async fn dial_peer_permits(&self, peer:PeerId, permits:Vec<BoxedDialPermit>) -> Result<Vec<DialSubmission>,TransportError>;
     async fn add_external_addr(&self, addr:&str) -> Result<(),TransportError>;
     async fn next_discovered(&self) -> Option<DiscoveredPeer>; // default never resolves
     async fn next_registered(&self) -> Option<RendezvousRegistration>; // exact node/ns + granted TTL; default never resolves
+    async fn evict_peer(&self, peer: PeerId) -> Result<(),TransportError>;   // default INERT, not an error
+    async fn unevict_peer(&self, peer: PeerId) -> Result<(),TransportError>; // readmission is an authenticated group event, never a timer
 }
 pub struct PeerId([u8;32]);   fn from_u64(n)->Self; fn as_bytes()->&[u8;32];
 pub struct Topic(Bytes);      fn new(impl Into<Bytes>)->Self; fn as_bytes()->&[u8];
@@ -82,6 +87,25 @@ pub enum PublishOnceError { Unsupported, TooLarge, Busy, Closed, NoPeers, Queues
 pub trait DialPermit: Send + Debug { fn address(&self)->&str; fn commit_if_current(self:Box<Self>)->Option<String>; }
 pub type BoxedDialPermit = Box<dyn DialPermit>;
 ```
+Two notes on the trailing methods, because their defaults carry the contract:
+
+- **`request_cancellable` has no default on purpose.** Every transport must state where the
+  keepalive lives after the caller retires the request; an inherited wrapper around `request` is
+  unsafe when that future can transfer work into a lower actor before it is dropped.
+  `request_connected_cancellable` fails closed for the same reason plus the connected one: a
+  provider fallback must neither redial an old route nor recycle concurrency while a cancelled
+  stream is still owned below the caller.
+- **`evict_peer`/`unevict_peer` default to inert rather than to an error.** A transport with no
+  notion of a connection (the in-memory test network) cannot honour them, and a failure here must
+  never abort a removal already committed to the MLS group. Eviction is defence in depth on top of
+  key rotation, never the thing that keeps a removed member out: the peer id it acts on is a
+  member's own claim, so the caller owns the checks (see `ChannelSync::queue_eviction`) and an
+  implementor must refuse to evict a peer its own configuration relies on. `unevict_peer` exists
+  because removal is not the end of a relationship here: re-invite is a shipped flow, transport
+  identity is stable across restarts, and without it a re-invited member's join times out at the
+  connection handler with nothing to diagnose. Membership decides when it fires; elapsed time is
+  not evidence of anything.
+
 Implementations:
 - **`MemNetwork`** (tests): `let hub = Hub::new(); let net = hub.join(PeerId::from_u64(n));`
 - **`MeshService`** (prod, catcoms-net): `spawn(swarm)` / `new_memory(listen, dial)` /
@@ -427,7 +451,30 @@ pub struct EncryptedDoc;   // automerge doc + signed-op log
   edit(&mut, &MlsDevice, &ServerGroup, rng, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<SealedOp>;
   ingest(&mut, &SealedOp, &ServerGroup, &MlsDevice) -> Result<bool>;   // verify+apply; dedup; epoch must == current
   ingest_with_key(&mut, &SealedOp, key:&[u8;32]) -> Result<bool>;      // open with a caller-supplied (past-epoch) key; inner sig still verified
+  heads() -> Vec<[u8;32]>;                     // automerge heads
+  sync_frontier(max) -> Vec<[u8;32]>;          // heads PLUS their immediate parents, deduped, capped at `max`
+    // Order is NOT meaningful despite the doc comment's "newest first": `AutoCommit::get_heads`
+    // sorts by hash, so which heads survive truncation is arbitrary. Callers pass
+    // `MAX_CATCHUP_SINCE_HEADS` (512). Naming the parents is what keeps the exchange incremental
+    // for a member that wrote while unreachable and so holds a head nobody else has seen.
+  holders_of(&[ChangeHash]) -> Vec<Vec<DeviceId>>;  // one DAG pass; attribution from the SIGNED op, not the actor id
+  snapshot() -> Result<Vec<u8>>;  restore(&[u8]) -> Result<EncryptedDoc>;  // see restore_for_actor for P1 edits
   export_catchup(&ServerGroup, &MlsDevice, rng) -> Result<Vec<SealedOp>>;   // re-sealed under current epoch
+  export_catchup_since(&mut, have_heads:&[[u8;32]], &ServerGroup, &MlsDevice, rng) -> Result<Vec<SealedOp>>;
+    // The whole difference, unbounded and unresumable. NO production caller: the sync layer serves
+    // every request through `export_catchup_page`. Retained because the replication and sync tests
+    // assert the subtraction against it.
+  export_catchup_page(&mut, have_heads:&[[u8;32]], from:usize, budget:usize, &ServerGroup, &MlsDevice, rng)
+      -> Result<(Vec<SealedOp>, Option<usize>)>;   // ops, plus where to resume (None = log exhausted)
+    // The function the whole catch-up path now runs on. Walks the closure behind every head it can
+    // resolve, then walks THIS node's append-only log from `from`, sealing what is not in that
+    // closure until `budget` is spent. Resuming by position is the point: `export_catchup_since`
+    // recomputes the entire difference every call, so a caller that can only send a prefix sends
+    // the SAME prefix every time, and with a truncated frontier that prefix is history the
+    // requester already holds. A page may legitimately be empty and still return a resume point,
+    // because a run of already-held ops is skipped rather than sent. A position is meaningful only
+    // against the log that produced it; the sync layer binds each one to the peer and runtime that
+    // minted it (see KIND_CATCHUP_SINCE).
   import_catchup(&mut, &[SealedOp], &ServerGroup, &MlsDevice) -> Result<usize>;
   restore_for_actor(snapshot, &DeviceId) -> Result<EncryptedDoc>; // required before post-restart P1 edits
   from_checkpoint(&VerifiedCheckpoint, &DeviceId) -> Result<EncryptedDoc>; // one receipt-authorized seed, empty user-op log
@@ -1262,6 +1309,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   set_config(SyncConfig);                                  // override recovery/key-window bounds
   async subscribe_control() -> Result<()>;                 // receive membership commits (member-only topic)
   epoch() -> u64;   routing_label() -> u64;   stats() -> SyncStats;
+  membership_chain_gap() -> Option<MembershipChainGap>;    // a chain no reached source could complete for us
+  // `None` is the ordinary answer and asserts nothing: a node that has spoken to nobody reports
+  // exactly what an up-to-date one does. The record is discarded on read once the epoch has moved,
+  // so a repair through ANY route retires it without that route having to know this state exists.
   rendezvous_namespaces(rz_peer:&[u8]) -> Vec<String>;     // blinded namespaces to register/discover under (current + grandfathered)
   mint_invite(nonce:[u8;16], expires_at_ms, bootstrap) -> Result<InviteToken>;
   mint_invite_with_rendezvous(nonce, expires_at_ms, bootstrap, rendezvous:Vec<String>) -> Result<InviteToken>;  // 6e-3d-9
@@ -1308,14 +1359,31 @@ pub struct PeerDescriptor { pub device_pubkey:Vec<u8>, pub peer_id:[u8;32], pub 
   verify_self() -> bool;
 
 // Bounds (all hard caps; Default suits a desktop node). past:8, commit_log:256,
-// pending:256, gap:1024, peers:64, catchup_queue:256, outbox:256.
+// pending:256, gap:1024, peers:64, catchup_queue:256, outbox:256, committer_rank:0, stage_window:250.
 pub struct SyncConfig { max_past_epochs:u64, max_commit_log:usize, max_pending_commits:usize,
-                        max_commit_gap:u64, max_known_peers:usize, max_catchup_queue:usize, max_outbox:usize }
+                        max_commit_gap:u64, max_known_peers:usize, max_catchup_queue:usize, max_outbox:usize,
+                        // 0 = strict single-committer (the synchronous fast path); >=1 admits concurrent
+                        // committers within that many leaf ranks and enables staged fork resolution.
+                        max_committer_rank:u32,
+                        // Contest window (ms, injected clock) before adopting the lowest-`commit_id`
+                        // same-epoch commit. Only read when max_committer_rank >= 1.
+                        stage_decision_window_ms:u64 }
 pub struct SyncStats { commits_applied, commits_buffered, commits_served, commit_catchups_requested,
+                       commit_chain_gaps_observed /* once per epoch stuck at, not per exchange */,
                        ops_ingested, ops_recovered_past_epoch, ops_dropped_future_epoch, ops_dropped_old_epoch,
-                       doc_catchups_requested, requests_rejected: u64,
+                       doc_catchups_requested, requests_rejected,
+                       forks_resolved, forks_lost /*our staged commit lost the tie-break*/,
+                       forks_too_deep /*base-fingerprint mismatch*/ : u64,
                        /* gauges: */ past_keys_retained, pending_commits, commit_log_len,
                        known_peers /*untrusted candidates*/, member_peers /*proven members*/ : usize }
+
+// The membership chain this node cannot complete: it has missed more removals than any reached
+// peer still retains, so it is connected, in the roster, and permanently unable to converge.
+// Evidence from the sources actually asked, never a claim about the group; `lowest_available`
+// keeps the BEST (lowest) offer seen at this epoch, because a shorter gap is a better chance of
+// repair. Detectability only: nothing recovers from it yet. See MESSAGE-FLOW section 8, P0.
+pub struct MembershipChainGap { current_epoch:u64, lowest_available:u64, observed_at_ms:u64 }
+  missing_commits() -> u64;   // lowest_available.saturating_sub(current_epoch)
 
 // RoutingState: the routing label L + retained ns_secret_L history, transferred to a
 // joiner in the join response (sealed, signature-bound). Opaque; pass to new_joined.
@@ -1428,15 +1496,35 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     `CATCHUP_REQUEST_MS` applied to a legal maximum response would demand roughly 67 Mb/s. Two
     current peers never spend that deadline on each other, because this request is only reached
     when the paged one came back empty or with a marker we do not know.
-  - `19` KIND_CATCHUP_SINCE; **authed** body wrapping `u16 doc_type ‖ u128 doc_id ‖ u32 count(≤64) ‖
-    32-byte change hashes`; response = `[marker] ‖ op bundle`, carrying only the ops behind the server's
-    frontier and not behind the hashes named. The hashes are the requester's automerge heads **plus
+  - `19` KIND_CATCHUP_SINCE; **authed** body wrapping `u16 doc_type ‖ u128 doc_id ‖ u32 count(≤512) ‖
+    32-byte change hashes ‖ [u8 1 ‖ bytes continuation(0 or 20)]`; response = `[marker] ‖ op bundle`,
+    or `[marker] ‖ 20-byte cursor ‖ op bundle` for marker `4`. It carries only the ops behind the
+    server's frontier and not behind the hashes named. The hashes are the requester's automerge heads **plus
     their immediate ancestors** (`EncryptedDoc::sync_frontier`): a member that wrote while it could
     not reach anyone has a head nobody else has seen, and a peer that cannot see a hash can subtract
     nothing behind it, so naming the parents keeps the exchange incremental. Sound because holding a
     change means holding its dependencies, so anything causally behind a named hash is already held.
     A hash the server does not know selects nothing. Members-only on exactly the same terms as
-    `KIND_CATCHUP`.
+    `KIND_CATCHUP`. `MAX_CATCHUP_SINCE_HEADS` is **512**, and the decoder refuses a larger claimed
+    count before allocating for it; 512 hashes frame to about 18 KiB against a 64 KiB request bound,
+    and the serving-side subtraction visits each change once, so it is `O(document)` from any
+    number of heads.
+  - **The `KIND_CATCHUP_SINCE` continuation field is trailing and OPTIONAL**, and that is the whole
+    of its compatibility story. `encode_catchup_since_req(doc_type, doc_id, heads, cursor)` appends
+    a `1` tag and then either 20 bytes or nothing; `decode_catchup_since_req` returns
+    `Option<Option<CatchupCursor>>`, where `None` is a build that predates paging (a legal frame,
+    answered exactly as it always was), `Some(None)` is a paging-capable requester starting a fresh
+    walk, and `Some(Some(_))` is one continuing an existing walk. The absent cursor is deliberately
+    not encoded as twenty zero bytes: that would travel as a real position zero under a provider
+    stamp nobody minted.
+  - **The cursor** is `CATCHUP_CURSOR_BYTES` = 20: `provider(16) ‖ position(4, big-endian)`. It is a
+    position in the **serving** node's append-only log, opaque to the requester and meaningful only
+    to the node that minted it. `provider` is that node's per-runtime id, so a cursor replayed to a
+    different peer, or to the same peer after a restart, is recognised as foreign and the walk
+    restarts at zero rather than skipping history. It is deliberately **not** authenticated: a
+    forged position can only make a server skip operations the forger then does not receive. The
+    requester holds one cursor per `(doc_type, doc_id, peer)` and sends only that peer's own, which
+    is the half of the fence it owns.
   - **The authenticated request binds the transport peer it is sent from**, for
     `KIND_CATCHUP_SINCE` and **only** for it. The requester's own peer id goes into the request
     transcript, and the server rebuilds it from where the bytes actually arrived, so a request
@@ -1482,6 +1570,21 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
   - **`KIND_CATCHUP_SINCE` response markers**, which are a continuation signal and not a version:
     - `1` `CATCHUP_SINCE_UNDERSTOOD`: this bundle is everything the server was holding for you.
     - `2` `CATCHUP_SINCE_MORE`: the bundle was cut to the budget and unsent ops remain; ask again.
+      This is the answer a request that carried **no** continuation field gets, and the requester
+      it is aimed at recomputes its difference from its frontier every round, so this marker can
+      legitimately repeat forever. That is the shape `MAX_NONPROGRESSING_CATCHUP_ROUNDS` exists for.
+    - `4` `CATCHUP_SINCE_PAGE`: as `2`, and the answer begins with the 20-byte cursor naming where
+      in **this** server's log to resume. Sent **only** to a request that carried the continuation
+      field, so a build that predates paging can never receive one; that is what makes both halves
+      of the change additive on the wire. The requester stores the cursor against
+      `(doc_type, doc_id, peer)` and replays it in its next request to that peer.
+      A `4` whose bundle applied nothing but whose cursor advanced is real work and is **not**
+      counted against the source: the walk is consuming the server's log and will reach the end of
+      it. A `4` with an empty bundle and a cursor that did not advance is a peer minting positions
+      for nothing, and is counted. The server's own walk is fenced per runtime: a cursor whose
+      `provider` is not this process restarts the walk at zero rather than being honoured, because
+      acting on somebody else's position would skip history the requester would never be offered
+      again.
     - empty response (no marker at all): "I do not know this kind". A peer built before kind 19
       existed answers every unknown kind this way, which is how a requester detects it and re-asks
       with `KIND_CATCHUP`.
@@ -3001,6 +3104,15 @@ connections (`removePeer`), not merely refresh lists. All constants here are mir
 exports in `apps/desktop/src/jam-contract.ts`; the validator, the tests, and this section cite
 that one module so numbers cannot drift.
 
+That last sentence was **false when it was written**, and is worth recording as a defect rather
+than read as an assumption. The module claimed to be the single source of truth for the patch
+bounds and was not: the editor knobs and four separate scopes each held their own copies of 24, 50,
+5000, 8000, 18000, 1200 and 100. Nothing was wrong while the copies agreed, which is exactly the
+condition under which the next change to one of them goes unnoticed. `PATCH_PARAM` in
+`jam-contract.ts` is now that table, shaped like the patch itself: a knob spreads its entry
+(`...PATCH_PARAM.e.a`) and a scope divides by `.max`, so a bound has one place to change. Wave
+indices and the two mode lists are deliberately not in it, being enumerations rather than ranges.
+
 **Authenticated channel seam.** Opening an authenticated peer's inst channel mints one opaque
 `JamSourceChannel` capability. That exact channel's callbacks close over it and every patch, note,
 drum, and metronome delivery must present it; a callback may never recover authority from a
@@ -3188,15 +3300,63 @@ so a valid dense/seeked take cannot monopolize the WebView, overflow the bounded
 launch its whole event log concurrently. Each lane's `src` derives from the
 authenticated channel at record time, never from a sender-supplied event field; `q` gaps are
 surfaced, and the guarantee is
-"musically aligned given the events received", not bit-identical. Recording state is visible to
-the whole call and is an honest-client consent mechanism, not prevention. Takes are ephemeral
-first. Local withdrawal updates the recorder gate synchronously before it is signalled. Every
-decoded musical frame captures its receipt time, recorder identity and monotonic uninterrupted-
-recording generation before entering the App causal queue; note, drum and later digest completion
-can append only under that exact lease. An event received before consent, during withdrawal, or
-before a recording→arming→recording cycle therefore cannot drift into the later interval. Losing a peer edge withdraws that
-edge's consent before membership reconciliation; reconnect requires a fresh `rc`. Consent pauses
-retain the take's original monotonic time origin, preventing resumed events from moving backward.
+"musically aligned given the events received", not bit-identical.
+
+**Seeking a take reconstructs what it is HOLDING, not just what happens next.** Starting at the
+first event whose `ms` reaches the offset is right for the schedule and wrong for the sound: a take
+holding one chord from 0 ms to 10 s, joined at 5 s, has no due event at all until the key-ups
+arrive, so a listener joining the jukebox deck mid-track heard silence where a chord was sounding
+and then a run of note-offs for voices nobody had opened. The longer the note, the longer the
+silence, which is exactly backwards. `planTakeSeek(take, offsetMs)` (`jam-playback.ts`) therefore
+folds the earlier events into held state and returns `{ next, sounding }`:
+
+- `next` is the first event index the ordinary scheduler owns, i.e. everything at or after the seek
+  point;
+- `sounding` is the note-ons before it that no note-off has closed, **in log order**, each with the
+  `ageMs` it has already been held. Held state uses one slot per `(lane, pitch)`, the same
+  single-slot rule the engine applies to a live voice, so a re-struck pitch revives once. Log order
+  preserves each lane's `q` ordering, which the take validator has already proved is strictly
+  increasing, so the engine's own duplicate/gap sequencing is satisfied with no renumbering.
+
+`JamNoteInput.ageMs` is the receiving half: optional, non-negative and finite (anything else is
+rejected as `invalid`), it back-dates the envelope's automation origin **clamped to attack plus
+decay**, so a revived voice arrives at the level it has reached instead of re-attacking, and a
+seek far past a note's decay cannot rewind past the sustain it would be sitting in. Live playing
+never sets it; zero and absent are an ordinary note starting now.
+
+**Drums are deliberately not revived.** A pad is a one-shot: its tail is the end of a sound whose
+transient has already gone, so firing a whole fresh crash because its 3-second tail happens to
+cross the seek point would insert an attack the take does not contain. `planTakeSeek` skips drum
+events when folding.
+
+**Takes require no consent, and `JamTakeRecorder` has no consent API.** Unanimous consent was
+removed deliberately, and this paragraph used to describe it as live. A take is not a recording of
+anybody: it holds the note events the jam layer already broadcasts to every ear in the room, each
+receiver synthesizes them locally, and playing one back plays the same synthesizer everyone was
+already hearing. No microphone, no voice, no audio of any kind is captured. Requiring the whole
+call to agree first treated it as though it were a recording of the room, and made keeping the riff
+that just happened need unanimity. What survives is:
+
+- **Recording state is still visible to the whole call**, broadcast on the coarse call-state
+  heartbeat (`off | arming | recording | paused`). Honest-client disclosure, not prevention.
+- **Membership is still enforced**, because a take's participant set is part of what it claims to
+  be. `membershipChanged(current)` pauses the take on ANY change to the participant set
+  (`paused-membership`); the UI may stop it or restore the exact set, and only a set that matches
+  the frozen header resumes. A pause that interrupts recording bumps the generation.
+- **The lease is still monotonic and uninterrupted-interval scoped.** `leaseGeneration()` is
+  captured with an admitted event before any async queue or digest; `acceptsLease(generation)`
+  admits an append only while the recorder is `recording` under that same generation. Note, drum
+  and later digest completion can append only under that exact lease, so an event received before
+  a recording→paused→recording cycle cannot drift into the later interval.
+- **Pauses retain the take's original monotonic time origin**, so resumed events cannot move
+  backward.
+
+Takes remain ephemeral first: the recorder, the playback deck and every kept take die with the
+call. `rc` is now a constant `1` on every heartbeat rather than a consent bit: nothing gates
+arming, starting or appending on a peer's `rc`, and arming is transient because the App starts the
+recorder in the same pass that constructs it. One vestigial "waiting for the room" line in the
+takes panel still reads `rc` off peer metadata; it is unreachable in practice and is the last
+thing left to remove.
 Saved takes go through the existing sealed blob + expiry + sharing machinery as an
 application-specific format with its own type: the player re-runs this section's patch validator,
 never hands bytes to a generic media decoder, never creates or resumes suspended audio from remote
@@ -3245,7 +3405,19 @@ downloaded patch can never be a shape the synth has not already agreed to render
 file's name, because a recipe has no identity of its own beyond its id. Ingress is bounded twice:
 the listed size is refused above `JAM_PATCH_FILE_MAX_BYTES` (4 KiB) before the whole-file fetch, and
 the transport string and its decoded length are refused again before `JSON.parse`. A loaded patch is
-kept in the same twelve-slot local library as a saved one and becomes the loader's own sound.
+kept in the same twelve-slot local library as a saved one (`JAM_SAVED_PATCHES_MAX = 12`) and
+becomes the loader's own sound.
+
+**That cap REFUSES; it does not evict.** `keepSavedPatch(library, name, patch, max)` returns
+`null` when the library is full and nothing may be written. It used to end in a `.slice(-12)` on an
+append, which is a silent FIFO wearing a bound's clothes: the thirteenth save destroyed the oldest
+recipe, and so did a shared patch arriving late enough to be kept-but-not-selected, and a caller
+could not even report it because an eviction and a clean save looked identical from the outside.
+Replacing an existing **name** is always allowed, full or not, because typing a name the library
+already has is a request to overwrite that one tile; nothing else is. `uniqueSavedName` is what
+lands an import on a free label rather than on somebody else's, so the two rules compose: an import
+at the cap is refused instead of quietly taking the oldest patch's slot. `JAM_PATCH_NAME_MAX_CHARS`
+is a second, unrelated twelve: how much of a name a tile can show. The two are free to move apart.
 
 ### Bounded file fetch and kept-copy contracts
 

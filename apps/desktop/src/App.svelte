@@ -190,6 +190,7 @@
     DEFAULT_FILE_TRUST_POLICY, authorOverride, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
     mayLoadJukeboxFile, scopedMediaKey, setAuthorOverride,
     type FileAuthorOverride, type FileTrustMode, type FileTrustPolicies, type FileTrustPolicy,
+    type PassiveFileClass,
   } from "./file-trust";
   import { acceptCapture, chooseMicrophoneSender, MediaCaptureSession } from "./media-capture";
   import {
@@ -3441,7 +3442,7 @@
     return save;
   }
   function continuityJson(): string {
-    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast });
+    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad });
   }
   /**
    * Seal the current continuity snapshot without the ordinary typing/read-position debounce.
@@ -3500,6 +3501,7 @@
       statusCursors = next.statusCursors;
       fileTrustPolicies = next.fileTrustPolicies;
       latePast = next.latePast;
+      embedAutoLoad = next.embedAutoLoad;
     } catch (e) {
       if (generation !== uiStateLoadGeneration || locked) return;
       console.warn("UI continuity load failed", e);
@@ -3508,6 +3510,7 @@
       statusCursors = {};
       fileTrustPolicies = {};
       latePast = {};
+      embedAutoLoad = false; // an unreadable record is not permission to start contacting anyone
       error = `Durable history could not be authenticated and was not loaded: ${e}`;
     } finally {
       if (generation === uiStateLoadGeneration && !locked) {
@@ -6323,6 +6326,8 @@
     readMarks = {};
     statusCursors = {}; // a reading habit, sealed beside the marks above and dropped with them
     fileTrustPolicies = {}; // member trust choices name relationships and leave the screen too
+    embedAutoLoad = false; // a locked app contacts nobody on its own; unlock re-reads the answer
+    embedGrants.clear();
     pendingStatusMarks.clear(); // and a mark still waiting on hydration is not replayed behind a lock
     uiStateReady = false;
     uiStateSaveFailed = false;
@@ -10460,9 +10465,11 @@
 
   function mayAutoLoadSharedFile(file: UiFile, server: number | null = activeServerId): boolean {
     // "Media" for the media-only mode is what the renderer would decode inline: a declared
-    // image, audio or video type the safe list admits. Anything else waits for a click.
-    const isMedia = safeMime(file.mime) !== "";
-    return server !== null && mayAutoLoadFile(fileTrustFor(server), file.author_identity, file.author_verified, isMedia);
+    // image, audio or video type the safe list admits. Anything else waits for a click. This is
+    // screening only; the native catcoms-media handler re-checks the declared type against the
+    // real container bytes and stays the authority on what gets a body.
+    const fileClass: PassiveFileClass = safeMime(file.mime) !== "" ? "validated-media" : "non-media";
+    return server !== null && mayAutoLoadFile(fileTrustFor(server), file.author_identity, file.author_verified, fileClass);
   }
 
   function setFileTrustMode(mode: FileTrustMode) {
@@ -10523,6 +10530,11 @@
     // or Google for as long as it is mounted. Tightening trust therefore has to unmount it rather
     // than just stop starting new ones, and the clicks that loaded them do not survive that. The
     // chips come back and the member can decide again under the policy they have just chosen.
+    //
+    // The standing auto-load preference deliberately DOES survive: it is a device-wide answer
+    // about two named companies, not a judgement about this server's files, so a file-trust
+    // change is not an instruction about it. Turning it off lives in Settings, next to the
+    // sentence saying what it costs.
     embedGrants.clear();
     reconcileAllEmbeds();
     for (const image of Array.from(document.querySelectorAll<HTMLImageElement>("img.ref-card-thumb[data-thumb-cid]"))) {
@@ -10686,6 +10698,12 @@
     }
   }
 
+  // Every call site is behind `mayAutoLoadRemoteUrl`, which returns false in every mode, so this
+  // is currently unreachable. It stays because the call sites express the shape of the decision
+  // rather than a constant, but note what re-enabling it would now take: the production CSP no
+  // longer admits a remote host in img-src, so this would render a broken image and nothing else
+  // until that is widened too. Widening it re-opens the exfiltration channel described on
+  // `remoteImageLoadChip`, so the answer is a vetted native proxy, not a CSP edit.
   function remoteImage(url: string, alt: string): HTMLImageElement {
     const img = document.createElement("img");
     img.src = url;
@@ -10699,14 +10717,24 @@
     return img;
   }
 
+  // SEC-EXFIL-001. The chip opens the picture in the member's normal browser rather than pulling
+  // it into this window. The reason is the CSP: img-src no longer admits a remote host, because
+  // an image request is a one-way channel that a compromised renderer can use to post stolen
+  // bytes to an address of its choosing, and no rule of ours applies to a renderer running
+  // someone else's code. Removing that channel means removing it for the honest path too.
+  //
+  // What this costs the member is that the picture opens elsewhere. What it costs an attacker is
+  // the whole exfiltration route, so it is not a trade worth reversing for convenience.
   function remoteImageLoadChip(url: string, alt: string): HTMLButtonElement {
     const button = document.createElement("button");
     button.className = "embed-chip media-load-chip";
-    button.textContent = "Load remote image";
-    button.title = "Remote images disclose your IP to their host and are decoded by the platform image stack.";
+    button.textContent = "Open remote image in browser";
+    button.title = "Opens in your browser. Remote images disclose your IP to whoever hosts them, so Mewtual does not fetch them.";
     button.dataset.remoteUrl = url;
     button.dataset.remoteAlt = alt;
-    button.onclick = () => button.replaceWith(remoteImage(url, alt));
+    // The native side re-checks that this is an http(s) URL and hands it to the OS launcher
+    // without a shell, so a hostile string cannot become a command line here.
+    button.onclick = () => void invoke("open_external_url", { url }).catch((err) => (error = String(err)));
     return button;
   }
 
@@ -10733,6 +10761,26 @@
   /** Entities whose chip has been clicked in this session. Never persisted, never a trust mode. */
   const embedGrants = new Set<string>();
   let embedWatcher: IntersectionObserver | null = null;
+
+  /**
+   * Load cards without asking (Settings, Chat & Media). Sealed with the rest of UI continuity,
+   * device-wide, and off unless somebody turned it on.
+   *
+   * It replaces the click and nothing else: an auto-loaded card still exists only while it is on
+   * screen in a visible window, because that half of the rule is about frames running where
+   * nobody is looking rather than about permission. See `embedMayRender`.
+   */
+  let embedAutoLoad = $state(false);
+
+  /** Turning it off is a withdrawal, so this session's clicks go with it. */
+  function setEmbedAutoLoad(on: boolean) {
+    embedAutoLoad = on;
+    if (!on) embedGrants.clear();
+    reconcileAllEmbeds();
+    // The immediate path, like the trust modes: turning this off and closing the app straight
+    // afterwards must not leave the more permissive answer sealed on disk.
+    void saveUiStateImmediately();
+  }
 
   function embedFrame(embed: ChatEmbed): HTMLIFrameElement {
     const frame = document.createElement("iframe");
@@ -10813,7 +10861,8 @@
     }
     const live = el.tagName === "IFRAME";
     const want = embedMayRender({
-      granted: embedGrants.has(embedKey(embed)),
+      clicked: embedGrants.has(embedKey(embed)),
+      autoLoad: embedAutoLoad,
       onScreen: el.dataset.embedOnscreen === "1",
       windowVisible: typeof document === "undefined" || !document.hidden,
     });
@@ -28587,6 +28636,32 @@
                   <li><code>[[Page]]</code> → link to a wiki page</li>
                   <li><code>- item</code> / <code>1. item</code> → bullet / numbered lists</li>
                 </ul>
+              </section>
+              <!-- Says what it costs rather than what it saves. The default is off because the
+                   cost is paid to someone the app otherwise never contacts, and a preference that
+                   starts network requests has to be asked for rather than drifted into. -->
+              <section class="set-section">
+                <h3>Spotify &amp; YouTube cards</h3>
+                <p class="muted small">
+                  A Spotify or YouTube link on a line of its own can open out into that service's
+                  own player. Normally you get a chip and clicking it is what contacts them.
+                </p>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked={embedAutoLoad}
+                    onchange={(e) => setEmbedAutoLoad(e.currentTarget.checked)}
+                  />
+                  <span>Load these cards without asking</span>
+                </label>
+                <p class="muted small">
+                  This tells Spotify and Google your address, and what you are looking at, for
+                  every such link that comes past; they have no way to know it was not you who
+                  chose it. Cards still load only while they are on screen in a visible window, so
+                  scrolling away or minimising still unloads them. Applies on this device, to
+                  every server. Shared files are separate and stay under each server's
+                  <b>Server settings → File Trust</b>.
+                </p>
               </section>
             {:else if settingsPage === "keybinds"}
               <div class="stx-crumb">SETTINGS // APP // KEYBINDS</div>

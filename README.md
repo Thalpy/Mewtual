@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.0--alpha.13-6f4fd6" alt="Version 0.3.0-alpha.13">
+  <img src="https://img.shields.io/badge/version-0.3.0--alpha.18-6f4fd6" alt="Version 0.3.0-alpha.18">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-444" alt="Windows and Linux">
   <img src="https://img.shields.io/badge/stack-Rust%20%2B%20Tauri%202%20%2B%20Svelte%205-b7410e" alt="Rust, Tauri 2, Svelte 5">
   <img src="https://img.shields.io/badge/crypto-MLS%20RFC%209420-2d7d46" alt="MLS RFC 9420">
@@ -29,14 +29,15 @@
 > Mewtual is an experimental, early-stage project. The desktop app works and is used daily, but it
 > has not received an independent security audit and should not yet be treated as production-ready.
 
-The current alpha is **0.3.0-alpha.13**. Windows installers are published to
-[GitHub Releases](https://github.com/Thalpy/Mewtual/releases); Linux is built from source
-(`.deb` / AppImage) and is still experimental. Alpha installers are not code-signed, so Windows
-SmartScreen may display a warning.
+The current alpha is **0.3.0-alpha.18**. A Windows installer, a Linux `.AppImage` and a `.deb` are
+published to [GitHub Releases](https://github.com/Thalpy/Mewtual/releases); the Linux builds are
+newer and still experimental. Alpha installers are not code-signed, so Windows SmartScreen may
+display a warning.
 
-Once installed on Windows, Mewtual checks for a newer release on launch and offers it: updates are
-minisign-signed and verified before anything is installed, and nothing installs without your click.
-Maintainers: see [docs/RELEASING.md](docs/RELEASING.md).
+Once installed from the Windows installer or the AppImage, Mewtual checks for a newer release on
+launch and offers it: updates are minisign-signed and verified before anything is installed, and
+nothing installs without your click. A `.deb` install has to be replaced by hand, because Tauri's
+updater has no format for it. Maintainers: see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## What is Mewtual?
 
@@ -103,7 +104,7 @@ surfaces. The short map:
 |---|---|---|
 | **Connectivity** | Direct, UPnP-assisted, relayed and rendezvous-discovered connections; a per-server connectivity assistant; post-join rediscovery, connection reports and join logs | Sidebar **Connectivity**; server settings → **Join Log** |
 | **Diagnostics** | One correlated, redaction-aware event record behind an in-app console, with keyed per-session identifiers, deterministic report rendering, a Safe capture for sharing and a separately labelled raw debug log | **Settings → Diagnostics** |
-| **Updates** | Minisign-signed release checks and explicit, user-confirmed installs (Windows) | **Settings → Updates** |
+| **Updates** | Minisign-signed release checks and explicit, user-confirmed installs (Windows installer and Linux AppImage) | **Settings → Updates** |
 
 The feature guide and [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) describe the UI; implementation
 status and security caveats live in [`docs/HANDOVER.md`](docs/HANDOVER.md) and
@@ -157,16 +158,21 @@ For the assumptions, attacker capabilities, mitigations, and remaining risks, re
 ## Staying fast as history grows
 
 A peer-to-peer client keeps its own history, so "it got slower every month" is a design problem
-rather than a hosting bill. The 2026-09 performance pass measured it and fixed the causes; the plan
-and every measurement live in
-[`docs/PERFORMANCE-SECURITY-HARDENING.md`](docs/PERFORMANCE-SECURITY-HARDENING.md).
+rather than a hosting bill. The 2026-09 performance pass measured it and fixed the causes. The plan
+and the chat-path measurements live in
+[`docs/PERFORMANCE-SECURITY-HARDENING.md`](docs/PERFORMANCE-SECURITY-HARDENING.md); the saved
+registry and Studio profiling lives in [`docs/P1-PERFORMANCE.md`](docs/P1-PERFORMANCE.md).
 
 | Cost, measured on one channel | Before | After |
 |---|---|---|
 | Materializing a 20k-message channel (release build) | 823 ms | 75 ms cold, 0 ms cached |
 | The actor's per-network-event change check at 20k | one full materialization each time | 2 ms |
-| Sealed snapshot after a send at 20k | 47 ms, every change | 54 ms, only when a document moved |
-| Startup JavaScript chunk | 881 kB / 291 kB gzip | 709 kB / 230 kB gzip |
+| How often a send re-encodes and seals a snapshot at 20k | every change | only when a document actually moved, and a burst costs the writes it needs (the encode itself is unchanged, roughly 50 ms when it runs) |
+| Startup JavaScript chunk, as split on 2026-08-20 | 881 kB / 291 kB gzip | 709 kB / 230 kB gzip |
+
+That last row is a dated result, not the current build: rebuilt at `6576a46` the chunk measures
+1,146 kB / 376 kB gzip (plus 321 kB / 59 kB gzip of CSS), so Studio and jam code have since spent
+the split's win and the lazy-loading pass has not been redone.
 
 The changes behind those numbers: a cursor walk instead of an indexed read per row and field, a
 per-document version cache, version-gated projections, **native paging** so the webview holds one
@@ -181,7 +187,8 @@ apps/
   desktop                  Tauri 2 + Svelte 5 desktop app over the catcoms-app actor bridge
                            (its own cargo workspace; npm install && npm run tauri dev)
 bins/
-  catcomsctl               Dev CLI driving the whole stack (demo, serve, join, relay, rendezvous)
+  catcomsctl               Dev CLI driving the whole stack (demo, recover, serve, join, relay,
+                           rendezvous)
 crates/
   catcoms-wire             Canonical, injective, length-prefixed wire encoding
   catcoms-rt               Core runtime seams: Clock + RNG + MeshTransport (+ in-memory test impls)
@@ -190,15 +197,19 @@ crates/
   catcoms-mls              MLS group core (openmls): one group per server, pinned ciphersuite,
                            ServerGroup lifecycle, per-channel key derivation
   catcoms-replication      Encrypted CRDT documents (automerge): inner-signed ops, per-epoch
-                           sealing, snapshot catch-up, and the epoch-close/receipt core
+                           sealing, snapshot catch-up, the epoch-close/receipt core, the server
+                           registry documents, and the studio (creative-suite) document types
   catcoms-storage          Content-addressed blob stores, per-file encryption (per-file wrap
-                           nonce), and the retention engine (3-scope expiry, GC with decorrelated
-                           eviction + holder probe, refetchable on eviction)
+                           nonce, deterministic size padding inside the AEAD), and the retention
+                           engine (3-scope expiry, GC with decorrelated eviction + holder probe,
+                           refetchable on eviction)
   catcoms-net              libp2p MeshService realizing the MeshTransport seam (gossipsub +
-                           request/response over Noise+yamux)
+                           request/response over Noise+yamux), plus the zero-knowledge relay and
+                           rendezvous server nodes and their budget metering
   catcoms-sync             ChannelSync: replicate encrypted CRDT docs over any MeshTransport
-                           (blinded ns_secret_L topics, live gossip, frontier catch-up, member
-                           PEX, the pre-join join_ns, membership tags)
+                           (blinded ns_secret_L topics, live gossip, position-paged frontier
+                           catch-up, member PEX, the pre-join join_ns, membership tags), plus
+                           encrypted blob fetch and the checkpoint/registry/studio exchanges
   catcoms-discovery        Pure eclipse-resistance: DiscoveryPolicy (ranked, bounded dial plan),
                            advisory eclipse detector, cross-session address cache (no I/O, no
                            ambient time/RNG)
@@ -303,12 +314,12 @@ installer at:
 apps/desktop/src-tauri/target/release/bundle/nsis/
 ```
 
-For the current alpha, the resulting file is `Mewtual_0.3.0-alpha.13_x64-setup.exe`. Before sharing
+For the current alpha, the resulting file is `Mewtual_0.3.0-alpha.18_x64-setup.exe`. Before sharing
 it, you can calculate a checksum from the repository root:
 
 ```powershell
 Get-FileHash -Algorithm SHA256 `
-  "apps/desktop/src-tauri/target/release/bundle/nsis/Mewtual_0.3.0-alpha.13_x64-setup.exe"
+  "apps/desktop/src-tauri/target/release/bundle/nsis/Mewtual_0.3.0-alpha.18_x64-setup.exe"
 ```
 
 The alpha installer is not code-signed, so Windows SmartScreen may display a warning. A local
@@ -443,7 +454,7 @@ npm run check
 npm run build
 ```
 
-That is 989 frontend tests and over a thousand Rust test functions across the two workspaces, plus
+That is 1,165 frontend tests and more than 1,700 Rust test functions across the two workspaces, plus
 the gates that make them mean something: the ambient-dependency check keeps OS time and randomness
 behind the runtime seams, so protocol behaviour stays deterministic under test, and the desktop's
 Tauri command ledger (`src/tauri-command-security.ts`) is compared against both the Rust handler
@@ -469,15 +480,19 @@ direct/relayed/rendezvous joining, replication and catch-up, encrypted persisten
 transfer, post-join rediscovery, multi-device admission, voice and shared instruments, the
 diagnostics plane, and the desktop product experience.
 
-**In progress:** bounded history through owner-signed epoch closes and recovery snapshots (the
-replication core has landed; checkpoint materializers, settlement, sync discovery and UI have not,
-see [`docs/design-epoch-close.md`](docs/design-epoch-close.md)); the rest of the performance
-sequence; last-copy-safe retention and disk quotas; automated restore; reachability diagnosis;
-mobile support; voice hardening; and broader security review.
+**In progress:** bounded history through owner-signed epoch closes and recovery snapshots. The
+replication core, the checkpoint materializers, settlement, and authenticated checkpoint discovery
+over sync have all landed; owner rotation and recovery are the slice being worked now, and no
+frontend consumes the settlement events yet, so the feature is not usable from the app. See
+[`docs/design-epoch-close.md`](docs/design-epoch-close.md). Also in progress: view extraction, the
+last of the performance sequence; last-copy-safe retention and disk quotas; automated restore;
+reachability diagnosis; mobile support; voice hardening; and broader security review.
 
-**Designed but not shipped:** the creative suite (shared drawing, flipnotes, sounding emoji, in-call
-play), which depends on the epoch-close work above.
-See [`docs/design-creative-suite.md`](docs/design-creative-suite.md).
+**Backend landed, not yet connected to the UI:** the creative suite (shared drawing, flipnotes,
+sounding emoji, in-call play). The document types, admission, exchange and recovery paths are
+implemented and tested in `catcoms-replication` and `catcoms-app`, and the desktop exposes them as
+Tauri commands; the Studio surface in the app is still an in-memory fixture that calls none of
+them. See [`docs/design-creative-suite.md`](docs/design-creative-suite.md).
 
 This repository deliberately documents unfinished security properties instead of presenting them as
 complete. Start with:

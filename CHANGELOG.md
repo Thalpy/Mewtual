@@ -4,6 +4,152 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A channel could stop catching up and never finish.** When you reconnect, your client tells a
+  peer what it already holds so the peer can send only the rest. It could name at most 64 points in
+  a channel's history, and a channel that had branched more widely than that could not describe
+  itself: the peer subtracted too little and re-sent history you already had, then did it again on
+  the next round, forever. Two changes fix it. The limit is now 512 points, which is past any
+  realistic group and still a fraction of the frame budget. More importantly, catch-up now sends
+  pages from a remembered position instead of recomputing the whole difference each time, so a
+  duplicate is consumed rather than offered again and every exchange makes progress however wide
+  the history is. Old and new builds still talk to each other: the position is an optional field,
+  and a build that does not send one is answered exactly as before.
+- **A member that has fallen too far behind on membership changes is now detected instead of
+  looking healthy.** If more removals have happened than any peer you can reach still keeps a
+  record of, your client cannot advance its routing label and quietly ends up listening on topics
+  nobody publishes to, while every check reports it as up to date. That case now has a name and a
+  count, and the repair task no longer retires itself after such an exchange, so a peer with a
+  longer record still gets asked. This is detection only: nothing yet repairs the gap for you, and
+  what is reported is what the peers actually reached could offer, never a claim about the group.
+
+- **Joining a jam or jukebox deck part-way through a take no longer starts with silence.** Seeking
+  into a recorded take began at the next event past the offset, which threw away every note that
+  was already sounding: you heard nothing for the length of a held chord, then a run of note-offs
+  for voices that had never opened. Seeking now works out what the take is holding at that point
+  and revives those notes at the level they had reached, rather than re-striking them. Drums are
+  deliberately not revived, because firing a fresh crash whose tail happens to cross the seek point
+  would add a hit the take does not contain.
+- **The shared-patch drawer no longer merges two different people's recipes into one tile.** It was
+  keyed by content address, and two people who build the same recipe produce the same bytes, so one
+  tile silently stood in for both. Both are kept now.
+- **SAVE no longer destroys your oldest recipe.** The saved list kept the last twelve by quietly
+  dropping the front of it, so the thirteenth save deleted a recipe with no warning, and so did a
+  shared patch that arrived and was kept without being selected. Saving at the cap now refuses and
+  says so. Overwriting a name you already used still works, because that is what typing it means.
+- **The jam filter's neutral setting is labelled WIDE, not OFF.** There is no bypass: every voice
+  runs through a lowpass, and at the top of the range it is simply open as far as it goes (lower
+  still where the sample rate forces it). The old label and tooltip claimed the tone passed through
+  untouched, which was not true. The sound is unchanged; only the label is honest now.
+- **The patch editor says when a change has actually taken effect.** Picking a preset marked it live
+  immediately, but a frame may not leave for up to the debounce plus the announce interval, so a key
+  pressed straight afterwards played the previous sound and the editor looked broken. A LIVE /
+  APPLYING chip now reads the bytes that were actually published, and picking a discrete option
+  skips the debounce that exists for dragging a slider.
+- **A Studio document that needed a third recovery slot could sit waiting forever.** The seven-day
+  grace after which a stale recovery warning is evicted was written but never actually applied, so
+  the document stayed in Closing until somebody pressed Acknowledge, which is exactly what the
+  grace exists to avoid. The deadline is now enforced on all four settlement and adoption paths,
+  and Acknowledge only brings the eviction forward. Studio is still not reachable from the app, so
+  this is not something you can see yet.
+
+### Changed
+
+- `docs/MESSAGE-FLOW.md` is new: it traces how a message travels from send through gossip to
+  catch-up, and corrects two claims about relaying that were wrong in the older documents.
+
+## [0.3.0-alpha.18] - 2026-09-10
+
+### Fixed
+
+- **A file that showed as unavailable can now repair itself.** Uploading checked whether the same
+  content was already stored and reused it without confirming the local bytes were still intact, so
+  a damaged or partly-removed copy could be published as if it were whole and then fail for
+  everyone. Uploads now verify what they are reusing, repairing keeps the fresh encrypted chunks it
+  fetched, and ownership and expiry survive the repair. Downloads, previews and the file list also
+  now agree on which encrypted variant of a file they are talking about, instead of each deciding
+  separately.
+- **Background file fetching is bounded, and a copy you already hold is kept.** Fetches run at most
+  four at a time per server and eight per app, with deadlines, and they are cancelled properly when
+  you leave. A file confirmed present on this device is retained and re-verified rather than pulled
+  down again. The file list is also more careful about what it claims: **Cached here**, **Partial**,
+  **Remote copy unconfirmed** and **No connected provider** are separate states, because a member
+  being online has never been evidence that they hold a particular file.
+- **The release workflow can no longer split one release in two.** Publishing the draft before the
+  Linux job finished left it unable to find the draft, so it created a second release whose update
+  manifest named only Linux. That is what happened to v0.3.0-alpha.17. The Linux job now uploads by
+  release id, and a third job reads the finished release back and fails the run unless every bundle,
+  every signature and both platforms are on it.
+
+### Changed
+
+- **Almost all of this release is work you cannot see yet.** The Studio and Flipnote backend reached
+  its fourth gate: canonical operations, deterministic projections, causal validation of index and
+  frame edits, typed checkpoints, durable exchange of saved art, bounded paging, checkpoint
+  discovery and adoption, owner rotation and recovery inspection. The saved-registry work alongside
+  it gained durable paging, recovery-first checkpoint installation, owner rotation from durable
+  decisions and receipt completion. None of it is reachable from the app: the creative suite's
+  screens are still a fixture running on data held in memory, and they call no backend command.
+
+## [0.3.0-alpha.17] - 2026-09-07
+
+Everything listed under 0.3.0-alpha.16 below ships in this build. That version was prepared but
+never tagged or published, so this is the release that carries it, together with the following.
+
+### Added
+
+- **The start screen was rebuilt around the two things you actually do there**, joining with an
+  invite and founding a group, laid out side by side with the identity and file-trust choices
+  beside them rather than buried below.
+- **A join now draws the route it is taking while it runs.** The invite, the direct dial, a relay
+  circuit, a member switchboard, the two-way reply and the admission each appear as a row that
+  turns active, succeeds, fails or is skipped, with the verdict naming which one it stopped on.
+  Rows are named by kind and never by address or by person: the addresses stay in the connection
+  check for whoever wants them, and nothing here names your inviter or a member who helped. Nothing
+  is claimed that was not recorded, so a dial reads as "tried" until something says how it ended.
+- **File trust's middle setting is now "media", and it is the default.** Images, audio and video
+  from the group load as you scroll; documents, archives and anything not recognised as media still
+  wait for a click. It replaces the old "specific" setting, which now reads as on-demand with its
+  trusted list intact, so upgrading changes nobody's effective choice.
+- **You can override file trust for one person**, in either direction: always fetch that person's
+  attested files even under on-demand, or keep them click-only even under everyone. Where the two
+  disagree the block wins, because that is the one that fails closed.
+- **Messages that arrive behind where you had read get an "arrived late" divider** and a jump from
+  the header, and they stay marked until the row has actually been on screen in a focused window.
+  The marks are stored with your read position, so a restart keeps them. Per server, on by default,
+  under Appearance.
+- **Each shaping stage in the jam patch editor has an OFF.** Envelope, filter and sends can be
+  switched off and back on, and what the stage held is remembered so switching it back returns the
+  sound. "Off" is written as an ordinary neutral value rather than a flag, so a patch stays exactly
+  what the format already allowed.
+
+### Fixed
+
+- **The jam's chorus, echo and reverb were close to inaudible.** A send at 100 meant half of the
+  voice, which then met each effect's own quiet return: a maxed knob sat roughly 16 dB under the dry
+  sound, so the controls moved and nothing changed. A send now means all of the voice, and the three
+  effect returns were raised to levels where each reads as the thing it is named after. The room is
+  still deliberately a small one.
+- **Notes no longer click when a patch has no release.** A release of zero stepped a sustained
+  waveform straight to silence, which is loudest on exactly the settings people choose when they
+  want a hard gate. There is now an 8 ms floor, taken from inside the existing safety window rather
+  than added to it, so it can never extend a voice past what that window already allowed.
+- **A send is accepted when the message is written, not when it finishes publishing.** If publishing
+  was refused after the message had already been added to the channel, it was reported to you as a
+  failed send while the message sat there untracked. It is now queued in the bounded outbox and
+  retried.
+- **The right-click menu opens on the pointer instead of sliding over it.** Near an edge it mirrors
+  to the other side of the click, and it is squeezed against the edge only when neither side fits,
+  which is what it always used to do.
+
+### Changed
+
+- Registry recovery gained its durable groundwork: local edits are prepared durably with exact
+  retries, settlement inputs are receipt-bound, checkpoints are installed after recovery rather than
+  before, and saved intents replay through checked recovery. Backend only, with no user-visible
+  effect in this release.
+
 ## [0.3.0-alpha.16] - 2026-09-07
 
 ### Added
@@ -15,13 +161,20 @@ All notable changes to Mewtual are documented here.
 
 - **Spotify and YouTube links in chat open out into player cards.** A link on a line of its own
   becomes a chip naming the service, and clicking it is what contacts them; a link written inside a
-  sentence stays an ordinary link. Nothing loads on its own in any trust mode, because a player
-  frame has no file attestation and discloses this device's address to the service. Unlike a remote
-  image it also keeps running once loaded, so the click is not the end of the grant: a card exists
-  only while it is on screen in a visible window, and reverts to its chip when you scroll away,
-  switch tabs or minimise. The frame is built in code from a parsed id and never from a member's
-  text, so chat markup still cannot create one, and the share-tracking token on a Spotify link is
-  dropped rather than passed on.
+  sentence stays an ordinary link. Nothing loads on its own by default, because a player frame has
+  no file attestation and discloses this device's address to the service. Unlike a remote image it
+  also keeps running once loaded, so a grant to load is not the end of it: a card exists only while
+  it is on screen in a visible window, and reverts to its chip when you scroll away, switch tabs or
+  minimise. The frame is built in code from a parsed id and never from a member's text, so chat
+  markup still cannot create one, and the share-tracking token on a Spotify link is dropped rather
+  than passed on.
+- **Settings → Chat & Media can load those cards without asking.** Off by default, device-wide
+  rather than per-server, and sealed in the vault with the other content preferences, because a
+  standing instruction to contact two named companies is not something the webview should be able
+  to flip. It replaces the click and only the click: an auto-loaded card still exists only while it
+  is on screen in a visible window, so the setting buys fewer interruptions rather than frames
+  running where nobody is looking. It reads as off whenever the sealed record is unreadable, and is
+  dropped on lock. Jukebox playback of a linked video keeps its own per-track approval regardless.
 - **The jukebox can queue a YouTube video by link**, from its own tab beside Audio, Video and
   Takes in **Add from share**. It plays on the deck's own screen like any
   other video and follows the same shared transport, so play, pause, skip and seek still move the

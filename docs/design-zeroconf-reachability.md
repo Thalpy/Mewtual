@@ -38,7 +38,7 @@ invite decoded fine, the MLS token was good, the joiner dialled, nothing answere
 reachability problem, and the product has no path through it that does not require the
 founder to understand networking.
 
-### 1a. Bugs in the invite path (fix pass, in progress)
+### 1a. Bugs in the invite path (fix pass, done; see the 1c board)
 
 | # | Bug | Effect |
 |---|-----|--------|
@@ -251,11 +251,18 @@ inbound connections, so NAT never arises. This is strictly harder.
 **Authorization is permanent.** A device added to the MLS group holds a leaf in the ratchet
 tree and is a member from then on. Invites expiring does not eject it.
 
-**[v1 RETRACTED] Re-finding the group is NOT half solved.** v1 claimed member PEX and the
-address cache mean "reaching any one member reveals where the others are, so a group heals
-itself". That machinery is written but **unwired** (P1), so steady-state re-finding does not
-work in the product either. v1 used this false claim to scope the whole document to "how the
-first connection gets made". Both problems are open.
+**[v1 RETRACTED, then partly restored] Re-finding the group was NOT half solved when this was
+written.** v1 claimed member PEX and the address cache mean "reaching any one member reveals
+where the others are, so a group heals itself". At the time that machinery was written but
+**unwired** (P1), so steady-state re-finding did not work in the product either, and v1 used
+the false claim to scope the whole document to "how the first connection gets made".
+
+**P1 is now fixed** (1c board, `32dab2a`): `publish_self_record` is wired through the actor
+(`crates/catcoms-app/src/actor.rs:4732`), and the address cache is persisted on the discovery
+tick and reloaded at server open (`apps/desktop/src-tauri/src/lib.rs:3306` and `:11647`). So
+PEX plus the cache does now heal a group whose members moved, provided one of them is
+reachable. What stays open is the *first* connection when **no** member is reachable, which is
+the rest of this document: mDNS, STUN, the wizard, hosted mode and the DHT are all still absent.
 
 ## 3. Two server modes
 
@@ -1039,8 +1046,10 @@ to pick up cold. Keep it current; delete an entry when it lands or is deliberate
 
 ### Housekeeping
 
-- The **desktop workspace is not rustfmt-clean** (6 pre-existing diffs) and is not covered by the
-  build ritual, so `cargo fmt` there reformats unrelated code. Every agent has had to hand-match
-  its own hunks and revert the churn. Worth either fixing once or adding to the ritual.
+- The **desktop workspace is rustfmt-clean now** (`cargo fmt --all -- --check` in
+  `apps/desktop/src-tauri` exits 0). It used to carry 6 pre-existing diffs and was not covered by
+  the build ritual, so `cargo fmt` there reformatted unrelated code and every agent had to
+  hand-match its own hunks and revert the churn. That is no longer a hazard; formatting is a CI
+  gate.
 - Desktop clippy has a baseline of 2 lib and 4 lib-test warnings.
 

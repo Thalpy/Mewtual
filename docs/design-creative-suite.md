@@ -1,8 +1,16 @@
 # Design: the creative suite (draw, doodle, flipnote, emoji sound, play, knock)
 
-Status: proposal, revision 15, ready for implementation. Nothing here has shipped. The
+Status: revision 15; the backend has landed through Gate 3 and Gate 4 (owner rotation and
+recovery) is the active gate. Shipped: `crates/catcoms-replication/src/studio/` (admission,
+frames, index, patch, recovery, snapshot and `epoch/{adoption,catchup,owner,settlement}`),
+`crates/catcoms-app/src/studio/{control,dispatch,publication,receiver,replay,restore,settlement}.rs`,
+the PIX1 validator and `publish_pix`/`request_blob_bounded` in `crates/catcoms-app/src/creative.rs`,
+five `studio::*` Tauri commands, and the frontend `pix.ts`, `pix-canvas.ts`, `Studio.svelte` and
+sixteen `jam-*.ts` modules. **Not shipped: the end-to-end connection.** The Studio frontend still
+runs on an in-memory fixture and invokes no backend command, so section 7's phase table row
+"Usable collaborative Studio | Not connected end to end" remains accurate. The
 creative-suite contracts held up under review; the history platform is its own design,
-`design-epoch-close.md` (P1), at revision 5 and likewise ready for implementation and
+`design-epoch-close.md` (P1), at revision 5, whose protocol core is implemented and under
 adversarial testing: owner-only receipts, no pruning before a receipt, atomic sealing at
 settlement, checkpoint retirement, provisional open-epoch edits with automatic replay, adoption
 folded into the first receipt of each owner tenure, and two retained recovery snapshots plus one
@@ -19,9 +27,10 @@ active completion target. `BACKEND-IMPLEMENTATION.md` defines seven evidence-bas
 gates, starting with typed documents and durable one-device Save/Load. UI remains user-owned.
 
 UI reference (2026-09-05): the owner's `Main.html`, `Inspector.html`, `Timeline.html`,
-`Palette.html` and `Tools.html`, with matching PNGs, under
-`C:\Users\phaso\AppData\Local\Temp\claude\m--Git--local--CatComs\682d22fb-7c91-4ed4-9226-deea8738efd5\scratchpad\flipnote\preview`
-are the canonical visual design. UI implementation is owned by the user; backend work supplies
+`Palette.html` and `Tools.html`, with matching PNGs, were drafted as a scratch preview outside
+the repo (a session-scoped temp directory) and may no longer exist. They are not a durable
+reference; the in-repo surfaces `apps/desktop/src/Studio.svelte` and `StudioNav.svelte` are what
+the visual design is now read from. UI implementation is owned by the user; backend work supplies
 the contracts and state needed by those surfaces.
 
 Builds on the jam layer (`docs/INTERFACES.md` section 12, `apps/desktop/src/jam-*.ts`), the

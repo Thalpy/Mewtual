@@ -1,7 +1,11 @@
 # Design; replay-proof admin-grant revocation (THREAT-MODEL item 3)
 
-Status: **design approved (adversarial design pass folded), implementing.** This is the GA gate
-that lets admin invites (Option C) be enabled in the product UI.
+Status: **implemented.** The owner-local `admin_roster` + `roster_gen`, the `inviter_is_authorized`
+admission gate and `set_admin` are in `crates/catcoms-sync/src/lib.rs`; the signed published-roster
+format and its fail-closed reader are in `crates/catcoms-sync/src/roles.rs`; the replay attack is
+covered by a test that asserts the replayed CRDT copy does name the demoted admin while the
+owner's local gate is unaffected. This was the GA gate for admin invites (Option C); with it
+closed, admin invites are enabled in the product UI (see `design-admin-invites.md`).
 
 See also: [`THREAT-MODEL.md`](THREAT-MODEL.md) item 3, [`design-admin-invites.md`](design-admin-invites.md).
 

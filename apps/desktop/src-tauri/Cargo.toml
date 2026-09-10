@@ -12,6 +12,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# build.rs reads security/command-policy.json to feed the ACL manifest, so the reviewed policy and
+# the enforced command list cannot drift. Already in the dependency graph via tauri-build.
+serde_json = "1"
 
 [dependencies]
 bytes = "1"

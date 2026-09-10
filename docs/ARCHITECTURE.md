@@ -8,7 +8,7 @@ code was written), the honest residual risks, and the phased build plan.
 
 | Area | Decision |
 |------|----------|
-| Stack | Rust core (shared `rlib`+`cdylib`) + Svelte 5 UI, packaged via **Tauri 2** to Linux/Windows/Android from one codebase. |
+| Stack | Rust core (an ordinary workspace of library crates; the shared `staticlib`+`cdylib`+`rlib` artifact is the **Tauri bridge**, `apps/desktop/src-tauri`, which is what a mobile host links against) + Svelte 5 UI, packaged via **Tauri 2** to Linux/Windows/Android from one codebase. |
 | Group crypto | **MLS (RFC 9420)** via `openmls`, ciphersuite `0x0003` (X25519 + ChaCha20-Poly1305 + SHA-256 + Ed25519), `PrivateMessage` wire format only. One MLS group == one server/connection. Per-**device** identity (a human with N devices = N leaves). |
 | Channels | NOT separate groups; each channel/wiki/status/calendar/moderation document derives an independent key via the MLS exporter secret + a canonical, injective `(doc_type, doc_id)` context. |
 | Delivery | Encrypted **CRDT documents** (`automerge`) synced P2P. Chat logs are append-oriented; policy documents are not assumed append-only without protocol enforcement. New Studio/index/reply/registry types use the owner-receipted bounded epoch-close protocol in [`design-epoch-close.md`](design-epoch-close.md); this is distinct from per-operation delivery receipts. A newly applied remote op queues an authenticated, connected-only delivery receipt for its exact document/change hash; causal descendant evidence remains the compatibility fallback. Delivery receipts prove delivery, never reading. |
@@ -420,18 +420,37 @@ cross the storage/inventory barrier; a receipt seal or MLS advance cannot turn t
 success. Automatic actor/native scheduling remains; the adapters
 do not move vault ownership into sync or change the legacy document map.
 
+Owner succession over an **already frozen** source now shares one first-new-tenure check
+(`crates/catcoms-replication/src/epoch/succession.rs`). `frozen_owner_inheritance` establishes what a
+new tenure inherits: the INSTALLED opening, never an uninstalled remote target and never an old
+owner's journal. Scope and key checks precede allocation, because a Rust record can bypass the wire
+decoder, so every receipt in play is re-decoded from its own encoding and restored-verified from the
+vault before anything else is read from it. Epoch zero with no opening, or an opening whose closed
+epoch is exactly one below and whose tenure start is strictly below this tenure, are the only two
+inheritances; anything else is a receipt conflict. A same-tenure call is permitted **only** to resume
+the exact previously journaled decision, never to generate a replacement for a pending seal, which is
+what makes the write/seal crash boundary safe: before the journal write the held seal belongs to an
+older tenure, and after it the seal may be that first current-tenure decision and no other.
+`owner_rotation_needs_adoption` is a local routing hint only; the authority and source checks are
+repeated inside `frozen_owner_decision`, which the Studio and Registry owner modules each hold over
+the shared helper. This deliberately does **not** reopen a gate or choose a seed: Studio and Registry
+still validate their own actual full closure, persist the exact decision, and use whole-source
+recovery before checkpoint adoption.
+
 The naive "one group, every device commits, replay old ciphertext to latecomers" design
 is broken. The load-bearing fixes:
 
 1. **Proposal/commit split.** Concurrent MLS commits fork the group. Devices replicate
    *proposals* via the CRDT; a single designated committer per epoch packs them into one
-   commit; deterministic fork-resolution (lowest `commit_hash`) + loser re-issues.
+   commit; deterministic fork-resolution (lowest commit hash) + loser re-issues. (Design-era
+   name; the implementation calls it `commit_id`.)
 2. **Snapshot-only catch-up.** Never replicate raw old-epoch frames between members (it
    contradicts forward secrecy). Latecomers receive a self-contained Automerge snapshot
    re-sealed under the current epoch. `max_past_epochs` only covers in-session reordering.
-3. **Inner per-op signature.** Every `LogEntry` is signed by the author's Ed25519 leaf
+3. **Inner per-op signature.** Every log entry is signed by the author's Ed25519 leaf
    over `(doc_id, deps, mls_epoch, payload, author_device)`, verified independently of MLS
    sealing; so re-sealing is a pure transport re-wrap and history cannot be forged/omitted.
+   (Design-era name; the implementation calls the type `SignedOp`, sealed as `SealedOp`.)
 4. **Invites bound in MLS.** The invitee's KeyPackage carries a `(GroupId, invite_nonce)`
    extension validated at `Add`; the leaf is reserved in the InviteLedger before commit.
    Stops cross-group KeyPackage replay and partition double-claim.
@@ -597,7 +616,9 @@ decrypt the new joiner's ops. A design+adversarial-review pass (verified against
 the openmls 0.8.1 source) showed the "safe by construction" claim was only *assumed*,
 so safety is **enforced**: only the **designated committer** (lowest leaf index) may
 admit, which prevents concurrent commits from forking the epoch chain. Tested with a
-3-member join + a non-committer-admit rejection.
+3-member join + a non-committer-admit rejection. That is the **default** configuration
+(`SyncConfig::max_committer_rank: 0`), not the only one the code can do; §4c records the
+staged fork-resolution path that a non-zero rank enables.
 
 ## 4c. Missed-commit recovery + past-epoch key window (6d-1b)
 
@@ -612,28 +633,121 @@ Separately, a bounded **past-epoch channel-key window** (`snapshot_epoch_keys` b
 each advance → `Zeroizing` keys, evicted past `max_past_epochs`) lets an op sealed
 just before an epoch boundary still decrypt (`ingest_with_key`, inner signature still
 verified) instead of being dropped as `EpochUnavailable`; deeper gaps fall back to
-auto-queued document/commit catch-up. Peer discovery is by remembering inbound
-`Gossip.from`/`Request.from` (no `DeviceId→PeerId` directory yet).
+auto-queued document/commit catch-up. Peer discovery started as nothing more than remembering
+inbound `Gossip.from`/`Request.from`; there is now a real `DeviceId→PeerId` directory.
+`ChannelSync::member_transport_peer(&DeviceId) -> Option<PeerId>` resolves a **current member**
+device to the transport identity in its latest self-signed `PeerDescriptor`, the records fed by
+member PEX and the sealed address cache. It is deliberately narrow: the record is signed by the
+device it describes, so a modified client can sign one naming somebody else's transport peer.
+That is harmless for a caller that only *labels* the record's own device, and not harmless at
+all for a caller that acts **against** the value, so every such caller carries its own
+operation-specific liveness and exact-binding checks (transport eviction is the worked example,
+with three checks in three places).
 
 An adversarial review (background `Workflow`) hardened this before commit. The
 load-bearing fix: the **catch-up serve endpoints are members-only**. A requester
-proves current membership by signing `("catcoms/catchup-auth/v1" ‖ group_id ‖ kind ‖
-body ‖ requester_pubkey ‖ timestamp)` with its MLS leaf key; the server serves only
+proves current membership by signing a transcript with its MLS leaf key; the server serves only
 if that key content-addresses a current member, the timestamp is fresh, and the
 signature verifies; so an outsider cannot harvest a group's id, member device ids,
-or history from these endpoints. (Residual: within-freshness-window replay of a
-captured signed request, closed by the Noise transport in production; a server nonce
-challenge or authenticated-peer binding is the full fix, with 6e.) Also folded in:
+or history from these endpoints. Also folded in:
 hard response-size bounds on the *serving* side, `committer_device` validated against
 the designated committer on the inbound apply path, and explicit caps on every
 recovery buffer/queue.
 
+The transcript has since grown, and both residuals the original review recorded are closed.
+It is now `(CATCHUP_AUTH_DOMAIN ‖ group_id ‖ u16 kind ‖ inner ‖ requester_pubkey ‖ ts ‖ nonce ‖
+req_epoch)`, with the requester's **transport peer** appended for the kinds where
+`kind_binds_requester_peer` is true (`KIND_CATCHUP_SINCE`, plus the registry page/receipt-head/seed
+and studio page/head/seed kinds). The per-request RNG nonce and the epoch close the
+same-millisecond `ts` collision window, so a captured response cannot be replayed against a
+different request; the peer binding is rebuilt from where the bytes actually arrived, so an
+endpoint cannot forward a request verbatim to a real member and have that member's answer
+attributed to itself. Which kinds carry the binding is a compatibility decision, not a security
+ranking. **The transcript is what a signature is over, so adding a field to it changes what an
+older build computes and breaks both directions of a mixed pair.** `KIND_PEX` and
+`KIND_COMMIT_CATCHUP` exist on the released build and keep the released transcript exactly; a
+commit catch-up that stopped verifying would be a member stuck at an old epoch, unable to open
+anything sealed under the new one, which is a missing-message failure rather than a discovery one.
+They instead stop being a way to *prove* anything about a transport peer: their answers still carry
+usable records, but only an exchange bound at both ends establishes that the endpoint answering is
+the member that signed. Two more are excluded on their own merits: reciprocal forwarding relays a
+request on somebody's behalf and re-authenticates the original bytes at the far end, and a delivery
+receipt is built once and sent to several targets, so binding either would be wrong rather than
+safer. The remaining residual is that there is no server-side seen-nonce log, so a captured
+*request* can be re-sent inside `MAX_REQUEST_AGE_MS`; that costs one freshly-signed re-serve into
+the peer's own Noise session.
+
+**Document catch-up pages by position.** `export_catchup_since` recomputed the whole difference on
+every call, so a serving peer that could only send a prefix sent the same prefix forever; against a
+requester whose frontier is too narrow to name everything it holds, that prefix is history it
+already has and the operations it needs sit behind a wall of duplicates it can never clear. That is
+a livelock, not an inefficiency, and it is reachable: `sync_frontier` caps the hashes a requester
+may name, and a serving peer walks its own log in insertion order, so unnameable history sorts
+ahead of whatever is actually missing. Two protocol-boundary facts follow.
+- `MAX_CATCHUP_SINCE_HEADS` is **512**, raised from 64. The subtraction walk visits each change at
+  most once (`have` is a set, and a hash already in it terminates that branch), so it is
+  O(document) whether it starts from two heads or five hundred; the real cost is 36 bytes each on
+  the wire, and a maximal frontier frames to roughly 18 KiB against the 64 KiB control-request
+  bound. What 64 bounded was the requester's ability to *describe itself*, and a frontier that
+  cannot say what it holds is not merely incomplete, it is wrong. This moved the threshold past
+  any realistic group; it did not remove the failure mode.
+- `export_catchup_page` did. It walks the log from a caller-supplied position, skips what the
+  requester claimed, stops on a byte budget and reports where to resume, sizing **before** sealing
+  so a page never pays to seal operations it will not send. `KIND_CATCHUP_SINCE` carries an
+  optional trailing continuation, and a truncated answer comes back under its own marker
+  `CATCHUP_SINCE_PAGE` with a 20-byte cursor (its own marker rather than an optional prefix on
+  `CATCHUP_SINCE_MORE`, because every twenty bytes decode as a cursor and a requester could not
+  otherwise tell one from the front of a bundle). **Both wire directions are additive**: a build
+  predating paging sends no continuation field, that frame still decodes and is answered exactly
+  as before, and it is never sent the new marker, because only a request carrying the field gets
+  one. A position means something only against the log that issued it, so each cursor is stamped
+  with a per-runtime provider id and one replayed to the wrong peer, or to the same peer after a
+  restart, is recognised as foreign and the walk restarts rather than skipping history. It is
+  deliberately **not** authenticated: a forged position can only make a server skip operations the
+  forger then does not receive, so the fence exists to stop an honest mistake silently hiding
+  history, not to stop a liar harming itself. A round that applies nothing but advances the walk no
+  longer counts against the source; a round that repeats with no way to advance still does.
+
+**The dead zone past the commit log, and what is now known about it.** A member behind by more
+than a serving peer's `max_commit_log` cannot be chained from that peer, and there are two bands:
+inside `max_commit_gap` the records buffer and can never drain, past it they are dropped before
+buffering. Both used to return `Verified { applied: 0 }`, which is byte-for-byte what an honest
+up-to-date peer returns, so the drain read the exchange as closed and retired the recovery; and
+past `max_commit_gap` nothing was logged at all. The state is now typed.
+`CommitCatchupOutcome` distinguishes `Verified { applied }` from `Empty` (the peer sent an empty
+bundle, which is genuinely what both an up-to-date member and a refusal look like on the wire, kept
+as its own variant so the conflation is visible where it is relied on), `Unanswered` (no answer,
+oversized, undecodable, or not signed by a current member: a fact about the peer and the link, and
+evidence about the commit log in neither direction) and `Stranded { lowest_available }` (the peer
+answered with authenticated records that all begin above this node's epoch). A `Stranded` outcome
+closes nothing, so the drain marks that source and re-queues to one whose log reaches further back.
+`note_membership_chain_gap` keeps the **best** (lowest) offer seen at this epoch in
+`MembershipChainGap { current_epoch, lowest_available, observed_at_ms }`, counts
+`SyncStats::commit_chain_gaps_observed` once per epoch, and warns; `membership_chain_gap()`
+filters on read against the current epoch, so a node repaired through any route stops claiming to
+be stranded without that route having to know about it. **The limit is deliberate and worth
+stating: this is detectability only. Nothing surfaces it in the UI and there is no repair path.**
+A full snapshot rejoin remains the missing recovery, and `docs/MESSAGE-FLOW.md` §11 puts
+surfacing the state to the user ahead of deciding whether an automatic rejoin can be made safe.
+
+**Implemented but off by default (not deferred):**
+- **Concurrent-commit fork resolution.** `SyncConfig::max_committer_rank` is `0` in
+  `Default`, which is strict single-committer: only the designated (lowest-leaf-index)
+  member admits, on the synchronous fast path. At `>= 1` the staged path is live: a node
+  collects competing same-base candidates for `stage_decision_window_ms` (`PendingResolve`),
+  adopts the lowest `commit_id`, and the winner merges its staged commit while the loser
+  aborts (`MyStaged`; a staged Add carries a `StagedJoin` whose provisional Welcome is
+  pushed on a win and rejected on a loss, and whose invite nonce is consumed only on a
+  winning merge). A candidate built on a different base is a deeper divergence and is
+  refused outright. `SyncStats::forks_resolved` / `forks_lost` / `forks_too_deep` count it,
+  and it is test-gated (roadmap 6d-2a 2b/2c, 6d-2b 1/2). Turning it on is a configuration
+  decision, not remaining work.
+
 **Still deferred, with the data model already in place (no rewrite):**
-- **6d-2**; concurrent-commit fork resolution + the full RFC 9420 proposal/commit
-  split (designated committer packs replicated proposals; deterministic lowest-hash
-  tie-break; openmls `clear_pending_commit` rollback / `fork_resolution` heal),
-  plus the replicated InviteLedger (single-use across members) and joiner-bound
-  nonces. Until then network admission is single-committer only.
+- The rest of **6d-2**: the full RFC 9420 proposal/commit split (the designated committer
+  packing replicated *proposals*, rather than each member committing its own), the
+  replicated InviteLedger giving single-use across members, and joiner-bound nonces.
+- A full snapshot rejoin for a member past every reached peer's commit log.
 - Per-peer rate limiting / off-actor offload of join work.
 
 ## 4d. Product operations and moderation plane

@@ -1,22 +1,54 @@
 # Desktop performance and security hardening plan
 
-Status: active, started 2026-08-20. This is the implementation checklist for the chat-lag,
-startup-splitting and desktop security work. A slice is complete only after focused tests,
-antagonist review, documentation, and all repository test gates pass.
+Status: active, started 2026-08-20; measurements below re-checked 2026-09-11 at `6576a46`. This is
+the implementation checklist for the chat-lag, startup-splitting and desktop security work. A slice
+is complete only after focused tests, antagonist review, documentation, and all repository test
+gates pass.
+
+**Scope, and how this relates to [P1-PERFORMANCE](P1-PERFORMANCE.md).** The two documents do not
+overlap and neither supersedes the other. This one measures the *desktop webview and its chat
+path*: Svelte/Tauri lag sources, bundle splitting, native message materialization and paging, and
+the IPC security surface. P1-PERFORMANCE measures the *`catcoms-app` saved P1 registry/Studio
+source* path behind `Server::serve_registry_page`. They share no fixture, no probe and no numbers,
+and a figure from one bounds nothing in the other - which has bitten readers before, so the two
+places where the numbers superficially collide now carry explicit cross-references.
 
 ## Measured baseline and first result
 
-The initial production build put `App.svelte`, QR generation and QR decoding into one startup
-chunk: **881.49 kB minified / 291.20 kB gzip**. The main CSS was **209.59 kB / 39.08 kB gzip**.
-These are transfer-format measurements rather than launch timings; Tauri reads them locally, but
-the webview still has to parse, compile and initialize the JavaScript.
+Every figure here is a transfer-format measurement of `vite build` output rather than a launch
+timing; Tauri reads these locally, but the webview still has to parse, compile and initialize the
+JavaScript. Read them together with "Where startup time actually goes" below, which measures what
+a byte of bundle is actually worth.
 
-After lazy-loading the Feedback and Wiki Help components plus QR codecs, the App chunk is
-**709.43 kB / 229.90 kB gzip**. QR generation is split across 25.79 kB and 31.43 kB chunks, QR
-decoding is a 130.73 kB chunk, Feedback is 4.27 kB JS + 0.75 kB CSS, and Wiki Help is 4.80 kB JS
+**2026-08-20 (historical).** The initial production build put `App.svelte`, QR generation and QR
+decoding into one startup chunk: **881.49 kB minified / 291.20 kB gzip**. The main CSS was
+**209.59 kB / 39.08 kB gzip**. After lazy-loading the Feedback and Wiki Help components plus QR
+codecs, the App chunk measured **709.43 kB / 229.90 kB gzip**: a reduction of **172.06 kB
+minified / 61.30 kB gzip**.
+
+**2026-09-11 (current).** `npm run build` in `apps/desktop`, at `6576a46`. The split held, and the
+satellite chunks are almost exactly where they were left. The App chunk is not: it is now larger
+than the pre-split figure the 172 kB win was measured against.
+
+| Startup artifact | 2026-08-20 before split | 2026-08-20 after split | 2026-09-11 |
+|---|---|---|---|
+| `dist/assets/App-*.js` | 881.49 kB / 291.20 kB gzip | 709.43 kB / 229.90 kB gzip | **1,146.34 kB / 375.58 kB gzip** (1,146,338 bytes) |
+| `dist/assets/app-*.css` | 209.59 kB / 39.08 kB gzip | not re-reported | **321.10 kB / 58.62 kB gzip** (321,099 bytes) |
+
+The 2026-09-11 satellite chunks: QR generation is split across 25.79 kB and 29.81 kB chunks, QR
+decoding is a 130.73 kB chunk, Feedback is 4.32 kB JS + 0.75 kB CSS, and Wiki Help is 4.80 kB JS
 + 0.50 kB CSS. Those chunks load only when their feature opens (Wiki Help is warmed on entering
-the Wiki). The App chunk reduction is **172.06 kB minified / 61.30 kB gzip**. The build warning
-remains honest: 709 kB is still large, so `chunkSizeWarningLimit` has not been raised.
+the Wiki). Studio arrived since and is lazy too: 43.71 kB JS + 16.40 kB CSS, plus a 4.31 kB
+StudioNav and 21.36 kB studio-state. `chunkSizeWarningLimit` has still not been raised, so the
+build warning is still honest.
+
+**The App chunk regression is open, not fixed.** Between 2026-08-20 and 2026-09-11 the startup
+chunk grew by 436.91 kB minified / 145.68 kB gzip: roughly two and a half times the extraction's
+saving, spent again. Nothing re-reported chunk sizes after any of the intervening slices, which is
+why it went unnoticed, and it is why the acceptance measurement "report chunk sizes after every
+extraction" is now marked open below. The extractions were not undone; `App.svelte` itself grew
+(1,545,498 source bytes at `6576a46`). Whether that matters is a separate question, and this
+document should not answer it from chunk sizes alone: see the webview measurement below.
 
 ## Lag-source inventory and treatment
 
@@ -31,7 +63,7 @@ remains honest: 709 kB is still large, so `chunkSizeWarningLimit` has not been r
 | Cross-server inbox scans | Each channel event can scan every server/channel | Debounce, run during browser idle time with a deadline, cancel on lock/unmount | Done; incremental native index remains |
 | Large startup component | One very large Svelte component and eager optional libraries increase parse/initialization work | Real dynamic imports; move component markup, behavior and feature CSS together | Feedback + Wiki Help + QR done; more views queued |
 | Server-wide search | Builds an all-channel corpus and runs filters/sorts on the UI thread | Load on explicit search only; the scan (the part that reads every message) moved to a worker (`search-index.ts` pure + `search-worker.ts`), with an inline fallback if a worker cannot start. Ordering stays on the main thread because it needs display names, and sorting matches is cheap next to finding them | Done (2026-09-03); paging the corpus itself is still queued |
-| Full native history materialization | `read_messages` walks every Automerge list item and IPC serializes the full vector | Walk with one sequential list/map cursor instead of an indexed lookup per row and field; cache the materialized list per channel under its document version (`Server::with_messages`) so one walk serves every read between two changes. Then an actor-owned page query around durable id anchors with per-row reply context and a whole-channel unread summary, so the webview holds one slice (`docs/design-native-paging.md`) | Cursor walk + version cache done (2026-09-03); native paging done on `perf-native-paging` (2026-09-03): `get_message_page` / `get_pinned_messages`, webview converted, `get_messages` kept only for search corpus and moderation timeline |
+| Full native history materialization | `read_messages` walks every Automerge list item and IPC serializes the full vector | Walk with one sequential list/map cursor instead of an indexed lookup per row and field; cache the materialized list per channel under its document version (`Server::with_messages`) so one walk serves every read between two changes. Then an actor-owned page query around durable id anchors with per-row reply context and a whole-channel unread summary, so the webview holds one slice (`docs/design-native-paging.md`) | Cursor walk + version cache done (2026-09-03); native paging done (2026-09-03), merged to `main` by PR #20 (`455dcfa`, from `perf-history`): `get_message_page` / `get_pinned_messages`, webview converted, `get_messages` kept only for search corpus and moderation timeline |
 | Per-event native projection sweep | Every network event (gossip frame, presence blip, receipt) re-materialized every open channel plus status, wiki, roles and Ed25519-verified moderation records to detect changes | Gate every projection on `Server::doc_version` (ops applied per document, O(1)) plus epoch/member-count for membership-derived ones. Delivery dirtying is left ungated on purpose: its one-second timer is also the wake that cancels a sync tick blocked in an outbound request (see INTERFACES § 10); gating it made `process_recovery_e2e` deadlock for the full request timeout | Done (2026-09-03) |
 | Actor blocks on outbound requests | A sync tick that awaits a catch-up/PEX response cannot serve the peer's inbound request; two members requesting each other at once wait for each other until a timeout. Only the `select!` cancellation from the delivery timer or a command broke it, which made an unrelated feature load-bearing | Bounded every outbound catch-up with `CATCHUP_REQUEST_MS` (2 s, on the injected clock): the tick returns, the inbound request is served, the catch-up is re-queued. More permissive than the ~1 s cancellation it replaces, and it let the delivery gating land. The real fix, serving inbound requests while an outbound one is in flight, needs the transport shareable rather than borrowed by the tick | Bounded 2026-09-03; the restructure is queued and needs adversarial review |
 | Catch-up carries the whole history | A reconnecting member re-received and re-verified every op of a document it mostly held, so every reconnect cost more than the last | `KIND_CATCHUP_SINCE`: the requester names its frontier plus its immediate ancestors, the server sends only what is behind its own and not behind that. Falls back to the full serve for a peer that does not know the kind | Done (2026-09-03); protocol-adjacent, so it wants the adversarial-review pass before release |
@@ -41,7 +73,7 @@ remains honest: 709 kB is still large, so `chunkSizeWarningLimit` has not been r
 | Voice/video/instruments | WebRTC peers, meters, rAF/timers and media decode are inherently expensive | Keep inactive code lazy, stop every track/timer on leave/lock, profile peer-count scaling | Queued |
 | Global timers/animated chrome | Presence, transfers, mascot, ticker and visual effects keep waking the webview | Pause hidden/locked work, consolidate clocks, respect motion-off | Queued |
 | Large settings/operations markup | Infrequent views still compile and initialize with chat | Extract Settings, Server Settings, Server Space, moderation/storage/connectivity, wiki help and recovery as typed lazy components | Queued in that order of coupling/risk |
-| CSS size/style invalidation | One 200+ kB global stylesheet is parsed up front and broad selectors can invalidate widely | Move feature CSS with extracted components; audit selectors before changing shared theme tokens | Queued |
+| CSS size/style invalidation | One global stylesheet (321.10 kB / 58.62 kB gzip on 2026-09-11, up from 209.59 kB) is parsed up front and broad selectors can invalidate widely | Move feature CSS with extracted components; audit selectors before changing shared theme tokens | Queued |
 | Persistence/crypto work on mutations | Snapshots and integrity work can overlap UI-visible activity | Measure actor latency first; batch only where durability contracts permit; never weaken seals/hashes | Measured 2026-09-03 (release, one channel): full `Server::snapshot` is 2.7 ms / 393 KiB at 1k messages, 12 ms / 1.9 MiB at 5k, 47 ms / 7.6 MiB at 20k, and `persist_server` runs it (plus seal, full-file rewrite and fsync, inside the actor mailbox) after every send/edit/reaction. Not the dominant cost, but linear in history; a debounce would change the "persisted before reported" contract and needs its own decision. Addressed 2026-09-03 without touching that contract: `EncryptedDoc::snapshot` no longer re-encodes a document whose heads and op-log length have not moved (documents over 1 MiB are still re-encoded rather than duplicated in memory), and `persist_server` coalesces concurrent requests so a burst costs the writes it needs, with each request still returning only after a write whose snapshot was taken after its own change |
 | Per-render image URLs and file lookups | Every avatar, banner and icon rebuilt a base64 data URL on every render of every row showing it, and each embed resolved its content address by scanning the whole file index | Memoize the URL by its bytes (`image-src.ts`, bounded, cleared at lock); index the file list by content address once | Done (2026-09-03) |
 
@@ -72,19 +104,36 @@ The review's scope criticism is accepted: this work should have been several cha
 The plan had been trading in chunk sizes without ever measuring the budget they belong to. Two
 probes now exist, and they disagree with the assumption.
 
-**The webview.** Attributing the 1004 KiB production chunk to its sources by generated bytes (from
-the sourcemap, not source length, which flatters comment-heavy files): `App.svelte` is 506 KiB of
-it, and within that the script is 261, shared snippets 77, the main layout and views 107, the
-Settings overlay 21, Server Settings 23, Server Space 11. Everything else is small: `marked` 41,
-`dompurify` 29, `debug-console.ts` 23, `jam-engine.ts` 22.
+**The webview.** Attributing the production chunk to its sources by generated bytes (from the
+sourcemap, not source length, which flatters comment-heavy files). The chunk was **1004 KiB** when
+this attribution was taken on 2026-09-03; it is 1,146.34 kB today, so treat the split as a
+proportion rather than a current byte count. `App.svelte` was 506 KiB of it, and within that the
+script 261, shared snippets 77, the main layout and views 107, the Settings overlay 21, Server
+Settings 23, Server Space 11. Everything else was small: `marked` 41, `dompurify` 29,
+`debug-console.ts` 23, `jam-engine.ts` 22.
 
-Loading that chunk in headless Edge against `vite preview` costs **7 ms of script execution** and
-about 75 ms of total task time to first paint. V8 pre-parses and compiles lazily, so a megabyte of
-bundle is not a megabyte of work. Extracting Settings and Server Settings, the plan's next step,
-moves 44 KiB of 1004: a fraction of a millisecond. It is worth doing for the file's readability and
-for keeping infrequent views out of the hot path, but it is not a startup fix, and this document
-should stop implying that it is. (The measurement stops at the boot-failure screen: the visual
-fixture is development-only by design, so a production bundle cannot be driven by it.)
+Loading that chunk in headless Edge against `vite preview` was recorded as **7 ms of script
+execution** and about 75 ms of total task time to first paint. V8 pre-parses and compiles lazily,
+so a megabyte of bundle is not a megabyte of work. On that reading, extracting Settings and Server
+Settings moves 44 KiB of 1004: a fraction of a millisecond. It is worth doing for the file's
+readability and for keeping infrequent views out of the hot path, but it is not a startup fix, and
+this document should stop implying that it is. (The measurement stops at the boot-failure screen:
+the visual fixture is development-only by design, so a production bundle cannot be driven by it.)
+
+> **This measurement is not currently reproducible, and it is the doc's most load-bearing claim.**
+> No committed script performs it. `apps/desktop/scripts/flow-check.mjs` (`npm run test:flows`)
+> does drive headless Edge over CDP, but against a *dev* Vite server at `/?fixture=chat`, not a
+> `vite preview` of the production bundle, and the fixture disables animation for deterministic
+> screenshots. `apps/desktop/scripts/startup-check.mjs` (`npm run test:startup`) launches the
+> native binary and waits for the `setup` marker; it times nothing in the webview. There is no npm
+> script for webview timing at all. Until one exists, the 7 ms / 75 ms pair is a one-off manual
+> observation from 2026-09-03 on one machine, at 1004 KiB, and it should not be cited as settled.
+> To redo it, the honest recipe is: `npm run build`, then `npm run preview`, then attach headless
+> Edge over CDP to that origin (`msedge --headless=new --remote-debugging-port=<port>`), and read
+> `Performance.getMetrics` / the `PerformanceNavigationTiming` and long-task entries for script
+> compile+execute and time to first paint, on an otherwise idle machine, median of several loads.
+> Committing that as a script (alongside `flow-check.mjs`, whose CDP plumbing it can reuse) is the
+> real fix; that is the only way the number stops being unreproducible.
 
 **The native side** (`startup_probe`, release, one server, this machine):
 
@@ -93,6 +142,22 @@ fixture is development-only by design, so a production bundle cannot be driven b
 | 200 | 84 KiB | 16 ms | 0 ms | 2 ms | 1 ms |
 | 5,000 | 1.9 MiB | 15 ms | 3 ms | 26 ms | 18 ms |
 | 20,000 | 7.7 MiB | 18 ms | 12 ms | 151 ms | 94 ms |
+
+The 7.7 MiB here and the 7.6 MiB in the persistence row of the lag table above are not a
+contradiction and neither is wrong: they come from two different probes in
+`crates/catcoms-app/src/actor.rs`. `startup_probe` builds a fresh server per size, while
+`scale_probe` grows one server cumulatively through 1k/5k/20k with different message text. Same
+order, slightly different bytes. Do not "fix" one to match the other; re-run the probe you mean.
+
+> **Cross-reference, because the two numbers look like a three-order-of-magnitude contradiction.**
+> The 151 ms `Server::restore` above and the **142,337 ms** cold restore in
+> [P1-PERFORMANCE](P1-PERFORMANCE.md) (§ "One owned active Studio source") measure different
+> objects. This one is `Server::restore` on a chat server document: `AutoCommit::load` plus
+> decoding and verifying a 20,000-message op log, on launch. That one is a cold reconstruction of a
+> saved **P1 registry/Studio source** for `Server::serve_registry_page`: 6,939 accepted setup ops
+> over a 4.9 MB physical record, whose validation work per op is far heavier, and it is explicitly
+> labelled a non-isolated diagnostic observation taken while a build overlapped it. Neither figure
+> bounds the other, and neither should be quoted as "restore takes X".
 
 Argon2id is a flat ~20 ms and is meant to be slow. Everything else scales with history, and
 `restore` is the largest single cost at any realistic size: it is `AutoCommit::load` plus decoding
@@ -123,10 +188,23 @@ webview, which is what native paging is for.
 
 ## Security review and command tracking
 
-The desktop exposes **103** custom Tauri commands. `src/tauri-command-security.ts` classifies every
-one by boundary, and `tauri-command-security.test.ts` compares that ledger with both the Rust
-`generate_handler!` list and literal frontend invocations. A new, removed, duplicated, dynamically
-named or unclassified command fails the frontend suite.
+The desktop exposes **168** custom Tauri commands (counted 2026-09-11 at `6576a46`): 154 bare names
+plus 14 path-qualified ones such as `studio::recovery::studio_recovery_list` in the
+`tauri::generate_handler!` list at `apps/desktop/src-tauri/src/lib.rs:15844`, and 168 entries in
+`TAURI_COMMAND_GROUPS` / `REVIEWED_TAURI_COMMANDS`
+(`apps/desktop/src/tauri-command-security.ts:16`, `:302`). `src/tauri-command-security.ts`
+classifies every one by boundary, and `tauri-command-security.test.ts` compares that ledger with
+both the Rust `generate_handler!` list and literal frontend invocations. A new, removed,
+duplicated, dynamically named or unclassified command fails the frontend suite.
+
+**This figure drifts silently, so re-count it rather than trusting it.** The ledger test asserts
+set equality between the extracted registrations and the ledger, but it asserts only a *floor* on
+the count: `MINIMUM_REGISTERED_COMMANDS = 150` and `MINIMUM_FRONTEND_INVOCATIONS = 120`
+(`tauri-command-security.test.ts:25`, `:33`). Nothing pins the total, so every added command
+leaves this paragraph stale and green. The floor exists because an earlier extraction regex could
+not match a path-qualified registration and "quietly reported 154 of 168" with nothing noticing
+(see the comment at `tauri-command-security.test.ts:20`) - which is exactly the 154 bare names
+above, so a naive re-count will reproduce the same undercount.
 
 The current review follows each path through these layers:
 
@@ -148,7 +226,7 @@ The current review follows each path through these layers:
 | Slow history response could populate a newly selected channel | Medium integrity/confidentiality-in-UI | Closed: capture server/channel plus monotonic request revision and discard stale responses |
 | Feedback launcher accepted an unbounded prefix-matching string | Low OS-boundary DoS/hardening | Closed: 6,000-byte/control-character native bound plus structural frontend origin/path check and tests |
 | Cached rendered plaintext could outlive its useful context | Medium local exposure | Closed: cache is memory-only, capacity 640, revision-aware, and cleared on server/channel change and lock |
-| Command surface could drift without review | Medium maintenance risk | Closed: exhaustive executable ledger for all 100 commands |
+| Command surface could drift without review | Medium maintenance risk | Closed for membership, open for count: the executable ledger is exhaustive and set-equal against the handler list (168 commands on 2026-09-11), but the test asserts only a 150-command floor, so the number quoted in prose drifts without failing anything |
 | Tauri core window, signed updater and process-restart plugin permissions are capability-scoped, not session-gated | Low availability | Accepted for now: they cannot read vault projections or install unsigned code, but compromised webview code could close/restart the app; revisit with separate locked/unlocked windows or narrower updater orchestration |
 
 Open inherited protocol residuals R2, R6 and R7 are not relabelled or weakened by this work.
@@ -163,7 +241,9 @@ implementation.
    every mutation in a typed native service wrapper.
 3. ~~Design actor-owned paged history: stable message-id anchors, bounded limits, edits/deletes,
    unread/search behavior, and legacy id-less rows. Review before changing the bridge contract.~~
-   Done (`perf-native-paging`, `docs/design-native-paging.md`).
+   Done and on `main`: merged by PR #20 (`455dcfa`, from branch `perf-history`), designed in
+   `docs/design-native-paging.md`. There is no `perf-native-paging` branch; earlier revisions of
+   this document named one that never existed under that name.
 4. Move server-wide search/filter/sort to an on-demand worker over paged data.
 5. Make remote media consent-aware and fixed-size before fetch; then profile voice/video and pause
    nonessential timers while hidden or locked.
@@ -172,11 +252,27 @@ implementation.
 
 ## Acceptance measurements
 
-- Report App and feature chunk minified/gzip sizes after every extraction; do not hide warnings.
-- Add a deterministic 10,000-message frontend fixture: initial DOM rows must remain at or below
-  the configured bound, history jumps must land, and reading position must survive prepend/append.
-- Record unlock-to-interactive, channel-open, message-arrival and scroll-frame timings on the same
-  release build/hardware before and after native paging.
-- Confirm lock rejects representative read, mutation, OS-launch and pairing commands while actors
-  continue native background work.
-- Keep the 100-command ledger test, CSP, full suites and documented R2/R6/R7 residuals green.
+Status as of 2026-09-11. Three of these were written as criteria and then never checked; they are
+marked open here rather than left to read as satisfied.
+
+- **OPEN.** Report App and feature chunk minified/gzip sizes after every extraction; do not hide
+  warnings. *Not done since 2026-08-20.* Nothing re-reported them across the whole 2026-09-03
+  paging/search/persistence sequence or the Studio work, which is the direct cause of the App chunk
+  growing from 709.43 kB to 1,146.34 kB unremarked. The build already prints these; the missing
+  step is copying them into this document (or failing a check) at the end of a slice.
+- **OPEN.** Add a deterministic 10,000-message frontend fixture: initial DOM rows must remain at or
+  below the configured bound, history jumps must land, and reading position must survive
+  prepend/append. *No such fixture exists.* `apps/desktop/src/chat-performance.test.ts` passes
+  `10_000` as an integer argument to `initialChatWindow` / `windowAround` (`:18`, `:29-31`) and
+  asserts the returned index ranges. That tests the windowing arithmetic, which is worth having,
+  but it never mounts a row, so nothing here measures DOM cost, scroll anchoring or paint.
+- **OPEN.** Record unlock-to-interactive, channel-open, message-arrival and scroll-frame timings on
+  the same release build/hardware before and after native paging. *No before/after record exists*,
+  even though native paging landed 2026-09-03 (`455dcfa`) - so the change shipped without the
+  measurement that was supposed to justify it. The `startup_probe` / `scale_probe` numbers above
+  cover the native half only; none of the four listed timings is a native-probe number.
+- **Met.** Confirm lock rejects representative read, mutation, OS-launch and pairing commands while
+  actors continue native background work.
+- **Met, with a caveat.** Keep the ledger test, CSP, full suites and documented R2/R6/R7 residuals
+  green. The ledger covers 168 commands, not the 100 an earlier revision of this line claimed, and
+  it pins membership rather than the count: see "Security review and command tracking" above.

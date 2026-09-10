@@ -1,9 +1,16 @@
 # Mewtual: message flow and micelle convergence
 
-Status: a **trace of what the code does today**, written before any change. It records the send
-path, the live receive path, the anti-entropy (catch-up) path, and how those behave when the group
-splits into independent sub-groups that talk separately and later meet. It also records what the
-existing tests actually prove, and what is still an open question.
+Status: a **trace of what the code does today**. It began as a trace written before any change;
+sections 1 to 5 have since been brought back in line with the fixes recorded in sections 8 to 11,
+so the trace and the fix log describe the same code. It records the send path, the live receive
+path, the anti-entropy (catch-up) path, and how those behave when the group splits into independent
+sub-groups that talk separately and later meet. It also records what the existing tests actually
+prove, and what is still an open question.
+
+Named functions and types are cited by symbol and linked to their file, without a line fragment.
+That is deliberate: this document has repeatedly pinned line numbers that rotted within a commit
+or two of being written, and a symbol name survives what a line number does not. Line numbers
+remain only where there is no symbol to name, chiefly individual tests.
 
 "Micelle" here means: a subset of members that is mutually reachable for a while, writes history,
 and is later joined to another such subset by a single member that can reach both. No member is
@@ -39,9 +46,9 @@ an append-only `Vec<SignedOp>` of the inner-signed changes that built it
    over the wall clock, so a device with a slow clock cannot post into the past and a device with a
    wild clock cannot drag the group's timeline forward permanently.
 
-2. **Sync accepts the edit.** [`ChannelSync::post`](../crates/catcoms-sync/src/lib.rs#L4910)
+2. **Sync accepts the edit.** [`ChannelSync::post`](../crates/catcoms-sync/src/lib.rs)
    requires the document to be open, then calls
-   [`EncryptedDoc::edit_tracked`](../crates/catcoms-replication/src/doc.rs#L621).
+   [`EncryptedDoc::edit_tracked`](../crates/catcoms-replication/src/doc.rs).
 
 3. **Replication signs and seals.** `edit_tracked` applies the Automerge edit, commits, takes the
    last local change, wraps its raw bytes in a `SignedOp` signed by the author's Ed25519 device key
@@ -56,12 +63,11 @@ an append-only `Vec<SignedOp>` of the inner-signed changes that built it
    exists in the document and the log, so it is queued in the bounded outbox for the next tick and
    is recoverable through ordinary catch-up regardless.
 
-5. **Product tracks it.** `track_delivery_target`
-   ([sync/lib.rs:8060](../crates/catcoms-sync/src/lib.rs#L8060)) plus a bounded per-channel ring of
-   `(message id, change hash)` so the UI can later ask who holds it.
+5. **Product tracks it.** [`track_delivery_target`](../crates/catcoms-sync/src/lib.rs) plus a
+   bounded per-channel ring of `(message id, change hash)` so the UI can later ask who holds it.
 
-**The acceptance point is the local edit, not the broadcast.** This is stated explicitly at
-[sync/lib.rs:4897-4909](../crates/catcoms-sync/src/lib.rs#L4897-L4909). Everything that can
+**The acceptance point is the local edit, not the broadcast.** This is stated explicitly in
+`post`'s own comment, immediately above its signature. Everything that can
 legitimately refuse a write (unopened document, missing routing secret, seal or Automerge failure)
 happens before the op exists; past that the message is real, durable and servable.
 
@@ -73,24 +79,24 @@ deduplication is needed at this layer.
 
 ## 3. Receiving live (gossip)
 
-[`on_gossip`](../crates/catcoms-sync/src/lib.rs#L11719) decodes the `SealedOp` and then:
+[`on_gossip`](../crates/catcoms-sync/src/lib.rs) decodes the `SealedOp` and then:
 
 - **Document not open locally: dropped.** A node only ingests (and therefore only later relays)
   documents it has opened. See section 8, H2.
 - **`sealed.epoch == current`** ->
-  [`ingest_current`](../crates/catcoms-sync/src/lib.rs#L11741): decrypt with the current channel
+  [`ingest_current`](../crates/catcoms-sync/src/lib.rs): decrypt with the current channel
   key, verify the inner signature, apply, and queue a delivery receipt.
 - **`sealed.epoch < current`** ->
-  [`ingest_past`](../crates/catcoms-sync/src/lib.rs#L11761): use a retained past-epoch key if the
+  [`ingest_past`](../crates/catcoms-sync/src/lib.rs): use a retained past-epoch key if the
   epoch is still inside the window (`max_past_epochs`, default 8); otherwise **enqueue a document
   catch-up** rather than dropping the message silently.
 - **`sealed.epoch > current`** ->
-  [`ingest_future`](../crates/catcoms-sync/src/lib.rs#L11796): this node is behind on membership
+  [`ingest_future`](../crates/catcoms-sync/src/lib.rs): this node is behind on membership
   commits. It chases the commits *and* the document, and deliberately does not ask the peer whose
   op revealed the gap to fill it.
 
 All three converge on
-[`apply_signed_tracked`](../crates/catcoms-replication/src/doc.rs#L1103), which:
+[`apply_signed_tracked`](../crates/catcoms-replication/src/doc.rs), which:
 
 - drops duplicates by op content hash (`self.applied`),
 - verifies the author signature and that the pubkey content-addresses the claimed device,
@@ -108,9 +114,14 @@ This is the path that matters for micelles. Gossip only carries live edits; it r
 
 ### 4.1 The requester states what it holds
 
-[`sync_frontier(max)`](../crates/catcoms-replication/src/doc.rs#L298) returns the Automerge heads
-**plus the immediate parents of those heads**, deduplicated, newest first, capped at
-`MAX_CATCHUP_SINCE_HEADS` (64).
+[`sync_frontier(max)`](../crates/catcoms-replication/src/doc.rs) returns the Automerge heads
+**plus the immediate parents of those heads**, deduplicated, capped at
+`MAX_CATCHUP_SINCE_HEADS` (512).
+
+Order is **not** meaningful. `sync_frontier`'s own doc comment still claims the truncated list is
+"newest first"; `AutoCommit::get_heads` sorts by hash, so which heads survive truncation is
+arbitrary. That is harmless now (see section 8, P1: truncation can no longer strand anyone), and
+correcting the comment is item 5 of section 11.
 
 The parents matter for exactly the micelle case: a member that wrote while isolated has a head
 nobody else has ever seen, and a peer that cannot resolve a hash cannot subtract anything behind
@@ -118,42 +129,81 @@ it. Naming the parents gives the serving peer a hash it does know.
 
 ### 4.2 The serving peer computes the difference
 
-[`serve_catchup_since`](../crates/catcoms-sync/src/lib.rs#L12213) authenticates the requester as a
+[`serve_catchup_since`](../crates/catcoms-sync/src/lib.rs) authenticates the requester as a
 current member, then:
 
 - If it does not hold the document at all, it answers `CATCHUP_SINCE_ABSENT`. This is
   deliberately distinct from "you have everything I have", because those mean opposite things.
 - Otherwise it calls
-  [`export_catchup_since`](../crates/catcoms-replication/src/doc.rs#L1026).
+  [`export_catchup_page`](../crates/catcoms-replication/src/doc.rs), **always**, whether or not
+  the request carried a cursor. `export_catchup_since` (same file) is the unpaged shape this path
+  used to run on and has no production caller left; it survives because the replication-layer and
+  sync-layer tests assert against it.
 
-`export_catchup_since` walks the transitive closure behind every head the requester named *that
-this node can resolve*, and then iterates **the entire local signed-op log**, sending every op
-whose change is not in that closure.
+`export_catchup_page(&have_heads, from, budget, ..)` walks the transitive closure behind every head
+the requester named *that this node can resolve*, then walks **the local signed-op log from
+position `from`**, sealing every op whose change is not in that closure until `budget` bytes are
+spent. It returns the ops plus `Option<usize>`: where to resume, or `None` when the log ran out.
 
-**The log is iterated whole. Authorship is irrelevant.** A node serves ops authored by members it
-has never met, on the strength of holding them. A head the server has never seen excludes nothing
-and is simply ignored. This is what makes the protocol epidemic rather than
+Resuming by position is the whole point of the paged form. `export_catchup_since` recomputes the
+entire difference on every call, so a caller that can only send a prefix of it sends the *same*
+prefix every time; see section 8, P1 for the starvation that produced.
+
+**The log is walked whole, across pages. Authorship is irrelevant.** A node serves ops authored by
+members it has never met, on the strength of holding them. A head the server has never seen
+excludes nothing and is simply ignored. This is what makes the protocol epidemic rather than
 origin-only: B can hand C messages written by A, and C can then hand them to E, whether or not A
 is alive, reachable, or still a member.
 
-The bundle is size-capped. If it was truncated the answer is `CATCHUP_SINCE_MORE`; otherwise
-`CATCHUP_SINCE_UNDERSTOOD`. The answer is signed and bound to the exact request (requester pubkey,
-timestamp, nonce, epoch, peer id), so a relay cannot forge or replay one.
+The answer's marker depends on both the walk and what the requester can parse:
+
+- nothing left to serve -> `CATCHUP_SINCE_UNDERSTOOD`;
+- more to serve **and the request carried the (optional, trailing) cursor field** ->
+  `CATCHUP_SINCE_PAGE`, with a 20-byte cursor in front of the bundle;
+- more to serve and the request carried no cursor field at all, i.e. a build that predates paging
+  -> `CATCHUP_SINCE_MORE`, exactly the frame it has always received.
+
+The cursor is `provider(16) ‖ position(4)`, where `provider` is the serving node's per-runtime id.
+A position means something only against the log that issued it, so a cursor replayed to the wrong
+peer, or to the same peer after a restart, is recognised as foreign and the walk restarts from
+zero rather than skipping history.
+
+The answer is signed and bound to the exact request (requester pubkey, timestamp, nonce, epoch,
+peer id), so a relay cannot forge or replay one.
 
 ### 4.3 The requester applies and decides whether it is done
 
-[`request_catchup_since`](../crates/catcoms-sync/src/lib.rs#L10851) checks the responder is a
-current member, verifies the request-bound signature, and then reads a four-state vocabulary:
+[`request_catchup_since`](../crates/catcoms-sync/src/lib.rs) checks the responder is a
+current member, verifies the request-bound signature, and then reads a five-state vocabulary:
 
 | Answer | Meaning | Effect |
 |---|---|---|
-| `UNDERSTOOD` | "you now have everything I have" | may complete the sweep (see below) |
-| `MORE` | "I withheld some; ask again" | remembered as a continuation, TTL 600s |
-| `ABSENT` | "I am not in this document" | this source set aside; the gap is untouched |
+| `1` `UNDERSTOOD` | "you now have everything I have" | may complete the sweep (see below) |
+| `2` `MORE` | "I withheld some; ask again" | remembered as a continuation, TTL 600s |
+| `3` `ABSENT` | "I am not in this document" | this source set aside; the gap is untouched |
+| `4` `PAGE` | "here is a page, resume at this cursor" | cursor stored per `(doc, peer)`; ask again |
 | unknown marker | a newer build | fall back to whole-history catch-up |
 
+`PAGE` and `MORE` are the same claim ("I withheld some") in two dialects, and which one arrives is
+decided by this node's own request rather than by the peer: a request carrying the cursor field
+gets `PAGE`, a request without it gets `MORE`. Either one, when the round actually applied
+something, clears the stall, is remembered as a continuation, and restarts the sweep.
+
+They differ in how a round that applied *nothing* is judged:
+
+- a `PAGE` whose cursor advanced is real work and is **not** counted against the source. It is a
+  page of ops this node already holds but could not name, which is exactly what a frontier wider
+  than its cap produces; the walk is consuming the peer's log and will reach the end of it. It is
+  deliberately not treated as a continuation claim either, because the peer chooses its own
+  positions.
+- an empty `PAGE` whose cursor did not advance is a peer minting positions for nothing, and counts.
+- a `MORE` that applies nothing always counts, because that path recomputes from the frontier and
+  can therefore repeat identically forever. That is the shape the non-progress bound exists for.
+
+The unknown-marker row is genuinely for a *future* marker. It is not the row `PAGE` falls into.
+
 Completion is **not** one peer's word. `note_source_checked` /
-[`unchecked_source_exists`](../crates/catcoms-sync/src/lib.rs#L5865) keep a per-document set of
+[`unchecked_source_exists`](../crates/catcoms-sync/src/lib.rs) keep a per-document set of
 sources that have answered *at the current document version* (version = op count). A document is
 only declared converged when every **connected, both-ends-bound proven member** has said
 "you have everything I have" at that version. Any op that actually lands resets the sweep, because
@@ -167,7 +217,7 @@ claimant or by real progress, so one member cannot end another's continuation by
 ### 4.4 What triggers a sweep
 
 - **A proven member connects.**
-  [`sweep_docs_on_reconnect`](../crates/catcoms-sync/src/lib.rs#L4983) queues a catch-up for
+  [`sweep_docs_on_reconnect`](../crates/catcoms-sync/src/lib.rs) queues a catch-up for
   **every open document**. The membership gate here is load-bearing and was added because sweeping
   on any connection aimed catch-up at mid-join peers and deadlocked real joins.
 - **A restored node proves its first member.** A node restored from disk has an empty proven-peer
@@ -192,7 +242,7 @@ a user visiting a channel.
 | Scenario | What happens | Verdict |
 |---|---|---|
 | A+B talk, C+D talk separately | Two concurrent Automerge branches of the same document | Both valid |
-| B later meets C | Both call `sync_frontier`, both serve `export_catchup_since` over their **whole** log | Exchanged, including A's and D's ops |
+| B later meets C | Both call `sync_frontier`, both page `export_catchup_page` over their **whole** log | Exchanged, including A's and D's ops |
 | B then disappears | C already pushed A's and B's ops into its own `log` on import | C can still propagate them |
 | D meets E | Same mechanism, one hop further out | Transitive |
 | Partitions reconnect repeatedly | `applied` content-hash set plus Automerge change-hash dedup | Idempotent |
@@ -229,7 +279,7 @@ Two independent kinds of positive evidence, both within the current roster:
 - an authenticated `KIND_DELIVERY_RECEIPT` naming the exact change hash, queued by a recipient
   when it applies an op ([sync/lib.rs:8077](../crates/catcoms-sync/src/lib.rs#L8077)); and
 - a causally descending change, computed in one DAG pass by
-  [`holders_of`](../crates/catcoms-replication/src/doc.rs#L436), where attribution comes from the
+  [`holders_of`](../crates/catcoms-replication/src/doc.rs), where attribution comes from the
   **signed** op envelope, not the Automerge actor id.
 
 The UI verdict function [`deliveryVerdict`](../apps/desktop/src/delivery.ts#L59) maps evidence to
@@ -275,8 +325,8 @@ guards, not merely by passing):
 - **Third-party transitive relay, end to end**, and the **chained multi-micelle heal**:
   `three_micelles_heal_in_a_chain_and_converge_without_their_authors` in
   `crates/catcoms-sync/tests/sync.rs`. Asserts the intermediate state before the authors die, which
-  is what makes the relay chain unambiguous. Breaking it: an author filter on
-  `export_catchup_since` fails the first heal, 1 op instead of 2.
+  is what makes the relay chain unambiguous. Breaking it: an author filter on the export the
+  serving path runs (`export_catchup_page`) fails the first heal, 1 op instead of 2.
 - **A frontier wider than its cap**: two tests in `crates/catcoms-replication/src/doc.rs`. See
   section 8, P1, which is now confirmed rather than suspected.
 - **Divergent clocks across a heal**:
@@ -314,12 +364,12 @@ control plane and in how two independently reasonable bounds compose.
 The feared liveness failure **does not occur in the ordinary case**, and the design anticipated it
 explicitly:
 
-- [`maybe_probe_for_missed_commits`](../crates/catcoms-sync/src/lib.rs#L6557) fires on every
+- [`maybe_probe_for_missed_commits`](../crates/catcoms-sync/src/lib.rs) fires on every
   `PeerConnected` for any non-committer, enqueuing a commit catch-up from this node's own epoch.
   Its own comment states the reason: rotation made topics label-specific, so a member that has
   fallen behind no longer receives the live topic and would have no reactive trigger, and commit
   catch-up is point-to-point so it "recovers us regardless of how far behind we are".
-- [`authenticate_request`](../crates/catcoms-sync/src/lib.rs#L6337) checks roster membership,
+- [`authenticate_request`](../crates/catcoms-sync/src/lib.rs) checks roster membership,
   wall-clock freshness and the signature. It binds `req_epoch` into the transcript but **never
   compares it against the server's current epoch**. A stale-but-still-rostered member is therefore
   not locked out of the control plane by its staleness.
@@ -331,10 +381,10 @@ the current topics, and the ordinary document sweep then runs.
 
 **The residual is narrower than feared and entirely undiagnosed.** Two bounds define a dead zone:
 
-- serving side, `max_commit_log` = 256 ([:738](../crates/catcoms-sync/src/lib.rs#L738)).
+- serving side, [`SyncConfig::max_commit_log`](../crates/catcoms-sync/src/lib.rs) = 256.
   `serve_commit_catchup` filters `commit_epoch >= from_epoch`; if the requester's epoch predates
   the oldest retained record, everything served starts *above* it.
-- receiving side, `max_commit_gap` = 1024 ([:740](../crates/catcoms-sync/src/lib.rs#L740)).
+- receiving side, [`SyncConfig::max_commit_gap`](../crates/catcoms-sync/src/lib.rs) = 1024.
   `buffer_future_commit` drops any record further ahead than that before it is buffered.
 
 Which gives two distinct stranded states:
@@ -450,7 +500,7 @@ the same coverage.
 
 The genuine gap is the **epoch-managed P1 types**: `StudioIndex`, `StudioObject`, `PostReplies`,
 `DocRegistry`. These never enter the legacy `docs` map, and
-[`apply_signed_tracked`](../crates/catcoms-replication/src/doc.rs#L1105) refuses them outright with
+[`apply_signed_tracked`](../crates/catcoms-replication/src/doc.rs) refuses them outright with
 `EpochScope`. They replicate through a different protocol (kinds 20 to 25), whose carrier set is
 deliberately bounded: at most 16 recent-target watches, installed only after successful explicit
 Studio access, and explicitly volatile across restart (see ARCHITECTURE section 2).

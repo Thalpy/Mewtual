@@ -2,8 +2,8 @@
 
 This is an acceptance checklist, not a count of source files. UI layout, components and the
 canonical Flipnote mockups remain user-owned. No item is complete merely because its core
-helper exists. As of 2026-09-09, the active scope is **Flipnote and the P1 paths it requires**,
-not completion of the entire Creative Suite.
+helper exists. As of 2026-09-11 (`39ceb76`), the active scope is **Flipnote and the P1 paths it
+requires**, not completion of the entire Creative Suite.
 
 Frontend integration is tracked separately in [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md): actual
 native commands/events, retry rules and explicitly unavailable controls. Update it alongside
@@ -42,7 +42,7 @@ for unrelated document types. Tests and review accompany each slice, not only ga
 | 1. Typed Flipnote documents | Rust StudioIndex/Flipnote domain-op validation, deterministic projection, conflict/Restore data and exact checkpoint preflight; frame, byte, sfx and patch caps. Unsupported linked-score behavior stays unavailable until gate 6, never silently accepted. | Tests exercise valid edits, malformed/cross-document operations, both concurrent delivery orders and cap boundaries through the real P1 gate. |
 | 2. Durable one-device Save/Load | **Index/art milestone implemented:** accounted vault/lifecycle ownership, native commands, real PIX CIDs, sealed intents, conservative source/seed/recovery reference protection and three-state expiry. Extend these same seams to actual sound/export records in gate 6. No UI edits. | Actor/native create/edit/restart/reopen uses real CIDs. Failure cases preserve durable state. Fileshare unlisting/upload cleanup cannot delete referenced pixels; full scans/restart include superseded seed/history, pending intents and retained/staged recovery. Open edits remain provisional. |
 | 3. Two-member collaboration and joining | **Index/art milestone implemented:** live sharing, automatic same-epoch repair, unopened saved-key service, keyed Registry/Studio checkpoint discovery and recovery-first Studio adoption through the existing actor/native worker. | Actual actors join after the fixture receipt, install Registry plus Index/art checkpoints, persist the Studio open tail and reopen. Provider restart needs no UI watch. Closing survives expired selection and restart; ordinary Read reestablishes the volatile watch, then no further action is needed. Existing cancellation/authority/durability tests and 70-op paging remain. The 8-MiB input/inventory and 256-KiB unrelated-cold rails remain; this is not arbitrary-size latency qualification. |
-| 4. Rotation and recovery in the running app | **Active:** accounted Studio owner settlement, watched rotation, Registry pointer/tail maintenance, recovery List/Read/backup Export/Ack/Restore/Copy, settlement invalidations and conservative own-intent replay are connected. Remaining: running-app succession/signed fault repair and full-gate acceptance. | Focused crash/restart, solo three-rotation, Registry paging, Create after Index rotation, native recovery fences and replay/manual-disposition regressions pass. Full-gate acceptance and final suites remain pending. No pruning before receipt and durable recovery; manual recovery is not settlement. Backup Export is not `.pixa` (gate 6). |
+| 4. Rotation and recovery in the running app | **Active:** accounted Studio owner settlement, watched rotation, Registry pointer/tail maintenance, recovery List/Read/backup Export/Ack/Restore/Copy, settlement invalidations and conservative own-intent replay are connected, and the persisted eviction grace is enforced rather than waiting on Acknowledge. Remaining: running-app succession/signed fault repair and full-gate acceptance. | Focused crash/restart, solo three-rotation, Registry paging, Create after Index rotation, native recovery fences, deadline-promotion and replay/manual-disposition regressions pass, each guard confirmed to fail when removed. Full-gate acceptance and final suites remain pending. No pruning before receipt and durable recovery; manual recovery is not settlement. Backup Export is not `.pixa` (gate 6). |
 | 5. Collaborative frame claims | Required full-identity signalling and shared channel admission; bounded capability/session-bound claim, Ask and Pass messages with receiver-observed expiry. No game/avatar path or standalone drawing feature. | Two members observe advisory claim/Ask/Pass/expiry; collision, replay and disconnect tests pass. Claims never become edit locks. |
 | 6. Sound and export | Linked-score typed operations/preflight/recovery, sfx/emoji patch sources, 64-patch union, deterministic valid-take export and byte-exact `.pixa` publication with durable export records. Cover the specified local GIF export contract without taking over UI design. | No-score and linked-score golden vectors, maximal accepted exports and malformed/over-cap rejection pass; exported bytes can be read back and validated. Playback-facing contracts preserve Deafen and membership teardown. |
 | 7. Flipnote backend acceptance and UI handoff | Run the complete create/save/restart/share/join/rotate/recover/export flow through production adapters, including failure paths. Publish Markdown for the real commands, events, limits and recovery behavior. | Backend acceptance tests and mandatory suites pass, adversarial blocker/high findings are resolved, and every canonical UI dependency maps to a working command/event or explicitly user-owned rendering work. |
@@ -77,9 +77,11 @@ micro-optimization alone is not a reason to postpone Studio integration.
 
 ## Completed-work ledger: reuse before adding
 
-Audited against this branch's committed history through `443c5f0` (2026-09-09). This groups
-the P1/Flipnote `feat` and `perf` commits from `57e51ad` onward, plus the original P1 commit
-`a67e284` and the performance probe. It is not a repository-wide release changelog: unrelated
+Audited against this branch's committed history through `39ceb76` (2026-09-11), the newest Studio
+commit. The per-commit rows below stop at `b6f137b`; the three Gate 4 commits after them
+(`cbed5b7`, `ccddd23`, `39ceb76`) are described in the active-slice section rather than as ledger
+rows. This groups the P1/Flipnote `feat` and `perf` commits from `57e51ad` onward, plus the
+original P1 commit `a67e284` and the performance probe. It is not a repository-wide release changelog: unrelated
 voice, files, release and user-owned UI work is not marked as Flipnote progress. Commit subjects
 are discovery aids, not proof of completion; the current contracts and limitations below govern.
 
@@ -133,9 +135,53 @@ Paths below use `rep/` = `crates/catcoms-replication/src/`, `app/` = `crates/cat
 
 | Cooperative Studio checkpoint discovery/adoption / 3 | `b6f137b` | [shared scopes](../crates/catcoms-sync/src/checkpoint_exchange.rs), [head attempts](../crates/catcoms-sync/src/receipt_head/detached.rs), [seed attempts](../crates/catcoms-sync/src/registry_seed/detached.rs), [Studio installer](../crates/catcoms-app/src/store/epoch_studio/adoption.rs), [source service](../crates/catcoms-app/src/store/epoch_studio/discovery.rs), [app custody](../crates/catcoms-app/src/studio_exchange/discovery.rs), [joined-member regressions](../crates/catcoms-app/src/studio_exchange/tests/discovery.rs) | Kinds 24/25 reuse the existing head/seed engine, all its budgets and owner-proof rules. Source Closing/Fault, typed recovery and separate successor use the same store/gate/inventory, not a new replication system. Ordinary Studio restart v1 is unchanged; adoption v2 and the Registry-only lineage ceiling are regression-tested. Explicit discovery/install/tail/reopen works after real endpoint bootstrap; service/runtime orchestration follows in the closure below. |
 
-### Gate 4 active slice: Studio owner settlement preparation (`9799c6f`)
+### Gate 4 active slice: bounded recovery hold and slot-order-proof replay (`39ceb76`)
 
-Studio now has the missing typed core adapter in
+Gate 4 has run four committed slices, all on this branch and all ancestors of HEAD:
+
+| Slice | Commit | What it added |
+|---|---|---|
+| Owner settlement preparation | `9799c6f` | Typed owner close/receipt core adapter and recovery-bound successors |
+| Owner rotation and recovery inspection | `cbed5b7` | Registry pointer/tail maintenance in the idle worker; native recovery List/Read/Export/Ack |
+| Recovery controls, replay and settlement events | `ccddd23` | Per-item Restore/Copy, separately retryable pointer restoration, own-intent replay, `settlement-changed` |
+| Bounded recovery hold, slot-order-proof replay | `39ceb76` | **Current slice.** Enforces the eviction grace and removes a slot-ordering dependency from replay |
+
+**Current slice (`39ceb76`), two fixes.** First, the seven-day eviction grace was never enforced:
+`EpochRecoveryAction::AdvanceTime` had no production call site, so every settlement and
+installation path returned `RecoveryPending` for as long as a persisted warning existed, and a
+document needing a third recovery slot stayed Closing until somebody pressed Acknowledge - which
+is precisely what the grace exists to bound.
+[`store/epoch_recovery.rs`](../crates/catcoms-app/src/store/epoch_recovery.rs) now exposes
+`advance_due_epoch_recovery_with_writer`, which promotes a staged version whose *persisted*
+deadline has passed under the caller's own accounting and writer custody, and writes nothing before
+then so an idle owner pass cannot churn the record or restart the grace. All four paths that hold
+the same shape share it: Studio settlement
+([epoch_studio/rotation.rs](../crates/catcoms-app/src/store/epoch_studio/rotation.rs)) and
+checkpoint adoption ([epoch_studio/adoption.rs](../crates/catcoms-app/src/store/epoch_studio/adoption.rs)),
+plus Registry installation and adoption
+([epoch_registry/installation.rs](../crates/catcoms-app/src/store/epoch_registry/installation.rs),
+[epoch_registry/adoption.rs](../crates/catcoms-app/src/store/epoch_registry/adoption.rs)).
+Acknowledge now only brings the eviction forward, which is what
+[FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md) tells the UI to show.
+
+Second, replay screened the mutable register in every retained and staged version, but the element
+*birth* only in the first version found. Retained slots are newest-first and the staged slot is
+newer than both while sorting last, so the newest evidence was never the one checked and slot order
+decided a safety question. In [studio/replay.rs](../crates/catcoms-app/src/studio/replay.rs),
+`selected()` now returns provenance, `choose()` requires every version carrying the envelope to
+agree on it, and `agreed_predecessor()` derives the explicit after-edge the same way. Disagreement
+becomes Manual, the existing bounded disposition. One element id has one register, so this is a
+determinism fix rather than a recovered wrong write. Five regressions cover both, each confirmed to
+fail when its own guard is removed: deadline promotion on the frozen-owner and settlement paths
+with an injected writer that fails if any recovery write happens inside the grace, and contested
+frame births and object creations held Manual in both slot orderings, with the rival birth
+deliberately the losing one so the extra evidence is the only difference.
+
+Remaining for Gate 4: running-app succession, signed fault/repair, and full-gate acceptance.
+
+#### Landed on the way: Studio owner settlement preparation (`9799c6f`)
+
+Studio has the typed core adapter in
 [owner.rs](../crates/catcoms-replication/src/studio/epoch/owner.rs) and
 [settlement.rs](../crates/catcoms-replication/src/studio/epoch/settlement.rs), with regressions in
 [owner/tests.rs](../crates/catcoms-replication/src/studio/epoch/owner/tests.rs). This reuses P1's
@@ -149,39 +195,46 @@ tests cover Index/art, later edits, restart, same-tenure retries, A-to-B-to-A su
 above Registry's product ceiling, malformed/stale plans, deletions and fifth conflict values.
 Existing cap regressions also check the actual compactor's omission predicate.
 
-Next, in order (work areas within Gate 4, not new gates):
+The work areas that followed it, in order (areas within Gate 4, not new gates). All four are now
+committed; the wording below is kept because it says what each area actually covers:
 
-1. **Implemented in the current worktree:** connect this adapter to the existing accounted
-   owner journal, recovery-first store installation and exact covered-intent retirement.
+1. **Committed (`cbed5b7`):** this adapter is connected to the existing accounted owner journal,
+   recovery-first store installation and exact covered-intent retirement.
    The Index/art crash matrix exercises actual source/journal/recovery/intent/successor writers,
    recovery eviction acknowledgement, reopen, retry and unchanged-file durability boundaries.
-2. **Integrated; acceptance verification in progress:** the existing idle worker rotates watched
-   owner documents, completes installed-head availability without a second member's query,
-   refreshes their Registry pointers and receives Registry open-tail pages. Solo owner rotation
-   across three restarts, two-member actual Registry paging, large-page inventory continuity and
-   per-bucket Fault isolation have focused regressions. These are extensions of the existing
-   worker, journal, page protocol and inventory cache, not replacement systems.
-3. **Replay connected:** paced own-envelope replay checks all retained snapshots and current
-   state, orders stable-id dependencies and holds competing mutable edits. Unsafe choices can
-   use the user-approved recovery-first manual disposition; missing evidence stays pending.
+2. **Committed (`cbed5b7`); full-gate acceptance verification still open:** the existing idle worker
+   rotates watched owner documents, completes installed-head availability without a second member's
+   query, refreshes their Registry pointers and receives Registry open-tail pages. Solo owner
+   rotation across three restarts, two-member actual Registry paging, large-page inventory
+   continuity and per-bucket Fault isolation have focused regressions. These are extensions of the
+   existing worker, journal, page protocol and inventory cache, not replacement systems.
+3. **Replay connected (`ccddd23`), then made slot-order independent (`39ceb76`):** paced
+   own-envelope replay checks all retained snapshots and current state, orders stable-id
+   dependencies and holds competing mutable edits. Unsafe choices can use the user-approved
+   recovery-first manual disposition; missing evidence stays pending. Contested births now require
+   agreement across every version carrying the envelope rather than trusting the first slot found.
    Remaining: running-app succession and signed fault/repair.
-4. **Connected:** native recovery List/Read/backup Export and exact eviction Ack share
-   the existing actor/vault/session custody. Per-item Restore/Copy and separately retryable
-   pointer restoration pass focused tests. Settlement invalidations now cross actor/native guards.
-   [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md) documents the tested callable names and limitations.
+4. **Connected (`cbed5b7` for List/Read/Export/Ack, `ccddd23` for Restore/Copy, pointer restoration
+   and settlement events; grace enforcement in `39ceb76`):** native recovery List/Read/backup Export
+   and exact eviction Ack share the existing actor/vault/session custody. Per-item Restore/Copy and
+   separately retryable pointer restoration pass focused tests. Settlement invalidations now cross
+   actor/native guards, and the eviction countdown is enforced rather than decorative.
+   [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md) documents the tested callable names and limitations;
+   it is checkpointed at the same commit as this document.
 
 No automatic Studio rotation or new native hook is claimed by the first core slice.
 Full root/native/frontend suites, root formatting and Clippy, native check, ambient-dependency
 and diff checks passed. Final read-only adversarial review found no remaining findings; the
 HANDOVER entry records commands, evidence and two focused coverage follow-ups for integration.
 
-Current-worktree integration files (not yet a completed Gate 4 or a released native contract):
+Gate 4 integration files, committed but not yet a completed Gate 4 or a released native contract:
 `store/epoch_studio/{rotation,registry}.rs`, `studio_exchange/rotation.rs`,
 `studio/receiver/catchup/{rotation,registry_runtime}.rs`, and the existing Registry
-receive/provider and owner adapters. Tests live beside those modules. No UI component or
-canonical mockup changed. Remaining succession/repair and full acceptance are required before
+receive/provider and owner adapters (`cbed5b7`). Tests live beside those modules. No UI component
+or canonical mockup changed. Remaining succession/repair and full acceptance are required before
 Gate 4 is complete. Replay/Restore additions reuse `studio/{replay,restore,settlement}.rs`,
-`studio/receiver/replay.rs`, the existing accounted intent/recovery writers and native custody.
+`studio/receiver/replay.rs`, the existing accounted intent/recovery writers and native custody
+(`ccddd23`), with `store/epoch_recovery.rs` and `studio/replay.rs` corrected in `39ceb76`.
 
 Gate 4 acceptance also must exercise **Create after Index rotation**: the current Create adapter
 now uses its existing two-write/intent path against the actual current locally checked Index;

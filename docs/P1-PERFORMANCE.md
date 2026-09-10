@@ -4,6 +4,20 @@ This opt-in harness measures the production `Server::serve_registry_page` path b
 P1 scheduling is enabled. It does not establish scheduler fairness, network latency, or a global
 worst-case CPU/memory bound. UI work is unaffected.
 
+**How to read the dates in this file.** Each `##` section is stamped with the day its numbers were
+taken and is a permanent record of that run: measurements are never edited in place, they are
+superseded by a later section. Every **Next:** paragraph, by contrast, is a snapshot of intent that
+expires - a later section, or a later commit, may already have closed it. Before acting on one,
+check the sections below it and `git log` for the work it names; the ones known to be closed are
+marked inline. Forward-looking text is stale by default here, not authoritative.
+
+**Not the same subject as
+[PERFORMANCE-SECURITY-HARDENING](PERFORMANCE-SECURITY-HARDENING.md).** That document measures the
+desktop webview and chat path (bundle splitting, message materialization, IPC surface); this one
+measures the `catcoms-app` saved P1 registry/Studio source. Neither supersedes the other and they
+share no numbers. See the cold-restore cross-reference in "One owned active Studio source" below
+for the one place the two look like they contradict each other and do not.
+
 ## Run
 
 Run each case in a separate process, on an otherwise idle machine, with the release profile:
@@ -133,10 +147,12 @@ for queued and accepted changes, and require missing dependencies and re-envelop
 reject before semantic validation. The opt-in app probes continue to enforce the real capacity,
 exact hashes, page/dependency bounds and unchanged-vault assertions.
 
-**Next:** bounded off-executor reconstruction/source reuse, with exact source-version and current
+**Next (written 2026-09-08; LANDED - see "After explicit preparation and source reuse" immediately
+below):** bounded off-executor reconstruction/source reuse, with exact source-version and current
 authority rechecks. Cold-source preparation cannot consume a five-second admitted request and
 then return a stale success. Nor may a long rebuild hold the vault mutex and block unrelated saves.
 These are runtime integration requirements, not a reason to remove validation or enlarge timeouts.
+The requirements themselves still hold; only the "next" framing is spent.
 
 Automatic scheduling remains disabled. A worker holding the vault mutex through the whole rebuild
 could still block unrelated persistence. Runtime integration must separately preserve source-version
@@ -242,5 +258,24 @@ changed-source reconstruction is not made fast by this change, and cold local Sa
 still repeat it. This slice removes repeated reconstruction from prepared remote receive and
 its timeline refresh; it does not qualify every accepted history, 16 active graphs, automatic
 catch-up or newcomer seed installation. Do not enlarge cold limits or request deadlines based
-on the warm observations. Gate 3's next integration is reconnect/catch-up using the existing
-bounded preparation/continuation paths, with cold preparation kept out of an admitted request.
+on the warm observations.
+
+**Forward-looking text below this line was written 2026-09-09 and is now closed.** It read: "Gate
+3's next integration is reconnect/catch-up using the existing bounded preparation/continuation
+paths, with cold preparation kept out of an admitted request." That integration landed:
+`86ed32a` (bounded same-epoch page serving and atomic receive), `443c5f0` (authenticated same-epoch
+catch-up without actor waits), `b6f137b` (authenticated checkpoint discovery and durable adoption),
+and `7ff8c0f`, which closed Flipnote gate 3 and recorded its evidence. Gate 4 (rotation and
+recovery in the running app) is mid-flight as of 2026-09-11; see
+[BACKEND-IMPLEMENTATION](BACKEND-IMPLEMENTATION.md) for its current slice. The constraint the
+sentence carried is still binding: cold preparation stays out of an admitted request.
+
+**Cross-reference: the 142,337 ms above is not comparable to the 151 ms in
+[PERFORMANCE-SECURITY-HARDENING](PERFORMANCE-SECURITY-HARDENING.md).** That document's startup
+probe reports `Server::restore` at 151 ms for a 20,000-message chat server: `AutoCommit::load` plus
+decoding and verifying a chat op log, on launch. This 142,337 ms is a cold reconstruction of a
+saved P1 registry/Studio source (6,939 accepted setup ops, a 4,934,432-byte physical record) whose
+per-op validation work is far heavier, taken as a non-isolated diagnostic observation with a build
+running alongside it. Different object, different path, different conditions. A reader who has just
+come from the other page should not conclude either figure is wrong by three orders of magnitude,
+and neither number should be quoted as "restore takes X".

@@ -1,14 +1,19 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-10. Rotation/inspection checkpoint: `cbed5b7`; Restore/Copy, settlement
-invalidations and own-intent replay are tested in the current worktree. Gate 4 is not yet accepted.
+Last checked: 2026-09-11. Checkpoint: `39ceb76` (`fix(studio): bound the recovery hold and make
+replay slot-order proof`), the newest Studio commit on this branch. Owner rotation and recovery
+inspection landed in `cbed5b7`; recovery controls, own-intent replay and settlement events are
+committed in `ccddd23`, not worktree-only; the eviction grace is now actually enforced and replay
+is slot-order independent as of `39ceb76`. Gate 4 is not yet accepted.
 This is the maintained frontend integration map, not a replacement UI design. The user's
 canonical HTML/mockups remain authoritative for layout and interaction. Update this guide in
 the same slice that adds or changes a native command, event or returned state.
 
 ## Available now
 
-The native entry points are [studio.rs](../apps/desktop/src-tauri/src/studio.rs) and
+The native entry points are [studio.rs](../apps/desktop/src-tauri/src/studio.rs),
+[studio/recovery.rs](../apps/desktop/src-tauri/src/studio/recovery.rs) (all seven
+`studio_recovery_*` commands) and
 [creative_blobs.rs](../apps/desktop/src-tauri/src/creative_blobs.rs); registration and event
 forwarding are in [lib.rs](../apps/desktop/src-tauri/src/lib.rs). These are real actor/vault
 paths, not fixture functions. The current frontend `studio-store.ts` is still an in-memory

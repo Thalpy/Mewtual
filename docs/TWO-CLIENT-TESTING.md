@@ -3,12 +3,15 @@
 This runbook covers the tests that answer a simple product question: can two Mewtual clients
 find one another, join the same server, exchange data, disconnect and recover?
 
-There are several useful levels. Everything below runs today except the packaged-desktop harness.
+There are several useful levels. Everything below runs today except the packaged-desktop harness,
+and the once-documented trick of running two desktop clients side by side on one machine, which the
+vault mount lock now correctly refuses.
 
 | Level | Runs today? | Boundary exercised | Intended use |
 |---|---|---|---|
 | Product scenario, memory mesh | Yes | `ServerActor`/`AppEvent`, protocol and product behaviour | Fast local/CI regression |
 | Product scenario, real TCP | Yes | The above plus two real libp2p nodes and OS sockets | Discrete two-client socket check |
+| Three native processes, on-disk state | Yes | Child-process lifecycle, real TCP and recovery across a listener change | Recovery-code regression |
 | Two CLI processes, real TCP | Yes | Process lifecycle, invite file and encrypted catch-up | Linux/Windows smoke test |
 | Two isolated Linux networks | Yes | Separate private LANs, NAT/firewall and optional relay | Internet-like topology test |
 | Two packaged desktop processes | No—planned | Separate vaults/processes, Tauri IPC and webviews | Nightly/release acceptance |
@@ -18,12 +21,13 @@ diagnostics explain where a failed run stopped. Log output alone is not a succes
 
 ## Prerequisites
 
-- Rust 1.89 or later, including `cargo`.
+- Rust 1.89.0, including `cargo`. [`rust-toolchain.toml`](../rust-toolchain.toml) pins that exact
+  version, so `rustup` will fetch it rather than use whatever is newer.
 - Run commands from the repository root.
 - Permit loopback TCP connections when the OS firewall prompts.
 
-The desktop-only manual check additionally needs Node.js, the packages installed by `npm ci`, and
-the platform's Tauri prerequisites.
+The desktop-only manual check additionally needs Node.js 22 (the version CI installs), the packages
+installed by `npm ci`, and the platform's Tauri prerequisites.
 
 ## Run the existing product scenarios
 
@@ -68,12 +72,30 @@ both sides, and Bob's shutdown makes Alice observe a real disconnect. This is a
 real socket test, but it is not a LAN or internet test: no router, firewall or NAT lies between the
 nodes.
 
-It deliberately does not prove packaged desktop startup, independent vaults, Tauri IPC, webview
-rendering, or cross-session redial from a publicly routable address. CI loopback addresses are
-removed from published peer records by the production safety classifier, so pretending this test
-proves public-address rediscovery would be misleading.
+It deliberately does not prove packaged desktop startup, sealed independent vaults, Tauri IPC,
+webview rendering, or cross-session redial from a publicly routable address. Both peers also live
+in one address space; the recovery test below is what crosses a real process boundary. CI loopback
+addresses are removed from published peer records by the production safety classifier, so
+pretending this test proves public-address rediscovery would be misleading.
 
-The root CI workflow already runs both suites through:
+## Run the native-process recovery check
+
+```sh
+cargo test -p catcoms-app --test process_recovery_e2e
+```
+
+This one launches the test binary as three real OS child processes over real TCP: Alice, then Bob
+twice, the second Bob a new process restoring on a different listener. The parent binds and holds
+Bob's first port before the second Bob starts, so address replacement is an enforced precondition
+rather than a hope about ephemeral port reuse. Bob's transport seed and the signed recovery code
+each cross an on-disk file, standing in for sealed `ServerNet` state and for the human copy/paste
+channel.
+
+Its point is what a single-address-space test cannot catch: an application snapshot that quietly
+depends on a live task, handle or other process-local state. It is not a vault test; vault sealing
+is covered separately, and these children share one run directory rather than two sealed vaults.
+
+The root CI workflow already runs all three suites through:
 
 ```sh
 cargo test --all --all-features
@@ -120,38 +142,35 @@ The separate `Two-client acceptance` GitHub Actions workflow runs this smoke tes
 touch the harness or relevant networking/product crates. Evidence is uploaded for seven days even
 when a scenario fails.
 
-## Run two desktop clients manually
+## Two desktop clients on one machine: not currently possible
 
-Until the packaged automation harness exists, the desktop boundary can be checked manually on one
-machine.
+Older revisions of this runbook told you to run `npm run tauri dev` and then start a second copy of
+`src-tauri/target/debug/mewtual-desktop` beside it. **That no longer works, and it is not a bug.**
 
-From the desktop directory, install dependencies and start the first client:
+`ServerStore::open` takes an exclusive, non-blocking OS lock on the vault directory before it
+unseals anything (`crates/catcoms-app/src/store.rs` → `acquire_vault_session` in
+`crates/catcoms-storage/src/vault.rs`). The second process loses the race and gets
+`StorageError::VaultBusy`, "the vault is busy in another application process; try again", without
+doing the Argon2 work or seeing a decrypted key. Two actors starting from one vault snapshot could
+each publish a valid but divergent successor to the MLS and invite-ledger state, so refusing the
+second mount is the correct behaviour.
 
-```sh
-cd apps/desktop
-npm ci
-npm run tauri dev
-```
+Both processes resolve the same vault because both resolve the same `app_data_dir()`, keyed on the
+`com.catcoms.desktop` identifier in `tauri.conf.json`, and there is **no app-data directory
+override**: no flag, no environment variable. Running the binary from a different working directory
+changes nothing.
 
-Keep that command running. In a second terminal, launch another backend process using the already
-built debug executable. Both windows use the first Vite development server, but each has its own
-native backend:
+So a second desktop client on the same machine and the same user account needs a second app-data
+root, which needs an override that does not exist yet. Until it does, use:
 
-Windows PowerShell:
+- two user accounts, two machines, or two VMs, for the manual acceptance sequence below;
+- `scripts/two-client-smoke.sh` / `.ps1` for an automated two-process check;
+- `npm --prefix apps/desktop run test:startup`, the closest thing to a packaged-startup gate, when
+  what you changed is setup or process spawning rather than two-client behaviour.
 
-```powershell
-Set-Location apps/desktop
-.\src-tauri\target\debug\mewtual-desktop.exe
-```
+### The manual acceptance sequence
 
-Linux:
-
-```sh
-cd apps/desktop
-./src-tauri/target/debug/mewtual-desktop
-```
-
-Then perform this short acceptance sequence:
+Wherever you run two genuinely separate clients (two machines, two VMs, two user accounts):
 
 1. In Alice, found a server and create a new invite.
 2. Paste the invite into Bob and join.
@@ -160,9 +179,8 @@ Then perform this short acceptance sequence:
 5. Close Bob and confirm Alice's connectivity view records the disconnect.
 6. Save both diagnostic reports if any step fails, noting which client and step each came from.
 
-This development arrangement is convenient but is not fully isolated: both webviews load the same
-Vite server. Do not use a debug executable as a distributable test build because it depends on that
-server.
+Do not use a debug executable as a distributable test build: it depends on the Vite development
+server that `npm run tauri dev` starts.
 
 ## Test LAN and internet-like paths
 
@@ -225,6 +243,15 @@ cargo test -p catcoms-sync --test tcp_relay_e2e -- --nocapture
 cargo test -p catcoms-sync --test tcp_dcutr_e2e -- --nocapture
 ```
 
+Two more in the same crate run real swarms over libp2p's **memory** transport: real Noise and
+request/response, no OS sockets. They cover the join handshake, encrypted catch-up and rendezvous
+discovery deterministically, and prove nothing about the network:
+
+```sh
+cargo test -p catcoms-sync --test libp2p_e2e -- --nocapture
+cargo test -p catcoms-sync --test rendezvous_e2e -- --nocapture
+```
+
 Those tests are the baseline. A network-topology harness should run the same user-visible acceptance
 sequence through separately launched CLI/product clients, rather than duplicate protocol assertions
 inside a shell script.
@@ -244,12 +271,16 @@ sudo bash scripts/two-client-netns.sh \
   --binary "$(pwd)/target/debug/catcomsctl"
 ```
 
-Build as the ordinary user first; only the topology runner needs `sudo`. It requires the optional
-host packages providing `ip`, `nft`, `ping`, `timeout` and `stdbuf`. On Debian/Ubuntu:
+Build as the ordinary user first; only the topology runner needs `sudo`. Its preflight requires
+`ip`, `nft`, `ping`, `timeout`, `grep`, `sed` and `stdbuf` on `PATH`, and exits 2 naming the first
+one missing. On Debian/Ubuntu:
 
 ```sh
-sudo apt-get install iproute2 nftables iputils-ping coreutils
+sudo apt-get install iproute2 nftables iputils-ping coreutils grep sed
 ```
+
+`grep` and `sed` are present on any ordinary Debian or Ubuntu system; they are listed because the
+script checks for them, and a minimal container image may not have them.
 
 No package from that list is linked into Mewtual or required by its core build. The harness creates
 uniquely named namespaces/interfaces, verifies that no private route bypasses the virtual routers,
@@ -268,8 +299,12 @@ The namespace runner currently proves join and encrypted catch-up. Bidirectional
 restart/catch-up and fault injection remain follow-ups because `catcomsctl join` presently exits
 after convergence rather than remaining as a controllable client.
 
-The optional CI workflow runs both namespace scenarios in separate Linux jobs. Its `apt-get` step
-installs topology tools into the disposable runner only; the root Cargo workspace and released
+The `Two-client acceptance` workflow runs both namespace scenarios in separate Linux jobs. Those
+jobs are **not** opt-in: `linux-nat` shares the workflow's top-level triggers with `process-smoke`,
+so besides running nightly and on dispatch, it runs automatically on every pull request touching
+`scripts/two-client-*`, `bins/catcomsctl/**`, or `crates/catcoms-app`, `-net`, `-sync` or
+`-discovery`. Change those and expect a red NAT topology to be part of your review. Its `apt-get`
+step installs topology tools into the disposable runner only; the root Cargo workspace and released
 application do not depend on them.
 
 ### Windows internet-like topology
@@ -308,6 +343,11 @@ apps/desktop/scripts/two-client-smoke.ps1 -Binary <path-to-built-exe> -Artifacts
 
 That command does **not exist yet**. The name above specifies the desired operator interface; it is
 not an instruction that currently works.
+
+Step 1 below is the gating item, not a detail: the app has no way to be pointed at a different
+app-data root, so two copies on one machine collide on one vault and the second is refused with
+`VaultBusy` (see "Two desktop clients on one machine" above). An explicit, test-only app-data
+override has to land before any of the rest of this harness can be written.
 
 The harness should:
 

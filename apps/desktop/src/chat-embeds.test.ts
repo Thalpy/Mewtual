@@ -40,16 +40,39 @@ test("a card's key names the content, not the message it appeared in", () => {
   assert.notEqual(embedKey(plain), embedKey(first));
 });
 
-test("a frame exists only when all three conditions hold at once", () => {
-  const live = { granted: true, onScreen: true, windowVisible: true };
+test("a frame exists only while it is permitted AND somebody can see it", () => {
+  const live = { clicked: true, autoLoad: false, onScreen: true, windowVisible: true };
   assert.equal(embedMayRender(live), true);
 
   // Each condition on its own is enough to unmount, and that is the point: a card that survived
   // any one of them would be a third-party connection running where nobody can see it.
-  assert.equal(embedMayRender({ ...live, granted: false }), false, "never loaded without a click");
+  assert.equal(embedMayRender({ ...live, clicked: false }), false, "never loaded without a click");
   assert.equal(embedMayRender({ ...live, onScreen: false }), false, "scrolled away, or a pane that is not selected");
   assert.equal(embedMayRender({ ...live, windowVisible: false }), false, "minimised or a background window");
-  assert.equal(embedMayRender({ granted: false, onScreen: false, windowVisible: false }), false);
+  assert.equal(embedMayRender({ clicked: false, autoLoad: false, onScreen: false, windowVisible: false }), false);
+});
+
+test("auto-load replaces the click and nothing else", () => {
+  const seen = { onScreen: true, windowVisible: true };
+  // Either permission is enough to load, which is the whole of what the setting does.
+  assert.equal(embedMayRender({ clicked: false, autoLoad: true, ...seen }), true);
+  assert.equal(embedMayRender({ clicked: true, autoLoad: false, ...seen }), true);
+  assert.equal(embedMayRender({ clicked: false, autoLoad: false, ...seen }), false);
+
+  // And this is the line that matters: turning it on is asking not to be interrupted by chips,
+  // not asking for frames that talk to Google from a window nobody has open. A preference must
+  // never buy its way past the second half of the rule.
+  for (const unseen of [
+    { onScreen: false, windowVisible: true },
+    { onScreen: true, windowVisible: false },
+    { onScreen: false, windowVisible: false },
+  ]) {
+    assert.equal(
+      embedMayRender({ clicked: true, autoLoad: true, ...unseen }),
+      false,
+      "auto-load must not keep an unseen card mounted",
+    );
+  }
 });
 
 test("a card survives the round trip through the DOM it is stored in", () => {

@@ -28,9 +28,16 @@ owner-tenure observations persist with MLS, and keyed registry receipt-head quer
 use explicit local snapshot preparation plus checked source/decision barriers. Expected-seed
 fetch and recovery-first registry installation now connect that selection to the vault and a
 fresh open-epoch catch-up pass. Automatic wakeups/global replay scheduling, other
-managed-file families and production orchestration are not wired yet. Studio
-materializers, settlement orchestration, all-family discovery, complete storage integration and app/UI events
-remain later slices and the feature is not usable yet. Revision 4
+managed-file families and production orchestration are not wired yet. The Studio slices named as
+later work in earlier revisions have since landed: the typed Index/frames materializers
+(`crates/catcoms-replication/src/studio/{index,frames}/snapshot.rs`), settlement orchestration
+(`.../studio/epoch/settlement.rs` and `crates/catcoms-app/src/studio/settlement.rs`), checkpoint
+discovery (`crates/catcoms-app/src/studio_exchange/discovery.rs`,
+`crates/catcoms-sync/src/checkpoint_exchange.rs`) and the app/UI event path, which forwards phase
+observations through `settlement-changed` (section 13). What remains later slices is the rest:
+the specialized settlement states, the Registry/repair producers, the other managed document
+families and complete storage integration. No frontend consumes any of this, so
+the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
 five remaining lifecycle corrections: adoption is folded into the first crash-safe receipt of
 each owner tenure (section 11); a newcomer reads old-owner heads provisionally and gets

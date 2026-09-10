@@ -100,7 +100,7 @@ before commit, per project discipline. Suggested order:
 | **9g ✅** | **Transport re-establishment**; `peer_addrs_from_snapshot` extracts persisted public peer multiaddrs from a snapshot (no full restore; the bridge needs them before building the mesh). Post-join discovery later moved these through the bounded cache/scheduler. `ServerNet` v3 now also seals at most two direct-IP routes that a joiner actually completed and Noise-authenticated to the named inviter, together with explicit `Disabled` / `AuthorizedPeer` / `LegacyPending` provenance. Direct admission fetches the inviter's signed descriptor before the first post-join snapshot when bounded PEX succeeds; helper/reply/switchboard admissions are disabled, and legacy migration is limited to an unambiguous two-member overlap. Reload installs the route into `ChannelSync`, which rechecks canonical peer binding, a unique current roster claim, raw TCP/QUIC host shape and the shared dial scheduler. Thus an established same-LAN joiner can reconnect after close/reopen when the inviter keeps the same listener address without publishing the retained private route through PEX. This does not discover a new/changed LAN peer; mDNS or rendezvous remains necessary for that. | med |
 | **9h ✅** | **Per-file encryption-at-rest**; two slices. **9h-a:** wired `SealingBlobStore` (over `FsBlobStore`) into each server under the vault `blob_key`, so files + avatars persist + are sealed at rest. **9h-b:** a **stable per-group file-wrap key** minted at founding, transferred at join **bundled into the routing transfer** (sealed under `routing_transfer_key`); `seal_file`/`open_file` so files are ciphertext keyed by the **ciphertext** CID with the wrapped key in the encrypted index; e2e, openable only by members holding the key. Adversarially reviewed (no blocking; joiner-key zeroing folded). | **high** (key mgmt + join handshake) |
 
-**Progress: 9a–9f done**; "survive restart, encrypted at rest" is delivered end-to-end: the
+**Progress: 9a–9h done**; "survive restart, encrypted at rest" is delivered end-to-end: the
 vault, sealing blob store, MLS snapshot, doc snapshot, sync-state assembly, the vault-sealed
 `ServerStore`/registry, and the desktop passphrase-gate + reload-on-startup (9c & 9e
 adversarially reviewed; all Rust tested, the app verified via cargo check + svelte-check).
@@ -109,8 +109,12 @@ Close the app, reopen, enter your passphrase → your servers + history are back
 servers/channels/profiles/files/status/wiki survive a restart, sealed under a passphrase, read
 offline; a reloaded joiner re-dials its peers; files are e2e-encrypted under a stable per-group
 key (9c, 9e, 9h-b adversarially reviewed). Threat model below stands: at-rest + e2e, not
-anti-malware. Future: rotating file keys for removed-member file forward-secrecy, rendezvous
-re-discovery for moved peers, chunked large-file transfer.
+anti-malware.
+
+Two of the three follow-ups named here have since shipped: **rendezvous re-discovery for moved
+peers** (see `docs/design-postjoin-discovery.md`) and **chunked large-file transfer**
+(`crates/catcoms-storage/src/filecrypto.rs`, and `docs/design-chunked-transfer.md`). Still future:
+rotating file keys for removed-member file forward-secrecy.
 
 9a–9f deliver "survive restart, encrypted at rest." 9g makes a reloaded joiner reconnect.
 9h is the file-encryption follow-up that was correctly deferred until persistence exists.

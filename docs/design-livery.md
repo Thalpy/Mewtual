@@ -1,13 +1,18 @@
 # Server livery (owner-published UI scheme); design
 
-Status: **implemented (L1–L3 ✅, 2026-08-15).** `DocType::Livery = 10` mirrors the Profile
+Status: **implemented (L1–L3 ✅, 2026-08-15; extended through 2026-09-06).** `DocType::Livery = 10` mirrors the Profile
 doc end to end (lazy open, doc sync + snapshot catch-up, generic persistence); writes are
 owner/admin-gated in `Server::set_livery` (same policy layer as roles; the attributable-but-
 not-rejected residual applies, as scoped below); the client validates on read, applies with
 the precedence below, and ships the Server-settings Livery section + the per-server
-Appearance follow-toggle. `tokens` overrides are plumbed but the publisher UI writes an
-empty map in v1 (preset + accent only). The shared **server icon** (`icon` key,
-`set_server_icon` invoke) has its backend half in place; no publisher UI yet. Not yet done:
+Appearance follow-toggle. `tokens` overrides went past the v1 plan: the publisher UI writes
+colour tokens (accent, ground/sidebar tint) **and** the typed non-colour vocabulary of
+`radius`, `font` and `pattern` (`App.svelte:21874-21943`), each an enum/catalog id validated
+on read (`design-livery-customisation-safety.md`). The shared **server icon** (`icon` key,
+`set_server_icon` invoke) has a full publisher UI: upload, replace and remove, filed beside
+the server name rather than under Livery (`App.svelte:28966-28970`, with the Livery page's
+own entry at `:29147-29151`). The later sections below record the 2026-09-06 sidebar banner
+and founding-publish work, which is likewise shipped. Not yet done:
 rail-monogram tint (optional), the contrast floor and debounce mitigations (noted below,
 revisit if abused).
 
