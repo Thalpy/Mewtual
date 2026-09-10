@@ -6,6 +6,8 @@ use super::*;
 use catcoms_replication::studio::StudioRecovery;
 use catcoms_rt::ManualClock;
 
+mod frozen;
+
 fn eligible(f: &Fixture, store: &mut ServerStore) {
     let mut b = budget(store, f);
     let (_, state) = f.edit(store, &mut b, f.insert());

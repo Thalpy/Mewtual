@@ -214,24 +214,99 @@ impl ServerStore {
             r.tenure_start_group_epoch == tenure
                 && (journal.pending().is_some() || !state.unit.opened_by(r))
         });
-        let decision = if let Some(receipt) = resume {
+        let (decision, adoption_seed) = if state.unit.owner_rotation_needs_adoption(tenure) {
+            if resume.is_some_and(|r| journal.close_for(r).is_none()) {
+                return Ok((RegistryOwnerRotationOutcome::DecisionNeedsClose, state));
+            }
+            let (decision, seed) = state
+                .unit
+                .frozen_owner_decision(
+                    group,
+                    device,
+                    tenure,
+                    previous,
+                    previous.and_then(|r| journal.close_for(r)),
+                )
+                .map_err(invalid)?;
+            (decision, Some(seed))
+        } else if let Some(receipt) = resume {
             let Some(close) = journal.close_for(receipt) else {
                 return Ok((RegistryOwnerRotationOutcome::DecisionNeedsClose, state));
             };
-            state
-                .unit
-                .resume_owner_decision(group, device, tenure, receipt, close)
-                .map_err(invalid)?
+            (
+                state
+                    .unit
+                    .resume_owner_decision(group, device, tenure, receipt, close)
+                    .map_err(invalid)?,
+                None,
+            )
         } else {
-            state
-                .unit
-                .new_owner_decision(group, device, tenure, previous)
-                .map_err(invalid)?
+            (
+                state
+                    .unit
+                    .new_owner_decision(group, device, tenure, previous)
+                    .map_err(invalid)?,
+                None,
+            )
         };
         let saved =
             self.prepare_registry_owner_decision(server, &decision, group, tenure, rng, budget)?;
         let publication_pending = saved.pending().is_some();
         after(OwnerRotationStep::JournalSaved)?;
+        if let Some(seed) = adoption_seed {
+            // Reuse Registry's existing two durable adoption barriers. The first call saves
+            // the new selection while keeping the complete frozen source; the second uses
+            // its typed whole-version recovery before replacing it. No intent is retired
+            // merely because this owner selected/recomputed a checkpoint.
+            drop(state);
+            let (outcome, state) = self.adopt_registry_checkpoint(
+                server,
+                group,
+                bucket,
+                device,
+                decision.receipt(),
+                None,
+                tenure,
+                clock,
+                rng,
+                budget,
+            )?;
+            after(OwnerRotationStep::SourceSealed)?;
+            if outcome == RegistryAdoptionOutcome::Fault {
+                return Ok((RegistryOwnerRotationOutcome::Fault, state));
+            }
+            if outcome != RegistryAdoptionOutcome::AwaitingSeed {
+                return Err(invalid("unexpected frozen Registry seal outcome"));
+            }
+            drop(state);
+            let (outcome, state) = self.adopt_registry_checkpoint(
+                server,
+                group,
+                bucket,
+                device,
+                decision.receipt(),
+                Some(seed.bytes()),
+                tenure,
+                clock,
+                rng,
+                budget,
+            )?;
+            return match outcome {
+                RegistryAdoptionOutcome::Installed => {
+                    after(OwnerRotationStep::SuccessorInstalled)?;
+                    Ok((
+                        RegistryOwnerRotationOutcome::Installed {
+                            publication_pending,
+                        },
+                        state,
+                    ))
+                }
+                RegistryAdoptionOutcome::RecoveryPending => {
+                    Ok((RegistryOwnerRotationOutcome::RecoveryPending, state))
+                }
+                _ => Err(invalid("unexpected frozen Registry adoption outcome")),
+            };
+        }
         let (admission, sealed) = self.seal_registry_epoch(
             server,
             group,

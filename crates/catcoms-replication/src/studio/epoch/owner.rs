@@ -75,6 +75,16 @@ impl StudioEpoch {
         group: &ServerGroup,
         owner: &MlsDevice,
     ) -> Result<(), ReplError> {
+        self.check_current_owner(group, owner)?;
+        if self.adopting {
+            return Err(ReplError::ReceiptConflict);
+        }
+        Ok(())
+    }
+
+    // Frozen takeover reuses identity/Fault checks without relaxing ordinary decision/seal
+    // rules. It has its own strictly first-new-tenure and whole-source adoption path below.
+    fn check_current_owner(&self, group: &ServerGroup, owner: &MlsDevice) -> Result<(), ReplError> {
         if group.group_id() != self.logical.server_id {
             return Err(ReplError::EpochScope);
         }
@@ -85,7 +95,7 @@ impl StudioEpoch {
         {
             return Err(ReplError::EpochAuthority);
         }
-        if self.adopting || self.receipts.is_faulted() || self.phase() == EpochPhase::Fault {
+        if self.receipts.is_faulted() || self.phase() == EpochPhase::Fault {
             return Err(ReplError::ReceiptConflict);
         }
         Ok(())
@@ -200,5 +210,6 @@ impl StudioEpoch {
     }
 }
 
+mod frozen;
 #[cfg(test)]
 mod tests;

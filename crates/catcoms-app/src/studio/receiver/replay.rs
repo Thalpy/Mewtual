@@ -4,6 +4,9 @@ use super::*;
 use crate::studio::replay::{choose, deconflict, ordered, ReplayChoice};
 use std::collections::BTreeSet;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Default)]
 pub(super) struct ReplayRuntime {
     active: Option<Pass>,
@@ -40,7 +43,23 @@ impl ReplayRuntime {
             };
         }
     }
-    pub(super) fn pending(&self, watches: &VecDeque<(ServerStudioWatch, u128)>) -> bool {
+    /// Uninspected bindings are checked by the normal five-second idle cadence (or a fair
+    /// turn during gossip). They are not immediately actionable work just because they were
+    /// read: doing so would advertise absent/no-intent documents forever and bypass backoff.
+    pub(super) fn pending(
+        &self,
+        watches: &VecDeque<(ServerStudioWatch, u128)>,
+        now: u64,
+        current: impl Fn(&ServerStudioWatch) -> bool,
+    ) -> bool {
+        now >= self.next_at
+            && self.active.as_ref().is_some_and(|p| {
+                watches
+                    .iter()
+                    .any(|(w, epoch)| w.target == p.target && *epoch == p.epoch && current(w))
+            })
+    }
+    pub(super) fn has_work(&self, watches: &VecDeque<(ServerStudioWatch, u128)>) -> bool {
         self.active.is_some()
             || watches
                 .iter()

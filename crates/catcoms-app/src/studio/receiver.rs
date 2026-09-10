@@ -171,7 +171,12 @@ impl StudioReceiver {
         server: &Server<T, R>,
     ) -> bool {
         !self.paused
-            && (self.replay.pending(&self.watches)
+            && ((self.catchup.replay_ready()
+                && self.replay.pending(
+                    &self.watches,
+                    server.runtime_clock().monotonic_ms(),
+                    |w| server.sync.studio_watch_is_current(&w.inner),
+                ))
                 || self.watches.iter().any(|(watch, _)| {
                     server.sync.studio_has_inbound(&watch.inner)
                         || server.sync.studio_has_page_request(&watch.inner)
@@ -312,7 +317,7 @@ impl StudioReceiver {
                 .any(|(w, _)| server.sync.studio_has_page_request(&w.inner));
         if (serving && self.gossip_runs >= 1)
             || (self.gossip_runs >= 4
-                && (self.replay.pending(&self.watches)
+                && (self.replay.has_work(&self.watches)
                     || self.catchup.pending(server, &self.watches)))
         {
             self.gossip_runs = 0;

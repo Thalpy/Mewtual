@@ -23,6 +23,7 @@ pub struct RegistryOwnerDecision {
     close: CloseRecord,
 }
 
+mod frozen;
 #[cfg(test)]
 mod tests;
 impl std::fmt::Debug for RegistryOwnerDecision {
@@ -45,6 +46,14 @@ impl RegistryEpoch {
         group: &ServerGroup,
         owner: &MlsDevice,
     ) -> Result<(), ReplError> {
+        self.check_current_owner(group, owner)?;
+        if self.adopting {
+            return Err(ReplError::ReceiptConflict);
+        }
+        Ok(())
+    }
+
+    fn check_current_owner(&self, group: &ServerGroup, owner: &MlsDevice) -> Result<(), ReplError> {
         if group.group_id() != self.logical.server_id {
             return Err(ReplError::EpochScope);
         }
@@ -55,7 +64,7 @@ impl RegistryEpoch {
         {
             return Err(ReplError::EpochAuthority);
         }
-        if self.adopting || self.receipts.is_faulted() || self.phase() == EpochPhase::Fault {
+        if self.receipts.is_faulted() || self.phase() == EpochPhase::Fault {
             return Err(ReplError::ReceiptConflict);
         }
         Ok(())

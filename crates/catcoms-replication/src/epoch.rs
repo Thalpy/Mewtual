@@ -3340,6 +3340,7 @@ impl RecoverySlots {
 
 mod adoption;
 mod repair_state;
+pub(crate) mod succession;
 
 #[cfg(test)]
 mod tests {

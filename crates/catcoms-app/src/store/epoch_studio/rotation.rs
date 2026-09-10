@@ -154,19 +154,40 @@ impl ServerStore {
             r.tenure_start_group_epoch == tenure
                 && (journal.pending().is_some() || !state.unit.opened_by(r))
         });
-        let decision = if let Some(receipt) = resume {
+        let (decision, adoption_seed) = if state.unit.owner_rotation_needs_adoption(tenure) {
+            if resume.is_some_and(|receipt| journal.close_for(receipt).is_none()) {
+                return Ok((StudioRotationOutcome::DecisionNeedsClose, state));
+            }
+            let (decision, seed) = state
+                .unit
+                .frozen_owner_decision(
+                    group,
+                    device,
+                    tenure,
+                    previous,
+                    previous.and_then(|r| journal.close_for(r)),
+                )
+                .map_err(invalid)?;
+            (decision, Some(seed))
+        } else if let Some(receipt) = resume {
             let Some(close) = journal.close_for(receipt) else {
                 return Ok((StudioRotationOutcome::DecisionNeedsClose, state));
             };
-            state
-                .unit
-                .resume_owner_decision(group, device, tenure, receipt, close)
-                .map_err(invalid)?
+            (
+                state
+                    .unit
+                    .resume_owner_decision(group, device, tenure, receipt, close)
+                    .map_err(invalid)?,
+                None,
+            )
         } else {
-            state
-                .unit
-                .new_owner_decision(group, device, tenure, previous)
-                .map_err(invalid)?
+            (
+                state
+                    .unit
+                    .new_owner_decision(group, device, tenure, previous)
+                    .map_err(invalid)?,
+                None,
+            )
         };
         let saved = self.prepare_studio_owner_decision_with_writer(
             server,
@@ -194,10 +215,14 @@ impl ServerStore {
             .map(source::SourceVersion::record)
             .or(observed);
         let before = Zeroizing::new(state.unit.snapshot().map_err(invalid)?);
-        let outcome = state
-            .unit
-            .seal(decision.receipt().clone(), group, tenure)
-            .map_err(invalid)?;
+        let outcome = if adoption_seed.is_some() {
+            state
+                .unit
+                .begin_checkpoint_adoption(decision.receipt().clone(), group, tenure)
+        } else {
+            state.unit.seal(decision.receipt().clone(), group, tenure)
+        }
+        .map_err(invalid)?;
         state = self.save_studio_source(
             server,
             state.unit,
@@ -211,6 +236,57 @@ impl ServerStore {
         )?;
         if outcome == ReceiptIngest::Fault {
             return Ok((StudioRotationOutcome::Fault, state));
+        }
+        if let Some(seed) = adoption_seed {
+            use super::adoption::{AdoptionSync, AdoptionWrite};
+            let (outcome, state) = self.finish_studio_checkpoint_adoption_with_io(
+                server,
+                group,
+                target,
+                decision.receipt(),
+                seed.bytes(),
+                tenure,
+                clock,
+                rng,
+                budget,
+                state,
+                record,
+                &mut |step, p, b| {
+                    writer(
+                        match step {
+                            AdoptionWrite::Source => RotationWrite::Source,
+                            AdoptionWrite::Recovery => RotationWrite::Recovery,
+                            AdoptionWrite::Successor => RotationWrite::Successor,
+                        },
+                        p,
+                        b,
+                    )
+                },
+                &mut |step, p, b| {
+                    sync(
+                        match step {
+                            AdoptionSync::Source => RotationSync::Source,
+                            AdoptionSync::Successor => RotationSync::Successor,
+                        },
+                        p,
+                        b,
+                    )
+                },
+            )?;
+            // This shared install half can only install or hold a recovery warning. An
+            // unexpected future outcome must not be reported as successful rotation.
+            return match outcome {
+                StudioAdoptionOutcome::Installed => Ok((
+                    StudioRotationOutcome::Installed {
+                        publication_pending: pending,
+                    },
+                    state,
+                )),
+                StudioAdoptionOutcome::RecoveryPending => {
+                    Ok((StudioRotationOutcome::RecoveryPending, state))
+                }
+                _ => Err(invalid("unexpected frozen Studio adoption outcome")),
+            };
         }
         self.settle_studio_source(
             server,

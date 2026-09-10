@@ -101,7 +101,7 @@ impl ServerStore {
         };
         // Fault and Closing cross their OWN durable barrier even if the seed is absent/bad.
         // Converting Fault to an error here would throw away the evidence with the moved unit.
-        let mut state = self.save_studio_source_reusing(
+        let state = self.save_studio_source_reusing(
             server,
             unit,
             observed,
@@ -119,6 +119,33 @@ impl ServerStore {
         let Some(raw_seed) = raw_seed else {
             return Ok((outcome, state));
         };
+        self.finish_studio_checkpoint_adoption_with_io(
+            server, group, target, receipt, raw_seed, tenure, clock, rng, budget, state, observed,
+            writer, sync,
+        )
+    }
+
+    // Joining and a journaled owner takeover share this exact recovery-first install half.
+    // The source is already saved Closing under this exclusive custody; don't cold-load a
+    // second mutable graph to finish the same transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn finish_studio_checkpoint_adoption_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        receipt: &Receipt,
+        raw_seed: &[u8],
+        tenure: u64,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        mut state: EpochStudioState,
+        observed: Option<StorageRecord>,
+        writer: &mut impl FnMut(AdoptionWrite, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(AdoptionSync, &Path, u64) -> Result<(), AppError>,
+    ) -> Result<(StudioAdoptionOutcome, EpochStudioState), AppError> {
+        let document = target.document(&group.group_id()).map_err(invalid)?;
         let plan = state
             .unit
             .prepare_checkpoint_adoption(receipt, raw_seed, group, tenure)

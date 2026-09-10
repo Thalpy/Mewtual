@@ -4,6 +4,8 @@ use crate::store::epoch_registry::owner::OwnerRotationStep;
 use catcoms_replication::registry::RegistryRecovery;
 use catcoms_rt::ManualClock;
 
+mod frozen;
+
 fn rotate(
     s: &mut TestSource,
     intents: &mut EpochIntentBudget,

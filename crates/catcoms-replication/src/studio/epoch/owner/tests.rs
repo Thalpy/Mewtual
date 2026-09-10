@@ -3,6 +3,8 @@ use automerge::transaction::{CommitOptions, Transactable};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod frozen;
+
 struct Fixture {
     owner: MlsDevice,
     rejoining_owner: Option<MlsDevice>,

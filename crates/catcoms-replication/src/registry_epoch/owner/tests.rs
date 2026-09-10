@@ -4,6 +4,8 @@ use crate::registry_epoch::settlement::tests::fill_close;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod frozen;
+
 struct Fixture {
     owner: MlsDevice,
     rejoining_owner: MlsDevice,

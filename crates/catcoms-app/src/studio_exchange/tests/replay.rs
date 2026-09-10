@@ -183,6 +183,13 @@ async fn studio_replay_sealed_active_pass_clears_and_stays_bounded() {
         .replay_step_for_test(&mut p.bob, &mut p.b_store, SERVER)
         .unwrap();
     assert!(receiver.replay_state_for_test().0);
+    // Pending advertises actionable replay, not an unvisited watch or a not-yet-due pass.
+    // Native idle inspection still runs every five seconds when no packet has arrived.
+    assert!(!receiver.pending(&p.bob));
+    p.clock.advance_ms(999);
+    assert!(!receiver.pending(&p.bob));
+    p.clock.advance_ms(1);
+    assert!(receiver.pending(&p.bob));
     let receipt = p.alice.sync.with_registry_context(|g, d, _, _| {
         Receipt::sign(
             target().document(&g.group_id()).unwrap(),
