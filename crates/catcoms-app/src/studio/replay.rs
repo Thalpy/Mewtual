@@ -121,9 +121,26 @@ pub(crate) enum ReplayChoice {
     NoEvidence,
 }
 
-/// Recovery order is not a causal clock. Every version that contains this complete envelope
-/// must agree it remains an unconflicted selected effect before automatic authoring is safe.
-fn selected(projection: &StudioProjection, intent: &LocalIntent) -> Result<bool, AppError> {
+/// Stable creation evidence behind the effect a historical version selects. One element id has
+/// one register, so a second birth is not another incarnation to write onto: it is proof that
+/// the versions disagree about the element's identity, which no automatic edit may resolve.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Provenance {
+    /// A document header. No element creation backs it.
+    Header,
+    /// Sole creation/insertion operation id of the mutated element.
+    Element([u8; 32]),
+}
+
+/// Recovery order is not a causal clock: retained slots are newest-first and the staged slot is
+/// newer than both while sorting last. Every version that contains this complete envelope must
+/// therefore agree, under one predicate, that the effect is still the unconflicted selected
+/// value AND that the element it names has a single agreed creation. Screening the register in
+/// every version but the creation in only the first one lets slot order decide.
+fn selected(
+    projection: &StudioProjection,
+    intent: &LocalIntent,
+) -> Result<Option<Provenance>, AppError> {
     let id = intent.operation.id(&intent.author);
     macro_rules! reg {
         ($r:expr) => {
@@ -133,43 +150,76 @@ fn selected(projection: &StudioProjection, intent: &LocalIntent) -> Result<bool,
     Ok(match projection {
         StudioProjection::Flipnote(p) => {
             match FlipnoteOp::decode(&intent.operation.body).map_err(invalid)? {
-                FlipnoteOp::SetHeader(FlipnoteHeader::Title(_)) => {
-                    p.title.as_ref().is_some_and(|r| reg!(r))
-                }
-                FlipnoteOp::SetHeader(FlipnoteHeader::Fps(_)) => {
-                    p.fps.as_ref().is_some_and(|r| reg!(r))
-                }
+                FlipnoteOp::SetHeader(FlipnoteHeader::Title(_)) => p
+                    .title
+                    .as_ref()
+                    .is_some_and(|r| reg!(r))
+                    .then_some(Provenance::Header),
+                FlipnoteOp::SetHeader(FlipnoteHeader::Fps(_)) => p
+                    .fps
+                    .as_ref()
+                    .is_some_and(|r| reg!(r))
+                    .then_some(Provenance::Header),
                 FlipnoteOp::InsertFrame { frame, .. } => p
                     .frames
                     .get(&frame)
-                    .is_some_and(|e| e.insertions.len() == 1 && e.insertions[0].source.op_id == id),
-                FlipnoteOp::ReplaceFrame { frame, .. } => {
-                    p.frames.get(&frame).is_some_and(|e| reg!(e.pixels))
-                }
-                _ => false,
+                    .filter(|e| e.insertions.len() == 1 && e.insertions[0].source.op_id == id)
+                    .map(|_| Provenance::Element(id)),
+                FlipnoteOp::ReplaceFrame { frame, .. } => p
+                    .frames
+                    .get(&frame)
+                    .filter(|e| reg!(e.pixels) && e.insertions.len() == 1)
+                    .map(|e| Provenance::Element(e.insertions[0].source.op_id)),
+                _ => None,
             }
         }
         StudioProjection::Index(p) => {
+            let entry = |object| p.objects.get(object).or_else(|| p.overflow.get(object));
             match IndexOp::decode(&intent.operation.body).map_err(invalid)? {
-                IndexOp::PutObject { object, .. } => p
-                    .objects
-                    .get(&object)
-                    .or_else(|| p.overflow.get(&object))
-                    .is_some_and(|e| e.creations.len() == 1 && e.creations[0].source.op_id == id),
-                IndexOp::SetTitle { object, .. } => p
-                    .objects
-                    .get(&object)
-                    .or_else(|| p.overflow.get(&object))
-                    .is_some_and(|e| reg!(e.title)),
-                IndexOp::SetExpiry { object, .. } => p
-                    .objects
-                    .get(&object)
-                    .or_else(|| p.overflow.get(&object))
-                    .is_some_and(|e| reg!(e.expiry)),
-                _ => false,
+                IndexOp::PutObject { object, .. } => entry(&object)
+                    .filter(|e| e.creations.len() == 1 && e.creations[0].source.op_id == id)
+                    .map(|_| Provenance::Element(id)),
+                IndexOp::SetTitle { object, .. } => entry(&object)
+                    .filter(|e| reg!(e.title) && e.creations.len() == 1)
+                    .map(|e| Provenance::Element(e.creations[0].source.op_id)),
+                IndexOp::SetExpiry { object, .. } => entry(&object)
+                    .filter(|e| reg!(e.expiry) && e.creations.len() == 1)
+                    .map(|e| Provenance::Element(e.creations[0].source.op_id)),
+                _ => None,
             }
         }
     })
+}
+
+/// Sole insertion of an explicit `after` predecessor as EVERY version carrying this envelope
+/// saw it. A version that never held the predecessor abstains; ambiguity or disagreement is not
+/// a dependency edge the runtime may pick by slot order.
+fn agreed_predecessor(
+    history: &[StudioRecovery],
+    intent: &LocalIntent,
+    frame: &[u8; 16],
+) -> Option<[u8; 32]> {
+    let id = intent.operation.id(&intent.author);
+    let mut birth = None;
+    for version in history
+        .iter()
+        .filter(|r| r.operations().get(&id) == Some(intent))
+    {
+        let StudioProjection::Flipnote(p) = version.projection() else {
+            return None;
+        };
+        let Some(entry) = p.frames.get(frame) else {
+            continue;
+        };
+        if entry.insertions.len() != 1 {
+            return None;
+        }
+        let seen = entry.insertions[0].source.op_id;
+        if *birth.get_or_insert(seen) != seen {
+            return None;
+        }
+    }
+    birth
 }
 
 /// Distinct branches can each select a different own value without carrying the other's
@@ -239,11 +289,15 @@ pub(crate) fn choose(
     {
         return Err(invalid("replay recovery scope mismatch"));
     }
+    let mut agreed = None;
     for version in history
         .iter()
         .filter(|r| r.operations().get(&id) == Some(intent))
     {
-        if !selected(version.projection(), intent)? {
+        let Some(provenance) = selected(version.projection(), intent)? else {
+            return Ok(ReplayChoice::Manual);
+        };
+        if *agreed.get_or_insert(provenance) != provenance {
             return Ok(ReplayChoice::Manual);
         }
     }
@@ -306,12 +360,8 @@ pub(crate) fn choose(
                             return Ok(manual);
                         }
                         if !now.frames.contains_key(&previous) {
-                            return Ok(then
-                                .frames
-                                .get(&previous)
-                                .filter(|e| e.insertions.len() == 1)
-                                .map(|e| ReplayChoice::After(e.insertions[0].source.op_id))
-                                .unwrap_or(manual));
+                            return Ok(agreed_predecessor(history, intent, &previous)
+                                .map_or(manual, ReplayChoice::After));
                         }
                     }
                     Ok(ready)

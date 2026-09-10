@@ -90,6 +90,13 @@ fn warm(f: &Fixture, store: &mut ServerStore) {
     store.retain_studio_source(&f.group, &f.device, state);
 }
 fn rotate(f: &Fixture, store: &mut ServerStore) -> (StudioRotationOutcome, EpochStudioState) {
+    rotate_at(f, store, &ManualClock::new(1000))
+}
+fn rotate_at(
+    f: &Fixture,
+    store: &mut ServerStore,
+    clock: &ManualClock,
+) -> (StudioRotationOutcome, EpochStudioState) {
     let mut b = budget(store, f);
     store
         .rotate_studio_owner(
@@ -98,7 +105,7 @@ fn rotate(f: &Fixture, store: &mut ServerStore) -> (StudioRotationOutcome, Epoch
             f.target,
             &f.device,
             0,
-            &ManualClock::new(1000),
+            clock,
             &mut rng(),
             &mut b,
         )
@@ -480,6 +487,95 @@ fn studio_rotation_store_pending_recovery_survives_restart_until_exact_ack() {
             .retained()
             .len(),
         2
+    );
+}
+
+/// Settlement half of the same contract. The seven-day grace bounds the hold: an owner who
+/// never presses Acknowledge delays this document's rotation, it does not stop it forever.
+#[test]
+fn studio_rotation_store_promotes_pending_recovery_at_its_deadline_without_ack() {
+    use catcoms_replication::{RecoveryReason, RecoveryTransition};
+    use catcoms_rt::Clock;
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    eligible(&f, &mut store);
+    let projection = f.load(&store).unwrap().projection().unwrap();
+    let clock = ManualClock::new(1000);
+    let mut b = budget(&mut store, &f);
+    for salt in [41, 42] {
+        let snapshot = StudioRecovery::snapshot(
+            &projection,
+            None,
+            RecoveryReason::Excluded,
+            [salt; 32],
+            &Default::default(),
+        )
+        .unwrap();
+        store
+            .update_epoch_recovery_accounted(
+                SERVER,
+                &f.logical,
+                EpochRecoveryAction::Stage(snapshot),
+                &clock,
+                &mut rng(),
+                &mut b.storage,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        rotate_at(&f, &mut store, &clock).0,
+        StudioRotationOutcome::RecoveryPending
+    );
+    let warning = store
+        .load_epoch_recovery(SERVER, &f.logical)
+        .unwrap()
+        .eviction_pending()
+        .unwrap()
+        .unwrap();
+    let RecoveryTransition::EvictionPending {
+        staged_snapshot,
+        deadline_ms,
+        ..
+    } = warning
+    else {
+        panic!("warning")
+    };
+    clock.advance_ms(deadline_ms - 1 - clock.now_ms());
+    warm(&f, &mut store);
+    assert_eq!(
+        rotate_at(&f, &mut store, &clock).0,
+        StudioRotationOutcome::RecoveryPending,
+        "one millisecond before the deadline the hold still stands"
+    );
+    assert_eq!(
+        store
+            .load_epoch_recovery(SERVER, &f.logical)
+            .unwrap()
+            .eviction_pending()
+            .unwrap(),
+        Some(warning),
+        "an idle pass inside the grace neither promotes nor restarts it"
+    );
+    assert_eq!(f.intents(&store), 1);
+    clock.advance_ms(1);
+    warm(&f, &mut store);
+    let (outcome, state) = rotate_at(&f, &mut store, &clock);
+    assert!(
+        matches!(outcome, StudioRotationOutcome::Installed { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(state.epoch(), 1);
+    assert_eq!(f.intents(&store), 0);
+    let recovery = store.load_epoch_recovery(SERVER, &f.logical).unwrap();
+    assert!(recovery.staged().is_none());
+    assert!(recovery.eviction_pending().unwrap().is_none());
+    assert_eq!(recovery.retained().len(), 2);
+    assert!(
+        recovery
+            .retained()
+            .any(|held| held.id().unwrap() == staged_snapshot),
+        "the promoted version is the one the warning named"
     );
 }
 

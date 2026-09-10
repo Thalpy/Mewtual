@@ -185,6 +185,11 @@ Read/Export of a known retained snapshot do not depend on the live source being 
 `evictionPending` is null or `{oldestSnapshot, stagedSnapshot, deadlineMs}`. The deadline is a
 lossless decimal u64 string from the persisted receiver clock, not a locally invented countdown.
 Show the warning before acknowledging. The exact pair is retryable; a changed/stale pair refuses.
+The countdown is enforced, not decorative: acknowledgement only brings the eviction forward. Once
+`deadlineMs` passes, the next ordinary owner settlement pass promotes the staged version and drops
+the named oldest one with no acknowledgement at all, so offer Export while it is still running.
+Until then no settlement pass rewrites the record, so the ids and deadline survive restarts
+unchanged rather than restarting the grace.
 Acknowledgement returns `kind:"recoveryAcknowledged"` with the same listing fields. It changes
 local recovery slots only: it neither retires intents nor installs/prunes a document. Ordinary
 background settlement must still finish its own barriers afterward.

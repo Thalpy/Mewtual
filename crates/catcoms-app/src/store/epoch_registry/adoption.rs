@@ -166,7 +166,20 @@ impl ServerStore {
                 return Err(error);
             }
         };
-        if pending.is_some() {
+        // A warning past its deadline is promoted here rather than held forever for an
+        // acknowledgement that may never come.
+        if self
+            .advance_due_epoch_recovery_with_writer(
+                server,
+                &document,
+                pending,
+                clock,
+                rng,
+                budget,
+                |path, bytes| writer(AdoptionWrite::Recovery, path, bytes),
+            )?
+            .is_some()
+        {
             return Ok((RegistryAdoptionOutcome::RecoveryPending, state));
         }
         if let Some(snapshot) = plan.recovery_snapshot() {

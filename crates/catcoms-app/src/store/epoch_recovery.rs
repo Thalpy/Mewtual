@@ -366,6 +366,47 @@ impl ServerStore {
         Ok(EpochRecoveryUpdate { transition, state })
     }
 
+    /// Settle an eviction warning that has run its course, under the caller's own accounting and
+    /// writer custody.
+    ///
+    /// The seven-day grace bounds the hold: it is the owner's chance to Export before the oldest
+    /// version goes, NOT a requirement that somebody press Acknowledge before this document can
+    /// ever rotate again. Every settlement/installation path therefore passes its freshly read
+    /// warning through here instead of returning on it directly. `Some` still holds the caller;
+    /// `None` clears it to proceed. Before the persisted deadline this writes nothing at all, so
+    /// repeated idle owner passes cannot churn the record or restart the grace they are waiting on.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_due_epoch_recovery_with_writer(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        pending: Option<RecoveryTransition>,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+    ) -> Result<Option<RecoveryTransition>, AppError> {
+        let Some(warning) = pending else {
+            return Ok(None);
+        };
+        let RecoveryTransition::EvictionPending { deadline_ms, .. } = warning else {
+            return Ok(Some(warning));
+        };
+        if clock.now_ms() < deadline_ms {
+            return Ok(Some(warning));
+        }
+        let saved = self.update_epoch_recovery_accounted_with_writer(
+            server,
+            document,
+            EpochRecoveryAction::AdvanceTime,
+            clock,
+            rng,
+            budget,
+            writer,
+        )?;
+        saved.state.eviction_pending()
+    }
+
     /// Load a bounded, authenticated recovery record. Absence alone means empty; corruption,
     /// a wrong scope, a non-regular file or a failed read is never treated as empty recovery.
     pub fn load_epoch_recovery(

@@ -348,8 +348,18 @@ impl ServerStore {
                 .map_err(invalid)?;
             old.eviction_pending()
         })();
-        if checked
-            .inspect_err(|_| budget.storage.invalidate())?
+        // A warning past its deadline is promoted here rather than held forever for an
+        // acknowledgement that may never come.
+        if self
+            .advance_due_epoch_recovery_with_writer(
+                server,
+                &document,
+                checked.inspect_err(|_| budget.storage.invalidate())?,
+                clock,
+                rng,
+                &mut budget.storage,
+                |p, b| writer(RotationWrite::Recovery, p, b),
+            )?
             .is_some()
         {
             return Ok((StudioRotationOutcome::RecoveryPending, state));

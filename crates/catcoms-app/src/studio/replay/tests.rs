@@ -47,6 +47,7 @@ fn studio_replay_reconciles_all_snapshots_and_holds_independent_branch_values() 
 use catcoms_mls::{MlsDevice, ServerGroup};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
+use std::slice;
 
 struct Fixture {
     device: MlsDevice,
@@ -91,6 +92,47 @@ impl Fixture {
             )
             .unwrap();
     }
+    /// Merge a real concurrent second birth of an element id this state already holds: a branch
+    /// that never observed the first one creates it against its own empty causal past, which the
+    /// validator accepts, and this state ingests the signed change. Two births of one id are
+    /// legitimate retained evidence, not a malformed slot.
+    fn contest(
+        &mut self,
+        state: &mut types::StudioEpoch,
+        body: impl Fn(&MlsDevice) -> Vec<u8>,
+        n: u8,
+        later_than: [u8; 32],
+    ) {
+        // Deliberately the LOSING birth, so the winner and every selected value stay exactly as
+        // the agreed version recorded them and the extra evidence is the only difference.
+        let (other, operation) = loop {
+            let other = MlsDevice::generate().unwrap();
+            let operation = domain(self.target, [n; 16], body(&other));
+            if operation.id(&other.device_id()) > later_than {
+                break (other, operation);
+            }
+        };
+        let welcome = self
+            .group
+            .add_member(&self.device, other.key_package().unwrap())
+            .unwrap()
+            .welcome;
+        let joined = ServerGroup::join(&other, &welcome).unwrap();
+        let packet = types::StudioEpoch::new(&joined, self.target, other.device_id())
+            .unwrap()
+            .edit_or_reseal(
+                &other,
+                &joined,
+                &mut ChaCha20Rng::seed_from_u64(19),
+                &operation,
+                100,
+            )
+            .unwrap();
+        assert_eq!(
+            state.ingest(&packet, &self.group, &self.device).unwrap(),
+            catcoms_replication::Admission::Accepted
+        );
+    }
     fn history(&self, state: &types::StudioEpoch) -> StudioRecovery {
         let snapshot = StudioRecovery::snapshot(
             &state.projection().unwrap(),
@@ -126,6 +168,156 @@ fn replace(cid: u8) -> Vec<u8> {
     }
     .encode()
     .unwrap()
+}
+fn insert_after() -> Vec<u8> {
+    FlipnoteOp::InsertFrame {
+        frame: [7; 16],
+        after: Some([4; 16]),
+        cid: [5; 32],
+        bytes: 20,
+    }
+    .encode()
+    .unwrap()
+}
+
+/// One frame id has one replacement register, so a contested birth is not another incarnation
+/// to write onto: it is two versions disagreeing about the element's identity. Retained slots
+/// are newest-first and the staged slot is newer still while sorting last, so a check applied
+/// to whichever version is found first is decided by slot order rather than by the evidence.
+#[test]
+fn studio_replay_holds_when_another_version_shows_a_second_frame_birth() {
+    let mut f = Fixture::new(false);
+    let mut old = f.empty();
+    let birth = f.intent(insert(), 1);
+    let replace = f.intent(replace(6), 2);
+    let follower = f.intent(insert_after(), 3);
+    f.edit(&mut old, &birth);
+    f.edit(&mut old, &replace);
+    f.edit(&mut old, &follower);
+    let agreed = f.history(&old);
+    f.contest(
+        &mut old,
+        |_| insert(),
+        200,
+        birth.operation.id(&birth.author),
+    );
+    let contested = f.history(&old);
+    let StudioProjection::Flipnote(shown) = contested.projection() else {
+        panic!("flipnote")
+    };
+    assert_eq!(
+        shown.frames[&[4; 16]].insertions.len(),
+        2,
+        "the fixture must really contest the birth"
+    );
+    let mut now = f.empty();
+    f.edit(&mut now, &birth);
+    let current = now.projection().unwrap();
+    let held = now.current_operations().unwrap();
+    let empty = f.empty().projection().unwrap();
+    assert_eq!(
+        choose(&current, &held, slice::from_ref(&agreed), &replace).unwrap(),
+        ReplayChoice::Ready
+    );
+    assert_eq!(
+        choose(
+            &empty,
+            &BTreeMap::new(),
+            slice::from_ref(&agreed),
+            &follower
+        )
+        .unwrap(),
+        ReplayChoice::After(birth.operation.id(&birth.author))
+    );
+    let mut history = vec![agreed, contested];
+    for _ in 0..2 {
+        assert_eq!(
+            choose(&current, &held, &history, &replace).unwrap(),
+            ReplayChoice::Manual,
+            "the contested version is evidence in either slot"
+        );
+        assert_eq!(
+            choose(&empty, &BTreeMap::new(), &history, &follower).unwrap(),
+            ReplayChoice::Manual,
+            "a contested predecessor is not an automatic dependency edge"
+        );
+        history.reverse();
+    }
+}
+
+/// Same rule on the Index side: `t/<object>` and `e/<object>` are one register per object id,
+/// and concurrent creations of one id are explicitly legal.
+#[test]
+fn studio_replay_holds_when_another_version_shows_a_second_object_creation() {
+    let mut f = Fixture::new(true);
+    let mut old = f.empty();
+    let birth = f.intent(
+        IndexOp::PutObject {
+            object: [3; 16],
+            kind: StudioKind::Flipnote,
+            title: "initial".into(),
+            created_by: f.device.device_id(),
+            ts: 100,
+            expiry: StudioExpiry::Unrecorded,
+        }
+        .encode()
+        .unwrap(),
+        1,
+    );
+    let rename = f.intent(
+        IndexOp::SetTitle {
+            object: [3; 16],
+            title: "wanted".into(),
+        }
+        .encode()
+        .unwrap(),
+        2,
+    );
+    f.edit(&mut old, &birth);
+    f.edit(&mut old, &rename);
+    let agreed = f.history(&old);
+    f.contest(
+        &mut old,
+        |other| {
+            IndexOp::PutObject {
+                object: [3; 16],
+                kind: StudioKind::Flipnote,
+                title: "rival".into(),
+                created_by: other.device_id(),
+                ts: 100,
+                expiry: StudioExpiry::Unrecorded,
+            }
+            .encode()
+            .unwrap()
+        },
+        200,
+        birth.operation.id(&birth.author),
+    );
+    let contested = f.history(&old);
+    let StudioProjection::Index(shown) = contested.projection() else {
+        panic!("index")
+    };
+    assert_eq!(
+        shown.objects[&[3; 16]].creations.len(),
+        2,
+        "the fixture must really contest the creation"
+    );
+    let mut now = f.empty();
+    f.edit(&mut now, &birth);
+    let current = now.projection().unwrap();
+    let held = now.current_operations().unwrap();
+    assert_eq!(
+        choose(&current, &held, slice::from_ref(&agreed), &rename).unwrap(),
+        ReplayChoice::Ready
+    );
+    let mut history = vec![agreed, contested];
+    for _ in 0..2 {
+        assert_eq!(
+            choose(&current, &held, &history, &rename).unwrap(),
+            ReplayChoice::Manual
+        );
+        history.reverse();
+    }
 }
 
 #[test]
