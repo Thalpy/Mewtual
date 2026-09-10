@@ -1451,4 +1451,203 @@ mod tests {
             .collect();
         assert_eq!(left_order, right_order);
     }
+
+    /// What a frontier wider than its own cap costs.
+    ///
+    /// [`EncryptedDoc::sync_frontier`] caps the hashes a requester may name, and a serving peer
+    /// subtracts only what is causally behind the hashes it was given. Past the cap the requester
+    /// cannot describe everything it holds, so an honest peer answers by re-sending history the
+    /// requester already has. That is safe on its own, because duplicates are dropped on arrival.
+    /// It matters because it is the first half of the composition recorded in
+    /// `docs/MESSAGE-FLOW.md` section 8: a catch-up round that applies nothing is exactly what the
+    /// sync layer's non-progress bound counts against a source.
+    ///
+    /// This test establishes the replication half of that: truncation is reachable, the re-send
+    /// follows from it, the re-send is pure duplicate, and it repeats identically because nothing
+    /// about the exchange moved the requester's frontier.
+    #[test]
+    fn a_frontier_wider_than_its_cap_makes_a_peer_resend_history_already_held() {
+        // Above the 64-hash cap. Each branch contributes one head; they share one ancestor, which
+        // deduplicates to a single extra entry, so the cap bites at roughly this many writers.
+        const BRANCHES: usize = 80;
+        let author = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&author).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(11);
+
+        // One shared ancestor, so every branch below is concurrent with every other.
+        let mut ancestor = EncryptedDoc::new(DocType::Channel, 5, &author.device_id());
+        ancestor
+            .edit(&author, &group, &mut rng, |d| d.put(ROOT, "seed", 0u64))
+            .unwrap();
+        let seed = ancestor.export_catchup(&group, &author, &mut rng).unwrap();
+
+        // Concurrent writers. Distinct automerge actor ids are what make these changes
+        // concurrent; which device signs them is irrelevant to the frontier arithmetic under
+        // test here, and the sealing key is per group rather than per author.
+        let mut every_op = seed.clone();
+        for i in 0..BRANCHES {
+            let actor = DeviceId::from_public_key_bytes(&[(i as u8).wrapping_add(1); 32]);
+            let mut branch = EncryptedDoc::new(DocType::Channel, 5, &actor);
+            branch.import_catchup(&seed, &group, &author).unwrap();
+            branch
+                .edit(&author, &group, &mut rng, |d| {
+                    d.put(ROOT, format!("k{i}"), i as u64)
+                })
+                .unwrap();
+            let ops = branch.export_catchup(&group, &author, &mut rng).unwrap();
+            every_op.push(ops.last().expect("the branch's own op").clone());
+        }
+
+        // Two nodes holding byte-for-byte the same history. Nothing is missing anywhere.
+        let mut requester = EncryptedDoc::new(DocType::Channel, 5, &author.device_id());
+        requester
+            .import_catchup(&every_op, &group, &author)
+            .unwrap();
+        let mut server = EncryptedDoc::new(
+            DocType::Channel,
+            5,
+            &DeviceId::from_public_key_bytes(&[0xAA; 32]),
+        );
+        server.import_catchup(&every_op, &group, &author).unwrap();
+        assert_eq!(requester.op_count(), BRANCHES + 1);
+        assert_eq!(requester.op_count(), server.op_count());
+
+        // The requester cannot say so. Its frontier is capped below the number of heads it holds.
+        let frontier = requester.sync_frontier(64);
+        assert_eq!(frontier.len(), 64, "the frontier is capped");
+        assert!(
+            requester.heads().len() > frontier.len(),
+            "and the cap is below what this node actually holds"
+        );
+
+        // So an honest peer, subtracting only what it was told about, sends back history the
+        // requester already has.
+        let resent = server
+            .export_catchup_since(&frontier, &group, &author, &mut rng)
+            .unwrap();
+        assert!(
+            !resent.is_empty(),
+            "the peer cannot subtract branches it was never told about"
+        );
+        assert_eq!(
+            requester.import_catchup(&resent, &group, &author).unwrap(),
+            0,
+            "an entire round that moves the requester nowhere"
+        );
+
+        // And it is not a one-off. Nothing in that exchange changed either side, so the next
+        // round is identical, and so is the round after it. An unbroken run of these is what the
+        // sync layer's non-progress bound is counting.
+        let next = requester.sync_frontier(64);
+        assert_eq!(
+            next, frontier,
+            "the frontier did not move, so nor will this"
+        );
+        let again = server
+            .export_catchup_since(&next, &group, &author, &mut rng)
+            .unwrap();
+        assert_eq!(again.len(), resent.len(), "the same answer, indefinitely");
+        assert_eq!(
+            requester.import_catchup(&again, &group, &author).unwrap(),
+            0
+        );
+    }
+
+    /// The second half of that composition, and the part that can actually starve a requester.
+    ///
+    /// A serving peer walks its own log in its own insertion order and the sync layer sends a
+    /// size-capped **prefix** of what comes out. History the requester already holds but could not
+    /// name sits at the front of that walk, because it was accepted before whatever the requester
+    /// is actually missing. So the genuinely new operation is at the tail, behind a block of
+    /// duplicates whose size the requester cannot influence and the server has no reason to skip.
+    ///
+    /// If that duplicate block does not fit inside one chunk, every answer is a prefix of the
+    /// duplicates, every round applies nothing, and the new operation is never reached. The
+    /// requester is not merely paying for bandwidth; it cannot converge with this peer at all,
+    /// and because the duplicates come from history every member holds, the next source it tries
+    /// answers exactly the same way.
+    #[test]
+    fn a_truncated_frontier_puts_the_missing_operation_behind_a_wall_of_duplicates() {
+        const BRANCHES: usize = 80;
+        let author = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&author).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(12);
+
+        let mut ancestor = EncryptedDoc::new(DocType::Channel, 6, &author.device_id());
+        ancestor
+            .edit(&author, &group, &mut rng, |d| d.put(ROOT, "seed", 0u64))
+            .unwrap();
+        let seed = ancestor.export_catchup(&group, &author, &mut rng).unwrap();
+
+        let mut every_op = seed.clone();
+        for i in 0..BRANCHES {
+            let actor = DeviceId::from_public_key_bytes(&[(i as u8).wrapping_add(1); 32]);
+            let mut branch = EncryptedDoc::new(DocType::Channel, 6, &actor);
+            branch.import_catchup(&seed, &group, &author).unwrap();
+            branch
+                .edit(&author, &group, &mut rng, |d| {
+                    d.put(ROOT, format!("k{i}"), i as u64)
+                })
+                .unwrap();
+            let ops = branch.export_catchup(&group, &author, &mut rng).unwrap();
+            every_op.push(ops.last().expect("the branch's own op").clone());
+        }
+
+        let mut requester = EncryptedDoc::new(DocType::Channel, 6, &author.device_id());
+        requester
+            .import_catchup(&every_op, &group, &author)
+            .unwrap();
+        let mut server = EncryptedDoc::new(
+            DocType::Channel,
+            6,
+            &DeviceId::from_public_key_bytes(&[0xBB; 32]),
+        );
+        server.import_catchup(&every_op, &group, &author).unwrap();
+
+        // The one thing the requester is actually missing, authored last and therefore last in
+        // the server's log.
+        server
+            .edit(&author, &group, &mut rng, |d| {
+                d.put(ROOT, "the_message_that_matters", "here")
+            })
+            .unwrap();
+
+        let frontier = requester.sync_frontier(64);
+        let bundle = server
+            .export_catchup_since(&frontier, &group, &author, &mut rng)
+            .unwrap();
+        // Sixteen branches the frontier had no room to name, plus the one genuinely new
+        // operation. The proportion is what matters: the duplicate block grows with the number of
+        // concurrent writers, while the useful payload stays one operation.
+        assert_eq!(
+            bundle.len(),
+            BRANCHES - 64 + 1,
+            "duplicates the requester could not name, and one operation it needs"
+        );
+
+        // Every strict prefix of that answer is worthless. A chunk budget that cannot fit the
+        // whole duplicate block therefore delivers nothing, however many times it is asked.
+        let saved = requester.snapshot().unwrap();
+        for take in 0..bundle.len() {
+            let mut attempt = EncryptedDoc::restore_for_actor(&saved, &author.device_id()).unwrap();
+            assert_eq!(
+                attempt
+                    .import_catchup(&bundle[..take], &group, &author)
+                    .unwrap(),
+                0,
+                "a chunk holding {take} operations still carries nothing usable"
+            );
+            assert_eq!(
+                attempt.sync_frontier(64),
+                frontier,
+                "and leaves the frontier exactly where it was, so the next round repeats"
+            );
+        }
+        // Only an answer large enough to clear the entire duplicate block makes progress.
+        assert_eq!(
+            requester.import_catchup(&bundle, &group, &author).unwrap(),
+            1,
+            "the whole bundle, and only the whole bundle, converges"
+        );
+    }
 }
