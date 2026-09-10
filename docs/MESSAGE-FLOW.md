@@ -269,22 +269,29 @@ Proven today:
   non-committing member converges on the winner
   ([tests/sync.rs:824-1065](../crates/catcoms-sync/tests/sync.rs#L824-L1065)).
 
-**Not covered by any test I found:**
+**Added since this document was first written** (each verified by breaking the invariant it
+guards, not merely by passing):
 
-1. **Third-party transitive relay end to end.** The mechanism is sound by inspection, but no test
-   asserts "B serves C an op authored by A while A is permanently gone, and C then serves it to E".
-   The closest is `pex_round_trip_learns_a_third_member_through_a_second`, which is peer discovery,
-   not document content.
-2. **Multi-micelle heal.** No test partitions a group into three, writes in each, kills several
-   authors, then heals in a chain and asserts identical head sets at every survivor. Critically,
-   nothing asserts the *intermediate* state (that the bridge peer held the third party's op before
-   the original author died), which is what makes the relay chain unambiguous. See section 10.1.
-3. **A frontier wider than 64 concurrent heads.** See section 8, P1.
-4. **Convergence across a membership change that happened inside one partition.**
-5. **The stranded-member states.** Neither the 257-to-1024 buffered case nor the beyond-1024 silent
-   case has a test, and the latter currently produces no observable evidence to assert on.
-6. **Divergent clocks across a heal**, asserted against the read-position and presentation
-   surfaces rather than against convergence.
+- **Third-party transitive relay, end to end**, and the **chained multi-micelle heal**:
+  `three_micelles_heal_in_a_chain_and_converge_without_their_authors` in
+  `crates/catcoms-sync/tests/sync.rs`. Asserts the intermediate state before the authors die, which
+  is what makes the relay chain unambiguous. Breaking it: an author filter on
+  `export_catchup_since` fails the first heal, 1 op instead of 2.
+- **A frontier wider than its cap**: two tests in `crates/catcoms-replication/src/doc.rs`. See
+  section 8, P1, which is now confirmed rather than suspected.
+- **Divergent clocks across a heal**:
+  `divergent_clocks_converge_and_cannot_park_the_read_boundary` in `crates/catcoms-app`.
+
+**Still not covered by any test:**
+
+1. **Convergence across a membership change that happened inside one partition.** See section 8, P2.
+2. **The stranded-member states.** Neither the 257-to-1024 buffered case nor the beyond-1024 silent
+   case has a test, and the latter currently produces no observable evidence to assert on. Typing
+   the state (section 10.3) has to come first.
+3. **Epidemic relay for the P1 document family**, which section 8 records as a deliberate scope
+   limit rather than a defect. A test would pin the limit, not close it.
+4. **The remaining presentation surfaces downstream of the timestamp sort**: day dividers,
+   scroll-to-bottom, notification previews, conversation-list ordering.
 
 ---
 
@@ -296,7 +303,7 @@ control plane and in how two independently reasonable bounds compose.
 | Priority | Concern | Assessment |
 |---|---|---|
 | P0 | Stale member stranded past the commit window, **silently** | Recovery works; the failure state is untyped |
-| P1 | >64 frontier heads vs the 8 non-progress rounds | Two DoS bounds may compose against an honest peer |
+| P1 | >64 frontier heads vs the 8 non-progress rounds | **Confirmed** by test; can starve a requester above one chunk |
 | P1 | Epidemic relay does not extend to the P1 document family | A real limit on the micelle guarantee |
 | P2 | Membership change inside a partition | Control-plane semantics not established |
 | P3 | Timestamp ordering after a heal | Data converges; UI integrity is the exposure |
@@ -357,29 +364,37 @@ apparently-syncing node that will never converge. That is the detectability defe
 fixing regardless of how rare the epoch gap is, because rarity is what makes an undiagnosed state
 expensive.
 
-### P1. Frontier truncation composing with the non-progress bound (was H4). Untested.
+### P1. Frontier truncation composing with the non-progress bound (was H4). Confirmed by test.
 
-The composition, restated:
+Two tests in `crates/catcoms-replication/src/doc.rs` settle this. The composition is real, and the
+consequence is worse than a deprioritised source: above one chunk it starves the requester.
 
 ```
-frontier capped at 64 heads
+frontier capped at 64 hashes
         v
-requester cannot fully describe what it holds
+requester cannot fully describe what it holds        [proven: 80 heads, 64 nameable]
         v
-serving peer legitimately resends ops behind the unnamed heads
+serving peer legitimately resends the unnamed branches   [proven: 16 ops, all duplicates]
         v
-dedup drops them: zero newly applied
+dedup drops them: zero newly applied, frontier unmoved    [proven: the next round is identical]
         v
-note_nonprogressing_catchup increments
+the peer walks its own log in order, so the operation the
+requester actually needs sits BEHIND that duplicate block  [proven: it is last of 17]
         v
-after 8 rounds an honest source is deprioritised
+a size-capped answer is a prefix of the duplicates, forever
 ```
 
-Both halves are individually correct defences. `MAX_CATCHUP_SINCE_HEADS` bounds the graph walk a
-requester can demand; `MAX_NONPROGRESSING_CATCHUP_ROUNDS` bounds a peer that says "ask me again"
-forever. Nothing establishes that they cannot fire against each other, and the design comment on
-the non-progress bound explicitly acknowledges that an empty round is legitimate precisely because
-the frontier can understate what is held. Test this before spending time on presentation work.
+The measured cost is exact: with the cap in place the answer is 17 operations, 16 of them
+duplicates; with the cap removed it is 1, which is precisely what was needed. The duplicate block
+grows with the number of concurrent writers while the useful payload stays at one operation.
+
+**The boundary matters.** Below `MAX_CATCHUP_CHUNK` the server answers `CATCHUP_SINCE_UNDERSTOOD`,
+whose handler calls `clear_catchup_stall` *before* anything else, so the non-progress counter never
+increments and small histories are unaffected. The counter only advances on the
+`CATCHUP_SINCE_MORE` path. The hazard therefore needs a duplicate block larger than one chunk,
+which needs enough concurrent writers that the cap bites and enough content behind the unnamed
+heads to fill 256 KiB. Rare, but it is a livelock rather than an inefficiency: every source holding
+the same history answers the same way, so no other peer rescues it.
 
 ### P1. Epidemic relay does not extend to the P1 document family (was H2). Traced; scope confirmed.
 
@@ -409,15 +424,22 @@ If one micelle performs a removal while split, the two halves rotate labels inde
 control-plane semantics of the heal are not established anywhere I could find. Distinct from P0,
 which is about a member falling behind a *linear* commit chain. No test covers it.
 
-### P3. Ordering after a heal (was H5)
+### P3. Ordering after a heal (was H5). Tested; better defended than expected.
 
-Section 5.1. Sharpen this into a clock-skew test rather than a presentation change: correct clock,
-minus three days, plus one year, all three writing during a partition, then heal. Nothing should
-disappear, and I expect convergence to be clean. The exposure is everything downstream of the
-sort: unread boundary, "latest message", the latest-own-message delivery anchor, day dividers,
-pagination, scroll-to-bottom, notification previews and conversation-list ordering. A broken or
-hostile local clock should not be able to make a conversation read as active until 2027, or bury
-genuinely unread messages three days back.
+Covered by `divergent_clocks_converge_and_cannot_park_the_read_boundary` in `catcoms-app`.
+Convergence is clean, a year-ahead stamp cannot become the read ceiling, and the bounded Lamport
+step in `next_message_ts` keeps one bad clock from dragging the group's timeline.
+
+The one finding worth recording is a **cross-layer contract that was only implicit**. A message
+that heals into the past arrives after the reader's mark was taken but sorts before it, and the
+native cursor rule is positional (`index > cursor`), so `unread_summary` does not count it. What
+reports it is [`lateArrivals`](../apps/desktop/src/unread.ts#L369) on the desktop, which exists for
+exactly this and is covered by `apps/desktop/src/latepast.test.ts`. The division is deliberate and
+load-bearing rather than decorative: without the frontend half, a healed arrival is silently
+already-read. The native test now pins that, so the two halves cannot drift apart quietly.
+
+Remaining, untested, and lower value: the other surfaces downstream of the sort (day dividers,
+scroll-to-bottom, notification previews, conversation-list ordering).
 
 ### P3. "Converged" is scoped to reachable peers (was H3)
 
@@ -456,7 +478,10 @@ old notes will otherwise re-derive them.
 
 ## 10. Next steps, in order
 
-### 10.1 The chained three-micelle test
+**Status: 10.1, 10.2 and 10.4 are done.** 10.3 is the only outstanding item, and it is a code
+change rather than a test. 10.5 is new, and follows from what 10.2 established.
+
+### 10.1 The chained three-micelle test (DONE)
 
 Home: `crates/catcoms-sync/tests/sync.rs` over the deterministic `MemNetwork`.
 
@@ -496,25 +521,51 @@ A authored -> B relayed -> C stored third-party history -> B gone -> C re-relaye
 rather than E having quietly obtained it from A or B. Without that assertion the test can pass for
 the wrong reason.
 
-**Second variant, same fixture:** break the B <-> C link partway through a chunked catch-up,
-reconnect it, and have C author a new message *during* reconciliation. That exercises requeue,
-dedup, the `MORE` continuation, the op-count version reset of the completion sweep, and
+**Second variant, same fixture, still to write:** break the B <-> C link partway through a chunked
+catch-up, reconnect it, and have C author a new message *during* reconciliation. That exercises
+requeue, dedup, the `MORE` continuation, the op-count version reset of the completion sweep, and
 concurrent-head preservation in one pass.
 
-### 10.2 The frontier-vs-non-progress test (P1)
+### 10.2 The frontier-vs-non-progress test (DONE, and it found something)
 
-Drive a document past 64 concurrent heads and assert that an honest serving peer is not
-deprioritised by `MAX_NONPROGRESSING_CATCHUP_ROUNDS`. This is cheap to write and settles whether
-the composition in section 8 is real.
+`a_frontier_wider_than_its_cap_makes_a_peer_resend_history_already_held` and
+`a_truncated_frontier_puts_the_missing_operation_behind_a_wall_of_duplicates`, both in
+`crates/catcoms-replication/src/doc.rs`.
 
-### 10.3 Type the stranded-member state (P0)
+The composition is real. It is also worse than "an honest source gets deprioritised": because the
+serving peer walks its own log in order and the sync layer sends a size-capped prefix, the
+operation the requester needs sits behind the duplicate block, so a chunk budget too small to
+clear that block never delivers it at all. Section 8, P1 has the measured numbers and the boundary
+condition that keeps small histories safe.
+
+### 10.3 Type the stranded-member state (P0). Outstanding.
 
 Not a test but a small protocol-visibility change: make the unfillable-gap condition a typed
 outcome rather than a log line, cover the `> max_commit_gap` case that currently produces no
 evidence at all, and stop it presenting as `Verified { applied: 0 }`. Detectability first; deciding
 what recovery to offer is separate.
 
-### 10.4 The clock-skew UI-integrity test (P3)
+### 10.4 The clock-skew test (DONE)
 
-Per section 8: three divergent clocks, partition, heal, then assert on the read-position and
-presentation surfaces rather than on convergence.
+`divergent_clocks_converge_and_cannot_park_the_read_boundary` in `crates/catcoms-app`. See section
+8, P3 for the cross-layer contract it turned up.
+
+### 10.5 Decide what to do about the frontier cap (new, follows from 10.2)
+
+Now that the starvation is demonstrated rather than hypothesised, the fix is a design choice and
+should be made deliberately. The options are not equivalent:
+
+- **Raise or remove `MAX_CATCHUP_SINCE_HEADS`.** Cheapest, but the cap exists to bound the graph
+  walk a requester can demand of a peer, so this trades a livelock for a work amplification.
+- **Order the server's walk so un-subtractable history does not always come first.** Addresses the
+  starvation directly and leaves both bounds intact.
+- **Let the requester name a compact frontier summary** rather than a truncated hash list, so
+  truncation stops understating what it holds.
+- **Do not count a round as non-progress when the answer was entirely duplicates**, which treats
+  the symptom and leaves the wasted bandwidth.
+
+Worth noting that `sync_frontier`'s doc comment claims the truncated list is "newest first, so a
+truncated list still describes the most useful part". `AutoCommit::get_heads` returns heads in hash
+order, not recency order, so which heads survive truncation is effectively arbitrary. That does not
+change correctness, but it does undercut the comment's justification and should be corrected
+whichever option is chosen.
