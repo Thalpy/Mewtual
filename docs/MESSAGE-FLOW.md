@@ -285,13 +285,12 @@ guards, not merely by passing):
 **Still not covered by any test:**
 
 1. **Convergence across a membership change that happened inside one partition.** See section 8, P2.
-2. **The stranded-member states.** Neither the 257-to-1024 buffered case nor the beyond-1024 silent
-   case has a test, and the latter currently produces no observable evidence to assert on. Typing
-   the state (section 10.3) has to come first.
-3. **Epidemic relay for the P1 document family**, which section 8 records as a deliberate scope
+2. **Epidemic relay for the P1 document family**, which section 8 records as a deliberate scope
    limit rather than a defect. A test would pin the limit, not close it.
-4. **The remaining presentation surfaces downstream of the timestamp sort**: day dividers,
+3. **The remaining presentation surfaces downstream of the timestamp sort**: day dividers,
    scroll-to-bottom, notification previews, conversation-list ordering.
+4. **Recovery from a stranded membership chain.** The state is now detectable (section 8, P0) and
+   nothing acts on it: there is no UI for it and no repair path.
 
 ---
 
@@ -302,15 +301,15 @@ control plane and in how two independently reasonable bounds compose.
 
 | Priority | Concern | Assessment |
 |---|---|---|
-| P0 | Stale member stranded past the commit window, **silently** | Recovery works; the failure state is untyped |
-| P1 | >64 frontier heads vs the 8 non-progress rounds | **Confirmed** by test; can starve a requester above one chunk |
+| P0 | Stale member stranded past the commit window, **silently** | **Now typed and reported**; recovery itself still manual |
+| P1 | >64 frontier heads vs the 8 non-progress rounds | **Fixed**: cap raised, and catch-up pages by position |
 | P1 | Epidemic relay does not extend to the P1 document family | A real limit on the micelle guarantee |
 | P2 | Membership change inside a partition | Control-plane semantics not established |
 | P3 | Timestamp ordering after a heal | Data converges; UI integrity is the exposure |
 | P3 | "Converged" means "with everyone reachable" | Correct semantics; dangerous only if overinterpreted |
 | P4 | Buffered-but-not-in-`heads()` | Regression coverage, not present evidence of a defect |
 
-### P0. Long-partition routing recovery (was H1). Traced; the mechanism works, the failure is silent.
+### P0. Long-partition routing recovery (was H1). Mechanism works; the failure is now reportable.
 
 The feared liveness failure **does not occur in the ordinary case**, and the design anticipated it
 explicitly:
@@ -346,23 +345,41 @@ Which gives two distinct stranded states:
 | 257 to 1024 | Records buffer, `drain_pending_commits` cannot chain them | one `tracing::warn!` |
 | > 1024 | Records dropped before buffering; `pending_commits` stays empty | **nothing at all** |
 
-The warn is at [sync/lib.rs:11587](../crates/catcoms-sync/src/lib.rs#L11587) and says "a full
-rejoin/snapshot is needed". Grep confirms it is the **only** occurrence of that condition anywhere:
-it is not a typed state, not a `SyncStats` counter, not an event, not in diagnostics, not in the
-UI. And in the `> 1024` case it does not fire, because the guard requires a non-empty
-`pending_commits`.
+That warn said "a full rejoin/snapshot is needed" and was the only occurrence of the condition
+anywhere: not a typed state, not a `SyncStats` counter, not an event, not in diagnostics, not in the
+UI. And in the `> 1024` band it did not fire at all, because its guard required a non-empty
+`pending_commits`. The two bands are easy to conflate and the easier one to construct is the one
+that proves less; a test for either is not a test for the other.
 
-Worse, both stranded states return `CommitCatchupOutcome::Verified { applied: 0 }`, which the drain
-at [:5703](../crates/catcoms-sync/src/lib.rs#L5703) reads as `closed` when nothing is buffered.
-That is byte-for-byte the same conclusion as an honest "you are already up to date". The
-`Empty` variant already carries a doc comment flagging exactly this class of conflation
-([:1015](../crates/catcoms-sync/src/lib.rs#L1015)); this is a second instance of it, one level up.
+Worse, both stranded states returned `CommitCatchupOutcome::Verified { applied: 0 }`, which the
+drain read as `closed` when nothing was buffered. That is byte-for-byte the same conclusion as an
+honest "you are already up to date". The `Empty` variant already carried a doc comment flagging
+exactly this class of conflation; this was a second instance of it, one level up.
 
-So the accurate statement of the risk is not "she can never reach the data plane". It is: **when
-she genuinely is stranded, nothing in the system knows.** The UI will show a connected, member,
-apparently-syncing node that will never converge. That is the detectability defect, and it is worth
-fixing regardless of how rare the epoch gap is, because rarity is what makes an undiagnosed state
-expensive.
+So the accurate statement of the risk was not "she can never reach the data plane". It was: **when
+she genuinely is stranded, nothing in the system knows.** The node showed as connected, in the
+roster, apparently syncing, and would never converge.
+
+**What the fix changed.** That state is now named rather than inferred from an absence:
+
+- `CommitCatchupOutcome::Stranded { lowest_available }` is returned when a source's bundle still
+  begins above this node's epoch after draining. The lowest offered epoch is taken from the records
+  as they arrive rather than from `pending_commits` afterwards, which is what covers the
+  `> max_commit_gap` band that previously produced no evidence at all.
+- `MembershipChainGap` records it with the epoch it was observed at, reachable through
+  `ChannelSync::membership_chain_gap()`. It is discarded on read once the epoch moves, so a repair
+  through any route retires it without that route needing to know this state exists. Repeated
+  observations keep the *best* offer, because a shorter gap is a better chance of repair and two
+  peers with different retention are telling this node how far back it would have to be repaired.
+  `SyncStats::commit_chain_gaps_observed` counts it once per epoch stuck at.
+- The drain no longer reads it as a completed exchange. That was the half with a cost rather than a
+  missing signal: the task retired itself, the source was left unmarked, and nobody else was asked,
+  when a member with a longer log might have been one drain away.
+
+**Still open, deliberately.** This is detectability only. No recovery is attempted, nothing is
+surfaced in the desktop UI yet, and a gap is evidence from the sources actually reached rather than
+a claim about the group. Deciding what recovery to offer (and whether a rejoin can be made safe) is
+separate work.
 
 ### P1. Frontier truncation composing with the non-progress bound (was H4). FIXED.
 
@@ -504,8 +521,7 @@ old notes will otherwise re-derive them.
 
 ## 10. Next steps, in order
 
-**Status: 10.1, 10.2 and 10.4 are done.** 10.3 is the only outstanding item, and it is a code
-change rather than a test. 10.5 is new, and follows from what 10.2 established.
+**Status: everything listed here is done.** What remains is in section 11.
 
 ### 10.1 The chained three-micelle test (DONE)
 
@@ -547,10 +563,16 @@ A authored -> B relayed -> C stored third-party history -> B gone -> C re-relaye
 rather than E having quietly obtained it from A or B. Without that assertion the test can pass for
 the wrong reason.
 
-**Second variant, same fixture, still to write:** break the B <-> C link partway through a chunked
-catch-up, reconnect it, and have C author a new message *during* reconciliation. That exercises
-requeue, dedup, the `MORE` continuation, the op-count version reset of the completion sweep, and
-concurrent-head preservation in one pass.
+**Second variant (DONE):** `a_heal_interrupted_midway_resumes_and_keeps_what_was_written_during_it`
+breaks the link partway through a chunked exchange, has both sides write while unreachable, and
+reconnects them on a hub neither has used, which also covers the paging cursor's deliberate
+impermanence.
+
+Worth recording what that test does *not* guard, because the first sabotage attempt failed to break
+it: disabling deduplication changes nothing there. The resumed walk subtracts correctly and never
+re-offers what the first round delivered, so there is nothing for deduplication to absorb. Its
+operation-count assertion is about the log not growing past what was written. What it does catch is
+a serving peer subtracting its own frontier instead of the requester's.
 
 ### 10.2 The frontier-vs-non-progress test (DONE, and it found something)
 
@@ -564,12 +586,17 @@ operation the requester needs sits behind the duplicate block, so a chunk budget
 clear that block never delivers it at all. Section 8, P1 has the measured numbers and the boundary
 condition that keeps small histories safe.
 
-### 10.3 Type the stranded-member state (P0). Outstanding.
+### 10.3 Type the stranded-member state (P0). DONE.
 
-Not a test but a small protocol-visibility change: make the unfillable-gap condition a typed
-outcome rather than a log line, cover the `> max_commit_gap` case that currently produces no
-evidence at all, and stop it presenting as `Verified { applied: 0 }`. Detectability first; deciding
-what recovery to offer is separate.
+`CommitCatchupOutcome::Stranded`, `MembershipChainGap` and
+`ChannelSync::membership_chain_gap()`. Section 8, P0 has the detail. Detectability only: no
+recovery is attempted, and nothing is surfaced in the desktop UI yet.
+
+One thing worth carrying forward from writing its tests. The first drain-path test used the band
+where records buffer, and in that band `pending_commits` is non-empty, so the drain's completion
+test already failed for an unrelated reason and sabotaging the new rule changed nothing. Only the
+beyond-`max_commit_gap` band exercises it. A test for either of these two bands is not a test for
+the other, and the one that is easier to construct is the one that proves less.
 
 ### 10.4 The clock-skew test (DONE)
 
@@ -600,3 +627,22 @@ first, so a truncated list still describes the most useful part". `AutoCommit::g
 hash (`automerge-0.10.0/src/automerge.rs:1280`), so which heads survive truncation is arbitrary.
 Harmless now that truncation cannot strand anyone, but the comment still overstates what the order
 gives you.
+
+---
+
+## 11. What is left
+
+Nothing here is blocking, and none of it is a defect in the data plane. In rough order of value:
+
+1. **Surface the stranded membership chain.** It is detectable and nothing looks at it: no UI, no
+   diagnostics row, no repair path. The honest first step is showing the user "this server cannot
+   catch up and needs to be rejoined", because the alternative is a client that looks healthy
+   forever. Deciding whether an automatic rejoin can be made safe is the larger question behind it.
+2. **Membership change inside a partition** (section 8, P2). The one remaining untraced area, and
+   the only one that is a protocol question rather than a product one.
+3. **Decide the P1 document family's relay promise** (section 8, P1). "B is the only surviving
+   bridge, so B preserves everything" is true for chat and false for Create-suite content. That may
+   be the right answer; it should be a decision rather than an accident.
+4. **The presentation surfaces downstream of the timestamp sort**, which the clock-skew test
+   deliberately stopped short of.
+5. **Correct `sync_frontier`'s ordering comment**, per above.
