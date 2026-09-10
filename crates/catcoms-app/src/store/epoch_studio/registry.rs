@@ -70,10 +70,90 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
     ) -> Result<Option<EpochRegistryState>, AppError> {
+        self.write_studio_registry_pointer(server, group, target, device, rng, budget, false)
+    }
+
+    /// Explicit local Restore alone may re-put a historical Registry tombstone after a
+    /// checkpoint has retired it. Current tombstones still win; their epoch must rotate first.
+    /// This restores discoverability, not content, and returns only after ordinary accounted
+    /// intent/source durability. It is independent/retryable if a prior content Save succeeded.
+    pub(crate) fn restore_studio_registry_pointer(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(u64, u128), AppError> {
+        let source = self.pointer_source_status(server, group, target, device, budget, true)?;
+        let Some((epoch, EpochPhase::Open, count)) = source else {
+            return Err(invalid(
+                "pointer Restore requires an existing Open document",
+            ));
+        };
+        if epoch == 0 && count == 0 {
+            return Err(invalid(
+                "pointer Restore requires nonempty epoch zero or a verified checkpoint",
+            ));
+        }
+        let logical = target.document(&group.group_id()).map_err(invalid)?;
+        let key = PointerKey::new(logical.doc_type, logical.logical_key).map_err(invalid)?;
+        let bucket = key.bucket();
+        let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        // Validate every historical Registry slot even on an already-present pointer retry.
+        // Explicit consent overrides a VALID old tombstone, never corrupt recovery bytes.
+        let history = self.load_epoch_recovery(server, &document)?;
+        for slot in history.retained().chain(history.staged()) {
+            RegistryRecovery::from_snapshot(slot, &document, bucket).map_err(invalid)?;
+        }
+        let state = self.load_registry_epoch(server, group, bucket, device)?;
+        let registry_id = state
+            .as_ref()
+            .map(EpochRegistryState::doc_id)
+            .unwrap_or_else(|| {
+                catcoms_replication::epoch_zero_id(document.doc_type, &document.logical_key)
+            });
+        if let Some(state) = state {
+            if state.phase() != EpochPhase::Open {
+                return Err(invalid("pointer Restore waits for Registry Open"));
+            }
+            let projection = state.projection()?;
+            if projection.tombstones.contains(&key) {
+                return Err(invalid(
+                    "pointer Restore waits for tombstoned Registry epoch to rotate",
+                ));
+            }
+            if projection.overflow.contains_key(&key)
+                || (!projection.pointers.contains_key(&key)
+                    && projection.pointers.len()
+                        >= catcoms_replication::registry::MAX_REGISTRY_POINTERS)
+            {
+                return Err(invalid("pointer Restore refused: Registry bucket is full"));
+            }
+            if projection.pointers.get(&key).is_some_and(|n| *n > epoch) {
+                return Err(invalid(
+                    "pointer Restore requires discovering the newer document checkpoint",
+                ));
+            }
+        }
+        self.write_studio_registry_pointer(server, group, target, device, rng, budget, true)?;
+        Ok((epoch, registry_id))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_studio_registry_pointer(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        explicit_restore: bool,
+    ) -> Result<Option<EpochRegistryState>, AppError> {
         let source =
-            self.with_studio_checkpoint_source(server, group, target, device, budget, |s| {
-                Ok((s.epoch(), s.phase(), s.op_count()))
-            })?;
+            self.pointer_source_status(server, group, target, device, budget, explicit_restore)?;
         let Some((epoch, EpochPhase::Open, count)) = source else {
             return Ok(None);
         };
@@ -149,6 +229,7 @@ impl ServerStore {
                 .projection()
                 .tombstones
                 .contains(&key)
+                && !explicit_restore
             {
                 return Ok(None);
             }
@@ -184,5 +265,58 @@ impl ServerStore {
         // Reuse the existing pure footprint cache; don't retain a second Registry graph.
         self.remember_installed_registry(server, &group.group_id(), bucket, &mut state)?;
         Ok(Some(state))
+    }
+
+    /// Explicit local recovery may read a bounded cold source, even when an Index read must
+    /// preserve the sole warm art graph. Background service keeps its existing warm-only rail.
+    /// Both paths verify the ACTUAL source record against the same complete inventory; a view
+    /// or claimed epoch number alone never authorizes a pointer write.
+    fn pointer_source_status(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        budget: &mut EpochStudioBudget,
+        explicit: bool,
+    ) -> Result<Option<(u64, EpochPhase, usize)>, AppError> {
+        if !explicit {
+            return self.with_studio_checkpoint_source(
+                server,
+                group,
+                target,
+                device,
+                budget,
+                |s| Ok((s.epoch(), s.phase(), s.op_count())),
+            );
+        }
+        current_member(group, device)?;
+        self.enter_studio_budget(server, group, budget)?;
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        let scope = scope_bytes(server, &document)?;
+        let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
+        let key = *blake3::hash(&scope).as_bytes();
+        let result = (|| {
+            let value = self.with_studio_source(server, group, target, device, |state| {
+                let record = state
+                    .source
+                    .as_ref()
+                    .ok_or_else(|| invalid("Studio pointer source has no physical stamp"))?
+                    .record();
+                budget
+                    .storage
+                    .verify_record(&storage_scope, key, Some(record))
+                    .map_err(invalid)?;
+                Ok((state.epoch(), state.phase(), state.op_count()))
+            })?;
+            if value.is_none() {
+                budget
+                    .storage
+                    .verify_record(&storage_scope, key, None)
+                    .map_err(invalid)?;
+            }
+            Ok(value)
+        })();
+        result.inspect_err(|_| budget.storage.invalidate())
     }
 }

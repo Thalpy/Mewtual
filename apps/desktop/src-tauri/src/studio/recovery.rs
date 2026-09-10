@@ -2,8 +2,127 @@
 use super::*;
 use catcoms_app::studio::{
     RecoveryReason, RecoveryTransition, StudioControlAction as Action, StudioControlRequest,
-    StudioControlResponse as Response, StudioRecoveryListing, StudioRecoverySummary,
+    StudioControlResponse as Response, StudioRecoveryApply, StudioRecoveryDisposition,
+    StudioRecoveryItem, StudioRecoveryListing, StudioRecoveryMode, StudioRecoverySummary,
 };
+
+/// Typed, exact-key choices; no renderer-provided historical value or author is accepted.
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) enum ChoiceInput {
+    Frame { id: String, value: String },
+    FrameDeletion { id: String },
+    Title { value: String },
+    Fps { value: String },
+    Object { id: String },
+    ObjectTitle { id: String, value: String },
+    ObjectExpiry { id: String, value: String },
+    ObjectDeletion { id: String },
+}
+impl ChoiceInput {
+    pub(super) fn checked(self) -> Result<StudioRecoveryItem, String> {
+        use StudioRecoveryItem as I;
+        Ok(match self {
+            Self::Frame { id: element, value } => I::Frame {
+                id: id(&element)?,
+                value: hash(&value)?,
+            },
+            Self::FrameDeletion { id: element } => I::FrameDeletion { id: id(&element)? },
+            Self::Title { value } => I::Title {
+                value: hash(&value)?,
+            },
+            Self::Fps { value } => I::Fps {
+                value: hash(&value)?,
+            },
+            Self::Object { id: element } => I::Object { id: id(&element)? },
+            Self::ObjectTitle { id: element, value } => I::ObjectTitle {
+                id: id(&element)?,
+                value: hash(&value)?,
+            },
+            Self::ObjectExpiry { id: element, value } => I::ObjectExpiry {
+                id: id(&element)?,
+                value: hash(&value)?,
+            },
+            Self::ObjectDeletion { id: element } => I::ObjectDeletion { id: id(&element)? },
+        })
+    }
+}
+fn mode(mode: &str) -> Result<StudioRecoveryMode, String> {
+    match mode {
+        "restore" => Ok(StudioRecoveryMode::Restore),
+        "copy" => Ok(StudioRecoveryMode::Copy),
+        _ => Err("recovery mode must be restore or copy".into()),
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn studio_recovery_preview(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+    snapshot: String,
+    choice: ChoiceInput,
+    mode: String,
+) -> Result<Value, String> {
+    invoke_control(
+        &state,
+        server,
+        target(&channel, object.as_deref())?,
+        Action::Preview {
+            snapshot: hash(&snapshot)?,
+            item: choice.checked()?,
+            mode: self::mode(&mode)?,
+        },
+    )
+    .await
+}
+
+/// A failed response is retried with this exact payload. Re-previewing is a NEW decision and
+/// needs a new nonce; never rewrite a predecessor or body under an earlier nonce.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RecoveryApplyInput {
+    snapshot: String,
+    choice: ChoiceInput,
+    mode: String,
+    epoch_id: String,
+    expected_projection: String,
+    nonce: String,
+    body: String,
+}
+impl RecoveryApplyInput {
+    pub(super) fn checked(self) -> Result<StudioRecoveryApply, String> {
+        if self.body.len() > 64 * 1024 {
+            return Err("recovery body exceeds 64 KiB".into());
+        }
+        Ok(StudioRecoveryApply {
+            snapshot: hash(&self.snapshot)?,
+            item: self.choice.checked()?,
+            mode: mode(&self.mode)?,
+            epoch_id: u128::from_be_bytes(id(&self.epoch_id)?),
+            expected_projection: hash(&self.expected_projection)?,
+            nonce: id(&self.nonce)?,
+            body: self.body.into_bytes(),
+        })
+    }
+}
+#[tauri::command]
+pub(crate) async fn studio_recovery_apply(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+    edit: RecoveryApplyInput,
+) -> Result<Value, String> {
+    invoke_control(
+        &state,
+        server,
+        target(&channel, object.as_deref())?,
+        Action::Apply(Box::new(edit.checked()?)),
+    )
+    .await
+}
 
 pub(super) fn hash(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64
@@ -58,6 +177,21 @@ pub(crate) async fn studio_recovery_list(
         server,
         target(&channel, object.as_deref())?,
         Action::List,
+    )
+    .await
+}
+#[tauri::command]
+pub(crate) async fn studio_recovery_restore_pointer(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+) -> Result<Value, String> {
+    invoke_control(
+        &state,
+        server,
+        target(&channel, object.as_deref())?,
+        Action::RestorePointer,
     )
     .await
 }
@@ -147,6 +281,30 @@ fn listing(v: StudioRecoveryListing) -> Result<Value, String> {
 }
 pub(super) fn response_value(response: Response) -> Result<Value, String> {
     let value = match response {
+        Response::PointerRestored {
+            target,
+            epoch,
+            registry_epoch_id,
+        } => json!({"v":1,"kind":"recoveryPointerRestored",
+            "channel":u128::from_be_bytes(target.channel()).to_string(),
+            "object":match target {StudioTarget::Index{..}=>None,StudioTarget::Flipnote{object,..}=>Some(hex::encode(object))},
+            "checkpointEpoch":epoch.to_string(),"registryEpochId":format!("{registry_epoch_id:032x}"),
+            "provisional":true}),
+        Response::Preview(v) => {
+            json!({"v":1,"kind":"recoveryPreview","snapshot":hex::encode(v.snapshot),
+            "epochId":format!("{:032x}",v.epoch_id),"expectedProjection":hex::encode(v.fingerprint),
+            "disposition":match v.plan.disposition {
+                StudioRecoveryDisposition::Ready=>"ready",StudioRecoveryDisposition::Unchanged=>"unchanged",
+                StudioRecoveryDisposition::Conflict=>"conflict",StudioRecoveryDisposition::Deleted=>"deleted",
+                StudioRecoveryDisposition::Full=>"full",StudioRecoveryDisposition::MissingTarget=>"missingTarget",
+            },"body":v.plan.body.map(String::from_utf8).transpose().map_err(|_|"invalid recovery operation encoding")?,
+            "originalAuthor":v.plan.original_author.map(|id|hex::encode(id.as_bytes()))})
+        }
+        Response::Applied {
+            target: _,
+            already_saved,
+        } => json!({"v":1,"kind":"recoveryApplied",
+            "contentSaved":true,"alreadySaved":already_saved,"provisional":true,"pointerRestored":false}),
         Response::List(value) => listing(value)?,
         Response::Acknowledged(value) => {
             let mut value = listing(value)?;

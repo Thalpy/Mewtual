@@ -171,12 +171,20 @@ impl CatchupRuntime {
             return Ok(None);
         }
         let mut budget = Self::budget(server, store, id)?;
-        let (outcome, state) = server.install_studio_seed_step(
+        let result = server.install_studio_seed_step(
             store,
             id,
             self.checkpoint.as_ref().expect("pass"),
             &mut budget,
-        )?;
+        );
+        self.settlement
+            .note(target, StudioSettlementState::RefreshRequired);
+        let (outcome, state) = result?;
+        self.settlement.note(target, state.phase().into());
+        if outcome == StudioAdoptionOutcome::RecoveryPending {
+            self.settlement
+                .note(target, StudioSettlementState::RecoveryEvictionPending);
+        }
         let doc_id = state.doc_id();
         server
             .sync

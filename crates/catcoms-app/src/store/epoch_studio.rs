@@ -22,6 +22,7 @@ use std::sync::Arc;
 mod adoption;
 mod discovery;
 mod preparation;
+mod recovery_disposition;
 mod registry;
 mod rotation;
 pub use adoption::StudioAdoptionOutcome;
@@ -76,6 +77,13 @@ pub struct EpochStudioState {
     source: Option<source::SourceVersion>,
 }
 impl EpochStudioState {
+    /// Exact current signed-log envelopes, never seed-attributed values.
+    pub(crate) fn current_operations(
+        &self,
+    ) -> Result<std::collections::BTreeMap<[u8; 32], catcoms_replication::LocalIntent>, AppError>
+    {
+        self.unit.current_operations().map_err(invalid)
+    }
     /// Complete retained signed-envelope comparison; never use projection/marker equality to
     /// infer a retry. This read-only evidence does not replace the store's edit/flush barriers.
     pub fn contains_exact_operation(

@@ -50,6 +50,7 @@ impl ServerStore {
             server,
             &plan.receipt().document,
             plan.included_operations(),
+            false,
             rng,
             budget,
             intents,
@@ -75,11 +76,31 @@ impl ServerStore {
             server,
             &plan.receipt().document,
             plan.included_operations(),
+            false,
             rng,
             budget,
             intents,
             writer,
             sync,
+        )
+    }
+
+    /// Only Studio's recovery-first disposition transaction may supply these exact checked
+    /// envelopes. This is separate from receipt-covered retirement and never reports finality.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn write_studio_manual_recovery_disposition_with_io(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        recovered: &BTreeMap<[u8; 32], catcoms_replication::LocalIntent>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        self.retire_included_with_io(
+            server, document, recovered, true, rng, budget, intents, writer, sync,
         )
     }
 
@@ -89,6 +110,7 @@ impl ServerStore {
         server: u64,
         document: &LogicalDocument,
         included: &BTreeMap<[u8; 32], catcoms_replication::LocalIntent>,
+        manual_recovery: bool,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
@@ -117,14 +139,19 @@ impl ServerStore {
         // proof that this local intent was receipted; fail without deleting it or the source.
         for (id, held) in state.pending() {
             if included.get(id).is_some_and(|included| included != held) {
-                return Err(invalid(
-                    "receipted intent envelope conflicts with local replay data",
-                ));
+                return Err(invalid(if manual_recovery {
+                    "recovery intent envelope conflicts with local replay data"
+                } else {
+                    "receipted intent envelope conflicts with local replay data"
+                }));
             }
         }
-        let removed = state
-            .ledger
-            .remove_receipted(&included.keys().copied().collect());
+        let ids = included.keys().copied().collect();
+        let removed = if manual_recovery {
+            state.ledger.remove_to_manual_recovery(&ids)
+        } else {
+            state.ledger.remove_receipted(&ids)
+        };
         if removed == 0 {
             intents.preflight(&self.intent_generation, id, old, old.unwrap_or(0), true)?;
             if let Some(record) = observed {

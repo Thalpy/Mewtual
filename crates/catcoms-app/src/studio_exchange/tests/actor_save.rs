@@ -1,4 +1,38 @@
 use super::*;
+
+#[tokio::test]
+async fn studio_actor_create_uses_current_open_index_after_checkpoint_and_retries_exactly() {
+    let mut p = Pair::new().await;
+    let index = StudioTarget::Index { channel: channel() };
+    let (_, _, index_id) = super::discovery::prepared_checkpoint(&mut p, index);
+    let store = Arc::new(tokio::sync::Mutex::new(Some(p.a_store)));
+    let (actor, mut events, task) = crate::spawn(p.alice);
+    let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+    let request = || StudioRequest::Create {
+        channel: channel(),
+        object: [8; 16],
+        nonce: [88; 16],
+        title: "after rotation".into(),
+        ts: 1000,
+    };
+    for _ in 0..2 {
+        let made = save(&actor, &store, request()).await.unwrap().unwrap();
+        assert_eq!(made.epoch, 0, "a new object still begins in epoch zero");
+        let view = save(&actor, &store, StudioRequest::Read { target: index })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.epoch_id, index_id);
+        let StudioProjection::Index(index) = view.projection else {
+            panic!()
+        };
+        assert_eq!(index.objects.len(), 2);
+        assert!(index.objects.contains_key(&[7; 16]) && index.objects.contains_key(&[8; 16]));
+    }
+    actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
+}
 use crate::studio::{StudioVaultLease, StudioView};
 use crate::{spawn, ServerActor};
 use tokio::sync::{oneshot, Mutex};

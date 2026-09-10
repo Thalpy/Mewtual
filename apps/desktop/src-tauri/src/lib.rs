@@ -2089,9 +2089,14 @@ fn forward_events(
                 continue;
             }
             match ev.event {
-                event @ (AppEvent::StudioUpdated { .. } | AppEvent::StudioReceivePaused) => {
+                event @ (AppEvent::StudioUpdated { .. }
+                | AppEvent::StudioReceivePaused
+                | AppEvent::SettlementChanged { .. }) => {
                     let state = app.state::<AppState>();
                     studio::forward_if_current(&state, server, instance, || match event {
+                        AppEvent::SettlementChanged { target, state } => emit_tracked(
+                            &app, "settlement-changed", studio::settlement::payload(server, target, state), trace,
+                        ),
                         AppEvent::StudioUpdated { channel, object } => emit_tracked(
                             &app, "studio-updated",
                             serde_json::json!({"server": server, "channel": channel.to_string(), "object": object.map(hex::encode)}), trace,
@@ -15905,6 +15910,9 @@ pub fn run() {
             studio::studio_apply,
             studio::studio_apply_index,
             studio::recovery::studio_recovery_list,
+            studio::recovery::studio_recovery_preview,
+            studio::recovery::studio_recovery_apply,
+            studio::recovery::studio_recovery_restore_pointer,
             studio::recovery::studio_recovery_read,
             studio::recovery::studio_recovery_export,
             studio::recovery::studio_recovery_acknowledge,

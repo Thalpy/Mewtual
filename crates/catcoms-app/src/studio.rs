@@ -14,10 +14,19 @@ use tokio::sync::{oneshot, OwnedMutexGuard};
 mod publication;
 pub(crate) use publication::StudioSavedTransaction;
 mod control;
+mod replay;
+mod restore;
+mod settlement;
 pub use control::{
     StudioControlAction, StudioControlReady, StudioControlRequest, StudioControlResponse,
-    StudioRecoveryListing, StudioRecoverySummary, StudioRecoveryVersion, StudioSettlementSource,
+    StudioRecoveryApply, StudioRecoveryListing, StudioRecoveryPreview, StudioRecoverySummary,
+    StudioRecoveryVersion, StudioSettlementSource,
 };
+pub use restore::{
+    StudioRecoveryDisposition, StudioRecoveryItem, StudioRecoveryMode, StudioRecoveryPlan,
+};
+use settlement::SettlementNotices;
+pub use settlement::StudioSettlementState;
 mod dispatch;
 pub(crate) use dispatch::{StudioDispatch, StudioReply, StudioResponse};
 mod receiver;
@@ -257,6 +266,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         {
             return Err(invalid("unknown Studio channel"));
         }
+        // A new object starts at epoch zero, but its existing channel Index may have rotated.
+        // Capture that checked source under the SAME exclusive transaction as both writes;
+        // never derive a current Index epoch from a UI fixture or a Registry pointer hint.
+        let mut create_index_epoch = None;
         self.sync.with_registry_context(|group, device, _, _| {
             if group.member_signature_key(&device.device_id()).as_deref()
                 != Some(device.public_key_bytes().as_slice())
@@ -300,6 +313,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 }
                 let index = StudioTarget::Index { channel: *channel };
                 if let Some(held) = store.load_studio_epoch(server, group, index, device)? {
+                    create_index_epoch = Some(held.doc_id());
                     let StudioProjection::Index(projection) = held.projection()? else {
                         return Err(invalid("wrong index type"));
                     };
@@ -490,7 +504,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         )?;
                         apply(
                             StudioTarget::Index { channel },
-                            epoch_zero_id(catcoms_wire::DocType::StudioIndex, &channel),
+                            create_index_epoch.unwrap_or_else(|| {
+                                epoch_zero_id(catcoms_wire::DocType::StudioIndex, &channel)
+                            }),
                             nonce,
                             IndexOp::PutObject {
                                 object,

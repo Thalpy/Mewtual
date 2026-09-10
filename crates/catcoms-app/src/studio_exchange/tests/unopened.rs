@@ -38,7 +38,7 @@ async fn studio_registry_preparation_outliving_head_needs_a_fresh_request() {
     });
     assert!(!matches!(
         p.bob
-            .complete_checkpoint_discovery(&mut p.b_store, SERVER, completed),
+            .complete_checkpoint_discovery(&p.b_store, SERVER, completed),
         Ok(Some(ServerCheckpointDiscovery::Selected(_)))
     ));
     receiver.complete(&mut p.alice, job.run(None).await);
@@ -72,7 +72,7 @@ async fn studio_registry_preparation_outliving_head_needs_a_fresh_request() {
     });
     assert!(matches!(
         p.bob
-            .complete_checkpoint_discovery(&mut p.b_store, SERVER, completed),
+            .complete_checkpoint_discovery(&p.b_store, SERVER, completed),
         Ok(Some(ServerCheckpointDiscovery::Selected(_)))
     ));
     assert!(!receiver.take_pause_notice());

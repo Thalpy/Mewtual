@@ -36,8 +36,9 @@ pub use epoch::{
     epoch_id, epoch_zero_id, tenure_id, Admission, AdmittedOperation, CloseRecord, ClosureStats,
     DomainOp, EpochGate, EpochPhase, InheritedCheckpoint, IntentLedger, LocalIntent,
     LogicalDocument, OwnerReceiptJournal, Receipt, ReceiptBook, ReceiptHeadProof, ReceiptIngest,
-    ReceiptRepair, RecoveryConflict, RecoveryConflictValue, RecoveryElement, RecoveryReason,
-    RecoverySlots, RecoverySnapshot, RecoveryTombstone, RecoveryTransition, VerifiedReceipt,
+    ReceiptRepair, ReceiptRepairIngest, RecoveryConflict, RecoveryConflictValue, RecoveryElement,
+    RecoveryReason, RecoverySlots, RecoverySnapshot, RecoveryTombstone, RecoveryTransition,
+    VerifiedReceipt,
 };
 pub use op::{SealedOp, SignedOp};
 

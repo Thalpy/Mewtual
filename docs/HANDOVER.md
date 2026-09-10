@@ -8,7 +8,33 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (latest entry: 2026-09-10)
 
-- **Gate 4 integration checkpoint, not gate completion (2026-09-10).** Studio now reuses the
+- **Gate 4 recovery/replay checkpoint (2026-09-10, worktree; gate still active).** Per-item
+  Restore/Copy, separately retryable pointer restoration and actor/native settlement
+  invalidations are connected without UI edits. Exact own current-log retries survive stale
+  previews/evicted snapshots; complete projection/deletion evidence fences new edits. Create
+  now writes through the current Open Index after rotation; the actor regression passes.
+  The watched worker conservatively replays only its own durable envelopes, checks ALL retained
+  recovery selections, orders stable-id prerequisites and refuses automatic overwrite of newer
+  values. The user explicitly approved manual disposition: unsafe replay leaves pending only
+  after full-envelope recovery is re-flushed, never as receipt finality. Missing evidence stays
+  pending; the ordinary two snapshots plus staged warning bound manual recovery. Current-log
+  entries cannot use that removal path. Seven replay tests and two store-disposition tests
+  (including the recovery/ledger before/after-write crash matrix) pass. Restore app/native,
+  pointer, event-payload and lifecycle regressions pass. Read-only replay/Restore review has no
+  remaining blocker/high. Focused follow-ups: sustained-gossip replay fairness, a cold large
+  Index reference, recovery changing mid-pass and forced event backpressure.
+  Full native tests passed (207), frontend tests passed (1,144), and root fmt/Clippy passed.
+  Root full suite is still running in `logs/gate4-recovery-replay-root.log`; it exposed an
+  existing Registry error-message compatibility assertion, now fixed by preserving its original
+  receipt-specific text (not weakening the test). Final suites must run after all Gate 4 code.
+  Next: running-app owner succession and signed repair, then full-gate acceptance. Repair's
+  v2 issuer-tenure and bounded persistent loser-screening prerequisite has nine focused tests
+  plus all 25 existing epoch-close tests passing; it is not runtime repair or permission to exit
+  Fault. Logs: `gate4-replay-focused.log`, `gate4-manual-recovery-focused.log`,
+  `gate4-recovery-replay-{native,frontend}.log`, `gate4-repair-book-focused.log`,
+  `gate4-repair-epoch-close.log` under `logs/`. No canonical mockup or UI component changed.
+
+- **Gate 4 integration checkpoint, not gate completion (`cbed5b7`, 2026-09-10).** Studio now reuses the
   existing accounted owner journal, exact-envelope intent retirement and recovery-first separate
   successor replacement. The existing recently watched idle worker drives owner rotation,
   installed-head availability, Registry pointer refresh and authenticated Registry open-tail
@@ -24,19 +50,21 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   re-reviewed. Residual focused gaps: large Registry replacement/restart with stale prepared
   source, and explicit actor ready-completion fairness. Corrupt live source metadata can refuse
   recovery List, while known snapshot Read/Export remain independent of that source.
-  Verification so far: the integration baseline root suite had 498 app passes, two Registry
-  joining fixture failures and nine existing ignored tests; it did NOT pass the full workspace.
+  The first integration baseline root suite had 498 app passes, two Registry
+  joining fixture failures and nine existing ignored tests; that attempt did NOT pass.
   Those failures were traced to ManualClock outrunning detached CPU preparation. A test-only
   tracked-preparation barrier leaves actors runnable and changes no production deadline; all
   six unopened fixtures then passed, as did an explicit expired-head/fresh-request regression.
+  The corrected full root rerun subsequently passed (`logs/gate4-integration-root-recheck.log`,
+  including 504 app tests). The original failure is retained here as historical evidence.
   The baseline native suite (201), frontend suite (1,144), native check, Clippy, formatting and
   ambient dependency check passed. Subsequent focused recovery app/native suites each passed
   three tests. Final full suites must be rerun after the remaining Gate 4 work; no complete-gate
   claim is made here. Logs: `logs/gate4-runtime-*.log`, `gate4-unopened-preparation.log`,
   `gate4-registry-expired-preparation.log`, `gate4-controls-focused.log` and
   `gate4-native-controls-focused.log` (all under `logs/`).
-  Remaining: own-intent replay, running-app succession and signed repair, Restore/Copy,
-  settlement events, then acceptance/review/full verification. User-owned package/version edits
+  The newer entry above supersedes this checkpoint's replay/Restore/event status. Running-app
+  succession and signed repair, then acceptance/review/full verification remain. User-owned package/version edits
   remain separate and untouched. No push destination has been assumed.
 
 - **Flipnote Gate 4 started: typed Studio owner/settlement core (`9799c6f`, 2026-09-09).** Index/art now

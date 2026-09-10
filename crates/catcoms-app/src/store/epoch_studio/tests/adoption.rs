@@ -4,7 +4,12 @@ use catcoms_replication::studio::StudioRecovery;
 use catcoms_replication::{CheckpointSeed, RecoveryTransition};
 use catcoms_rt::ManualClock;
 
-fn checkpoint(f: &Fixture, store: &ServerStore, epoch: u64, salt: u8) -> (Receipt, CheckpointSeed) {
+pub(super) fn checkpoint(
+    f: &Fixture,
+    store: &ServerStore,
+    epoch: u64,
+    salt: u8,
+) -> (Receipt, CheckpointSeed) {
     let mut projection = f.load(store).unwrap().projection().unwrap();
     match &mut projection {
         StudioProjection::Index(p) => p.epoch = epoch,
@@ -23,7 +28,7 @@ fn checkpoint(f: &Fixture, store: &ServerStore, epoch: u64, salt: u8) -> (Receip
     .unwrap();
     (receipt, seed)
 }
-fn adopt(
+pub(super) fn adopt(
     f: &Fixture,
     store: &mut ServerStore,
     receipt: &Receipt,

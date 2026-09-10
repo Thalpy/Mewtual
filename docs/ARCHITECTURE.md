@@ -38,6 +38,24 @@ remains a per-bucket hold; it does not invalidate otherwise authenticated storag
 Actual changed Registry wrappers refresh the existing inventory-validation cache before the next
 Studio turn. No second mutable document cache, budget owner or network protocol is introduced.
 
+Explicit recovery controls now borrow the same sole Server/vault/session custody. Whole-version
+Restore is a sequence of re-previewed domain choices, never a replacement Automerge branch or
+an atomic batch. A fingerprint covers the complete current projection; Apply also rechecks all
+retained/staged historical deletion evidence and then uses normal Save. Exact accepted own-log
+retries remain idempotent after later edits or snapshot eviction. Pending intents do not bypass
+that fence. Copy is explicit mutable replacement/deletion, not same-id resurrection. Pointer
+restoration is separately retryable with actual saved-target verification and existing Registry
+accounting; an incomplete pointer step cannot relabel already saved content as wholly restored.
+
+The same watched worker now paces own-intent replay, with current full-log equality and all
+retained recovery snapshots checked before each operation. Stable-id prerequisites use a bounded
+topological plan; hashes do not choose between competing mutable edits. A newer current value,
+deletion, contradictory historical selection or cold large reference holds automatic replay.
+The user-approved manual disposition first flushes the existing full-envelope recovery copy,
+then removes only the matching own intents through the accounted ledger writer. This is needs
+recovery, not receipt finality. Missing evidence stays pending. Settlement invalidations are
+queued under custody but emitted after its release; reads do not emit refresh-triggering events.
+
 Studio's first Rust schema layer (`catcoms_replication::studio`) decodes the closed IndexOp and
 FlipnoteOp bodies, preserving stable element ids and the frontend's canonical JSON bytes.
 Contextual decoding checks the whole P1 envelope and expected type/key; Index creation additionally
@@ -98,8 +116,10 @@ the same vault namespace. Create writes the object before the Index and is exact
 atomic across files; a different nonce cannot rename an existing object through Create.
 Native projections retain conflict/deletion evidence and three-state expiry. Local update events
 invalidate views, while responses explicitly label local publication and provisional edits.
-Current Create targets epoch zero. Automatic sync/settlement and the rotated-index installer
-remain integration work, with dense-source latency still unqualified. UI is unchanged.
+Create keeps the new object in epoch zero but obtains the Index's actual Open epoch under the
+same transaction, including after rotation. Automatic Index/art sync and watched-owner rotation
+are connected; the remaining recovery/succession integration is tracked in the backend roadmap.
+Dense-source latency remains unqualified. UI is unchanged.
 Persistent blob handles now share one mount-local deletion guard outside the kept-copy adapter.
 The derived reference union is keyed by full group bytes (including numeric-server aliases).
 Studio source/intent/recovery writes add holds before I/O; only a complete, generation-current,

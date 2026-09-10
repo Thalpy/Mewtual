@@ -7,6 +7,8 @@ use catcoms_replication::studio::StudioRecovery;
 use catcoms_replication::{RecoveryReason, RecoverySnapshot};
 use std::collections::BTreeMap;
 use tokio::sync::Mutex;
+mod restore;
+mod settlement;
 
 async fn invoke(
     actor: &crate::ServerActor,

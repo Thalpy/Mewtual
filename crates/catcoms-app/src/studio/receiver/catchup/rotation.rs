@@ -60,6 +60,10 @@ impl CatchupRuntime {
             return Ok(None);
         }
         let result = server.rotate_studio_owner_step(store, id, target, &snapshot, &mut budget);
+        // A failed later write can leave a durably sealed source. Do not infer its phase or
+        // label every refusal as disk-full; request a fresh view even on the error path.
+        self.settlement
+            .note(target, StudioSettlementState::RefreshRequired);
         let (outcome, state) = match result {
             Ok(value) => value,
             Err(error) => {
@@ -70,6 +74,11 @@ impl CatchupRuntime {
             }
         };
         let epoch = state.doc_id();
+        self.settlement.note(target, state.phase().into());
+        if outcome == StudioRotationOutcome::RecoveryPending {
+            self.settlement
+                .note(target, StudioSettlementState::RecoveryEvictionPending);
+        }
         server
             .sync
             .with_registry_context(|g, d, _, _| store.retain_studio_source(g, d, state));

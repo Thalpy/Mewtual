@@ -233,8 +233,22 @@ discovery. Exact installed retries flush the actual successor and preserve later
 are retired by adoption. The caller explicitly re-watches the installed epoch for paged catch-up.
 This cooperative registry path is not automatic actor scheduling or a generic Studio installer.
 
-An intent is **final** when inside a receipted closure. Until then it is retained, vault-sealed,
-and replayed wherever the document is next `Open`.
+An intent is **final** only when inside a receipted closure. Ordinary pending intents remain
+vault-sealed and are considered for replay when the document is next `Open`.
+
+**Manual-recovery disposition (user decision, 2026-09-10).** An old own edit that cannot safely
+be replayed, or is represented only by checkpoint provenance without its receipted closure,
+may leave the pending queue only after its complete author/envelope is matched in an actual
+typed retained/staged recovery snapshot and that recovery record is durably flushed under the
+same exclusive storage custody. This means **needs recovery**, never receipted/final. Current
+signed-log operations, another author's edits, seed equality alone and failed-Save ledger entries
+without recovery evidence do not authorize this disposition. Classify after successor installation
+and attempt safe automatic replay before moving held edits to manual recovery. Do not infer
+causal ordering from operation hashes or timestamps, or overwrite a newer remote field during
+replay. The existing two retained snapshots, one staged slot, warning and seven-day eviction
+policy bound the remaining copy; Restore, Copy and Export remain available while it is retained.
+If recovery flush or ledger replacement fails, retain pending state and retry the same checked
+transition. This is bounded recovery, not a new finality protocol or indefinite preservation.
 
 ## 8. Seeds, checkpoints, retirement, and receipts
 
@@ -314,12 +328,28 @@ therefore exactly the open epoch.
 
 **Fault and repair.** Two valid receipts under one tenure for one epoch naming different closes
 put the document into a read-only **fault** state, both kept, surfaced to everyone. It ends
-with a `ReceiptRepair v1 = { v:1, server id, doc type tag, logical key, tenure id, receipt hash a,
+with a `ReceiptRepair v2 = { v:2, server id, doc type tag, logical key, fault tenure id,
+issuer tenure start group epoch, receipt hash a,
 receipt hash b, selected receipt hash, repair sequence, owner public key, signature }` (at most
 1 KiB, sequence strictly increasing, persisted before publication like a receipt). The record
 selects the entire conflicting receipt rather than one epoch so it also repairs differing inherited
 fields first observed on different receipt epochs. Applying it is held until the losing receipt's
 checkpoint, if held, is persisted as a recovery snapshot through the staged slot.
+
+V2 separates the repairing owner's tenure from the tenure of the conflicting receipts. Live
+verification requires an independently observed current issuer tenure before even an exact retry;
+a carried field is not its own evidence. V1 remains decode/hash-compatible historical data but
+cannot authorize live repair. The bounded receipt book retains the latest exact repair and both
+full named receipts across checkpoints/restart. It screens the exact loser in ordinary, opening
+and adoption ingest; if inherited selections differed, it also screens receipts with that exact
+losing inherited selection in that fault tenure. A third baseline still faults. Same-baseline
+receipts carry no parent chain, so higher descendants cannot be classified by invented ancestry.
+Exact repair retries preserve newer progress and cannot clear a different active fault. A fault
+whose named pair differs holds until the exact evidence is available. Only the latest repair is
+retained: an older no-longer-covered conflict can require another repair after that bounded
+evidence is replaced. Repaired books use explicit local versions 4/5 under the unchanged 8 KiB
+cap; ordinary v1/v2 and adoption v3 remain unchanged without repair evidence. This codec/book
+prerequisite is tested, but does not itself exit a gate, reset an owner journal or install a seed.
 
 Implementation note for owner issuance: `ServerStore::prepare_epoch_owner_receipt` now persists
 the bounded canonical owner journal before returning. `mark_epoch_owner_receipt_published` reloads
@@ -342,7 +372,8 @@ completion after verifying the exact installed Open checkpoint, expected seed an
 current-owner journal and flushing both records. This records head/seed availability, never remote
 delivery, and allows a solo owner to rotate repeatedly. Only durable completion permits another
 eligible owner decision. Recently watched Studio and associated Registry maintenance now use the
-existing idle worker; complete replay, recovery controls and repair remain unfinished.
+existing idle worker; conservative own-intent replay and native recovery controls are connected.
+Running-app succession, signed repair and final Gate 4 acceptance remain unfinished.
 
 ## 9. Intents and markers
 
@@ -737,9 +768,12 @@ membership/MLS epoch and the retained document's Open lifecycle; this API sends 
 `AppEvent::SettlementChanged { doc type tag, logical key, state }` on every change of a
 document's settlement state: `Open`, `Closing`, `AwaitingReceipt`, `Settled`,
 `HeldForStorage`, `Fault`, `Repairing`, `AwaitingTenureReceipt`, `RecoveryAvailable`,
-`RecoveryEvictionPending`, `StorageRefused`. The desktop bridge must forward it with the same shape
-as `StatusUpdated`, with contract tests. This is a required interface, not present implementation:
-the actor event and bridge forwarding are still pending; local typed outcomes do not emit it.
+`RecoveryEvictionPending`, `StorageRefused`. The Studio actor/native path now forwards phase
+observations `Open`, `Closing`, `Settled`, `Fault`, recovery availability/warnings and a
+`RefreshRequired` invalidation through `settlement-changed`, with payload and lifecycle tests.
+These are independent observations, not an exclusive combined state machine or receipt evidence.
+The remaining specialized states and Registry/repair producers are not yet connected; the UI
+must re-read actual state rather than synthesize them. See `FLIPNOTE-UI-HOOKS.md` for the payload.
 
 ## 14. Tests
 

@@ -10,6 +10,7 @@ mod inventory_cache;
 mod pages;
 pub(crate) mod performance;
 mod preparation;
+mod recovery_disposition;
 mod registry;
 mod rotation;
 mod source;

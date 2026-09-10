@@ -27,6 +27,9 @@ impl ReceiptBook {
         if self.is_faulted() {
             return Ok(ReceiptIngest::Fault);
         }
+        if self.is_repaired_loser(&receipt) {
+            return Ok(ReceiptIngest::Stale);
+        }
         let mut next = self.clone();
         // Retargeting keeps one previous target, while the original seed has its own opening
         // receipt. Either can expose equivocation BELOW the selected high-water. Screening

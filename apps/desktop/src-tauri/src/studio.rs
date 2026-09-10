@@ -4,6 +4,7 @@ use super::*;
 use catcoms_app::studio::{types::*, EpochPhase, StudioRequest, StudioVaultLease, StudioView};
 use serde_json::{json, Value};
 pub(crate) mod recovery;
+pub(crate) mod settlement;
 
 enum InvokeRequest {
     Document(StudioRequest),

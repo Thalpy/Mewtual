@@ -1,6 +1,7 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-10, Gate 4 integration worktree (not yet committed/accepted).
+Last checked: 2026-09-10. Rotation/inspection checkpoint: `cbed5b7`; Restore/Copy, settlement
+invalidations and own-intent replay are tested in the current worktree. Gate 4 is not yet accepted.
 This is the maintained frontend integration map, not a replacement UI design. The user's
 canonical HTML/mockups remain authoritative for layout and interaction. Update this guide in
 the same slice that adds or changes a native command, event or returned state.
@@ -32,6 +33,9 @@ are 64 lowercase hex. A four-byte display fingerprint is never an authority key.
 | Inspect one recovery version | `studio_recovery_read({server, channel, object?, snapshot})` | Historical typed content, not a current Studio view |
 | Export a recovery backup | `studio_recovery_export({server, channel, object?, snapshot})` | Bounded `{format:"p1-recovery-v1", bytes, bytesB64, snapshot}` |
 | Accept an eviction warning | `studio_recovery_acknowledge({server, channel, object?, oldestSnapshot, stagedSnapshot})` | Updated recovery listing after exact-pair durable acknowledgement |
+| Preview a recovery choice | `studio_recovery_preview({server, channel, object?, snapshot, choice, mode})` | One bounded proposed domain edit or an explicit conflict/hold; saves nothing |
+| Apply that exact choice | `studio_recovery_apply({server, channel, object?, edit})` | Ordinary provisional content Save; see the retry contract below |
+| Restore discoverability | `studio_recovery_restore_pointer({server, channel, object?})` | Separately retryable Registry pointer step for an actually saved document; no caller-supplied epoch |
 
 `body` is a **canonical JSON string**, not an object or a full signed P1 envelope. Use
 `canonicalJson` from [studio-contract.ts](../apps/desktop/src/studio-contract.ts).
@@ -70,8 +74,8 @@ const updated = await invoke("studio_apply", {
 
 A retry of an uncertain operation keeps the **same complete request**, including nonce, body
 and epoch id. Do not mint a new nonce automatically after an error: the local save may already
-have committed. If the epoch changed, re-read and preserve the unsaved work; automatic intent
-replay and user-facing recovery controls are still Gate 4. Do not silently reauthor into a new
+have committed. If the epoch changed, re-read and preserve the unsaved work; the backend's
+conservative replay and recovery controls are described below. Do not silently reauthor into a new
 epoch. A failed Create may have persisted part of the two-document work; retry the same Create
 identity/nonce rather than creating another object. For `studio_read`, `null` is local absence,
 not a deletion or proof no other member has the document. `studio_list` instead synthesizes an
@@ -129,6 +133,13 @@ bounded fetch ceiling is 9 MiB, not permission to fetch a 9-MiB frame.
 |---|---|---|
 | `studio-updated` | `{server: number, channel: string, object: string | null}` | Invalidate/re-read the matching Index and affected open object. `null` names the Index. Coalesce refreshes; an event is not a new projection. |
 | `studio-receive-paused` | `{server: number}` | Show a receive/storage warning without claiming settlement failure or deleting local work. Successful explicit Read/Save resumes the paused receiver; Read alone may not warm unrelated large histories. |
+| `settlement-changed` | `{server: number, docType: 15 | 16, logicalKey: string, channel: string, object: string | null, state: string}` | Invalidate matching recovery/phase observations and re-read `studio_recovery_list`. This is not a receipt or a new projection. |
+
+Settlement states currently emitted are `open`, `closing`, `settled`, `fault`,
+`recoveryAvailable`, `recoveryEvictionPending`, and `refreshRequired`. Phase and recovery
+observations are independent: a recovery notification does not replace the document phase.
+`logicalKey` is 32 lowercase hex characters; `channel` is a decimal u128 string. List/read
+commands do not emit invalidations, so listening and re-reading must not create a refresh loop.
 
 Install listeners with normal component/session cleanup. Fence late reads by current server,
 channel, object and local request generation. Native already rejects stale actor/session
@@ -140,10 +151,10 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 
 | Canonical UI surface | Backend availability / next hook |
 |---|---|
-| Settlement chip / rotation progress | `phase` is available; a dedicated settlement-status event/view is not. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
+| Settlement chip / rotation progress | `settlement-changed` invalidates the actual phase/recovery listing. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
 | Local overlay while rotating | Keep editor work separately. Persisted overlay/replay orchestration is not yet a native command. Shared apply may refuse Closing/Fault. |
-| Recovery rail: Restore / Copy / Export | List, inspect and recovery-backup export are callable above. Restore/Copy application and automatic intent replay are still pending Gate 4; backup export is not `.pixa`. |
-| Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Dedicated settlement-change events are still pending; refresh after the action. |
+| Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |
+| Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Refresh after the action and matching `settlement-changed` events. |
 | Claims, Ask, Pass, countdown | Pending Gate 5. Local fixture claims are not peer claims and never locks. |
 | Sound, linked Music, `.pixa` export | Pending Gate 6. Do not infer availability from the contract's type definitions. |
 
@@ -151,6 +162,16 @@ Implementation progress and reuse evidence live in [BACKEND-IMPLEMENTATION](BACK
 UI hooks will be marked callable here only once their actor/native path and tests exist.
 
 ## Recovery read/export/ack contract (Gate 4 worktree)
+
+The backend automatically considers this device's saved intents after checkpoint changes. It
+keeps the original author/nonce, requires complete retained recovery evidence and rechecks the
+current projection before each paced edit. It does not overwrite a newer header or frame value,
+resurrect a deleted id, infer causal order from hashes, or replay another member's edits.
+Conflicting or unsafe choices can leave the pending queue only after their full envelopes are
+verified in a durably flushed recovery snapshot. Show **needs recovery**, never **settled**.
+The existing two retained snapshots, staged warning, Restore/Copy/Export and eviction limits
+apply. An intent with no such evidence remains pending. Cold large referenced documents may
+require explicit recovery. Current-log accepted edits remain pending until covered by a receipt.
 
 Snapshot ids are 64 lowercase hex characters. Listing returns `kind:"recoveryList"`, `v:1`,
 `channel`, `object`, `source`, `versions`, `evictionPending` and `pendingIntents`.
@@ -179,3 +200,53 @@ Export returns `kind:"recoveryExport"`, `v:1`, `snapshot`, `format:"p1-recovery-
 operation evidence, **not** playable media, a published share, an archive of PIX blobs, or an
 implemented import command. All controls reuse Save's native operation cap, actor lease and
 session/incarnation fences. Do not retry on navigation/lock as though the original session survived.
+
+## Restore / Copy choices (current worktree)
+
+Whole-version recovery is a sequence of explicit domain edits, not an atomic replacement of the
+document. Use the historical Read projection to enumerate choices, preview each, apply ready
+choices, then re-read/re-preview before the next step. A partial sequence is saved content and
+must not be labelled an all-or-nothing Restore. Caps and missing local PIX bytes can refuse Save.
+Fetch missing frames through `request_blob_bounded` before applying; never invent a CID or size.
+
+`mode` is exactly `restore` (add only) or `copy` (user-confirmed mutable replacement/deletion).
+`choice` has an exact key set:
+
+| Choice | Fields besides `kind` | Meaning |
+|---|---|---|
+| `frame` | `id`, `value` | Stable frame id and original pixel value's `source.opId` |
+| `frameDeletion` | `id` | Explicitly apply a deletion recorded on that fork; requires Copy confirmation |
+| `title`, `fps` | `value` | Original register value's `source.opId`; headers never automatically Restore |
+| `object` | `id` | Add a missing Index entry, only if its same-channel object exists locally |
+| `objectTitle`, `objectExpiry` | `id`, `value` | Copy a specific historical mutable Index value |
+| `objectDeletion` | `id` | Explicit fork deletion; requires Copy confirmation |
+
+Element ids are 32 lowercase hex; `value` and snapshot ids are 64 lowercase hex. For a whole-version
+Restore use selected pixel values, not the initial insertion blob. A missing frame's predecessor
+resolves to its recorded live predecessor, otherwise the current end. Deleted ids are not silently
+resurrected, even in Copy mode. Immutable Index kind/creator/time are never overwritten. A restored
+Index insertion is authored by the restoring member; `originalAuthor` is historical attribution,
+not an authorization claim or the new operation's signer.
+
+Preview returns `kind:"recoveryPreview"`, `snapshot`, `epochId`, `expectedProjection`,
+`disposition`, `body` and `originalAuthor`. Dispositions: `ready`, `unchanged`, `conflict`,
+`deleted`, `full`, `missingTarget`. Only Ready carries a canonical JSON body string. A preview is
+not a storage reservation. `expectedProjection` covers all current conflict/deletion/provenance
+data, not just visible pixels; Apply also rechecks every retained/staged recovery slot.
+
+Apply's `edit` is `{snapshot, choice, mode, epochId, expectedProjection, nonce, body}`. Echo the
+preview exactly and choose a fresh 32-hex nonce. Retry that *same whole payload* after uncertain
+failure. Never rewrite its predecessor/body under the same nonce. A stale preview requires a
+new preview and new nonce. An exact own operation already saved in the current Open epoch can
+still retry after later edits or snapshot eviction; a pending intent alone cannot bypass checks.
+Success is `{v:1, kind:"recoveryApplied", contentSaved:true, alreadySaved, provisional:true,
+pointerRestored:false}`. Re-read current state. No remote delivery or owner settlement is implied.
+
+After content recovery, restore the affected document's pointer separately. For an Index `object`
+choice, call pointer restoration with that object's id (not just the Index). Omit `object` to
+restore the Index's own pointer when needed. Success is `kind:"recoveryPointerRestored"` with
+`checkpointEpoch` (decimal string), `registryEpochId` (32-hex), channel/object and `provisional:true`.
+Historical Registry deletion requires this explicit action; ordinary idle refresh still refuses
+it. A current tombstone waits for Registry rotation; Closing/Fault, a full bucket, missing source
+or a pointer to a newer checkpoint refuses. Content already saved stays saved: show the pointer
+step as pending/blocked and retry it separately, not "Restore completed".

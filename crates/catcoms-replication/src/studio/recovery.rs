@@ -46,6 +46,26 @@ impl StudioProjection {
             Self::Flipnote(p) => p.checkpoint(close),
         }
     }
+    /// Local optimistic-concurrency fence for explicit recovery choices. Unlike a compact
+    /// checkpoint this includes ALL conflict, deletion and original-position evidence. It is
+    /// neither a signature nor a receipt; callers still authenticate the source and recheck
+    /// recovery eligibility under their exclusive edit gate immediately before authoring.
+    pub fn recovery_fingerprint(&self) -> Result<[u8; 32], ReplError> {
+        let payload = self.encode(MAX_RECOVERY_SNAPSHOT_BYTES)?;
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"catcoms-studio-recovery-view:v1");
+        for part in [
+            self.document().server_id.as_slice(),
+            self.document().logical_key.as_slice(),
+            payload.as_slice(),
+        ] {
+            hash.update(&(part.len() as u64).to_be_bytes());
+            hash.update(part);
+        }
+        hash.update(&self.document().doc_type.tag().to_be_bytes());
+        hash.update(&self.epoch().to_be_bytes());
+        Ok(*hash.finalize().as_bytes())
+    }
     fn encode(&self, limit: usize) -> Result<Vec<u8>, ReplError> {
         match self {
             Self::Index(p) => p.encode_snapshot(limit),

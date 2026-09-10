@@ -783,6 +783,55 @@ expendable. Actual sound/export/doodle projections are not enabled; the body cod
 export CIDs but its hash extraction is not full production export coverage. Unknown future
 typed recovery fails closed. Dense-source latency and blob quota/expiry remain separate limits.
 
+### Native Studio recovery (gate 4 integration)
+
+P1 core repair now uses `ReceiptRepair::sign_in_tenure` and
+`verify_current_owner(group, expected_issuer_tenure_start)`. V1 decoding/hashing stays compatible
+but is not live authority. `ReceiptBook::apply_repair` takes the same independent tenure and
+returns `(Applied | Duplicate, losing_receipt)`; an exact duplicate preserves later progress,
+and an active different fault refuses it. The latest full signed evidence survives book
+encoding/checkpoint copies under the existing 8 KiB cap. This remains a bookkeeping prerequisite,
+not a callable native repair, gate transition, owner-journal rebase or recovery persistence API.
+
+`studio_recovery_list`, `studio_recovery_read`, `studio_recovery_export`, and
+`studio_recovery_acknowledge` use the same actor/native custody as Save. They authenticate all
+retained/staged typed recovery slots; historical reads/backup export do not invent a current view.
+Exact oldest/staged ids bind the eviction acknowledgement. Export is canonical P1 recovery bytes,
+not `.pixa`, an archive of referenced blobs or an implemented import.
+
+`studio_recovery_preview` proposes one historical domain choice from a saved snapshot and the
+current full conflict-preserving projection. `studio_recovery_apply` requires exact snapshot,
+choice/mode, current epoch, projection fingerprint, fresh nonce and canonical body. It rechecks
+all historical deletion evidence and routes Ready through normal Save, including local PIX,
+complete-envelope, intent, projection and storage checks. Exact current-log own-envelope retries
+precede the evicted selected-snapshot/stale-preview checks; a pending intent alone is insufficient.
+Copy explicitly replaces mutable fields/deletes; Restore is additive. Index creation uses the
+restoring member's verified identity and independently checks actual same-channel target existence.
+
+`studio_recovery_restore_pointer` is a separate accounted, retryable Registry step. Its epoch
+comes from the checked saved target, never the UI. Explicit consent can re-put a historical
+Registry tombstone after rotation, not override a current tombstone or a newer pointer. Cold
+local access retains ordinary Index-read art-cache preservation; remote service cold rails are
+unchanged. Content Save can succeed while this step is blocked. All results remain provisional.
+Commands, exact JSON choices/results, retry and partial-sequence rules are in
+[FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md). No frontend component is part of these adapters.
+
+The watched Studio worker also replays only this device's retained intent envelopes, using
+all historical selections plus a fresh full current projection and ordinary Save/publication.
+Stable-id dependencies are topologically ordered; competing mutable choices are held, not
+hash-ranked. Unsafe replay may move to manual recovery only after the same complete envelopes
+are verified and flushed in retained/staged recovery, before exact accounted ledger removal.
+Missing recovery evidence remains pending, and current-log operations cannot use that removal
+path. This is manual recovery under the existing two-snapshot limits, not receipt finality.
+
+`AppEvent::SettlementChanged {target, state}` forwards as `settlement-changed` with
+`{server, docType, logicalKey, channel, object, state}`. Scope encoding matches the guide;
+the seven implemented strings are `open`, `closing`, `settled`, `fault`, `recoveryAvailable`,
+`recoveryEvictionPending`, `refreshRequired`. Phase/recovery observations are independent.
+The bounded/coalesced queue drains only after Server/vault custody is released, through the
+existing native incarnation guard. Read-only controls emit nothing; failures after possible
+mutation still invalidate. Clients re-read actual listings rather than infer finality from events.
+
 ### Native Studio Save/Load (gate 2, Index/art only)
 
 These commands require the unlocked session and an existing current server/channel. `server`
@@ -800,7 +849,8 @@ nonce and complete request across retries; do not generate another operation on 
 
 Create's `createdAtMs` must be a nonnegative JS-safe integer. Both complete operation envelopes
 must fit the existing 64 KiB limit, not just their title/body alone. Create currently targets
-epoch zero for both the new object and Index; rotated-index creation is not installed yet.
+epoch zero for the new object and the actual current locally checked Index epoch. An absent Index
+still starts at epoch zero. No peer-supplied pointer or renderer field chooses that Index epoch.
 The two writes are **not atomic**: index/storage refusal can leave an unlisted object. Retry the
 same object, nonce, title and timestamp to complete it. Only an exact saved initial operation
 permits an existing object; a new nonce must use Apply instead. An exact retry after a later

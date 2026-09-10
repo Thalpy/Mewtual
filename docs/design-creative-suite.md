@@ -435,7 +435,10 @@ queries; this design does not claim measured maximum-source latency or readiness
    receipts are owner-only, crash-safe and irrevocable, and owner equivocation is a visible
    fault state, never a silent choice.
 7. Intents are idempotent by a verifiable `op_id` with a constant marker committed atomically
-   with the edit, and are final only inside a receipted closure.
+   with the edit, and are final only inside a receipted closure. Unsafe-to-replay own edits may
+   instead move from pending into durably flushed, full-envelope-matching manual recovery
+   under P1's explicit bounded-recovery policy. This is labelled needs recovery, not settled;
+   the two-snapshot eviction warning applies. Seed equality alone never retires an intent.
 8. Events fire for remote changes to every studio document type and for every settlement state
    change, including sealing, faults, repairs, awaiting the tenure's first receipt, recovery
    availability and eviction warnings, and storage refusal.

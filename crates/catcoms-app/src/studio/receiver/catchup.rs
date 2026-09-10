@@ -127,6 +127,7 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
 
 #[derive(Default)]
 pub(super) struct CatchupRuntime {
+    pub(super) settlement: SettlementNotices,
     provider: Option<ServerStudioPageProvider>,
     pass: Option<ServerStudioReceive>,
     target: Option<StudioTarget>,
@@ -174,6 +175,19 @@ pub(super) struct CatchupRuntime {
     registry_selection: usize,
 }
 impl CatchupRuntime {
+    /// Never evict the source of a ready/active page or checkpoint just to start replay.
+    pub(super) fn replay_ready(&self) -> bool {
+        !self.in_flight
+            && !self.preparing
+            && self.preparation.is_none()
+            && self.prepared.is_none()
+            && self.registry_preparation.is_none()
+            && self.registry_prepared.is_none()
+            && self.checkpoint.is_none()
+            && self.discovery_plan.is_none()
+            && self.pass.is_none()
+            && self.registry_pass.is_none()
+    }
     #[cfg(test)]
     pub(in crate::studio::receiver) fn hold_registry_page_for_test(
         &mut self,

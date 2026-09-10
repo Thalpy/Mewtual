@@ -7,6 +7,7 @@ use catcoms_replication::Admission;
 use std::collections::VecDeque;
 use std::sync::Arc;
 mod catchup;
+mod replay;
 pub(crate) use catchup::StudioBackgroundResult;
 
 /// Recently accessed targets, bounded by the existing sync watch rail. Reopening the same exact
@@ -18,8 +19,74 @@ pub(crate) struct StudioReceiver {
     pause_notice: bool,
     catchup: catchup::CatchupRuntime,
     gossip_runs: usize,
+    settlement: SettlementNotices,
+    replay: replay::ReplayRuntime,
+    replay_turn: bool,
 }
 impl StudioReceiver {
+    /// Recovery writes deliberately reuse ordinary Save's watch, storage and one-shot
+    /// publication path. Read-only controls carry no fake document or saved packets.
+    pub(crate) fn control<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        request: StudioControlRequest,
+    ) -> Result<
+        (
+            StudioSavedTransaction,
+            Option<StudioTarget>,
+            Option<StudioControlResponse>,
+        ),
+        AppError,
+    > {
+        if let StudioControlAction::Apply(apply) = request.action {
+            let (edit, already_saved) =
+                server.prepare_studio_recovery_apply(store, id, request.target, *apply)?;
+            let (saved, updated) = self.run(server, store, id, Some(edit))?;
+            Ok((
+                saved,
+                updated,
+                Some(StudioControlResponse::Applied {
+                    target: request.target,
+                    already_saved,
+                }),
+            ))
+        } else {
+            let target = request.target;
+            let changing = matches!(
+                request.action,
+                StudioControlAction::Acknowledge { .. } | StudioControlAction::RestorePointer
+            );
+            let result = server.studio_control_transaction(store, id, request);
+            if changing {
+                // Even an error may follow a successful first durability barrier. Read-only
+                // List/Preview never emit, preventing a notification -> refresh -> event loop.
+                self.settlement
+                    .note(target, StudioSettlementState::RefreshRequired);
+            }
+            if let Ok(StudioControlResponse::Acknowledged(list)) = &result {
+                if let Some(source) = &list.source {
+                    self.settlement.note(target, source.phase.into());
+                }
+                self.settlement.note(
+                    target,
+                    if list.eviction_pending.is_some() {
+                        StudioSettlementState::RecoveryEvictionPending
+                    } else {
+                        StudioSettlementState::RecoveryAvailable
+                    },
+                );
+            }
+            result.map(|r| (StudioSavedTransaction::empty(), None, Some(r)))
+        }
+    }
+    pub(crate) fn take_settlement_notices(&mut self) -> Vec<(StudioTarget, StudioSettlementState)> {
+        for (target, state) in self.catchup.settlement.take() {
+            self.settlement.note(target, state);
+        }
+        self.settlement.take()
+    }
     #[cfg(test)]
     pub(crate) fn hold_registry_page_for_test(
         &mut self,
@@ -64,6 +131,24 @@ impl StudioReceiver {
         }
         Ok(updated)
     }
+    /// The same fair background turn services catch-up and at most one own replay operation.
+    /// Sustained gossip must not postpone recovery indefinitely, and replay must not steal a
+    /// source that a fetched page/seed still needs.
+    fn background_step<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+    ) -> Result<(StudioSavedTransaction, Option<StudioTarget>), AppError> {
+        self.replay_turn = !self.replay_turn;
+        if self.replay_turn {
+            if let Some(saved) = self.replay_step(server, store, id)? {
+                return Ok(saved);
+            }
+        }
+        let updated = self.catchup_step(server, store, id)?;
+        Ok((StudioSavedTransaction::empty(), updated))
+    }
     /// Notify before any bounded event-channel await: native work never waits on the event
     /// consumer, and event backpressure must not conceal an already-queued inbox packet.
     pub(crate) fn signal<T: MeshTransport, R: CryptoRngCore>(
@@ -86,10 +171,12 @@ impl StudioReceiver {
         server: &Server<T, R>,
     ) -> bool {
         !self.paused
-            && (self.watches.iter().any(|(watch, _)| {
-                server.sync.studio_has_inbound(&watch.inner)
-                    || server.sync.studio_has_page_request(&watch.inner)
-            }) || self.catchup.pending(server, &self.watches))
+            && (self.replay.pending(&self.watches)
+                || self.watches.iter().any(|(watch, _)| {
+                    server.sync.studio_has_inbound(&watch.inner)
+                        || server.sync.studio_has_page_request(&watch.inner)
+                })
+                || self.catchup.pending(server, &self.watches))
     }
     pub(crate) fn take_pause_notice(&mut self) -> bool {
         std::mem::take(&mut self.pause_notice)
@@ -162,9 +249,25 @@ impl StudioReceiver {
             return Err(invalid("Studio receive mount or numeric server changed"));
         }
         self.catchup.lifecycle(server, store, id);
+        let mls = server.sync.with_registry_context(|g, _, _, _| g.epoch());
+        self.replay.lifecycle(store, id, mls);
         if let Some(request) = request {
             let updated = request.changes_state().then(|| request.target());
-            let saved = server.studio_transaction_with_publication(store, id, request)?;
+            let result = server.studio_transaction_with_publication(store, id, request);
+            if let Some(target) = updated {
+                self.settlement.note(
+                    target,
+                    match &result {
+                        Ok(saved) => saved
+                            .view
+                            .as_ref()
+                            .map(|v| v.phase.into())
+                            .unwrap_or(StudioSettlementState::RefreshRequired),
+                        Err(_) => StudioSettlementState::RefreshRequired,
+                    },
+                );
+            }
+            let saved = result?;
             // Only explicit successful access retries a failed/over-budget background pass.
             // More inbound traffic cannot repeatedly restart expensive failed disk work.
             self.paused = false;
@@ -208,11 +311,13 @@ impl StudioReceiver {
                 .iter()
                 .any(|(w, _)| server.sync.studio_has_page_request(&w.inner));
         if (serving && self.gossip_runs >= 1)
-            || (self.gossip_runs >= 4 && self.catchup.pending(server, &self.watches))
+            || (self.gossip_runs >= 4
+                && (self.replay.pending(&self.watches)
+                    || self.catchup.pending(server, &self.watches)))
         {
             self.gossip_runs = 0;
-            return match self.catchup_step(server, store, id) {
-                Ok(updated) => Ok((empty(), updated)),
+            return match self.background_step(server, store, id) {
+                Ok(saved) => Ok(saved),
                 Err(error) => {
                     self.paused = true;
                     self.pause_notice = true;
@@ -225,9 +330,9 @@ impl StudioReceiver {
             .iter()
             .position(|(w, _)| server.sync.studio_has_inbound(&w.inner))
         else {
-            let result = self.catchup_step(server, store, id);
+            let result = self.background_step(server, store, id);
             return match result {
-                Ok(updated) => Ok((empty(), updated)),
+                Ok(saved) => Ok(saved),
                 Err(error) => {
                     self.paused = true;
                     self.pause_notice = true;

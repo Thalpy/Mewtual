@@ -11,6 +11,43 @@ table with the commit that closed it.
 
 ## Trust assumptions
 
+- **A repair is bound to the repairing owner's tenure, not just their key.** The v2 repair
+  transcript adds issuer tenure separately from the fault tenure. Live application checks the
+  independently observed current tenure before exact-retry handling; old v1 remains historical
+  only. The bounded book keeps full selected/losing evidence and the latest signed repair,
+  revalidates them on restart, and screens its named loser across all three receipt paths.
+  Different inherited baselines identify a losing branch; identical baselines do not reveal
+  descendant ancestry. Third baselines still fault. New progress survives exact retries, and a
+  newer fault cannot be cleared by replaying the old repair. Latest-only retention is not an
+  audit chain: a no-longer-covered old conflict may require another repair. These primitives do
+  not change gates, persist recovery or rebase the owner's journal; runtime repair is unfinished.
+
+- **Automatic recovery is conservative and author-local.** Studio replay checks the complete
+  own envelope, every retained/staged historical selection and the fresh current projection.
+  It never uses op-id sorting as causality or lets one older snapshot override a newer conflict.
+  Replay shares bounded worker scheduling and ordinary Save authorization/publication. A cold
+  large referenced object is held rather than reconstructed on the actor thread. Unsafe edits
+  leave pending only after an actual full-envelope recovery record is re-flushed before the
+  accounted ledger replacement; exact post-rename retries still sync. This user-approved manual
+  disposition is not settlement and has the same two-snapshot eviction limits as explicit
+  recovery. No-evidence intents remain pending. Existing accepted current-log operations cannot
+  be manually retired by this path. Settlement events are invalidations, not authority or proof
+  of receipt coverage; native session/incarnation guards also fence their delivery.
+
+- **Local recovery is a new edit, not historical authority.** Explicit Studio Restore/Copy
+  validates all sealed typed slots and current member/channel/epoch before using ordinary Save
+  and its blob, intent, storage and one-shot publication checks. Original attribution remains
+  separate from the restoring signer. Restore never overwrites; Copy requires an explicit choice,
+  cannot replace immutable Index identity fields and cannot resurrect a retained deleted id.
+  The complete current projection fences previews, and new historical tombstones are rechecked
+  independently. Only an exact own envelope already in the current Open log bypasses re-preview;
+  a pending intent, marker, known op id or matching visible value does not. Native JSON/base64
+  conversion stays under final session/incarnation guards. Recovery backup export contains
+  private historical content, not only visible pixels. Pointer restoration uses a separate
+  explicit Registry write and actual saved source, never a renderer-supplied checkpoint. It can
+  override valid historical deletion evidence after rotation, not a current tombstone. Partial
+  recovery/pointer failure is reported, not silently promoted to complete or settled recovery.
+
 - **Creative blob size bounds are per operation, not retention or automatic-load authority.**
   `publish_pix` validates the bounded PIX1 format and promotes verified bytes before returning a
   referenceable CID. `request_blob_bounded` bounds local/sealed reads, response body copies and

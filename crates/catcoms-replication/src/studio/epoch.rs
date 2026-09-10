@@ -260,6 +260,14 @@ impl StudioEpoch {
         }
         Ok(self.held(author, domain)?.is_some())
     }
+    /// Bounded exact-envelope inventory of this epoch's signed log, excluding seed provenance.
+    /// Batch replay/disposition decodes once instead of rescanning the full log per intent.
+    /// This read-only evidence is not receipt finality or intent-removal authority.
+    pub fn current_operations(
+        &self,
+    ) -> Result<std::collections::BTreeMap<[u8; 32], LocalIntent>, ReplError> {
+        recovery::current_operations(&self.doc)
+    }
     /// Pre-journal validation prevents invalid targets/origins or impossible projections from
     /// stranding durable intents. It authors only a detached draft; neither signs nor mutates us.
     /// A retained exact retry bypasses NEW-edit policy: later deletion/cap growth must not prevent

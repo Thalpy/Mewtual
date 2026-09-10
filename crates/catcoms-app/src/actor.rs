@@ -977,6 +977,12 @@ impl ChannelChange {
 /// An event from a running server actor to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
+    /// Invalidate settlement/recovery metadata for this Studio logical document. State is an
+    /// observation, not a success/receipt assertion; phase and recovery observations can coexist.
+    SettlementChanged {
+        target: catcoms_replication::studio::StudioTarget,
+        state: crate::studio::StudioSettlementState,
+    },
     /// A local transaction or newly accepted remote Studio edit crossed its persistence barrier.
     /// Invalidate the channel Index and named object. Duplicate/quarantined packets emit nothing.
     /// An errored/partial Create must be reread by its initiating caller.
@@ -1076,11 +1082,12 @@ impl ServerActor {
     pub async fn studio_receive_begin(&self) -> Result<crate::studio::StudioReady, String> {
         self.studio_ready(None).await
     }
-    /// Fixed-size local recovery requests; no renderer-supplied snapshot or vault guard is queued.
+    /// Bounded local recovery choices; no renderer-supplied snapshot or vault guard is queued.
     pub async fn studio_control_begin(
         &self,
         request: crate::studio::StudioControlRequest,
     ) -> Result<crate::studio::StudioControlReady, String> {
+        request.validate().map_err(|e| e.to_string())?;
         let (ready, rx) = oneshot::channel();
         self.cmd_tx
             .send(AppCommand::StudioControl { request, ready })
@@ -4004,8 +4011,7 @@ where
                                 Some(store) if !reply.is_closed() && !cancelled => match request {
                                     StudioDispatch::Document(request) => studio_receiver.run(&mut server, store, lease.server, request)
                                         .map(|(saved, updated)| (saved, updated, None)),
-                                    StudioDispatch::Control(request) => server.studio_control_transaction(store, lease.server, request)
-                                        .map(|response| (crate::studio::StudioSavedTransaction::empty(), None, Some(response))),
+                                    StudioDispatch::Control(request) => studio_receiver.control(&mut server, store, lease.server, request),
                                 }.map_err(|e| e.to_string()),
                                 _ => Err("Studio request cancelled or vault closed".into()),
                             };
@@ -4034,6 +4040,9 @@ where
                         #[cfg(test)]
                         studio_preparation_signal.send_replace(studio_receiver.preparing_for_test());
                         reply.send(result);
+                        for (target, state) in studio_receiver.take_settlement_notices() {
+                            let _ = event_tx.send(AppEvent::SettlementChanged { target, state }).await;
+                        }
                         if let Some(target) = updated {
                             let object = match target { catcoms_replication::studio::StudioTarget::Index { .. } => None,
                                 catcoms_replication::studio::StudioTarget::Flipnote { object, .. } => Some(object) };
