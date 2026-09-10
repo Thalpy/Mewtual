@@ -14604,4 +14604,166 @@ mod tests {
              status ref do not"
         );
     }
+
+    /// Three members whose clocks disagree wildly, converging after writing separately.
+    ///
+    /// Convergence itself is never in doubt: timestamps decide presentation order and nothing
+    /// else, so no clock can make a message disappear. What a bad clock can reach is everything
+    /// downstream of that order, which is where a lost message actually looks like a lost message:
+    /// the read boundary, the newest-row anchor, and the stamp this device writes next.
+    ///
+    /// The case is a partition heal, so the writes happen before anyone has seen anyone else. That
+    /// matters because [`Server::next_message_ts`] steps over the newest row this device has
+    /// already seen; a member who has synchronized first cannot post into the past by accident,
+    /// and this test is about the member who has not.
+    #[tokio::test]
+    async fn divergent_clocks_converge_and_cannot_park_the_read_boundary() {
+        const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+        const YEAR_MS: u64 = 365 * DAY_MS;
+
+        let hub = Hub::new();
+        // Joining is an authenticated exchange with a freshness window, so everyone joins in
+        // agreement and the clocks diverge afterwards. `set_wall_ms` is the right seam for that:
+        // it models an administrator or NTP correction and leaves elapsed time alone, so the
+        // monotonic invariant the sync layer's cooldowns rely on still holds.
+        let alice_clock = ManualClock::new(T0);
+        let bob_clock = ManualClock::new(T0);
+        let carol_clock = ManualClock::new(T0);
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder_on(&hub, alice_peer, &alice_clock, 1);
+        alice.subscribe_control().await.unwrap();
+        alice.open_channel(GENERAL).await.unwrap();
+
+        let bob_invite = alice.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(bob_clock.clone()),
+                "bob",
+                alice_peer,
+                &bob_invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = bob.unwrap();
+        bob.subscribe_control().await.unwrap();
+        bob.open_channel(GENERAL).await.unwrap();
+
+        let carol_invite = alice.mint_invite([8u8; 16], u64::MAX, vec![]).unwrap();
+        let (carol, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(3)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(3),
+                Box::new(carol_clock.clone()),
+                "carol",
+                alice_peer,
+                &carol_invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut carol = carol.unwrap();
+        carol.subscribe_control().await.unwrap();
+        carol.open_channel(GENERAL).await.unwrap();
+        assert!(bob.sync_once().await.unwrap(), "Bob applies Carol's Add");
+
+        // Now the clocks diverge: three days behind, and a year ahead.
+        bob_clock.set_wall_ms(T0 - 3 * DAY_MS);
+        carol_clock.set_wall_ms(T0 + YEAR_MS);
+
+        // Alice and Carol write and reach each other. Bob never synchronizes at all, so his own
+        // list stays empty and his stamp is his own clock rather than a step over anything he has
+        // seen: he is the isolated micelle.
+        alice
+            .send_message(GENERAL, "from the present")
+            .await
+            .unwrap();
+        carol
+            .send_message(GENERAL, "from the future")
+            .await
+            .unwrap();
+        for _ in 0..8 {
+            if alice.messages(GENERAL).len() >= 2 {
+                break;
+            }
+            assert!(alice.sync_once().await.unwrap());
+        }
+        let before_heal = alice.messages(GENERAL);
+        assert_eq!(before_heal.len(), 2, "Alice's own message and Carol's");
+        let carol_row = before_heal.last().expect("Carol sorts last").clone();
+        assert_eq!(carol_row.text, "from the future");
+
+        // Alice reads everything, so her cursor names the newest row from somebody else.
+        let read_mark = UnreadProbe {
+            divider_id: carol_row.id.clone(),
+            divider_ts: carol_row.ts,
+            now_ms: alice_clock.now_ms(),
+        };
+
+        // The heal arrives: Bob writes three days in the past and only now reaches anyone.
+        assert!(bob.messages(GENERAL).is_empty(), "Bob has seen nobody");
+        bob.send_message(GENERAL, "from the past").await.unwrap();
+        for _ in 0..8 {
+            if alice.messages(GENERAL).len() >= 3 {
+                break;
+            }
+            assert!(alice.sync_once().await.unwrap());
+        }
+        let healed = alice.messages(GENERAL);
+        assert_eq!(healed.len(), 3, "nothing a bad clock touched went missing");
+        assert_eq!(
+            healed.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+            vec!["from the past", "from the present", "from the future"],
+            "presentation order is by timestamp, so the heal lands in the past"
+        );
+
+        let page = alice.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Tail,
+                before: 16,
+                after: 0,
+                unread: Some(read_mark),
+            },
+        );
+        let unread = page.unread.expect("the query asked for it");
+
+        // A year-ahead stamp cannot become the boundary. If it could, every legitimate message
+        // after it would fail the "newer than the mark" test and the indicator would go quiet
+        // exactly when it matters.
+        assert!(
+            unread.ceiling_ts <= alice_clock.now_ms() + CLOCK_SKEW_GRACE_MS,
+            "the ceiling stays within the grace, not a year out"
+        );
+        assert_eq!(
+            unread.ceiling_ts, healed[1].ts,
+            "it settles on the newest plausible row, which is Alice's own"
+        );
+
+        // And the contract the desktop's late-arrival path exists to cover. Bob's message arrived
+        // after the mark was taken, but it sorts before it, and the cursor rule is positional; so
+        // the native summary does not count it. `lateArrivals` in `apps/desktop/src/unread.ts` is
+        // what reports it instead. That division is deliberate, and it is load-bearing rather than
+        // decorative: without it this arrival is silently already-read.
+        assert_eq!(
+            unread.count, 0,
+            "a row that heals into the past is not ordinary unread"
+        );
+        assert_eq!(unread.first_index, None);
+
+        // Finally, one hostile clock must not drag the group's timeline with it. Alice has now
+        // seen a stamp a year ahead, and her next message still lands at her own clock.
+        alice.send_message(GENERAL, "after the heal").await.unwrap();
+        let latest = alice
+            .messages(GENERAL)
+            .into_iter()
+            .find(|m| m.text == "after the heal")
+            .expect("Alice's own message");
+        assert!(
+            latest.ts <= alice_clock.now_ms() + CLOCK_SKEW_GRACE_MS,
+            "the Lamport step is bounded by the grace, so one bad clock cannot move the group"
+        );
+    }
 }
