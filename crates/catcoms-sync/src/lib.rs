@@ -205,6 +205,15 @@ const CATCHUP_SINCE_UNDERSTOOD: u8 = 1;
 /// inferred it from "did I apply anything" stopped on a chunk of ops it already had, and on a
 /// chunk that could carry nothing because the next op was larger than the budget.
 const CATCHUP_SINCE_MORE: u8 = 2;
+/// As [`CATCHUP_SINCE_MORE`], and the answer begins with a [`CATCHUP_CURSOR_BYTES`]-byte
+/// continuation naming where in the serving peer's log to resume.
+///
+/// Its own marker rather than an optional prefix on [`CATCHUP_SINCE_MORE`], because a cursor is
+/// twenty arbitrary bytes and every twenty bytes decode as one: a requester cannot tell a
+/// continuation from the first twenty bytes of a bundle by looking. Only a request that carried
+/// the cursor field is answered with this, so a build that predates paging never sees it, and if
+/// one somehow does, the unknown-marker path already falls back to whole-history catch-up.
+const CATCHUP_SINCE_PAGE: u8 = 4;
 /// The serving peer understands the request and simply does not hold this document.
 ///
 /// Distinct from [`CATCHUP_SINCE_UNDERSTOOD`] with an empty bundle, which says "you have
@@ -3488,7 +3497,45 @@ fn encode_catchup_req(doc_type: DocType, doc_id: u128) -> Vec<u8> {
     e.finish()
 }
 
-fn encode_catchup_since_req(doc_type: DocType, doc_id: u128, heads: &[[u8; 32]]) -> Vec<u8> {
+/// A serving peer's resume point in its own log, as the requester replays it.
+///
+/// Opaque to the requester and meaningful only to the node that minted it: `provider` is that
+/// node's per-runtime identity, so a cursor replayed to the wrong peer, or to the same peer after
+/// a restart, is recognised as foreign and the walk simply starts again. That check is the whole
+/// of its safety requirement. A forged position can only make a server skip operations the forger
+/// then does not receive, so it is not authenticated; the fence exists to stop an honest mistake
+/// (a cursor crossing peers) from silently hiding history, not to stop a liar harming itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CatchupCursor {
+    provider: [u8; 16],
+    position: u32,
+}
+
+const CATCHUP_CURSOR_BYTES: usize = 20;
+
+impl CatchupCursor {
+    fn encode(&self) -> [u8; CATCHUP_CURSOR_BYTES] {
+        let mut out = [0u8; CATCHUP_CURSOR_BYTES];
+        out[..16].copy_from_slice(&self.provider);
+        out[16..].copy_from_slice(&self.position.to_be_bytes());
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let raw: [u8; CATCHUP_CURSOR_BYTES] = bytes.try_into().ok()?;
+        Some(Self {
+            provider: raw[..16].try_into().ok()?,
+            position: u32::from_be_bytes(raw[16..].try_into().ok()?),
+        })
+    }
+}
+
+fn encode_catchup_since_req(
+    doc_type: DocType,
+    doc_id: u128,
+    heads: &[[u8; 32]],
+    cursor: Option<&CatchupCursor>,
+) -> Vec<u8> {
     let mut e = Encoder::new();
     e.put_u16(doc_type.tag());
     e.put_u128(doc_id);
@@ -3496,11 +3543,23 @@ fn encode_catchup_since_req(doc_type: DocType, doc_id: u128, heads: &[[u8; 32]])
     for head in heads {
         e.put_bytes(head).expect("a 32-byte head always encodes");
     }
+    // Trailing and optional, so a build that predates paging still decodes the frame it knows and
+    // answers it. An empty continuation means "I understand cursors and hold none yet", which is
+    // what tells the serving peer it may put one in the reply.
+    e.put_u8(1);
+    // Deliberately not `unwrap_or_default()`: the default of a fixed-size array is that many zero
+    // bytes, not the absence of one, so "no walk in progress" would travel as a real cursor at
+    // position zero under a provider stamp nobody minted.
+    let encoded = cursor.map(CatchupCursor::encode);
+    e.put_bytes(encoded.as_ref().map_or(&[][..], |c| &c[..]))
+        .expect("a 20-byte cursor always encodes");
     e.finish()
 }
 
 #[allow(clippy::type_complexity)]
-fn decode_catchup_since_req(bytes: &[u8]) -> Result<(DocType, u128, Vec<[u8; 32]>), SyncError> {
+fn decode_catchup_since_req(
+    bytes: &[u8],
+) -> Result<(DocType, u128, Vec<[u8; 32]>, Option<Option<CatchupCursor>>), SyncError> {
     let mut d = Decoder::new(bytes);
     let tag = d.get_u16().map_err(|_| SyncError::Malformed)?;
     let doc_type = DocType::from_tag(tag).ok_or(SyncError::Malformed)?;
@@ -3520,8 +3579,26 @@ fn decode_catchup_since_req(bytes: &[u8]) -> Result<(DocType, u128, Vec<[u8; 32]
             .map_err(|_| SyncError::Malformed)?;
         heads.push(head);
     }
+    // Absent for a peer that predates paging, and that is a legal frame rather than a malformed
+    // one: it is answered exactly as it always was. `Some(None)` is a paging-capable requester
+    // starting a fresh walk; `Some(Some(_))` is one continuing an existing one.
+    let cursor = if d.is_empty() {
+        None
+    } else {
+        if d.get_u8().map_err(|_| SyncError::Malformed)? != 1 {
+            return Err(SyncError::Malformed);
+        }
+        let raw = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+        if raw.is_empty() {
+            Some(None)
+        } else {
+            Some(Some(
+                CatchupCursor::decode(raw).ok_or(SyncError::Malformed)?,
+            ))
+        }
+    };
     d.finish().map_err(|_| SyncError::Malformed)?;
-    Ok((doc_type, doc_id, heads))
+    Ok((doc_type, doc_id, heads, cursor))
 }
 
 fn decode_catchup_req(bytes: &[u8]) -> Result<(DocType, u128), SyncError> {
@@ -3979,6 +4056,18 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// that source, not about the group, so it takes every eligible source saying it before the
     /// document is treated as caught up. Reset whenever the version moves.
     catchup_sources_checked: HashMap<(DocType, u128), (u64, BTreeSet<PeerId>)>,
+    /// This node's identity as a catch-up *provider*, minted per runtime.
+    ///
+    /// A resume position means something only against the log that produced it: the same operation
+    /// sits at a different index on every member, and a restored snapshot need not rebuild the
+    /// same order. Stamping each continuation with this lets the serving side recognise one that
+    /// came from somewhere else and start the walk again instead of skipping history. It is not
+    /// persisted, so a restart correctly invalidates every cursor outstanding against this node.
+    catchup_provider: [u8; 16],
+    /// Where this node is in each serving peer's log, per document, for a walk in progress.
+    /// Keyed by peer because a cursor from one is meaningless to another. Bounded like every
+    /// other per-document ledger here; the keys are all this node's own.
+    catchup_cursors: HashMap<(DocType, u128, PeerId), CatchupCursor>,
     /// Tasks whose lack of an eligible source has already been reported. A kept task is retried
     /// on every drain, so without this the same stall is restated for as long as it lasts: one
     /// document with one checked source wrote a line a second for half an hour. Emptied whenever
@@ -4225,6 +4314,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // replaces it with the transferred one via `adopt_routing_state`.
         let mut file_wrap_key = Zeroizing::new([0u8; 32]);
         rng.fill_bytes(file_wrap_key.as_mut());
+        // Per-runtime, never persisted: a restart must invalidate the resume positions other
+        // members are holding against this node's log rather than have them silently skip.
+        let mut provider = [0u8; 16];
+        rng.fill_bytes(&mut provider);
         let clock: Arc<dyn Clock + Send> = Arc::from(clock);
         let mut this = Self {
             transport: Arc::new(transport),
@@ -4289,6 +4382,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             catchup_cooldowns: HashMap::new(),
             catchup_continuations: HashMap::new(),
             catchup_sources_checked: HashMap::new(),
+            catchup_provider: provider,
+            catchup_cursors: HashMap::new(),
             catchup_stall_reported: HashSet::new(),
             pending: None,
             welcome_outbox: Vec::new(),
@@ -10868,9 +10963,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         doc_id: u128,
         heads: &[[u8; 32]],
     ) -> Result<Option<usize>, SyncError> {
+        // Replay only this peer's own continuation. A position from anywhere else names an index
+        // in a different log, and the serving side rejects a foreign one anyway; not sending it is
+        // the half of that fence this node owns.
+        let cursor = self.catchup_cursors.get(&(doc_type, doc_id, peer)).copied();
         let (req, req_auth) = self.build_authed_request(
             KIND_CATCHUP_SINCE,
-            &encode_catchup_since_req(doc_type, doc_id, heads),
+            &encode_catchup_since_req(doc_type, doc_id, heads, cursor.as_ref()),
         )?;
         tracing::debug!(
             ?doc_type,
@@ -10933,8 +11032,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // A signed answer with no marker at all says nothing; treat it as unusable.
             None => Ok(None),
             Some((&CATCHUP_SINCE_UNDERSTOOD, bundle)) => {
-                // It is finished with us, so an unbroken run of "ask me again" has ended.
+                // It is finished with us, so an unbroken run of "ask me again" has ended, and the
+                // walk it was continuing is over. A stale position kept here would make the next
+                // pass resume past history this peer accepts after now.
                 self.clear_catchup_stall(peer, doc_type, doc_id);
+                self.catchup_cursors.remove(&(doc_type, doc_id, peer));
                 let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
                 // "That is everything I have" is only a completion of the gap when it comes from
                 // the peer that said there was more of it. Peer selection is group-wide, so the
@@ -10997,12 +11099,41 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // aside, so the next drain asks somebody else.
                 tracing::debug!(?doc_type, doc_id, ?peer, "peer does not hold this document");
                 self.clear_catchup_stall(peer, doc_type, doc_id);
+                self.catchup_cursors.remove(&(doc_type, doc_id, peer));
                 self.note_source_checked(peer, doc_type, doc_id);
                 self.cool_off_catchup_peer(peer, doc_type, doc_id);
                 self.enqueue_doc_catchup(doc_type, doc_id);
                 Ok(Some(0))
             }
-            Some((&CATCHUP_SINCE_MORE, bundle)) => {
+            // A paging peer puts its resume point first. Retaining it is what makes a round that
+            // applies nothing still be progress: the next request continues past what was just
+            // offered instead of asking for the same prefix again. `CATCHUP_SINCE_MORE` is the
+            // older shape, which recomputes from the frontier every time and so can repeat itself
+            // indefinitely; that is the behaviour the non-progress bound exists for.
+            Some((marker @ (&CATCHUP_SINCE_MORE | &CATCHUP_SINCE_PAGE), rest)) => {
+                let (advanced, bundle) = if *marker == CATCHUP_SINCE_PAGE {
+                    let Some(cursor) =
+                        CatchupCursor::decode(rest.get(..CATCHUP_CURSOR_BYTES).unwrap_or_default())
+                    else {
+                        tracing::warn!(?peer, "paged catch-up answer without a continuation");
+                        return Err(SyncError::Malformed);
+                    };
+                    let bundle = &rest[CATCHUP_CURSOR_BYTES..];
+                    let previous = self
+                        .catchup_cursors
+                        .insert((doc_type, doc_id, peer), cursor);
+                    // Progress means the walk moved AND the peer paid for it. A conforming pager
+                    // cannot produce an empty page alongside "there is more", because it only
+                    // stops early when the budget is full: a run of operations this node already
+                    // holds is skipped inside one page, not spread over empty ones. So an empty
+                    // page here is a peer minting positions for nothing, which is precisely what
+                    // the non-progress bound is for and must keep counting.
+                    let advanced = bundle.len() > 4
+                        && previous.is_none_or(|old| cursor.position > old.position);
+                    (advanced, bundle)
+                } else {
+                    (false, rest)
+                };
                 let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
                 // The peer said it withheld some, so ask again whatever this round applied. A
                 // chunk can legitimately apply nothing (ops already held, or one op too large to
@@ -11023,6 +11154,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // A round that moved us also starts the sweep again: every other source's
                     // last answer was about a frontier this node has now passed.
                     self.clear_sources_checked(doc_type, doc_id);
+                } else if advanced {
+                    // Nothing landed, and the round was still real work: a page of operations this
+                    // node already holds but could not name, which is what a frontier wider than
+                    // its cap produces. Counting these was the defect. The walk is consuming the
+                    // peer's log and will reach the end of it, so an unbroken run of them is
+                    // finite where the recomputing path's was not.
+                    //
+                    // Deliberately not cleared, and deliberately not treated as a continuation
+                    // claim: the peer chooses its own positions, so this is progress worth not
+                    // punishing rather than evidence worth granting authority on.
                 } else {
                     self.note_nonprogressing_catchup(peer, doc_type, doc_id);
                 }
@@ -12226,7 +12367,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     fn serve_catchup_since(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
         let (inner, req_pubkey, req_auth) =
             self.authenticate_request(KIND_CATCHUP_SINCE, data, from)?;
-        let (doc_type, doc_id, heads) = decode_catchup_since_req(&inner).ok()?;
+        let (doc_type, doc_id, heads, cursor) = decode_catchup_since_req(&inner).ok()?;
         // A document this peer does not hold is answered, not left silent. An empty response is
         // the wire's way of saying "I do not know this request kind", and the requester's only
         // sane reading of that is to fall back to the whole-history grammar; so staying silent
@@ -12243,11 +12384,35 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             answer.extend_from_slice(&empty);
             return self.sign_doc_catchup_answer(&req_pubkey, &req_auth, answer);
         }
+        // A cursor this node did not mint (a different peer's, or its own from before a restart)
+        // names a position in somebody else's log. Starting over is the only safe reading: acting
+        // on it would skip history the requester would then never be offered again.
+        let resume = match cursor.flatten() {
+            Some(cursor) if cursor.provider == self.catchup_provider => cursor.position as usize,
+            Some(_) => {
+                tracing::debug!(
+                    ?doc_type,
+                    doc_id,
+                    ?from,
+                    "catch-up continuation was not minted here; restarting the walk"
+                );
+                0
+            }
+            None => 0,
+        };
+        let provider = self.catchup_provider;
         let doc = self.docs.get_mut(&(doc_type, doc_id))?;
-        match doc.export_catchup_since(&heads, &self.group, &self.device, &mut self.rng) {
-            Ok(bundle) => {
+        match doc.export_catchup_page(
+            &heads,
+            resume,
+            MAX_CATCHUP_CHUNK.min(MAX_SIGNED_CATCHUP_BUNDLE),
+            &self.group,
+            &self.device,
+            &mut self.rng,
+        ) {
+            Ok((page, next)) => {
                 let (prefix, served) =
-                    match size_capped_ops(&bundle, MAX_CATCHUP_CHUNK, MAX_SIGNED_CATCHUP_BUNDLE) {
+                    match size_capped_ops(&page, MAX_CATCHUP_CHUNK, MAX_SIGNED_CATCHUP_BUNDLE) {
                         Ok(capped) => capped,
                         Err(e) => {
                             // Refusing is the honest answer: claiming to be done here would
@@ -12256,28 +12421,40 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                             return None;
                         }
                     };
-                let more = served < bundle.len();
-                if more {
-                    tracing::debug!(
-                        served,
-                        total = bundle.len(),
-                        "incremental doc catch-up truncated; the requester is told to ask again"
-                    );
-                }
+                // The pager sized the page to the same budget, so a short encode here would mean
+                // the two disagreed. Resuming at the operation actually served keeps the reply
+                // truthful either way rather than skipping what was dropped.
+                let next = if served < page.len() {
+                    Some(resume + served)
+                } else {
+                    next
+                };
                 tracing::debug!(
                     ?doc_type,
                     doc_id,
                     ops = served,
                     heads = heads.len(),
-                    more,
+                    resume,
+                    next,
                     "serving incremental doc catch-up"
                 );
-                let mut answer = Vec::with_capacity(prefix.len() + 1);
-                answer.push(if more {
-                    CATCHUP_SINCE_MORE
-                } else {
-                    CATCHUP_SINCE_UNDERSTOOD
-                });
+                let mut answer = Vec::with_capacity(prefix.len() + 1 + CATCHUP_CURSOR_BYTES);
+                match next {
+                    // Only a paging-capable requester is sent a continuation; an older build gets
+                    // exactly the frame it has always got, and re-asks from its frontier.
+                    Some(position) if cursor.is_some() => {
+                        answer.push(CATCHUP_SINCE_PAGE);
+                        answer.extend_from_slice(
+                            &CatchupCursor {
+                                provider,
+                                position: position as u32,
+                            }
+                            .encode(),
+                        );
+                    }
+                    Some(_) => answer.push(CATCHUP_SINCE_MORE),
+                    None => answer.push(CATCHUP_SINCE_UNDERSTOOD),
+                }
                 answer.extend_from_slice(&prefix);
                 self.sign_doc_catchup_answer(&req_pubkey, &req_auth, answer)
             }
@@ -14401,7 +14578,7 @@ mod tests {
                 head
             })
             .collect();
-        let inner = encode_catchup_since_req(DocType::Channel, 1, &heads);
+        let inner = encode_catchup_since_req(DocType::Channel, 1, &heads, None);
         // The signed envelope this travels inside: kind byte, requester pubkey, timestamp, nonce,
         // epoch and signature, plus their framing. Generous, so the assertion is about the
         // frontier rather than about guessing the envelope to the byte.
@@ -14411,7 +14588,7 @@ mod tests {
             "a full frontier ({} heads, {framed} framed bytes) must fit the control request bound",
             heads.len()
         );
-        let (doc_type, doc_id, decoded) = decode_catchup_since_req(&inner).unwrap();
+        let (doc_type, doc_id, decoded, _) = decode_catchup_since_req(&inner).unwrap();
         assert_eq!((doc_type, doc_id), (DocType::Channel, 1));
         assert_eq!(decoded, heads, "and survive the round trip intact");
 
@@ -14419,7 +14596,12 @@ mod tests {
         let mut too_many = heads.clone();
         too_many.push([0xFF; 32]);
         assert!(matches!(
-            decode_catchup_since_req(&encode_catchup_since_req(DocType::Channel, 1, &too_many)),
+            decode_catchup_since_req(&encode_catchup_since_req(
+                DocType::Channel,
+                1,
+                &too_many,
+                None
+            )),
             Err(SyncError::Malformed)
         ));
     }
@@ -17005,6 +17187,260 @@ mod tests {
         }
     }
 
+    /// The continuation field is additive in both directions.
+    ///
+    /// A build that predates paging sends no field at all, and that frame has to keep decoding or
+    /// a mixed group stops synchronizing entirely. A paging requester with no walk in progress
+    /// sends an empty one, which is what tells the serving peer it may answer with a cursor.
+    #[test]
+    fn a_catch_up_continuation_is_optional_and_round_trips() {
+        let heads = [[7u8; 32]];
+
+        let mut legacy = Encoder::new();
+        legacy.put_u16(DocType::Channel.tag());
+        legacy.put_u128(9);
+        legacy.put_u32(1);
+        legacy.put_bytes(&heads[0]).unwrap();
+        let (doc_type, doc_id, decoded, cursor) =
+            decode_catchup_since_req(&legacy.finish()).unwrap();
+        assert_eq!((doc_type, doc_id), (DocType::Channel, 9));
+        assert_eq!(decoded, heads);
+        assert_eq!(cursor, None, "no field at all is a peer that cannot page");
+
+        let fresh = encode_catchup_since_req(DocType::Channel, 9, &heads, None);
+        assert_eq!(
+            decode_catchup_since_req(&fresh).unwrap().3,
+            Some(None),
+            "a paging requester starting a walk says so"
+        );
+
+        let cursor = CatchupCursor {
+            provider: [3; 16],
+            position: 41,
+        };
+        let resumed = encode_catchup_since_req(DocType::Channel, 9, &heads, Some(&cursor));
+        assert_eq!(
+            decode_catchup_since_req(&resumed).unwrap().3,
+            Some(Some(cursor)),
+            "and one continuing a walk replays it exactly"
+        );
+
+        // A short continuation is refused rather than read as a smaller position, which would
+        // silently resume somewhere nobody chose.
+        let mut truncated = Encoder::new();
+        truncated.put_u16(DocType::Channel.tag());
+        truncated.put_u128(9);
+        truncated.put_u32(0);
+        truncated.put_u8(1);
+        truncated
+            .put_bytes(&[0u8; CATCHUP_CURSOR_BYTES - 1])
+            .unwrap();
+        assert!(matches!(
+            decode_catchup_since_req(&truncated.finish()),
+            Err(SyncError::Malformed)
+        ));
+    }
+
+    /// A resume position is only meaningful against the log that issued it.
+    ///
+    /// The same operation sits at a different index on every member, so honouring a cursor minted
+    /// elsewhere would skip history the requester would then never be offered again. The serving
+    /// side recognises a foreign provider stamp and starts the walk over.
+    #[tokio::test]
+    async fn a_continuation_minted_elsewhere_restarts_the_walk() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        alice.open_channel(DocType::Channel, 86).await.unwrap();
+
+        // More than one chunk, so every answer below is a page with a continuation rather than a
+        // completed exchange.
+        let body = "y".repeat(16_384);
+        for i in 0..40 {
+            alice
+                .post(DocType::Channel, 86, |doc| {
+                    doc.put(ROOT, format!("m{i}"), body.as_str())
+                })
+                .await
+                .unwrap();
+        }
+
+        // What the serving side answers a requester that names no continuation.
+        let position_for =
+            |alice: &mut Member, bob: &mut Member, cursor: Option<&CatchupCursor>| {
+                let (req, _) = bob
+                    .build_authed_request(
+                        KIND_CATCHUP_SINCE,
+                        &encode_catchup_since_req(DocType::Channel, 86, &[], cursor),
+                    )
+                    .unwrap();
+                let resp = alice
+                    .serve_catchup_since(bob_peer, &req[1..])
+                    .expect("a member serves a member");
+                let (_, _, answer) = decode_signed_commit_resp(&resp).unwrap();
+                assert_eq!(answer[0], CATCHUP_SINCE_PAGE, "there is more to come");
+                CatchupCursor::decode(&answer[1..1 + CATCHUP_CURSOR_BYTES]).expect("a continuation")
+            };
+
+        let first = position_for(&mut alice, &mut bob, None);
+        assert_eq!(
+            first.provider, alice.catchup_provider,
+            "the continuation is stamped with the log that produced it"
+        );
+        assert!(first.position > 0, "the first page consumed some log");
+
+        // Alice's own continuation moves the walk on, which is what makes the next assertion mean
+        // something: positions are honoured when they are hers.
+        let second = position_for(&mut alice, &mut bob, Some(&first));
+        assert!(
+            second.position > first.position,
+            "her own continuation resumes rather than restarting"
+        );
+
+        // The same position under somebody else's provider stamp is refused, and the walk begins
+        // again from the top rather than skipping to that index.
+        let foreign = CatchupCursor {
+            provider: [0xAB; 16],
+            position: second.position,
+        };
+        let restarted = position_for(&mut alice, &mut bob, Some(&foreign));
+        assert_eq!(
+            restarted.position, first.position,
+            "a continuation from another log is ignored, not obeyed"
+        );
+    }
+
+    /// The regression guard for the composition in `docs/MESSAGE-FLOW.md` section 8.
+    ///
+    /// A page of operations the requester already holds applies nothing, and before the cursor
+    /// existed that was indistinguishable from a peer answering uselessly on a timer: it counted
+    /// against the source, and eight of them deprioritised an honest member. With a continuation
+    /// the same round is real progress, because the walk consumed log and cannot repeat itself.
+    /// The old shape, which recomputes the difference every time and genuinely can repeat, must
+    /// still be counted.
+    #[tokio::test]
+    async fn a_page_of_pure_duplicates_is_progress_but_an_unpaged_repeat_is_not() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        alice.open_channel(DocType::Channel, 87).await.unwrap();
+        bob.open_channel(DocType::Channel, 87).await.unwrap();
+        // Bob authors it, so he holds it without a delivery step. Handing it to him with
+        // `run_once` would also drain his catch-up queue, which is a request nobody in this
+        // fixture answers and an injected clock never times out.
+        bob.post(DocType::Channel, 87, |doc| doc.put(ROOT, "only", "op"))
+            .await
+            .unwrap();
+        assert_eq!(bob.doc(DocType::Channel, 87).unwrap().op_count(), 1);
+
+        // That same operation, offered back to him: a page that applies nothing, which is exactly
+        // what a frontier too narrow to name everything produces. The channel key is derived from
+        // the group rather than the author, so a bundle sealed on either side opens on the other.
+        let duplicate = {
+            let bundle = bob
+                .docs
+                .get_mut(&(DocType::Channel, 87))
+                .unwrap()
+                .export_catchup_since(&[], &bob.group, &bob.device, &mut bob.rng)
+                .unwrap();
+            assert_eq!(bundle.len(), 1);
+            size_capped_ops(&bundle, MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE)
+                .unwrap()
+                .0
+        };
+
+        /// Drive one exchange in which Alice answers with exactly `body`.
+        ///
+        /// Alice's stream carries whatever else the fixture left on it, so this drains to the
+        /// catch-up request rather than assuming it is first, which is what a serve loop does
+        /// anyway.
+        async fn answer(
+            alice: &mut Member,
+            bob: &mut Member,
+            alice_peer: PeerId,
+            bob_peer: PeerId,
+            body: Vec<u8>,
+        ) {
+            let (_, ()) = tokio::join!(
+                bob.request_catchup(alice_peer, DocType::Channel, 87),
+                async {
+                    let mut body = Some(body);
+                    for _ in 0..16 {
+                        match alice.transport.next_event().await {
+                            Some(TransportEvent::Request {
+                                data, responder, ..
+                            }) if data.first() == Some(&KIND_CATCHUP_SINCE) => {
+                                let body = body.take().expect("answered once");
+                                responder.respond(Bytes::from(signed_catchup_answer(
+                                    alice, bob_peer, &data, body,
+                                )));
+                                return;
+                            }
+                            Some(_) => continue,
+                            None => panic!("the transport closed before the request arrived"),
+                        }
+                    }
+                    panic!("the catch-up request never arrived");
+                }
+            );
+        }
+
+        // Three paged rounds, each carrying only what Bob has and each naming a further position.
+        for round in 1..=3u32 {
+            let mut page = vec![CATCHUP_SINCE_PAGE];
+            page.extend_from_slice(
+                &CatchupCursor {
+                    provider: [9; 16],
+                    position: round,
+                }
+                .encode(),
+            );
+            page.extend_from_slice(&duplicate);
+            answer(&mut alice, &mut bob, alice_peer, bob_peer, page).await;
+            assert_eq!(
+                bob.catchup_stalls
+                    .get(&(DocType::Channel, 87, alice_peer))
+                    .copied(),
+                None,
+                "a page that advances the walk is progress, not a strike against the source"
+            );
+        }
+        assert_eq!(
+            bob.catchup_cursors
+                .get(&(DocType::Channel, 87, alice_peer))
+                .map(|c| c.position),
+            Some(3),
+            "and the requester replays the newest position it was given"
+        );
+
+        // The same bundle without a continuation is the old shape, which can be repeated forever,
+        // so it is still counted.
+        let mut unpaged = vec![CATCHUP_SINCE_MORE];
+        unpaged.extend_from_slice(&duplicate);
+        answer(&mut alice, &mut bob, alice_peer, bob_peer, unpaged).await;
+        assert_eq!(
+            bob.catchup_stalls
+                .get(&(DocType::Channel, 87, alice_peer))
+                .copied(),
+            Some(1),
+            "a repeat with no way to advance is exactly what the bound is for"
+        );
+    }
+
     /// One operation can be larger than a whole catch-up chunk, and it must still be delivered.
     ///
     /// A signed op is capped at 256 KiB before sealing, and sealing pads to the next power of two
@@ -18393,7 +18829,7 @@ mod tests {
         let (req, _auth) = bob
             .build_authed_request(
                 KIND_CATCHUP_SINCE,
-                &encode_catchup_since_req(DocType::Channel, 103, &[]),
+                &encode_catchup_since_req(DocType::Channel, 103, &[], None),
             )
             .unwrap();
 
@@ -19632,12 +20068,14 @@ mod tests {
         let request_epoch = bob.group.epoch();
         let request_ts = 1_000;
 
-        // `ChannelSync::new` draws the first 32 bytes for the file-wrap key. Reproduce that draw
-        // through the injected deterministic RNG, then bind Alice's reply to the exact nonce the
-        // following catch-up request will use.
+        // `ChannelSync::new` draws 32 bytes for the file-wrap key and then 16 for its catch-up
+        // provider id. Reproduce both draws through the injected deterministic RNG, then bind
+        // Alice's reply to the exact nonce the following catch-up request will use.
         let mut expected_rng = ChaCha20Rng::seed_from_u64(0x0BAD_51A6);
         let mut discarded_file_key = [0u8; 32];
         expected_rng.fill_bytes(&mut discarded_file_key);
+        let mut discarded_provider = [0u8; 16];
+        expected_rng.fill_bytes(&mut discarded_provider);
         let mut request_nonce = [0u8; 16];
         expected_rng.fill_bytes(&mut request_nonce);
 

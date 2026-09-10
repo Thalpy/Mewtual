@@ -17,6 +17,7 @@ use automerge::{ActorId, AutoCommit, Change, ChangeHash, ReadDoc, ScalarValue, V
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_rt::CryptoRngCore;
+use catcoms_storage::pad;
 use catcoms_wire::{Decoder, DocType, Encoder};
 
 use crate::epoch::{
@@ -1030,19 +1031,7 @@ impl EncryptedDoc {
         device: &MlsDevice,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Vec<SealedOp>, ReplError> {
-        let mut have: HashSet<ChangeHash> = HashSet::new();
-        let mut stack: Vec<ChangeHash> = have_heads.iter().copied().map(ChangeHash).collect();
-        while let Some(hash) = stack.pop() {
-            if self.doc.get_change_by_hash(&hash).is_none() || !have.insert(hash) {
-                continue;
-            }
-            let deps = self
-                .doc
-                .get_change_by_hash(&hash)
-                .map(|change| change.deps().to_vec())
-                .unwrap_or_default();
-            stack.extend(deps);
-        }
+        let have = self.held_closure(have_heads);
         let mut out = Vec::new();
         for op in &self.log {
             let carried = Change::from_bytes(op.delta.clone()).ok().map(|c| c.hash());
@@ -1052,6 +1041,80 @@ impl EncryptedDoc {
             out.push(SealedOp::seal(op, group, device, rng)?);
         }
         Ok(out)
+    }
+
+    /// [`Self::export_catchup_since`], resumable and bounded: begin at `from` in this node's log,
+    /// take sealed operations until `budget` bytes are used, and report where to resume.
+    ///
+    /// The difference between this and capping the output of `export_catchup_since` is the whole
+    /// point, and it is what makes a wide frontier survivable. That function recomputes the entire
+    /// difference every call, so a caller that can only send a prefix of it sends the *same*
+    /// prefix every time. When the frontier is truncated, that prefix is history the requester
+    /// already holds, and the operations it actually needs sit behind a wall of duplicates it can
+    /// never get past. Resuming by position means every exchange consumes log, so an all-duplicate
+    /// page is still progress and the wall is finite.
+    ///
+    /// The log is append-only, so a position stays meaningful as the document grows. It is
+    /// meaningful only against **this** node's log, though: the same operation sits at different
+    /// positions on different members. Callers must not replay a position to a peer that did not
+    /// issue it; the sync layer binds each one to the peer and the runtime that produced it.
+    ///
+    /// A page may legitimately be empty while still returning a resume point, because a run of
+    /// operations the requester already holds is skipped rather than sent.
+    pub fn export_catchup_page(
+        &mut self,
+        have_heads: &[[u8; 32]],
+        from: usize,
+        budget: usize,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(Vec<SealedOp>, Option<usize>), ReplError> {
+        let have = self.held_closure(have_heads);
+        let mut position = from.min(self.log.len());
+        let mut out = Vec::new();
+        let mut used = 0usize;
+        while position < self.log.len() {
+            let op = &self.log[position];
+            let carried = Change::from_bytes(op.delta.clone()).ok().map(|c| c.hash());
+            if carried.is_some_and(|hash| have.contains(&hash)) {
+                position += 1;
+                continue;
+            }
+            // The sealed size is deterministic from the unsealed one, so the budget is applied
+            // before paying for the seal rather than after. Same accounting as the registry pager
+            // and as the sync layer's own `size_capped_ops`: the padded body plus a 58-byte
+            // envelope, the 4-byte pad footer, the 16-byte tag and 4 bytes of list framing.
+            let bytes = pad::padded_len(op.encode().len(), pad::OP_PAD_FLOOR, pad::OP_PAD_CEILING)
+                .saturating_add(82);
+            if !out.is_empty() && used.saturating_add(bytes) > budget {
+                break;
+            }
+            out.push(SealedOp::seal(op, group, device, rng)?);
+            used = used.saturating_add(bytes);
+            position += 1;
+        }
+        let next = (position < self.log.len()).then_some(position);
+        Ok((out, next))
+    }
+
+    /// Every change at or behind `heads` that this node can actually resolve.
+    ///
+    /// A head this node has never seen selects nothing: it is a change the *requester* has and
+    /// this node does not, so nothing can be excluded on its account and the requester keeps it.
+    fn held_closure(&self, have_heads: &[[u8; 32]]) -> HashSet<ChangeHash> {
+        let mut have: HashSet<ChangeHash> = HashSet::new();
+        let mut stack: Vec<ChangeHash> = have_heads.iter().copied().map(ChangeHash).collect();
+        while let Some(hash) = stack.pop() {
+            let Some(change) = self.doc.get_change_by_hash(&hash) else {
+                continue;
+            };
+            if !have.insert(hash) {
+                continue;
+            }
+            stack.extend(change.deps().iter().copied());
+        }
+        have
     }
 
     /// Apply a catch-up bundle produced by [`EncryptedDoc::export_catchup`].
@@ -1648,6 +1711,107 @@ mod tests {
             requester.import_catchup(&bundle, &group, &author).unwrap(),
             1,
             "the whole bundle, and only the whole bundle, converges"
+        );
+    }
+
+    /// The fix for the wall above: page by position instead of recomputing the difference.
+    ///
+    /// Same fixture, same truncated frontier, and a budget deliberately far too small to clear the
+    /// duplicate block in one answer, which is precisely the condition under which
+    /// `export_catchup_since` can never converge. Because each page resumes where the last one
+    /// stopped, the duplicates are consumed rather than re-offered, and the operation behind them
+    /// is reached in a bounded number of rounds.
+    #[test]
+    fn paging_by_position_gets_past_the_wall_that_defeats_a_recomputed_difference() {
+        const BRANCHES: usize = 80;
+        let author = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&author).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(13);
+
+        let mut ancestor = EncryptedDoc::new(DocType::Channel, 7, &author.device_id());
+        ancestor
+            .edit(&author, &group, &mut rng, |d| d.put(ROOT, "seed", 0u64))
+            .unwrap();
+        let seed = ancestor.export_catchup(&group, &author, &mut rng).unwrap();
+
+        let mut every_op = seed.clone();
+        for i in 0..BRANCHES {
+            let actor = DeviceId::from_public_key_bytes(&[(i as u8).wrapping_add(1); 32]);
+            let mut branch = EncryptedDoc::new(DocType::Channel, 7, &actor);
+            branch.import_catchup(&seed, &group, &author).unwrap();
+            branch
+                .edit(&author, &group, &mut rng, |d| {
+                    d.put(ROOT, format!("k{i}"), i as u64)
+                })
+                .unwrap();
+            let ops = branch.export_catchup(&group, &author, &mut rng).unwrap();
+            every_op.push(ops.last().expect("the branch's own op").clone());
+        }
+
+        let mut requester = EncryptedDoc::new(DocType::Channel, 7, &author.device_id());
+        requester
+            .import_catchup(&every_op, &group, &author)
+            .unwrap();
+        let mut server = EncryptedDoc::new(
+            DocType::Channel,
+            7,
+            &DeviceId::from_public_key_bytes(&[0xCC; 32]),
+        );
+        server.import_catchup(&every_op, &group, &author).unwrap();
+        server
+            .edit(&author, &group, &mut rng, |d| {
+                d.put(ROOT, "the_message_that_matters", "here")
+            })
+            .unwrap();
+
+        let frontier = requester.sync_frontier(64);
+        assert_eq!(frontier.len(), 64, "the same truncated frontier as above");
+
+        // One operation per page: `budget` is smaller than any sealed operation, and the pager
+        // always takes at least one so it can never stall on an oversized entry.
+        let mut position = 0usize;
+        let mut applied = 0usize;
+        let mut rounds = 0usize;
+        let mut first_page_applied = None;
+        loop {
+            let (page, next) = server
+                .export_catchup_page(&frontier, position, 1, &group, &author, &mut rng)
+                .unwrap();
+            let landed = requester.import_catchup(&page, &group, &author).unwrap();
+            first_page_applied.get_or_insert(landed);
+            applied += landed;
+            rounds += 1;
+            assert!(rounds <= BRANCHES + 2, "paging must terminate");
+            match next {
+                Some(resume) => {
+                    assert!(resume > position, "every page consumes log");
+                    position = resume;
+                }
+                None => break,
+            }
+        }
+
+        // The first page is pure duplicate, which is exactly the round that defeats the
+        // recomputing path. Here it is progress anyway, because the position moved.
+        assert_eq!(
+            first_page_applied,
+            Some(0),
+            "the wall is still in front, it is just no longer infinite"
+        );
+        assert_eq!(applied, 1, "and the operation behind it arrives");
+        assert!(
+            requester
+                .doc()
+                .get(ROOT, "the_message_that_matters")
+                .unwrap()
+                .is_some(),
+            "the requester converged"
+        );
+        assert_eq!(
+            rounds,
+            BRANCHES - 64 + 1,
+            "one round per operation offered: sixteen duplicates, then the one that matters, \
+             whose page also reports the end because it exhausts the log"
         );
     }
 }
