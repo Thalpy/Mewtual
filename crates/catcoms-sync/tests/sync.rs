@@ -1455,6 +1455,20 @@ async fn relocate(
     moved
 }
 
+/// One catch-up exchange: what the requester applied from a single round.
+async fn sync_round(
+    requester: &mut ChannelSync<MemNetwork, ChaCha20Rng>,
+    server: &mut ChannelSync<MemNetwork, ChaCha20Rng>,
+    server_peer: u64,
+) -> usize {
+    let (applied, served) = tokio::join!(
+        requester.request_catchup(PeerId::from_u64(server_peer), DocType::Channel, CHANNEL),
+        server.run_once(),
+    );
+    assert!(served.expect("the serving transport stays open"));
+    applied.expect("catch-up")
+}
+
 /// Pull everything `server` holds that `requester` does not, driving both sides until the
 /// exchange stops yielding. Returns the total applied.
 async fn sync_from(
@@ -1463,13 +1477,8 @@ async fn sync_from(
     server_peer: u64,
 ) -> usize {
     let mut total = 0;
-    for _ in 0..8 {
-        let (applied, served) = tokio::join!(
-            requester.request_catchup(PeerId::from_u64(server_peer), DocType::Channel, CHANNEL),
-            server.run_once(),
-        );
-        assert!(served.expect("the serving transport stays open"));
-        let applied = applied.expect("catch-up");
+    for _ in 0..64 {
+        let applied = sync_round(requester, server, server_peer).await;
         total += applied;
         if applied == 0 {
             break;
@@ -1650,4 +1659,112 @@ async fn three_micelles_heal_in_a_chain_and_converge_without_their_authors() {
     }
     assert_eq!(heads(&b), heads(&c), "B and C agree on the frontier");
     assert_eq!(heads(&c), heads(&e), "C and E agree on the frontier");
+}
+
+/// The heal interrupted partway through, with a write landing during the reconciliation.
+///
+/// The chained test above heals over links that stay up. Real ones do not: a bridge peer meets
+/// another, gets some of the way through a chunked exchange, loses the link, and both sides carry
+/// on writing before it comes back. This puts requeue, deduplication, the paging continuation, the
+/// completion sweep's version reset and concurrent-head preservation in one scenario.
+///
+/// It also covers the paging cursor's deliberate impermanence. A resume position is bound to the
+/// runtime that issued it, so the reconnect below cannot use the one the interrupted walk was
+/// holding; the walk has to complete anyway, from a frontier that now describes a partially
+/// applied history.
+#[tokio::test]
+async fn a_heal_interrupted_midway_resumes_and_keeps_what_was_written_during_it() {
+    catcoms_log::init_test();
+    let clock = ManualClock::new(1_000);
+
+    let hub0 = Hub::new();
+    let (mut syncs, _ids) = build_members(&hub0, &clock, 2).await;
+    for s in syncs.iter_mut() {
+        s.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    }
+
+    // B writes a history comfortably larger than one catch-up chunk, so the exchange below has to
+    // page and can therefore be interrupted in the middle of one.
+    let body = "z".repeat(16_384);
+    const POSTS: usize = 40;
+    for i in 0..POSTS {
+        syncs[0]
+            .post(DocType::Channel, CHANNEL, |d| {
+                d.put(ROOT, format!("b{i}"), body.as_str())
+            })
+            .await
+            .unwrap();
+    }
+
+    // C never consumed the live gossip, and moving it to a fresh hub discards the queue, which is
+    // the state a member is actually in after being away: the history exists and it has none of
+    // it. Both land on one hub so the exchange can begin.
+    let hub_link = Hub::new();
+    let mut b = relocate(&mut syncs[0], &hub_link, P_B, &clock, 501).await;
+    let mut c = relocate(&mut syncs[1], &hub_link, P_C, &clock, 502).await;
+    drop(syncs);
+    assert!(held(&c).is_empty(), "C starts with none of it");
+
+    // One round, and only one: the link drops with the walk unfinished.
+    let first = sync_round(&mut c, &mut b, P_B).await;
+    assert!(first > 0, "the first round delivered something");
+    assert!(
+        first < POSTS,
+        "and not all of it, or there is no interruption to test"
+    );
+    let midway = ops(&c);
+
+    // The link is gone. Neither is registered on the other's hub, so nothing can pass between
+    // them, and both keep working.
+    let hub_b = Hub::new();
+    let hub_c = Hub::new();
+    let mut b = relocate(&mut b, &hub_b, P_B, &clock, 503).await;
+    let mut c = relocate(&mut c, &hub_c, P_C, &clock, 504).await;
+    assert_eq!(ops(&c), midway, "the partial history survived the break");
+
+    c.post(DocType::Channel, CHANNEL, |d| {
+        d.put(ROOT, "written_during_the_heal", "yes")
+    })
+    .await
+    .unwrap();
+    b.post(DocType::Channel, CHANNEL, |d| {
+        d.put(ROOT, "written_on_the_other_side", "yes")
+    })
+    .await
+    .unwrap();
+
+    // Back together, on a hub neither has used, so the interrupted walk's resume position is
+    // meaningless here and the exchange has to stand on its own.
+    let hub_back = Hub::new();
+    let mut b = relocate(&mut b, &hub_back, P_B, &clock, 505).await;
+    let mut c = relocate(&mut c, &hub_back, P_C, &clock, 506).await;
+    let resumed = sync_from(&mut c, &mut b, P_B).await;
+    assert!(resumed > 0, "the interrupted walk continued");
+    sync_from(&mut b, &mut c, P_C).await;
+
+    // Everything, once each. Convergence alone would not notice a resume that re-offered what the
+    // first round already delivered, because deduplication absorbs it; the operation count is
+    // what would show the log growing past what was actually written.
+    let expected = POSTS + 2;
+    for s in [&b, &c] {
+        assert_eq!(
+            ops(s),
+            expected,
+            "every operation exactly once, with nothing duplicated by the resume"
+        );
+    }
+    for i in 0..POSTS {
+        assert!(
+            held(&c).contains(&format!("b{i}")),
+            "the whole of B's history reached C"
+        );
+    }
+    // The two concurrent writes are the part an interrupted heal is most likely to lose: each was
+    // authored while the other side was unreachable, so they are concurrent branches that the
+    // merge has to keep rather than one overwriting the other.
+    for s in [&b, &c] {
+        assert!(held(s).contains(&"written_during_the_heal".to_string()));
+        assert!(held(s).contains(&"written_on_the_other_side".to_string()));
+    }
+    assert_eq!(heads(&b), heads(&c), "and both agree on the frontier");
 }
