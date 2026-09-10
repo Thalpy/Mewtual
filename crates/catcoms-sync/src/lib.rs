@@ -180,9 +180,22 @@ const KIND_STUDIO_PAGE: u8 = 23;
 const KIND_STUDIO_HEAD: u8 = 24;
 const KIND_STUDIO_SEED: u8 = 25;
 /// Frontier entries one incremental catch-up may name. A document's frontier is one hash per
-/// concurrent writer and normally one or two; this is a bound on the walk a requester can ask a
-/// serving peer to perform, not a limit anyone reaches.
-const MAX_CATCHUP_SINCE_HEADS: usize = 64;
+/// concurrent writer, so it is one or two in ordinary use and as many as the group is wide after
+/// a partition in which everybody wrote.
+///
+/// This is deliberately generous, because the cost it was once thought to bound is not really
+/// there. The serving peer's subtraction walk visits each change at most once (`have` is a set,
+/// and a hash already in it terminates that branch), so it is `O(document)` whether it starts
+/// from two heads or five hundred; naming more of them adds 36 bytes each on the wire and a
+/// handful of misses for hashes the peer cannot resolve. `MAX_CONTROL_REQUEST` still bounds the
+/// frame, and 512 heads sit comfortably inside it.
+///
+/// What the old value of 64 did bound was the requester's ability to describe itself, and a
+/// frontier that cannot say what it holds is not merely incomplete, it is **wrong**: the peer
+/// subtracts less than it should and re-sends history the requester already has. See
+/// `docs/MESSAGE-FLOW.md` section 8 for what that composes into. The paging cursor below is the
+/// actual fix; this value keeps ordinary groups from ever reaching the situation.
+const MAX_CATCHUP_SINCE_HEADS: usize = 512;
 /// Marks a response as coming from a peer that understands [`KIND_CATCHUP_SINCE`], so "you are
 /// already up to date" (a bundle of zero ops) is distinguishable from "I did not understand you"
 /// (an empty response). Everything after it is an ordinary catch-up bundle.
@@ -14373,6 +14386,42 @@ mod tests {
     fn catchup_request_roundtrips_through_codec() {
         let bytes = encode_catchup_req(DocType::Wiki, 99);
         assert_eq!(decode_catchup_req(&bytes).unwrap(), (DocType::Wiki, 99));
+    }
+
+    /// The head cap is only worth raising if a frontier that large still fits the frame it has to
+    /// travel in, and is still accepted at the far end. Both halves matter: a cap the decoder
+    /// refuses, or one that overruns `MAX_CONTROL_REQUEST`, would turn a wide-frontier member into
+    /// a member that cannot catch up at all rather than one that catches up inefficiently.
+    #[test]
+    fn a_maximal_frontier_still_fits_and_is_still_accepted() {
+        let heads: Vec<[u8; 32]> = (0..MAX_CATCHUP_SINCE_HEADS)
+            .map(|i| {
+                let mut head = [0u8; 32];
+                head[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                head
+            })
+            .collect();
+        let inner = encode_catchup_since_req(DocType::Channel, 1, &heads);
+        // The signed envelope this travels inside: kind byte, requester pubkey, timestamp, nonce,
+        // epoch and signature, plus their framing. Generous, so the assertion is about the
+        // frontier rather than about guessing the envelope to the byte.
+        let framed = 1 + inner.len() + 256;
+        assert!(
+            framed < MAX_CONTROL_REQUEST,
+            "a full frontier ({} heads, {framed} framed bytes) must fit the control request bound",
+            heads.len()
+        );
+        let (doc_type, doc_id, decoded) = decode_catchup_since_req(&inner).unwrap();
+        assert_eq!((doc_type, doc_id), (DocType::Channel, 1));
+        assert_eq!(decoded, heads, "and survive the round trip intact");
+
+        // One past the cap is still refused, so raising the value did not remove the bound.
+        let mut too_many = heads.clone();
+        too_many.push([0xFF; 32]);
+        assert!(matches!(
+            decode_catchup_since_req(&encode_catchup_since_req(DocType::Channel, 1, &too_many)),
+            Err(SyncError::Malformed)
+        ));
     }
 
     #[test]
