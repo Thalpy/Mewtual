@@ -364,10 +364,15 @@ apparently-syncing node that will never converge. That is the detectability defe
 fixing regardless of how rare the epoch gap is, because rarity is what makes an undiagnosed state
 expensive.
 
-### P1. Frontier truncation composing with the non-progress bound (was H4). Confirmed by test.
+### P1. Frontier truncation composing with the non-progress bound (was H4). FIXED.
 
-Two tests in `crates/catcoms-replication/src/doc.rs` settle this. The composition is real, and the
-consequence is worse than a deprioritised source: above one chunk it starves the requester.
+Two tests in `crates/catcoms-replication/src/doc.rs` established this, and it has since been fixed
+in two moves: the cap was raised to 512 heads, and `KIND_CATCHUP_SINCE` gained a paging cursor. The
+diagnosis below is kept because it is what the regression tests assert against; see the end of this
+section for what the fix changed.
+
+The composition was real, and the consequence was worse than a deprioritised source: above one
+chunk it starved the requester.
 
 ```
 frontier capped at 64 hashes
@@ -395,6 +400,27 @@ increments and small histories are unaffected. The counter only advances on the
 which needs enough concurrent writers that the cap bites and enough content behind the unnamed
 heads to fill 256 KiB. Rare, but it is a livelock rather than an inefficiency: every source holding
 the same history answers the same way, so no other peer rescues it.
+
+**What the fix changed.**
+
+- `MAX_CATCHUP_SINCE_HEADS` is 512, not 64. The cost this bound was thought to protect turned out
+  not to be there: the subtraction walk visits each change once, so it is `O(document)` from any
+  number of heads, and 512 hashes frame to about 18 KiB against a 64 KiB request bound. This does
+  not remove the failure mode, it moves the threshold past any realistic group.
+- `KIND_CATCHUP_SINCE` carries an optional continuation, and a truncated answer comes back as
+  `CATCHUP_SINCE_PAGE` with a 20-byte cursor naming where in the serving peer's log to resume.
+  `EncryptedDoc::export_catchup_page` walks from that position, so duplicates are consumed rather
+  than re-offered and every exchange is progress at any frontier width. That is the actual fix.
+- The cursor is stamped with a per-runtime provider id. A position means something only against the
+  log that issued it, so one replayed to the wrong peer (or to the same peer after a restart) is
+  recognised as foreign and the walk starts again rather than skipping history. Removing that check
+  makes a foreign cursor skip 14 operations in the regression test.
+- A round that applies nothing but advances the walk no longer counts against the source. A round
+  that repeats with no way to advance still does, because that is the shape the bound is for.
+
+Both halves are additive on the wire. A build that predates paging sends no continuation field, and
+that frame decodes and is answered exactly as before; it is never sent a `CATCHUP_SINCE_PAGE`,
+because only a request carrying the field gets one.
 
 ### P1. Epidemic relay does not extend to the P1 document family (was H2). Traced; scope confirmed.
 
@@ -550,22 +576,27 @@ what recovery to offer is separate.
 `divergent_clocks_converge_and_cannot_park_the_read_boundary` in `crates/catcoms-app`. See section
 8, P3 for the cross-layer contract it turned up.
 
-### 10.5 Decide what to do about the frontier cap (new, follows from 10.2)
+### 10.5 Fix the frontier cap (DONE)
 
-Now that the starvation is demonstrated rather than hypothesised, the fix is a design choice and
-should be made deliberately. The options are not equivalent:
+The chosen fix was the interim cap raise plus a paging cursor, and the shape of the cursor was not
+invented for it: the registry page path (`KIND_REGISTRY_PAGE`) already solved the same problem, and
+`RegistryPageRequest`'s own comment anticipated the wide-frontier case. `RegistryFrontier` clears a
+frontier past its cap rather than truncating it, and `RegistryPageCursor` advances by position past
+what it has already emitted. Section 8, P1 records what was ported and what was left behind.
 
-- **Raise or remove `MAX_CATCHUP_SINCE_HEADS`.** Cheapest, but the cap exists to bound the graph
-  walk a requester can demand of a peer, so this trades a livelock for a work amplification.
-- **Order the server's walk so un-subtractable history does not always come first.** Addresses the
-  starvation directly and leaves both bounds intact.
-- **Let the requester name a compact frontier summary** rather than a truncated hash list, so
-  truncation stops understating what it holds.
-- **Do not count a round as non-progress when the answer was entirely duplicates**, which treats
-  the symptom and leaves the wasted bandwidth.
+Two of the four options considered are recorded as rejected, because the reasoning is worth
+keeping:
 
-Worth noting that `sync_frontier`'s doc comment claims the truncated list is "newest first, so a
-truncated list still describes the most useful part". `AutoCommit::get_heads` returns heads in hash
-order, not recency order, so which heads survive truncation is effectively arbitrary. That does not
-change correctness, but it does undercut the comment's justification and should be corrected
-whichever option is chosen.
+- **Clear a wide frontier to empty instead of truncating it, on its own.** Sound in the registry,
+  where a cursor exists, and strictly worse without one: with nothing subtracted and no way to
+  resume, every round returns the oldest chunk of history forever.
+- **Stop counting all-duplicate rounds as non-progress, on its own.** This was listed as an option
+  in an earlier revision of this document and it is not one. It stops an honest source being
+  deprioritised, but the requester still never receives the operation, so the starvation is
+  untouched. It is now part of the fix rather than the whole of it.
+
+One thing this did not fix. `sync_frontier`'s doc comment claims the truncated list is "newest
+first, so a truncated list still describes the most useful part". `AutoCommit::get_heads` sorts by
+hash (`automerge-0.10.0/src/automerge.rs:1280`), so which heads survive truncation is arbitrary.
+Harmless now that truncation cannot strand anyone, but the comment still overstates what the order
+gives you.
