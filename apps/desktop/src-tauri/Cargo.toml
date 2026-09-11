@@ -41,6 +41,26 @@ netwatch = "=0.18.0"
 n0-watcher = "=1.0.0-rc.0"
 # The bridge emits its own spans now: log_ui carries what the webview saw into the same file.
 tracing = "0.1"
+# Shared images are decoded here rather than by WebView2, so a malicious-but-valid file meets a
+# memory-safe decoder instead of a C one. See `src/media_decode.rs` for what that does and does
+# not buy. `default-features = false` is load-bearing twice over: it drops `rayon` (no decoder
+# thread pool inside the media handler) and it drops every format we do not admit, so the code
+# for dds/exr/hdr/pnm/qoi/tga/farbfeld is not compiled in at all. `avif` and `avif-native` stay
+# off deliberately: the first is an encoder (ravif) and the second is a binding to the C libdav1d,
+# which would put us straight back where we started.
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "gif",
+    "ico",
+    "jpeg",
+    "png",
+    "tiff",
+    "webp",
+] }
+# Used directly for the output side. `image`'s PNG encoder cannot write APNG, and flattening every
+# shared GIF to a still frame is a visible product regression. Same 0.18 line `image` resolves, so
+# this adds a direct path to a crate already in the graph rather than a second copy of it.
+png = "0.18"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 

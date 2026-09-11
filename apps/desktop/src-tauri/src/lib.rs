@@ -55,6 +55,8 @@ use zeroize::Zeroizing;
 
 mod creative_blobs;
 mod errors;
+mod media_decode;
+mod security_intent;
 mod studio;
 mod tasks;
 use errors::{codes, AppError, ErrorCode};
@@ -9787,6 +9789,11 @@ const _: () = assert!(MEDIA_WINDOW_BYTES <= CHUNK_BYTES);
 /// most an ordinary `<img>` may cost at once.
 const MAX_WHOLE_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 
+// The handler must not assemble a body the transcoder will then refuse to look at: a member would
+// see a chip with no reason, and the reason would be two constants disagreeing in different files.
+const _: () =
+    assert!(MAX_WHOLE_IMAGE_BYTES == media_decode::DecodeBounds::DEFAULT.max_input_bytes as u64,);
+
 /// Whether a request must be answered with the whole file rather than one window.
 ///
 /// `<img>` issues a plain GET with no `Range` header, takes the response body as the entire
@@ -9926,6 +9933,50 @@ fn parse_range_header(raw: &str, total: u64) -> Option<(u64, usize)> {
     Some((start, len))
 }
 
+/// At most this many images decode at once.
+///
+/// The bounds in `media_decode` cap one transcode. They say nothing about forty arriving together
+/// when somebody scrolls a gallery, and the decode now happens in our process rather than the
+/// webview's. Two permits keeps the worst-case transient near 400 MB and leaves the blocking pool
+/// with threads for everything else.
+const MEDIA_TRANSCODE_PERMITS: usize = 2;
+
+/// How long the scheme handler waits for a transcode before answering without one.
+///
+/// Naming the limit of this honestly: the decode is not interruptible. If this fires, the response
+/// is a denial but the blocking thread keeps running until the decoder returns on its own. That is
+/// the reason for the permit cap above, not a detail of it.
+const MEDIA_TRANSCODE_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn media_transcode_permits() -> &'static tokio::sync::Semaphore {
+    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| tokio::sync::Semaphore::new(MEDIA_TRANSCODE_PERMITS))
+}
+
+/// Decode a shared image in Rust and return the PNG to serve in its place.
+///
+/// `spawn_blocking` rather than the async pool: a 25 MP photo is hundreds of milliseconds of CPU,
+/// and the runtime thread it would otherwise occupy is the one the server actor and every other
+/// command share. The whole point of moving the decode in-process is undone if it stalls the deck.
+async fn transcoded_image_body(
+    declared: &str,
+    body: Vec<u8>,
+) -> Result<media_decode::DecodedImage, media_decode::DecodeRefusal> {
+    let Ok(_permit) = media_transcode_permits().acquire().await else {
+        return Err(media_decode::DecodeRefusal::DeadlineExceeded);
+    };
+    let declared = declared.to_string();
+    let handle = tauri::async_runtime::spawn_blocking(move || {
+        media_decode::transcode_inline_image(&declared, &body)
+    });
+    match tokio::time::timeout(MEDIA_TRANSCODE_TIMEOUT, handle).await {
+        Ok(Ok(result)) => result,
+        // The module contains its own unwinds, so this is the blocking pool itself failing.
+        Ok(Err(_)) => Err(media_decode::DecodeRefusal::DecoderPanicked),
+        Err(_) => Err(media_decode::DecodeRefusal::DeadlineExceeded),
+    }
+}
+
 /// Serve one media request. Split out from the protocol registration so the whole path is
 /// testable and so every failure returns a status rather than panicking inside the webview's
 /// scheme handler.
@@ -9972,7 +10023,24 @@ async fn serve_media(
 
     // An image asked for without a Range is asked for whole. Served chunk by chunk like every
     // other read, so the actor still returns to its loop between decrypts.
-    if serves_whole_image(&mime, range.is_some(), total) {
+    // Images never reach the platform decoder as the peer wrote them. The bytes are assembled here,
+    // decoded by `media_decode` in Rust, and re-encoded into a PNG this app produced, so what
+    // WebView2 parses is our output. A file that is a valid PNG or JPEG and also exploits the
+    // platform decoder has nothing left to exploit; a file that will not decode gets no body at
+    // all, which the frontend shows as the click-to-load chip rather than as a broken image.
+    //
+    // This does not make media safe. It removes one bug class from still images. Audio and video
+    // still stream to the platform decoders untouched, and denial of service is bounded rather
+    // than eliminated: see `media_decode::DecodeBounds`.
+    if mime.starts_with("image/") {
+        // A Range over an image is meaningless once the body is re-encoded, because the offsets
+        // would address the source file and not the response. Images are whole or nothing, and
+        // `serves_whole_image` is asked with `ranged = false` deliberately: the caller's Range is
+        // ignored rather than honoured, and a file too large to assemble is refused instead of
+        // falling back to a raw window, which is the hole this closes.
+        if !serves_whole_image(&mime, false, total) {
+            return deny(http::StatusCode::PAYLOAD_TOO_LARGE);
+        }
         // Every chunk read below carries the generation guard of its own, and the response is
         // built under the same commit the windowed path holds, so there is nothing extra to take
         // here: the size this is about to allocate is already bounded by `serves_whole_image`.
@@ -9999,21 +10067,37 @@ async fn serve_media(
                 break;
             }
         }
+        let decoded = match transcoded_image_body(&mime, body).await {
+            Ok(decoded) => decoded,
+            Err(refusal) => {
+                // Worth a log line every time. A refusal is either a peer sending something we
+                // will not decode, or a bug in a decoder reached by a peer's file, and the only
+                // moment the distinction exists is here.
+                tracing::warn!(
+                    target: "catcoms_media",
+                    "inline image {cid} ({mime}, {total} bytes) not served: {refusal}"
+                );
+                return deny(http::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            }
+        };
         // The same last authorization point the windowed path holds, for the same reason: no
-        // plaintext crosses the scheme boundary if an explicit lock completed during the reads.
+        // plaintext crosses the scheme boundary if an explicit lock completed during the reads or
+        // during the transcode, which is the longest await on this path.
         let _response_commit = match require_ui_session_generation(state, generation).await {
             Ok(commit) => commit,
             Err(_) => return deny(http::StatusCode::FORBIDDEN),
         };
         return http::Response::builder()
             .status(http::StatusCode::OK)
-            .header("Content-Type", mime)
-            .header("Accept-Ranges", "bytes")
-            .header("Content-Length", body.len().to_string())
+            // Our type, not the peer's. The body is a PNG whatever went in.
+            .header("Content-Type", decoded.mime())
+            // Ranges are not answerable over a re-encoded body, so do not advertise them.
+            .header("Accept-Ranges", "none")
+            .header("Content-Length", decoded.png.len().to_string())
             .header("Cache-Control", "no-store")
             .header("Access-Control-Allow-Origin", "null")
             .header("X-Content-Type-Options", "nosniff")
-            .body(body)
+            .body(decoded.png)
             .expect("response builds");
     }
 
@@ -10261,13 +10345,22 @@ fn safe_media_mime(declared: &str) -> String {
     let base = lowered.split(';').next().unwrap_or("").trim().to_string();
     // Explicit allowlist: notably excludes SVG/XML and playlist formats, which can contain active
     // links or markup and are not inert merely because their top-level type says "image/audio".
+    //
+    // AVIF is absent, and its absence is the one entry here that is about the decoder rather than
+    // about active content. Every image type listed below is decoded in Rust by `media_decode`
+    // before it is served, so the platform never parses what a peer wrote. AVIF has no pure-Rust
+    // decoder available to us: the usual one is a binding to the C libdav1d, which would put an
+    // attacker-chosen file back in front of a C parser and undo the whole arrangement. So an AVIF
+    // is not served inline at all; it stays a file to download and open deliberately.
+    //
+    // `DetectedMediaContainer::Avif` deliberately stays. Recognising AVIF bytes is still wanted so
+    // that a file declaring PNG with AVIF content reads as a mismatch rather than as unrecognised.
     let ok = matches!(
         base.as_str(),
         "image/png"
             | "image/jpeg"
             | "image/gif"
             | "image/webp"
-            | "image/avif"
             | "image/bmp"
             | "image/tiff"
             | "image/x-icon"
@@ -18036,6 +18129,92 @@ mod tests {
         let response = serve_media(&state, &format!("/1/{cid}"), None).await;
         assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
         assert!(response.body().is_empty());
+    }
+
+    /// The proof that the transcode happens on the path that actually serves bytes.
+    ///
+    /// `media_decode` has its own tests for every format and bound. What those cannot show is that
+    /// the scheme handler reaches them: the whole arrangement is worth nothing if the glue passes
+    /// the peer's file through, and a pass-through looks identical to success from the outside.
+    /// So this asserts the served body is NOT the bytes that went in.
+    #[tokio::test]
+    async fn an_inline_image_is_re_encoded_rather_than_passed_through() {
+        let pixels = image::RgbaImage::from_fn(8, 8, |x, y| {
+            image::Rgba([(x * 8) as u8, (y * 8) as u8, 0, 255])
+        });
+        let encode = |format: image::ImageFormat| {
+            let mut out = Vec::new();
+            image::DynamicImage::ImageRgba8(pixels.clone())
+                .to_rgb8()
+                .write_to(&mut std::io::Cursor::new(&mut out), format)
+                .expect("fixture encodes");
+            out
+        };
+
+        // A JPEG in must come back as a PNG. Nothing about that outcome is reachable by passing
+        // the peer's bytes through, so it is the unambiguous proof that a decode happened.
+        //
+        // Note what the earlier version of this test got wrong, because it is an easy trap: a
+        // trivial PNG re-encoded by the same crate at the same settings is byte-identical to the
+        // input, so asserting "output differs from input" on a PNG passes for the wrong reason
+        // when it passes at all, and fails on a correct implementation.
+        let jpeg = encode(image::ImageFormat::Jpeg);
+        let from_jpeg = transcoded_image_body("image/jpeg", jpeg)
+            .await
+            .expect("a valid JPEG transcodes");
+        assert_eq!(
+            from_jpeg.mime(),
+            "image/png",
+            "the response type is ours, not the peer's"
+        );
+        assert!(
+            from_jpeg.png.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "the served body must be a PNG whatever went in",
+        );
+
+        // A PNG carrying a comment must come back without it: the served body is re-encoded from
+        // pixels, so anything the peer attached alongside them is simply not carried over.
+        let mut annotated = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut annotated, 8, 8);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .add_text_chunk("Comment".into(), "peer supplied metadata".into())
+                .expect("fixture text chunk");
+            let mut writer = encoder.write_header().expect("fixture header");
+            writer
+                .write_image_data(pixels.as_raw())
+                .expect("fixture pixels");
+        }
+        assert!(
+            annotated.windows(4).any(|w| w == b"tEXt"),
+            "the fixture must actually contain the chunk this is about to look for",
+        );
+        let from_png = transcoded_image_body("image/png", annotated)
+            .await
+            .expect("a valid PNG transcodes");
+        assert!(
+            !from_png.png.windows(4).any(|w| w == b"tEXt"),
+            "the served body carried the peer's text chunk through, so it is not a re-encode",
+        );
+
+        // Bytes that are not the type they claim get no body, which the frontend shows as the
+        // click-to-load chip rather than as a broken image.
+        assert!(
+            transcoded_image_body("image/png", b"not a png at all".to_vec())
+                .await
+                .is_err(),
+            "a declared PNG that is not one must be refused rather than served",
+        );
+        // And the type we deliberately cannot decode safely is refused by name, whatever the bytes
+        // are. A real AVIF and a PNG wearing the label get the same answer: no body.
+        assert!(
+            transcoded_image_body("image/avif", encode(image::ImageFormat::Png))
+                .await
+                .is_err(),
+            "AVIF has no pure-Rust decoder and must never reach a transcode",
+        );
     }
 
     /// Walk a file the way a player does and report which chunks had to be decrypted.
