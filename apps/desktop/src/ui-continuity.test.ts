@@ -77,9 +77,11 @@ test("ordinary window close awaits the native final vault snapshot before destru
   assert.match(handler, /await relaunch\(\)/, "failed emergency destroy must terminate the native session");
   assert.match(handler, /errorText\(e\)/, "a structured Tauri failure must remain readable");
 
+  // Named for the window it governs since the capability split; it was `default.json` while a
+  // single blanket capability covered everything and every file in the directory was auto-enabled.
   const capability = JSON.parse(
     readFileSync(
-      fileURLToPath(new URL("../src-tauri/capabilities/default.json", import.meta.url)),
+      fileURLToPath(new URL("../src-tauri/capabilities/main.json", import.meta.url)),
       "utf8",
     ),
   ) as { permissions?: string[] };
