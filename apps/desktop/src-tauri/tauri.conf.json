@@ -24,8 +24,8 @@
     ],
     "security": {
       "capabilities": ["main"],
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: catcoms-media: http://catcoms-media.localhost; media-src 'self' data: blob: catcoms-media: http://catcoms-media.localhost; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src https://open.spotify.com https://www.youtube-nocookie.com",
-      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: catcoms-media: http://catcoms-media.localhost; media-src 'self' data: blob: catcoms-media: http://catcoms-media.localhost; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src https://open.spotify.com https://www.youtube-nocookie.com"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: catcoms-media: http://catcoms-media.localhost; media-src 'self' data: blob: catcoms-media: http://catcoms-media.localhost; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src https://open.spotify.com https://www.youtube-nocookie.com https://w.soundcloud.com https://player.vimeo.com https://player.mixcloud.com https://embed.music.apple.com https://embed.bsky.app",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: catcoms-media: http://catcoms-media.localhost; media-src 'self' data: blob: catcoms-media: http://catcoms-media.localhost; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src https://open.spotify.com https://www.youtube-nocookie.com https://w.soundcloud.com https://player.vimeo.com https://player.mixcloud.com https://embed.music.apple.com https://embed.bsky.app"
     }
   },
   "bundle": {

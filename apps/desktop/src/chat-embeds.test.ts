@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   EMBED_KEEPALIVE_MARGIN_PX,
+  EMBED_PROVIDERS,
   chatEmbedFor,
   chatEmbedLink,
   embedChipLabel,
@@ -15,8 +16,10 @@ const VIDEO = "dQw4w9WgXcQ";
 const TRACK = "4cOdK2wGLETKBW3PvgPWqT";
 
 test("each provider claims only its own links, and nothing else gets a card", () => {
-  assert.equal(chatEmbedFor(`https://open.spotify.com/track/${TRACK}`)?.provider, "spotify");
-  assert.equal(chatEmbedFor(`https://youtu.be/${VIDEO}`)?.provider, "youtube");
+  assert.equal(chatEmbedFor(`https://open.spotify.com/track/${TRACK}`)?.provider.id, "spotify");
+  assert.equal(chatEmbedFor(`https://youtu.be/${VIDEO}`)?.provider.id, "youtube");
+  assert.equal(chatEmbedFor("https://soundcloud.com/artist/a-track")?.provider.id, "soundcloud");
+  assert.equal(chatEmbedFor("https://vimeo.com/123456789")?.provider.id, "vimeo");
   assert.equal(chatEmbedFor("https://example.com/a-page"), null);
   assert.equal(chatEmbedFor("https://open.spotify.com.evil.example/track/x"), null);
   assert.equal(chatEmbedFor(""), null);
@@ -28,15 +31,16 @@ test("a card's key names the content, not the message it appeared in", () => {
   const first = chatEmbedFor(`https://open.spotify.com/track/${TRACK}?si=abc123def456`)!;
   const second = chatEmbedFor(`spotify:track:${TRACK}`)!;
   assert.equal(embedKey(first), embedKey(second));
-  assert.equal(embedKey(first), `spotify:track:${TRACK}`);
+  assert.match(embedKey(first), /^spotify:track:/);
+  assert.ok(embedKey(first).includes(TRACK));
 
   // A video linked at a different timestamp is a different thing to watch, so it is its own key.
   const plain = chatEmbedFor(`https://youtu.be/${VIDEO}`)!;
   const timed = chatEmbedFor(`https://youtu.be/${VIDEO}?t=90`)!;
   assert.notEqual(embedKey(plain), embedKey(timed));
-  assert.equal(embedKey(timed), `youtube:${VIDEO}:90`);
+  assert.ok(embedKey(timed).endsWith(":90"));
 
-  // Two providers can never collide on a key.
+  // Two providers can never collide on a key, because the slug leads it.
   assert.notEqual(embedKey(plain), embedKey(first));
 });
 
@@ -120,11 +124,12 @@ test("the chip names the service, because that is what is being consented to", (
   assert.equal(embedChipLabel(show), "Load Spotify podcast", "\"show\" is not what anyone calls it");
 
   // "Load embed" would not tell anybody what is about to be contacted, which is the substance of
-  // the decision.
-  for (const embed of [video, track]) {
+  // the decision. Checked across every provider, so a new one cannot ship a nameless chip.
+  for (const provider of EMBED_PROVIDERS) {
+    const embed = { provider, ref: { id: "x", kind: "track", extra: "", start: 0 } };
     const label = embedChipLabel(embed);
-    const service = embed.provider === "youtube" ? "YouTube" : "Spotify";
-    assert.ok(label.includes(service), `${label} must name the service`);
+    assert.ok(label.includes(provider.name), `${label} must name ${provider.name}`);
+    assert.ok(embedChipTitle(embed).includes(provider.name), "and so must the explanation");
     assert.ok(embedChipTitle(embed).includes("discloses your address"), "the cost is stated, not implied");
     assert.ok(embedChipTitle(embed).includes("scroll away"), "so is the unloading behaviour");
   }

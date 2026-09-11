@@ -303,10 +303,13 @@ test("a linked video and a shared file are told apart by what they carry", () =>
   // Half a linked entry is not a linked entry: both halves or neither.
   assert.equal(isLinkedVideo({ source: "youtube", link: "" }), false);
   assert.equal(isLinkedVideo({ source: "", link: "dQw4w9WgXcQ" }), false);
-  assert.equal(isLinkedVideo({ source: "vimeo", link: "dQw4w9WgXcQ" }), false, "an unknown source is not ours");
+  
 
-  assert.equal(entryKind(linked()), "youtube");
-  assert.equal(entryKind(linked({ name: "song.mp3" })), "youtube", "the source decides, not the name");
+  assert.equal(entryKind(linked()), "linked-video");
+  assert.equal(entryKind(linked({ name: "song.mp3" })), "linked-video", "the source decides, not the name");
+  // A linked track is not always a picture: SoundCloud is a strip, and must not claim a surface.
+  assert.equal(entryKind(linked({ source: "soundcloud", link: "artist/track" })), "linked-audio");
+  assert.equal(entryKind(linked({ source: "vimeo", link: "123456789" })), "linked-video");
   assert.equal(entryKind(entry({ name: "song.mp3" })), "audio");
   assert.equal(entryKind(entry({ name: "clip.mp4" })), "video");
   assert.equal(entryKind(entry({ name: "jam.jamtake" })), "take");
@@ -333,19 +336,21 @@ test("one unplayable video does not take every other linked track with it", () =
 });
 
 test("a linked video claims a screen, because there is something to look at", () => {
-  assert.equal(deckSurface("youtube", true, true, true), "focus");
-  assert.equal(deckSurface("youtube", true, false, true), "dock");
-  assert.equal(deckSurface("youtube", true, false, false), "none", "a folded dock is one line");
-  assert.equal(deckSurface("youtube", false, true, true), "none", "nothing playing, nothing to show");
+  assert.equal(deckSurface("linked-video", true, true, true), "focus");
+  assert.equal(deckSurface("linked-video", true, false, true), "dock");
+  assert.equal(deckSurface("linked-video", true, false, false), "none", "a folded dock is one line");
+  assert.equal(deckSurface("linked-video", false, true, true), "none", "nothing playing, nothing to show");
+  // The audio half of the same feature: a strip plays from the body like any other audio.
+  assert.equal(deckSurface("linked-audio", true, true, true), "none");
 });
 
 test("a linked video is corrected like audio, because easing is not on offer", () => {
   // The embed exposes no usable playback-rate control, so the only correction available is a
   // seek. Leaving small gaps alone is therefore the better of the two behaviours, not the worse.
-  assert.equal(driftAction(0.6, "youtube"), "hold", "a shared film would ease this out; this cannot");
+  assert.equal(driftAction(0.6, "linked-video"), "hold", "a shared film would ease this out; this cannot");
   assert.equal(driftAction(0.6, "video"), "nudge");
-  assert.equal(driftAction(3, "youtube"), "seek");
-  assert.equal(driftAction(-3, "youtube"), "seek");
+  assert.equal(driftAction(3, "linked-video"), "seek");
+  assert.equal(driftAction(-3, "linked-video"), "seek");
 });
 
 test("the queue plays in the order it was built, with the id as the tiebreak", () => {

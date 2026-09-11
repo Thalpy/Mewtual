@@ -76,7 +76,6 @@
     EMBED_KEEPALIVE_MARGIN_PX, chatEmbedFor, chatEmbedLink, embedChipLabel, embedChipTitle,
     embedKey, embedMayRender, type ChatEmbed,
   } from "./chat-embeds";
-  import { spotifyEmbedHeight, spotifyEmbedUrl } from "./spotify";
   import { youtubeEmbedUrl, youtubeRef } from "./youtube";
   import { scheduleNewsChime } from "./news-chime";
   import { acceptTickerReceipt, messageTickerId } from "./ticker";
@@ -113,14 +112,16 @@
     deckAdvance, deckPosition, deckSurface, driftAction, entryAddress, entryKind, fetchPhase,
     jukeClaimWins, mediaChoices,
     mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, queueChanged, queueDigest, resolveCallName,
-    stallChip, validJukeSeq, DRIFT_SEEK_S, JAM_TAKE_EXT, JAM_TAKE_MIME, JUKE_SOURCE_YOUTUBE,
+    stallChip, validJukeSeq, DRIFT_SEEK_S, JAM_TAKE_EXT, JAM_TAKE_MIME, JUKE_SOURCE_SOUNDCLOUD, JUKE_SOURCE_VIMEO, JUKE_SOURCE_YOUTUBE,
     STALL_ANNOUNCE_MS,
     type FetchPhase, type JukeEntry, type MediaFilter, type MediaKind,
   } from "./jukebox";
   import {
-    readYouTubeMessage, youtubeBlocked, youtubePosition, youtubeReported, youtubeTransportPlan,
-    ytCommand, ytListen, YT_BUFFERING, YT_ENDED, YT_ORIGIN, YT_UNSTARTED,
-  } from "./youtube-deck";
+    deckDriver, deckPlayerBlocked, deckPlayerPosition, deckReported, deckSources,
+    deckTransportPlan, type DeckDriver, type DeckState,
+  } from "./deck-players";
+  import { soundcloudDeckUrl } from "./providers-audio";
+  import { vimeoFrameUrl } from "./providers-video";
   import {
     CLOCK_SKEW_GRACE_MS, NO_READ_MARK, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
     addLatePast, clearLatePast, lateArrivals,
@@ -10784,13 +10785,17 @@
 
   function embedFrame(embed: ChatEmbed): HTMLIFrameElement {
     const frame = document.createElement("iframe");
-    const spotify = embed.provider === "spotify";
-    frame.src = spotify ? spotifyEmbedUrl(embed.ref) : youtubeEmbedUrl(embed.ref);
-    frame.className = `chat-embed ${embed.provider}-embed`;
-    frame.height = String(spotify ? spotifyEmbedHeight(embed.ref.kind) : 0);
+    const { provider, ref } = embed;
+    frame.src = provider.frameUrl(ref);
+    frame.className = `chat-embed ${provider.id}-embed`;
+    // Zero means "a 16:9 picture", which the stylesheet sizes from the width; anything else is a
+    // fixed height the provider named because its player is a strip rather than a picture.
+    const height = provider.height(ref);
+    if (height > 0) frame.height = String(height);
+    else frame.classList.add("chat-embed-video");
     frame.loading = "lazy";
-    // `origin`, not `no-referrer`. Both providers refuse to play for an embed that sends no
-    // referrer at all: YouTube answers with its "Video player configuration error, Error 153"
+    // `origin`, not `no-referrer`. Players refuse to configure themselves for an embed that sends
+    // no referrer at all: YouTube answers with its "Video player configuration error, Error 153"
     // card, which looks like a broken app and is really the player declining to be embedded by
     // nobody. `origin` sends this app's origin and never a path, so what they learn is that a
     // Mewtual window embedded them, not which channel or conversation it was in.
@@ -10800,14 +10805,14 @@
     // nothing here because the frame is a foreign origin either way. What is deliberately NOT
     // granted is allow-top-navigation: a card cannot steer the window it sits in.
     frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-popups allow-forms allow-presentation");
-    frame.title = spotify ? `Spotify ${embed.ref.kind}` : "YouTube video";
+    frame.title = `${provider.name} ${provider.noun(ref)}`;
     armEmbed(frame, embed);
     return frame;
   }
 
   function embedChip(embed: ChatEmbed): HTMLButtonElement {
     const button = document.createElement("button");
-    button.className = `embed-chip media-load-chip chat-embed-chip ${embed.provider}-chip`;
+    button.className = `embed-chip media-load-chip chat-embed-chip ${embed.provider.id}-chip`;
     button.textContent = embedChipLabel(embed);
     button.title = embedChipTitle(embed);
     button.onclick = () => {
@@ -14070,7 +14075,7 @@
     if (jukeAudio) jukeAudio.muted = callDeafened; // the deck is part of "everyone", not an exception
     // The video deck is part of it too, and its level lives inside its own document, so silence
     // has to be sent rather than set.
-    if (jukeYt) jukeYtPost(ytCommand(callDeafened ? "mute" : "unMute"));
+    if (jukeLinkDriver) jukeLinkPost(jukeLinkDriver.mute(callDeafened));
     // Deafen is one hard room gate: it cancels lookahead clicks and releases every engine voice,
     // including local previews, so no retained tail can emerge when the master reopens.
     if (callDeafened && synthCtx) {
@@ -15580,7 +15585,7 @@
   // queue on arrival, because a listener can hear the transport before the channel document has
   // caught up, and "the room is playing something I cannot identify yet" is exactly the state
   // that used to leave a joiner silent until the next press.
-  let jukeNow = $state<{ entry: string; cid: string; link: string; name: string; paused: boolean; dj: string } | null>(null); // dj: "" is me
+  let jukeNow = $state<{ entry: string; cid: string; src: string; link: string; name: string; paused: boolean; dj: string } | null>(null); // dj: "" is me
   let jukeStale = $state(false); // the DJ went quiet: the deck is frozen until someone presses
   let jukeDur = $state(0); // 0 until loadedmetadata knows
   let jukeVol = $state(loadJukeVol());
@@ -15649,7 +15654,7 @@
     }
     // A linked video keeps its own volume inside its own document, so the slider has to be sent
     // rather than set. Its scale is 0..100, not 0..1.
-    if (jukeYt) jukeYtPost(ytCommand("setVolume", [Math.round(jukeVol * 100)]));
+    if (jukeLinkDriver) jukeLinkPost(jukeLinkDriver.volume(jukeVol));
     try { localStorage.setItem("catcoms.call.jukevol", String(jukeVol)); } catch { /* ignore */ }
   }
   // The one deck element, made on first play and appended like the per-peer call audio.
@@ -15724,7 +15729,7 @@
     // another document and arrives late, so the projection is the base answer and the player's
     // own reading refines it when there is a fresh one.
     const takeOnDeck = jukeKind === "take";
-    const videoOnDeck = jukeKind === "youtube";
+    const videoOnDeck = jukeKind === "linked-video" || jukeKind === "linked-audio";
     const projected = deckPosition({
       isDj: takeOnDeck || videoOnDeck ? false : jukeIsDj(),
       paused: jukeNow.paused,
@@ -15733,7 +15738,7 @@
       since: performance.now() - jukeAdopted.at,
       element: takeOnDeck || videoOnDeck ? null : jukeElOn(jukeNow.cid),
     });
-    return videoOnDeck ? youtubePosition(projected, jukeYtReport, performance.now()) : projected;
+    return videoOnDeck ? deckPlayerPosition(projected, jukeLinkReport, performance.now()) : projected;
   }
   // Where a load should land. The DJ starts exactly where it pressed; a listener has to age that
   // offset by however long its own load took, or it starts behind the room.
@@ -15836,26 +15841,33 @@
     const server = callServer;
     const channel = callChannel;
     if (server === null || !channel || jukeLinkBusy) return;
-    const video = youtubeRef(jukeLinkDraft);
-    if (!video) {
-      jukeLinkError = "that is not a YouTube link";
+    // Any provider the deck can actually drive. A link to one it cannot (a Spotify track, say) is
+    // refused here with the reason rather than queued as something nobody can play: the deck needs
+    // play, pause, a seek and a position report to keep a room together, and not every embed has
+    // them. `chatEmbedFor` is reused so a link behaves identically in chat and in the queue.
+    const found = chatEmbedFor(jukeLinkDraft);
+    if (!found || !found.provider.deck) {
+      jukeLinkError = found
+        ? `${found.provider.name} cannot be queued: its player cannot be kept in sync with the room`
+        : "that is not a link the deck can play";
       return;
     }
+    const source = found.provider.id;
     jukeLinkBusy = true;
     jukeLinkError = "";
     try {
       // The name is the queue's only human-readable handle on a linked track. Nothing here can
-      // fetch the real title without contacting Google on the whole room's behalf, so the member
-      // queueing it gets to write one, and the id is the honest fallback.
-      const name = jukeLinkName.trim() || `YouTube: ${video.id}`;
+      // fetch the real title without contacting the provider on the whole room's behalf, so the
+      // member queueing it gets to write one, and the id is the honest fallback.
+      const name = jukeLinkName.trim() || `${found.provider.name}: ${found.ref.id}`;
       await invokeDebugged<string>("jukebox_add_link", {
         server,
         channel,
-        source: JUKE_SOURCE_YOUTUBE,
-        link: video.id,
+        source,
+        link: found.ref.id,
         name: name.slice(0, 200),
       });
-      jukeFailed.delete(`${JUKE_SOURCE_YOUTUBE}:${video.id}`); // a re-add is also a retry
+      jukeFailed.delete(`${source}:${found.ref.id}`); // a re-add is also a retry
       jukeLinkDraft = "";
       jukeLinkName = "";
       await refreshJukebox();
@@ -15880,11 +15892,11 @@
   }
   // Claim the deck: my press outranks everything I have heard, and I apply it to myself on the same
   // path a receiver does, so the DJ is never a special case in the player.
-  function jukeSend(entry: string, cid: string, link: string, name: string, off: number, paused: boolean) {
+  function jukeSend(entry: string, cid: string, src: string, link: string, name: string, off: number, paused: boolean) {
     if (!inCall || !callChannel) return;
     jukeSeq = nextJukeSeq(jukeSeq, jukeAdopted?.seq ?? null);
-    jukeAdopt(jukeSeq, callSelfFp, entry, cid, link, name, off, paused);
-    broadcast({ callId: callChannel, type: "juke", seq: jukeSeq, entry, cid, link, name, off, paused });
+    jukeAdopt(jukeSeq, callSelfFp, entry, cid, src, link, name, off, paused);
+    broadcast({ callId: callChannel, type: "juke", seq: jukeSeq, entry, cid, src, link, name, off, paused });
   }
   /**
    * Tell one peer what is playing, right now.
@@ -15904,14 +15916,15 @@
       seq: jukeAdopted.seq,
       entry: jukeNow.entry,
       cid: jukeNow.cid,
+      src: jukeNow.src,
       link: jukeNow.link,
       name: jukeNow.name,
       off: jukePos(),
       paused: jukeNow.paused,
     });
   }
-  function jukeAdopt(seq: number, fromFp: string, entry: string, cid: string, link: string, name: string, off: number, paused: boolean) {
-    const same = jukeNow?.entry === entry && jukeNow?.cid === cid && jukeNow?.link === link;
+  function jukeAdopt(seq: number, fromFp: string, entry: string, cid: string, src: string, link: string, name: string, off: number, paused: boolean) {
+    const same = jukeNow?.entry === entry && jukeNow?.cid === cid && jukeNow?.src === src && jukeNow?.link === link;
     const sameDeckLease = same && jukeAdopted?.seq === seq && jukeAdopted.fromFp === fromFp;
     // A pause/resume, replacement DJ or different track owns a new continuation epoch. The load
     // coordinator cancels the old native chunk operation before releasing its active slot.
@@ -15925,7 +15938,7 @@
       jukeTrustBlocked = "";
     }
     jukeNow = entry || cid || link
-      ? { entry, cid, link, name, paused, dj: fromFp === callSelfFp ? "" : fromFp }
+      ? { entry, cid, src, link, name, paused, dj: fromFp === callSelfFp ? "" : fromFp }
       : null;
     if (!jukeNow) {
       jukeDur = 0;
@@ -15935,7 +15948,7 @@
     // Moving off a linked video takes its player down with it. A frame left mounted would go on
     // talking to Google about a track the room has already left, which is the one thing the click
     // that started it was not consent for.
-    if (!link && jukeYt) jukeYtPark();
+    if (!link && jukeLinkFrame) jukeLinkPark();
     void jukeApply(same);
   }
   // Put the element where the adopted transport says it should be, fetching the blob first the one
@@ -16240,8 +16253,8 @@
     // A blocked video deck is a frame the webview would not let start. The click IS the gesture
     // it was waiting for, so the command can go straight out; the player answers with its state
     // and the chip clears itself.
-    if (jukeYt && jukeNow?.link) {
-      jukeYtPost(ytCommand("playVideo"));
+    if (jukeLinkDriver && jukeNow?.link) {
+      jukeLinkPost(jukeLinkDriver.play());
       return;
     }
     const el = jukeAudio;
@@ -16309,7 +16322,7 @@
   // room's shape does not change: nothing is sent between peers, the DJ says what is playing and
   // where it is, and every listener runs its own player against that. What changes is that this
   // player is a document belonging to Google, so it can only be spoken to (postMessage) and
-  // believed at arm's length. See `youtube-deck.ts` for why it is driven directly rather than
+  // believed at arm's length. See `deck-players.ts` for why it is driven directly rather than
   // through their API script, and for what is and is not trusted in a reply.
   //
   // The consent story is the important half. A linked track has no group attestation of any kind:
@@ -16317,35 +16330,61 @@
   // video because somebody else in the room said so. So it is never automatic in any trust mode,
   // exactly like a remote image, and the deck stops on it until this member says yes.
 
-  let jukeYt: HTMLIFrameElement | null = null;
-  let jukeYtLink = ""; // the video the frame currently holds, so a re-press does not rebuild it
-  let jukeYtState = $state(YT_UNSTARTED);
-  let jukeYtReport: { at: number; currentTime: number } | null = null;
-  let jukeYtHandshake: ReturnType<typeof setInterval> | undefined;
+  let jukeLinkFrame: HTMLIFrameElement | null = null;
+  /** The provider driving the current frame, so replies can be read and commands addressed. */
+  let jukeLinkDriver: DeckDriver | null = null;
+  /** What the frame currently holds, so a re-press or a ping does not rebuild it. */
+  let jukeLinkOn = "";
+  let jukeLinkState = $state<DeckState>("unstarted");
+  let jukeLinkReport: { at: number; currentTime: number } | null = null;
+  let jukeLinkHandshake: ReturnType<typeof setInterval> | undefined;
 
-  /** How the deck addresses whatever is on it: a content address, or a linked video. */
-  function jukeDeckAddress(now: { cid: string; link: string }): string {
-    return entryAddress({ cid: now.cid, source: now.link ? JUKE_SOURCE_YOUTUBE : "", link: now.link });
+  /** How the deck addresses whatever is on it: a content address, or a linked track. */
+  function jukeDeckAddress(now: { cid: string; src: string; link: string }): string {
+    return entryAddress({ cid: now.cid, source: now.src, link: now.link });
   }
 
-  /** A linked video is click-only, always: there is no attestation a policy could act on. */
-  function mayPlayLinkedVideo(now: { cid: string; link: string }): boolean {
+  /** A linked track is click-only, always: there is no attestation a policy could act on. */
+  function mayPlayLinkedVideo(now: { cid: string; src: string; link: string }): boolean {
     return (
       callServer !== null &&
       jukeExplicitApprovals.has(scopedMediaKey(callServer, jukeDeckAddress(now)))
     );
   }
 
-  function jukeYtPost(command: string) {
-    jukeYt?.contentWindow?.postMessage(command, YT_ORIGIN);
+  /** Commands go to the driver's own origin and nowhere else, even if the frame moved. */
+  function jukeLinkPost(command: string | null) {
+    if (command && jukeLinkDriver) {
+      jukeLinkFrame?.contentWindow?.postMessage(command, jukeLinkDriver.origin);
+    }
   }
 
-  function jukeYtEl(link: string, start: number): HTMLIFrameElement {
-    if (jukeYt && jukeYtLink === link) return jukeYt;
-    jukeYtPark();
+  /**
+   * The address a controlled deck frame loads, per provider.
+   *
+   * Only the deck builds a driveable frame: a chat card is somebody watching by themselves, and a
+   * player that answers commands it will never be sent is a capability with no purpose. The offset
+   * is in the address rather than seeked afterwards, so a listener joining an hour into something
+   * starts there instead of starting at the top and jumping.
+   */
+  function jukeLinkSrc(src: string, link: string, start: number): string {
+    if (src === JUKE_SOURCE_VIMEO) {
+      return vimeoFrameUrl({ id: link, kind: "", extra: "", start }, { controlled: true, start });
+    }
+    if (src === JUKE_SOURCE_SOUNDCLOUD) {
+      return soundcloudDeckUrl(link, start);
+    }
+    return youtubeEmbedUrl({ id: link, start }, { controlled: true, origin: window.location.origin, start });
+  }
+
+  function jukeLinkEl(src: string, link: string, start: number): HTMLIFrameElement {
+    if (jukeLinkFrame && jukeLinkOn === `${src}:${link}`) return jukeLinkFrame;
+    jukeLinkPark();
+    const driver = deckDriver(src);
+    if (!driver) return document.createElement("iframe"); // unreachable: callers check first
     const frame = document.createElement("iframe");
     frame.id = "jukebox-video";
-    frame.className = "juke-yt";
+    frame.className = `juke-link juke-link-${src}`;
     frame.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
     // As for a chat card: what is withheld is allow-top-navigation, so the player cannot steer
     // the window it is embedded in.
@@ -16354,38 +16393,38 @@
     // embedded by nobody declines to configure itself. `origin` gives it the window's origin and
     // never a path.
     frame.referrerPolicy = "origin";
-    frame.src = youtubeEmbedUrl(
-      { id: link, start },
-      { controlled: true, origin: window.location.origin, start },
-    );
+    frame.src = jukeLinkSrc(src, link, start);
     document.body.appendChild(frame);
-    jukeYt = frame;
-    jukeYtLink = link;
-    jukeYtState = YT_UNSTARTED;
-    jukeYtReport = null;
-    window.addEventListener("message", jukeYtMessage);
-    // The frame ignores anything that arrives before its own player is constructed, and there is
-    // no event announcing when that was. Repeating the handshake until it answers is cheaper than
-    // a protocol with no way to start; the first reply stops it.
-    clearInterval(jukeYtHandshake);
-    jukeYtHandshake = setInterval(() => jukeYtPost(ytListen()), 500);
-    jukeYtPost(ytListen());
+    jukeLinkFrame = frame;
+    jukeLinkDriver = driver;
+    jukeLinkOn = `${src}:${link}`;
+    jukeLinkState = "unstarted";
+    jukeLinkReport = null;
+    window.addEventListener("message", jukeLinkMessage);
+    // Every one of these players ignores anything that arrives before its own player object is
+    // constructed, and none of them announce when that was. Repeating the handshake until one
+    // answers is cheaper than a protocol with no way to start; the first reply stops it.
+    clearInterval(jukeLinkHandshake);
+    const hello = () => { for (const message of driver.hello()) jukeLinkPost(message); };
+    jukeLinkHandshake = setInterval(hello, 500);
+    hello();
     return frame;
   }
 
   /** Take the player down. Nothing is left mounted: a parked frame is still a live connection. */
-  function jukeYtPark() {
-    clearInterval(jukeYtHandshake);
-    jukeYtHandshake = undefined;
-    window.removeEventListener("message", jukeYtMessage);
-    if (jukeYt) {
-      jukeYt.removeAttribute("src");
-      jukeYt.remove();
+  function jukeLinkPark() {
+    clearInterval(jukeLinkHandshake);
+    jukeLinkHandshake = undefined;
+    window.removeEventListener("message", jukeLinkMessage);
+    if (jukeLinkFrame) {
+      jukeLinkFrame.removeAttribute("src");
+      jukeLinkFrame.remove();
     }
-    jukeYt = null;
-    jukeYtLink = "";
-    jukeYtState = YT_UNSTARTED;
-    jukeYtReport = null;
+    jukeLinkFrame = null;
+    jukeLinkDriver = null;
+    jukeLinkOn = "";
+    jukeLinkState = "unstarted";
+    jukeLinkReport = null;
   }
 
   /**
@@ -16396,30 +16435,34 @@
    * the same origin. Everything past that is evidence, never instruction; the only thing a reply
    * can move is this listener's own player.
    */
-  function jukeYtMessage(e: MessageEvent) {
-    if (e.origin !== YT_ORIGIN || !jukeYt || e.source !== jukeYt.contentWindow) return;
-    const report = readYouTubeMessage(e.data);
+  function jukeLinkMessage(e: MessageEvent) {
+    const driver = jukeLinkDriver;
+    if (!driver || !jukeLinkFrame) return;
+    if (e.origin !== driver.origin || e.source !== jukeLinkFrame.contentWindow) return;
+    const report = driver.read(e.data);
     if (!report) return;
-    // It is talking, so the handshake has landed and does not need repeating.
-    if (jukeYtHandshake !== undefined) {
-      clearInterval(jukeYtHandshake);
-      jukeYtHandshake = undefined;
-      jukeYtPost(ytCommand("setVolume", [Math.round(jukeVol * 100)]));
-      if (callDeafened) jukeYtPost(ytCommand("mute"));
+    // It is talking, so the handshake has landed and does not need repeating. This is also the
+    // first moment the player will accept the level, which is why volume is sent here rather than
+    // with the address.
+    if (jukeLinkHandshake !== undefined) {
+      clearInterval(jukeLinkHandshake);
+      jukeLinkHandshake = undefined;
+      jukeLinkPost(driver.volume(jukeVol));
+      if (callDeafened) jukeLinkPost(driver.mute(true));
     }
     if (report.duration !== undefined) jukeDur = report.duration;
     if (report.currentTime !== undefined) {
-      jukeYtReport = { at: performance.now(), currentTime: report.currentTime };
+      jukeLinkReport = { at: performance.now(), currentTime: report.currentTime };
       jukeBuffering = false; // it is telling us where it is, so it is not stuck
     }
     if (report.state !== undefined) {
-      jukeYtState = report.state;
-      jukeBuffering = report.state === YT_BUFFERING;
+      jukeLinkState = report.state;
+      jukeBuffering = report.state === "buffering";
       // Only the DJ moves the room on, exactly as for a media element's `ended`.
-      if (report.state === YT_ENDED && inCall && jukeIsDj()) jukeAdvance(true);
+      if (report.state === "ended" && inCall && jukeIsDj()) jukeAdvance(true);
     }
     const wants = !!jukeNow && !jukeNow.paused && !jukeStale;
-    jukeBlocked = youtubeBlocked(jukeYtState, wants);
+    jukeBlocked = deckPlayerBlocked(jukeLinkState, wants);
   }
 
   /**
@@ -16430,33 +16473,42 @@
    * at the top and jumping, and a listener joining an hour into a video does not briefly stream
    * the beginning of it.
    */
-  function jukeApplyVideo(now: { cid: string; link: string; name: string; paused: boolean }) {
+  function jukeApplyVideo(now: { cid: string; src: string; link: string; name: string; paused: boolean }) {
+    const driver = deckDriver(now.src);
+    if (!driver) {
+      // A source this build cannot drive is not a track it can play. Saying so beats a silent
+      // stall: the room moves on, and this listener is told why it is not hearing anything.
+      jukeTrustBlocked = "unavailable";
+      jukeLinkPark();
+      return;
+    }
     if (!mayPlayLinkedVideo(now)) {
       jukeTrustBlocked = "consent";
-      jukeYtPark();
+      jukeLinkPark();
       return;
     }
     jukeTrustBlocked = "";
     if (jamDeckPlaybackCid()) jamStopPlayback(); // the room left whatever the take deck held
     const target = Math.max(0, jukePos());
-    if (!jukeYt || jukeYtLink !== now.link) {
-      jukeYtEl(now.link, Math.floor(target));
+    if (!jukeLinkFrame || jukeLinkOn !== `${now.src}:${now.link}`) {
+      jukeLinkEl(now.src, now.link, Math.floor(target));
       return; // it comes up at the right place, playing; the next ping corrects whatever it did
     }
-    for (const command of youtubeTransportPlan({
+    for (const command of deckTransportPlan({
+      driver,
       target,
-      at: youtubeReported(jukeYtReport, performance.now()),
+      at: deckReported(jukeLinkReport, performance.now()),
       playing: !now.paused && !jukeStale,
-      state: jukeYtState,
+      state: jukeLinkState,
       seekAfter: DRIFT_SEEK_S,
     })) {
-      jukeYtPost(command);
+      jukeLinkPost(command);
     }
   }
 
   function jukeHost(node: HTMLElement) {
     // Whichever player is holding the current track: the one media element, or the video frame.
-    const el = jukeNow?.link ? jukeYtEl(jukeNow.link, 0) : jukeEl();
+    const el = jukeNow?.link ? jukeLinkEl(jukeNow.src, jukeNow.link, 0) : jukeEl();
     node.appendChild(el);
     return {
       destroy() {
@@ -16464,7 +16516,7 @@
         // back) mounts the new host before the old one tears down, and a teardown that re-homed
         // unconditionally would snatch the element straight back out of the surface that had just
         // adopted it, leaving a black box behind.
-        if ((jukeAudio === el || jukeYt === el) && el.parentElement === node) {
+        if ((jukeAudio === el || jukeLinkFrame === el) && el.parentElement === node) {
           document.body.appendChild(el);
         }
       },
@@ -16510,7 +16562,7 @@
     // progress here so emptying/replacing the deck cannot strand a LOADING chip indefinitely.
     jukeFetch = null;
     if (jamDeckPlaybackCid()) jamStopPlayback(); // the take deck stops with the transport
-    jukeYtPark(); // and so does the video deck: an unmounted frame is the only stopped one
+    jukeLinkPark(); // and so does the linked deck: an unmounted frame is the only stopped one
     const el = jukeAudio;
     if (!el) return;
     el.pause();
@@ -16531,7 +16583,7 @@
     if (!e) return;
     jukeWakeSynth();
     jukeFailed.delete(entryAddress(e)); // an explicit press is also a retry of a track that would not fetch
-    jukeSend(e.id, e.cid, e.link ?? "", e.name, 0, false);
+    jukeSend(e.id, e.cid, e.source ?? "", e.link ?? "", e.name, 0, false);
   }
   function jukeToggle() {
     if (!inCall) return;
@@ -16542,7 +16594,7 @@
       return;
     }
     // A press on a stale deck resumes it (and claims it) rather than pausing an already dead DJ.
-    jukeSend(jukeNow.entry, jukeNow.cid, jukeNow.link, jukeNow.name, jukePos(), jukeStale ? false : !jukeNow.paused);
+    jukeSend(jukeNow.entry, jukeNow.cid, jukeNow.src, jukeNow.link, jukeNow.name, jukePos(), jukeStale ? false : !jukeNow.paused);
   }
   /**
    * Move the room on to the next track.
@@ -16555,8 +16607,8 @@
    */
   function jukeAdvance(played: boolean, list = jukePlayable()) {
     const { next, drop } = deckAdvance(list, jukeNow?.entry ?? "", played);
-    if (next) jukeSend(next.id, next.cid, next.link ?? "", next.name, 0, false);
-    else jukeSend("", "", "", "", 0, true); // queue exhausted: everyone stops
+    if (next) jukeSend(next.id, next.cid, next.source ?? "", next.link ?? "", next.name, 0, false);
+    else jukeSend("", "", "", "", "", 0, true); // queue exhausted: everyone stops
     if (drop) void jukeRemoveTrack(drop);
   }
   function jukeSkip() {
@@ -16578,6 +16630,8 @@
     // Absent on a frame from a build that predates linked tracks, which is a file transport and
     // reads as no link at all rather than as a malformed frame.
     const link = msg.link ?? "";
+    // Absent on a frame from a build that only knew YouTube, which is what such a frame meant.
+    const src = msg.src ?? (msg.link ? JUKE_SOURCE_YOUTUBE : "");
     const name = msg.name;
     const off = msg.off;
     const paused = msg.paused;
@@ -16592,7 +16646,16 @@
     // it. A frame naming both a file and a video is refused outright rather than resolved in
     // favour of one: the two say different things about who fetches what from where, and picking
     // one would be this device deciding what a peer meant.
-    if (typeof link !== "string" || (link !== "" && !/^[A-Za-z0-9_-]{11}$/.test(link))) return;
+    // A link is checked to a shape an address can be built from, here at the edge, because this
+    // is peer input and the frame is the only place it is checked before a URL is made of it. The
+    // source has to be one this build can actually drive, or there is no player to hand it to.
+    if (typeof src !== "string" || typeof link !== "string") return;
+    if (link !== "" && !deckSources().includes(src)) return;
+    if (link !== "" && !/^[A-Za-z0-9_-]{1,64}(?:\/[A-Za-z0-9_.-]{1,64}){0,3}$/.test(link)) return;
+    if (link === "" && src !== "") return;
+    // A frame naming both a file and a linked track is refused outright rather than resolved in
+    // favour of one: the two say different things about who fetches what from where, and picking
+    // one would be this device deciding what a peer meant.
     if (link !== "" && cid !== "") return;
     if (typeof name !== "string") return;
     if (typeof off !== "number" || !Number.isFinite(off) || off < 0) return;
@@ -16600,7 +16663,7 @@
     // Newest press wins; a tie goes to the higher fingerprint so every machine agrees. A frame
     // that is not newer is still taken from the DJ we already follow: that is the re-announce.
     if (!jukeClaimWins(jukeAdopted, { seq, fromFp })) return;
-    jukeAdopt(seq, fromFp, entry, cid, link, name.slice(0, 200), off, paused);
+    jukeAdopt(seq, fromFp, entry, cid, src, link, name.slice(0, 200), off, paused);
   }
   // Rides the 5s presence ping rather than owning a timer: as DJ I re-announce the transport (same
   // seq, fresh offset) so late joiners catch up and drift gets corrected; as a listener I use the
@@ -16608,7 +16671,7 @@
   function jukeTick() {
     if (!inCall || !jukeAdopted || !jukeNow) return;
     if (jukeIsDj()) {
-      broadcast({ callId: callChannel, type: "juke", seq: jukeAdopted.seq, entry: jukeNow.entry, cid: jukeNow.cid, link: jukeNow.link, name: jukeNow.name, off: jukePos(), paused: jukeNow.paused });
+      broadcast({ callId: callChannel, type: "juke", seq: jukeAdopted.seq, entry: jukeNow.entry, cid: jukeNow.cid, src: jukeNow.src, link: jukeNow.link, name: jukeNow.name, off: jukePos(), paused: jukeNow.paused });
       return;
     }
     if (jukeNow.paused || jukeStale || performance.now() - jukeHeard <= JUKE_DJ_GONE_MS) return;
@@ -16676,7 +16739,7 @@
     { key: "audio", label: "AUDIO" },
     { key: "video", label: "VIDEO" },
     { key: "take", label: "TAKES" },
-    { key: "youtube", label: "YOUTUBE" },
+    { key: "youtube", label: "LINK" },
   ];
   let jukePickKind = $state<JukePickTab>("all");
   // The YouTube tab lists nothing from the share. The empty list keeps every share-derived
@@ -27163,13 +27226,13 @@
                 class="juke-link-add"
                 onsubmit={(e) => { e.preventDefault(); void jukeAddLink(); }}
               >
-                <label class="juke-link-lbl" for="juke-link-url">Paste a YouTube link</label>
+                <label class="juke-link-lbl" for="juke-link-url">Paste a YouTube, SoundCloud or Vimeo link</label>
                 <div class="juke-link-row">
                   <input
                     id="juke-link-url"
                     class="juke-link-url"
                     type="text"
-                    placeholder="https://youtu.be/..."
+                    placeholder="https://youtu.be/... or soundcloud.com/..."
                     bind:value={jukeLinkDraft}
                     oninput={() => (jukeLinkError = "")}
                   />
@@ -27189,8 +27252,10 @@
                 {:else}
                   <p class="juke-link-note">
                     Not shared through this server, so it does not use your fileshare and cannot
-                    expire out of it. Everyone who plays it fetches it from Google themselves, and
-                    each of them is asked before their own player loads.
+                    expire out of it. Everyone who plays it fetches it from the provider
+                    themselves, and each of them is asked before their own player loads. Spotify
+                    and Apple Music cannot be queued: their players cannot be kept in sync with a
+                    room.
                   </p>
                 {/if}
               </form>

@@ -159,19 +159,46 @@ test("plugin, base and form targets stay closed in both policies", () => {
   }
 });
 
+/**
+ * Media providers framed for chat embeds. Each entry is a third party that learns this device's
+ * address and what it is looking at, and runs its own script inside our window, so the list is
+ * pinned exactly rather than described by a pattern: adding a provider should cost one deliberate
+ * edit here and the review that goes with it.
+ *
+ * On Windows there is a second reason to keep this short. wry injects Tauri's initialization
+ * scripts into every subframe regardless of the main-frame-only flag, so each origin below
+ * receives the IPC internals object. Remote origins are refused natively before any command runs,
+ * so this is not currently an execution path, but the length of this list is the width of that
+ * exposure.
+ */
+const REVIEWED_EMBED_HOSTS = [
+  "https://embed.bsky.app",
+  "https://embed.music.apple.com",
+  "https://open.spotify.com",
+  "https://player.mixcloud.com",
+  "https://player.vimeo.com",
+  "https://w.soundcloud.com",
+  "https://www.youtube-nocookie.com",
+];
+
 test("the framed embed hosts are an exact reviewed list, not a scheme", () => {
-  // Spotify and YouTube are framed for ordinary chat embeds. They are an accepted, narrow
-  // exception and they are named in full: a bare `https:` here would hand a compromised renderer
-  // a frame to any origin it likes, which is an exfiltration channel wearing a different hat.
+  // A bare `https:` here would hand a compromised renderer a frame to any origin it likes, which
+  // is an exfiltration channel wearing a different hat.
   //
-  // These frames are ordinary product features. They are not a security boundary, and nothing
-  // that needs isolation may be built inside one.
+  // These frames are ordinary product features. They are not a security boundary, and nothing that
+  // needs isolation may be built inside one.
   const frame = effective(production, "frame-src");
   assert.deepEqual(
     [...frame].sort(),
-    ["https://open.spotify.com", "https://www.youtube-nocookie.com"],
-    "frame-src must remain the exact reviewed embed list",
+    REVIEWED_EMBED_HOSTS,
+    "frame-src changed: add or remove the host in REVIEWED_EMBED_HOSTS in the same commit, so the list stays a decision rather than a leftover",
   );
+  // Whatever the list holds, every entry must be one exact https origin.
+  for (const host of frame) {
+    assert.ok(host.startsWith("https://"), `framed origin ${host} is not https`);
+    assert.ok(!host.includes("*"), `framed origin ${host} uses a wildcard`);
+    assert.equal(host.split("/").length, 3, `framed origin ${host} must be a bare origin`);
+  }
 });
 
 test("the development policy relaxes only what Vite needs, and only toward localhost", () => {

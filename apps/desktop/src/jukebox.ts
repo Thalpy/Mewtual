@@ -7,18 +7,33 @@
  * below is about reconciling one local element against a shared clock.
  */
 
+import { deckDriver, deckSources } from "./deck-players.ts";
+
 /**
  * What a queued track is, as far as the deck cares.
  *
- * `youtube` is the odd one out and is worth naming as its own kind rather than folding into
- * `video`: it is not served by the group, it is not read by a media element, and the drift
- * correction a shared film gets is not available for it (the embed has no playback-rate control).
- * Anywhere those differences matter, the difference is this word.
+ * The two `linked-` kinds are the odd ones out and are worth naming rather than folding into
+ * `audio` and `video`: they are not served by the group, they are not read by a media element, and
+ * the drift correction a shared film gets is not available for them (no embed offers a usable
+ * playback-rate control). Anywhere those differences matter, the difference is one of these words.
+ *
+ * They are two kinds rather than one because a linked track is not always a picture. A SoundCloud
+ * track is a strip; handing it a call surface would put a 166-pixel audio player in a 16:9 box and
+ * drop the faces out of the call to make room for it.
  */
-export type MediaKind = "audio" | "video" | "take" | "youtube" | "other";
+export type MediaKind =
+  | "audio"
+  | "video"
+  | "take"
+  | "linked-audio"
+  | "linked-video"
+  | "other";
 
 /** The source marker a linked YouTube entry carries. Matches `JUKE_SOURCE_YOUTUBE` natively. */
 export const JUKE_SOURCE_YOUTUBE = "youtube";
+/** The other two linked sources a deck can drive. All three match the native constants. */
+export const JUKE_SOURCE_SOUNDCLOUD = "soundcloud";
+export const JUKE_SOURCE_VIMEO = "vimeo";
 
 /** The jam-take export format: a validated event log the deck replays through the jam synth. */
 export const JAM_TAKE_EXT = ".jamtake";
@@ -143,7 +158,7 @@ export function deckSurface(
   focusOpen: boolean,
   dockOpen: boolean,
 ): DeckSurface {
-  if (!playing || (kind !== "video" && kind !== "youtube")) return "none";
+  if (!playing || (kind !== "video" && kind !== "linked-video")) return "none";
   if (focusOpen) return "focus";
   return dockOpen ? "dock" : "none";
 }
@@ -209,7 +224,7 @@ export type JukeEntry = {
 
 /** Is this entry a video linked from YouTube rather than a file the group holds? */
 export function isLinkedVideo(entry: Pick<JukeEntry, "source" | "link">): boolean {
-  return entry.source === JUKE_SOURCE_YOUTUBE && !!entry.link;
+  return !!entry.source && !!entry.link && deckSources().includes(entry.source);
 }
 
 /**
@@ -225,7 +240,7 @@ export function isLinkedVideo(entry: Pick<JukeEntry, "source" | "link">): boolea
  * on a third party's id format, and this does not have to.
  */
 export function entryAddress(entry: Pick<JukeEntry, "cid" | "source" | "link">): string {
-  return isLinkedVideo(entry) ? `${JUKE_SOURCE_YOUTUBE}:${entry.link}` : entry.cid;
+  return isLinkedVideo(entry) ? `${entry.source}:${entry.link}` : entry.cid;
 }
 
 /**
@@ -239,7 +254,8 @@ export function entryKind(
   entry: Pick<JukeEntry, "name" | "cid" | "source" | "link">,
   mime = "",
 ): MediaKind {
-  return isLinkedVideo(entry) ? "youtube" : mediaKind(entry.name, mime);
+  if (!isLinkedVideo(entry)) return mediaKind(entry.name, mime);
+  return deckDriver(entry.source ?? "")?.picture ? "linked-video" : "linked-audio";
 }
 
 /**

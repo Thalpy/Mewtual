@@ -15,6 +15,8 @@
  * whether to load anything, on purpose; that is the caller's gate.
  */
 
+import { ref as providerRef, type EmbedProvider } from "./embed-provider.ts";
+
 /**
  * A video id, which is the only member-supplied text that ever reaches a URL path here.
  *
@@ -189,3 +191,25 @@ export function youtubePageUrl(ref: YouTubeRef): string {
 export function youtubeLabel(ref: YouTubeRef): string {
   return `YouTube video ${ref.id}`;
 }
+
+/**
+ * YouTube as a uniform provider, for the chat-card registry.
+ *
+ * An uncontrolled frame here: a chat card is somebody watching a video by themselves, and a
+ * player that answers commands it will never be sent is a capability with no purpose. The deck
+ * builds its own controlled frame through `youtubeEmbedUrl`; see `youtube-deck.ts`.
+ */
+export const YOUTUBE: EmbedProvider = {
+  id: "youtube",
+  name: "YouTube",
+  origin: "https://www.youtube-nocookie.com",
+  parse: (raw) => {
+    const found = youtubeRef(raw);
+    return found ? providerRef(found.id, { start: found.start }) : null;
+  },
+  frameUrl: (r) => youtubeEmbedUrl({ id: r.id, start: r.start }),
+  pageUrl: (r) => youtubePageUrl({ id: r.id, start: r.start }),
+  height: () => 0, // 16:9, sized by the stylesheet
+  noun: () => "video",
+  deck: true,
+};

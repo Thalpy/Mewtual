@@ -1873,12 +1873,35 @@ button.attach:hover {
   background: var(--muted);
 }
 
+/* Each service's own mark, so the dot is recognisable before the label is read. Literal colours
+   rather than tokens on purpose: these identify a third party and must not shift with the theme
+   the way a semantic token should. */
 .spotify-chip::before {
   background: #1db954;
 }
 
 .youtube-chip::before {
   background: #ff0033;
+}
+
+.soundcloud-chip::before {
+  background: #ff5500;
+}
+
+.vimeo-chip::before {
+  background: #1ab7ea;
+}
+
+.mixcloud-chip::before {
+  background: #5000ff;
+}
+
+.applemusic-chip::before {
+  background: #fa2d48;
+}
+
+.bluesky-chip::before {
+  background: #0085ff;
 }
 
 .chat-embed {
@@ -1888,10 +1911,11 @@ button.attach:hover {
   color-scheme: normal; /* the frame is a foreign document; do not force our scheme onto it */
 }
 
-/* Spotify names its own height per entity (a track is compact, a playlist needs its track list),
-   so the element's height attribute is left to do the work. A video has no intrinsic height to
-   give, so the box provides one and keeps the picture from letterboxing itself. */
-.youtube-embed {
+/* A provider that names a height (a Spotify track, a SoundCloud strip, an Apple Music record) gets
+   it as the element's height attribute and needs nothing here. A video names none, because what it
+   wants is a shape rather than a number: the box supplies 16:9 from whatever width it is given, so
+   the picture fills it instead of letterboxing inside a default 300x150. */
+.chat-embed-video {
   aspect-ratio: 16 / 9;
   height: auto;
 }
@@ -15303,8 +15327,8 @@ body > #jukebox-video {
 /* The linked-video deck fills whichever surface adopted it, exactly as the video element does.
    It carries no border of its own: the surface already draws one, and the player paints its own
    black behind the picture. */
-.juke-screen iframe.juke-yt,
-.focus-deck iframe.juke-yt {
+.juke-screen iframe.juke-link,
+.focus-deck iframe.juke-link {
   display: block;
   width: 100%;
   height: 100%;

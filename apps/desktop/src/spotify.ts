@@ -16,6 +16,8 @@
  * clip, and the embed offers no playback-rate control to correct drift with even if it could.
  */
 
+import { ref, type EmbedProvider } from "./embed-provider.ts";
+
 /** The entity kinds `open.spotify.com/embed/<kind>/<id>` will render. */
 export type SpotifyKind = "track" | "album" | "playlist" | "artist" | "episode" | "show";
 
@@ -119,3 +121,28 @@ export function spotifyLabel(ref: SpotifyRef): string {
   const noun = ref.kind === "show" ? "podcast" : ref.kind;
   return `Load Spotify ${noun}`;
 }
+
+/**
+ * Spotify as a uniform provider, for the chat-card registry.
+ *
+ * `deck: false` is the load-bearing field, and it is a finding rather than a preference: full
+ * playback needs a Premium session signed in to `open.spotify.com` in this very webview plus a
+ * working Widevine decoder, and a desktop webview has neither, so the embed plays a preview of
+ * about thirty seconds. There is also no playback-rate control to ease drift with. A room cannot
+ * listen together to a thirty-second clip, so this stays a chat card and the jukebox does not
+ * offer it. See the module header.
+ */
+export const SPOTIFY: EmbedProvider = {
+  id: "spotify",
+  name: "Spotify",
+  origin: "https://open.spotify.com",
+  parse: (raw) => {
+    const found = spotifyRef(raw);
+    return found ? ref(found.id, { kind: found.kind }) : null;
+  },
+  frameUrl: (r) => spotifyEmbedUrl({ kind: r.kind as SpotifyKind, id: r.id }),
+  pageUrl: (r) => spotifyPageUrl({ kind: r.kind as SpotifyKind, id: r.id }),
+  height: (r) => spotifyEmbedHeight(r.kind as SpotifyKind),
+  noun: (r) => (r.kind === "show" ? "podcast" : r.kind),
+  deck: false,
+};

@@ -514,6 +514,31 @@ pub const JUKE_SOURCE_FILE: &str = "";
 /// Unlike a file, nothing about it is content-addressed or held by the group: every listener
 /// fetches it from Google themselves, which is a disclosure their client gates locally.
 pub const JUKE_SOURCE_YOUTUBE: &str = "youtube";
+/// A track played from SoundCloud's embedded widget, by the track's own path.
+pub const JUKE_SOURCE_SOUNDCLOUD: &str = "soundcloud";
+/// A video played from Vimeo's embedded player, by video id.
+pub const JUKE_SOURCE_VIMEO: &str = "vimeo";
+
+/// Every linked source a queue entry may name.
+///
+/// The membership test lives here rather than being spelled out at each site, because there are
+/// now three places that have to agree about it (the writer, the reader, and the actor command)
+/// and a list that is enumerated twice is a list that will eventually disagree with itself. A
+/// source outside this set is not a track: see the note on [`JUKE_SOURCE_FILE`].
+///
+/// Deliberately absent: Spotify. Its embed plays a preview of about thirty seconds unless the
+/// listener's own webview holds a Premium session, so a room cannot listen to it together; it is
+/// a chat card only. See `spotify.ts`.
+pub const JUKE_LINK_SOURCES: [&str; 3] = [
+    JUKE_SOURCE_YOUTUBE,
+    JUKE_SOURCE_SOUNDCLOUD,
+    JUKE_SOURCE_VIMEO,
+];
+
+/// Whether `source` names a linked provider this build can queue and play.
+pub fn is_juke_link_source(source: &str) -> bool {
+    JUKE_LINK_SOURCES.contains(&source)
+}
 
 /// Append a `{id, author, text, ts}` message to a channel document (the canonical edit).
 pub fn append_message(
@@ -890,10 +915,10 @@ fn read_jukebox(doc: &AutoCommit) -> Vec<JukeEntry> {
                 // guessed at, and an entry carrying BOTH a content address and a link is skipped
                 // too: a reader that picked one of them would be picking which of two things a
                 // peer meant, and the two disagree about who fetches what from where.
-                let playable = match source.as_str() {
-                    JUKE_SOURCE_FILE => !cid.is_empty() && link.is_empty(),
-                    JUKE_SOURCE_YOUTUBE => cid.is_empty() && valid_juke_link(&link),
-                    _ => false,
+                let playable = if source == JUKE_SOURCE_FILE {
+                    !cid.is_empty() && link.is_empty()
+                } else {
+                    is_juke_link_source(&source) && cid.is_empty() && valid_juke_link(&link)
                 };
                 if !playable {
                     continue;
@@ -935,24 +960,51 @@ fn valid_juke_cid(cid: &str) -> bool {
         && cid.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Whether `link` is a storable provider id: 1..=[`MAX_JUKEBOX_LINK_CHARS`] characters of the
-/// URL-safe base64 alphabet.
+/// The most path segments a stored link may hold. A SoundCloud set is the longest real case at
+/// three (`artist/sets/name`); the rest are one.
+const MAX_JUKEBOX_LINK_SEGMENTS: usize = 4;
+
+/// Whether `link` is a storable provider id: up to [`MAX_JUKEBOX_LINK_CHARS`] characters, as one
+/// to [`MAX_JUKEBOX_LINK_SEGMENTS`] segments of the URL-safe base64 alphabet joined by `/`.
 ///
-/// The alphabet is the substance. A link ends up in a URL path on every listener's device, so
-/// what matters is that it cannot leave the segment it is written into: no slash, no dot, no
-/// query, nothing percent-encoded, so there is no escaping step for a client to get wrong.
+/// The alphabet is the substance. A link is placed into an address on every listener's device, so
+/// what matters is that it cannot escape the part of the address it is written into: no query, no
+/// fragment, no dot-run that could traverse, nothing percent-encoded, so there is no unescaping
+/// step for a client to get wrong.
 ///
-/// It deliberately does NOT pin the eleven characters a YouTube id happens to be. This layer
-/// stores a queue; it is not the right place to encode a third party's current id format, and a
-/// change at their end should not turn every stored entry into an unreadable one. The client that
-/// builds the actual address checks the exact shape it needs (see `youtube.ts`), which is the
-/// check that has to be right and is next to the code that depends on it.
+/// The slash is allowed because not every provider addresses a track by a single token: a
+/// SoundCloud track IS a path (`artist/track`), and it reaches that widget as a percent-encoded
+/// query parameter rather than as a path. Permitting it here therefore does not widen what a link
+/// can reach; the segment rules are what keep the guarantee. An empty segment and a segment that
+/// is only dots are both refused, which is what stops `a//b`, `a/../b` and a leading or trailing
+/// slash from being storable in the first place.
+///
+/// It deliberately does NOT pin the exact id format any provider currently uses. This layer stores
+/// a queue; it is not the right place to encode a third party's format, and a change at their end
+/// should not turn every stored entry into an unreadable one. The client that builds the actual
+/// address checks the exact shape it needs (see `youtube.ts` and `providers-audio.ts`), which is
+/// the check that has to be right and is next to the code that depends on it.
 fn valid_juke_link(link: &str) -> bool {
-    !link.is_empty()
-        && link.len() <= MAX_JUKEBOX_LINK_CHARS
-        && link
+    if link.is_empty() || link.len() > MAX_JUKEBOX_LINK_CHARS {
+        return false;
+    }
+    let mut segments = 0;
+    for part in link.split('/') {
+        segments += 1;
+        if segments > MAX_JUKEBOX_LINK_SEGMENTS || part.is_empty() {
+            return false;
+        }
+        if part.bytes().all(|b| b == b'.') {
+            return false; // "." and ".." traverse; nothing else made only of dots is an id
+        }
+        if !part
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Edit the text of the message with `id` in a channel document, stamping `edited`. Returns
@@ -4252,7 +4304,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         link: &str,
         name: &str,
     ) -> Result<String, AppError> {
-        if source != JUKE_SOURCE_YOUTUBE {
+        if !is_juke_link_source(source) {
             return Err(AppError::Invalid(format!(
                 "unknown jukebox source: {source:?}"
             )));
@@ -9465,8 +9517,10 @@ mod tests {
         assert!(alice.jukebox(GENERAL).is_empty());
 
         // A source nobody here understands is refused at the door rather than stored to confuse
-        // a reader later.
-        for source in ["", "vimeo", "YOUTUBE", "youtube "] {
+        // a reader later. Spotify is on this list deliberately and not by omission: its embed
+        // plays a thirty-second preview unless the listener holds a Premium session, so a room
+        // cannot listen to it together and it is a chat card only.
+        for source in ["", "spotify", "bandcamp", "YOUTUBE", "youtube "] {
             assert!(
                 alice
                     .jukebox_add_link(GENERAL, source, "dQw4w9WgXcQ", "V")
@@ -9475,15 +9529,24 @@ mod tests {
                 "source {source:?} is not one this build knows"
             );
         }
-        // A link ends up in a URL path on every listener's device. These are the ways out of a
-        // path segment, and the alphabet is what closes them.
+        // A link is placed into an address on every listener's device. These are the ways out of
+        // the part it is written into, and the segment rules are what close them. The slash
+        // itself is allowed, because a SoundCloud track IS a path; what is not allowed is any
+        // shape that could traverse or produce an empty segment.
         for bad in [
             "",
-            "has/slash",
-            "has.dot",
             "has?query",
             "has#frag",
             "has%2f",
+            "has space",
+            "a//b",
+            "/leading",
+            "trailing/",
+            "a/../b",
+            "..",
+            ".",
+            "a/./b",
+            "a/b/c/d/e",
         ] {
             assert!(
                 alice
@@ -9530,6 +9593,48 @@ mod tests {
             .await
             .is_err());
         assert_eq!(alice.jukebox(GENERAL).len(), MAX_JUKEBOX_ENTRIES);
+    }
+
+    #[tokio::test]
+    async fn a_linked_entry_may_name_any_source_this_build_can_play() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+
+        // Every source in the closed set round-trips, so adding one to the list is all it takes.
+        for source in JUKE_LINK_SOURCES {
+            alice
+                .jukebox_add_link(GENERAL, source, "someid", &format!("{source} track"))
+                .await
+                .unwrap();
+        }
+        let queue = alice.jukebox(GENERAL);
+        assert_eq!(queue.len(), JUKE_LINK_SOURCES.len());
+        let mut sources: Vec<&str> = queue.iter().map(|e| e.source.as_str()).collect();
+        sources.sort_unstable();
+        let mut expected: Vec<&str> = JUKE_LINK_SOURCES.to_vec();
+        expected.sort_unstable();
+        assert_eq!(sources, expected);
+        assert!(queue.iter().all(|e| e.cid.is_empty()));
+
+        // A SoundCloud track is addressed by a path, not a token, so a slash has to survive
+        // storage. It is the shape of the segments that keeps the guarantee, not the absence of
+        // the separator; see `valid_juke_link`.
+        let id = alice
+            .jukebox_add_link(
+                GENERAL,
+                JUKE_SOURCE_SOUNDCLOUD,
+                "artist/sets/a-mix",
+                "A Mix",
+            )
+            .await
+            .unwrap();
+        let stored = alice
+            .jukebox(GENERAL)
+            .into_iter()
+            .find(|e| e.id == id)
+            .expect("the path-addressed entry is readable back");
+        assert_eq!(stored.link, "artist/sets/a-mix");
+        assert_eq!(stored.source, JUKE_SOURCE_SOUNDCLOUD);
     }
 
     #[tokio::test]
