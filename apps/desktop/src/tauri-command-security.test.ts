@@ -203,6 +203,71 @@ test("every native command is registered exactly once and classified for securit
   assert.deepEqual([...registered].sort(), [...REVIEWED_TAURI_COMMANDS].sort(), "update the security ledger");
 });
 
+test("the enforced permission chain holds end to end: registered, classified, granted, enabled", () => {
+  // SEC-IPC-001. There are four statements of what this app exposes and they have to agree, because
+  // each one is load-bearing in a different place. `generate_handler!` decides what exists;
+  // security/command-policy.json is what a human reviews and what build.rs feeds into the ACL
+  // manifest; capabilities/main.json is what the runtime actually grants; tauri.conf.json decides
+  // which capability files are live at all. A gap anywhere in that chain is silent: a command
+  // missing from the policy is denied everywhere with no compile error, and a capability file that
+  // is never enabled looks like a granted permission while granting nothing.
+  //
+  // The runtime half of this is proved separately, in src-tauri/tests/command_acl.rs, which asks
+  // the real RuntimeAuthority rather than reading these files. This test is the drift guard; that
+  // one is the behaviour proof. Neither replaces the other.
+  const policy: { command: string; risk: string; surfaces: string[] }[] =
+    JSON.parse(readFileSync(join(nativeDir, "..", "security", "command-policy.json"), "utf8"));
+  const capability = JSON.parse(readFileSync(join(nativeDir, "..", "capabilities", "main.json"), "utf8"));
+  const config = JSON.parse(readFileSync(join(nativeDir, "..", "tauri.conf.json"), "utf8"));
+
+  const registered = registeredCommands(nativeSources().get("lib.rs") ?? "");
+  const classified = policy.map((entry) => entry.command);
+  assert.equal(new Set(classified).size, classified.length, "duplicate command-policy entry");
+  assert.deepEqual(
+    [...classified].sort(),
+    [...registered].sort(),
+    "security/command-policy.json and the handler list diverged: an unclassified command is denied everywhere, and a classified one that no longer exists is a stale review",
+  );
+
+  // Surfaces are window labels, and a window label is a security identity. An unknown one here
+  // would be granted to nothing and read as though it were a boundary.
+  for (const entry of policy) {
+    assert.ok(entry.risk && typeof entry.risk === "string", `${entry.command} has no risk class`);
+    assert.ok(Array.isArray(entry.surfaces) && entry.surfaces.length > 0, `${entry.command} names no surface`);
+    for (const surface of entry.surfaces) {
+      assert.ok(
+        ["main", "security-approval"].includes(surface),
+        `${entry.command} names unknown surface ${surface}`,
+      );
+    }
+  }
+
+  // The app permissions in the capability are exactly the commands classified for that window.
+  // Core and plugin permissions carry a prefix and are governed by their own upstream manifests.
+  const granted = capability.permissions.filter((p: string) => p.startsWith("allow-") && !p.includes(":"));
+  const expected = policy
+    .filter((entry) => entry.surfaces.includes("main"))
+    .map((entry) => `allow-${entry.command.replace(/_/g, "-")}`);
+  assert.deepEqual(
+    [...granted].sort(),
+    [...expected].sort(),
+    "capabilities/main.json and the command policy disagree about what the main window may invoke",
+  );
+
+  // SEC-IPC-003. Explicit enablement, so a capability file cannot become live by being dropped in
+  // the directory, and a file that is present but unlisted cannot be mistaken for an active grant.
+  const enabled: string[] = config.app.security.capabilities;
+  assert.ok(Array.isArray(enabled) && enabled.length > 0, "tauri.conf.json must list capabilities explicitly");
+  const onDisk = readdirSync(join(nativeDir, "..", "capabilities"))
+    .filter((name) => extname(name) === ".json")
+    .map((name) => JSON.parse(readFileSync(join(nativeDir, "..", "capabilities", name), "utf8")).identifier);
+  assert.deepEqual([...onDisk].sort(), [...enabled].sort(), "a capability file is present but not enabled, or enabled but absent");
+  assert.ok(enabled.includes(capability.identifier), "the main capability must be enabled");
+  for (const window of capability.windows) {
+    assert.notEqual(window, "*", "a wildcard window scope grants every future window at once");
+  }
+});
+
 test("the frontend invokes only registered, security-classified literal commands", () => {
   const registered = new Set(registeredCommands(readFileSync(bridgePath, "utf8")));
   const reviewed = new Set<string>(REVIEWED_TAURI_COMMANDS);

@@ -30,7 +30,8 @@ struct Entry {
 }
 
 fn policy() -> Vec<Entry> {
-    let parsed: serde_json::Value = serde_json::from_str(POLICY).expect("policy must be valid JSON");
+    let parsed: serde_json::Value =
+        serde_json::from_str(POLICY).expect("policy must be valid JSON");
     let entries = parsed.as_array().expect("policy must be an array");
     assert!(
         // A policy that parsed to nothing would make every assertion below vacuously true, which
@@ -78,7 +79,7 @@ fn every_policy_command_resolves_for_the_surfaces_it_names() {
     let mut ungranted = Vec::new();
     for entry in policy() {
         for surface in &entry.surfaces {
-            if !allowed(&authority, &entry.command, surface, &Origin::Local) {
+            if !allowed(authority, &entry.command, surface, &Origin::Local) {
                 ungranted.push(format!("{} on {surface}", entry.command));
             }
         }
@@ -104,7 +105,7 @@ fn no_command_resolves_for_a_surface_its_policy_does_not_name() {
             if entry.surfaces.contains(*surface) {
                 continue;
             }
-            if allowed(&authority, &entry.command, surface, &Origin::Local) {
+            if allowed(authority, &entry.command, surface, &Origin::Local) {
                 leaked.push(format!("{} leaks to {surface}", entry.command));
             }
         }
@@ -124,8 +125,11 @@ fn an_unlisted_window_label_gets_nothing_at_all() {
     let mut leaked = Vec::new();
     for entry in policy() {
         for label in ["media", "unregistered-window", ""] {
-            if allowed(&authority, &entry.command, label, &Origin::Local) {
-                leaked.push(format!("{} resolves for the unlisted label {label:?}", entry.command));
+            if allowed(authority, &entry.command, label, &Origin::Local) {
+                leaked.push(format!(
+                    "{} resolves for the unlisted label {label:?}",
+                    entry.command
+                ));
             }
         }
     }
@@ -140,11 +144,13 @@ fn a_remote_origin_resolves_nothing_even_on_main() {
     let mut context = context();
     let authority = context.runtime_authority_mut();
     let remote = Origin::Remote {
-        url: "https://open.spotify.com/embed/track/x".parse().expect("url"),
+        url: "https://open.spotify.com/embed/track/x"
+            .parse()
+            .expect("url"),
     };
     let mut leaked = Vec::new();
     for entry in policy() {
-        if allowed(&authority, &entry.command, "main", &remote) {
+        if allowed(authority, &entry.command, "main", &remote) {
             leaked.push(entry.command.clone());
         }
     }
@@ -168,7 +174,7 @@ fn an_unregistered_command_name_is_denied_everywhere() {
     ] {
         for label in KNOWN_SURFACES {
             assert!(
-                !allowed(&authority, name, label, &Origin::Local),
+                !allowed(authority, name, label, &Origin::Local),
                 "the authority resolved an unregistered command {name:?} for {label}",
             );
         }
