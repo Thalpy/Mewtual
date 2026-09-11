@@ -78,9 +78,9 @@ micro-optimization alone is not a reason to postpone Studio integration.
 ## Completed-work ledger: reuse before adding
 
 Audited against this branch's committed history through `39ceb76` (2026-09-11), the newest Studio
-commit. The per-commit rows below stop at `b6f137b`; the three Gate 4 commits after them
-(`cbed5b7`, `ccddd23`, `39ceb76`) are described in the active-slice section rather than as ledger
-rows. This groups the P1/Flipnote `feat` and `perf` commits from `57e51ad` onward, plus the
+commit. The per-commit rows below stop at `b6f137b`; the four Gate 4 commits after them
+(`9799c6f`, `cbed5b7`, `ccddd23`, `39ceb76`) are described in the active-slice section rather than
+as ledger rows. This groups the P1/Flipnote `feat` and `perf` commits from `57e51ad` onward, plus the
 original P1 commit `a67e284` and the performance probe. It is not a repository-wide release changelog: unrelated
 voice, files, release and user-owned UI work is not marked as Flipnote progress. Commit subjects
 are discovery aids, not proof of completion; the current contracts and limitations below govern.

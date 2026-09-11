@@ -5,7 +5,10 @@ recovery) is the active gate. Shipped: `crates/catcoms-replication/src/studio/` 
 frames, index, patch, recovery, snapshot and `epoch/{adoption,catchup,owner,settlement}`),
 `crates/catcoms-app/src/studio/{control,dispatch,publication,receiver,replay,restore,settlement}.rs`,
 the PIX1 validator and `publish_pix`/`request_blob_bounded` in `crates/catcoms-app/src/creative.rs`,
-five `studio::*` Tauri commands, and the frontend `pix.ts`, `pix-canvas.ts`, `Studio.svelte` and
+twelve Tauri commands under `studio::` (five `studio::studio_*`: `studio_list`, `studio_read`,
+`studio_create`, `studio_apply`, `studio_apply_index`; plus seven
+`studio::recovery::studio_recovery_*`: `list`, `preview`, `apply`, `restore_pointer`, `read`,
+`export`, `acknowledge`), and the frontend `pix.ts`, `pix-canvas.ts`, `Studio.svelte` and
 sixteen `jam-*.ts` modules. **Not shipped: the end-to-end connection.** The Studio frontend still
 runs on an in-memory fixture and invokes no backend command, so section 7's phase table row
 "Usable collaborative Studio | Not connected end to end" remains accurate. The

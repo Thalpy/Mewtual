@@ -87,9 +87,29 @@ is consumed once, on the owner's persisted ledger; a second submission gets `Alr
    the `MemberRoles` CRDT (no grant epoch/nonce) and reappear in `read_admins`, letting it still
    get someone admitted. Admin invites did not make the residual worse, but they made it
    *exploitable for admission*. Fixed by replay-proof grant revocation: admission now reads the
-   owner's **local** `admin_roster`, and the CRDT copy is owner-signed and display-only, so a
-   replay or deletion of it is cosmetic. See `design-grant-revocation.md`; admin invites are
-   enabled in the product UI.
+   owner's **local** `admin_roster`, which no member can write, so replaying an old grant op into
+   the CRDT can no longer re-authorize anybody. That closes the **admission** hole, which was the
+   GA gate.
+
+   What the owner-signed CRDT copy is, precisely: **not** display-only. It is a reject-only
+   liveness hint, read by a relaying admin's own pre-flight (`published_roster_omits`, consulted
+   from `serve_join_inner`) and by the product layer's role display. Reject-only means it can never
+   admit anyone, and it is fail-open on anything it cannot verify (`read_published_roster` returns
+   `None` on junk, a wrong length, a wrong owner key or a bad signature, and `None` is read as
+   "unknown", so the relay proceeds). So **deletion is benign and junk is benign**; a member cannot
+   disable every admin's relay by scribbling on the scalar.
+
+   A **stale but validly owner-signed** roster is the case that is not benign.
+   `read_published_roster` parses `gen` but enforces no high-water on read, so an old, correctly
+   signed roster replayed into the CRDT verifies cleanly and is read as a positive omission: a
+   newly-promoted admin reads itself as absent and declines to relay its own invite until the
+   owner republishes. That is a **liveness** denial, not an authority one; admission is unaffected
+   because it reads the owner's local `admin_roster`. It is the same missing per-reader high-water
+   named in the residual of `THREAT-MODEL.md` hardening item 3, which is also why
+   `max_committer_rank ≥ 1` must stay off: a second committer *would* re-check against this
+   published copy, turning the same replay into an admission bypass.
+
+   See `design-grant-revocation.md`; admin invites are enabled in the product UI.
 2. **Metadata (residual, not fixed; see note):** `CTRL_ADD_REQUEST` rides the members-only
    control topic but carries the KeyPackage + invite to **every** member (not just the owner).
    Members already see every Add commit + the new member's identity, so this is bounded. The

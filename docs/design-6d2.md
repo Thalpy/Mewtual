@@ -43,7 +43,7 @@ CommitRecord { group_id, commit_epoch, committer_device, mls_commit,
 - `commit_id = BLAKE3("catcoms/commit-id/v1" ‖ group_id ‖ commit_epoch ‖ base_authenticator ‖ committer_device ‖ mls_commit)`; derived, never stored; the tie-break key (lowest wins; content-addressed, no clock/order input).
 - `commit_auth_transcript = "catcoms/commit-auth/v1" ‖ group_id ‖ commit_epoch ‖ base_authenticator ‖ committer_device ‖ BLAKE3(mls_commit)`; signed by the committer's MLS leaf key. **openmls still independently authenticates the inner commit** via `process_incoming`; `committer_sig` is *authorization*, not state authentication.
 
-`SyncConfig` adds: `max_committer_rank` (default 1), `stage_decision_window_ms`
+`SyncConfig` adds: `max_committer_rank` (default 0), `stage_decision_window_ms`
 (250), `max_pending_proposals` (256), `max_revoked` (4096).
 
 ## openmls 0.8.1 call map (all confirmed present)

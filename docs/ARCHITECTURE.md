@@ -654,7 +654,8 @@ hard response-size bounds on the *serving* side, `committer_device` validated ag
 the designated committer on the inbound apply path, and explicit caps on every
 recovery buffer/queue.
 
-The transcript has since grown, and both residuals the original review recorded are closed.
+The transcript has since grown: of the two residuals the original review recorded, one is closed
+and the other is narrowed but still open (see the end of this paragraph).
 It is now `(CATCHUP_AUTH_DOMAIN ‖ group_id ‖ u16 kind ‖ inner ‖ requester_pubkey ‖ ts ‖ nonce ‖
 req_epoch)`, with the requester's **transport peer** appended for the kinds where
 `kind_binds_requester_peer` is true (`KIND_CATCHUP_SINCE`, plus the registry page/receipt-head/seed

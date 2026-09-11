@@ -35,7 +35,7 @@ strong request amplifier. The **storage** layer has no size limit at all; `Cid::
   `F_REF`. `MAX_FILE_BYTES` becomes a (larger) **total** cap; the blob cap then bounds only
   per-chunk size. Two numbers, not one: `MAX_FILE_BYTES` is the protocol ceiling, **1 GiB**
   (`crates/catcoms-app/src/lib.rs:2725`, raised from 256 MiB on 2026-09-04), past which a manifest
-  does not parse; `DEFAULT_FILE_SIZE_LIMIT` (`:2733`) is the **256 MiB** policy limit a server
+  does not parse; `DEFAULT_FILE_SIZE_LIMIT` (`:2732`) is the **256 MiB** policy limit a server
   starts with and its owner may set lower (never higher). Wherever this doc says 256 MiB below,
   read it as "what a default server accepts", not "what the format allows".
 - **`download_file`:** decode the manifest; for each chunk `FileRef` in order; if `!has_blob`,

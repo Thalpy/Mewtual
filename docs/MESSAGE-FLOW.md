@@ -191,12 +191,15 @@ something, clears the stall, is remembered as a continuation, and restarts the s
 
 They differ in how a round that applied *nothing* is judged:
 
-- a `PAGE` whose cursor advanced is real work and is **not** counted against the source. It is a
-  page of ops this node already holds but could not name, which is exactly what a frontier wider
-  than its cap produces; the walk is consuming the peer's log and will reach the end of it. It is
-  deliberately not treated as a continuation claim either, because the peer chooses its own
+- a non-empty `PAGE` whose cursor advanced is real work and is **not** counted against the source.
+  It is a page of ops this node already holds but could not name, which is exactly what a frontier
+  wider than its cap produces; the walk is consuming the peer's log and will reach the end of it. It
+  is deliberately not treated as a continuation claim either, because the peer chooses its own
   positions.
-- an empty `PAGE` whose cursor did not advance is a peer minting positions for nothing, and counts.
+- a `PAGE` counts if **either** half of that fails: the bundle is empty **or** the cursor did not
+  advance. An empty page counts even when its cursor moved: a conforming pager stops early only on a
+  full budget, so it cannot emit an empty page alongside "there is more", and an empty one is a peer
+  minting positions for nothing.
 - a `MORE` that applies nothing always counts, because that path recomputes from the frontier and
   can therefore repeat identically forever. That is the shape the non-progress bound exists for.
 

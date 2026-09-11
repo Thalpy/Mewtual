@@ -1046,10 +1046,15 @@ to pick up cold. Keep it current; delete an entry when it lands or is deliberate
 
 ### Housekeeping
 
-- The **desktop workspace is rustfmt-clean now** (`cargo fmt --all -- --check` in
-  `apps/desktop/src-tauri` exits 0). It used to carry 6 pre-existing diffs and was not covered by
-  the build ritual, so `cargo fmt` there reformatted unrelated code and every agent had to
-  hand-match its own hunks and revert the churn. That is no longer a hazard; formatting is a CI
-  gate.
+- **Re-run rustfmt in `apps/desktop/src-tauri`; do not assume it is clean.** The desktop workspace
+  used to carry 6 pre-existing diffs and was not covered by the build ritual, so `cargo fmt` there
+  reformatted unrelated code and every agent had to hand-match its own hunks and revert the churn.
+  It has been cleaned since, but it is not *kept* clean by anything: `cargo fmt --all -- --check` is
+  a CI gate at the **workspace root** (`.github/workflows/ci.yml`, and the `full)` case of
+  `scripts/linux-container-test.sh`), and the root workspace **excludes** `apps/desktop/src-tauri`
+  (`Cargo.toml` `exclude`), while the desktop CI job runs `linux-container-test.sh desktop`, whose
+  `desktop_checks` does not run `cargo fmt` at all. So the desktop workspace can and does drift
+  out of format mid-slice. Run the check there yourself before believing any claim about it;
+  treat a nonzero exit as somebody's in-flight work, not as your own hunks to fix.
 - Desktop clippy has a baseline of 2 lib and 4 lib-test warnings.
 

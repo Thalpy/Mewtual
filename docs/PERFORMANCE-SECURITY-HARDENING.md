@@ -252,8 +252,8 @@ implementation.
 
 ## Acceptance measurements
 
-Status as of 2026-09-11. Three of these were written as criteria and then never checked; they are
-marked open here rather than left to read as satisfied.
+Status as of 2026-09-11. Four of these were written as criteria and then never checked; they are
+marked open or unverified here rather than left to read as satisfied.
 
 - **OPEN.** Report App and feature chunk minified/gzip sizes after every extraction; do not hide
   warnings. *Not done since 2026-08-20.* Nothing re-reported them across the whole 2026-09-03
@@ -273,6 +273,10 @@ marked open here rather than left to read as satisfied.
   cover the native half only; none of the four listed timings is a native-probe number.
 - **Met.** Confirm lock rejects representative read, mutation, OS-launch and pairing commands while
   actors continue native background work.
-- **Met, with a caveat.** Keep the ledger test, CSP, full suites and documented R2/R6/R7 residuals
-  green. The ledger covers 168 commands, not the 100 an earlier revision of this line claimed, and
-  it pins membership rather than the count: see "Security review and command tracking" above.
+- **UNVERIFIED this pass.** Keep the ledger test, CSP, full suites and documented R2/R6/R7
+  residuals green. *No suite was re-run for this pass; the entry was previously marked met by
+  inspection alone.* Inspection can confirm the ledger's shape but not that anything is green, and
+  at least one gate demonstrably was not: `cargo fmt --all -- --check` in `apps/desktop/src-tauri`
+  exits 1 on in-flight work. Re-run the suites before restoring a met/green claim here. The ledger
+  itself covers 168 commands, not the 100 an earlier revision of this line claimed, and it pins
+  membership rather than the count: see "Security review and command tracking" above.

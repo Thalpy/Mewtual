@@ -315,13 +315,17 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   **Actual size** switches between fit-to-window and 1:1. **Right-click** an image for
   **Properties** (size, type, who shared it, where it's used), **Download**, its address, and
   the message's own actions.
-- **A Spotify or YouTube link on a line of its own** becomes a player card. By default it does not
-  load by itself: you get a chip naming the service, and clicking it is what contacts them.
+- **A link to one of the supported services, on a line of its own**, becomes a player card. Seven
+  hosts are allowed to render one: Spotify, YouTube, SoundCloud, Vimeo, Mixcloud, Apple Music and
+  Bluesky. By default none of them loads by itself: you get a chip naming the service, and clicking
+  it is what contacts them.
   **Settings → Chat & Media → Load these cards without asking** turns the chips off and lets them
-  open on sight; it applies on this device across every server, and the trade is that Spotify and
-  Google then learn your address and what you are looking at for every such link that scrolls past,
-  with no way for them to tell it was not you who chose it. Either way the frame keeps talking to
-  the service for as long as it is on screen, so it unloads when you scroll away, switch to another
+  open on sight. It is one switch covering all seven, not a per-service or per-server choice, and it
+  applies on this device everywhere; a service added to the list in a later build is covered by the
+  same switch without being asked for again. The trade is that each of those companies then learns
+  your address and what you are looking at for every such link that scrolls past, with no way for
+  them to tell it was not you who chose it. Either way the frame keeps talking to the service for
+  as long as it is on screen, so it unloads when you scroll away, switch to another
   tab, or minimise the window, and comes back when you return. A Spotify card usually plays a short
   preview: full tracks need that device to be signed in to Spotify Premium. A link written inside a
   sentence stays an ordinary link.
@@ -594,10 +598,12 @@ here". The first is a **server** rule, the second is **yours alone**.
   gives the room one grid to play against, and a patch editor shapes your own sound (oscillator,
   filter, ADSR envelope) and announces the recipe so everyone hears you the same way.
 - **Takes**; the **TAKES** fold on the instrument panel records what the room is playing. A take
-  is the note events everyone is already hearing, not audio. Pressing **REC** *arms* it and waits
-  for the room: it shows **waiting for the room** until every participant's app has consented,
-  and an older build can never consent, so it will not start behind anyone's back. The whole room
-  sees that it is recording. **STOP · KEEP** keeps a take and **DISCARD** throws it away; a
+  is the note events everyone is already hearing, not audio. Pressing **REC** starts recording
+  straight away; nobody else is asked first, and nobody else can stop it. What the room does get is
+  visibility: while it runs, the whole room is shown that a take is being recorded. If the set of
+  people in the call changes, the take pauses, because a take's participant list is part of what it
+  claims to be; you can then stop it or put the original set back. **STOP · KEEP** keeps a take
+  and **DISCARD** throws it away; a
   **N lost** chip is shown when events went missing in transit, and the take keeps the holes
   rather than hiding them. Kept takes can be renamed, replayed locally through your own synth
   (nothing is re-sent), saved as **sheet music** (an SVG in your Downloads folder), or shared into
@@ -611,13 +617,18 @@ here". The first is a **server** rule, the second is **yours alone**.
   a track comes off the queue once the room has heard it through. **Add from share** can be
   narrowed to audio, video or takes. A video plays on the deck's own screen in the voice stage, or
   full size in the focus view; audio needs no picture and plays with the deck folded or the stage
-  collapsed. The same panel's **YouTube** tab queues a video by link instead of from the share,
-  which works differently in one way worth knowing: nothing is shared through the server, so it
-  uses none of your fileshare and cannot expire out of it, and everyone who plays it fetches it
-  from Google themselves after being asked. The room still shares one transport, so play, pause
-  and skip move everybody together. Spotify cannot be queued, because its embedded player only
-  plays a short preview unless that device is signed in to Spotify Premium; a Spotify link posted
-  in chat becomes a player card instead.
+  collapsed. The same panel's **LINK** tab queues a track by link instead of from the share:
+  **YouTube, SoundCloud and Vimeo**. It works differently in one way worth knowing: nothing is
+  shared through the server, so it uses none of your fileshare and cannot expire out of it, and
+  everyone who plays it fetches it from that service themselves after being asked. The room still
+  shares one transport, so play, pause and skip move everybody together. A SoundCloud track plays
+  with no picture, like any other audio.
+
+  Only those three can be queued, and the reason is the same for the rest: keeping a room together
+  needs a player that will take a seek and say where it has got to, and the others do not offer
+  both. Spotify additionally only plays a preview of about thirty seconds unless that device is
+  signed in to Spotify Premium. Paste one of those links here and the panel says so rather than
+  queueing something nobody can play; in chat they still become player cards.
 - A hardware **MIDI controller** is set up under **Settings → Devices → MIDI controllers**. That
   panel lists every input the system reports, says which ones are routed, shows the messages
   arriving in a live monitor, and carries step-by-step setup and troubleshooting help. Controllers

@@ -7,11 +7,14 @@ not-rejected residual applies, as scoped below); the client validates on read, a
 the precedence below, and ships the Server-settings Livery section + the per-server
 Appearance follow-toggle. `tokens` overrides went past the v1 plan: the publisher UI writes
 colour tokens (accent, ground/sidebar tint) **and** the typed non-colour vocabulary of
-`radius`, `font` and `pattern` (`App.svelte:21874-21943`), each an enum/catalog id validated
-on read (`design-livery-customisation-safety.md`). The shared **server icon** (`icon` key,
+`radius`, `font` and `pattern` (`App.svelte`: the `lv-grp` groups labelled `Corners`,
+`Typeface` and `Pattern`, iterating `LIVERY_RADIUS` / `LIVERY_FONTS` / `LIVERY_PATTERNS`),
+each an enum/catalog id validated on read (`design-livery-customisation-safety.md`). The shared **server icon** (`icon` key,
 `set_server_icon` invoke) has a full publisher UI: upload, replace and remove, filed beside
-the server name rather than under Livery (`App.svelte:28966-28970`, with the Livery page's
-own entry at `:29147-29151`). The later sections below record the 2026-09-06 sidebar banner
+the server name rather than under Livery (`App.svelte`: the `<h3>Server icon</h3>`
+`set-section` on the server-settings name page, with the Livery page's own entry in the
+`serverSettingsPage === "livery"` branch, the field labelled "Server icon: shown on
+everyone's rail"). The later sections below record the 2026-09-06 sidebar banner
 and founding-publish work, which is likewise shipped. Not yet done:
 rail-monogram tint (optional), the contrast floor and debounce mitigations (noted below,
 revisit if abused).

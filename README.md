@@ -204,8 +204,9 @@ crates/
                            engine (3-scope expiry, GC with decorrelated eviction + holder probe,
                            refetchable on eviction)
   catcoms-net              libp2p MeshService realizing the MeshTransport seam (gossipsub +
-                           request/response over Noise+yamux), plus the zero-knowledge relay and
-                           rendezvous server nodes and their budget metering
+                           request/response over Noise+yamux), plus the zero-knowledge relay (it
+                           routes ciphertext only; the operator still sees who connects, when and
+                           how much) and rendezvous server nodes and their budget metering
   catcoms-sync             ChannelSync: replicate encrypted CRDT docs over any MeshTransport
                            (blinded ns_secret_L topics, live gossip, position-paged frontier
                            catch-up, member PEX, the pre-join join_ns, membership tags), plus
@@ -255,21 +256,17 @@ To start talking:
 See the [user guide](docs/USER_GUIDE.md) for the complete UI walkthrough, networking setup, file
 sharing, wiki syntax, roles, and troubleshooting.
 
-### Test two instances on one computer
+### Testing with two members
 
-`tauri dev` owns the Vite development port, so run the second instance from the already-built debug
-binary while the first terminal remains open:
+Two desktop instances on one machine are not currently possible. The vault takes an exclusive,
+non-blocking lock before it unseals, so the second process stops with "the vault is busy in another
+application process"; both resolve the same application data directory, and there is no override
+for it.
 
-```sh
-# Terminal 1
-cd apps/desktop
-npm run tauri dev
-
-# Terminal 2
-./apps/desktop/src-tauri/target/debug/mewtual-desktop
-```
-
-Use a blank reachable-address field when both instances are on the same machine.
+To exercise two members, use the developer CLI in one process (`cargo run -p catcomsctl -- demo`),
+two separate machines or VMs, or the automated two-client checks. See
+[Two-client testing](docs/TWO-CLIENT-TESTING.md) for the real-TCP tests, the packaged-process
+recovery check, and the network-namespace lanes.
 
 ### Connecting other people
 
@@ -277,7 +274,7 @@ The founder advertises one or more addresses in the invite:
 
 | Where the joining member is | Setup |
 |---|---|
-| Same computer | Leave the reachable address blank |
+| Same computer | Not possible: one machine runs a single instance (see above) |
 | Same LAN/Wi-Fi | Enter the founder's LAN IP, such as `192.168.1.5` |
 | Across the internet | Enter a public address and forward the selected TCP port |
 | Behind NAT without port forwarding | Run a reachable relay and paste its multiaddress |
@@ -454,7 +451,8 @@ npm run check
 npm run build
 ```
 
-That is 1,165 frontend tests and more than 1,700 Rust test functions across the two workspaces, plus
+That is more than 1,170 frontend tests and more than 1,700 Rust test functions across the two
+workspaces, plus
 the gates that make them mean something: the ambient-dependency check keeps OS time and randomness
 behind the runtime seams, so protocol behaviour stays deterministic under test, and the desktop's
 Tauri command ledger (`src/tauri-command-security.ts`) is compared against both the Rust handler
@@ -502,5 +500,3 @@ complete. Start with:
 - [Threat model](docs/THREAT-MODEL.md): assets, trust boundaries, attacks, and residual risk.
 - [Interfaces](docs/INTERFACES.md): the main cross-crate contracts.
 - [Handover notes](docs/HANDOVER.md): implementation state and engineering context.
-</content>
-</invoke>

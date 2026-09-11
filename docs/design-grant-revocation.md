@@ -61,15 +61,21 @@ be attack-proof is the owner's own. Therefore:
 Keeping the read on the CRDT forces `read_admins` to mutate persisted high-water state (an ugly
 `&mut`-infected signature on the gate) plus full gen/roster wire format plus fail-closed liveness
 handling. Moving the authoritative read off the CRDT needs only two snapshot fields and a local-set
-update; `read_published_roster` stays a pure `&AutoCommit -> Option<set>` display reader. Fewer
-lines, more robust, **no liveness tension** (Mallory griefing the CRDT can't degrade admission;
-the owner reads its local set; at worst other members' badges go briefly stale, which is cosmetic).
+update; `read_published_roster` stays a pure `&AutoCommit -> Option<set>` reader. Fewer lines, more
+robust, and **no admission tension** (Mallory griefing the CRDT can't degrade admission; the owner
+reads its local set). It is not free of liveness tension: the published copy is also read by an
+admin's own relay pre-flight, so a stale-valid replay can deny that relay. See residual 1.
 
 ## Residuals
 
-1. **Display drift (cosmetic, R4-class):** Mallory can replay an older signed roster or delete the
-   `roster` key, transiently making *other members'* UIs show a stale/empty admin badge. Confers
-   no capability (admission is owner-local + rank-gated). Optionally hardened later with a
+1. **Relay-liveness drift (R4-class):** Mallory can replay an older signed roster or delete the
+   `roster` key, transiently making *other members'* UIs show a stale/empty admin badge. Deletion
+   and junk are genuinely cosmetic, because `read_published_roster` fails closed to `None` and the
+   caller then relays anyway. A **stale but validly owner-signed** replay is not: `gen` is parsed
+   with no high-water enforced on read, so it reads cleanly and suppresses a newly-promoted admin's
+   own relay pre-flight until the owner republishes. This is liveness only, never a capability:
+   admission stays owner-local + rank-gated. It is the same missing per-reader high-water recorded
+   as the residual of THREAT-MODEL item 3. Optionally hardened later with a
    display-only high-water; deferred.
 2. **The guarantee rests on "only the owner admits" (Option C).** If `max_committer_rank > 0` were
    ever enabled, a second committer would also gate admission and would have to consult the signed

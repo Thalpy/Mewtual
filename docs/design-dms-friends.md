@@ -1,9 +1,11 @@
 # Design; Direct Messages + Friends
 
 Status: **all three phases shipped.** Phase 1 (DM foundation + friend-code establishment) is the
-New DM / Add friend composers and their flows (`App.svelte:435-436`, forms at `:24836-24848`);
+New DM / Add friend composers and their flows (`App.svelte`: the `showNewDm` / `showAddFriend`
+state and the two `<form class="dm-form">` blocks that call `newDm()` and `addFriend()`);
 phase 2 is the four sort modes, `recent` / `activity` / `reconnect` / `alpha`
-(`App.svelte:398-411`, picker at `:24852`); phase 3 (in-server one-click add over
+(`App.svelte`: the `DmSort` type, `dmSort` state and the `sortedDmList` derivation, with the
+picker at `<select bind:value={dmSort}>`); phase 3 (in-server one-click add over
 `KIND_DM_INVITE`) was already marked done below.
 
 ## Decisions (from the user)

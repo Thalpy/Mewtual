@@ -1033,8 +1033,8 @@ table with the commit that closed it.
   trusted member.
   Third-party HTTP(S) images always require a click, even under everyone mode: they have no file
   attestation, disclose the client address, and may target loopback/private-network services.
-  **Third-party player frames** (Spotify and YouTube cards in chat, and YouTube tracks on the
-  jukebox deck) are the same class of exposure and are gated the same way, with one addition. Like
+  **Third-party player frames** (cards in chat for any of the allow-listed embed hosts, and YouTube
+  tracks on the jukebox deck) are the same class of exposure and are gated the same way, with one addition. Like
   a remote image they carry no attestation and disclose the client address; a queued video id is a
   claim by whoever queued it, and no device contacts the provider on a peer's behalf to check it.
   Unlike an image they keep running once loaded, so a grant to load cannot be the end of it: a card
@@ -1047,11 +1047,20 @@ table with the commit that closed it.
   about permission. The preference is deliberately not per-server and not part of file trust: an
   embed's host set is fixed by the CSP so it cannot be aimed at loopback or a private LAN the way a
   remote image can, and it has no author attestation a per-member policy could act on, so the
-  decision is only ever "may this device disclose itself to these two companies without asking".
-  Deck playback of a linked video stays a per-track explicit approval regardless of this
-  preference. `frame-src` admits exactly `open.spotify.com` and `www.youtube-nocookie.com`;
-  no third-party **script** origin is admitted, so the YouTube deck drives its frame over
-  postMessage rather than loading the provider's API script into this document. A frame is
+  decision is only ever "may this device disclose itself to the allow-listed embed hosts without
+  asking". Note the scope honestly: it is **one switch over the whole allow-list**, not a per-host
+  or per-service consent, so every host in `frame-src` is covered by it, and adding a host extends
+  an answer the member already gave rather than asking again. Deck playback of a linked video stays
+  a per-track explicit approval regardless of this preference. `frame-src` admits exactly the
+  allow-listed embed hosts in `tauri.conf.json`, **currently seven**: `open.spotify.com`,
+  `www.youtube-nocookie.com`, `w.soundcloud.com`, `player.vimeo.com`, `player.mixcloud.com`,
+  `embed.music.apple.com`, `embed.bsky.app`;
+  no third-party **script** origin is admitted, so every deck frame is driven over postMessage
+  rather than by loading a provider's API script into this document. Only three of the seven are
+  deck sources at all (`youtube`, `soundcloud`, `vimeo`, enumerated natively as
+  `JUKE_LINK_SOURCES`): a queue entry naming any other source is not a playable track and is
+  skipped by the document reader, and a call-transport frame naming one is refused at the wire
+  edge. A frame is
   sandboxed without `allow-top-navigation`, and replies from it are evidence (position, player
   state) that can move only the local player, never the room's transport. This narrows disclosure
   to a deliberate act per member per entity; it does **not** make the provider's player benign,
@@ -1107,7 +1116,7 @@ table with the commit that closed it.
 | Membership authenticity | MLS commits; joins admitted only via a signed invite + committer | `catcoms-sync::serve_join` |
 | **Invite admission** | Two paths, both role-gated. Direct: the admitter must be the **named inviter** *and* an **authorized committer** (leaf rank ≤ `max_committer_rank`; at rank 0 that is exactly the owner). Relayed (Option C): a non-committer admin broadcasts a signed Add-request and the **owner** re-checks, before committing, that the requester **is** the invite's named inviter and that that inviter is owner/admin **right now** per the owner's local authoritative roster. A member who is neither **cannot get anyone admitted**, even with a self-minted invite. | `catcoms-sync::{serve_join_inner, on_add_request, inviter_is_authorized}` |
 | Owner identity | Owner = MLS **designated committer** = lowest leaf index; cryptographic, not stored | `catcoms-mls::designated_committer` |
-| Admin-grant authenticity | Admin = an **owner-signed** capability (`owner_pubkey ‖ sig` over `domain ‖ len(group_id) ‖ group_id ‖ target_fp`), verified at read against the *current* owner's full device id. A modified client **cannot forge** an admin grant. | `catcoms-app::read_admins` |
+| Admin-set authenticity | Two copies, different jobs. The **authoritative** admin set is the owner's **local** `admin_roster`, which is not in the shared CRDT, so no member can write what the admission gate reads. The CRDT carries one **owner-signed whole-set roster** value (`gen ‖ owner_pk ‖ n ‖ fps ‖ sig`, signed over `ROLE_ROSTER_DOMAIN ‖ len(group_id) ‖ group_id ‖ gen ‖ n ‖ fps`), read fail-closed against the *current* owner's full device id, for **display/propagation and a relaying admin's reject-only pre-flight** - not per-fingerprint grants, and not admission. Scope of the guarantee: a modified client **cannot forge** a roster the reader accepts (that needs the owner's signing key) and cannot alter the set the owner admits from; it **can** delete the published copy or fill it with junk, which is cosmetic (reads fail open), and it **can** stale-replay a validly signed older copy, which is **not** cosmetic: that reads cleanly and denies a newly-promoted admin's relay until the owner republishes. Both are liveness only, because admission never consults this copy. See item 3's residual (no per-reader high-water). | `catcoms-sync::roles::read_published_roster`; `catcoms-sync::inviter_is_authorized` (owner-local `admin_roster`) |
 | Member-removal authorization | Removal is **owner-only**: `request_remove` rejects a non-owner, and the committer ignores any inbound remove request whose requester isn't the owner (signature-verified, so a forged owner-claim fails). A modified member cannot get anyone removed. | `catcoms-sync` (on_remove_request gate + `request_remove` Unauthorized) |
 | Forward secrecy on removal | A removal is a real MLS Remove commit → epoch advance + routing-secret rotation; the removed member is genuinely cut off | `catcoms-sync` removal path |
 | Blob integrity | Content-addressed; served bytes are re-hashed against the requested CID before storing (no cache poisoning) | `catcoms-sync::request_blob` |
@@ -1150,8 +1159,13 @@ design that shipped:
   working end-to-end path, not a UI affordance: `canInvite` in `App.svelte` is not gated off.
 - The admin's own pre-flight check on that path is a **liveness courtesy, not a security gate**:
   it is reject-only against a *positively read* published roster, so a member who overwrites the
-  published-roster scalar with junk cannot disable other admins' relays, and it can never admit
-  anyone. The owner's local-roster check is the authoritative one.
+  published-roster scalar with junk cannot disable other admins' relays (`read_published_roster`
+  returns `None` on anything it cannot verify, and `None` means relay anyway), and it can never
+  admit anyone. The owner's local-roster check is the authoritative one. The case that does bite
+  is a **stale but validly owner-signed** roster replayed into the CRDT: it verifies cleanly, is
+  read as a positive omission, and suppresses a newly-promoted admin's relay until the owner
+  republishes. That is liveness only, for the same reason: admission reads the owner's local
+  `admin_roster`. It is the missing per-reader high-water named in item 3's residual below.
 
 ## Hardening backlog (the fixes)
 
@@ -1172,19 +1186,28 @@ design that shipped:
    persisted `admin_roster`); since only the owner admits (Option C), the admission gate
    (`inviter_is_authorized`) reads that local set, which a malicious member cannot write; so a
    demoted admin replaying or deleting its grant in the shared CRDT can no longer re-authorize
-   itself. The CRDT now carries a single **owner-signed** `roster` value for display only
-   (readers verify the owner's signature; a tampered copy is at worst cosmetic). Adversarial
-   review: no blocking/should-fix findings. **Residual:** the guarantee rests on single-committer
-   admission; under `max_committer_rank ≥ 1` a second committer would re-introduce the replay
-   surface (it would need a per-reader high-water on the signed published roster). Do not enable
-   concurrent committers. This **closes the GA gate** for admin invites (item 4).
+   itself. The CRDT now carries a single **owner-signed** `roster` value, which readers verify
+   against the owner's key. It is **not** display-only: it is a reject-only liveness hint, read by
+   a relaying admin's pre-flight (`published_roster_omits`) as well as by role display. A tampered
+   or deleted copy is cosmetic, because verification is fail-open (`None` → relay anyway). A
+   *stale-but-validly-signed* copy is not: it reads cleanly and denies a newly-promoted admin's
+   relay until the owner republishes. Adversarial review: no blocking/should-fix findings.
+   **Residual (one missing high-water, two consequences):** there is no per-reader high-water on
+   the signed published roster. Today that costs **liveness only** (the stale-replay relay denial
+   above), because admission reads the owner's local set. Under `max_committer_rank ≥ 1` a second
+   committer would re-check against this published copy instead, and the same replay becomes an
+   **admission** bypass. Do not enable concurrent committers. This **closes the GA gate** for admin invites (item 4).
 4. **Make admin invites functional (R3)**; ✅ **DONE + REVIEWED; live end to end.** Design:
    Option C, "owner-serialized admin invites." An admin who wants to invite
    broadcasts a *signed Add-request* on the control topic (mirroring the R1 remove-request
    pattern); the **owner alone** runs the MLS Add after re-checking the inviter is Owner/Admin per
-   the live roles doc. This keeps `max_committer_rank = 0` (single committer → **no fork**),
-   reuses the most-tested membership code + the existing two-phase Welcome-push. Shipped slices:
-   (0) `read_admins`/grant logic moved into `catcoms-sync` (live-doc gate, zero staleness) ✓;
+   the **owner's own local `admin_roster`**. This keeps `max_committer_rank = 0` (single committer
+   → **no fork**), reuses the most-tested membership code + the existing two-phase Welcome-push.
+   Shipped slices:
+   (0) roster/grant logic moved into `catcoms-sync` (`roles::read_published_roster` for the
+   display copy; the gate itself reads the owner's local roster, so a member cannot write what
+   the gate consults - a local roster is not a zero-staleness read of the shared doc, it is a set
+   only the owner edits) ✓;
    (1) the inviter-role re-check at admission ✓; (2) the `CTRL_ADD_REQUEST` op + `on_add_request`
    + the **Welcome-authentication chain** ✓; the load-bearing new crypto passed a focused
    adversarial review with **no blocking findings** (verified: no non-owner commit path; the

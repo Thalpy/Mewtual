@@ -4,6 +4,47 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Chat recognises five more services.** A link on a line of its own from **SoundCloud, Vimeo,
+  Mixcloud, Apple Music** or **Bluesky** now opens out into that service's player, alongside the
+  Spotify and YouTube cards. Every one is gated identically to the two that came before: inert
+  until permitted, and mounted only while it is on screen in a visible window. Providers are now a
+  small table rather than a pair of special cases, so each is a parser and two URL builders with no
+  ability to change any of that. A Bluesky link only becomes a card when it carries the author's
+  DID; the embed rejects handles, and turning a handle into a DID would mean contacting Bluesky
+  about a link that merely scrolled past, so those stay ordinary links.
+- **The jukebox can queue SoundCloud and Vimeo as well as YouTube.** The LINK tab (formerly
+  YOUTUBE) takes any of the three, and the room shares one transport across all of them as before.
+  Those three and no others because keeping a room together needs a player that will take a seek
+  and report where it has got to: Spotify, Mixcloud and Apple Music do not offer both, and pasting
+  one now says so rather than queueing a track nobody can play. A SoundCloud track correctly plays
+  without claiming the call's video surface, which a 166-pixel audio strip has no use for.
+
+- **Settings → Chat & Media can load player cards without asking.** Off by default, device-wide
+  rather than per-server, and sealed in the vault with the other content preferences, so it is not
+  readable from disk and is dropped when the app locks. Read what it covers before turning it on:
+  it applies to every allow-listed embed host in `tauri.conf.json`'s `frame-src`, currently seven
+  (`open.spotify.com`, `www.youtube-nocookie.com`, `w.soundcloud.com`, `player.vimeo.com`,
+  `player.mixcloud.com`, `embed.music.apple.com`, `embed.bsky.app`), and any host added to that
+  list later is covered by the same switch without being asked for again. Each of those companies
+  learns this device's address and what it is looking at for every such link that scrolls past. It
+  replaces the click and only the click: an auto-loaded card still exists only while it is on
+  screen in a visible window, so the setting buys fewer interruptions rather than frames running
+  where nobody is looking. It reads as off whenever the sealed record is unreadable. Jukebox
+  playback of a linked video keeps its own per-track approval regardless.
+
+### Security
+
+- **`frame-src` now admits seven embed hosts, not two.** SoundCloud, Vimeo, Mixcloud, Apple Music
+  and Bluesky join Spotify and YouTube, so the list a previous release described as "exactly
+  `open.spotify.com` and `www.youtube-nocookie.com`" is out of date. Nothing else about the policy
+  changed: still no third-party **script** origin, frames still sandboxed without
+  `allow-top-navigation`, and what a frame reports back can move only the local player. Each host
+  is still click-to-load by default, but the **load these cards without asking** preference above
+  is a single switch over the whole list rather than a per-service one, so an existing "yes" now
+  covers five more companies than it did.
+
 ### Fixed
 
 - **A channel could stop catching up and never finish.** When you reconnect, your client tells a
@@ -51,8 +92,8 @@ All notable changes to Mewtual are documented here.
   grace after which a stale recovery warning is evicted was written but never actually applied, so
   the document stayed in Closing until somebody pressed Acknowledge, which is exactly what the
   grace exists to avoid. The deadline is now enforced on all four settlement and adoption paths,
-  and Acknowledge only brings the eviction forward. Studio is still not reachable from the app, so
-  this is not something you can see yet.
+  and Acknowledge only brings the eviction forward. None of this is something you can see yet: the
+  Studio backend is not wired up to the app, so nothing the Studio tab shows you is running on it.
 
 ### Changed
 
@@ -89,8 +130,12 @@ All notable changes to Mewtual are documented here.
   frame edits, typed checkpoints, durable exchange of saved art, bounded paging, checkpoint
   discovery and adoption, owner rotation and recovery inspection. The saved-registry work alongside
   it gained durable paging, recovery-first checkpoint installation, owner rotation from durable
-  decisions and receipt completion. None of it is reachable from the app: the creative suite's
-  screens are still a fixture running on data held in memory, and they call no backend command.
+  decisions and receipt completion. None of that backend is reachable from the app: it is wired to
+  nothing, and the creative suite's screens call no backend command. The screens themselves *are*
+  reachable, and always have been: **Studio** is in the sidebar, in the quick switcher and on
+  Ctrl/Cmd+8, and it opens and draws. Treat it as a preview only. It runs entirely on data held in
+  memory, nothing you make there is shared with the group, and it is discarded rather than
+  saved: close the tab or the app and the work is gone, with no warning and no way to get it back.
 
 ## [0.3.0-alpha.17] - 2026-09-07
 
@@ -168,13 +213,6 @@ never tagged or published, so this is the release that carries it, together with
   minimise. The frame is built in code from a parsed id and never from a member's text, so chat
   markup still cannot create one, and the share-tracking token on a Spotify link is dropped rather
   than passed on.
-- **Settings → Chat & Media can load those cards without asking.** Off by default, device-wide
-  rather than per-server, and sealed in the vault with the other content preferences, because a
-  standing instruction to contact two named companies is not something the webview should be able
-  to flip. It replaces the click and only the click: an auto-loaded card still exists only while it
-  is on screen in a visible window, so the setting buys fewer interruptions rather than frames
-  running where nobody is looking. It reads as off whenever the sealed record is unreadable, and is
-  dropped on lock. Jukebox playback of a linked video keeps its own per-track approval regardless.
 - **The jukebox can queue a YouTube video by link**, from its own tab beside Audio, Video and
   Takes in **Add from share**. It plays on the deck's own screen like any
   other video and follows the same shared transport, so play, pause, skip and seek still move the

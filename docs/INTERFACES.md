@@ -1578,10 +1578,14 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
       field, so a build that predates paging can never receive one; that is what makes both halves
       of the change additive on the wire. The requester stores the cursor against
       `(doc_type, doc_id, peer)` and replays it in its next request to that peer.
-      A `4` whose bundle applied nothing but whose cursor advanced is real work and is **not**
-      counted against the source: the walk is consuming the server's log and will reach the end of
-      it. A `4` with an empty bundle and a cursor that did not advance is a peer minting positions
-      for nothing, and is counted. The server's own walk is fenced per runtime: a cursor whose
+      A `4` that carries operations and whose cursor advanced is real work and is **not**
+      counted against the source, even if every operation in it was already held: the walk is
+      consuming the server's log and will reach the end of it. Progress is the **conjunction**, so
+      a `4` is counted whenever **either** half fails: an empty bundle **or** a cursor that did not
+      advance. An empty page is a peer minting positions for nothing even when its cursor moved,
+      because a conforming pager only stops early on a full budget and so cannot emit an empty page
+      alongside "there is more"; it keeps counting.
+      The server's own walk is fenced per runtime: a cursor whose
       `provider` is not this process restarts the walk at zero rather than being honoured, because
       acting on somebody else's position would skip history the requester would never be offered
       again.
@@ -2887,8 +2891,8 @@ fetches messages when it opens one. The bridge forwards the flags on the `channe
 pub struct JukeEntry {
     pub id: String, pub cid: String, pub name: String,
     pub author: String, pub added_ms: u64,
-    pub source: String, // "" = a shared file; "youtube" = a linked video
-    pub link: String,   // the provider's video id; empty for a file entry
+    pub source: String, // "" = a shared file; else one of JUKE_LINK_SOURCES
+    pub link: String,   // the provider's track id or path; empty for a file entry
 }
 impl Server {
     // cid: 1..=128 lowercase hex, shape-checked only (the blob may still be in flight)
@@ -2905,15 +2909,22 @@ service and has no `cid`, because nothing here holds it and each listener fetche
 `source` and `link` are written only for a linked entry, so a file entry is byte-for-byte the
 document older builds wrote and their absence reads as "file".
 
+`JUKE_LINK_SOURCES` is the closed set of linked sources: `youtube`, `soundcloud`, `vimeo`. A
+source is on it only if its player takes a seek **and** reports where it has got to, which is what
+keeping a room together needs; Spotify, Mixcloud, Apple Music and Bluesky are chat cards only.
+
 `read_jukebox` is the boundary, not the add call: a peer writes the channel document directly. It
-skips any entry that is not exactly one well-formed kind, which means an unknown `source`, a
-linked entry whose `link` is not the storable alphabet, and (deliberately) an entry carrying
+skips any entry that is not exactly one well-formed kind, which means a `source` outside that set,
+a linked entry whose `link` is not the storable alphabet, and (deliberately) an entry carrying
 **both** a `cid` and a `link`. Resolving that last case either way would be this device deciding
 what a peer meant by two claims that disagree about who fetches what from where. Both kinds share
 the one `MAX_JUKEBOX_ENTRIES` cap.
 
-The link's **storage** check is an alphabet, not a format: URL-safe base64 within a length budget,
-which is what stops a link leaving the URL path segment it is written into. The exact eleven-character
+The link's **storage** check is an alphabet, not a format: up to four `/`-joined segments of
+URL-safe base64 within a length budget, with empty and dot-only segments refused. The separator is
+permitted because not every provider addresses a track by one token (a SoundCloud track IS a path,
+and reaches its widget percent-encoded in a query rather than in a path); the segment rules are
+what stop a link escaping the part of an address it is written into. The exact eleven-character
 YouTube id shape is checked in the frontend (`youtube.ts`), next to the code that builds an address
 from it, so a change at the provider's end cannot make stored entries unreadable. The call-transport
 frame carries `link` alongside `cid` and re-validates it at the edge to the exact id shape, rejecting

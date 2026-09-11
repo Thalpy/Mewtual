@@ -5,7 +5,8 @@ it. `DocType::Moderation = 14` (`crates/catcoms-wire/src/context.rs:72`) carries
 signed event/vote encoding and its kind/outcome vocabulary are in
 `crates/catcoms-app/src/moderation.rs:27,106,111`; `create_kick_case` and `resolve_kick_case` are at
 `crates/catcoms-app/src/lib.rs:7310,7412`; the lane graph, its per-user filter and the evidence
-scroll are rendered from `apps/desktop/src/App.svelte:4144-4150`. This document is
+scroll are rendered from the `moderationTimeline` / `filteredModerationTimeline` / `moderationGraph`
+derivations in `apps/desktop/src/App.svelte`. This document is
 security-relevant and must be kept in step with `docs/THREAT-MODEL.md` and the public bridge in
 `docs/INTERFACES.md`.
 

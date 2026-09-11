@@ -142,8 +142,9 @@ follow it by hand when you want to do a step yourself.
 2. Move the `[Unreleased]` entries in [`CHANGELOG.md`](../CHANGELOG.md) under the new version.
 
    Nothing enforces this. `release.yml` has no changelog gate, and it shows: `alpha.17` and
-   `alpha.18` both shipped without the move, so `CHANGELOG.md`'s newest version heading is
-   `[0.3.0-alpha.16]` while every version file reads `0.3.0-alpha.18`. The script does the move,
+   `alpha.18` both shipped without the move, so both releases went out while `CHANGELOG.md`'s
+   newest version heading still read `[0.3.0-alpha.16]`; their entries were written retroactively
+   afterwards rather than at release time. The script does the move,
    and warns rather than inventing entries when `[Unreleased]` is empty.
 3. If any dependency changed since the last release, regenerate the attribution file:
    `npm --prefix apps/desktop run notices` (needs

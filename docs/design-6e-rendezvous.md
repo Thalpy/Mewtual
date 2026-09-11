@@ -125,7 +125,7 @@ joiner discovers it via ≥2 rendezvous; removing the single-seed SPOF. ≥2 nam
 | **6e-3d-5** | Member-verifiable discovery tag verified pre-dial · two-pool model (`known_peers`/`member_peers`; the untrusted pool shipped as `known_peers`) · stop `remember_peer` on raw `PeerConnected` · `pick_catchup_peer` member-only · sign catch-up **responses** (`CATCHUP_RESP_DOMAIN`). | Valid-tag record dialed; junk-tag dropped pre-dial; un-handshaked peer never enters `member_peers`; unsigned/wrong catch-up response rejected, no promotion. |
 | **6e-3d-6** | `catcoms-discovery`: pure `DiscoveryPolicy` (union, ≤1 root/rendezvous, Clock+RNG dial budget, multi-page cookie re-sort honest-first, freshness off signed seq, roster clamp). Ranks only; never gates messaging. | Single rendezvous can't dominate dial order; corroborated peer first; 500-under-roster-4 flood clamped; stale-seq dropped; cache-only peer still offered; junk ranks last. |
 | **6e-3d-7** | Member PEX (`KIND_PEX`) over the members-only auth channel; entries = peers' own signed records; responder-signed; capped/rate-limited; feeds DiscoveryPolicy. | M1 PEXes M2, learns M3; non-member PEX rejected; junk reply raises raw discovered but not distinct member_peers; reply verified. |
-| **6e-3d-8** | Advisory eclipse detector (D/R/S, hysteresis, `next_eclipse_warning()`, never gates) + cross-session cache (proven members only, RNG-jittered eviction, seq persisted). **Shipped without SQLCipher inside `catcoms-discovery`** (`crates/catcoms-discovery/src/cache.rs:9` says so): the crate holds the cache in memory plus a serialization seam whose `to_bytes`/`from_bytes` carry a **keyed integrity tag**, and the desktop persists those bytes through the vault instead. | Big roster + all-attacker → suspect after grace; small group → never; diverse partition → not suspect; single-source low → suspect; a legit Remove applies under CAUTION; session-2 reaches a cached member past a hostile rendezvous; tampered row rejected. |
+| **6e-3d-8** | Advisory eclipse detector (D/R/S, hysteresis, `EclipseDetector::{observe,level}` surfaced to the app as `observe_eclipse()`, never gates) + cross-session cache (proven members only, RNG-jittered eviction, seq persisted). **Shipped without SQLCipher inside `catcoms-discovery`** (`crates/catcoms-discovery/src/cache.rs:9` says so): the crate holds the cache in memory plus a serialization seam whose `to_bytes`/`from_bytes` carry a **keyed integrity tag**, and the desktop persists those bytes through the vault instead. | Big roster + all-attacker → suspect after grace; small group → never; diverse partition → not suspect; single-source low → suspect; a legit Remove applies under CAUTION; session-2 reaches a cached member past a hostile rendezvous; tampered row rejected. |
 | **6e-3d-9** | Invite rewiring (`rendezvous: Vec<String>`, INVITE_DOMAIN bump) + `serve --rendezvous`/`join` discover→dial→request_join + pre-join `join_ns`. End-to-end. | Invite round-trip+tamper; same-PeerId-twice fails; circuit-in-rendezvous rejected; end-to-end memory: joiner discovers inviter via `join_ns`, dials, joins with **no hard-coded server addr**, then discovers another member. |
 
 Security-critical slices (5, 6, 7, 8, 9) get an **adversarial-review workflow before commit**,
@@ -138,7 +138,7 @@ per the project convention.
    sync layer's Clock. **ANSWERED: it is not allowlisted.** `scripts/check-no-ambient.sh` allows
    exactly `crates/catcoms-rt/src/(clock|rng).rs` and scans all of `crates`, so `catcoms-net` is
    held to the gate like everything else, and re-registration timing lives in the sync layer on
-   the injected Clock (`RendezvousRenewal`, `crates/catcoms-sync/src/lib.rs:3898-3911`) rather
+   the injected Clock (the `RendezvousRenewal` struct in `crates/catcoms-sync/src/lib.rs`) rather
    than on a libp2p timer.
 2. **libp2p 0.56 circuit reservation → external address:** confirm whether a granted reservation
    auto-populates the swarm external-address set or the Actor must `add_external_address(circuit)`
@@ -261,7 +261,8 @@ each verifying against the code) before commit. Summary:
   `/p2p/`; the discovered-record queue is per-Discover-response capped. Deferred (dev-tooling /
   availability-only): Clock-paced re-registration before the rendezvous TTL, **since built for the
   product** (`RendezvousRenewal` renews at three quarters of the bounded TTL off the injected
-  Clock, `crates/catcoms-sync/src/lib.rs:3898-3911`) and still accurate only of the CLI, where
+  Clock; the `RendezvousRenewal` struct in `crates/catcoms-sync/src/lib.rs`) and still accurate
+  only of the CLI, where
   `serve` registers once and never renews (`bins/catcomsctl/src/main.rs:762-768`);
   multi-rendezvous `join` fall-through; `--host` DNS form; the cache's SQLCipher persistence
   (storage-phase; what shipped instead is the keyed-integrity serialization seam in the 6e-3d-8

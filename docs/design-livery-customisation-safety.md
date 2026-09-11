@@ -7,10 +7,11 @@ allow-list + catalog assets + a CID-based custom cursor. This doc records why, s
 isn't re-litigated later.
 
 What shipped: the CSP backstop (below), the widened token vocabulary
-(`App.svelte:937-948`: `--radius` enum, bundled font catalog, background-pattern catalog),
+(`App.svelte`, the `LIVERY_RADIUS` / `LIVERY_FONTS` / `LIVERY_PATTERNS` catalogs read by
+`sanitizeLivery`: `--radius` enum, bundled font catalog, background-pattern catalog),
 and the custom cursor with its dimension cap, opaque-area minimum and mandatory `, auto`
-fallback (`App.svelte:978-998`), written through `set_server_cursor`
-(`apps/desktop/src-tauri/src/lib.rs:7253`). Still open: the optional **contrast floor** and
+fallback (`App.svelte`, `validateCursor`), written through the `set_server_cursor` command
+(`apps/desktop/src-tauri/src/lib.rs`). Still open: the optional **contrast floor** and
 the publisher-side **debounce** (see `design-livery.md`).
 
 ## The threat frame
@@ -75,7 +76,7 @@ becomes markup or a network fetch. This is the same shape as the existing livery
 
 `tauri.conf.json` now ships a real **CSP** (plus a `devCsp` that differs only by allowing
 Vite's HMR socket, `ws://localhost:1420 http://localhost:1420`, in `connect-src`). The
-live policy, at `apps/desktop/src-tauri/tauri.conf.json:26`:
+live policy, the `app.security.csp` key of `apps/desktop/src-tauri/tauri.conf.json`:
 
 - `default-src 'self'`, `script-src 'self'` (Tauri auto-nonces its own bootstrap),
   `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`, `font-src 'self'`.
@@ -84,10 +85,16 @@ live policy, at `apps/desktop/src-tauri/tauri.conf.json:26`:
   are the local custom protocol that streams decrypted attachment bytes (and its Windows
   `http://…localhost` spelling), so large media need not be inlined.
 - `connect-src 'self' ipc: http://ipc.localhost`: the IPC scheme only, no outbound origin.
-- `frame-src https://open.spotify.com https://www.youtube-nocookie.com`: **not** `'none'`.
-  Two allow-listed embed hosts are permitted so link embeds can render their players. That
-  is a deliberate, named exception: those origins are sandboxed cross-origin frames with no
-  bridge access, but any widening of this list is a security change, not a styling one.
+- `frame-src`: **not** `'none'`. Seven allow-listed embed hosts are permitted so link embeds can
+  render their players: `https://open.spotify.com`, `https://www.youtube-nocookie.com`,
+  `https://w.soundcloud.com`, `https://player.vimeo.com`, `https://player.mixcloud.com`,
+  `https://embed.music.apple.com`, `https://embed.bsky.app`. That is a deliberate, named
+  exception: those origins are sandboxed cross-origin frames with no bridge access, but any
+  widening of this list is a security change, not a styling one, and it is a privacy change as
+  well as a script-execution one. The device-wide **Chat & Media → load these cards without
+  asking** preference is a single switch over this whole list rather than a per-host consent, so
+  adding a host silently extends an answer the member already gave, and the member-facing copy
+  (`USER_GUIDE.md`, `CHANGELOG.md`) has to be updated in the same change.
 - Style attributes keep `'unsafe-inline'` (profile colours/bubbles are inline styles; style
   attrs cannot execute script, but see the overlay-phishing note above).
 
