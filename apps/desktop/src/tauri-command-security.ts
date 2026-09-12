@@ -4,6 +4,14 @@
  * This does not grant authority. Rust and `catcoms-app` remain the enforcement points. Its job is
  * to make the exposed surface enumerable: the companion test fails whenever a command is added,
  * removed or invoked without updating this review classification.
+ *
+ * That claim was false for the whole life of the Studio feature. The test read `lib.rs` alone and
+ * matched only bare registrations, so the fourteen commands registered by module path, from
+ * `creative_blobs.rs`, `studio.rs` and `studio/recovery.rs`, were invisible to it: never counted,
+ * never classified, never checked for the session gate. The extraction now walks every native
+ * source, accepts a path-qualified registration, and asserts a floor on what it finds, because an
+ * extractor that sees nothing and one that sees everything produce the same green run when the
+ * ledger is written from whatever the extractor saw.
  */
 export const TAURI_COMMAND_GROUPS = {
   local_session_and_vault: {
@@ -71,7 +79,7 @@ export const TAURI_COMMAND_GROUPS = {
     commands: [
       "get_channels", "get_members", "get_profiles", "get_livery", "get_badges", "get_devices",
       "get_files", "get_storage_health", "get_online_members", "get_delivery", "dm_stats",
-      "get_dm_requests", "file_available", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
+      "get_dm_requests", "file_available", "get_kept_files", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
       "get_wiki_history", "get_wiki_pending", "get_wiki_review_days", "get_roles", "get_moderation",
       // The server's upload cap, off the file index document every member already reads. The
@@ -104,6 +112,40 @@ export const TAURI_COMMAND_GROUPS = {
       // Counts and timestamps only, no message text: the projection unread badges are rebuilt
       // from after a lock or a restart, neither of which the live event stream survives.
       "get_channel_heads",
+      // Studio document reads. Both go through that module's single custody fence, which takes the
+      // unlocked-session generation, the actor and a vault lease before it reads, and discards the
+      // answer if the session locked or the server was replaced while it was being built.
+      // `studio_list` returns one channel's object index and `studio_read` one flipnote document.
+      // Neither is a settled or tidied view: the projection deliberately keeps every conflicting
+      // register value, every tombstone and every over-cap marker, so what reaches the webview is
+      // the full CRDT state of a document every member of this server can already read. The only
+      // ceiling is a 32 MiB refusal on the encoded view, which fails rather than quietly dropping
+      // the conflict evidence to fit.
+      "studio_list", "studio_read",
+      // Retained Studio history, all of it local vault content. `studio_recovery_list` is metadata
+      // only: at most three snapshots with their epoch, size and why each was retained.
+      // `studio_recovery_read` returns one snapshot's projection, and `studio_recovery_export`
+      // returns that snapshot's canonical envelope as base64, which is the retained bytes rather
+      // than a rendering of them. All three are the historical form of content this device already
+      // holds; none reaches the network, and the export bytes stay private until the same final
+      // session-and-instance recheck every read here passes.
+      "studio_recovery_list", "studio_recovery_read", "studio_recovery_export",
+      // Preview belongs with the reads because it is one: it recomputes a restore plan from saved
+      // typed content and emits no settlement notice. It also hands back the canonical body the
+      // caller would echo to `studio_recovery_apply`, which is not authority to save it. The actor
+      // recomputes eligibility and revalidates that body when the apply arrives, so a webview that
+      // edits what preview gave it gets a refusal rather than a write of its own composition.
+      "studio_recovery_preview",
+      // Bounded content-addressed fetch, and the one command here that hands the renderer raw blob
+      // bytes: base64 of whatever the CID names, up to the caller's declared maximum and never
+      // past the native 9 MiB ceiling. The bytes are peer-authored, so the honest description is
+      // that another member's blob becomes readable by the webview through this call. What bounds
+      // it is the address rather than any filter on the content: storage verifies the CID, the
+      // responder signed a request-bound response, exactly one known peer is asked, and a refusal
+      // is never retried against a second provider. Callers still require the exact declared
+      // length and validate their own format before rendering, because a matching CID says who
+      // could not have altered the bytes, not what they mean.
+      "request_blob_bounded",
     ],
   },
   authenticated_content_writes: {
@@ -120,7 +162,10 @@ export const TAURI_COMMAND_GROUPS = {
       "begin_inline_download", "download_file",
       "send_call_signal", "dismiss_dm_request", "create_event",
       "save_wiki_page", "send_message", "edit_message", "delete_message", "toggle_reaction",
-      "set_channel_topic", "jukebox_add", "jukebox_remove",
+      // `jukebox_add_link` queues a video id rather than a content address. It has the same
+      // authority as `jukebox_add` and reaches no network of its own: whether a listener ever
+      // fetches what it names is that listener's decision, taken locally at play time.
+      "set_channel_topic", "jukebox_add", "jukebox_add_link", "jukebox_remove",
       // The announcement feed's counterparts to the three above, and gated the same way. An edit
       // is author-only; a delete is the author's or a moderator's; a reaction is every member's,
       // because reading the feed is the one thing everyone does and reacting is how they answer.
@@ -130,6 +175,45 @@ export const TAURI_COMMAND_GROUPS = {
       // what every post written before ids existed carries, which makes it an address for
       // whichever of them the feed happens to hold first rather than for one the caller chose.
       "edit_status", "delete_status", "toggle_status_reaction",
+      // Studio document writes, through the same custody fence as the Studio reads and all of them
+      // ordinary member authority: the actor requires that the caller is a current member with a
+      // live signature key and that the channel exists, and nothing else. There is no role check
+      // anywhere in the Studio path, which is worth saying plainly here, because `studio_apply_index`
+      // carries the index operations and those include deleting and re-titling an object another
+      // member created. What that costs the caller is a tombstone with their own id on it rather
+      // than a silent removal: the projection keeps the evidence, so such a write is attributable
+      // rather than prevented. Bodies are capped at 64 KiB natively and again at the protocol's
+      // operation bound, ids must be exactly 32 lowercase hex characters, and the channel must be
+      // canonical decimal, so an id or a channel is never a way to address something else.
+      "studio_create", "studio_apply", "studio_apply_index",
+      // The bytes half of a flipnote frame. It validates the PIX grammar, then seals one immutable
+      // blob into this device's persistent blob store and returns its address. It publishes no
+      // frame, index entry or expiry, so a failed call can leave an orphan blob but can never
+      // justify a reference to one. The blob does become servable to any member who learns the
+      // CID, which is what makes this a write to shared state rather than a local cache fill. The
+      // encoded input is refused on length before base64 allocates anything.
+      "publish_pix",
+      // Restoring historical Studio content is an ordinary save, not a privileged rewind. The
+      // renderer names a retained snapshot and echoes preview's canonical body back; the actor
+      // recomputes eligibility against the current projection, refuses when the expected
+      // projection fingerprint no longer matches, and writes the result as a new edit authored by
+      // the caller under a caller-supplied nonce. Re-previewing is a new decision and needs a new
+      // nonce, so an exact retry is idempotent while a rewritten body is not a way to publish
+      // history under someone else's authorship.
+      "studio_recovery_apply",
+      // The discoverability half of a restore, separately retryable because the save above can
+      // land while this does not. It moves this device's Studio registry checkpoint pointer and
+      // accepts no epoch from the webview: the actor chooses it, and refuses to rewind a pointer
+      // onto a newer checkpoint.
+      "studio_recovery_restore_pointer",
+      // The one Studio command that destroys content. Acknowledging an eviction warning drops the
+      // oldest retained snapshot and promotes the staged one, and what it drops is local: the
+      // group holds no copy of an excluded version to fetch back. No role gates it, because
+      // retention is this device's own. What gates it is exact agreement: the caller must name
+      // both the oldest and the staged snapshot the warning showed, so an acknowledgement composed
+      // from a stale listing refuses instead of evicting a version the user was never warned
+      // about, and an exact retry of the acknowledgement they did see stays safe.
+      "studio_recovery_acknowledge",
     ],
   },
   policy_controlled_writes: {
@@ -142,7 +226,10 @@ export const TAURI_COMMAND_GROUPS = {
       // The server's upload cap. Owner/admin natively, and bounded natively at both ends: the
       // page cannot set it above the protocol ceiling by sending a larger number.
       "set_file_size_limit",
-      "set_livery", "set_server_icon", "set_server_cursor", "set_member_badge",
+      "set_livery", "set_server_icon", "set_server_cursor", "set_server_banner", "set_member_badge",
+      // Per-file local consent, reserved disk quota, full verification and native lock cancellation.
+      // Forget only releases this device's separate copy; shared metadata grants no such authority.
+      "keep_file", "forget_kept_file",
       "delete_file", "set_file_expiry", "delete_event", "set_wiki_format", "delete_wiki_page",
       "rename_wiki_page", "set_wiki_review_days", "approve_wiki_edit", "reject_wiki_edit",
       "restore_wiki_page", "warn_message", "create_kick_case", "cast_kick_vote",

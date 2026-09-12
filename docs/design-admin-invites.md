@@ -1,11 +1,14 @@
 # Design; admin invites (owner-serialized, Option C + offline queuing)
 
-Status: **implemented (slices 2a–2d landed), GA-gated on THREAT-MODEL item 3.** The protocol +
-codecs + owner/admin handlers are in `catcoms-sync` and pass an adversarial review (no blocking
-findings; S1/S3 folded, S2 documented below). The admin-invite path is **not yet exposed in the
-product UI**; that waits on replay-proof grant revocation (item 3). Lets an **Admin**
-(owner-signed role grant) hand out an invite and have the join actually admit the newcomer;
-fork-safe, with the owner as the sole MLS committer.
+Status: **implemented and live in the product UI.** The protocol + codecs + owner/admin handlers
+are in `catcoms-sync` and pass an adversarial review (no blocking findings; S1/S3 folded, S2
+documented below). The former GA gate, replay-proof grant revocation (THREAT-MODEL item 3), is
+closed: see `design-grant-revocation.md`. The desktop app surfaces the invite affordance to
+admins (`canInvite = myRole === "owner" || myRole === "admin"` in `App.svelte`, with the
+"admitted once the owner is next online" copy on the admin path) over `Role::can_invite` in
+`crates/catcoms-app/src/lib.rs`. Lets an **Admin** (owner-signed role grant) hand out an invite
+and have the join actually admit the newcomer; fork-safe, with the owner as the sole MLS
+committer.
 
 See also: [`THREAT-MODEL.md`](THREAT-MODEL.md) R3 / hardening item 4.
 
@@ -78,12 +81,35 @@ is consumed once, on the owner's persisted ledger; a second submission gets `Alr
 
 ## Residuals (and the GA gate)
 
-1. **Demoted-admin grant replay; GATE GA ON THREAT-MODEL ITEM 3.** `inviter_is_authorized`
-   reads the *current* roles doc, so a propagated demotion is enforced; but a demoted admin can
-   re-add its **own old grant op** to the `MemberRoles` CRDT (no grant epoch/nonce yet) and
-   reappear in `read_admins`, letting it still get someone admitted. Admin invites do not make
-   the residual worse, but they make it *exploitable for admission*. **Do not enable admin
-   invites in the product UI until replay-proof grant revocation (item 3) lands.**
+1. **Demoted-admin grant replay; was the GA gate, now CLOSED.** The problem, recorded here
+   because it shaped the design: `inviter_is_authorized` read the *current* roles doc, so a
+   propagated demotion was enforced, but a demoted admin could re-add its **own old grant op** to
+   the `MemberRoles` CRDT (no grant epoch/nonce) and reappear in `read_admins`, letting it still
+   get someone admitted. Admin invites did not make the residual worse, but they made it
+   *exploitable for admission*. Fixed by replay-proof grant revocation: admission now reads the
+   owner's **local** `admin_roster`, which no member can write, so replaying an old grant op into
+   the CRDT can no longer re-authorize anybody. That closes the **admission** hole, which was the
+   GA gate.
+
+   What the owner-signed CRDT copy is, precisely: **not** display-only. It is a reject-only
+   liveness hint, read by a relaying admin's own pre-flight (`published_roster_omits`, consulted
+   from `serve_join_inner`) and by the product layer's role display. Reject-only means it can never
+   admit anyone, and it is fail-open on anything it cannot verify (`read_published_roster` returns
+   `None` on junk, a wrong length, a wrong owner key or a bad signature, and `None` is read as
+   "unknown", so the relay proceeds). So **deletion is benign and junk is benign**; a member cannot
+   disable every admin's relay by scribbling on the scalar.
+
+   A **stale but validly owner-signed** roster is the case that is not benign.
+   `read_published_roster` parses `gen` but enforces no high-water on read, so an old, correctly
+   signed roster replayed into the CRDT verifies cleanly and is read as a positive omission: a
+   newly-promoted admin reads itself as absent and declines to relay its own invite until the
+   owner republishes. That is a **liveness** denial, not an authority one; admission is unaffected
+   because it reads the owner's local `admin_roster`. It is the same missing per-reader high-water
+   named in the residual of `THREAT-MODEL.md` hardening item 3, which is also why
+   `max_committer_rank ≥ 1` must stay off: a second committer *would* re-check against this
+   published copy, turning the same replay into an admission bypass.
+
+   See `design-grant-revocation.md`; admin invites are enabled in the product UI.
 2. **Metadata (residual, not fixed; see note):** `CTRL_ADD_REQUEST` rides the members-only
    control topic but carries the KeyPackage + invite to **every** member (not just the owner).
    Members already see every Add commit + the new member's identity, so this is bounded. The
@@ -120,6 +146,6 @@ is consumed once, on the owner's persisted ledger; a second submission gets `Alr
   deferred residual (#2 above); NIT gossipsub-`Signed` dependency commented at `on_add_request`.
   A full multi-party networked e2e is deferred; the `run_once` wiring is correct by inspection
   (top-of-tick drains are cancellation-safe) and the security properties are method-tested.
-- **Remaining; actor/desktop wiring:** the sync layer admits transparently; the only product
-  change is exposing the on-demand invite affordance to admins (today owner-only). **Gated off
-  in the UI until item 3.**
+- **Actor/desktop wiring; done:** the sync layer admits transparently, and the on-demand invite
+  affordance is exposed to admins as well as the owner. The item-3 gate that once held this back
+  is closed (`design-grant-revocation.md`).

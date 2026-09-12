@@ -39,20 +39,26 @@ pub trait MeshTransport: Send + Sync {
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError>;
     async fn unsubscribe(&self, topic: Topic) -> Result<(), TransportError>;
     async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError>;
+    async fn publish_once(&self, topic: Topic, data: Bytes) -> Result<PublishSubmission, PublishOnceError>; // fail-closed default
     async fn request(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<Bytes, TransportError>;
+    async fn request_cancellable(&self, peer: PeerId, proto: ProtocolId, data: Bytes, cancellation: RequestCancellation) -> Result<Bytes, TransportError>; // NO default, deliberately
     async fn request_connected(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<Bytes, TransportError>; // fail-closed default
+    async fn request_connected_cancellable(&self, peer: PeerId, proto: ProtocolId, data: Bytes, cancellation: RequestCancellation) -> Result<Bytes, TransportError>; // fail-closed default
     async fn notify(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>;
     async fn notify_connected(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>; // fail-closed default
     async fn next_event(&self) -> Option<TransportEvent>;   // single-consumer
     async fn rendezvous_register(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
     async fn rendezvous_discover(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
     async fn dial_addr(&self, addr:&str) -> Result<(),TransportError>;
+    async fn dial_addr_outcome(&self, addr:&str) -> Result<DialSubmission,TransportError>; // dial WITH actor acknowledgement; defaults to dial_addr + Submitted
     async fn dial_permit(&self, permit:BoxedDialPermit) -> Result<DialSubmission,TransportError>;
     async fn dial_peer_batch(&self, peer:PeerId, addrs:&[String]) -> Result<Vec<DialSubmission>,TransportError>; // 1..=2, direct, terminal peer-bound
     async fn dial_peer_permits(&self, peer:PeerId, permits:Vec<BoxedDialPermit>) -> Result<Vec<DialSubmission>,TransportError>;
     async fn add_external_addr(&self, addr:&str) -> Result<(),TransportError>;
     async fn next_discovered(&self) -> Option<DiscoveredPeer>; // default never resolves
     async fn next_registered(&self) -> Option<RendezvousRegistration>; // exact node/ns + granted TTL; default never resolves
+    async fn evict_peer(&self, peer: PeerId) -> Result<(),TransportError>;   // default INERT, not an error
+    async fn unevict_peer(&self, peer: PeerId) -> Result<(),TransportError>; // readmission is an authenticated group event, never a timer
 }
 pub struct PeerId([u8;32]);   fn from_u64(n)->Self; fn as_bytes()->&[u8;32];
 pub struct Topic(Bytes);      fn new(impl Into<Bytes>)->Self; fn as_bytes()->&[u8];
@@ -76,14 +82,62 @@ pub enum ConnectionDirection { Dialer, Listener }
 pub struct Responder;  fn respond(self, Bytes);  fn channel() -> (Responder, ResponderRx);
 pub struct ResponderRx; async fn recv(self) -> Option<Bytes>;
 pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, NoResponse, InvalidDialBatch }
+pub enum PublishSubmission { Submitted, Duplicate } // local driver/cache evidence, NEVER delivery
+pub enum PublishOnceError { Unsupported, TooLarge, Busy, Closed, NoPeers, QueuesFull, Failed }
 pub trait DialPermit: Send + Debug { fn address(&self)->&str; fn commit_if_current(self:Box<Self>)->Option<String>; }
 pub type BoxedDialPermit = Box<dyn DialPermit>;
 ```
+Two notes on the trailing methods, because their defaults carry the contract:
+
+- **`request_cancellable` has no default on purpose.** Every transport must state where the
+  keepalive lives after the caller retires the request; an inherited wrapper around `request` is
+  unsafe when that future can transfer work into a lower actor before it is dropped.
+  `request_connected_cancellable` fails closed for the same reason plus the connected one: a
+  provider fallback must neither redial an old route nor recycle concurrency while a cancelled
+  stream is still owned below the caller.
+- **`evict_peer`/`unevict_peer` default to inert rather than to an error.** A transport with no
+  notion of a connection (the in-memory test network) cannot honour them, and a failure here must
+  never abort a removal already committed to the MLS group. Eviction is defence in depth on top of
+  key rotation, never the thing that keeps a removed member out: the peer id it acts on is a
+  member's own claim, so the caller owns the checks (see `ChannelSync::queue_eviction`) and an
+  implementor must refuse to evict a peer its own configuration relies on. `unevict_peer` exists
+  because removal is not the end of a relationship here: re-invite is a shipped flow, transport
+  identity is stable across restarts, and without it a re-invited member's join times out at the
+  connection handler with nothing to diagnose. Membership decides when it fires; elapsed time is
+  not evidence of anything.
+
 Implementations:
 - **`MemNetwork`** (tests): `let hub = Hub::new(); let net = hub.join(PeerId::from_u64(n));`
 - **`MeshService`** (prod, catcoms-net): `spawn(swarm)` / `new_memory(listen, dial)` /
   `new_tcp(...)`; `build_memory_swarm()` / `build_tcp_swarm()`. Maps `PeerId`↔libp2p
-  PeerId, hex-encodes topics, queues+retries publishes until a subscriber appears.
+  PeerId, hex-encodes topics, and holds a publication for a retry **only when the failure it got
+  can pass**: no subscriber yet, or every peer's send queue momentarily full. A message too large,
+  an unsignable one or a failed transform is reported and dropped rather than queued behind a
+  retry that cannot help it, and a duplicate is already published. Held payloads are retried both
+  on a `Subscribed` event and on `PENDING_PUBLISH_RETRY` (2 s), because a fully subscribed mesh
+  produces no further subscription events, and are bounded by `MAX_PENDING_PUBLISH` (256) and
+  `MAX_PENDING_PUBLISH_BYTES` (8 MiB), oldest dropped first. The queue is a bridge across a
+  transient failure, not durable storage: what matters past it is recovered by document catch-up.
+  **`publish_once` is a separate, driver-acknowledged path:** one synchronous gossip attempt,
+  never the legacy `pending_publish` retry queue. Unsupported transports fail closed rather than
+  fall back to `publish`. `MeshService` admits at most 16 queued/being-attempted commands, each
+  with at most 512 KiB of payload and 64 topic bytes; capacity is acquired before compact-copying
+  slices, and a full command queue returns `Busy` without waiting. A cancelled queued command
+  keeps its capacity until drained. This bounds owned pending payloads to 8 MiB plus 1 KiB of
+  topics, excluding caller inputs and already-admitted gossip state. The gossip configuration
+  may reject a payload below this API ceiling; its limits are unchanged.
+
+  Dropping the caller future closes its acknowledgement receiver. The driver checks that receiver
+  immediately before its synchronous attempt; a drop observed then suppresses work. After that
+  admission boundary, cancellation/acknowledgement loss cannot retract it. Even `NoPeers` or
+  `QueuesFull` can leave normal libp2p cache effects (its cache insertion precedes some refusals).
+  `Duplicate` is distinct from `Submitted` and proves neither delivery nor a successful prior
+  send. `Closed` may mean unknown submission, not rollback. No outcome retires a P1 intent.
+  `MemNetwork` implements immediate bounded fan-out, reports `NoPeers` when no other live
+  subscriber accepts it, and has no deferred retry; it does not model libp2p cache/queue behaviour.
+  The cooperative registry sender below uses this seam; actor ownership, native lifecycle
+  cancellation and automatic replay wakeups remain unimplemented.
+
   `request_connected` / `notify_connected` are deliberately narrow repair sends: the actor
   succeeds only when its current peer map and `Swarm::is_connected` both say
   the transport is live. Unlike ordinary `request_control`, it never consults `recent_peers` and
@@ -397,9 +451,34 @@ pub struct EncryptedDoc;   // automerge doc + signed-op log
   edit(&mut, &MlsDevice, &ServerGroup, rng, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<SealedOp>;
   ingest(&mut, &SealedOp, &ServerGroup, &MlsDevice) -> Result<bool>;   // verify+apply; dedup; epoch must == current
   ingest_with_key(&mut, &SealedOp, key:&[u8;32]) -> Result<bool>;      // open with a caller-supplied (past-epoch) key; inner sig still verified
+  heads() -> Vec<[u8;32]>;                     // automerge heads
+  sync_frontier(max) -> Vec<[u8;32]>;          // heads PLUS their immediate parents, deduped, capped at `max`
+    // Order is NOT meaningful despite the doc comment's "newest first": `AutoCommit::get_heads`
+    // sorts by hash, so which heads survive truncation is arbitrary. Callers pass
+    // `MAX_CATCHUP_SINCE_HEADS` (512). Naming the parents is what keeps the exchange incremental
+    // for a member that wrote while unreachable and so holds a head nobody else has seen.
+  holders_of(&[ChangeHash]) -> Vec<Vec<DeviceId>>;  // one DAG pass; attribution from the SIGNED op, not the actor id
+  snapshot() -> Result<Vec<u8>>;  restore(&[u8]) -> Result<EncryptedDoc>;  // see restore_for_actor for P1 edits
   export_catchup(&ServerGroup, &MlsDevice, rng) -> Result<Vec<SealedOp>>;   // re-sealed under current epoch
+  export_catchup_since(&mut, have_heads:&[[u8;32]], &ServerGroup, &MlsDevice, rng) -> Result<Vec<SealedOp>>;
+    // The whole difference, unbounded and unresumable. NO production caller: the sync layer serves
+    // every request through `export_catchup_page`. Retained because the replication and sync tests
+    // assert the subtraction against it.
+  export_catchup_page(&mut, have_heads:&[[u8;32]], from:usize, budget:usize, &ServerGroup, &MlsDevice, rng)
+      -> Result<(Vec<SealedOp>, Option<usize>)>;   // ops, plus where to resume (None = log exhausted)
+    // The function the whole catch-up path now runs on. Walks the closure behind every head it can
+    // resolve, then walks THIS node's append-only log from `from`, sealing what is not in that
+    // closure until `budget` is spent. Resuming by position is the point: `export_catchup_since`
+    // recomputes the entire difference every call, so a caller that can only send a prefix sends
+    // the SAME prefix every time, and with a truncated frontier that prefix is history the
+    // requester already holds. A page may legitimately be empty and still return a resume point,
+    // because a run of already-held ops is skipped rather than sent. A position is meaningful only
+    // against the log that produced it; the sync layer binds each one to the peer and runtime that
+    // minted it (see KIND_CATCHUP_SINCE).
   import_catchup(&mut, &[SealedOp], &ServerGroup, &MlsDevice) -> Result<usize>;
   restore_for_actor(snapshot, &DeviceId) -> Result<EncryptedDoc>; // required before post-restart P1 edits
+  from_checkpoint(&VerifiedCheckpoint, &DeviceId) -> Result<EncryptedDoc>; // one receipt-authorized seed, empty user-op log
+  checkpoint_origin() -> Option<&CheckpointOrigin>; checkpoint_bytes() -> Result<Option<Vec<u8>>>;
   edit_domain_gated(&mut, &LogicalDocument, &EpochGate, ..., &DomainOp, edit) -> Result<(SealedOp,ChangeHash)>;
   ingest_domain_gated(&mut, &LogicalDocument, &EpochGate, &SealedOp, ...) -> Result<Admission>;
 
@@ -414,11 +493,794 @@ pub struct ReceiptBook;      // ingest_and_seal atomically updates receipt state
 pub struct EpochGate;        // server/document/id-bound Open -> Closing/Settled/Fault boundary
 pub struct IntentLedger;     // bounded vault-sealed local operations retained until receipted
 pub struct RecoverySlots;    // two retained typed snapshots + one crash-resumable staged slot
+pub struct CheckpointSeed;   // deterministic raw change candidate, at most 2 MiB; building gives no authority
+  build(&LogicalDocument, checkpoint_epoch, close_hash, typed_writer) -> Result<Self>;
+  verify(&VerifiedReceipt, raw_bytes, typed_validator) -> Result<VerifiedCheckpoint>;
+pub struct VerifiedCheckpoint; // opaque, immutable receipt/hash/schema-verified seed
+// P1 v2 raw changes are pre-scanned for bounded RLE/string/predecessor work; compressed changes
+// reject. New inbound P1 authors must match a current member's full signing key, not only its relay.
+pub struct CheckpointOrigin; // logical scope, epoch, close and seed hashes retained in vault snapshots
+// Both checked P1 paths preflight the prospective materialization before gate admission/state swap:
+EncryptedDoc::edit_domain_preflight_gated(..., typed_change_validator, projection_preflight);
+EncryptedDoc::ingest_domain_preflight_gated(..., typed_change_validator, projection_preflight);
+// catcoms_replication::studio (codecs, typed projections/checkpoints + P1 core consumers):
+pub enum IndexOp;       // put_object, tombstone_object, set_title, set_expiry
+  encode() -> Result<Vec<u8>>; decode(canonical_body) -> Result<Self>;
+  decode_domain(&LogicalDocument, &DomainOp, verified_outer_author:&DeviceId) -> Result<Self>;
+pub enum FlipnoteOp;    // frame, sfx, patch, export and discriminated header operations
+  encode() -> Result<Vec<u8>>; decode(canonical_body) -> Result<Self>;
+  decode_domain(&LogicalDocument, &DomainOp) -> Result<Self>;
+pub enum StudioExpiry { Unrecorded, Never, At(u64) } // absent / null / integer; zero is At(0)
+pub struct StudioPatch; // private validated jam descriptor plus the existing SHA-256 identity
+  new(&serde_json::Value) -> Result<Self>; id() -> [u8;32]; value() -> &serde_json::Value;
+studio_index_document(server_id:&[u8], channel:[u8;16]) -> Result<LogicalDocument>;
+pub struct StudioIndexProjection; // objects (64), overflow, deleted_objects, tombstones with sources
+  read(&LogicalDocument, epoch:u64, &AutoCommit) -> Result<Self>; document() -> &LogicalDocument;
+pub struct IndexEntry; // creations sorted by op id, mutable title/expiry IndexRegisters
+pub struct IndexRegister<T>; // selected IndexValue<T> + concurrent conflicts sorted by op id
+pub struct IndexValue<T>; // value + IndexSource (derived op id, asserted full author, nonce)
+pub struct IndexCreation; // kind/title/created_by/ts/three-state expiry, before any mutable writes
+validate_index_change(&LogicalDocument, epoch:u64, &DomainOp, &Change, before:&AutoCommit) -> Result<()>;
+// Pure semantic callback; epoch > 0 requires the typed immutable seed at change.deps().
+// The change actor must be independently bound to the signed current author by P1. `before`
+// is accepted authenticated history, never a peer-supplied snapshot. Targets/predecessors are
+// checked at change.deps(), including overflow/deleted evidence, not the receiver's merged view.
+// This callback alone is not admission; StudioTarget adds exact checkpoint/recovery preflight.
+flipnote_document(server_id:&[u8], object:[u8;16]) -> Result<LogicalDocument>;
+pub struct FlipnoteFrameProjection; // art subset: all frames/tombstones, live timeline, cap flags
+  read(&LogicalDocument, channel:[u8;16], epoch:u64, &AutoCommit) -> Result<Self>;
+  document() -> &LogicalDocument; insertion_order() -> &[[u8;32]]; // includes hidden anchor nodes
+pub struct FrameEntry; // insertion candidates + pixel-replacement register (actual AM winner)
+pub struct FrameInsertion; // after/anchor/before, blob, checkpoint:bool (normalized seed position)
+pub struct FrameBlob; // cid:[u8;32], bytes:u64; declarations, not available/valid PIX proof
+pub struct FrameSource; // derived op id, asserted full author/nonce/timestamp (safe integer ms)
+pub struct FrameValue<T>; pub struct FrameRegister<T>; // source/value and selected/conflicts
+pub struct FrameLimits; // count/bytes flags; cumulative over-cap suffix remains in timeline
+validate_frame_change(&LogicalDocument, channel:[u8;16], epoch:u64, &DomainOp, &Change, before:&AutoCommit) -> Result<()>;
+// Pure art callback: insert/remove/replace frame, title/fps only. Derives both origins
+// at change.deps(), including hidden direct children; full actor and canonical envelope/metadata
+// must match the record. Fresh markers and exact same-property predecessors are mandatory.
+// Assumes authenticated accepted history plus P1 signed actor/member/server/physical checks.
+// Over-cap targets still exist semantically (notably for trimming); this is not aggregate edit
+// policy, checkpoint preflight, blob validation or a production Studio edit/ingest adapter.
+// Title/fps registers are optional until set; no fabricated author for empty-title/12-fps defaults.
+// Art-only reader rejects unsupported sound/score/export state, including an explicit score:null.
+// Frames includes deleted/over-cap entries and all live CID alternatives. This reader applies no
+// expiry/retention policy; the store guard is described under Creative byte-reference protection.
+// Index record provenance is internally consistent, not independently authenticated. Read checks
+// every live concurrent value and returns all deletion/overflow evidence, but cannot detect hidden
+// historical deletion/forgery by inspecting current state alone. It is not an admission callback.
+// JSON integers must be JS-safe and nonnegative where applicable; frame/export bytes are
+// declarations, not proof of a blob. Expected server/type/root-kind and verified outer author
+// come from the caller's authenticated context. Decoding checks no Automerge delta, aggregate
+// state, receipt or persistence barrier. No bridge serialization or Studio command is added.
+StudioIndexProjection::checkpoint(close:[u8;32]) -> Result<CheckpointSeed>;
+StudioIndexProjection::verify_checkpoint(&VerifiedReceipt, bytes:&[u8]) -> Result<VerifiedCheckpoint>;
+FlipnoteFrameProjection::checkpoint(close:[u8;32]) -> Result<CheckpointSeed>;
+FlipnoteFrameProjection::verify_checkpoint(&VerifiedReceipt, channel:[u8;16], bytes:&[u8]) -> Result<VerifiedCheckpoint>;
+pub enum StudioProjection { Index(StudioIndexProjection), Flipnote(Box<FlipnoteFrameProjection>) }
+  document(); epoch(); channel(); checkpoint(close:[u8;32]);
+pub enum StudioTarget { Index { channel:[u8;16] }, Flipnote { channel:[u8;16], object:[u8;16] } }
+  document(server:&[u8]) -> Result<LogicalDocument>; channel() -> [u8;16];
+  read(&LogicalDocument, epoch:u64, &AutoCommit) -> Result<StudioProjection>;
+  edit(&mut EncryptedDoc, &EpochGate, &MlsDevice, &ServerGroup, &mut impl CryptoRngCore,
+       &DomainOp, ts:u64) -> Result<SealedOp>;
+  ingest(&mut EncryptedDoc, &EpochGate, &SealedOp, &ServerGroup, &MlsDevice) -> Result<Admission>;
+// Core only: caller MUST persist intent before edit, save accounted document/log/gate before
+// publication and use retained-log body-checked reseal for retry. NoChange is not durable success.
+// Local insertion refuses cap growth; remote concurrency retains deterministic overflow.
+// BOTH paths preflight actual encoded 2 MiB seed and 6 MiB complete recovery including op bodies.
+pub struct StudioRecovery; // private complete projection/operations; redacted Debug
+  snapshot(&StudioProjection, base_close:Option<[u8;32]>, RecoveryReason,
+           selecting_receipt:[u8;32], &BTreeMap<[u8;32],LocalIntent>) -> Result<RecoverySnapshot>;
+  from_snapshot(&RecoverySnapshot, expected:&LogicalDocument, channel:[u8;16]) -> Result<Self>;
+  projection() -> &StudioProjection; operations() -> &BTreeMap<[u8;32],LocalIntent>;
+  selecting_receipt() -> [u8;32];
+// Source base-close is absent exactly at epoch zero. For Rewound, selecting_receipt is the
+// SOURCE opening hash (zero at epoch zero), never the destination: frozen-source bytes must
+// stay stable on retarget. For Excluded it names the receipt selecting this source's closure.
+// Constructors validate bounded canonical content, NOT arbitrary provenance/receipt currency.
+// The complete payload retains every conflict/deletion author/hidden origin and supplied op body;
+// generic elements/conflicts/tombstones arrays stay empty; applied_ops exactly matches payload ops.
+// catcoms_replication::registry (first typed consumer; no automatic settlement yet):
+pub struct PointerKey;        // type + bounded logical key; deterministic bucket()
+pub enum RegistryOp { Put { key:PointerKey, epoch:u64 }, Tombstone { key:PointerKey } }
+pub struct RegistryProjection; // admitted pointers, explicit overflow and tombstones
+  read(...); checkpoint(close_hash); verify_checkpoint(&VerifiedReceipt, bucket, raw_bytes);
+pub struct RegistryRecovery; // typed, local-only recovery; content-redacted Debug
+  from_snapshot(&RecoverySnapshot, &LogicalDocument, bucket) -> Result<Self>;
+  projection(); receipt_hash(); excluded_operations(); // historical evidence, not replay permission
+registry_document(server_id, bucket) -> Result<LogicalDocument>;
+edit_registry(..., &DomainOp) -> Result<SealedOp>; ingest_registry(...) -> Result<Admission>;
+checkpoint_registry_close(...) -> Result<(CheckpointSeed, ClosureStats)>; // verified named closure, source untouched
+// catcoms_replication::registry_epoch; one exclusively owned restart unit, not a disk adapter:
+pub struct RegistryEpoch; // private EncryptedDoc + EpochGate + ReceiptBook + opening receipt
+  new(&ServerGroup, bucket, actor:DeviceId) -> Result<Self>;
+  from_checkpoint(&ServerGroup, bucket, actor, Receipt, expected_tenure_start, seed) -> Result<Self>;
+  opened_by(&Receipt) -> bool; // exact opening receipt, Open/Closing only; no durability proof
+  checkpoint_successor(&RegistrySettlementPlan, &ServerGroup, expected_tenure_start) -> Result<Self>;
+  // Separately constructs seed-backed successor preserving the receipt book; source untouched.
+  edit(&MlsDevice, &ServerGroup, rng, &DomainOp) -> Result<SealedOp>;
+  validate_local_edit(&MlsDevice, &ServerGroup, &DomainOp) -> Result<()>;
+  retains_local_operation(&MlsDevice, &ServerGroup, &DomainOp) -> Result<bool>; // exact signed log, not marker
+  edit_or_reseal(&MlsDevice, &ServerGroup, rng, &DomainOp) -> Result<SealedOp>;
+  ingest(&SealedOp, &ServerGroup, &MlsDevice) -> Result<Admission>;
+  seal(Receipt, &ServerGroup, expected_tenure_start) -> Result<ReceiptIngest>; // retains full source
+  prepare_settlement(&CloseRecord, &ServerGroup, expected_tenure_start) -> Result<RegistrySettlementPlan>;
+  begin_checkpoint_adoption(Receipt, &ServerGroup, expected_tenure_start) -> Result<ReceiptIngest>;
+  // Seals but retains the whole source, including distant/rewound selections. Persist Fault
+  // outcomes before reporting failure. Scope/tenure must come from fresh discovery in networking.
+  prepare_checkpoint_adoption(&Receipt, raw_seed, &ServerGroup, expected_tenure_start) -> Result<RegistryAdoptionPlan>;
+  adopted_successor(&RegistryAdoptionPlan, &ServerGroup, expected_tenure_start) -> Result<Self>;
+  // Construction only: store must save recovery and finish warnings BEFORE replacing source.
+  doc_id(); epoch(); phase(); op_count(); quarantined_len(); projection(); // detached/read-only
+  snapshot() -> Result<Vec<u8>>; // raw seed + signed log + gate/book, v1 ordinary / v2 adoption
+  restore(vault_authenticated_bytes, &ServerGroup, expected_bucket, actor) -> Result<Self>;
+  validate_vault_snapshot(vault_authenticated_bytes, server_id, bucket) -> Result<usize>;
+  storage_protocol_bytes() -> Result<usize>; // exact receipt-only bytes, not declared usage
+// Restore is local-only, not network authorization. Caller journals intent before edit and
+// atomically vault-persists the unit before publishing/acknowledging. No mutable handles escape;
+// This core builder does not prune/replace the source or acknowledge recovery. The store
+// transaction below does; live orchestration and fault repair are still separate work.
+pub struct RegistrySettlementPlan; // private, computation-only, content-redacted Debug
+  receipt(); checkpoint(); source_projection(); // immutable references
+  included_operation_ids(); included_operations(); excluded_operations(); // full envelopes; no replay authority
+  source_version() -> [u8;32]; matches_source(&mut RegistryEpoch) -> Result<bool>;
+  source_base_close() -> Option<[u8;32]>; // close that opened the source, not its successor
+  recovery_snapshot() -> Result<Option<RecoverySnapshot>>; // bounded, not persisted
+pub struct RegistryAdoptionPlan; // private, typed, content-redacted; never a durable/network permit
+  receipt(); checkpoint(); matches_source(&mut RegistryEpoch) -> Result<bool>;
+  recovery_snapshot() -> Option<&RecoverySnapshot>; // complete prior version, no intent retirement
+// Adoption restart uses an isolated book v3, rejected by ordinary ReceiptBook::decode. Rewound
+// registry recovery retains all source operations plus seed pointers/overflow/tombstones, up to
+// terminal epoch 4096. receipt_hash() names the SOURCE opening (zero for epoch zero). Its bytes
+// are independent of destination receipts and quarantine, preserving eviction-warning identity.
 ```
 
 ---
 
 ## 5. Storage & retention  *(catcoms-storage)*
+
+### Studio checkpoint/recovery bytes (Index and art subset)
+
+These are typed P1 payloads, not new receipts or network mutations. A checkpoint contains the
+existing immutable Index/art headers and exactly one immutable `_studio/seed` bytes field.
+It contains no authored operation records or intent markers. P1's raw-change hash verification
+is followed by a typed canonical rebuild; a matching owner signature alone does not admit extra
+fields, trailing bytes or a noncanonical seed. Two golden vectors pin the entire raw change.
+
+The private codec uses the existing wire encoder: unsigned big-endian integers, u32 byte-length
+prefixes (including fixed-size ids), u32 collection counts, and one-byte option tags 0/1. Payload
+headers are version byte 1, server bytes, document tag as u64, logical-key bytes, channel[16], and
+epoch u64. Sources are full author[32] and nonce[16], plus asserted timestamp u64 for art;
+operation ids are derived, never encoded as trusted ids. A register writes selected source/value
+first, then conflicts in ascending derived-id order. Selected values are not reselected by hash.
+Index creation values contain kind byte (0 flipnote, 1 score), UTF-8 title, creator[32], timestamp
+u64 and expiry (0 absent, 1 never, 2 followed by timestamp u64). Index payloads encode ordered
+objects, overflow, deleted objects, then ordered tombstones with all deletion sources. Each entry
+has ordered creation values followed by title and expiry registers.
+
+Art payloads encode optional title/fps registers, ordered frame entries, then ordered tombstones.
+Each frame has ordered insertion values and its pixel register. Insertions carry a checkpoint
+0/1 flag, optional after[16]/anchor[32]/before[32], and a blob (CID[32], bytes u64). FPS is one
+byte. Compact seeds keep only the admitted object/playable-frame prefix, no tombstones, selected
+values and up to three alternatives in at most 1024 fields. Art field priority is title, fps,
+then frame-id order (insertion then pixels). All retained births normalize onto the live timeline
+chain with checkpoint=true; original gaps remain in recovery. Subsequent ordinary root registers
+override baseline fallbacks and cannot cite the seed property's predecessor or reuse its sources.
+
+Recovery's generic arrays are empty except `applied_ops`. Its typed payload is version byte 1,
+receipt provenance[32], ordered operations (full author plus canonical DomainOp bytes), then a
+length-framed complete projection as above. `applied_ops` must exactly equal the operation keys.
+The complete outer envelope, not only its projection, must fit 6 MiB. Source opening close is
+absent exactly in epoch zero. Rewound provenance is the SOURCE opening receipt (zero for epoch
+zero); Excluded provenance identifies the closure-selecting receipt. The current constructor
+expects authenticated frozen-source inputs and supplies no persistence or retirement barrier.
+
+### Studio owned epoch and vault Save/Load (Index/art only)
+
+`catcoms_replication::studio::StudioEpoch` privately owns the document, actor, gate, ordinary
+receipt book and optional opening receipt. `new` opens deterministic epoch zero;
+`from_checkpoint` verifies the current-owner receipt and typed expected seed into a separate
+unit, not a replacement/deletion permit. `restore` accepts only authenticated local vault bytes,
+revalidates historical signatures/causal mutations/seed/gate and refreshes the current quota owner.
+Removed authors remain readable but cannot author or reseal new output. `validate_local_edit`
+checks scope, current local membership, open phase, exact retained-envelope equality and (for new
+work) causal/cap/exact checkpoint-plus-recovery preflight. `edit_or_reseal` requires a preceding
+durable intent and a subsequent whole-unit save before publication. `ingest` and `seal` share its
+exclusive ownership; a delayed conflicting opening receipt cannot hide behind a newer high-water.
+There is no mutable document/gate escape or arbitrary replacement method. The adjacent
+settlement preparation methods below construct a separate successor but never install it.
+
+### Studio owner-close and adjacent settlement preparation (Gate 4, core only)
+
+`StudioEpoch` now exposes these typed consumers of the existing P1 close/receipt machinery:
+
+```rust
+new_owner_decision(&mut self, &ServerGroup, &MlsDevice, tenure:u64, previous:Option<&Receipt>)
+  -> Result<StudioOwnerDecision, ReplError>;
+resume_owner_decision(&mut self, &ServerGroup, &MlsDevice, tenure:u64, &Receipt, &CloseRecord)
+  -> Result<StudioOwnerDecision, ReplError>;
+prepare_settlement(&mut self, &CloseRecord, &ServerGroup, tenure:u64)
+  -> Result<StudioSettlementPlan, ReplError>;
+checkpoint_successor(&mut self, &StudioSettlementPlan, &ServerGroup, tenure:u64)
+  -> Result<StudioEpoch, ReplError>;
+```
+
+These methods accept only the privately owned, typed-admitted Studio source. The new decision
+uses every current head (more than 64 refuses), the existing authenticated dependency closure
+and lower/hard budgets, then the existing typed canonical checkpoint builder. It never signs
+the current projection as a substitute for the named closure. Tenure is independently supplied
+by the caller. First-tenure inheritance comes from the installed opening; later decisions must
+repeat the checked journal baseline. Studio does not inherit Registry's 4096-epoch ceiling.
+
+`StudioOwnerDecision` exposes only the immutable `receipt()` and `close()`. The store integration
+must atomically persist this exact pair before sealing/publishing. A resumed pair is revalidated,
+not regenerated after newer Open edits; an installed retry cannot reseed subsequent edits.
+
+`StudioSettlementPlan` requires ordinary Closing, not adoption/Fault, and the exact held receipt.
+It exposes the verified checkpoint, full source projection, complete included/excluded
+author-plus-domain envelopes, optional bounded recovery snapshot and `matches_source`.
+The local source fingerprint covers the whole normalized restart unit, including quarantine,
+gate and receipt state, and is not a wire id or storage permission. Retirement must compare
+included full envelopes, not only nonce-derived ids. Excluded envelopes grant no authority to
+replay as their authors. Recovery is required for excluded operations OR evidence omitted by
+the actual typed compactor, including deleted/over-cap content, fifth conflict alternatives and
+original art insertion gaps. Thus a fully included art close may still need a recovery slot.
+
+`checkpoint_successor` rechecks that entire source and current receipt authority and carries
+the receipt book's repair anti-replay state into a **separate** unit. It does not replace or
+prune the source. Durable owner journaling, recovery-first replacement, included-intent retirement,
+publication, automatic scheduling and native recovery commands still require Gate 4 integration.
+This slice changes no wire/seed/vault format or native command/event. Frontend availability is
+tracked in [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md).
+
+### Studio vault representation (Index/art)
+
+The version-1 plaintext snapshot is: `u8(1)`, length-framed channel[16], opening receipt (or empty),
+raw checkpoint (or empty), receipt book, gate, then u32 operation count and each length-framed
+complete SignedOp. All integers/framing use `catcoms_wire::Encoder`; there is no compressed
+Automerge save. The cap is `MAX_STUDIO_EPOCH_SNAPSHOT_BYTES`, the sum of existing component
+caps plus count/framing overhead; each component, signed-op total and operation count are also
+checked before reconstruction. `validate_vault_snapshot` returns only classified protocol bytes,
+not a writable capability or network proof.
+
+`ServerStore` exposes:
+
+- `scan_epoch_storage_with_studio` / `cleanup_epoch_storage_staging_with_studio`: explicit
+  `RecoveryOwnerReceiptsIntentsRegistryAndStudio` coverage. Earlier APIs keep narrower coverage.
+  `EpochRecordKind::Studio` and `studio_records` identify the fifth family. Only canonical
+  unpublished temporary siblings are cleanup targets; final records and intents are never deleted.
+- `studio_storage_budget(server, group, inventory) -> EpochStudioBudget`: consumes the freshness
+  of one completed five-family scan to compose existing storage/global-intent budgets. The
+  non-Clone wrapper is bound to the mount/server/full group. A new mint supersedes the previous
+  wrapper; every attempt entering the checked Studio budget and five-family cleanup invalidates
+  captured scans. Early schema/authority rejection leaves their freshness unchanged.
+  This requires sole coordinator ownership with no interleaved raw registry/recovery/owner
+  writes; it does not account blobs or legacy snapshots. Failed/uncertain I/O requires rescanning.
+- `load_studio_epoch(server, group, target, device) -> Option<EpochStudioState>`: authenticated,
+  bounded read-only restore; `None` means actual absence, never malformed/unreadable state.
+  The detached state exposes doc id, epoch, phase, op/quarantine counts and typed projection.
+  `contains_exact_operation(author, domain)` checks the complete retained signed envelope for
+  Create retry recognition; historical presence grants no current membership or edit permission.
+- `edit_studio_epoch(server, group, target, expected_doc_id, device, operation, ts, rng, budget)`
+  returns `(SealedOp, EpochStudioState)` only after the intent then source durability barriers.
+  Preserve concrete epoch id, nonce and complete envelope across retry. Source presence/absence
+  must match the scanned ledger before any intent write. New-operation validation/preflight also
+  precedes journaling. A second-barrier failure can retain a replayable intent without a saved
+  edit; it returns no output. An exact retained retry flushes the unchanged intent/source files.
+- `ingest_studio_epoch(... sealed, rng, budget)` returns saved `(Admission, state)`; ciphertext
+  is bounded before decryption. Duplicate/Late results also cross a save/flush barrier, and Late
+  is quarantine, not an edit acknowledgement.
+- `seal_studio_epoch(... receipt, tenure_start, rng, budget)` verifies current receipt authority
+  before disk work, then saves receipt/book/gate including typed Fault outcomes with full source
+  history retained. It requires an existing source and independently established tenure context;
+  it neither issues receipts nor settles, prunes, repairs or installs checkpoint replacements.
+
+One path per numeric server/full group/type/logical id is
+`servers/<BLAKE3(scope)>.studio-epoch`. Scope is the length-framed
+`catcoms/epoch-studio-store/v1` domain, u64 server, framed full group, u16 type and framed 16-byte
+logical key. Channel is checked inside the sealed wrapper, not an alternate object filename.
+Plaintext wraps framed scope, channel and snapshot; vault framing adds 40 physical bytes.
+The store caps both path metadata and actual bounded reads, authenticates the seal and verifies
+scope/name consistency during inventory. Receipt-book growth, opening receipt and closing gate
+hash charge protocol; user/seed/metadata/quarantine bytes charge content. Atomic replacements
+reserve old-plus-new peak bytes; unchanged files are flushed without rewriting. File sync plus
+Unix-only parent sync uses the existing vault durability seam, not a new Windows guarantee.
+
+These store APIs are not network-send permits. The explicit native adapter below coordinates
+local indexing and blob/reference ordering. Conservative byte-reference protection is described
+below; automatic sync, expiry enforcement and recovery installation remain separate work.
+
+### Creative byte-reference protection (Index/art, gate 2)
+
+`ServerStore::creative_pinned_cids(&mut self) -> Result<CreativeReferences>` runs the existing
+five-family inventory with reference collection explicitly enabled. It authenticates complete
+Studio sources, pending local intent ledgers, and both retained/staged typed recovery. Studio
+references include current alternatives, the verified seed-only projection, and every retained
+signed operation. Sequential replacements, hidden/deleted/over-cap frames and old checkpoint
+values still hold their pixels. No blob body is fetched or read during enumeration.
+
+`CreativeReferences::{len,is_empty,for_group(&[u8])}` reports the full-group union across native
+numeric server aliases. This detached report is not a deletion permit; its Debug shows counts
+only. The current rail is 65,536 distinct `(group,CID)` entries. Overflow, incomplete traversal,
+unpublished metadata siblings, malformed/unsupported typed records, or stale generation returns
+an error and keeps reclamation disabled. Ordinary accounting scans do NOT install a hold set.
+
+Every persistent handle from `ServerStore::blob_store` wraps the kept-copy adapter in the same
+mount's guard. Valid namespace keys are 1..512 ASCII alphanumeric/`-`/`_`; full group namespaces
+are hex, with hex case aliases sharing protection. Separators cannot retarget a protected folder.
+Fresh mounts may prove an empty set by bounded absence of all reserved P1 filenames; restored
+P1 state starts Unknown. Studio access refreshes Unknown on its existing blocking worker before
+holding/verifying a new PIX CID. Failed refresh still permits healthy reads, but never deletion;
+normal mutation accounting independently checks disk state. An explicit complete scan can also
+refresh it. This adds no native command or UI rendering work.
+
+Before Studio source, intent and recovery persistence, holds grow monotonically. Failure does
+not release them. Only a fresh exclusive successful scan can subtract them after the relevant
+durable records are actually gone. The blob guard holds its mutex through synchronous deletion;
+store drop revokes stale handles. `BlobStore::delete`/sync `delete_blob` return true only when a
+held copy was removed; false may mean pinned, and Unknown returns an error. Current unlisting
+and upload-discard paths tolerate retained bytes, so successful unlisting is not reclaimed space.
+Kept-copy release acts on its separate copy; staging discard never removes held blobs.
+
+This is conservative physical byte-liveness, not expiry/circulation enforcement. A tombstone or
+deadline alone does not make a still-retained checkpoint, history, intent or recovery version
+expendable. Actual sound/export/doodle projections are not enabled; the body codec recognizes
+export CIDs but its hash extraction is not full production export coverage. Unknown future
+typed recovery fails closed. Dense-source latency and blob quota/expiry remain separate limits.
+
+### Native Studio recovery (gate 4 integration)
+
+P1 core repair now uses `ReceiptRepair::sign_in_tenure` and
+`verify_current_owner(group, expected_issuer_tenure_start)`. V1 decoding/hashing stays compatible
+but is not live authority. `ReceiptBook::apply_repair` takes the same independent tenure and
+returns `(Applied | Duplicate, losing_receipt)`; an exact duplicate preserves later progress,
+and an active different fault refuses it. The latest full signed evidence survives book
+encoding/checkpoint copies under the existing 8 KiB cap. This remains a bookkeeping prerequisite,
+not a callable native repair, gate transition, owner-journal rebase or recovery persistence API.
+
+`studio_recovery_list`, `studio_recovery_read`, `studio_recovery_export`, and
+`studio_recovery_acknowledge` use the same actor/native custody as Save. They authenticate all
+retained/staged typed recovery slots; historical reads/backup export do not invent a current view.
+Exact oldest/staged ids bind the eviction acknowledgement. Export is canonical P1 recovery bytes,
+not `.pixa`, an archive of referenced blobs or an implemented import.
+
+`studio_recovery_preview` proposes one historical domain choice from a saved snapshot and the
+current full conflict-preserving projection. `studio_recovery_apply` requires exact snapshot,
+choice/mode, current epoch, projection fingerprint, fresh nonce and canonical body. It rechecks
+all historical deletion evidence and routes Ready through normal Save, including local PIX,
+complete-envelope, intent, projection and storage checks. Exact current-log own-envelope retries
+precede the evicted selected-snapshot/stale-preview checks; a pending intent alone is insufficient.
+Copy explicitly replaces mutable fields/deletes; Restore is additive. Index creation uses the
+restoring member's verified identity and independently checks actual same-channel target existence.
+
+`studio_recovery_restore_pointer` is a separate accounted, retryable Registry step. Its epoch
+comes from the checked saved target, never the UI. Explicit consent can re-put a historical
+Registry tombstone after rotation, not override a current tombstone or a newer pointer. Cold
+local access retains ordinary Index-read art-cache preservation; remote service cold rails are
+unchanged. Content Save can succeed while this step is blocked. All results remain provisional.
+Commands, exact JSON choices/results, retry and partial-sequence rules are in
+[FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md). No frontend component is part of these adapters.
+
+The watched Studio worker also replays only this device's retained intent envelopes, using
+all historical selections plus a fresh full current projection and ordinary Save/publication.
+Stable-id dependencies are topologically ordered; competing mutable choices are held, not
+hash-ranked. Unsafe replay may move to manual recovery only after the same complete envelopes
+are verified and flushed in retained/staged recovery, before exact accounted ledger removal.
+Missing recovery evidence remains pending, and current-log operations cannot use that removal
+path. This is manual recovery under the existing two-snapshot limits, not receipt finality.
+
+`AppEvent::SettlementChanged {target, state}` forwards as `settlement-changed` with
+`{server, docType, logicalKey, channel, object, state}`. Scope encoding matches the guide;
+the seven implemented strings are `open`, `closing`, `settled`, `fault`, `recoveryAvailable`,
+`recoveryEvictionPending`, `refreshRequired`. Phase/recovery observations are independent.
+The bounded/coalesced queue drains only after Server/vault custody is released, through the
+existing native incarnation guard. Read-only controls emit nothing; failures after possible
+mutation still invalidate. Clients re-read actual listings rather than infer finality from events.
+
+### Native Studio Save/Load (gate 2, Index/art only)
+
+These commands require the unlocked session and an existing current server/channel. `server`
+is the native numeric server id; `channel` is its canonical decimal u128 string. Object ids,
+operation nonces and physical `epochId` are exactly 32 lowercase hex characters. Preserve the
+nonce and complete request across retries; do not generate another operation on a busy error.
+
+| Command | Arguments besides `server`, `channel` | Result |
+|---|---|---|
+| `studio_list` | None | Index view; an absent Index is empty epoch zero, not a created file. |
+| `studio_read` | `object` | Flipnote view, or `null` for actual absence. Corrupt/unreadable state rejects. |
+| `studio_create` | `object`, `nonce`, `title`, `createdAtMs` | Saved Flipnote view. Creates its title then puts the Index entry with actual full author and unrecorded expiry. |
+| `studio_apply` | `object`, `epochId`, `nonce`, `body` | Updated Flipnote view. `body` is the canonical JSON **string**, not an Automerge change or object. |
+| `studio_apply_index` | `epochId`, `nonce`, `body` | Updated Index view using canonical IndexOp JSON string. |
+
+Create's `createdAtMs` must be a nonnegative JS-safe integer. Both complete operation envelopes
+must fit the existing 64 KiB limit, not just their title/body alone. Create currently targets
+epoch zero for the new object and the actual current locally checked Index epoch. An absent Index
+still starts at epoch zero. No peer-supplied pointer or renderer field chooses that Index epoch.
+The two writes are **not atomic**: index/storage refusal can leave an unlisted object. Retry the
+same object, nonce, title and timestamp to complete it. Only an exact saved initial operation
+permits an existing object; a new nonce must use Apply instead. An exact retry after a later
+rename/deletion does not undo that change. Closing/Fault and stale physical-epoch edits reject.
+On a Create error, the initiating caller should reread its known object id before retrying;
+an uncertain/partial write is not reported through a durable-success event.
+
+Apply supports InsertFrame, RemoveFrame, ReplaceFrame and Title/Fps headers. Sound, score and
+export operations reject until gate 6. IndexOp retains its closed grammar and live-author creator
+binding. Local Insert/Replace first requires the actual held PIX blob at the declared length,
+valid PIX1 and exactly 192x144 dimensions; it re-promotes/flushes before saving the reference.
+Use `publish_pix` below first; a placeholder CID or missing blob is an error, not a fetch request.
+
+Every successful view has this envelope (read/apply use the same shape):
+
+```text
+{ v: 1, epochId: hex32, epoch: decimalString, channel: decimalString,
+  publication: "local", provisional: true,
+  phase: "open" | "closing" | "settled" | "fault", content: ... }
+```
+
+`epochId` is opaque; carry it from the read into Apply. The epoch **number** is a string to avoid
+JS precision loss. Phase is the stored P1 gate phase, not proof that every displayed edit has an
+owner receipt or reached a peer. Successful mutations now attempt initial one-shot publication
+as described below; `publication: "local"` remains a local durability acknowledgement, not a
+delivery claim. This adapter does not retire intents or drive settlement.
+IPC encoding over 32 MiB rejects rather than silently dropping conflict evidence.
+
+Index `content` has `kind: "index"`, maps `objects`, `overflow`, `deletedObjects`, and `tombstones`
+keyed by hex object id. Each entry retains `creations: [{value, source}]` plus title/expiry
+registers. A register is `{selected: {value, source}, conflicts: [{value, source}]}`.
+Creation values contain kind, title, `createdBy`, `ts` and expiry. Expiry is discriminated:
+`{kind:"unrecorded"}`, `{kind:"never"}`, or `{kind:"at",ms}`; zero is a timestamp, never Never.
+
+Flipnote `content` has `kind: "flipnote"`, nullable title/fps registers, `timeline: hexId[]`,
+`declaredFrameBytes`, `overCap: {frameId:{count,bytes}}`, `tombstones`, and `frames`.
+Frames retain `pixels` registers with `{cid:hex64, bytes}` values and all insertion
+`{value,source}` alternatives; insertion values contain `checkpoint`, nullable `after`, `anchor`,
+`before` ids, and `blob`. Do not discard hidden/deleted/conflicting values when adapting this view.
+Sources contain full `author:hex64`, `opId:hex64`, `nonce:hex32`; frame sources also retain `ts`.
+Tombstone maps contain source arrays. This is not the fixture store's flattened root format.
+
+`AppEvent::StudioUpdated {channel, object}` forwards as `studio-updated` with
+`{server, channel:decimalString, object:hex32|null}` after a successful local mutation or newly
+Accepted remote edit's durable barrier; null means
+Index-only. **Every event invalidates that channel's Index**, and a non-null object additionally
+invalidates that object: local Create changes both without emitting two events. Remote Create
+records arrive independently, so their two events have no cross-document order guarantee.
+Duplicates, quarantine and failed ingest emit no update. This is not a settlement notification.
+The bridge fences both Studio event types below against the original server incarnation and
+current unlocked UI generation through synchronous emission.
+
+Internally `ServerActor::studio_begin(StudioRequest) -> StudioReady` uses a bounded queue with
+no vault guard. The actor's Ready lease window is five injected-clock seconds; expiry is checked
+again when a lease arrives. Native Ready waiting also has a five-second bound and reuses four
+native operation slots. Every post-Ready lock acquisition is fail-fast. A trusted local
+`StudioVaultLease` holds the sole mounted store plus numeric-server persistence, UI commit and
+registry-incarnation guards. The actor moves its sole live Server into a finite blocking worker,
+checks current channel/membership and saves its current server snapshot before intent/source
+writes. The worker retains custody across invoke/actor cancellation; a running save may finish,
+but UI/session/incarnation checks suppress stale responses. Panic stops the actor. Guards drop
+after the bounded initial send and before reply/event waits. Bounded scans/restores are not a measured latency promise. The shared
+reference guard above protects saved pixels from existing cache-reclamation paths, not disk
+corruption, arbitrary external filesystem edits or expiry enforcement. No UI adapter is installed.
+
+Successful Apply saves one private packet returned by `edit_studio_epoch`; successful Create
+saves at most two (object then Index). Only complete transaction success, including the final
+projection read, permits the batch to leave the blocking worker. The actor retains the same
+Server/store/native lease while calling the existing `publish_local_studio_once`, with fresh
+full-author/MLS/routing checks and one aggregate two-second injected-clock deadline. No second
+save, durable packet outbox or new retry journal is introduced. Read never triggers publication.
+The explicit saved-op retry adapter below remains for later retries, not the just-finished Save.
+
+Native cancellation and its operation-slot keepalive now travel in `StudioVaultLease`.
+Pre-cancelled work refuses; a save already running can finish, but cancellation/reply closure
+suppresses later sends and interrupts pending publication. Native then suppresses cancelled or
+stale responses. Send failure/NoPeers/Duplicate/timeout never turn successful local Save into
+failure or retire an intent. A cancelled response can be uncertain: reread and retry the SAME
+operation. Transport admission may already have happened; cancellation does not prove no bytes
+escaped. Residual lower-driver work uses existing transport slots after the native lease drops.
+
+Two Create sends are not remote atomicity or discovery: a peer not yet watching the object can
+miss its first packet. Catch-up/discovery and reconnect retries remain unwired. Automatic recent
+target receive is now integrated below, with a conservative small-vault service rail.
+
+Successful Read/Create/Apply retains checked source descriptors in an actor-owned, 16-target
+recent-use watch set. Create watches both object and Index. Read of an absent object watches only
+its deterministic epoch zero; it does not create a file or infer a remote current epoch. Same
+logical target/mount/epoch reuse preserves its queue; replacement/eviction explicitly unwatches.
+Subscription reconciliation shares the existing aggregate two-second send deadline; failure
+does not undo a local Save or claim subscription/delivery success. Read publishes no content.
+
+`ServerActor::studio_pending()` is a coalesced boolean scheduling hint, not a UI event or authority.
+One supervised native worker per exact installed actor drives `studio_receive_begin()` through
+the SAME Ready/lease/four-slot/cancellation path. The event consumer never waits for this work.
+Each pass selects one queued watch round-robin, verifies current mount/channel/member/MLS before
+disk work, scans the existing five-family inventory, saves the current server snapshot, then
+calls the existing durable receive adapter. No locks survive into reply/event awaits or pacing.
+The minimum delay between completed attempts and the next attempt is one injected-clock second;
+pending false/true churn cannot bypass it. Locked/busy native custody retains queued packets.
+
+Automatic inventory has LOCAL service rails of 1024 visited directory entries, 64 P1 records,
+8 MiB aggregate authenticated record bytes and 256 KiB aggregate cold validation bytes. A
+mount-local 64-entry LRU memoizes only pure Registry/Studio footprint validation. A hit needs a
+fresh bounded read/unseal, scope/filename binding, and exact complete-wrapper digest plus size;
+it never reuses a complete inventory or budget. `EpochStorageScanProgress.reused_records` and
+`uncached_bytes` report reuse and physical bytes charged to cold validation. Reference scans
+always enumerate actual CIDs, even when footprint metadata is warm. Ordinary complete scans
+(including normal Save) warm this cache; reopening the vault clears it. Explicit Read also warms
+the particular verified Studio record's footprint, not unrelated histories.
+An unfamiliar oversized record rejects before authentication; a changed same-size candidate
+rejects above the cold rail before reconstruction. A cold selected mutable Studio source separately
+refuses above 256 KiB before inventory/snapshot/restore, even with warm footprint metadata. These rails
+cover the whole mounted vault, including unrelated registry records. An incomplete inventory
+never authorizes a write. Scan/snapshot/ingest failure pauses background receive until successful
+explicit Studio access; new traffic cannot restart it. Pre-drain failure retains the packet;
+an ingest error may already have consumed it. `studio-receive-paused` carries `{server}` once on
+that transition; UI should warn and offer explicit reopen/retry, not call it a settlement fault
+or proof of local corruption. Authenticated missing-dependency/causal-invalid input can also pause.
+This warning event still needs the user-owned UI listener; it is not a persistent UI status query.
+The mounted store now retains at most one verified owned Studio source of at most 8 MiB encoded
+input. `with_studio_source` reuses it for explicit views; an independent Index/list refresh preserves
+opened art while warming only the Index footprint. `receive_studio_step_reusing` takes the unit
+and freshly reads/unseals/hashes the full actual wrapper, checking physical size, exact scope,
+mount, actor, current group/MLS and the newly inventoried footprint before normal typed ingest.
+The 8 MiB source read is additional to the inventory scan; it is not an aggregate per-pass I/O
+or resident-memory promise. The retained unit is moved, not cloned into a second slot or separately
+persisted; normal transient typed-preflight drafts are unchanged. Failed
+ingest/write/flush drops it; successful unchanged flush keeps the previous physical stamp and
+changed writes stamp exactly the successful encoded bytes. Explicit views may cold-load changed
+records; automatic receive never falls back to a large cold restore. Remount starts cold.
+Small other-target packets do not evict opened art. This is not 16 warm source slots, a new
+storage owner, or automatic checkpoint installation.
+The existing document/wire caps and manual Save are unchanged. Cold dense sources remain costly.
+These are work bounds, not a latency guarantee; fresh typed preflight and snapshot serialization
+still run per packet. No pixels are fetched, no delivery ack
+is emitted and no intent is retired. Existing event backpressure can still stall the actor.
+
+### Studio operation exchange (gate 3, cooperative Index/art adapter)
+
+`catcoms_app::studio_exchange` extends the saved sources above with explicit transport calls:
+
+- `watch_studio_epoch(store, server, target) -> ServerStudioWatch` loads a checked concrete
+  source, or chooses deterministic epoch zero only on actual absence. It validates the current
+  channel/local member and binds full logical target, physical vault mount, numeric server,
+  sync incarnation and watch generation. It writes no source and performs no discovery.
+- `flush_studio_subscriptions()` uses the existing cancel-safe routing-topic reconciler.
+  `unwatch_studio_epoch(&watch)` immediately revokes that exact generation and queued bytes;
+  asynchronous unsubscription follows. Dropping the watch alone does not unsubscribe. A stale
+  mount's handle may revoke itself, never a newer replacement.
+- `receive_studio_step(store, watch, budget) -> Option<StudioReceived>` consumes at most one
+  authenticated packet and returns `Admission` plus `EpochStudioState` only after accounted
+  `ingest_studio_epoch` persistence. `Accepted`, `Duplicate`, `Quarantined` and
+  `RejectedQuarantineFull` retain their existing meanings. Queueing is not admission; quarantine
+  is not a timeline edit. Missing dependencies, bad channel roots and storage errors emit no ack.
+- `send_saved_studio_once(store, server, target, expected_doc_id, operation, budget)` requires
+  an exact OWN full DomainOp already in the saved source. It cannot create an edit, accept an
+  unsaved nonce/body, or send another member's operation. Existing exact retry checks Open and
+  current membership, flushes intent/source, and reseals for current MLS/routing before the
+  existing one-shot transport attempt. Submitted is local driver admission, not delivery. No
+  result, cancellation or refusal retires the intent or queues ciphertext for later retry.
+
+The low-level sync `StudioWatch`/publish seam is trusted-local, not a UI capability. There is one
+slot per `(type, logical key)`, at most 16 watches; a conflicting channel binding for one object
+replaces the slot and revokes old traffic rather than creating another logical document. All
+Studio-tagged gossip is intercepted before legacy document ingestion, even unwatched/malformed
+traffic. No legacy delivery receipt, accepted counter or catch-up fallback is earned.
+
+The Studio inbox holds at most 16 copied sealed packets, each at most 256 KiB + 78 envelope
+bytes. Its separate aggregate pre-authentication allowance is 50/s, burst 200; post-authentication
+debt is 10/s, burst 50 per full author/type/logical key with at most 4096 rows. Only fully refilled
+rows can be removed. Rewatch, channel rebinding and epoch rotation do not refund debt. These
+fixed allowances are additional to the existing registry inbox, not a shared fairness promise.
+Current full local/author membership and MLS are checked at enqueue and again before drain;
+grandfather routing topics do not authorize old-MLS ciphertext. Signature/body checks do not
+prove the frame root's channel: the existing typed durable gate does that before source creation.
+
+These remain **cooperative backend calls**; the native runtime above now drives initial send
+and bounded recent-target receive through them.
+Callers must retain exclusive Server/store plus native persistence/UI/incarnation custody across
+the send await. Source restoration/persistence is synchronous and not latency-qualified;
+larger-vault automatic service still requires safe inventory/source reuse and measured evidence.
+Rotation requires a new
+checked watch; receipt/seed discovery and checkpoint installation are not supplied by these calls.
+Dropped traffic needs explicit saved-op retry or future catch-up. No pixels are auto-fetched and no
+receipt or settlement event is produced. The native
+Save result stays `publication: "local"`; UI adapters and canonical rendering remain user-owned.
+
+### Studio operation pages and automatic same-epoch catch-up (gate 3)
+
+`catcoms_replication::studio::catchup::StudioPageProvider` is a thin typed wrapper over the
+existing registry page engine, not a second continuation algorithm. `StudioFrontier`,
+`StudioPageRequest`, `StudioOpPage`, `StudioPageCursor` and `StudioPageOutcome` alias its shared
+framing/outcomes. `StudioEpoch::catchup_frontier()` returns accepted heads and verified seed;
+more than 64 heads becomes [] rather than truncating branches. `page(&StudioEpoch, group,
+device, request, rng)` reads only accepted typed history and reseals current-author operations
+under current MLS. It mutates no source or receipt and transfers no seed/vault snapshot.
+
+Studio's cursor MAC uses `catcoms/studio-page-cursor/v1`, length-framed group/logical-key/provider/
+requester, actual u16 document tag, length-framed 16-byte channel, then the existing concrete-id,
+initial-heads/seed and payload framing. Registry's domain/framing/golden bytes remain unchanged.
+The shared prefix digest retains its existing domain and length-framed signed-envelope walk.
+Bounds remain 64 sorted unique heads, 32 operations, 512 KiB summed `4 + SealedOp::encode().len()`,
+81-byte cursor and a non-renewing ten-minute monotonic lifetime. The provider checks current full
+provider/requester membership on every call. Remaining missing removed-author history produces
+`HistoricalAuthorizationRequired`; a mismatched seed produces `CheckpointRequired`, never an
+implicit installation. Unknown heads/wrong concrete epoch/expired cursor produce `Restart`.
+Fault refuses; read-only Closing history can still be paged. Prefix completion is not currency.
+
+`ServerStore::serve_studio_page(server, group, target, device, provider, request, rng)` checks
+bounded fields, full membership, MAC and expiry before source I/O, then requires the existing
+one-slot source with exact authenticated wrapper/context matching. Cold/stale/missing sources
+are local preparation errors, not empty success or a cold fallback. A successful explicit Studio
+view can prepare the slot; Index-refresh/art-priority and the 8-MiB encoded-input limit still apply.
+This API is trusted-local: its caller authenticates requester transport identity, bounds provider
+instances/rates, supplies current actor/MLS/native custody and remints the secret on runtime/mount
+restart. The provider object is not a mount-bound app capability or registered network handler.
+
+`ServerStore::ingest_studio_page(server, group, target, expected_doc_id, device, operations,
+rng, budget) -> StudioPageAdmission { accepted, duplicates, frontier }` uses the same checked
+owned source as live ingest, fresh five-family accounting and existing author/DAG/domain/projection
+preflight for every operation. The exact target must be Open, including empty or duplicate pages;
+each nonempty envelope must use the current MLS epoch. Only the whole valid page crosses one
+atomic source write. Duplicate/empty pages flush existing file/parent bytes before returning.
+Actually absent empty epoch zero remains absent; a source recorded as present in the storage
+inventory but missing on disk fails accounting. A StudioIndex listing alone is not stored history.
+The resulting frontier comes from the saved state, not the provider. Changed or previously warm
+sources return to the existing one-slot policy; an unchanged cold flush need not warm that slot.
+Cold admission still refuses sources above 256 KiB, with no large implicit preparation.
+
+An invalid middle operation leaves durable bytes unchanged and discards a consumed warm unit.
+An I/O error instead may leave either old bytes or the entire new page; it returns no saved-page
+acknowledgement. Reconcile uncertain accounting and retry the SAME page/cursor. No operation
+creates or retires an own intent. The caller must not advance its cursor on error or replace the
+ORIGINAL request heads/seed with the returned frontier mid-pass; that would invalidate the MAC.
+
+Additive request kind **23** now carries Studio pages through the **same** kind-20 Registry
+pending queue, pre-auth/per-full-device/service rates and four outbound/four receive slots.
+Registry kinds 20-22 and their golden bytes are unchanged. Studio's query is version 1, u16
+tag (15/16), fixed 16-byte channel and object (zero for Index), then concrete u128 id and the
+existing heads/seed/cursor fields. Its response domain is `catcoms/studio-page-response/v1`.
+Request authentication binds the actual endpoint to the full current member identity; responses
+bind that exact provider, requester, group/MLS epoch, query and endpoint. Signed envelopes and
+decoded pages are bounded before typed admission. Queued requests expire after five seconds.
+
+`Server::begin_studio_receive`, `prepare_studio_receive_step`, `complete_studio_receive_step`
+and `persist_studio_receive_step` own one original frontier, cursor and retained page. Prepare
+returns a non-cloneable `StudioPageAttempt`; `fetch()` owns no Server, MLS secrets or vault lease.
+Connected-only cancellable transport uses a fixed ten-second attempt deadline, including queued
+time, and capacity follows a submitted lower-driver request through cancellation. Completion
+rechecks runtime/watch/channel/member/provider/MLS; persistence rechecks mount and current
+authority. A pass has a fixed ten-minute lifetime, one-second request/write pacing, at most
+20,001 pages / 20,000 operations / 16 MiB received work, and one empty-head restart fallback.
+The same page survives a failed save; cursor progress follows durability only.
+
+The existing actor/native Studio receiver drives these adapters automatically for its recent
+16 watches and up to four proven connected member endpoints. One tracked network attempt and
+one preparation waiter per actor leave it free to serve the other peer. Native's injected-clock
+five-second idle wake permits silent reconnect/missed-last-edit repair; it adds no actor timer
+arm (existing command-versus-legacy-outbox cancellation debt is unchanged). Bounded gossip/service/client turns prevent either direction from
+monopolizing the receiver. Accepted durable page edits emit the existing `StudioUpdated` event.
+Network/context supersession backs off for a fresh pass; real storage/admission failures retain
+the existing explicit-access-only pause and `StudioReceivePaused` diagnostic.
+
+Cold watched sources are captured under native custody with an 8-MiB encoded-input bound,
+verified off-actor, then attached to the **existing sole source slot** after exact wrapper,
+mount/server, actor, owner and MLS checks. Registry and Studio share four process preparation
+slots, held through actual blocking-worker termination and result custody even if the waiter is
+cancelled. Healthy supersession discards a result, not a sticky disk fault. The original bounded
+inventory rails still apply; unrelated uncached history may require explicit access. These are
+not latency or resident-heap promises.
+
+**Automatic Index/art joining is now driven by this same receiver.** Recently accessed targets
+discover a Registry checkpoint and then the current owner's Studio head/seed and open tail.
+The actor/native command/event surface is unchanged. A prefix alone never establishes currency.
+
+`ChannelSync::enable_epoch_service` is a local unlocked-lifecycle opt-in, independent of receive
+watches. `reserve_epoch_service_interest` prepays one exact queued head/seed/page request using
+that family's existing service bucket. Its opaque, non-cloneable token binds runtime, enable
+generation, request identity, scope and fixed queue expiry. Preparation leaves the request in
+its original bounded queue; cancellation cannot refund debt or capture it twice. Disabling clears
+pending service authority, not rate debt. `serve_epoch_{head,seed,page}_interest` reuses the same
+authenticated responders, owner-proof checks and completion barriers without charging twice.
+Neither source lookup nor background preparation creates/retargets a user's receive watch.
+
+The existing idle worker can prepare unopened saved keys. Registry preparation reuses its owned
+page provider and warms only the existing exact-wrapper inventory metadata LRU; no second graph
+or accounting owner is added. Installed Registry graphs release their process permit at a fixed
+30-second local deadline. Owner snapshot persistence runs once per mount/MLS observation and
+retries failures every 30 seconds, independent of incoming queries. Discovery copies the original
+Studio watch generation and discards late work after supersession/channel removal. A saved
+Closing source re-enters discovery after ordinary Read on restart; expired proof reacquisition
+requires no additional action. A large local Registry is prepared for accounting, but adoption
+of that large bucket and automatic Registry operation-tail replay remain Gate 4. Its checkpoint
+is not labelled a current pointer projection. Unrelated cold inventory retains the existing rail.
+
+### Studio checkpoint discovery and installation (cooperative, kinds 24/25)
+
+`CheckpointTarget::{Registry(bucket), Studio(target)}` extends the existing head/seed engine,
+not its finality model. Registry kind 21/22 wire bytes and signature domains are unchanged.
+Studio uses kind 24 (`catcoms/studio-head-response/v1`) and kind 25
+(`catcoms/studio-seed-response/v1`). Its head query is `v:u8=1, type:u16=15|16,
+channel:bytes16, object:bytes16, nonce:bytes16` (63 bytes); its seed query replaces nonce with
+`concrete_id:u128, expected_change_hash:bytes32` (95 bytes). Bytes are u32-length framed,
+integers big-endian, and Index object bytes must all be zero. Both queries retain the 256-byte
+pre-parse inner cap and authenticated outer framing; replies reuse the bounded Registry answer
+envelopes. Seed AEAD uses the actual Studio type and concrete epoch, not DocRegistry. Exact
+Automerge hash verification precedes decoding; typed validation then checks root and channel.
+
+`Server::prepare_checkpoint_discovery` captures target, mount and numeric server; its returned
+`CheckpointDiscoveryAttempt::fetch` holds no Server or vault. `complete_checkpoint_discovery`
+checks the same mount/server/channel plus sync's runtime, MLS, full identities, proven endpoint,
+deadline and newest prepared attempt. Only an actual fresh current-owner proof yields the opaque
+`ServerCheckpointFetch`; `Hint` is never an installation or seed-fetch grant. Unknown requester
+tenure can be learned from the verified owner's proof, but unknown provider tenure cannot mint
+an owner snapshot. A later failed/hint request does not revoke an already verified selection;
+preparing a later same-target attempt does revoke the older in-flight completion. Another valid
+owner selection revokes the old seed handle even when the receipt hash is equal.
+
+`prepare_checkpoint_seed_fetch` / `complete_checkpoint_seed_fetch` similarly detach expected-hash
+I/O, with immutable selection and attempt identities. All these detached calls are connected-only;
+the existing cooperative Registry request wrappers now also use that narrower policy instead of
+implicitly dialing a previously proven endpoint. Current-member proof is still required BEFORE
+disclosing any logical key. Four head-outbound, four seed-outbound and four retained seed slots
+are shared across Registry and Studio. Unpolled jobs, completed results and cancelled lower-driver
+streams keep their slots. Seed handles retain the original 60-second lifetime, three attempts and
+one-second spacing; each request has a fixed ten-second deadline starting at preparation. Weak
+generation maps are reaped on preparation/selection so arbitrary Studio keys cannot grow them
+forever. The same pending queues and per-identity/global debt are reused, with at most sixteen
+Studio logical head/seed registrations in addition to the 256 fixed Registry buckets.
+
+`watch_studio_checkpoint` registers head/seed service without changing the concrete receive watch.
+`serve_studio_head_step` reads only the sole prepared, authenticated, inventory-matched Studio
+source, checks the pending-preferred owner journal, flushes the source and re-saves the exact
+journal decision before signing. The reusable `ServerOwnerSnapshot` must already have been
+prepared by local persistence work. It is never created by a remote query. Only checked reply
+handoff completes publication; a later write failure cannot retract the reply and exact retry
+republishes the same receipt. Missing indexed/corrupt/faulted state refuses; real absent state
+can return a hint with no receipt, never an authoritative empty document. Cold service refuses
+before body allocation and requires separate preparation, not per-request history rebuilding.
+`serve_studio_seed_step` serves only the installed opening's exact seed, even during Closing;
+a selected newer receipt is not evidence that its successor seed exists.
+
+`install_studio_seed_step` accepts only that private current selection under exclusive runtime
+and vault custody. It uses the existing five-family `EpochStudioBudget` and returns the same
+`Installed`, `AlreadyInstalled`, `AwaitingSeed`, `RecoveryPending`, `Fault` and `Stale` outcomes
+as Registry. Full source Closing/Fault is saved first, typed whole-version recovery second,
+separate successor last. No intent retires on adoption. Source-only crashes, failed writes and
+third-snapshot warnings resume safely; exact installed retries preserve later edits. Studio
+adoption uses restart version 2 while ordinary Studio version 1 remains unchanged. Registry's
+4,096-epoch lineage ceiling applies only to Registry, not to Studio restart verification.
+The caller retains the returned source, replaces its concrete watch only after durable success,
+then pages the open tail. No actor/native scheduler or UI command is added by these adapters.
+
+### Creative blob seam (C0c, independent of Studio/P1 metadata)
+
+- Native `publish_pix({server, bytesB64}) -> {cid, bytes}` calls
+  `ServerActor::publish_pix` / `Server::publish_pix`. Rust validates PIX1 (64 KiB encoded cap),
+  then `ChannelSync::publish_blob_bounded` stages, verifies, promotes and flushes before returning
+  the actual BLAKE3 address of the PIX bytes. This does **not** publish a Studio/file/chat record.
+  The caller publishes references only after success. A promoted orphan may remain after failure;
+  failures must not delete a held CID that another reference could use. Filesystem blobs are
+  file-synced, plus containing directories on Unix, matching the existing vault platform seam;
+  this is not a new cross-platform sudden-power-loss guarantee. Unix blob-directory creation
+  also flushes ancestor entries, including on a retry after failed creation. `publish_pix` refuses
+  a process-local memory store (including the production disk-attachment fallback).
+- Native `request_blob_bounded({server, cid, maxBytes}) -> {bytes_b64, bytes} | null` calls the
+  same-named actor/Server/sync methods. CID syntax is exactly 64 lowercase hex digits; `maxBytes`
+  is an integer in 0..9 MiB, normally the reference's declared byte length. Local reads check the
+  opened file's size before allocation (sealed frame overhead is 40 bytes). One selected peer is
+  asked if missing/corrupt; signed response framing, declared limit, current membership,
+  request-bound signature and CID all validate before storage. Refusals have no provider fallback.
+  Null is unavailable, errors reject. **Consumers must also require exact byte equality and decode
+  their format before rendering.** The transport still buffers its existing capped response;
+  the caller-specific network bound is post-transport, before blob body copy/hash/storage.
+- Both commands reuse the four native inline-download slots, lock cancellation and transport
+  accounting keepalives. Response conversion rechecks unlock generation and server incarnation.
+  Neither command triggers passive fetches, installs a UI cache, emits Studio updates, pins content,
+  defines expiry or provides aggregate storage admission. Those remain separate integration work.
+- `BlobStore::get_bounded(cid, max_bytes)` and `promote_staged_bounded(cid, max_bytes)` are required
+  store methods, not default fallbacks to unbounded reads. Ordinary fetched-blob `put` dedup also
+  checks an existing file using the incoming length. Legacy unbounded reads/promotions remain for
+  existing consumers; callers needing declared-size protection must use the bounded seam.
 
 ```rust
 pub struct Cid([u8;32]);  of(bytes)->Self; from_bytes/as_bytes/to_hex/from_hex;   // BLAKE3 over CIPHERTEXT
@@ -447,11 +1309,15 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   set_config(SyncConfig);                                  // override recovery/key-window bounds
   async subscribe_control() -> Result<()>;                 // receive membership commits (member-only topic)
   epoch() -> u64;   routing_label() -> u64;   stats() -> SyncStats;
+  membership_chain_gap() -> Option<MembershipChainGap>;    // a chain no reached source could complete for us
+  // `None` is the ordinary answer and asserts nothing: a node that has spoken to nobody reports
+  // exactly what an up-to-date one does. The record is discarded on read once the epoch has moved,
+  // so a repair through ANY route retires it without that route having to know this state exists.
   rendezvous_namespaces(rz_peer:&[u8]) -> Vec<String>;     // blinded namespaces to register/discover under (current + grandfathered)
   mint_invite(nonce:[u8;16], expires_at_ms, bootstrap) -> Result<InviteToken>;
   mint_invite_with_rendezvous(nonce, expires_at_ms, bootstrap, rendezvous:Vec<String>) -> Result<InviteToken>;  // 6e-3d-9
   async open_channel(DocType, doc_id) -> Result<()>;       // create doc + subscribe its ns_secret_L-keyed topic
-  async post(DocType, doc_id, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<()>;  // edit + gossip
+  async post(DocType, doc_id, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<()>;  // edit, then gossip; Ok once the EDIT applied
   async run_once() -> Result<bool>;                        // drain outbox + recovery + sub-resync; then handle ONE event
   async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;        // incremental where possible; see KIND_CATCHUP_SINCE
   async request_commit_catchup(peer:PeerId, from_epoch:u64) -> Result<usize>;  // missed-commit recovery (ordered replay, SIGNED response)
@@ -493,14 +1359,31 @@ pub struct PeerDescriptor { pub device_pubkey:Vec<u8>, pub peer_id:[u8;32], pub 
   verify_self() -> bool;
 
 // Bounds (all hard caps; Default suits a desktop node). past:8, commit_log:256,
-// pending:256, gap:1024, peers:64, catchup_queue:256, outbox:256.
+// pending:256, gap:1024, peers:64, catchup_queue:256, outbox:256, committer_rank:0, stage_window:250.
 pub struct SyncConfig { max_past_epochs:u64, max_commit_log:usize, max_pending_commits:usize,
-                        max_commit_gap:u64, max_known_peers:usize, max_catchup_queue:usize, max_outbox:usize }
+                        max_commit_gap:u64, max_known_peers:usize, max_catchup_queue:usize, max_outbox:usize,
+                        // 0 = strict single-committer (the synchronous fast path); >=1 admits concurrent
+                        // committers within that many leaf ranks and enables staged fork resolution.
+                        max_committer_rank:u32,
+                        // Contest window (ms, injected clock) before adopting the lowest-`commit_id`
+                        // same-epoch commit. Only read when max_committer_rank >= 1.
+                        stage_decision_window_ms:u64 }
 pub struct SyncStats { commits_applied, commits_buffered, commits_served, commit_catchups_requested,
+                       commit_chain_gaps_observed /* once per epoch stuck at, not per exchange */,
                        ops_ingested, ops_recovered_past_epoch, ops_dropped_future_epoch, ops_dropped_old_epoch,
-                       doc_catchups_requested, requests_rejected: u64,
+                       doc_catchups_requested, requests_rejected,
+                       forks_resolved, forks_lost /*our staged commit lost the tie-break*/,
+                       forks_too_deep /*base-fingerprint mismatch*/ : u64,
                        /* gauges: */ past_keys_retained, pending_commits, commit_log_len,
                        known_peers /*untrusted candidates*/, member_peers /*proven members*/ : usize }
+
+// The membership chain this node cannot complete: it has missed more removals than any reached
+// peer still retains, so it is connected, in the roster, and permanently unable to converge.
+// Evidence from the sources actually asked, never a claim about the group; `lowest_available`
+// keeps the BEST (lowest) offer seen at this epoch, because a shorter gap is a better chance of
+// repair. Detectability only: nothing recovers from it yet. See MESSAGE-FLOW section 8, P0.
+pub struct MembershipChainGap { current_epoch:u64, lowest_available:u64, observed_at_ms:u64 }
+  missing_commits() -> u64;   // lowest_available.saturating_sub(current_epoch)
 
 // RoutingState: the routing label L + retained ns_secret_L history, transferred to a
 // joiner in the join response (sealed, signature-bound). Opaque; pass to new_joined.
@@ -589,6 +1472,17 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
   Pre-join **`join_ns`**: `"catcoms1-" ‖ hex(keyed(derive_key("…/join-rz/hkdf/v1", invite_nonce), "catcoms/join-rz/v1" ‖ group_id ‖ rz_peer)[..20])`.
 - **`SealedOp`** (gossip payload): `u16 doc_type ‖ u128 doc_id ‖ u64 epoch ‖ bytes nonce(24) ‖ bytes ciphertext`.
   Ciphertext = XChaCha20-Poly1305 of the encoded `SignedOp` under `channel_secret(doc,epoch)`.
+  - **The edit is the acceptance point, not the broadcast.** Everything that can legitimately
+    refuse a `post` happens before the edit is applied: an unopened document, a missing routing
+    secret, a sealing or automerge failure. Past that the operation exists with a stable change
+    hash in a document this process will serve and persist, so a refused *publication* is a
+    delivery still owed rather than a failed post; it is queued in the same bounded `outbox` as a
+    membership commit and retried on the next tick. Reporting it as an error told every caller
+    above that nothing had happened while something had: the app layer skipped delivery tracking,
+    the actor skipped its UI delta and the desktop skipped its save, while the message sat in the
+    channel, so retyping it minted a second copy under a new id and both surfaced later. After
+    the transport's own classification (see `MeshService`), the only publication failure that
+    still reaches this layer is the command channel being closed, i.e. a send racing shutdown.
 - **`CommitRecord`** (control payload): `bytes group_id ‖ u64 commit_epoch ‖ bytes committer_device(32) ‖ bytes mls_commit ‖ bytes base_auth(32) ‖ bytes committer_sig(64)`.
 - **Request/response** (`ProtocolId("/catcoms/rr/1")`): first payload byte = **kind**:
   - `0` KIND_CATCHUP; **authed** body wrapping `u16 doc_type ‖ u128 doc_id`; response = op bundle,
@@ -602,15 +1496,35 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     `CATCHUP_REQUEST_MS` applied to a legal maximum response would demand roughly 67 Mb/s. Two
     current peers never spend that deadline on each other, because this request is only reached
     when the paged one came back empty or with a marker we do not know.
-  - `19` KIND_CATCHUP_SINCE; **authed** body wrapping `u16 doc_type ‖ u128 doc_id ‖ u32 count(≤64) ‖
-    32-byte change hashes`; response = `[marker] ‖ op bundle`, carrying only the ops behind the server's
-    frontier and not behind the hashes named. The hashes are the requester's automerge heads **plus
+  - `19` KIND_CATCHUP_SINCE; **authed** body wrapping `u16 doc_type ‖ u128 doc_id ‖ u32 count(≤512) ‖
+    32-byte change hashes ‖ [u8 1 ‖ bytes continuation(0 or 20)]`; response = `[marker] ‖ op bundle`,
+    or `[marker] ‖ 20-byte cursor ‖ op bundle` for marker `4`. It carries only the ops behind the
+    server's frontier and not behind the hashes named. The hashes are the requester's automerge heads **plus
     their immediate ancestors** (`EncryptedDoc::sync_frontier`): a member that wrote while it could
     not reach anyone has a head nobody else has seen, and a peer that cannot see a hash can subtract
     nothing behind it, so naming the parents keeps the exchange incremental. Sound because holding a
     change means holding its dependencies, so anything causally behind a named hash is already held.
     A hash the server does not know selects nothing. Members-only on exactly the same terms as
-    `KIND_CATCHUP`.
+    `KIND_CATCHUP`. `MAX_CATCHUP_SINCE_HEADS` is **512**, and the decoder refuses a larger claimed
+    count before allocating for it; 512 hashes frame to about 18 KiB against a 64 KiB request bound,
+    and the serving-side subtraction visits each change once, so it is `O(document)` from any
+    number of heads.
+  - **The `KIND_CATCHUP_SINCE` continuation field is trailing and OPTIONAL**, and that is the whole
+    of its compatibility story. `encode_catchup_since_req(doc_type, doc_id, heads, cursor)` appends
+    a `1` tag and then either 20 bytes or nothing; `decode_catchup_since_req` returns
+    `Option<Option<CatchupCursor>>`, where `None` is a build that predates paging (a legal frame,
+    answered exactly as it always was), `Some(None)` is a paging-capable requester starting a fresh
+    walk, and `Some(Some(_))` is one continuing an existing walk. The absent cursor is deliberately
+    not encoded as twenty zero bytes: that would travel as a real position zero under a provider
+    stamp nobody minted.
+  - **The cursor** is `CATCHUP_CURSOR_BYTES` = 20: `provider(16) ‖ position(4, big-endian)`. It is a
+    position in the **serving** node's append-only log, opaque to the requester and meaningful only
+    to the node that minted it. `provider` is that node's per-runtime id, so a cursor replayed to a
+    different peer, or to the same peer after a restart, is recognised as foreign and the walk
+    restarts at zero rather than skipping history. It is deliberately **not** authenticated: a
+    forged position can only make a server skip operations the forger then does not receive. The
+    requester holds one cursor per `(doc_type, doc_id, peer)` and sends only that peer's own, which
+    is the half of the fence it owns.
   - **The authenticated request binds the transport peer it is sent from**, for
     `KIND_CATCHUP_SINCE` and **only** for it. The requester's own peer id goes into the request
     transcript, and the server rebuilds it from where the bytes actually arrived, so a request
@@ -656,6 +1570,25 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
   - **`KIND_CATCHUP_SINCE` response markers**, which are a continuation signal and not a version:
     - `1` `CATCHUP_SINCE_UNDERSTOOD`: this bundle is everything the server was holding for you.
     - `2` `CATCHUP_SINCE_MORE`: the bundle was cut to the budget and unsent ops remain; ask again.
+      This is the answer a request that carried **no** continuation field gets, and the requester
+      it is aimed at recomputes its difference from its frontier every round, so this marker can
+      legitimately repeat forever. That is the shape `MAX_NONPROGRESSING_CATCHUP_ROUNDS` exists for.
+    - `4` `CATCHUP_SINCE_PAGE`: as `2`, and the answer begins with the 20-byte cursor naming where
+      in **this** server's log to resume. Sent **only** to a request that carried the continuation
+      field, so a build that predates paging can never receive one; that is what makes both halves
+      of the change additive on the wire. The requester stores the cursor against
+      `(doc_type, doc_id, peer)` and replays it in its next request to that peer.
+      A `4` that carries operations and whose cursor advanced is real work and is **not**
+      counted against the source, even if every operation in it was already held: the walk is
+      consuming the server's log and will reach the end of it. Progress is the **conjunction**, so
+      a `4` is counted whenever **either** half fails: an empty bundle **or** a cursor that did not
+      advance. An empty page is a peer minting positions for nothing even when its cursor moved,
+      because a conforming pager only stops early on a full budget and so cannot emit an empty page
+      alongside "there is more"; it keeps counting.
+      The server's own walk is fenced per runtime: a cursor whose
+      `provider` is not this process restarts the walk at zero rather than being honoured, because
+      acting on somebody else's position would skip history the requester would never be offered
+      again.
     - empty response (no marker at all): "I do not know this kind". A peer built before kind 19
       existed answers every unknown kind this way, which is how a requester detects it and re-asks
       with `KIND_CATCHUP`.
@@ -705,14 +1638,27 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
       Otherwise a peer could leave, write something, return, and be excluded from the very sweep
       its reconnect queued; and a peer that was only a candidate when it answered would keep that
       answer after becoming a source the sweep must hear from. Forgetting only forgets: queueing
-      the work is left to `sweep_docs_on_reconnect`, which already declines to aim a whole-node
-      sweep at a peer that has not proved it can serve one.
-      **Known gap.** A node that restores with documents on disk and no proof cache does not sweep
-      on its first reconnect, and proving its first member does not sweep either, so a room that
-      stays quiet can remain as short as the restore left it. The same applies to a source that
-      quietly advances while staying connected and never changing standing. Closing both needs a
-      bounded periodic anti-entropy pass, spread across documents and peers; whole-node sweeps at
-      those moments were tried and aim catch-up requests at peers that cannot yet serve them.
+      the work is left to `sweep_docs_on_reconnect`, which declines to aim a whole-node sweep at a
+      peer that has not proved it can serve one.
+      **A restore also sweeps, once, on its first bound proof.** `member_peers` is session-local,
+      so a node that restores with documents on disk reaches its first connection with nothing
+      proven and correctly declines the sweep there; `restore` records the obligation
+      (`first_proof_sweep_owed`, set only when a snapshot brought documents back) and
+      `promote_member_peer_bound` discharges it. Without that, recovery depended on a further
+      connection edge that a stable link never produces, and a room that stayed quiet remained as
+      short as the restore left it for the whole session; restoring, opening one channel and
+      finding the rest still short is the user-visible shape.
+      Two conditions, both load-bearing. **Bound only**, because a bound proof is exactly a peer
+      that has served *this node* a document catch-up, so its membership check ran and passed:
+      PEX and commit catch-up promote unbound, a peer still mid-join answers both, and sweeping
+      on those aims members-only recovery at the joiner and blocks the loop on a reply it cannot
+      give; that is the connection-time deadlock reached one step later. **Once, and only after a
+      restore**, because a session that founded or joined has nothing older than itself to
+      recover, and a whole node's documents in front of its discovery and presence work costs
+      those the ticks they converge in.
+      **Known gap.** A source that quietly advances while staying connected and never changing
+      standing is still not re-swept. Closing that needs a bounded periodic anti-entropy pass,
+      spread across documents and peers.
       One member device holds at most one proof, and one transport peer at most one device, so a
       device cannot manufacture sweep obligations or evict honest proofs by answering from many
       identities.
@@ -771,6 +1717,16 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
     `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome ‖ sealed_routing`). Not member-authed.
   - `2` KIND_COMMIT_CATCHUP; **authed** body wrapping `u64 from_epoch`; response is **responder-signed**:
     `bytes responder_pubkey ‖ bytes sig(64) ‖ bytes bundle`, sig over `"catcoms/catchup-resp/v1" ‖ group_id ‖ requester_pubkey ‖ u64 req_ts ‖ nonce(16) ‖ u64 req_epoch ‖ bundle`.
+    The drain judges the exchange by what it **established** (`CommitCatchupOutcome`), not by how
+    far the epoch moved: `Verified` (a current member signed a decodable bundle), `Empty` (no
+    bundle at all) or `Unanswered` (failed, timed out, oversized, undecodable, or not signed by a
+    current member). Only an answer can retire a task. A non-committer's proactive probe on
+    `PeerConnected` carries no proven gap and a restarted node has nothing buffered, so every
+    other term of "finished" is already true there; treating a timeout as a completion meant an
+    ordinary member that missed an epoch while offline discarded its own recovery on the way back.
+    `Empty` still counts as an answer, because it is exactly what an up-to-date member sends: the
+    wire does not distinguish "nothing from `from_epoch`" from "refused", and the variant is kept
+    separate so that conflation is visible where it is relied on.
   - `4` KIND_PEX (6e-3d-7); **authed** body (empty); response responder-signed like commit catch-up but under
     `"catcoms/pex-resp/v1"`; bundle = `u32 count(≤64) ‖ len-prefixed PeerDescriptor`s, each self-signed under `"catcoms/peer-record/v1"`.
   - `14` KIND_RECIPROCAL_FORWARD; authed exact requester/target descriptor references + random
@@ -855,10 +1811,841 @@ impl ServerStore {
     fn verify_passphrase(&self, passphrase:&[u8]) -> Result<(),AppError>; // verify-only; no second mount
     fn save_ui_state(&self, json:&[u8], rng:&mut impl CryptoRngCore) -> Result<(),AppError>; // ≤1 MiB, vault-sealed + atomic
     fn load_ui_state(&self) -> Result<Vec<u8>,AppError>;
+    fn load_epoch_recovery(&self, server:u64, document:&LogicalDocument) -> Result<EpochRecoveryState,AppError>;
+    fn update_epoch_recovery(&mut self, server:u64, document:&LogicalDocument, action:EpochRecoveryAction,
+        clock:&dyn Clock, rng:&mut impl CryptoRngCore) -> Result<EpochRecoveryUpdate,AppError>;
     fn backup_source_dir(&self) -> &Path;
     fn change_passphrase(&self, current:&[u8], new:&[u8], rng:&mut impl CryptoRngCore) -> Result<(),AppError>;
 }
 ```
+
+`catcoms_app::store::{EpochRecoveryAction, EpochRecoveryState, EpochRecoveryUpdate}` persist P1's
+recovery slots, not settlement itself. Actions are `Stage(RecoverySnapshot)`,
+`Acknowledge { oldest_snapshot, staged_snapshot }`, and `AdvanceTime`. State exposes read-only
+`retained()`, `staged()` and `eviction_pending()`; the update returns that saved state and the
+`RecoveryTransition`. Full local-server/group/type/key scope is inside the sealed record as well
+as its domain-separated filename derivation. Exclusive mutable store access serializes reload,
+transition and replacement. Even idempotent retries re-save before returning, including exact
+acknowledgement retries after `CommittedButNotDurable`; stale acknowledgements cannot promote a
+newer warning. Reading alone never expires recovery. The registry store installation below now
+uses it before checkpoint selection/source pruning; actor/bridge, live inventory bootstrap and
+removal cleanup remain unwired.
+
+`catcoms_app::store::epoch_budget` adds `StorageScope`, `Footprint`, `StorageRecord`,
+`Replacement`, `WritePurpose`, `EpochStorageBudget`, and `BudgetError`. A budget is constructed or
+reconciled from a **complete trusted local inventory**, including temporary/orphan records. Its
+1984 MiB content, 16 MiB protocol and 48 MiB settlement pools sum to 2 GiB. `reserve` verifies
+permanent and peak old+replacement+scratch occupancy without early deletion credit, marks the
+budget unready before returning an exclusive guard, and rejects another document while staged
+bytes pin the reserve. `commit` follows successful durable I/O; `cancel_before_write` is valid only
+before I/O. Dropped/forgotten guards or uncertain writes require reconciliation. There is a local
+65,536-record metadata rail; it does not alter replicated registry admission. Empty crash-orphan
+files consume a slot too. An over-rail inventory refuses reconciliation until bounded cleanup;
+discarding entries from accounting to fit the rail is not safe.
+
+`ServerStore::epoch_recovery_inventory_record(server, document)` returns **one** authenticated
+physical inventory entry, not a complete inventory. `update_epoch_recovery_accounted` takes the
+same arguments as the low-level save plus `&mut EpochStorageBudget`, verifies the old pool split
+and owner, reserves the entire replacement, saves, then commits counters. Failed reads/writes
+invalidate accounting; matching lengths alone do not prove a matching pool split. The existing
+`update_epoch_recovery` remains explicitly unaccounted for bootstrap/tooling. A coordinator must
+own the sole budget, exclude unaccounted writers, and provide complete inventory discovery before
+production use; this API alone neither enforces a vault-wide policy nor settles multiple records.
+
+`ServerStore::scan_epoch_recovery(&mut self)` returns an `EpochRecoveryScan` borrowing the store
+exclusively through all steps. `step()` visits at most 64 directory entries and authenticates at
+most one bounded recovery record; it returns count-only `RecoveryScanProgress`. EOF alone permits
+`finish()` to return `EpochRecoveryInventory`. Errors, exhausted rails and caught parser panics
+permanently poison a scan. The job caps all traversal at 131,072 entries (ignored legacy files
+included), recovery files plus temporaries at 65,536, and total authenticated bytes at that record
+count times the per-record sealed cap. It stores metadata only, not recovery bodies.
+
+Discovery verifies the sealed full server/group/type/key scope and its canonical filename without
+consulting the current server registry, so removed-server recovery is not omitted. Canonical
+staging siblings are observed, not promoted/deleted; their bodies are never read. Attribution uses
+verified destinations after EOF, independent of traversal order. `records_for_server(server,
+group)` returns **recovery-only** storage inputs and refuses if any orphan lacks a verified
+destination. Known temporary bytes are settlement scratch, even when empty; incompatible pinned
+documents or over-cap usage still refuse budget construction until cleanup. The completed view is
+not a write lease or a complete P1 inventory: the future coordinator must exclude intervening
+writes, inventory all other managed types and resolve orphan cleanup before production wiring.
+
+`ServerStore::cleanup_epoch_recovery_staging(&mut self)` returns an exclusive
+`EpochRecoveryCleanup`. Its count-only `step()` result, `RecoveryCleanupProgress`, names visited
+entries, removed files and their **observed ciphertext bytes**, not filesystem free space. Each
+step visits at most 64 names, with the same 131,072-entry traversal rail as inventory, and removes
+only exact canonical recovery-write staging siblings. It does not read bodies or touch published
+recovery files, even corrupt ones; logical staged snapshots stay inside their final record.
+Failure/panic poisons completion and can leave partial deletions. Every successful batch/EOF,
+including an empty retry, runs the existing parent sync (Unix-only durability). A successful EOF
+means that traversal ended, not that directory iteration during deletion found every orphan.
+`into_inventory()` requires successful EOF and transfers the exclusive borrow to a fresh scan;
+callers repeat cleanup if necessary and reconcile complete current inventories before refunding
+any budget. This standalone operation has no startup, actor/bridge or network invocation yet.
+
+`ServerStore::{load_epoch_owner_receipts, prepare_epoch_owner_receipt,
+mark_epoch_owner_receipt_published}` add the owner-local publication journal. Preparation takes a
+local server id, signed `Receipt`, current `ServerGroup`, externally observed tenure-start epoch,
+RNG and complete `EpochStorageBudget`; completion takes server/document, exact receipt hash, RNG
+and budget. Both reload and atomically replace under exclusive store access, returning
+`EpochOwnerReceiptState` only after save success. Its `pending()` and `published()` references are
+historical state, not current-authority capabilities. Exact completed retries preserve any newer
+pending decision and re-save; a strictly newer verified tenure can replace an older pending decision,
+but same-tenure conflicting choices reject. `OwnerReceiptJournal::published()` exposes the latest
+high-water receipt; the journal wire encoding is unchanged.
+
+The outer owner-vault record now has an optional v2 decision extension after its existing framed
+journal: `u8=2, receipt_hash:bytes32, close_record:bytes` (u32 length framing). It retains one exact
+close for the pending-preferred receipt, including after publication completion until a newer
+decision replaces it. No-extension legacy records retain their bytes; older readers reject the
+extension. Decode checks the exact selected receipt hash, close hash/epoch/server/type, canonical
+close bounds, and no trailing fields. Current authority, close signature and closure/seed eligibility
+are rechecked before use, not inferred from inventory. The plaintext record cap is 8,448 bytes;
+the sealed physical cap is 8,488 bytes. These protocol bytes and replacement peak stay accounted.
+`EpochOwnerReceiptState::close_for(receipt)` returns historical provenance only. Re-saving the same
+receipt or completing its publication keeps its close; a genuinely different selected legacy
+receipt cannot inherit old heads.
+
+`Server::rotate_registry_owner_step(store, server, bucket, snapshot, budget, intents)` requires the
+current mount/server-bound `ServerOwnerSnapshot`. Sync's `with_durable_owner_snapshot` checks the
+actual runtime/MLS/full owner/observed tenure before lending exclusive context; Unknown or stale
+snapshots never reach disk mutation. The store flushes its complete source and verifies both
+inventories, then uses `RegistryEpoch::{new_owner_decision,resume_owner_decision}`. A new decision
+requires Open, no fault/adoption, epoch below 4096 and at most 64 complete heads; normal close and
+typed seed validation establish eligibility. Inheritance derives from the actual installed opening
+at succession and repeats the owner's published baseline within its tenure.
+
+The exact close and receipt are saved together before sealing; the existing recovery-first adjacent
+installer then runs. A pending choice (or published-but-not-installed choice) resumes from its saved
+heads, never current heads. Results are `Installed { publication_pending }`,
+`AlreadyInstalled { publication_pending }`, `RecoveryPending`, `Fault`, or `DecisionNeedsClose`
+for a legacy irrevocable choice without close provenance. Errors do not grant progress. Exact
+installed retries preserve newer edits, and post-journal/pre-seal edits are included in recovery.
+This explicit rotation step is not a publisher. Kind-21 `serve_registry_head_step` now completes
+the exact journal attempt after a checked owner-proof handoff, permitting a later eligible rotation.
+`Responder::try_respond` returns the actual local reply-channel send result; legacy `respond`
+continues to discard it. Success means accepted by that channel, not driver admission or delivery.
+Sync's additive `serve_receipt_head_with_handoff` returns `ReceiptHeadServed::{Hint, Owner}`;
+only a successful fresh proof response mints the private, non-Clone `ReceiptHeadHandoff`. Its
+receipt/bucket, runtime, MLS epoch, full owner, observed tenure, watch generation and request expiry
+are rechecked by `with_receipt_head_handoff` before lending the exact receipt to completion.
+The Server consumes it immediately, retaining its mount/server/store/budget borrow without await.
+A hint, expired authority or dropped reply channel cannot complete publication. A later completion
+write error cannot retract the reply; uncertain writes invalidate accounting, and restart/retry
+re-hands off the same decision before durably recording completion. The legacy sync serving wrapper
+discards handoff evidence and never completes a store by itself. A pending decision still blocks a
+different one until checked completion.
+
+Gate 4 adds a second, local completion route: the current owner's exact installed Open checkpoint
+must match the durable journal, provide the expected seed, and cross unchanged source/journal flush
+barriers before completing that same pending slot. `published` thus means checked reply handoff OR
+checked local installed-head availability, never remote possession. Studio's
+`Server::{rotate_studio_owner_step,complete_studio_owner_availability}` uses the same current
+`ServerOwnerSnapshot`; the existing native idle worker drives recent watched targets at a local
+five-second cadence. Registry maintenance refreshes pointers from actual source epoch numbers and
+uses the existing signed kind-20 page format through detached, connected-only requests. A changed
+saved Registry wrapper is memoized in the existing exact authenticated inventory LRU before another
+Studio turn. Fault/Closing never admits an ordinary operation-tail pass; held pages recheck that
+phase before storage. These are Rust/runtime hooks, not new renderer commands or completed Gate 4.
+
+The bounded sealed `.owner-receipts` record binds local server/group/type/key. Permanent bytes
+charge protocol allowance; replacement copies borrow the same logical-document settlement reserve
+as recovery records. `epoch_owner_receipt_inventory_record` observes one final file only; the combined
+inventory below covers its namespace and orphan temporaries. The sole coordinator and network
+publication remain deferred; the recovery-only scanner still excludes owner files. Before actual sending,
+the publisher must re-prepare/re-save the exact choice and recheck current owner, tenure and session.
+The explicit registry rotation path now validates the close and deterministic seed before signing;
+other managed types still need their own adapters. File-sync and
+atomic replacement use the existing store primitive, with parent-directory durability on Unix only.
+
+`scan_epoch_storage()` returns `EpochStorageScan`; `cleanup_epoch_storage_staging()` returns
+`EpochStorageCleanup`. These share the recovery engine and its unchanged aggregate traversal,
+metadata and per-step rails, but include both `.recovery` and `.owner-receipts` files. `coverage()`
+on cleanup, scan and completed `EpochStorageInventory` is fixed as
+`EpochInventoryCoverage::RecoveryAndOwnerReceipts`; the old recovery-only APIs return
+`RecoveryOnly`. The old recovery type names remain aliases of the common types. None means all P1
+storage or a continuing write lease. `EpochStorageScanProgress` retains `recovery_records` and adds
+`owner_receipt_records`; each step authenticates at most one body TOTAL. Each namespace uses its
+own bounded reader, scope domain and schema. `EpochStorageInventoryEntry::kind` and
+`EpochStorageOrphan::kind()` expose the physical family; orphan attribution keys on both that kind
+and digest. Owner final bytes charge protocol allowance; owner temporaries charge settlement
+scratch to their authenticated destination's shared logical-document owner. Unknown ownership in
+either covered family blocks per-server composition. Owner journals are historical vault state:
+inventory never requires current-owner authorization and never grants publication authority.
+
+Combined cleanup removes only canonical unpublished staging siblings, never saved pending/published
+journals or recovery slots. Failure can leave partial removals; empty retries still sync. Its
+`into_inventory()` keeps both exclusive access and coverage unchanged. Recovery-only APIs continue
+ignoring even malformed owner-only aliases (while charging traversal); combined APIs reject them.
+Other managed families, sole-writer admission, startup/actor/network integration and retention of
+saved records remain separate work. No cleanup operation is automatically invoked yet.
+
+`ServerStore::load_epoch_intents(server, document)` returns read-only `EpochIntentState::pending()`
+entries in derived-id order. `prepare_epoch_intent(server, document, operation, device, group, rng,
+server_budget, intent_budget)` reloads, verifies the local device's current roster signing key and
+group, checks the domain envelope bounds/scope, and durably adds one intent before returning.
+The caller must validate type-specific semantics first. There is no public raw-save or retirement
+API. Exact duplicate intents preserve newer entries and sync the authenticated unchanged final
+file plus parent without rewriting; sync-only admission reserves no bytes. New entries use ordinary
+content replacement accounting. Reads alone do not repair an uncertain save or authorize replay
+as a different author. File and parent durability are the existing file-sync/Unix-parent-sync model.
+
+The new explicit `scan_epoch_storage_with_intents` and
+`cleanup_epoch_storage_staging_with_intents` APIs return the same incremental jobs with fixed
+`EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents`. Earlier APIs still exclude intents,
+even malformed intent-only aliases. `EpochRecordKind::Intents` identifies `.intents` finals and
+staging siblings; `EpochStorageScanProgress::intent_records` counts authenticated ledgers.
+Namespace-specific bounds and `(kind, digest)` orphan attribution apply unchanged. Intent final
+AND temporary bytes charge content, never settlement. Saved ledgers are never cleanup targets.
+
+`EpochIntentBudget::from_inventory(&completed_inventory)` requires coverage including these three families,
+counts intent files across ALL servers in the vault, and includes unknown-owner temporaries.
+`reconcile` blocks the old budget on failure; `bytes()` is observed physical occupancy. The
+64 MiB cap (`MAX_VAULT_INTENT_BYTES`) includes sealing/framing and peak temporary copies, a
+conservative interpretation of the design's payload cap; the 65,536-record rail counts empty
+intent temporaries too. A private process-local mount/generation token is retained by inventories
+and budgets, and replaced before intent write/sync/cleanup I/O: duplicate budgets, prior-session
+budgets and stale completed inventories cannot authorize another intent update. Exact flush
+retries need neither replacement headroom nor a new RNG nonce. Both accounting guards remain
+unready after errors/panics, with no guessed refunds. The token does not track other file families:
+their metadata/admission and the sole complete per-server budget remain coordinator work.
+`IntentLedger::document()` exposes its full scope for the enclosing store decoder's equality check.
+
+This is a persist-before-edit prerequisite, not live editing or automatic replay. The registry
+adapter below now invokes it; retirement still requires checkpoint/recovery persistence and no
+actor/network path invokes these adapters yet.
+
+### Durable registry edits, sealing and checkpoint installation (P1, not yet live-wired)
+
+`ServerStore` now exposes:
+
+```rust
+load_registry_epoch(server, &ServerGroup, bucket:u8, &MlsDevice)
+  -> Result<Option<EpochRegistryState>, AppError>;
+edit_registry_epoch(server, &ServerGroup, bucket, expected_doc_id:u128, &MlsDevice, DomainOp, rng,
+                    &mut EpochStorageBudget, &mut EpochIntentBudget)
+  -> Result<(SealedOp, EpochRegistryState), AppError>;
+ingest_registry_epoch(server, &ServerGroup, bucket, &MlsDevice, &SealedOp, rng, &mut EpochStorageBudget)
+  -> Result<(Admission, EpochRegistryState), AppError>;
+seal_registry_epoch(server, &ServerGroup, bucket, &MlsDevice, Receipt, tenure_start, rng, &mut EpochStorageBudget)
+  -> Result<(ReceiptIngest, EpochRegistryState), AppError>;
+plan_registry_settlement(server, &ServerGroup, bucket, &MlsDevice, close_bytes, tenure_start)
+  -> Result<RegistrySettlementPlan, AppError>;
+stage_registry_recovery(server, &ServerGroup, bucket, &MlsDevice, close_bytes, tenure_start,
+                        &dyn Clock, rng, &mut EpochStorageBudget)
+  -> Result<Option<EpochRecoveryUpdate>, AppError>;
+install_registry_checkpoint(server, &ServerGroup, bucket, &MlsDevice, receipt_bytes, close_bytes,
+                            tenure_start, &dyn Clock, rng, &mut EpochStorageBudget,
+                            &mut EpochIntentBudget)
+  -> Result<(RegistryInstallOutcome, EpochRegistryState), AppError>;
+replay_registry_intent(server, &ServerGroup, bucket, expected_doc_id:u128, &MlsDevice,
+                       intent_id:[u8;32], rng, &mut EpochStorageBudget, &mut EpochIntentBudget)
+  -> Result<(RegistryReplayOutcome, EpochRegistryState), AppError>;
+begin_registry_replay(server, &ServerGroup, bucket, expected_doc_id:u128, &MlsDevice,
+                      &mut EpochStorageBudget, &mut EpochIntentBudget)
+  -> Result<RegistryReplayPass, AppError>;
+step_registry_replay(&mut RegistryReplayPass, &ServerGroup, &MlsDevice, &dyn Clock, rng,
+                     &mut EpochStorageBudget, &mut EpochIntentBudget)
+  -> Result<RegistryReplayStep, AppError>;
+```
+
+`EpochRegistryState` exposes only `doc_id`, `epoch`, `phase`, `op_count`, `quarantined_len` and a detached
+`projection`; no mutable document or arbitrary-save API escapes. Records are versioned,
+scope-bound, vault-sealed `.registry-epoch` files. Every mutation reloads and validates the full
+signed source under one exclusive store borrow, checks its exact accounting record, and saves
+before returning the outcome. Missing ingress may create epoch zero only. A receipt requires
+current owner/tenure and bucket verification before disk work; a normally absent source refuses
+without invalidating accounting, whereas loss of an inventoried source requires reconciliation.
+Sealing retains all source history; saved post-seal quarantine hashes are NOT accepted edits.
+
+Settlement preparation is read-only and accepts a canonical close of at most 4 KiB before disk
+work. It reloads the checked vault unit, requires Closing and the exact selected current-owner/
+tenure receipt, reconstructs only its dependency-complete closure and verifies the deterministic
+seed against the receipt's expected hash. Missing source/heads, malformed closes, another close
+from a current member, a wrong seed, stale authority and Fault all refuse without writes.
+The plan retains the full source projection (including overflow/tombstones), included operation
+ids plus their full envelopes and excluded accepted author-bound domain operations in canonical id order. Quarantined
+late bodies are not accepted source work. Excluded peer operations are recovery evidence, never
+permission to journal or replay as that peer. The plan's Debug excludes all content.
+
+`source_version` fingerprints the entire normalized local restart unit, not just its receipt:
+peers with the same receipt can have different excluded edits. It is serialization-version
+dependent and is not a wire id, currency proof or durability/installation permit. Settlement
+must reload/revalidate authority and the source version under the document gate, preflight and
+persist typed recovery, then install. A plan does not guarantee the eventual recovery encoding
+fits its byte cap/reservation. This API does not replace a source, write recovery, retire intents,
+or finish settlement; the source remains Closing and fully retained.
+
+`stage_registry_recovery` takes no stale plan: it reloads and verifies the source's exact accounting
+record, recomputes the plan, then validates every existing registry recovery slot before a nonempty
+save through the
+accounted recovery adapter. It holds the exclusive store borrow throughout, with no await or source
+mutation. None means no excluded operations, overflow or tombstones need a new snapshot; it is not
+an installation permit or a health check of old recovery files, which that path does not load.
+Some returns the saved slots/warning only after durable replacement.
+`EvictionPending` still holds future installation in Closing. Exact retries preserve snapshot ids
+and the warning deadline even if late packets added quarantine hashes. Failed I/O poisons accounting
+and grants no success; the source remains intact. A content-full first/second snapshot may still
+refuse, without crediting future source deletion. Settlement-wide capacity reservation is later.
+
+`install_registry_checkpoint` requires bounded canonical receipt/close bytes, the exact held
+current-owner decision and independently observed tenure. Under one exclusive store borrow it
+flushes the checked source, validates/account-checks old recovery even for an empty new plan,
+saves needed typed recovery, then holds any eviction warning. `RecoveryPending` is not success
+at installing: callers surface the existing saved warning and its acknowledgement/timer actions.
+Next it compares receipt-covered intent ids AND full author/domain envelopes, saves monotonic
+included-only retirement, reloads/rechecks the entire source version and atomically selects the
+verified successor seed. The receipt book (including repair anti-replay state) is preserved.
+`Installed` returns only after the final vault barrier. Until replacement the durable Closing
+source proves why included intents are final; excluded/unaccepted intents are never retired.
+
+On an exact opening-receipt retry, `AlreadyInstalled` flushes the actual successor unchanged,
+even if newer edits or a newer closing receipt arrived. It does not repeat old retirement or
+reinstall the seed. Fault and stale/other receipt scopes refuse. Failed writes/flushes poison the
+affected inventories; reconcile actual files before retry. No new journal or record family is
+introduced. Full-quota progress is still limited by per-record content reservations and the
+64-MiB physical intent ceiling: a shrinking ledger also needs its full replacement copy.
+Automatic replay, repair, discovery and actor/network orchestration remain separate work.
+
+Delayed current-owner equivocation against the retained opening receipt faults the successor
+even while a newer receipt seals it. Accepted content, seed, opening receipt and high-water are
+retained. Restart requires one fault-evidence member to equal that seed's exact opening receipt;
+unrelated older evidence refuses. ReceiptBook v2 encodes only the new case of a retained newer
+high-water above the opening-epoch pair; ordinary books remain v1, new readers accept both, and
+old readers reject v2 rather than dropping its fault. No network receipt encoding changes.
+
+Registry recovery has a versioned typed payload inside the unchanged generic `RecoverySnapshot` v1.
+It carries the full source pointers, overflow and pointer-key tombstones, selected receipt hash,
+and excluded author-bound domain operations; `applied_ops` is the sorted source-operation id union.
+The outer base-close is the close that opened the source (None at epoch zero). Generic collection
+metadata arrays are empty: registry keys are not Studio random element ids. Snapshot identity omits
+the ephemeral whole-source fingerprint, quarantine and quota-owner metadata. The exact aggregate
+6-MiB cap is checked before payload allocation/persistence; decoding validates the full wrapper,
+scope, canonical ordering, disjoint key sets, bounds and excluded-id membership in `applied_ops`.
+`RecoverySnapshot` Debug now redacts content even when nested in a generic Option/Result. These are
+vault-local records, not independently signed replay requests. Rewound whole-version records are
+saved by the scoped registry adoption installer below. Pointer verification, Restore,
+repair-specific typed records and actor/bridge integration remain unwired.
+
+Local editing uses two ordered barriers under the exclusive store borrow: validate the canonical
+registry operation and current local author, save/flush its intent, then reload, apply and save/flush
+the registry epoch. The nonce/envelope and captured concrete `expected_doc_id` are supplied by
+the caller and MUST stay unchanged on retry. The id is checked before journaling and again before
+the final gated edit; a retired-epoch retry refuses instead of creating a second edit after its
+old log/markers were pruned. Deliberate author-owned replay targets the newly read concrete id.
+`validate_local_edit` checks scope, canonical body, actor/membership, Open/epoch ceiling and any
+retained-id conflict before journaling. It is not a storage or prospective projection permit.
+`edit_or_reseal` repeats those checks and either authors normally through the typed projection
+preflight or reseals the exact retained signed change, never reauthoring it against newer heads.
+Because ids omit the body, a retained id's full envelope is compared even if no local ledger exists.
+
+No ciphertext escapes until both records cross their barriers. A later failure keeps the already
+saved intent for retry/recovery; a marker never retires it. Closing/Fault refuses both new local edits
+and retries without adding intents. Restored intents must be replayed only by their original author;
+this API accepts new local operations, not a foreign author's replay authorization. It prepares
+ciphertext under the current MLS epoch but does not send it. The cooperative sender below owns
+server-instance, membership, MLS and Open checks; native session cancellation remains its caller's
+responsibility before live integration.
+
+`replay_registry_intent` performs one bounded replay step from the saved ledger, without accepting
+a body/nonce from its caller. The original author must equal the actual device, still a current
+member. Unknown ids, missing/stale concrete epochs, Closing/Fault, malformed slots and mismatched
+inventories refuse without new intents or outbound ciphertext. Both server and vault-intent
+inventories are checked, including freshness, before the decision; every retained/staged recovery
+slot is type-checked/accounted even for an exact retry. Prepared uses the normal two-barrier edit
+path, preserving the saved envelope and returning ciphertext only after intent/epoch durability.
+
+`RegistryReplayOutcome` is `Prepared(SealedOp)` or `Held(RegistryReplayHold)`; Debug redacts the
+ciphertext/content. New authoring is held with `DeletedPointer` on current or retained/staged
+tombstones, or `SupersededPointer` when a current admitted/overflow hint exceeds the saved Put's
+epoch. Deletion takes precedence. Held retains the intent and source bytes, is not an ack or
+finality/durability claim for that intent, and must not be immediately auto-looped. Registry keys
+are stable and intents lack origin epochs: a deliberate later re-put can conservatively need
+manual recovery. Missing deletion evidence after two-slot eviction is best-effort, not proof a key
+was never deleted. No saved envelope is silently rewritten to "catch up" its hint.
+
+An exact authenticated CURRENT signed-log match (full author/envelope, never just a marker)
+instead reseals the original change unchanged, even after deletion or a higher hint. It cannot
+overwrite newer state and is required to retry a Tombstone after a failed post-rename flush.
+Scope, membership, Open, all recovery validation and both durability barriers still apply.
+This one-step API neither schedules/sends replay nor retires intents, repairs forks or implements
+Restore; those remain separate actor/transport/recovery work.
+
+The optional `RegistryReplayPass` is a cooperative driver around that single-intent API, not a
+worker or transport outbox. Begin checks current local membership and both ledger inventories,
+then retains only that author's sorted saved ids, at most 10,000 / 320,000 id payload bytes in a
+boxed slice. It does NOT read/flush the source or prove the captured concrete id is current/Open.
+Every actual step reloads all enforcement state through `replay_registry_intent`. New intents are
+outside the snapshot; disappearance of a selected id pauses rather than implying finality.
+
+`RegistryReplayStep` is `Complete`, `Wait { retry_at_ms }`, `Paused`, `AwaitingSubmission`,
+`Held { intent_id, reason, state }` or `Prepared { intent_id, ticket, op, state }`. At most one
+actual replay runs per step. A monotonic 100-ms PER-PASS deadline is charged before calling replay,
+including failed attempts. Checked deadline arithmetic refuses exhaustion before work, and Paused
+is installed before any error/unwind can escape. Waiting/paused/complete/awaiting steps do no disk
+work. This is neither a global rate limit nor a bound on how many passes the future actor creates.
+
+Prepared waits for an exact `RegistryReplayTicket`; its private fresh allocation identifies ONE
+attempt, so stale/cross-pass/duplicate acknowledgements cannot advance. `pass.submitted(&ticket)`
+advances after the caller acknowledges local transport submission, not delivery. It retires nothing
+and cannot establish that sending was authorized. `pass.retry_submission(&ticket)` invalidates the
+ticket without advancing; the next eligible attempt reseals the same saved operation using the
+existing current-member and Open checks. `pass.retry_failed()` resumes a paused id without resetting
+its deadline or repairing budgets. No timeout skips work. Losing a ticket requires dropping and
+restarting the pass; durable intents/logs preserve exact retry semantics.
+
+`pass.progress()` reports selected/visited/submitted/held counts, with visited = submitted + held.
+Complete means the original ids were traversed, possibly with holds, NOT that the current ledger
+is empty, all edits were sent or any edit is final. Held advances once but preserves the intent for
+explicit recovery. Dropping/restarting may revisit previously submitted work; it never retires it.
+
+Passes are non-cloneable and bound to numeric server, full group/device, bucket, concrete epoch and
+a stable private physical-mount token, separate from rotating budget freshness. Wrong mount/group/
+device calls refuse without consuming the pass. This token is NOT a native unlock/server-incarnation
+lease: explicit UI lock can keep the vault mounted. Raw pass consumers must cancel lifecycle-stale
+passes and recheck session/incarnation/membership/MLS epoch/Open immediately before sending. No
+ciphertext is retained in the pass; pass/step/ticket Debug redacts ids, scope and content.
+
+`Server::{begin_registry_replay, send_registry_replay_step}` adds a cooperative sender. Begin takes
+the store, numeric server, bucket, concrete document id and both inventories, then returns a private
+`ServerRegistryReplay` bound immediately to this exact `ChannelSync` instance. Restoring even the
+same group/device mints a new process-local token and refuses an old cursor before preparation.
+The cursor exposes only `progress()` and `retry_failed()`, not raw submission tickets or packets.
+One async step takes exclusive Server/store/cursor/budget borrows and returns
+`RegistryReplaySendStep::{Complete, Wait, Paused, Held, Attempt}`. Attempt carries the intent id,
+`Result<PublishSubmission, SyncError>` and saved registry state; Debug omits ids and content.
+
+Preparation uses the Server's actual group/device/Clock/RNG through synchronous trusted-local
+`ChannelSync::with_registry_context`, not caller-provided snapshots. Exclusive borrows remain held
+through awaited dispatch, excluding interleaving changes to known local membership and the store
+gate. This is not proof of remote currency or native UI-unlock authority. Immediately after
+Prepared, a private guard owns the exact ticket: only Submitted advances; Duplicate, error, future
+drop and unwind invalidate the attempt without skipping its saved id or resetting its 100-ms
+deadline. No result retires an intent. A later attempt reruns store checks and freshly seals the
+same saved operation. Cancellation after driver admission is ambiguous, not rollback.
+
+`ChannelSync::publish_local_registry_once(expected_doc_id, SealedOp)` rejects wrong type/id/MLS
+epoch, oversized ciphertext, non-current local membership, invalid signatures and nonlocal full
+authors. It opens and validates the canonical registry domain envelope under the actual group,
+then uses the current blinded DocRegistry topic and awaits `publish_once` without an outbox or a
+legacy document-map entry. `SyncError::Publication` preserves the transport's typed refusal.
+This low-level trusted API does not itself establish Open/durability; the Server adapter obtains
+the packet from the checked store while retaining exclusive access. `RegistrySyncInstance` uses
+allocation identity, not equality of token contents, and is neither persisted nor sent.
+
+There is no autonomous worker, driver deadline, aggregate pass scheduler, native lock cancellation,
+managed catch-up or automatic wakeup yet. The existing gossip-size limit can refuse
+an otherwise accepted P1 operation; this slice changes no transport limit or wire format.
+
+### Opt-in registry gossip receive (P1, not actor-owned yet)
+
+`Server::watch_registry_epoch(&ServerStore, server:u64, bucket:u8)` synchronously returns an opaque
+`ServerRegistryWatch`. It reads the checked local current epoch, falling back to deterministic epoch
+zero only for an absent record; it creates no file and proves no remote currency. The handle binds
+numeric server, physical mount, full group through the exact sync instance, bucket, concrete id and
+a fresh installation generation. There is one desired watch per bucket (at most 256). Rewatching
+even the same id clears its old queued packets and invalidates its old handle. Dropping a handle
+alone does not unsubscribe; use `unwatch_registry_epoch(&watch)` or replace it. Revocation needs
+only the exact sync/watch generation, not the old mount, so it still works after a vault reopen;
+only ingestion requires the physical mount to match.
+
+The next `sync_once` reconciles desired subscriptions before reading network events. Optional
+`flush_registry_subscriptions().await` performs reconciliation without waiting for an event.
+Current and retained routing-window topics are included without opening a generic document.
+Reconciliation tracks each successful subscription and one uncertain in-flight subscribe, undoing
+the latter on retry before recomputing desired topics. Unsubscribes likewise remove their local
+subscription claim and retain an uncertain topic before awaiting, so a same-topic rewatch after
+cancellation cannot remain silently unsubscribed. The retry flag remains armed across errors
+and cancellation, and revoked watches reject traffic immediately, even before unsubscribe finishes.
+This also fixes lost retry/cleanup ownership for interrupted ordinary routing subscriptions.
+
+`sync_once` intercepts registry-tagged frames before legacy ingestion. Encoded frames above
+256 KiB + 78 bytes reject before SealedOp decode; scope, current MLS epoch, AEAD, full current
+signed author, local membership, canonical domain/bucket and exact watched blinded topic must
+validate before enqueueing. A global pre-auth token bucket allows 50/s with burst 200, across ALL
+senders, before cryptographic work. Verified full-author + concrete-document rows allow 10/s with
+burst 50. At most 4096 rows exist, and only fully refilled rows are reclaimed; watch changes cannot
+reset debt. Refill uses injected monotonic time, saturating arithmetic and no wall-clock credit.
+The global ceiling also implies the design's per-device server ceiling but is intentionally stricter:
+one sender can exhaust it for everyone. It is a bounded-work rail, not a fairness guarantee.
+
+The inbox retains at most 16 compact SealedOps (16 x (256 KiB + 20) ciphertext bytes plus fixed
+metadata), never the transport Bytes backing allocation or decrypted bodies. Thus at most 16
+documents have queued/active validation work; the store drain itself is synchronous and serial.
+`receive_registry_step(&mut ServerStore, &watch, &mut EpochStorageBudget)` consumes at most one
+packet for the exact handle. It rechecks watch/mount/instance, current receiver/author and MLS
+before calling the existing durable `ingest_registry_epoch` with the captured server/bucket and
+actual group/device/RNG. It returns `Option<RegistryReceived { admission, state }>` only after the
+store's barrier. Accepted, Duplicate, Quarantined and RejectedQuarantineFull remain distinct. No
+network delivery receipt, local-author intent, or legacy accepted-op statistic is produced.
+Watch/result Debug redacts scope/content. Low-level `ChannelSync::{watch_registry,
+registry_watch_is_current, unwatch_registry, drain_registry_inbound}` are trusted local adapters,
+not independently authoritative store APIs. Only their app wrapper checks physical-mount binding.
+
+Errors/unwinds consume only the volatile packet and grant no acknowledgement; queue overflow,
+invalid/stale packets and unregistered traffic are dropped. Past/future MLS epochs do not enter
+legacy catch-up or past-key paths. Retrying the original author's saved operation or future managed
+catch-up must recover drops; neither is automatically scheduled yet. Watches/inboxes/rate debt are
+process-local and reset on sync restore; no wire or persistence format changes. Live actor/native
+store ownership, lifecycle cancellation and automatic discovery/catch-up scheduling remain
+unimplemented; the cooperative network adapters are described below. A rotated persisted epoch
+needs a newly installed watch, never a retargeted old handle.
+
+### Cooperative registry catch-up page serving
+
+`Server::begin_registry_page_provider(&ServerStore, server:u64, bucket:u8)` returns an opaque,
+non-cloneable `ServerRegistryPageProvider` with a random provider-local MAC key. It binds the
+exact sync instance, physical mount, captured numeric server and bucket; it reads/creates no
+document and subscribes no topic. Drop on runtime/mount replacement. This is not a native lock
+lease, a network request registration or an aggregate provider-count limit.
+
+`begin_registry_page_preparation(&ServerStore, &mut provider)` captures bounded authenticated
+vault bytes and returns an optional opaque job. Release store/actor locks before awaiting
+`job.rebuild()` on a Tokio worker; reacquire current lifecycle custody and call
+`finish_registry_page_preparation(&ServerStore, &mut provider, result)` to attach it. No live
+MLS/device keys enter the worker. Four process-wide slots cover captures, queued/running workers,
+detached results and retained sources, including cancelled callers and remounts. Refresh drops
+the old cache first and supersedes earlier jobs; it preserves the provider's cursor MAC key.
+Actual absence returns None; capacity/corruption are errors. Attachment checks current membership,
+runtime/mount, preparation generation and the exact complete authenticated saved record.
+
+`serve_registry_page(&ServerStore, &mut provider, RegistryPageRequest)` reuses the prepared
+read-only source and returns `RegistryPageOutcome::{Page, Restart, CheckpointRequired,
+HistoricalAuthorizationRequired}` or an error. The request carries a full requester device id,
+concrete doc id, at most 64 strictly sorted unique initial heads, optional claimed verified seed
+hash and optional 81-byte opaque cursor. Runtime/mount and current local/requester membership,
+field caps, cursor HMAC and expiry are checked before source I/O. The current concrete id and
+seed match are checked against the prepared source. Each page rereads/unseals/hashes the bounded
+complete saved record, including receipt book and gate, without replaying history. Cold/stale/
+missing sources require explicit LOCAL preparation; they are errors, not wire Restart or empty
+success. Corruption also errors and drops the cache. Fault refuses. Closing history may be read
+without opening its gate. `has_prepared_source()` is local cache presence, not verified currency.
+The network adapter likewise never starts a rebuild; its caller prepares before consuming work.
+
+The low-level `RegistryPageProvider` uses HMAC-SHA256 over length-framed provider/requester,
+full group/logical/type/concrete scope, initial heads/seed and a version-1 cursor payload:
+`version:u8, frozen_count:u32, next_position:u32, issued_monotonic_ms:u64, prefix_digest:32,
+mac:32`. Integers are big-endian. The prefix digest includes the seed hash and length-framed
+signed envelopes in accepted-log order. This provider-local order is already dependency-complete;
+it need not equal another peer's order. MAC comparison uses the library's constant-time verify.
+The ephemeral key is zeroized on drop and must be reminted across runtime restarts. The fixed
+ten-minute expiry is not renewed by continuation; wall-clock changes grant no credit.
+
+Repeat the ORIGINAL heads/seed on every continuation. Unknown heads restart. The frozen count
+and digest allow append-only growth or byte-identical source reload, but refuse changed prefixes.
+Returned pages subtract the initial ancestor closure and advance by cursor position, including
+already emitted dependencies. A requester with more than 64 heads can begin at [] (plus its
+verified seed if rotated) and deduplicate repeats. A page contains at most 32 freshly current-MLS
+sealed operations and 512 KiB summed `4 + SealedOp::encode().len()`; cursor/response envelope
+bytes are extra. Any nonterminal page emits at least one operation. No plaintext seed, vault
+snapshot, quarantined body or old ciphertext is exported. `next:None` means the captured prefix
+ended, not that later edits do not exist or that the provider is current. Debug redacts identities,
+scope, cursor bytes and content.
+
+Missing removed-author operations in the REMAINING page range produce
+`HistoricalAuthorizationRequired`, never omission or impersonation. Previously emitted cursor
+positions and initial ancestors are claimed held history, so author removal after delivery need
+not block later descendants. These are not possession proofs: a conforming requester derives its
+heads/seed from verified state and continues only after persisting a dependency-complete page.
+
+Saved-source reconstruction uses the applied change graph's metadata for Boolean dependency and
+duplicate presence checks; queued changes and serialized metadata grant no admission. It also has
+an internal exact-frontier optimization: after authenticating each operation and checking its
+dependencies, the restore loop compares them with all actual current
+Automerge heads. Only exact equality permits current-view property reads; other views retain
+historical reads. The exact-frontier path need not reconstruct each dependency again for the
+semantic validator's redundant presence check. No wire/snapshot field enables it, no prefix is
+truncated, and all signatures, semantic checks, gate verification and final projection preflight
+still run. See `P1-PERFORMANCE.md`
+for measured costs rather than inferring latency from the byte cap.
+Historical authority transfer and automatic receiver scheduling remain unwired. Cooperative durable
+receive, keyed head/seed exchange and explicit registry installation are described below.
+
+The direct trusted-local page API imposes no aggregate call-rate limit. One prepared call rereads
+the bounded saved record, then walks its bounded change index/ancestor sets. It grants no delivery
+acknowledgement, intent retirement, saved mutation or finality. Network callers use the adapter below.
+
+### Independently observed owner tenure
+
+`ChannelSync::observed_owner_tenure_start() -> Option<u64>` reports local evidence about the
+current designated committer. `Some(0)` is the locally observed founding tenure; None means
+unknown, never an implicit zero. Only an actually applied owner change establishes a new start
+at the resulting MLS epoch. Same-owner commits preserve both knowledge and Unknown. All inbound,
+staged winner/loser/applier, synchronous removal, invite Add and companion Add paths observe the
+actual group before propagating the helper's result, including an error following a merge.
+
+The sync snapshot appends one length-framed version-1 tenure tail after direct-admission results:
+`version:u8=1, observed_epoch:u64, owner:bytes, start:bytes`. Integers are big-endian; each `bytes`
+has a u32 length. Owner is empty or the full 32-byte identity, start is empty or 8-byte epoch.
+The body cap is 57 bytes. Observed epoch/owner must match the MLS snapshot exactly; a known
+start requires an owner and cannot exceed that epoch. Missing tail alone loads as Unknown;
+partial, malformed or trailing data rejects. New snapshots always encode the tail, including
+Unknown. Older binaries reject the new tail; backward reading of old snapshots is supported,
+not downgrade compatibility. Existing peer-address extraction stops before this appended data.
+
+Welcome joins start Unknown, even if the new device fills the lowest leaf and becomes owner.
+Legacy upgrades and such owners may remain Unknown indefinitely across same-owner commits.
+Do not recover availability by assigning the current epoch or copying a receipt's own tenure.
+The observation is not a publication permit: a proof publisher must flush this exact
+MLS snapshot and the irrevocable owner decision, check fault/current membership, and recheck
+tenure at signing/submission. The cooperative publisher below implements that boundary; the
+getter alone issues no proof or editing lease.
+
+### Keyed registry receipt-head discovery (cooperative, kind 21)
+
+`Server::watch_registry_head(store, server, bucket)` registers a logical registry bucket without
+loading/creating a file or subscribing to an epoch topic. `unwatch_registry_head` revokes its
+exact runtime/generation even after a mount closes. A watch binds the physical mount and captured
+numeric server. It survives registry rotation; replacement drops its queued requests, not rate debt.
+
+`Server::request_registry_head(peer, bucket)` requires an already bound current full-member
+endpoint before disclosing the key. Sync derives the logical key and mints a fresh nonce from
+the injected RNG on EVERY request. The inner bytes are `v:u8=1, type:u16=18, key:bytes32,
+nonce:bytes16` (59 bytes, hard pre-parse cap 256); integers are big-endian and bytes are u32-length
+framed. Existing authenticated-request framing binds kind 21, group, current MLS epoch, actual
+transport requester, signature key, timestamp, nonce and entire inner query. No concrete epoch
+id is required. Unsupported/refused empty responses mean None, not an empty document or fallback.
+
+`ReceiptHeadAnswer { receipt, repair, proof }` encodes `v:u8=1` then three length-framed optional
+records in that order; empty fields mean None and each non-empty canonical record is at most
+1024 bytes. The answer cap is 3085 bytes, plus 108 bytes for the signed response envelope. The
+`catcoms/receipt-head-response/v1` transcript binds the complete query, requester auth, group,
+provider transport and answer. Caps apply after transport frame buffering, before copying or
+parsing records. Scope, trailing bytes and proof/receipt hash mismatch reject. Fresh proof
+acceptance also requires the response signer to be the current owner, the exact internally minted
+nonce/full requester, and independently known tenure when available. Repair records remain hints;
+the current provider sends None because durable signed repair retention/serving is not wired.
+
+`Server::prepare_owner_head_snapshot(store, server)` is EXPLICIT LOCAL persistence work: it saves
+the current whole-server snapshot and returns `ServerOwnerSnapshot` only after its durable write.
+Never invoke it as a consequence of a remote query: legacy whole-server serialization is not
+bounded by P1's per-query budget. The permit binds runtime, MLS epoch, full owner, independently
+observed tenure, mount and numeric server. It can be reused across buckets until any of these
+changes. Unknown tenure or save failure yields no permit. Runtime/lock ownership must discard it
+on lifecycle replacement; automatic lifecycle scheduling is still a later integration step.
+
+`serve_registry_head_step(store, watch, optional_snapshot, budget)` drains one authenticated
+request. It never serializes or writes the whole-server snapshot. Source/journal reads check the
+complete inventory; a disappeared indexed file or corrupt/faulted source cannot turn into None.
+The owner prefers its pending decision over published state. A fresh proof requires a current
+snapshot permit and EXACT agreement with the checked source head; otherwise the selection is only
+a hint, never a fresh proof of an older fallback. Before signing, the source file and parent flush
+and the exact journal choice is re-saved through accounted persistence. Failed/uncertain writes
+send no success and require budget reconciliation. Signing/handoff recheck request lifetime and
+authority after synchronous I/O. A checked owner-proof handoff now durably completes that exact
+publication attempt; a failure in this later completion cannot retract the response. Discovery
+never changes the source, retires intents, prunes history or installs a checkpoint. The proof says which receipt the owner
+selected now, not that its seed is available/verified, and provides no lease.
+
+Per runtime, head discovery independently retains at most eight requests, one per full requester,
+with a fixed five-second queue lifetime; preauth is 10/s burst 20, requester service 1/s burst 2
+with at most 4096 debt rows, and aggregate source work 2/s burst 4. Registrations are at most 256.
+Four outbound request permits remain charged until transport actually releases them after
+cancellation. The receiver deadline is ten seconds and is checked even if a ready response wins
+the timer race. These limits are separate from registry-page limits and reset on process restart.
+The saved registry rebuild is bounded by its existing epoch cap, not a constant-time operation;
+maximum-source latency remains an acceptance check before automatic scheduling.
+
+### Expected-hash registry seed exchange (cooperative, kind 22)
+
+`Server::watch_registry_seed(store, server, bucket)` / `unwatch_registry_seed(watch)` register
+logical buckets with runtime/watch-generation/mount/server binding, independently of head and
+operation watches. `serve_registry_seed_step(store, watch, budget)` drains at most one bounded
+authenticated request through the checked vault source. A missing bucket or mismatched concrete
+id/hash returns unavailable. A lost indexed file, corruption or Fault is an error. The provider
+reads the installed opening seed, even during Closing; the latest next receipt is not evidence
+that its seed is installed. No generation from close candidates, fallback lookup, source write,
+head advancement or owner-journal publication occurs.
+
+`Server::discover_registry_seed(store, server, peer, bucket).await` first reserves retained capacity,
+then performs fresh keyed head discovery. It returns None for unsupported/refused transport,
+`ServerRegistrySeedDiscovery::Hint(ReceiptHeadAnswer)` for provisional records, or
+`Selected(ServerRegistrySeedFetch)` for a current owner's verified selection. The opaque non-Clone
+pass contains immutable verified receipt provenance minted inside actual kind-21 verification;
+there is no constructor accepting public receipt/proof fields. It captures runtime, current MLS,
+full requester/owner, tenure, per-bucket supersession token, mount and numeric server. Another
+fresh owner selection for that bucket revokes prior passes, including one selecting the same hash.
+Raw `request_registry_head` calls participate in this supersession too. Hints do not revoke.
+This cooperative discovery API still holds its `&ServerStore` borrow across the await, although
+it reads only the mount token. It is not yet a detached actor job; fetch itself borrows no store.
+
+`fetch_registry_seed_step(pass, peer).await` attempts a fetch from a separately proven current
+member endpoint. True means exact typed seed bytes are retained in memory, not installed or
+currently authoritative. False means unsupported/refused/unavailable, never an empty seed.
+`registry_seed_ready(store, server, pass)` additionally checks runtime/MLS/owner/supersession,
+expiry and exact mount/server now; it is not a settlement chip or a lease. The sync-only trusted
+`with_registry_seed(pass, callback)` rechecks context and lends the immutable receipt, verified
+seed, bucket and tenure under exclusive sync ownership. `with_registry_seed_selection` performs
+the same check but permits absent seed bytes, so receipt/fault persistence need not wait on a
+provider. Neither callback alone is a store API. Discovery/fetch creates no receiver epoch or recovery.
+
+`Server::install_registry_seed_step(store, server, pass, budget)` is the explicit accounted vault
+transaction. It rechecks the physical mount/numeric server and fresh selection at entry, then holds
+exclusive sync/store borrows throughout synchronous persistence. The receiver's injected runtime
+Clock supplies recovery time; caller or peer timestamps cannot extend freshness. It returns
+`(RegistryAdoptionOutcome, EpochRegistryState)` only after the corresponding save/flush barrier:
+
+- `AwaitingSeed`: full source and selected receipt saved Closing; expected seed still absent.
+- `RecoveryPending`: full source remains Closing while a staged eviction warning waits.
+- `Fault`: conflicting receipt evidence saved independently of missing/invalid seed or recovery.
+- `Stale`: an older same-tenure selection did not replace local high-water evidence.
+- `Installed`: typed whole-source recovery saved before atomic successor replacement.
+- `AlreadyInstalled`: actual successor flushed without reseeding, even if it has newer edits.
+
+Invalid inventory (including a missing indexed source), wrong typed seed or failed/uncertain I/O
+returns an error, not a success label. Recovery must be typed and inventory-matched; existing
+warnings are never reset by retargeting. A restarted/expired pass requires fresh head discovery
+and seed fetch to resume. Exact opening retries need no seed bytes and do not touch recovery.
+Adoption retires no intents: a seed value alone is not evidence an author's operation was final.
+The caller must explicitly watch the installed concrete epoch and begin a fresh receive pass;
+old watches and already queued old-epoch pages cannot save into its successor. This is neither a
+lease nor automatic scheduling. Existing conservative per-record/reserve limits still apply;
+settlement progress at the full server quota is not yet guaranteed.
+
+Query v1: `v:u8=1, type:u16=18, logical_key:bytes32, concrete_id:u128, seed_hash:bytes32` (91 bytes,
+cap 256). Integers are big-endian and bytes u32-length framed. The authenticated request binds
+kind 22, group, current MLS, timestamp, nonce, requester key and actual requester transport.
+The expected hash is an Automerge change hash, NOT a blob CID. The signed response uses
+`catcoms/registry-seed-response/v1`, binding request auth, actual provider transport, exact query
+and sealed body. The standard `key:bytes32, signature:bytes64, body:bytes` envelope costs 108 bytes.
+An empty signed body means unavailable. Otherwise it is existing `encode_sealed`: nonce:bytes24
+and ciphertext:bytes, with plaintext padded via `OP_PAD_FLOOR=512` / `OP_PAD_CEILING=1048576`.
+The raw seed cap is 2,097,152 bytes; sealed body cap 2,097,204 and response cap 2,097,312. Limits
+apply after transport frame buffering, before copying or decrypting the body. Canonical padding
+and expected raw hash/checksum reject before Automerge parsing; exact change metadata and typed
+registry projection validation follow. Other members can re-seal the same seed in current MLS.
+
+There are four retained passes per runtime, acquired before head discovery. Each owns at most
+one seed, has a fixed 60-second receiver-monotonic lifetime and at most three attempts spaced
+one second apart. Invalid replies and cancellation spend attempts. Revocation/expiry does not
+free capacity while a caller holds the old pass. Four independent outgoing transport slots follow
+driver termination, not caller cancellation, and each request expires after at most ten seconds.
+Provider limits: 256 logical watches, eight five-second metadata requests, one per full identity,
+10/s burst-20 preauth, 1/s burst-2 per requester (4096 debt rows), 1/s burst-2 aggregate source work.
+Watch replacement does not reset rate debt. Crypto/parser temporaries and a bounded source rebuild
+are additional to the four retained raw-seed bodies. Provider responder handoff is not delivery;
+the four outgoing client slots do not account for provider transport response buffers.
+Automatic actor/lock scheduling and source latency acceptance remain unfinished.
+
+### Authenticated registry page exchange (cooperative, kind 20)
+
+`Server::request_registry_page(peer, RegistryPageQuery)` requests exactly one unadmitted page.
+The endpoint must already have a transport-bound proof for a current full device identity;
+candidate discovery is not permission to disclose registry identifiers. The requester signs
+with its actual device. Kind 20 uses the existing authenticated-request envelope, including
+actual requester transport peer binding. Current MLS epoch and exact current member public keys
+are required at queue and source-read time; old request kinds retain their compatible transcripts.
+
+The version-1 inner query is canonical big-endian:
+`version:u8=1, bucket:u8, doc_id:u128, head_count:u8, heads:[bytes32], seed:bytes, cursor:bytes`.
+Every `bytes` field has a u32 length prefix. Heads are strictly increasing, unique and at most
+64; seed is empty or 32 bytes, cursor empty or 81 version-1 bytes. No trailing data is accepted.
+The inner cap is 2444 bytes and authenticated body cap 2588 bytes (plus one kind byte).
+Requester identity is derived solely from the verified outer signature, never a body field.
+
+`run_once` queues requests only for an exact installed registry watch. There are at most eight
+pending responders per sync instance and one per full requester across all buckets, with a
+five-second monotonic admission lifetime. Replacement/unwatch drops that bucket's queue.
+Global pre-authentication work is limited to 10 requests/sec, burst 20; each verified full
+requester gets 1/sec, burst 2, with at most 4096 debt rows. Replacement and cancellation do not
+reset debt; only fully refilled rows are reclaimed. Source callbacks additionally share a 2/sec,
+burst-4 rail across all watches. Expiry is swept on enqueue/drain; stale records can remain
+bounded in an idle queue but can never be served after expiry. Refusals/errors drop the responder.
+
+`Server::serve_registry_request_step(store, provider, watch)` drains one request through the
+checked saved source. The provider must match the watch's captured numeric server, bucket,
+runtime and physical mount. Scope checks happen before queue consumption; current membership,
+MLS epoch, freshness, watch generation and service budget are checked before source I/O.
+`None` means no eligible work, including throttling. `Some(())` means a response was handed to
+the responder, NOT delivery. Cancelled requesters may still cause bounded source work because
+Responder does not expose cancellation. No source mutation, intent retirement or generic ack occurs.
+
+Answer bytes are `version:u8=1, status:u8`. Status 1=Restart, 2=CheckpointRequired and
+3=HistoricalAuthorizationRequired end there. Status 0 adds `op_count:u8`, length-framed
+SealedOps and one length-framed optional cursor. At most 32 ops and 512 KiB of framed ops are
+allowed; each op must match DocRegistry, concrete id and current MLS epoch. Empty nonterminal
+pages reject. Signed framing is `[provider_pubkey:bytes32, signature:bytes64, answer:bytes]`.
+The answer cap is 524376 bytes, signed response cap 524484 bytes. The latter is checked after
+the transport has buffered its globally bounded frame but before payload copies/signature work.
+
+The response signature uses `catcoms/registry-page-response/v1` in the existing length-framed
+signed-response transcript (group, requester key, timestamp, nonce, request epoch), with a bound
+bundle of length-framed actual provider PeerId, entire canonical query and entire answer. The
+client requires the same full device that proved the selected endpoint. Tampered, relayed or
+cross-query responses cannot become a page. An empty unsigned response means unsupported/refused,
+not an empty document; there is no legacy catch-up fallback. Decrypted author/projection/DAG
+admission is still the durable receiver's job; it must save all operations before using `next`.
+
+One outbound request has a ten-second injected-clock deadline. Four fixed per-sync permits are
+retained by `RequestCancellation` accounting until the transport actually releases its work;
+dropping or timing out the caller publishes cancellation but does not recycle a live stream's
+permit. No retry, durable receive cursor, actor/native scheduler or receipt/seed discovery is
+provided by this exchange alone.
+
+### Durable registry receiver continuation (cooperative)
+
+`Server::begin_registry_receive(store, watch, peer, budget)` checks the exact runtime/watch,
+numeric server/bucket, physical vault mount and proven current provider device, then reserves
+one of four live receiver permits before I/O. It verifies/flushes the saved Open epoch against
+the sole complete storage budget. An absent deterministic epoch zero remains absent. The pass
+captures sorted saved heads (empty when there are more than 64) and the verified seed hash.
+
+`fetch_registry_receive_step(pass)` requests at most one page with no vault borrow or write.
+`persist_registry_receive_step(store, pass, budget)` validates the whole dependency-ordered page
+in a detached epoch and saves it through one accounted atomic replacement before advancing its
+cursor. An invalid middle op saves none of the page. Exact duplicates sync unchanged bytes;
+even a terminal-empty page verifies current Open/id, inventory and flushes held bytes. Uncertain
+writes pause with the same page/cursor retained; reconcile accounting before explicit `retry()`.
+MLS advance discards stale ciphertext into RestartRequired, without saving or advancing.
+
+States are Ready, PageReady, Paused, PrefixComplete, RestartRequired, CheckpointRequired,
+HistoricalAuthorizationRequired and Stopped. Only Paused is retryable; a pending page retries
+storage, otherwise network. Cancellation arms Paused before awaiting and never refunds work.
+Initial unknown heads can cause a single empty-head fallback on Restart, preserving the verified
+seed, provider, lifetime and attempts. Restart after any received page is held, not a reset loop.
+PrefixComplete describes one provider's frozen prefix, never currency, finality or delivery.
+
+Each pass holds at most one 512-KiB framed page and a private 81-byte cursor, with a fixed
+ten-minute receiver-monotonic lifetime. Request and persistence attempts each pace at one second
+and cap at 20001; received work caps at 20001 pages, 20000 operations and 16 MiB framed bytes,
+including duplicates. Authority/watch replacement stops retained passes but does not free their
+four-slot ownership until Drop. Current full requester/provider identities recheck before work
+and after network; persistence also rechecks physical mount and current MLS. Dropping/restarting
+loses traversal only: new passes derive saved heads, never trust a durable remote cursor. These
+are per-runtime/pass bounds, not the future actor's aggregate scheduling or UI-lock policy.
+
+### Registry persistence and inventory constraints
+
+Public receipt fields and ciphertext are capped before encoding/decryption. Changed state uses
+an accounted atomic replacement; identical pre/post mutation snapshots instead sync the unchanged
+authenticated file and parent. Both snapshots use the restored current owner: refreshing this
+derived quota owner alone needs no copy at the content cap. Actual old bytes remain accounted and
+flushed, and each restore derives the owner again. Failed writes, flushes or unwinds grant no
+success and poison accounting until reconciliation. A loaded state alone grants no acknowledgement
+after an uncertain rename. The existing durability model remains file sync plus Unix-only parent sync.
+
+Peer-writable history, seed and metadata charge ordinary content. Only exact receipt-book growth,
+the opening receipt and the optional gate receipt hash charge protocol allowance; an owner seal
+therefore remains admissible at the content ceiling if protocol/settlement headroom remains.
+`RegistryEpoch::validate_vault_snapshot` shares full restart validation but returns ONLY that
+computed receipt byte count. It requires authenticated local bytes, not a current owner, and
+grants neither an editable object nor network authority.
+
+`scan_epoch_storage_with_registry` and `cleanup_epoch_storage_staging_with_registry` opt into
+`EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry`. Older coverage stays unchanged.
+`EpochRecordKind::Registry` and progress `registry_records` identify this fourth family; cleanup
+keeps the same coverage through its rescan and also invalidates intent freshness tokens. Final
+records are never cleanup targets. Unpublished registry temporaries conservatively charge content
+regardless of their intended mutation; a receipt-copy orphan at the content ceiling may require
+explicit cleanup before reconciliation. Unresolved ownership still blocks server composition.
+
+These APIs require the caller's sole complete server budget; inventory is not a continuing write
+lease. Checked installation/retirement and single-intent replay are implemented at the store layer.
+The cooperative adapters supply live gossip, durable paged catch-up, keyed registry head/seed
+exchange and recovery-first registry installation, not autonomous scheduling or actor/Studio wiring.
+Each mutation rebuilds a
+bounded saved graph (local editing also checks the source before journaling); the receiver applies
+the ingress rails above, while aggregate actor-owned scheduling remains to be integrated.
 
 `get_delivery(server,channel)` and `delivery-changed` both carry the actor-issued `revision` beside
 the complete bounded `states` array. The webview accepts only a strictly newer revision for its
@@ -1000,8 +2787,12 @@ vault-encrypted copy. Its final staging-file rename and reveal are authorized by
 generation that began the export; locking, then unlocking again, cannot revive the old operation.
 Chunk health is keyed by the exact encoded `FileRef`, and the inventory joins
 that verdict to the exact manifest in one actor snapshot; a reused ciphertext or plaintext CID
-cannot borrow another row's successful verification, and ambiguous same-CID manifests stay out of
-`local_files`. Authentication attempts are capped at four distinct exact references per ciphertext
+cannot borrow another row's successful verification. `StorageHealth.resolvable_manifest_versions`
+contains exact digests admitted by the shared bounded manifest resolver; this is compatibility
+metadata, not a possession verdict. Inventory selects a complete exact-verified local variant only
+when all differing same-CID manifests are compatible, so a healthy repair can appear in `local_files`
+alongside an unavailable original. Incompatible sets stay excluded. Authentication attempts are
+capped at four distinct exact references per ciphertext
 CID; a larger contradictory set fails that CID and every dependent manifest closed instead of
 multiplying large-blob decryption work. It performs at most one ordinary scan per server per
 unlocked UI session (the cache survives HMR but explicit lock clears it). Cache publication is
@@ -1014,8 +2805,15 @@ Media presented to the WebView uses an exact inert MIME allow-list and must have
 image/audio/video container signature in authenticated chunk zero; SVG, mismatches and unrecognized
 containers receive a bodyless scheme denial instead of relying on `application/octet-stream` or
 `nosniff`, because media elements may still sniff an opaque response. The validated head and each
-decrypted chunk cache are bound to an exact manifest digest, and every request re-resolves a unique
-current manifest before serving, so reusing a claimed plaintext CID cannot inherit a stale MIME.
+decrypted chunk cache are bound to the complete sorted set of current encrypted manifest digests
+(single-manifest identities retain their prior digest). Up to four variants may coexist only if
+total size, MIME and ordered plaintext chunk CID/size/MIME agree. Every request re-resolves this set,
+and each fallback is independently opened against its own exact reference, so a claimed plaintext
+CID cannot inherit a stale MIME decision. Downloads, plans and media share this resolution policy;
+all local alternatives are tried before bounded sequential provider attempts. Upload dedup requires
+complete verified local possession; otherwise publication retains fresh staged chunks and posts an
+attested repair. Only a verified local-device row at the same name/path/CID can be replaced, preserving
+its expiry. A new repair row has a fresh default expiry. No wire or persistence encoding changes.
 Every head/chunk cache access and URI-responder publication is bound to the initiating unlocked UI
 generation; explicit lock clears cached plaintext and a delayed actor read can publish only a
 bodyless denial afterward. Plaintext exports report `contentValidation` as `matched`, `mismatch`,
@@ -1087,6 +2885,51 @@ merge can leave the count untouched. First sight of a channel reports nothing, b
 fetches messages when it opens one. The bridge forwards the flags on the `channel-updated` payload
 (`messages_appended`, `messages_changed`, `topic`, `jukebox`).
 
+### The jukebox queue: two kinds of entry
+
+```rust
+pub struct JukeEntry {
+    pub id: String, pub cid: String, pub name: String,
+    pub author: String, pub added_ms: u64,
+    pub source: String, // "" = a shared file; else one of JUKE_LINK_SOURCES
+    pub link: String,   // the provider's track id or path; empty for a file entry
+}
+impl Server {
+    // cid: 1..=128 lowercase hex, shape-checked only (the blob may still be in flight)
+    async fn jukebox_add(&mut self, channel: u128, cid: &str, name: &str) -> Result<String, AppError>;
+    // link: 1..=64 URL-safe base64 chars; reaches no network and checks no provider
+    async fn jukebox_add_link(&mut self, channel: u128, source: &str, link: &str, name: &str)
+        -> Result<String, AppError>;
+}
+```
+
+An entry names **exactly one** way of getting the track. A file entry is content the group holds,
+addressed by `cid` and served out of the vault; a linked entry names a video on a third party's
+service and has no `cid`, because nothing here holds it and each listener fetches it themselves.
+`source` and `link` are written only for a linked entry, so a file entry is byte-for-byte the
+document older builds wrote and their absence reads as "file".
+
+`JUKE_LINK_SOURCES` is the closed set of linked sources: `youtube`, `soundcloud`, `vimeo`. A
+source is on it only if its player takes a seek **and** reports where it has got to, which is what
+keeping a room together needs; Spotify, Mixcloud, Apple Music and Bluesky are chat cards only.
+
+`read_jukebox` is the boundary, not the add call: a peer writes the channel document directly. It
+skips any entry that is not exactly one well-formed kind, which means a `source` outside that set,
+a linked entry whose `link` is not the storable alphabet, and (deliberately) an entry carrying
+**both** a `cid` and a `link`. Resolving that last case either way would be this device deciding
+what a peer meant by two claims that disagree about who fetches what from where. Both kinds share
+the one `MAX_JUKEBOX_ENTRIES` cap.
+
+The link's **storage** check is an alphabet, not a format: up to four `/`-joined segments of
+URL-safe base64 within a length budget, with empty and dot-only segments refused. The separator is
+permitted because not every provider addresses a track by one token (a SoundCloud track IS a path,
+and reaches its widget percent-encoded in a query rather than in a path); the segment rules are
+what stop a link escaping the part of an address it is written into. The exact eleven-character
+YouTube id shape is checked in the frontend (`youtube.ts`), next to the code that builds an address
+from it, so a change at the provider's end cannot make stored entries unreadable. The call-transport
+frame carries `link` alongside `cid` and re-validates it at the edge to the exact id shape, rejecting
+a frame that names both.
+
 The signature is recomputed only for a channel whose document **moved**. `Server::doc_version(doc_type,
 doc_id)` is the number of signed ops applied to a document this session (O(1); every content change,
 local or remote, live or caught up, is exactly one op, and duplicates never count), and the actor keeps
@@ -1143,6 +2986,20 @@ things the CRDT does not do for us, both of which reached users:
   with a **stable** sort, so ties keep the merge's own deterministic order — which for the case
   that produces ties, one person typing faster than the clock ticks, is the order they were sent
   in. Adding the id as a tiebreak would replace that with alphabetical order.
+
+**A send is stamped `max(now, newest_seen + 1)`** (`Server::next_message_ts`), not with the wall
+clock alone. Because the order above is the timestamp order, a device whose clock runs behind wrote
+straight into the past: what it said appeared above conversation that had already happened, and a
+reply sorted above its own parent. Reconnecting is where that became visible rather than subtle,
+since catch-up hands a returning member a block of history whose newest row is later than their own
+clock and everything they then say lands inside it. A Lamport-style step over the wall clock fixes
+causality without needing the clocks to agree: when they do agree it is exactly `now`, and when they
+do not, a message still sorts under everything its sender had already seen. It is **bounded** by
+`CLOCK_SKEW_GRACE_MS` past this device's own clock — the same grace the unread ceiling applies —
+so one member whose clock is far in the future cannot drag a group's whole timeline forward with no
+way back; past that bound the message sorts under the out-of-range row instead of chasing it. This
+is still not a causal ordering key: two members who both send while neither has seen the other order
+by their clocks alone.
 
 **A `channel-updated` delta names the rows that arrived** (`arrivals`, capped at 32 ids, in the
 order they now read), because with rows in timestamp order an arrival is not always the last row:
@@ -1258,6 +3115,15 @@ connections (`removePeer`), not merely refresh lists. All constants here are mir
 exports in `apps/desktop/src/jam-contract.ts`; the validator, the tests, and this section cite
 that one module so numbers cannot drift.
 
+That last sentence was **false when it was written**, and is worth recording as a defect rather
+than read as an assumption. The module claimed to be the single source of truth for the patch
+bounds and was not: the editor knobs and four separate scopes each held their own copies of 24, 50,
+5000, 8000, 18000, 1200 and 100. Nothing was wrong while the copies agreed, which is exactly the
+condition under which the next change to one of them goes unnoticed. `PATCH_PARAM` in
+`jam-contract.ts` is now that table, shaped like the patch itself: a knob spreads its entry
+(`...PATCH_PARAM.e.a`) and a scope divides by `.max`, so a bound has one place to change. Wave
+indices and the two mode lists are deliberately not in it, being enumerations rather than ranges.
+
 **Authenticated channel seam.** Opening an authenticated peer's inst channel mints one opaque
 `JamSourceChannel` capability. That exact channel's callbacks close over it and every patch, note,
 drum, and metronome delivery must present it; a callback may never recover authority from a
@@ -1346,9 +3212,18 @@ materially different interpretation is `mewtual-synth:v2`, never a silent change
 levels are normalized as a blend under a receiver-owned 0.11 voice peak (all-zero is silent);
 filter Q maps linearly to 0.1..18, filter-envelope amount to +/-6 octaves, cutoff LFO depth to up to
 0..4 octaves (further reduced when needed to keep the whole envelope/LFO sweep within 20 Hz and
-45% of sample rate), pitch LFO depth to 0..25 cents, and each effect send to 0..0.5 gain. The room master is
+45% of sample rate), pitch LFO depth to 0..25 cents, and each effect send to 0..1 gain (raised from 0..0.5 on
+2026-09-06: stacked with the effects' own wet returns, a maxed send arrived about 16 dB under the
+dry signal, so the knobs moved and nothing was audibly different). The room master is
 0.72 into a fixed compressor/limiter (-12 dB threshold, 6 dB knee, 12:1 ratio, 3 ms attack,
-250 ms release). The receiver also clamps filter frequency to 45% of its sample rate.
+250 ms release). The receiver also clamps filter frequency to 45% of its sample rate, and floors
+every release ramp at `JAM_VOICE_DECLICK_SECONDS` (8 ms), because a patch may legally ask for a
+release of 0 and cutting a sustained waveform mid-cycle is a step discontinuity. That floor is
+applied by one calculation (`effectiveReleaseSeconds`) shared by the note-off, the audio-clock
+watchdog and the take transport's end-of-log horizon; a floor only some paths honour is not one.
+These are **renderer** levels, not descriptor semantics: a patch id names a recipe, and
+`mewtual-synth:v1` has never promised identical audio across builds, so a peer on an older build
+hears the older amounts of the same recipe.
 Deafen disconnects the entire old room graph rather than merely zeroing its master, so buffered
 delay feedback cannot reappear after undeafening. Short call UI cues never create or resume a
 suspended context, are cancelled by Deafen and leave, overlap at most four voices globally, and
@@ -1436,15 +3311,63 @@ so a valid dense/seeked take cannot monopolize the WebView, overflow the bounded
 launch its whole event log concurrently. Each lane's `src` derives from the
 authenticated channel at record time, never from a sender-supplied event field; `q` gaps are
 surfaced, and the guarantee is
-"musically aligned given the events received", not bit-identical. Recording state is visible to
-the whole call and is an honest-client consent mechanism, not prevention. Takes are ephemeral
-first. Local withdrawal updates the recorder gate synchronously before it is signalled. Every
-decoded musical frame captures its receipt time, recorder identity and monotonic uninterrupted-
-recording generation before entering the App causal queue; note, drum and later digest completion
-can append only under that exact lease. An event received before consent, during withdrawal, or
-before a recording→arming→recording cycle therefore cannot drift into the later interval. Losing a peer edge withdraws that
-edge's consent before membership reconciliation; reconnect requires a fresh `rc`. Consent pauses
-retain the take's original monotonic time origin, preventing resumed events from moving backward.
+"musically aligned given the events received", not bit-identical.
+
+**Seeking a take reconstructs what it is HOLDING, not just what happens next.** Starting at the
+first event whose `ms` reaches the offset is right for the schedule and wrong for the sound: a take
+holding one chord from 0 ms to 10 s, joined at 5 s, has no due event at all until the key-ups
+arrive, so a listener joining the jukebox deck mid-track heard silence where a chord was sounding
+and then a run of note-offs for voices nobody had opened. The longer the note, the longer the
+silence, which is exactly backwards. `planTakeSeek(take, offsetMs)` (`jam-playback.ts`) therefore
+folds the earlier events into held state and returns `{ next, sounding }`:
+
+- `next` is the first event index the ordinary scheduler owns, i.e. everything at or after the seek
+  point;
+- `sounding` is the note-ons before it that no note-off has closed, **in log order**, each with the
+  `ageMs` it has already been held. Held state uses one slot per `(lane, pitch)`, the same
+  single-slot rule the engine applies to a live voice, so a re-struck pitch revives once. Log order
+  preserves each lane's `q` ordering, which the take validator has already proved is strictly
+  increasing, so the engine's own duplicate/gap sequencing is satisfied with no renumbering.
+
+`JamNoteInput.ageMs` is the receiving half: optional, non-negative and finite (anything else is
+rejected as `invalid`), it back-dates the envelope's automation origin **clamped to attack plus
+decay**, so a revived voice arrives at the level it has reached instead of re-attacking, and a
+seek far past a note's decay cannot rewind past the sustain it would be sitting in. Live playing
+never sets it; zero and absent are an ordinary note starting now.
+
+**Drums are deliberately not revived.** A pad is a one-shot: its tail is the end of a sound whose
+transient has already gone, so firing a whole fresh crash because its 3-second tail happens to
+cross the seek point would insert an attack the take does not contain. `planTakeSeek` skips drum
+events when folding.
+
+**Takes require no consent, and `JamTakeRecorder` has no consent API.** Unanimous consent was
+removed deliberately, and this paragraph used to describe it as live. A take is not a recording of
+anybody: it holds the note events the jam layer already broadcasts to every ear in the room, each
+receiver synthesizes them locally, and playing one back plays the same synthesizer everyone was
+already hearing. No microphone, no voice, no audio of any kind is captured. Requiring the whole
+call to agree first treated it as though it were a recording of the room, and made keeping the riff
+that just happened need unanimity. What survives is:
+
+- **Recording state is still visible to the whole call**, broadcast on the coarse call-state
+  heartbeat (`off | arming | recording | paused`). Honest-client disclosure, not prevention.
+- **Membership is still enforced**, because a take's participant set is part of what it claims to
+  be. `membershipChanged(current)` pauses the take on ANY change to the participant set
+  (`paused-membership`); the UI may stop it or restore the exact set, and only a set that matches
+  the frozen header resumes. A pause that interrupts recording bumps the generation.
+- **The lease is still monotonic and uninterrupted-interval scoped.** `leaseGeneration()` is
+  captured with an admitted event before any async queue or digest; `acceptsLease(generation)`
+  admits an append only while the recorder is `recording` under that same generation. Note, drum
+  and later digest completion can append only under that exact lease, so an event received before
+  a recording→paused→recording cycle cannot drift into the later interval.
+- **Pauses retain the take's original monotonic time origin**, so resumed events cannot move
+  backward.
+
+Takes remain ephemeral first: the recorder, the playback deck and every kept take die with the
+call. `rc` is now a constant `1` on every heartbeat rather than a consent bit: nothing gates
+arming, starting or appending on a peer's `rc`, and arming is transient because the App starts the
+recorder in the same pass that constructs it. One vestigial "waiting for the room" line in the
+takes panel still reads `rc` off peer metadata; it is unreachable in practice and is the last
+thing left to remove.
 Saved takes go through the existing sealed blob + expiry + sharing machinery as an
 application-specific format with its own type: the player re-runs this section's patch validator,
 never hands bytes to a generic media decoder, never creates or resumes suspended audio from remote
@@ -1455,7 +3378,7 @@ Every whole-file take load is serialized/coalesced to one running plus one lates
 continuation is bound to the exact call lifecycle lease, server, channel and deck CID, and current
 listing/size/trust admission is rerun after download before parsing, caching or starting playback.
 Before `download_file`, the take path reserves one `begin_inline_download(cancellation)` token;
-`cancel_inline_download(cancellation)` is observed inside the actor-owned chunk await, not merely
+`cancel_inline_download(cancellation)` is observed inside the detached chunk wait, not merely
 at the JavaScript continuation. Cancellation acknowledgement promptly retires the old JavaScript
 coordinator slot. If libp2p already submitted a request, a shared native keepalive leaves that
 registration charged until the exact request responds, fails, or times out; at most four such
@@ -1482,3 +3405,45 @@ durable attribution is phase 6, one signature per participant over the domain
 all that participant's session lanes}`, which also exposes unrepaired gaps and prevents a
 commitment being replayed into another group.
 Phase 6 remains blocked until the native bridge exposes that stable group id.
+
+**`jam-patch:v1` in the share (`.jampatch`, `application/x-mewtual-jampatch`).** A patch announce
+tells the room how to render YOUR notes for the length of a call; it gives nobody a copy of the
+sound and nobody a way to play through it themselves, so passing a patch to a friend meant reading
+the knobs out loud. A patch can therefore be sealed into a server's share, through the same blob +
+expiry + sharing machinery as a take. The file is exactly the canonical `jam-patch:v1` JSON the
+wire announce carries and nothing else, so the ONE validator (`validateJamPatch`) admits both and a
+downloaded patch can never be a shape the synth has not already agreed to render; the name is the
+file's name, because a recipe has no identity of its own beyond its id. Ingress is bounded twice:
+the listed size is refused above `JAM_PATCH_FILE_MAX_BYTES` (4 KiB) before the whole-file fetch, and
+the transport string and its decoded length are refused again before `JSON.parse`. A loaded patch is
+kept in the same twelve-slot local library as a saved one (`JAM_SAVED_PATCHES_MAX = 12`) and
+becomes the loader's own sound.
+
+**That cap REFUSES; it does not evict.** `keepSavedPatch(library, name, patch, max)` returns
+`null` when the library is full and nothing may be written. It used to end in a `.slice(-12)` on an
+append, which is a silent FIFO wearing a bound's clothes: the thirteenth save destroyed the oldest
+recipe, and so did a shared patch arriving late enough to be kept-but-not-selected, and a caller
+could not even report it because an eviction and a clean save looked identical from the outside.
+Replacing an existing **name** is always allowed, full or not, because typing a name the library
+already has is a request to overwrite that one tile; nothing else is. `uniqueSavedName` is what
+lands an import on a free label rather than on somebody else's, so the two rules compose: an import
+at the cap is refused instead of quietly taking the oldest patch's slot. `JAM_PATCH_NAME_MAX_CHARS`
+is a second, unrelated twelve: how much of a name a tile can show. The two are free to move apart.
+
+### Bounded file fetch and kept-copy contracts
+
+`MeshTransport::request_connected_cancellable` fails closed by default and requires a live connection
+at actual driver admission. `ChannelSync::{prepare_blob_fetch, authenticate_blob_fetch,
+complete_blob_fetch}` split one opaque authenticated attempt from actor-owned validation/storage.
+`ServerActor::{fetch_file_chunk_cancellable, read_file_range}` use bounded detached network workers;
+ranges above `CHUNK_BYTES` are rejected before I/O. See [limits and lifecycle](design-file-reliability.md).
+
+The local-only `get_kept_files(server)`, `keep_file(server,cid,cancellation)` and
+`forget_kept_file(server,cid)` commands expose explicit device ownership. Keep claims a native
+`begin_inline_download` registration; lock/cancel signals the exact lease. Inventory returns bounded
+CID/version/checked rows plus conservative allocated bytes and a fixed local limit, never saved
+wrapped manifests or keys. Existing copies load unchecked and can be explicitly checked/repaired
+from their saved manifest after unlisting. They do not enter `files()` or authorize media heads.
+The additive `BlobStore` keep methods fail closed on unsupported stores. `KeptBlobStore` reserves,
+verifies, flushes and separately owns copies; ordinary put/delete/staging target primary storage.
+Remote confirmations and automated retention/eviction are not part of this interface.

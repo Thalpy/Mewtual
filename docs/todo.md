@@ -44,24 +44,32 @@
 | 8o | **cross-network founding/joining** — bind all interfaces + advertise a reachable address (LAN/public IP); joining dials all bootstrap addresses | done |
 | 8p | **multi-server** — a Discord-style server rail; be in several servers at once (each its own group/channels/roster/profiles/files) | done |
 | 8q | **relay-circuit founding** — reserve a circuit on a relay node so NAT'd peers connect with no port-forward (zero-config NAT traversal) | done |
-| 8r/8s | **security-review hardening** — adversarial review of 8m–8q (no blocking findings); bounded avatar fetching + size-bounded blob store; [User Guide](docs/USER_GUIDE.md) | done |
+| 8r/8s | **security-review hardening** — adversarial review of 8m–8q (no blocking findings); bounded avatar fetching + size-bounded blob store; [User Guide](USER_GUIDE.md) | done |
 | 8t | **status feed** — a per-server post stream (announcements/activity) + Status panel in the UI | done |
 | 8u/8v | **wiki** — per-server collaborative pages (name→body map doc) + Chat/Wiki view toggle (page list + editor); page bodies are automerge `Text`, so concurrent edits merge **char-by-char** (8v) | done |
-| 9 | **disk persistence + encryption-at-rest** — [designed](docs/design-persistence.md), **9a–9h done**: key vault, sealing blob store, snapshottable MLS state, doc + whole-server sync-state persistence, vault-sealed `ServerStore`/registry, the desktop passphrase-gate + reload-on-startup, peer re-dial, and e2e per-group file encryption (9c/9e/9h-b adversarially reviewed). Close/reopen the app, enter your passphrase → servers + history are back (read offline), sealed at rest | done |
+| 9 | **disk persistence + encryption-at-rest** — [designed](design-persistence.md), **9a–9h done**: key vault, sealing blob store, snapshottable MLS state, doc + whole-server sync-state persistence, vault-sealed `ServerStore`/registry, the desktop passphrase-gate + reload-on-startup, peer re-dial, and e2e per-group file encryption (9c/9e/9h-b adversarially reviewed). Close/reopen the app, enter your passphrase → servers + history are back (read offline), sealed at rest | done |
 | 10 | **desktop UI / product overhaul** — **10a–10h done**: tabbed nav + Settings overlay; a sanitized markdown renderer (`marked`+DOMPurify) with `[[wiki links]]`, `:emoji:`, and `![cid embeds]`; fileshare **folders** + drag-drop **media embeds** in chat/status (built in code from CID-verified blobs); a **wiki** overhaul (markdown, links, backlinks, media, in-app help); **custom emoji**; **notification sounds**; and **owner/admin roles** + a server-settings role manager. 10c & 10h adversarially reviewed; roles enforcement is documented as policy-layer (cryptographic hardening is a named follow-up) | done |
-| 11 | Desktop expansion: discovery UI, chunked transfers, DMs/friends, events/news, search/inbox, delivery states, multi-device, wiki history/review, livery and voice surfaces | done/current |
+| 11 | Desktop expansion: discovery UI, chunked transfers, DMs/friends, events/news, search/inbox, delivery states, multi-device, wiki history/review, livery and voice surfaces | done (voice landed as a surface only; the media plane is 12f) |
 | 12a | Signed moderation plane: event timeline, range warn/delete, collapsible warning evidence, kick cases/votes and owner-only resolution | done; full suites + antagonist gates passed 2026-08-20, R7 disclosed |
 | 12b | Durable history UX: vault-sealed composer drafts/read positions plus safe legacy read-mark migration | done; full suites passed 2026-08-20 |
 | 12c | Storage health/repair and connectivity assistant in the server sidebar, with storage repeated in Transfers | done; full suites passed 2026-08-20 |
 | 12d | Backup & Recovery centre: coherent encrypted export now; locked staged verification/import/rollback remains a named security gate | partial; export in tree, restore deferred |
 | 12e–12g | Notification controls (parallel review), voice completion (after user test), channel governance (later design) | queued/deferred |
-| 13 | Android (Tauri 2 mobile): keystore, foreground service and two-tier keys | planned |
-| 14 | Hardening: last-copy-safe retention, recovery import, AutoNAT, voice completion, supply-chain attestation and independent security review | planned |
+| 12h | Desktop performance + IPC hardening: gated frames, bounded chat DOM, render cache, event coalescing, lazy Feedback/QR split, the native IPC command ledger and lock gate, **native paged history** (`get_message_page`), **worker-thread search** (`search-worker.ts`) and the **remote-media consent gate** (`remote-media.ts`) | mostly done; **view extraction is the one remaining item** and `App.svelte` is still 29,850 lines. Production-bundle sizes are recorded now (`PERFORMANCE-SECURITY-HARDENING.md:33-42`, 2026-09-11 at `6576a46`) and show the App chunk back above its pre-split size; the timing measurements and the re-report-after-every-extraction commitment are still open |
+| 13 | Android (Tauri 2 mobile): keystore, foreground service and two-tier keys | planned; not started |
+| 14 | Hardening: last-copy-safe retention, recovery import, AutoNAT, voice completion, supply-chain attestation and independent security review | planned; not started |
+| 15 | Diagnostics suite rebuild (M0–M7), plan of record [`design-diagnostics-suite.md`](design-diagnostics-suite.md) | in progress: M0–M3 done, M4 has reading + capture control but no findings/checks panels or virtualised list, M6 mostly done (native disclosure findings on Copy/Save, canonical allowlist for the public issue path), **M5 and M7 not started** |
+| 16 | **P1: epoch close, owner checkpoints and bounded recovery** — [`design-epoch-close.md`](design-epoch-close.md) | in progress, and one of the two largest current workstreams. Landed: the replication core, typed registry/Studio checkpoint materializers, receipt-bound settlement, durable recovery-first installation, authenticated paged registry catch-up and authenticated checkpoint discovery. **Active slice: owner rotation and running-app recovery.** Not usable yet: nothing in the frontend consumes settlement events |
+| 17 | **Creative suite / Flipnote Studio** — [`design-creative-suite.md`](design-creative-suite.md), gate board in [`BACKEND-IMPLEMENTATION.md`](BACKEND-IMPLEMENTATION.md) | in progress, the other largest current workstream. **Backend gates 1–3 implemented** for the Index/art milestone (typed op codec + causal validation, deterministic projections, durable one-device Save/Reopen with real PIX CIDs, two-member collaboration, same-epoch catch-up, recovery-first adoption). **Gate 4 (rotation and recovery in the running app) is active.** Gates 5–7 (frame claims, sound/export, acceptance + UI handoff) untouched. The **Studio frontend is still an in-memory fixture**: `studio-store.ts` holds the only copy and nothing under `apps/desktop/src` invokes a `studio_*` command. Hooks mapped in [`FLIPNOTE-UI-HOOKS.md`](FLIPNOTE-UI-HOOKS.md) |
+| 18 | Sync/replication frontier and catch-up hardening — [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) | landed: position-paged catch-up so a wide frontier cannot starve a peer, a 512-head frontier cap, naming the membership chain a member cannot complete, and micelle-healing regressions across an interrupted reconciliation. Remaining, non-blocking, list in `MESSAGE-FLOW.md` § 11 (surfacing the stranded membership chain is the first item) |
+
+Phases 13 and 14 keep their historical numbers but are **not** the current work: phases 15–18
+are. Phase numbers here are the order the blocks were planned, not the order they are being built.
 
 The active, evidence-based status for the current development pass is maintained in
 [`DEVELOPMENT-SWEEP.md`](DEVELOPMENT-SWEEP.md). It separates existing-but-unverified work from
 work that has not been implemented and records contradictory older directions without silently
-choosing between them.
+choosing between them. **Last reconciled against the tree: 2026-09-10, at `0.3.0-alpha.18`.**
 
 Features/things in stack:
 1. Draw a waveform or shared visualizer for MIDI/instruments in voice chat (fun; decide whether
@@ -130,31 +138,42 @@ operator contract for the packaged two-process harness:
 - `crates/catcoms-app/tests/product_e2e.rs` drives the same `ServerActor`/`AppEvent` product surface
   as the Tauri bridge, deterministically over the in-memory mesh;
 - `crates/catcoms-app/tests/tcp_product_e2e.rs` runs two real libp2p nodes over OS TCP sockets and
-  verifies join, chat convergence, presence and disconnect;
+  verifies join, bidirectional chat convergence, a deterministic file transfer compared by bytes
+  and CID, presence and disconnect;
 - the lower-level sync suite separately covers direct, rendezvous, relay and DCUtR paths.
 
 These are product integration tests, but they do not launch two packaged desktop processes, load
 two independent vaults, or cross the webview/IPC boundary. Keep that distinction explicit rather
 than calling the existing suite a complete desktop acceptance test.
 
-**TODO — fast discrete two-client scenario (normal CI).** Extend the real-socket product test, or
-add a neighbouring `two_client_acceptance.rs`, with one named scenario and a small reusable `Node`
-harness. It should use ephemeral ports and temporary stores, bound every wait, and assert visible
-outcomes rather than log text:
+**PARTIAL (2026-09-10) — fast discrete two-client scenario (normal CI).** The scenario below was
+to be built either by extending the real-socket product test or by adding a neighbouring
+`two_client_acceptance.rs`. The first route was taken: `crates/catcoms-app/tests/tcp_product_e2e.rs`
+(538 lines) now covers **steps 1 to 4** over real OS sockets, with ephemeral ports, temporary
+stores, bounded waits and observable assertions rather than log text. `two_client_acceptance.rs`
+was never created; it remains a valid alternative shape for the remaining steps, not a dead
+reference.
 
-1. Alice founds a server and mints a fresh invite; Bob redeems it.
-2. Each sends a uniquely identified message and the other observes it.
-3. Transfer a small deterministic file and compare its bytes/CID at Bob.
-4. Stop Bob, assert Alice observes the disconnect, then start Bob from the same sealed store.
-5. Assert rediscovery/reconnection and catch-up without minting another invite.
-6. Export each node's bounded diagnostic report only on failure, labelled Alice/Bob and with the
-   scenario seed, phase and exact commit in the test artifact.
+1. ~~Alice founds a server and mints a fresh invite; Bob redeems it.~~ Covered.
+2. ~~Each sends a uniquely identified message and the other observes it.~~ Covered.
+3. ~~Transfer a small deterministic file and compare its bytes/CID at Bob.~~ Covered.
+4. ~~Stop Bob, assert Alice observes the disconnect, then start Bob from the same sealed store.~~
+   The stop and the observed disconnect are covered.
+5. **Still open, deliberately.** Assert rediscovery/reconnection and catch-up without minting
+   another invite. This is not covered over loopback on purpose: production strips loopback
+   addresses from published records, so asserting public-route rediscovery there would test a
+   configuration that does not exist. Sealed-store restart and catch-up stay covered in
+   `product_e2e` over the in-memory mesh. Closing this step properly needs the two-process
+   harness below, or a non-loopback fixture.
+6. **Still open.** Export each node's bounded diagnostic report only on failure, labelled
+   Alice/Bob and with the scenario seed, phase and exact commit in the test artifact.
 
 Do not use fixed sleeps as success criteria, share a vault/store between nodes, assert prose log
 messages, or run both discovery passes simultaneously. The existing product tests document why
 simultaneous PEX passes can make both actors wait for their request deadlines.
 
-**TODO — two-process desktop smoke test (nightly/release gate).** Add a Windows-first harness that
+**TODO — two-process desktop smoke test (nightly/release gate).** *Re-verified still open,
+2026-09-10: no such harness exists.* Add a Windows-first harness that
 launches two copies of the built application with separate temporary app-data roots and drives a
 minimal stable automation surface. Prefer purpose-built, debug/test-only commands addressed by
 semantic operation (`found`, `mint_invite`, `join`, `send`, `wait_for_message`, `shutdown`) over
@@ -176,8 +195,12 @@ transport principals, connected-only reciprocal proof requests, separate relay-c
 keys and exact WebSocket-path parsing resolved or explicitly accepted the three MEDIUM findings.
 The present scheduler deliberately accounts dial-command submissions, not confirmed socket starts.
 
+*All five items below re-verified still open on 2026-09-10.*
+
 - **TODO:** replace scalar `DiscoveryPolicy::refund_endpoint_budget(count)` with an opaque,
-  single-use reservation/permit tied to the exact planned endpoint.
+  single-use reservation/permit tied to the exact planned endpoint. Still scalar at
+  `crates/catcoms-discovery/src/lib.rs:880`; its own doc comment records that the typed batch API
+  "should eventually replace this count with an opaque reservation receipt".
 - **PARTIAL:** exact single-use permits now reach the network actor's `Submitted`/`Suppressed`
   decision. Duplicate/already-connected suppression and failed command delivery refund by dropping
   the uncommitted permit. A distinct post-flush `started` acknowledgement and cancellation after

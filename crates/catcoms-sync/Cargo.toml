@@ -16,6 +16,8 @@ catcoms-discovery = { path = "../catcoms-discovery" }
 thiserror.workspace = true
 bytes.workspace = true
 futures.workspace = true
+# Cancellation signalling only; production execution still uses the catcoms-rt clock seam.
+tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 blake3 = "1"
 hex = "0.4"
@@ -31,6 +33,9 @@ catcoms-crypto = { path = "../catcoms-crypto" }
 catcoms-net = { path = "../catcoms-net" }
 rand_chacha = "0.3"
 rand_core = "0.6"
+# A log-volume guard has to read what was actually emitted. Asserting on the state the code keeps
+# to suppress a repeat would pass just as happily if the suppression stopped being consulted.
+tracing-subscriber = "0.3"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 libp2p = { version = "0.56", features = ["tokio"] }
 

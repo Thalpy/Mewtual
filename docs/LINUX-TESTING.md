@@ -1,7 +1,8 @@
 # Linux testing
 
-Mewtual has three distinct Linux test surfaces. Keeping them separate prevents a green headless
-container from being mistaken for proof that desktop capture works on every compositor.
+Mewtual has four distinct Linux test surfaces. Three are covered below; the fourth, installing and
+running a shipped bundle, is not covered by anything. Keeping them separate prevents a green
+headless container from being mistaken for proof that desktop capture works on every compositor.
 
 ## 1. Unprivileged Docker suite
 
@@ -9,7 +10,7 @@ With Docker Desktop's Linux engine running from the repository root (PowerShell)
 
 ```powershell
 New-Item -ItemType Directory -Force target/linux-container | Out-Null
-docker compose -f compose.linux-test.yml run --rm full
+docker compose -f compose.linux-test.yml run --build --rm full
 ```
 
 On native Linux, pre-create the bind target as the invoking user and pass that user's ids into the
@@ -21,11 +22,35 @@ MEWTUAL_TEST_UID="$(id -u)" MEWTUAL_TEST_GID="$(id -g)" \
   docker compose -f compose.linux-test.yml run --build --rm full
 ```
 
+`--build` on both invocations is deliberate: source is copied into the image rather than mounted,
+so without it the second and every later run silently re-tests the source as it was the first time.
+
 This builds a Debian Bookworm image pinned to Rust 1.89, installs WebKitGTK/Tauri build libraries,
-and runs the root Rust suite, the frontend suite/check/build, the separate Tauri suite/check, the
-ambient-dependency gate, and the real two-process loopback acceptance test. Source is copied into
-the image; rebuild after changing it. Evidence from the process smoke is written beneath
+and runs, in this order: `cargo fmt --all -- --check`, then
+`cargo clippy --all-targets --all-features -- -D warnings`, then the root Rust suite, the
+ambient-dependency gate, the frontend suite/check/build, the separate Tauri suite/check, and the
+real two-process loopback acceptance test. Format and clippy come first because they are the two
+most likely to fail a first run, and they fail in seconds rather than after a full compile.
+Evidence from the process smoke is written beneath
 `target/linux-container/`.
+
+`scripts/linux-container-test.sh` is the one entry point behind all of this, and it takes four
+modes, not two: `full`, `desktop` (the frontend and Tauri checks alone), `process` (the two-process
+loopback smoke alone) and `netns SCENARIO`. Each Compose service picks one.
+
+### The desktop lane runs natively in CI, without Docker
+
+`ci.yml`'s `Linux frontend & Tauri` job does not use the container. It runs
+`bash scripts/linux-container-test.sh desktop --install` directly on a bare `ubuntu-latest`, after
+installing the four packages a contributor most needs on a Linux workstation:
+
+```sh
+sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+```
+
+The webkit and appindicator headers are what the Tauri build links against; `patchelf` is the
+AppImage bundler's dependency, not the application's. With those installed you can run the desktop
+lane on the host and skip Docker entirely.
 
 The build context is default-deny: only reviewed source, manifests, scripts and required assets are
 sent to the daemon. CI plants an untracked sentinel and builds the lightweight `context-audit`
@@ -77,3 +102,30 @@ can exercise ordinary rendering, but it does not turn those missing services int
 Wayland/PipeWire desktop. Platform media acceptance should therefore run opt-in on a Linux machine
 or VM with a real graphical login and record the WebView version, session type, portal backend,
 PipeWire version, offered capture choices and negotiated WebRTC codec.
+
+## 4. Installing a shipped Linux bundle — nothing covers this
+
+Linux is a shipped platform now. `release.yml` has a `linux` job, pinned to `ubuntu-22.04` so the
+AppImage's glibc floor is the oldest distro we intend to support, building
+`--bundles appimage,deb`; the `verify` job hard-fails the run without a `.AppImage`, an
+`.AppImage.sig`, a `.deb`, a `.deb.sig` and a signed `linux-x86_64` entry in `latest.json`.
+
+None of the three surfaces above touches the artefact a user actually installs. The first two build
+and run from source in a container; the third runs a development build on a real desktop. This one
+is about the bundle itself. The questions only it can answer:
+
+- does the AppImage run on a host older than `ubuntu-22.04`, and does it fail legibly rather than
+  with a bare glibc symbol error when it does not?
+- is the `.deb`'s generated dependency set right on Debian stable as well as on current Ubuntu,
+  including the WebKitGTK and appindicator runtime packages?
+- does the AppImage's in-place self-update actually apply, given it must rewrite the running file?
+- does a `.deb` install find an update, correctly report that it cannot apply it, and say so in a
+  way that sends the user to the AppImage rather than to a dead end?
+- desktop-entry and icon registration, which the `.deb` performs on install and the AppImage
+  leaves to the user.
+
+This is a manual, opt-in check today: download the two bundles from a draft release, install each
+on a matching VM, and record the distro, glibc version and what the update check reported. It is
+worth doing before publishing a release, because it is the one gap between "the workflow was green"
+and "the user could install it". See [Releasing Mewtual](RELEASING.md) for what the release job
+produces, and `README.md` for building the same bundles locally from source.

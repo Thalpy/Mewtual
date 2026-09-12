@@ -1,5 +1,13 @@
 # Design; Direct Messages + Friends
 
+Status: **all three phases shipped.** Phase 1 (DM foundation + friend-code establishment) is the
+New DM / Add friend composers and their flows (`App.svelte`: the `showNewDm` / `showAddFriend`
+state and the two `<form class="dm-form">` blocks that call `newDm()` and `addFriend()`);
+phase 2 is the four sort modes, `recent` / `activity` / `reconnect` / `alpha`
+(`App.svelte`: the `DmSort` type, `dmSort` state and the `sortedDmList` derivation, with the
+picker at `<select bind:value={dmSort}>`); phase 3 (in-server one-click add over
+`KIND_DM_INVITE`) was already marked done below.
+
 ## Decisions (from the user)
 - **Identity model: isolated 1:1 DMs.** A *friend* is a dedicated, persistent **2-person group** (a
   DM) you establish once. This reuses the entire server/MLS/transport/persistence stack and
@@ -45,9 +53,9 @@ frontend math over the existing message history.
 - **Recent**; last message timestamp.
 
 ## Phasing
-1. **DM foundation + friend-code establishment**; the `is_dm` plumbing, the DMs circle + DM-home,
-   New DM / Add friend (friend code), conversations. _(first; usable end-to-end)_
-2. **Friends-list sortings**; the four sorts above.
+1. **DM foundation + friend-code establishment** _(done)_; the `is_dm` plumbing, the DMs circle +
+   DM-home, New DM / Add friend (friend code), conversations. _(first; usable end-to-end)_
+2. **Friends-list sortings** _(done)_; the four sorts above.
 3. **In-server one-click add** _(done)_; "Add friend" on an **online** shared-server member founds a
    DM and delivers its invite **in-band** over that server via a new authenticated `KIND_DM_INVITE`
    request (same membership+signature+freshness auth as PEX/blob-fetch; `from` is the verified

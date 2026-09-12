@@ -31,6 +31,8 @@ use crate::{
     StorageSnapshot, SwitchboardOffer, WikiPendingEdit, WikiRevision,
 };
 
+mod file_transfers;
+
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
 const DISCOVERY_DRAIN_MS: u64 = 500;
 /// Arrival ids one channel delta carries. A notification needs the rows that arrived, not all of
@@ -53,14 +55,17 @@ const PEX_REQUEST_MS: u64 = 3_000;
 /// error string). One chunk per command keeps the actor responsive during a large download.
 type ChunkResult = Result<(Vec<u8>, Option<String>), String>;
 
-/// Await one actor-owned chunk fetch while retaining a native cancellation edge.
+/// Await one detached chunk request while retaining a native cancellation edge.
 ///
 /// Dropping only the bridge's reply receiver does not cancel an [`AppCommand`] already executing
-/// inside the actor. The cancellation receiver must therefore participate in the same `select!`
-/// as the `Server` future so a stale room cannot keep this actor pinned behind a withholding peer.
-async fn fetch_chunk_or_cancel<F>(mut cancel: Option<RequestCancellation>, fetch: F) -> ChunkResult
+/// inside a worker. Cancellation participates in the same `select!` as the network future;
+/// the worker's drop guard then signals its separately accounted lower request.
+async fn fetch_chunk_or_cancel<F, O>(
+    mut cancel: Option<RequestCancellation>,
+    fetch: F,
+) -> Result<O, String>
 where
-    F: Future<Output = ChunkResult>,
+    F: Future<Output = Result<O, String>>,
 {
     let Some(cancel) = cancel.as_mut() else {
         return fetch.await;
@@ -223,6 +228,31 @@ impl EventSink {
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
 pub enum AppCommand {
+    /// No vault guard may be queued. The dedicated Ready/lease exchange starts only in this arm.
+    Studio {
+        /// None drives one authenticated inbox packet; it accepts no renderer packet/scope.
+        request: Option<crate::studio::StudioRequest>,
+        ready: oneshot::Sender<crate::studio::StudioReady>,
+    },
+    /// Historical content controls use the exact same Ready/vault custody as document work.
+    StudioControl {
+        request: crate::studio::StudioControlRequest,
+        ready: oneshot::Sender<crate::studio::StudioControlReady>,
+    },
+    /// Store an immutable PIX blob; no Studio metadata is changed. Cancellation also owns the
+    /// native concurrency slot while the command is queued or executing.
+    PublishPix {
+        bytes: Vec<u8>,
+        cancellation: Option<RequestCancellation>,
+        reply: oneshot::Sender<Result<crate::creative::PublishedPix, String>>,
+    },
+    /// Fetch bounded, authenticated blob bytes, retaining cancellation through the transport.
+    RequestBlobBounded {
+        cid: Cid,
+        max_bytes: usize,
+        cancellation: Option<RequestCancellation>,
+        reply: oneshot::Sender<Result<Option<Vec<u8>>, String>>,
+    },
     /// Create (or idempotently open) a channel and publish it to the shared directory.
     CreateChannel {
         name: String,
@@ -289,6 +319,15 @@ pub enum AppCommand {
     JukeboxAdd {
         channel: u128,
         cid: String,
+        name: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Queue a linked track (a video id on a third-party service) in a channel's jukebox (any
+    /// member); replies with the entry id. Reaches no network: see [`Server::jukebox_add_link`].
+    JukeboxAddLink {
+        channel: u128,
+        source: String,
+        link: String,
         name: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
@@ -414,6 +453,11 @@ pub enum AppCommand {
     /// Set (or clear, with `""`) the shared server name (owner/admin only).
     SetServerName {
         name: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Set (or clear, with `""`) the shared sidebar banner (owner/admin only).
+    SetServerBanner {
+        banner: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query the server's published livery.
@@ -561,6 +605,19 @@ pub enum AppCommand {
     FileAvailable {
         cid: Vec<u8>,
         reply: oneshot::Sender<bool>,
+    },
+    /// Explicit local retention. No peer or replicated document can enable this operation.
+    KeepFile {
+        cid: Vec<u8>,
+        cancel: Option<RequestCancellation>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    KeptFiles {
+        reply: oneshot::Sender<catcoms_storage::kept::KeptFiles>,
+    },
+    ForgetKeptFile {
+        cid: Vec<u8>,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Remove a file from the shared index by content address (owner/admin only).
     DeleteFile {
@@ -920,6 +977,23 @@ impl ChannelChange {
 /// An event from a running server actor to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
+    /// Invalidate settlement/recovery metadata for this Studio logical document. State is an
+    /// observation, not a success/receipt assertion; phase and recovery observations can coexist.
+    SettlementChanged {
+        target: catcoms_replication::studio::StudioTarget,
+        state: crate::studio::StudioSettlementState,
+    },
+    /// A local transaction or newly accepted remote Studio edit crossed its persistence barrier.
+    /// Invalidate the channel Index and named object. Duplicate/quarantined packets emit nothing.
+    /// An errored/partial Create must be reread by its initiating caller.
+    StudioUpdated {
+        channel: u128,
+        object: Option<[u8; 16]>,
+    },
+    /// Background Studio receive hit an admission/source/storage/work refusal (including missing
+    /// dependencies). Explicit successful Studio access retries it; inbound traffic alone does
+    /// not. Neither local corruption nor a receipt/settlement fault is implied.
+    StudioReceivePaused,
     /// The shared channel directory changed; the UI should re-fetch it (`channels`).
     ChannelsUpdated,
     /// A channel's rendered content changed; the UI should re-fetch it (`messages`). Using
@@ -988,9 +1062,77 @@ pub enum AppEvent {
 #[derive(Debug, Clone)]
 pub struct ServerActor {
     cmd_tx: CommandSender,
+    studio_pending: tokio::sync::watch::Receiver<bool>,
+    #[cfg(test)]
+    studio_preparing: tokio::sync::watch::Receiver<bool>,
+    #[cfg(test)]
+    studio_hints: tokio::sync::watch::Receiver<
+        Option<crate::studio_exchange::discovery::StudioHintObservation>,
+    >,
 }
 
 impl ServerActor {
+    /// Queue only bounded intent metadata, never a vault/lifecycle lock. The receiver must use
+    /// fail-fast lock acquisition after Ready. Dropping this future leaves queued work powerless.
+    pub async fn studio_begin(
+        &self,
+        request: crate::studio::StudioRequest,
+    ) -> Result<crate::studio::StudioReady, String> {
+        request.validate().map_err(|e| e.to_string())?;
+        self.studio_ready(Some(request)).await
+    }
+    /// Trusted native coordinator only. The same Ready lease is required; no packet or target
+    /// may be supplied. Empty inboxes do no disk work. This is not a renderer command.
+    pub async fn studio_receive_begin(&self) -> Result<crate::studio::StudioReady, String> {
+        self.studio_ready(None).await
+    }
+    /// Bounded local recovery choices; no renderer-supplied snapshot or vault guard is queued.
+    pub async fn studio_control_begin(
+        &self,
+        request: crate::studio::StudioControlRequest,
+    ) -> Result<crate::studio::StudioControlReady, String> {
+        request.validate().map_err(|e| e.to_string())?;
+        let (ready, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::StudioControl { request, ready })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await
+            .map_err(|_| "server stopped or Studio control expired".to_string())
+    }
+    /// Coalesced scheduling hint with no content; the actor closing terminates its receiver.
+    pub fn studio_pending(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.studio_pending.clone()
+    }
+
+    /// Let deterministic fixtures finish detached CPU work without advancing their network
+    /// clock. This never waits for network I/O: both actors remain free to serve requests.
+    #[cfg(test)]
+    pub(crate) async fn wait_studio_preparation(&self) {
+        self.studio_preparing
+            .clone()
+            .wait_for(|preparing| !*preparing)
+            .await
+            .expect("Studio actor stopped during preparation");
+    }
+    #[cfg(test)]
+    pub(crate) fn observed_studio_hint_for_test(
+        &self,
+    ) -> Option<crate::studio_exchange::discovery::StudioHintObservation> {
+        self.studio_hints.borrow().clone()
+    }
+    async fn studio_ready(
+        &self,
+        request: Option<crate::studio::StudioRequest>,
+    ) -> Result<crate::studio::StudioReady, String> {
+        let (ready, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::Studio { request, ready })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await
+            .map_err(|_| "server stopped or Studio request expired".to_string())
+    }
     /// A handle whose commands belong to one operation.
     ///
     /// The join between the caller's diagnostics and the actor's. A caller that has minted a trace
@@ -1002,6 +1144,11 @@ impl ServerActor {
     /// in flight without either adopting the other's trace.
     pub fn with_trace(&self, trace: u64) -> ServerActor {
         ServerActor {
+            studio_pending: self.studio_pending.clone(),
+            #[cfg(test)]
+            studio_preparing: self.studio_preparing.clone(),
+            #[cfg(test)]
+            studio_hints: self.studio_hints.clone(),
             cmd_tx: CommandSender {
                 tx: self.cmd_tx.tx.clone(),
                 trace: Trace(trace),
@@ -1214,6 +1361,34 @@ impl ServerActor {
             .send(AppCommand::JukeboxAdd {
                 channel,
                 cid,
+                name,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Queue a linked track in a channel's jukebox; replies with the entry id. Any member may;
+    /// see [`Server::jukebox_add_link`], which reaches no network and checks only the shape of
+    /// what it stores. A `ChannelUpdated` event follows.
+    pub async fn jukebox_add_link(
+        &self,
+        channel: u128,
+        source: String,
+        link: String,
+        name: String,
+    ) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::JukeboxAddLink {
+                channel,
+                source,
+                link,
                 name,
                 reply,
             })
@@ -1759,6 +1934,22 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
+    /// Set (or clear, with `""`) the shared sidebar banner; base64 image bytes (owner/admin
+    /// only; a `LiveryUpdated` event follows). Publishing colours, the icon or the cursor never
+    /// disturbs it.
+    pub async fn set_server_banner(&self, banner: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetServerBanner { banner, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
     /// Fetch the server's published livery.
     pub async fn livery(&self) -> Livery {
         let (reply, rx) = oneshot::channel();
@@ -1897,6 +2088,48 @@ impl ServerActor {
         {
             return Err("server stopped".into());
         }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Validate before enqueueing and return only the Server's real publication result.
+    pub async fn publish_pix(
+        &self,
+        bytes: Vec<u8>,
+        cancellation: Option<RequestCancellation>,
+    ) -> Result<crate::creative::PublishedPix, String> {
+        crate::creative::validate_pix(&bytes).map_err(|e| e.to_string())?;
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::PublishPix {
+                bytes,
+                cancellation,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Maximum-size read; exact length and format validation remain the reference consumer's job.
+    pub async fn request_blob_bounded(
+        &self,
+        cid: Cid,
+        max_bytes: usize,
+        cancellation: Option<RequestCancellation>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        if max_bytes > crate::creative::MAX_BOUNDED_BLOB_BYTES {
+            return Err("blob limit exceeds 9 MiB".into());
+        }
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::RequestBlobBounded {
+                cid,
+                max_bytes,
+                cancellation,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
@@ -2248,7 +2481,48 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
-    /// Whether the file's blob is held locally (openable without a network fetch).
+    /// Explicitly reserve, fetch and verify one durable local copy, or check/repair its saved plan.
+    /// Cancellation abandons an unfinished reservation; completed copies require explicit release.
+    pub async fn keep_file(
+        &self,
+        cid: Vec<u8>,
+        cancel: Option<RequestCancellation>,
+    ) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::KeepFile { cid, cancel, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver
+            .await
+            .unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn kept_files(&self) -> catcoms_storage::kept::KeptFiles {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::KeptFiles { reply })
+            .await
+            .is_err()
+        {
+            return Default::default();
+        }
+        receiver.await.unwrap_or_default()
+    }
+
+    pub async fn forget_kept_file(&self, cid: Vec<u8>) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::ForgetKeptFile { cid, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver
+            .await
+            .unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Presence only, not an integrity scan or evidence of any remote copy.
     pub async fn file_available(&self, cid: Vec<u8>) -> bool {
         let (reply, rx) = oneshot::channel();
         if self
@@ -3143,7 +3417,16 @@ where
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Envelope>(64);
     let (raw_events, event_rx) = mpsc::channel::<TracedEvent>(256);
     let event_tx = EventSink::new(raw_events);
+    let (studio_signal, studio_pending) = tokio::sync::watch::channel(false);
+    #[cfg(test)]
+    let (studio_preparation_signal, studio_preparing) = tokio::sync::watch::channel(false);
+    #[cfg(test)]
+    let (studio_hint_signal, studio_hints) = tokio::sync::watch::channel(None);
     let handle = tokio::spawn(async move {
+        let mut studio_receiver = crate::studio::StudioReceiver::default();
+        #[cfg(test)]
+        studio_receiver.observe_hints_for_test(studio_hint_signal);
+        let mut studio_jobs = tokio::task::JoinSet::<crate::studio::StudioBackgroundResult>::new();
         // Per open channel: a content signature of its messages, topic and jukebox (see
         // `channel_delta`), so an edit/delete/add all surface a `ChannelUpdated` that says which
         // of the three it was.
@@ -3208,7 +3491,7 @@ where
         if let Err(e) = server.open_files().await {
             tracing::warn!(error = %e, "open_files failed");
         }
-        let mut file_count = server.files().len();
+        let mut last_files = server.files();
         // …and the status feed.
         if let Err(e) = server.open_status().await {
             tracing::warn!(error = %e, "open_status failed");
@@ -3248,7 +3531,11 @@ where
         // A sync event inside the throttle window must not be forgotten. Dirty channels are
         // coalesced here and revisited by an injected-clock timer even if the network goes idle.
         let mut delivery_dirty = HashSet::new();
+        let mut file_transfers = file_transfers::FileTransfers::new();
         loop {
+            studio_receiver.signal(&server, &studio_signal);
+            #[cfg(test)]
+            studio_preparation_signal.send_replace(studio_receiver.preparing_for_test());
             let delivery_clock = server.runtime_clock();
             let delivery_delay =
                 next_delivery_delay(delivery_clock.monotonic_ms(), &delivery, &delivery_dirty);
@@ -3263,6 +3550,17 @@ where
             tokio::pin!(delivery_wake);
             tokio::select! {
                 biased;
+                // Consume an already-completed bounded Studio job before granting another
+                // native lease. A continuously ready command queue must not leave a fetched
+                // page/preparation marked in-flight forever. Pending work never blocks commands.
+                completed = studio_jobs.join_next(), if !studio_jobs.is_empty() => {
+                    event_tx.idle();
+                    match completed {
+                        Some(Ok(result)) => studio_receiver.complete(&mut server, result),
+                        Some(Err(_)) => { tracing::error!("Studio background task panicked; stopping actor"); return; },
+                        None => {}
+                    }
+                },
                 // `begin` unwraps the envelope and adopts the caller's operation for as long as
                 // this arm runs, so every event the arm emits is attributed to the command that
                 // caused it without any of the fifty arms below having to mention it.
@@ -3438,6 +3736,24 @@ where
                                 .await;
                         }
                     }
+                    Some(AppCommand::JukeboxAddLink {
+                        channel,
+                        source,
+                        link,
+                        name,
+                        reply,
+                    }) => {
+                        let res = server
+                            .jukebox_add_link(channel, &source, &link, &name)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
+                            let _ = event_tx
+                                .send(AppEvent::ChannelUpdated { channel, change })
+                                .await;
+                        }
+                    }
                     Some(AppCommand::JukeboxRemove {
                         channel,
                         entry,
@@ -3599,6 +3915,16 @@ where
                             let _ = event_tx.send(AppEvent::LiveryUpdated).await;
                         }
                     }
+                    Some(AppCommand::SetServerBanner { banner, reply }) => {
+                        let res = server
+                            .set_server_banner(banner)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if livery_changed(&server, &mut last_livery) {
+                            let _ = event_tx.send(AppEvent::LiveryUpdated).await;
+                        }
+                    }
                     Some(AppCommand::Livery { reply }) => {
                         let _ = reply.send(server.livery());
                     }
@@ -3654,7 +3980,7 @@ where
                         // UI waiting behind an unrelated (and potentially back-pressured) event.
                         drop(progress);
                         let _ = reply.send(res);
-                        if files_changed(&server, &mut file_count) {
+                        if files_changed(&server, &mut last_files) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
@@ -3663,6 +3989,96 @@ where
                             .seal_upload_chunk(&bytes, &mime)
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
+                    }
+                    Some(command @ (AppCommand::Studio { .. } | AppCommand::StudioControl { .. })) => {
+                        use crate::studio::{StudioDispatch, StudioReply, StudioResponse};
+                        let (lease_tx, lease_rx) = oneshot::channel::<crate::studio::StudioVaultLease>();
+                        // Only reply routing differs. Both APIs enter the SAME custody, worker,
+                        // cancellation and panic path; historical reads never clone the Server.
+                        let (request, reply) = match command {
+                            AppCommand::Studio { request, ready } => {
+                                let (reply, result) = oneshot::channel();
+                                if ready.send(crate::studio::StudioReady { lease: lease_tx, result }).is_err() { continue; }
+                                (StudioDispatch::Document(request), StudioReply::Document(reply))
+                            }
+                            AppCommand::StudioControl { request, ready } => {
+                                let (reply, result) = oneshot::channel();
+                                if ready.send(crate::studio::StudioControlReady { lease: lease_tx, result }).is_err() { continue; }
+                                (StudioDispatch::Control(request), StudioReply::Control(reply))
+                            }
+                            _ => unreachable!(),
+                        };
+                        let clock = server.runtime_clock();
+                        let deadline = clock.monotonic_ms().saturating_add(5_000);
+                        let lease = tokio::select! {
+                            biased;
+                            result = lease_rx => match result { Ok(v) => v, Err(_) => continue },
+                            _ = clock.sleep(Duration::from_secs(5)) => continue,
+                        };
+                        // A queued lease and timer can become ready together. The biased select
+                        // must not extend this custody window merely by preferring the lease.
+                        if reply.is_closed() || clock.monotonic_ms() >= deadline { continue; }
+                        // MOVE the sole Server, never clone live membership into a stale worker.
+                        // Worker-owned native guards survive cancellation/abort of this waiter.
+                        let worked = tokio::task::spawn_blocking(move || {
+                            let mut lease = lease;
+                            let cancelled = lease.is_cancelled();
+                            let result = match lease.store.as_mut() {
+                                Some(store) if !reply.is_closed() && !cancelled => match request {
+                                    StudioDispatch::Document(request) => studio_receiver.run(&mut server, store, lease.server, request)
+                                        .map(|(saved, updated)| (saved, updated, None)),
+                                    StudioDispatch::Control(request) => studio_receiver.control(&mut server, store, lease.server, request),
+                                }.map_err(|e| e.to_string()),
+                                _ => Err("Studio request cancelled or vault closed".into()),
+                            };
+                            (server, studio_receiver, lease, reply, result)
+                        }).await;
+                        let (returned, returned_receiver, mut lease, mut reply, result) = match worked {
+                            Ok(value) => value,
+                            Err(_) => { tracing::error!("Studio worker panicked; stopping actor with unavailable state"); return; }
+                        };
+                        server = returned;
+                        studio_receiver = returned_receiver;
+                        let (result, updated) = match result {
+                            Ok((saved, updated, control)) => {
+                                let view = server.publish_studio_save(&mut lease, &mut reply, saved).await;
+                                (Ok(match control { Some(response) => StudioResponse::Control(response), None => StudioResponse::Document(view) }), updated)
+                            },
+                            Err(error) => (Err(error), None),
+                        };
+                        // Keep custody through the bounded initial send, but never through replies
+                        // or bounded event backpressure. A send result cannot change Save success.
+                        let background = if result.is_ok() && !lease.is_cancelled() { studio_receiver.detach(&mut server) } else { None };
+                        let cancellation = lease.background_cancellation();
+                        drop(lease);
+                        if let Some(job) = background { studio_jobs.spawn(job.run(cancellation)); }
+                        studio_receiver.signal(&server, &studio_signal);
+                        #[cfg(test)]
+                        studio_preparation_signal.send_replace(studio_receiver.preparing_for_test());
+                        reply.send(result);
+                        for (target, state) in studio_receiver.take_settlement_notices() {
+                            let _ = event_tx.send(AppEvent::SettlementChanged { target, state }).await;
+                        }
+                        if let Some(target) = updated {
+                            let object = match target { catcoms_replication::studio::StudioTarget::Index { .. } => None,
+                                catcoms_replication::studio::StudioTarget::Flipnote { object, .. } => Some(object) };
+                            let _ = event_tx.send(AppEvent::StudioUpdated { channel: u128::from_be_bytes(target.channel()), object }).await;
+                        }
+                        if studio_receiver.take_pause_notice() {
+                            let _ = event_tx.send(AppEvent::StudioReceivePaused).await;
+                        }
+                    }
+                    Some(AppCommand::PublishPix { bytes, cancellation, reply }) => {
+                        let res = if cancellation.as_ref().is_some_and(RequestCancellation::is_cancelled) || reply.is_closed() {
+                            Err("request cancelled".into())
+                        } else { server.publish_pix(&bytes).map_err(|e| e.to_string()) };
+                        let _ = reply.send(res);
+                    }
+                    Some(AppCommand::RequestBlobBounded { cid, max_bytes, cancellation, reply }) => {
+                        if !reply.is_closed() {
+                            let res = server.request_blob_bounded(&cid, max_bytes, cancellation).await.map_err(|e| e.to_string());
+                            let _ = reply.send(res);
+                        }
                     }
                     Some(AppCommand::PublishUpload {
                         name,
@@ -3686,7 +4102,7 @@ where
                             .map(|cid| cid.to_hex())
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if files_changed(&server, &mut file_count) {
+                        if files_changed(&server, &mut last_files) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
@@ -3766,31 +4182,10 @@ where
                             .and_then(|arr| server.file_download_plan(&Cid::from_bytes(arr)));
                         let _ = reply.send(plan);
                     }
-                    // Fetch ONE chunk, then return to the select! loop; so a large download no
-                    // longer pins the actor: other commands + sync_once interleave between chunks
-                    // (the bridge orchestrates the per-chunk loop + reassembly + progress).
+                    // Return to the loop while the network is waiting, including during ONE
+                    // slow chunk. The bridge still owns reassembly and whole-file verification.
                     Some(AppCommand::FetchFileChunk { cid, idx, cancel, reply }) => {
-                        let res = match <[u8; 32]>::try_from(cid.as_slice()) {
-                            Ok(arr) => {
-                                let server_cancellation = cancel.clone();
-                                fetch_chunk_or_cancel(
-                                cancel,
-                                async {
-                                    server
-                                        .fetch_file_chunk_cancellable(
-                                            &Cid::from_bytes(arr),
-                                            idx,
-                                            server_cancellation,
-                                        )
-                                        .await
-                                        .map_err(|e| e.to_string())
-                                },
-                            )
-                            .await
-                            },
-                            Err(_) => Err("bad content address".to_string()),
-                        };
-                        let _ = reply.send(res);
+                        file_transfers.chunk(&mut server, cid, idx, cancel, reply);
                     }
                     Some(AppCommand::FileHead { cid, reply }) => {
                         let head = <[u8; 32]>::try_from(cid.as_slice())
@@ -3805,19 +4200,7 @@ where
                         max_len,
                         reply,
                     }) => {
-                        let res = match <[u8; 32]>::try_from(cid.as_slice()) {
-                            Ok(arr) => server
-                                .read_file_range(
-                                    &Cid::from_bytes(arr),
-                                    expected_manifest_version,
-                                    start,
-                                    max_len,
-                                )
-                                .await
-                                .map_err(|e| e.to_string()),
-                            Err(_) => Err("bad content address".to_string()),
-                        };
-                        let _ = reply.send(res);
+                        file_transfers.range(&mut server, cid, expected_manifest_version, start, max_len, reply);
                     }
                     Some(AppCommand::FileAvailable { cid, reply }) => {
                         let avail = match <[u8; 32]>::try_from(cid.as_slice()) {
@@ -3825,6 +4208,15 @@ where
                             Err(_) => false,
                         };
                         let _ = reply.send(avail);
+                    }
+                    Some(AppCommand::KeepFile { cid, cancel, reply }) => {
+                        file_transfers.keep(&mut server, cid, cancel, reply);
+                    }
+                    Some(AppCommand::KeptFiles { reply }) => { let _ = reply.send(server.sync.kept_files()); }
+                    Some(AppCommand::ForgetKeptFile { cid, reply }) => {
+                        let result = <[u8; 32]>::try_from(cid.as_slice()).map_err(|_| "bad content address".to_string())
+                            .and_then(|raw| server.sync.forget_kept(&Cid::from_bytes(raw)).map_err(|e| e.to_string()));
+                        let _ = reply.send(result);
                     }
                     Some(AppCommand::DeleteFile { cid, reply }) => {
                         let res = match <[u8; 32]>::try_from(cid.as_slice()) {
@@ -3835,7 +4227,7 @@ where
                             Err(_) => Err("bad content address".to_string()),
                         };
                         let _ = reply.send(res);
-                        if files_changed(&server, &mut file_count) {
+                        if files_changed(&server, &mut last_files) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
@@ -3847,11 +4239,8 @@ where
                                 .map_err(|e| e.to_string()),
                             Err(_) => Err("bad content address".to_string()),
                         };
-                        let ok = res.is_ok();
                         let _ = reply.send(res);
-                        // The listing count is unchanged, so `files_changed` can't see this;
-                        // announce it directly so every surface repaints the new expiry.
-                        if ok {
+                        if files_changed(&server, &mut last_files) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
@@ -3872,7 +4261,7 @@ where
                         if let Err(e) = server.request_files_catchup(peer).await {
                             tracing::warn!(error = %e, "files catch-up failed");
                         }
-                        if files_changed(&server, &mut file_count) {
+                        if files_changed(&server, &mut last_files) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
@@ -4119,7 +4508,7 @@ where
                         let _ = reply.send(res);
                         // The limit lives in the file index document, so this is a file change
                         // as far as every reader is concerned.
-                        if files_changed(&server, &mut file_count) {
+                        if files_changed(&server, &mut last_files) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
@@ -4304,6 +4693,12 @@ where
                         // it learns that the existing connection belongs to this roster member.
                         let online = server.online_members();
                         if online != last_online {
+                            tracing::debug!(
+                                online = online.len(),
+                                was = last_online.len(),
+                                via = "discovery",
+                                "presence changed"
+                            );
                             last_online = online.clone();
                             let _ = event_tx.send(AppEvent::ConnectivityChanged { online }).await;
                         }
@@ -4401,6 +4796,18 @@ where
                         break;
                     }
                 },
+                // Queued commands have priority even when a local-copy worker is already ready.
+                // Do not add an immediate fallback that polls/drops sync_once: legacy outbox
+                // drains may own unpublished work across an await. Local Keep yields each chunk;
+                // an all-local finite copy can still delay background sync, never queued commands.
+                // Network waits own no Server borrow. A ready result is committed against the
+                // current index/membership before another chunk or provider can be admitted.
+                completed = file_transfers.next(), if !file_transfers.is_empty() => {
+                    event_tx.idle();
+                    if let Some(completed) = completed {
+                        file_transfers.complete(&mut server, completed);
+                    }
+                },
                 // A receipt may be the final network event in a quiet room. Wake from the same
                 // injected clock used to start the throttle so the last coalesced state is still
                 // surfaced without waiting for unrelated traffic.
@@ -4421,6 +4828,7 @@ where
                 // reader would go on to trust.
                 cont = server.sync_once() => { event_tx.idle(); match cont {
                     Ok(true) => {
+                        studio_receiver.signal(&server, &studio_signal);
                         if server.has_pending_reciprocal() {
                             server.drive_pending_reciprocal().await;
                         }
@@ -4444,7 +4852,21 @@ where
                             moved_channels.push(channel);
                             // The version was consumed just above; a second check here would
                             // read "unchanged" and swallow the very change it is meant to report.
-                            if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                            let change = channel_delta(&server, channel, &mut counts);
+                            // The document version and what the UI was told about it, side by
+                            // side: the last of the four states a report conflates, and the one
+                            // that separates "the message never arrived" from "it arrived and
+                            // the screen was never told".
+                            tracing::debug!(
+                                channel,
+                                version = server.doc_version(crate::DocType::Channel, channel),
+                                appended = change.as_ref().is_some_and(|c| c.messages_appended),
+                                arrivals = change.as_ref().map_or(0, |c| c.arrivals.len()),
+                                changed = change.as_ref().is_some_and(|c| c.messages_changed),
+                                emitted = change.is_some(),
+                                "channel document moved"
+                            );
+                            if let Some(change) = change {
                                 let _ = event_tx
                                     .send(AppEvent::ChannelUpdated { channel, change })
                                     .await;
@@ -4483,7 +4905,7 @@ where
                             &server,
                             crate::DocType::FileIndex,
                             crate::FILE_INDEX_DOC,
-                        ) && files_changed(&server, &mut file_count)
+                        ) && files_changed(&server, &mut last_files)
                         {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
@@ -4534,6 +4956,12 @@ where
                         let online = server.online_members();
                         let presence_changed = online != last_online;
                         if presence_changed {
+                            tracing::debug!(
+                                online = online.len(),
+                                was = last_online.len(),
+                                via = "transport",
+                                "presence changed"
+                            );
                             last_online = online.clone();
                             let _ = event_tx
                                 .send(AppEvent::ConnectivityChanged { online })
@@ -4604,6 +5032,11 @@ where
     });
     (
         ServerActor {
+            studio_pending,
+            #[cfg(test)]
+            studio_preparing,
+            #[cfg(test)]
+            studio_hints,
             cmd_tx: CommandSender {
                 tx: cmd_tx,
                 trace: Trace::NONE,
@@ -4829,15 +5262,17 @@ where
     change.any().then_some(change)
 }
 
-/// Whether the shared file count changed since last seen (updating the record).
-fn files_changed<T, R>(server: &Server<T, R>, last: &mut usize) -> bool
+/// Compare the bounded materialized index, including references and verified uploader identity.
+/// Repair can replace a manifest without changing the row count; remote clients still need an
+/// update to invalidate stale availability, trust decisions and failed preview state.
+fn files_changed<T, R>(server: &Server<T, R>, last: &mut Vec<FileEntry>) -> bool
 where
     T: MeshTransport,
     R: CryptoRngCore,
 {
-    let n = server.files().len();
-    if *last != n {
-        *last = n;
+    let next = server.files();
+    if *last != next {
+        *last = next;
         true
     } else {
         false
@@ -4938,10 +5373,10 @@ where
 }
 
 /// Whether the server livery changed since last seen (updating the record). Compares the
-/// whole materialized [`Livery`], so an **icon-only** or **cursor-only** write is caught like a
-/// colour change. The colour fields are a handful of short strings; the icon and cursor are
-/// bounded base64 blobs (≤ `MAX_SERVER_ICON_BYTES` / `MAX_SERVER_CURSOR_BYTES` decoded), so
-/// this stays a cheap memcmp per convergence.
+/// whole materialized [`Livery`], so an **icon-only**, **cursor-only** or **banner-only** write
+/// is caught like a colour change. The colour fields are a handful of short strings; the images
+/// are bounded base64 blobs (≤ `MAX_SERVER_ICON_BYTES` / `MAX_SERVER_CURSOR_BYTES` /
+/// `MAX_SERVER_BANNER_BYTES` decoded), so this stays a cheap memcmp per convergence.
 fn livery_changed<T, R>(server: &Server<T, R>, last: &mut Livery) -> bool
 where
     T: MeshTransport,
@@ -5101,6 +5536,81 @@ mod tests {
 
     const GENERAL: u128 = 1;
 
+    #[tokio::test]
+    async fn pix_publication_actor_returns_real_cid_and_rejects_failed_or_cancelled_calls() {
+        let hub = Hub::new();
+        let bytes = crate::creative::tests::golden();
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        assert!(server
+            .publish_pix(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("persistent"));
+        server.set_blob_store(Box::new(
+            catcoms_storage::SealingBlobStore::open(
+                dir.path(),
+                [7; 32],
+                ChaCha20Rng::seed_from_u64(3),
+            )
+            .unwrap(),
+        ));
+        let (actor, _events, handle) = spawn(server);
+        let published = actor.publish_pix(bytes.clone(), None).await.unwrap();
+        let cid = Cid::of(&bytes);
+        assert_eq!(published.cid, cid.to_hex());
+        assert_eq!(published.bytes, bytes.len());
+        assert_eq!(
+            actor
+                .request_blob_bounded(cid, bytes.len(), None)
+                .await
+                .unwrap()
+                .unwrap(),
+            bytes
+        );
+        assert!(actor
+            .request_blob_bounded(cid, bytes.len() - 1, None)
+            .await
+            .is_err());
+        assert!(actor
+            .publish_pix(vec![0; 64 * 1024 + 1], None)
+            .await
+            .is_err());
+        assert!(actor
+            .publish_pix(b"not pixels".to_vec(), None)
+            .await
+            .is_err());
+        let (signal, rx) = tokio::sync::watch::channel(true);
+        assert!(actor
+            .publish_pix(
+                bytes.clone(),
+                Some(RequestCancellation::new(rx.clone(), None))
+            )
+            .await
+            .is_err());
+        assert!(actor
+            .request_blob_bounded(cid, bytes.len(), Some(RequestCancellation::new(rx, None)))
+            .await
+            .is_err());
+        drop(signal);
+        assert!(
+            actor.files().await.is_empty(),
+            "blob publication does not invent a share entry"
+        );
+        actor.shutdown().await;
+        handle.await.unwrap();
+        assert!(actor
+            .publish_pix(bytes, None)
+            .await
+            .unwrap_err()
+            .contains("stopped"));
+        assert!(actor
+            .request_blob_bounded(cid, 64, None)
+            .await
+            .unwrap_err()
+            .contains("stopped"));
+    }
+
     /// A delta says which rows arrived, not which row sorts last.
     ///
     /// Rows are ordered by the sender's timestamp, so a message that was delayed, or written on a
@@ -5217,10 +5727,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_interrupts_an_actor_owned_chunk_future() {
+    async fn cancellation_interrupts_a_detached_chunk_wait() {
         let (cancel, receiver) = tokio::sync::watch::channel(false);
         let cancellation = RequestCancellation::new(receiver, None);
-        let stalled = fetch_chunk_or_cancel(Some(cancellation), std::future::pending());
+        let stalled =
+            fetch_chunk_or_cancel(Some(cancellation), std::future::pending::<ChunkResult>());
         tokio::pin!(stalled);
 
         assert!(timeout(Duration::from_millis(10), &mut stalled)
@@ -5241,6 +5752,9 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         let actor = ServerActor {
+            studio_hints: tokio::sync::watch::channel(None).1,
+            studio_pending: tokio::sync::watch::channel(false).1,
+            studio_preparing: tokio::sync::watch::channel(false).1,
             cmd_tx: CommandSender {
                 tx,
                 trace: Trace::NONE,
@@ -6792,5 +7306,66 @@ mod tests {
         bob.shutdown().await;
         let _ = alice_handle.await;
         let _ = bob_handle.await;
+    }
+
+    #[tokio::test]
+    async fn same_row_repair_emits_one_file_update_and_noop_reupload_emits_none() {
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_files().await.unwrap();
+        let data = b"repair in place".to_vec();
+        let cid = server
+            .add_file("same.bin", "application/octet-stream", "", &data)
+            .await
+            .unwrap();
+        let mut snapshot = server.files();
+        for blob in server.sync.blob_cids() {
+            server.sync.delete_blob(&blob).unwrap();
+        }
+        let (actor, mut events, handle) = spawn(server);
+        actor
+            .add_file(
+                "same.bin".into(),
+                "application/octet-stream".into(),
+                "".into(),
+                data.clone(),
+            )
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if matches!(
+                    events.recv().await.map(|event| event.event),
+                    Some(AppEvent::FilesUpdated)
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("an in-place manifest repair must notify clients");
+        let repaired = actor.files().await;
+        assert_eq!(repaired.len(), snapshot.len());
+        assert_ne!(repaired[0].file_ref, snapshot[0].file_ref);
+        snapshot = repaired;
+        actor
+            .add_file(
+                "same.bin".into(),
+                "application/octet-stream".into(),
+                "".into(),
+                data,
+            )
+            .await
+            .unwrap();
+        assert_eq!(actor.files().await, snapshot);
+        assert!(actor.file_available(cid.as_bytes().to_vec()).await);
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event.event, AppEvent::FilesUpdated),
+                "no duplicate event on an unchanged index"
+            );
+        }
+        actor.shutdown().await;
+        handle.await.unwrap();
     }
 }

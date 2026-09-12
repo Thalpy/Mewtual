@@ -1,14 +1,71 @@
 # Design: the creative suite (draw, doodle, flipnote, emoji sound, play, knock)
 
-Status: proposal, revision 15, ready for implementation. Nothing here has shipped. The
+Status: revision 15; the backend has landed through Gate 3 and Gate 4 (owner rotation and
+recovery) is the active gate. Shipped: `crates/catcoms-replication/src/studio/` (admission,
+frames, index, patch, recovery, snapshot and `epoch/{adoption,catchup,owner,settlement}`),
+`crates/catcoms-app/src/studio/{control,dispatch,publication,receiver,replay,restore,settlement}.rs`,
+the PIX1 validator and `publish_pix`/`request_blob_bounded` in `crates/catcoms-app/src/creative.rs`,
+twelve Tauri commands under `studio::` (five `studio::studio_*`: `studio_list`, `studio_read`,
+`studio_create`, `studio_apply`, `studio_apply_index`; plus seven
+`studio::recovery::studio_recovery_*`: `list`, `preview`, `apply`, `restore_pointer`, `read`,
+`export`, `acknowledge`), and the frontend `pix.ts`, `pix-canvas.ts`, `Studio.svelte` and
+sixteen `jam-*.ts` modules. **Not shipped: the end-to-end connection.** The Studio frontend still
+runs on an in-memory fixture and invokes no backend command, so section 7's phase table row
+"Usable collaborative Studio | Not connected end to end" remains accurate. The
 creative-suite contracts held up under review; the history platform is its own design,
-`design-epoch-close.md` (P1), at revision 5 and likewise ready for implementation and
+`design-epoch-close.md` (P1), at revision 5, whose protocol core is implemented and under
 adversarial testing: owner-only receipts, no pruning before a receipt, atomic sealing at
 settlement, checkpoint retirement, provisional open-epoch edits with automatic replay, adoption
 folded into the first receipt of each owner tenure, and two retained recovery snapshots plus one
 staged per document with Restore, Copy and Export. This document keeps the studio-facing
 contract: document types, roots, events, the closed domain-operation sets with stable element
 ids and merge rules, and the properties it requires of P1.
+
+**Active implementation scope (2026-09-08): Flipnote only, with its required P1 integration.**
+Games and game-only avatar-consent/profile work are paused at the user's request. Standalone
+Draw/Pictochat, chat/announcement doodles, knocks and GB cam are deferred. Flipnote retains
+sound, linked scores, export, advisory claims and recovery; shared identity/channel work is
+limited to those dependencies. The broader design below is preserved as backlog, not the
+active completion target. `BACKEND-IMPLEMENTATION.md` defines seven evidence-based delivery
+gates, starting with typed documents and durable one-device Save/Load. UI remains user-owned.
+
+Gate 4 audit (2026-09-12, `acdb7f8`): watched owner rotation, Registry maintenance,
+recovery controls, conservative own-intent replay and eviction grace are connected. Frozen-owner
+takeover also has core/store coverage (`dba52e5`); running-app succession and signed repair are
+still pending. ReceiptRepair v2's codec/book support does not implement runtime repair. The
+remaining overlay, provisional newcomer and tenure/repair-label requirements below remain
+acceptance obligations. See the progress audit in `BACKEND-IMPLEMENTATION.md` and the current
+callable/unavailable controls in `FLIPNOTE-UI-HOOKS.md`; no percentage is inferred from commits.
+The subsequent actor test slice (`d7ea514`/`5d65998`) now has user-provided review closure for
+SUC-001/SUC-002. It covers header-only Flipnote Open/Closing takeover after restart and completed
+takeover surviving vault reopen; it does not close the broader succession or Gate 4 obligations.
+The user-accepted `e3f6669` expands the matrix to Index, installed-checkpoint inheritance and
+editing through a freshly restored successor actor; all eight cases pass. It adds
+no native command or UI layout and does not close the remaining runtime succession scenarios.
+The next joining fixture demonstrates that an invite can itself change ownership again by reusing
+the removed founder's low MLS leaf. Known-CID pixel availability and provisional metadata loading
+are separate obligations: the latter currently fails because the receiver discards unconfirmed
+Studio head hints. [The proposed next runtime slice](GATE4-PROVISIONAL-READ-REVIEW.md) adds a bounded,
+explicitly unconfirmed read fallback; its design passed user-provided review and is not implemented.
+The user accepted `48fcc2e`'s transition/byte evidence but requested PR-001 changes to that proposal:
+previews must not retain all capacity needed for authoritative discovery. The revision caps all
+provisional custody at three of the four shared slots, reserves authoritative progress across Studio
+and Registry, and separates preview eviction from successful authoritative replacement. TEST-001/002
+tighten the Registry/refused-Apply and completed-Hint observations. The user re-review of `7393165`
+closes TEST-001/TEST-002 and PR-001 (design only). The capacity checkpoint adds the shared three-of-four
+capacity reservation; fetching, scheduler fairness, lifecycle fencing and provisional native reads
+remain pending. Gate 4 remains active.
+The user accepted `1c90c41`'s capacity foundation without requested changes. The next checkpoint
+adds authenticated provisional head discovery and scoped candidate custody, including watch and
+app mount/server checks. It still supplies no parsed preview or native unconfirmed-history state;
+receipt attribution, seed/tail validation and runtime scheduling remain acceptance obligations.
+
+UI reference (2026-09-05): the owner's `Main.html`, `Inspector.html`, `Timeline.html`,
+`Palette.html` and `Tools.html`, with matching PNGs, were drafted as a scratch preview outside
+the repo (a session-scoped temp directory) and may no longer exist. They are not a durable
+reference; the in-repo surfaces `apps/desktop/src/Studio.svelte` and `StudioNav.svelte` are what
+the visual design is now read from. UI implementation is owned by the user; backend work supplies
+the contracts and state needed by those surfaces.
 
 Builds on the jam layer (`docs/INTERFACES.md` section 12, `apps/desktop/src/jam-*.ts`), the
 livery palette (`design-livery.md`), the sealed blob store with its staging area, the fileshare
@@ -69,9 +126,13 @@ Every hash in this document is `H(domain, part1, part2, ...)` = SHA-256 over the
 of, for each part in order, a 4-byte big-endian length followed by the part's bytes. `domain` is
 an ASCII string. String parts are UTF-8 with no normalization unless stated. Integers are
 8-byte big-endian. Identities are the 32 raw device-id bytes. "Canonical JSON" means the
-serialization the jam patch validator already uses: object keys sorted by UTF-16 code unit, no
-whitespace, integers only, strings escaped per RFC 8259 in the shortest form. Every derivation
-ships a golden vector in the slice that introduces it. P1 uses the same conventions.
+Studio serialization: object keys sorted by UTF-16 code unit, no whitespace, integers only,
+strings escaped per RFC 8259 in the shortest form. Studio text contains valid Unicode scalars
+(lone surrogate escapes reject); integers crossing JSON are within JavaScript's safe range.
+Existing jam patch identities are a named exception: the jam validator hashes its reconstructed
+declaration-order JSON, not sorted keys. Embedding that recipe in a sorted Studio body does not
+change its hash. Shared Rust/TypeScript vectors pin both representations. Every derivation
+ships a golden vector in the slice that introduces it. P1 uses the framed-hash conventions above.
 
 ### 2.1 `pix:v1` is a byte-exact binary format decoded by our own code
 
@@ -89,7 +150,9 @@ runs      pairs of (len1 u8, idx u8) until exactly W*H pixels are produced
 - Roles: 0 literal, 1 `bg`, 2 `fg`, 3 `accent`, 4 `muted`, 5..8 the fixed tones `t0..t3`.
   Any other role byte rejects. Every entry carries an RGB fallback. Duplicate entries reject.
 - A run is `len1 + 1` pixels (1..256) of palette index `idx`; `idx >= N` rejects. Runs are
-  maximal: a run followed by a run of the same index rejects.
+  maximal up to the 256-pixel wire limit: a run followed by a run of the same index rejects
+  unless the preceding run has length 256. For 512 pixels of index 1, the run bytes are
+  `ff 01 ff 01` (two full runs), never shorter adjacent runs.
 - Decode order: parse the fixed header; reject if `W*H > 65536`; allocate `W*H` bytes once;
   consume runs with bounds checks; reject on overshoot, undershoot, or trailing bytes.
 - Cap: 64 KiB measured on the encoded byte length, checked before any decode.
@@ -273,7 +336,7 @@ generic rules; these refine them):
 | Type | Operations | Element ids | Restore refinement |
 |---|---|---|---|
 | score | `set_cell(step,row,value)`, `clear_cell(step,row)`, `set_patch(patch id, descriptor)`, `remove_patch(patch id)`, `set_header(field, value)` for `title`, `bpm`, `bpb`, `steps` | cells are keyed by `(step,row)`, which is stable by construction; patches by descriptor hash | a cell is restored only if empty in the target, else shown as a conflict; a patch is restored if absent and the 64 cap allows, else flagged; a cleared cell on the fork is shown as "cleared on the fork" with a Clear action; headers are conflicts, never restored automatically |
-| flipnote | `insert_frame(frame id, after frame id or none, cid, bytes)`, `remove_frame(frame id)`, `replace_frame(frame id, cid, bytes)`, `set_sfx(sfx id, frame id, patch id, note)`, `remove_sfx(sfx id)`, `set_patch`, `remove_patch`, `set_export(export id, ...)`, `remove_export(export id)`, `set_header(field, value)` for `title`, `fps`, `score` | frames, sfx and exports by random 32-hex id | a frame absent in the target is inserted after its recorded predecessor if present, else at the end; concurrent inserts after one predecessor order by ascending `op_id`; a frame present in both with a different `cid` is a conflict shown with both authors; a removed frame on the fork is shown with a Delete action; sfx and exports restore by id if absent; the patch union rule (2.10) applies after restore and can flag |
+| flipnote | `insert_frame(frame id, after frame id or none, cid, bytes)`, `remove_frame(frame id)`, `replace_frame(frame id, cid, bytes)`, `set_sfx(sfx id, frame id, patch id, note)`, `remove_sfx(sfx id)`, `set_patch`, `remove_patch`, `set_export(export id, ...)`, `remove_export(export id)`, `set_header(field, value)` for `title`, `fps`, `score` | frames, sfx and exports by random 32-hex id | a frame absent in the target is inserted after its recorded predecessor if present, else at the end; concurrent inserts into the same resolved gap order by ascending `op_id`, subject to the placement rule below; a frame present in both with a different `cid` is a conflict shown with both authors; a removed frame on the fork is shown with a Delete action; sfx and exports restore by id if absent; the patch union rule (2.10) applies after restore and can flag |
 | index | `put_object(object id, kind, title, created_by, ts, expiry)`, `tombstone_object(object id)`, `set_title(object id, title)`, `set_expiry(object id, expiry)` | objects by random 32-hex id | objects restore by id if absent and the 64 cap allows; a tombstone on the fork shows a Delete action; titles and expiry are conflicts |
 | replies | `put_reply(reply id, author, cid, bytes, ts, expiry)`, `tombstone_reply(reply id)` | replies by random 32-hex id | replies restore by id if absent and the per-post and per-author caps allow |
 | registry | `put_pointer(key, epoch)`, `tombstone_pointer(key)` | by logical key | owned by P1: a pointer is re-put on Restore if its target document exists |
@@ -282,6 +345,109 @@ Generic rules from P1 apply everywhere: a collection projects as an ordered set 
 a tombstone wins over any insertion of the same id, scalars project by Automerge's
 concurrent-put rule with other values shown as conflicts, and delivery order never changes a
 projection. Restore adds and never overwrites; conflicts are shown, not resolved silently.
+
+**Rust index representation (gate 1, read-only so far).** The logical root above is a view,
+not nested Automerge map allocation. Physical root headers are `v`, `kind`, `channel` (the
+16-byte channel key as lowercase hex) and `epoch`. Insertion candidates live at
+`i/<object-id>/<derived-op-id>` and deletions at `d/<object-id>/<derived-op-id>`, both immutable
+within the epoch. `t/<object-id>` and `e/<object-id>` are mutable title/expiry registers. A record
+is a byte scalar containing byte `1`, the full 32-byte author, then the existing encoded
+`DomainOp`; its operation must match the property, and its id is recomputed. `_p1/op/<id>`
+markers are the existing constant `Uint(1)` values. Deletions retain each author's provenance.
+Creations do not write mutable registers: the smallest insertion id supplies initial values,
+then an explicit title/expiry register takes precedence, even if another insertion arrives late.
+Every live concurrent value is checked; exact duplicate records collapse, but one operation id
+with different bytes rejects. A mutable field with no insertion rejects. Tombstones hide all
+insertions of the same id. The first 64 nondeleted object ids are visible; overflow and deleted
+objects retain their live values/conflicts for recovery rather than disappearing from the view.
+
+The reader checks 128,192 primitive operations before `get_all` and bounds visible key/value
+bytes at 6 MiB (the existing 4 MiB content plus 2 MiB seed allowances). These are defensive
+reader limits, not encoded-checkpoint preflight or signed-log accounting. Signed causal delta
+validation must still authenticate provenance, prevent rewriting immutable properties or deleting
+evidence, check same-property predecessors and causal target existence, and invoke exact seed
+preflight before any live write or ingest. Checkpoint and typed recovery encodings remain a later
+gate-1 substep; this representation enables neither production Save/Load nor receipt verification.
+
+**Epoch-zero Index mutation contract.** The pure Rust `validate_index_change` callback derives
+the entire permitted delta from the canonical DomainOp and full change actor. P1 independently
+binds that actor to the signed current member and the server/physical document. Each expected
+header is either already present (all causal values must match, no rewrite allowed) or initialized
+in the first root change. Every operation writes exactly its record and a fresh constant marker.
+Immutable creation/deletion keys cannot be overwritten; mutable title/expiry puts consume exactly
+all currently visible predecessors of that property at the author's dependency frontier.
+
+`put_object` requires no creation or tombstone of its id in that frontier. Rename, expiry and
+delete require an existing nondeleted target, including an object beyond the 64-item display cap.
+Thus same-id concurrent creations remain legal, sequential reuse after deletion does not, and a
+concurrent deletion does not invalidate an independently justified edit. No receiver-only target
+or predecessor is usable. Exact signed retries are deduplicated by P1; a newly fabricated causal
+retry cannot replace its marker/evidence. Local marker-based NoChange alone does not authenticate
+an intent retry: the future durable adapter must resolve it against the retained signed envelope.
+This callback trusts previously authenticated accepted history and does not validate arbitrary
+saved snapshots. Checkpoint epochs refuse until the typed seed contract exists. No production
+writer/ingest wrapper is exposed before exact checkpoint/recovery preflight is implemented.
+
+**Rust frame representation (gate 1, read-only art subset).** `FlipnoteFrameProjection` has
+immutable `v=1`, `kind="flipnote"`, `id`, `channel`, `epoch`, `w=192`, `h=144` root headers.
+Every concurrent header must match the supplied scope. `i/<frame>/<op-id>` and
+`d/<frame>/<op-id>` retain immutable insertions and deletions; `r/<frame>` is the pixel-replacement
+register; `h/title` and `h/fps` are mutable registers. Unset title/fps have no fabricated source;
+a view may use the existing empty-title/12-fps defaults. The art-only reader rejects all other
+operation families/properties, including `score:null`, until their stateful support exists.
+
+A record is byte `1`, author (32 bytes), asserted timestamp (u64 big-endian, JS-safe),
+`anchor` and `before` (each byte `0`, or byte `1` plus a 32-byte insertion op id), then the existing
+encoded DomainOp. Non-insertions require both origins absent. These are signed-delta metadata,
+not new fields in the domain body. `SignedOp` has no independent clock field; timestamps are
+author claims, not ordering/freshness authority. Whole-record comparison detects visible reuse
+of one op id with changed body, timestamp or origins. Later writers must preserve retry metadata
+within an epoch and validate it against the authenticated change; the reader alone does not.
+
+**Frame placement refinement.** `after:null` inserts at the beginning, matching the existing
+fixture implementation (its append comment is stale). An explicit `after` resolves to the winning
+insertion node of that frame at the author's dependency frontier. `before` names the first child
+of that anchor in that same view, or is absent. Missing predecessors during Restore normalize
+to the current last live frame id (null only for an empty timeline) before preparing a new intent.
+The future causal validator must derive these origins, not trust caller-supplied choices.
+
+Each anchor's children form a right-origin forest. Children with no `before` sort by op id;
+before emitting a child, emit the nodes whose `before` names it, recursively under the same rule.
+Emit the child's own anchored children immediately after it. Same-gap insertions thus order by
+op id while later observed placement is preserved: siblings X,Y plus a later C before X yield
+C,X,Y, never Y,C,X. The implementation walks iteratively, rejects dangling/wrong-parent/cyclic
+origins and retains hidden insertion nodes as anchors. It emits only the smallest-op-id insertion
+of each nondeleted frame; losing/deleted insertions never rewire the graph or strand descendants.
+This deliberately refines the earlier blanket concurrent-op-id sentence: arbitrary pairwise hash
+ordering cannot also preserve observed sequential insertion when peers saw different gaps.
+
+Replacement pixels use the actual Automerge winner; every live alternative and insertion blob
+declaration remains in the frame map, even for deleted/over-cap frames. The timeline includes all
+nondeleted frames; cap flags apply once list position reaches 999 or cumulative selected declared
+bytes exceed 8 MiB. Later small frames are not packed around excess. This is neither a retention
+policy nor a deletion guard by itself; the implemented store protection is described in §2.10.
+Reader bounds are 188,192 primitives
+and 6 MiB of visible key/value bytes, independent of exact checkpoint admission. No live write,
+checkpoint/recovery serialization or Save/Load is enabled by this frame-reader slice.
+
+**Epoch-zero art mutation contract.** `validate_frame_change` checks the exact root mutation
+against the canonical DomainOp and full change actor. P1 independently authenticates the signed
+member/server/physical context. The private historical reader uses `keys_at`, `get_all_at` and
+`get_at` at the complete known dependency frontier; it cannot substitute the receiver's current
+winner or first visible frame. Origins are derived by the placement rule above: the first direct
+child includes losing/deleted insertion nodes. Existing observed frame ids cannot be reused;
+replace/remove and an explicit `after` require nondeleted targets in the causal view. New roots
+initialize all seven immutable headers; later changes cannot rewrite them. Every change writes
+exactly its frame/title/fps record and a fresh marker, with exact same-property predecessor sets
+for mutable registers. Timestamp metadata is an author assertion bounded to safe integer ms.
+
+This semantic callback admits neither unsupported operation families nor checkpoint epochs.
+It supplies no production writer or exact checkpoint/recovery preflight. Over-cap frames still
+exist as semantic targets (especially for trimming); production aggregate/edit policy is a
+separate required check. Historical reader budgets match the current reader, and public empty
+state still requires genuinely pristine history. Empty private heads represent the empty causal
+past, not a way to validate an erased snapshot. Automerge repeats historical-clock work for these
+queries; this design does not claim measured maximum-source latency or readiness for scheduling.
 
 **What the studio requires of P1**, so a change to P1 that breaks one of these is caught here:
 
@@ -312,7 +478,10 @@ projection. Restore adds and never overwrites; conflicts are shown, not resolved
    receipts are owner-only, crash-safe and irrevocable, and owner equivocation is a visible
    fault state, never a silent choice.
 7. Intents are idempotent by a verifiable `op_id` with a constant marker committed atomically
-   with the edit, and are final only inside a receipted closure.
+   with the edit, and are final only inside a receipted closure. Unsafe-to-replay own edits may
+   instead move from pending into durably flushed, full-envelope-matching manual recovery
+   under P1's explicit bounded-recovery policy. This is labelled needs recovery, not settled;
+   the two-snapshot eviction warning applies. Seed equality alone never retires an intent.
 8. Events fire for remote changes to every studio document type and for every settlement state
    change, including sealing, faults, repairs, awaiting the tenure's first receipt, recovery
    availability and eviction warnings, and storage refusal.
@@ -346,6 +515,15 @@ announcement reply, returning the cids referenced by anything not deleted and no
 recorded expiry, reading every concurrent value of a conflicted `cid` field through `get_all`.
 The retention pass must consult it.
 
+Implementation note (2026-09-08, active Index/art scope): physical cache deletion has a stronger
+conservative hold set than circulation expiry. `ServerStore::creative_pinned_cids()` includes
+whole retained sources, verified seed-only baselines, pending intents, and retained/staged typed
+recovery, including superseded/deleted pixel versions. A tombstone/deadline cannot release bytes
+still needed by that evidence. A shared mount-local guard protects existing unlist/upload cleanup;
+there is no durable pin journal or automatic expiry pass. Actual export/doodle projection coverage
+remains with those deferred slices, and unsupported typed state refuses reclamation. See
+INTERFACES for bounds, Unknown handling, and the distinction between a report and deletion authority.
+
 **Exports have a durable record.** Under each flipnote root:
 
 ```
@@ -358,6 +536,12 @@ pins the rest until deleted). Replacement is a new record plus `deleted` on the 
 **Expiry is recorded now, enforced later**, on studio objects, exports, announcement replies and
 chat doodle attachments (`{cid, bytes, expiry}`), using `FileExpiry` three-state semantics from
 the backend `Clock`.
+
+In Studio operation JSON, omitted `expiry` means Unrecorded, `null` means Never, and a
+nonnegative safe integer means At(that absolute millisecond timestamp). Zero is At(0), not
+Never. `set_expiry` with the field absent explicitly clears recorded expiry metadata. The Rust
+operation codec preserves all three. The in-memory frontend fixture still has a numeric-only
+view; gate-2 integration must adapt it explicitly before claiming production Save/Load.
 
 **`flipnote:v1` root**, in a `StudioObject` document:
 
@@ -726,7 +910,56 @@ replay keys, rank and host attribution.
 
 ## 7. Phases and prerequisites
 
+**Implementation roadmap (2026-09-08; backend status).**
+P1 is in progress. Tested building blocks are not yet a live shared Studio; the feature table
+below contains 25 creative slices with very different sizes, so counting commits or completed
+helpers would give a misleading percentage. The owner's frontend work proceeds separately.
+The earlier 25%/65% estimates are retired following the Flipnote scope reset: foundation
+coverage did not measure product integration or time remaining. `BACKEND-IMPLEMENTATION.md`
+tracks the active Flipnote gates; this broader table records foundations and future backlog.
+
+`P1-PERFORMANCE.md` records real saved-source release probes. Indexed restore queries improve
+byte-heavy pages; dense reconstruction previously cost roughly 11 seconds per saved-source page
+(baseline about 13). Explicit bounded worker preparation and read-only source reuse now remove
+that rebuild from warm page serving, with exact saved-version and current-authority fences.
+The split jobs still need runtime driving outside actor/vault locks; these measurements do not
+close automatic catch-up. This work belongs to Flipnote's shared-runtime gate and is not a
+reason to wait for every P1 consumer before implementing the missing Studio types.
+
+| Milestone | Current evidence | Still needed to close it |
+|---|---|---|
+| P1 protocol core | Implemented/tested: signed operations, closes, owner receipt/fault state, epoch gate, intent/recovery models; explicit source-derived owner rotation with exact close journaling and checked local reply-channel publication completion | Automatic orchestration and remaining repair/succession paths; explicit adapters are not a live scheduler or delivery acknowledgement |
+| P1 checkpoints and registry | Implemented/tested: deterministic seeds, typed bucket materialization/preflight, adjacent settlement and scoped newcomer installation with recovery/restart | Automatic lifecycle integration, other managed types, settlement-wide capacity handling |
+| P1 durable storage | Implemented/tested: recovery/owner receipt saves, vault-wide intent cap, four-family inventory/cleanup, durable edits, included-only intent retirement and registry installation barriers | Sole coordinator, other managed document families, remaining recovery actions and full-capacity settlement integration |
+| P1 network and application integration | Cooperative saved-intent sender, opt-in gossip, bounded durable page receive, keyed owner-head/expected-seed exchange and registry installation followed by fresh catch-up | Historical-authority/repair-record transfer, aggregate scheduling, native lifecycle ownership, actor/bridge events and production acceptance tests |
+| C0c immutable blob seam | Native `publish_pix` and `request_blob_bounded` wired through actor and sync; PIX1 validator, bounded cache/dedup/response checks and conservative art source/intent/recovery reference protection | Owner's frontend invocation; actual sound/export references extend in gate 6. Game-only profile result and consented-avatar work is paused |
+| Creative backend contracts | Static Rust codecs; Index/art projections, causal validators, canonical typed checkpoints/recovery, exact preflight, accounted vault Save/Reopen and actor/native commands | Automatic shared runtime/events and Studio checkpoint installation; sound/export families still reject pending gate 6. Broader C3 work is deferred |
+| Usable collaborative Studio | Not connected end to end | Shared save/load, publication, claims, settlement/recovery actions and export integrated with the owner's UI |
+
+**UI work that can proceed now:** the canonical editor shell, local canvas tools, palette/theme
+adaptation, local layers, timeline and playback controls, and Art/Sound/Music panel layouts can
+be implemented against an in-memory projection. Claims, conflicts, fetching, storage refusal,
+settlement and recovery can be exercised as explicitly synthetic fixtures. These fixtures must
+not claim that real shared saves, owner receipts or Restore operations happened. `.pix`/`.pixa`
+I/O still needs its codec/export contract tests; local UI readiness is not protocol readiness.
+
+**Next backend order:** the seven Flipnote gates in `BACKEND-IMPLEMENTATION.md` supersede the
+previous platform-first order. Typed Index/art and durable one-device Save/Load now exist using
+accounted P1 storage; the active gate is automatic collaboration. Follow with
+rotation/recovery, claims, sound/export and production acceptance. Complete each required P1
+path as part of those outcomes, not support for unrelated managed types. No claims of shared
+saves or settled edits until their actual production paths pass. UI remains with the owner.
+
+P1 reuses Automerge, signed encrypted operations, MLS membership and vault persistence. Existing
+snapshots reload retained history; they do not authorize throwing it away. P1 adds bounded history
+retirement with owner receipts, verified checkpoints and explicitly limited recovery. It applies
+to shared document metadata, not to editing uploaded image bytes, and is not a prerequisite for
+publishing or fetching an immutable PIX blob.
+
 **Platform prerequisites this suite depends on but does not own.**
+
+There are **two**: P1 is the blocking history/recovery platform; P2 is non-blocking file-retention
+enforcement. The implementation milestones above are parts of P1, not additional P prerequisites.
 
 | Prereq | Delivers | Blocks |
 |---|---|---|
@@ -763,10 +996,12 @@ replay keys, rank and host attribution.
 | C8d | per-call results in the Play tab and bounded history | C8a |
 | C9 | GB cam | video path as landed |
 
-C2a, C3b, C8a are independent after their prerequisites. C6 must not start until C4 and C5 have
-had a review pass. Prerequisites noted in the jam section still apply to anything that renders
-sound: Deafen must gate rendering, and roster revocation must tear down the removed member's
-call connections.
+C2a, C3b, C8a are independent after their prerequisites in the broader backlog. For the active
+Flipnote scope, typed art persistence may proceed before the standalone C4 Draw product;
+collaborative claims still require reviewed C0b/C0d and the relevant C4a channel contracts.
+The C5 document contracts remain a prerequisite. Prerequisites noted in the jam section still
+apply to anything that renders sound: Deafen must gate rendering, and roster revocation must
+tear down the removed member's call connections.
 
 ## 8. Remaining open questions
 

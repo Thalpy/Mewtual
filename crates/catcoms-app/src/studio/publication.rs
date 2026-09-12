@@ -1,0 +1,86 @@
+//! Initial publication is part of the existing Save custody window, not a retry scheduler.
+//! The only batch producer is the successful durable transaction; no renderer packet is accepted.
+
+use super::*;
+use catcoms_replication::SealedOp;
+use std::time::Duration;
+
+pub(super) struct StudioSavedPacket {
+    pub(super) target: StudioTarget,
+    pub(super) epoch_id: u128,
+    pub(super) sealed: SealedOp,
+}
+
+pub(crate) struct StudioSavedTransaction {
+    pub(crate) view: Option<StudioView>,
+    pub(super) packets: Vec<StudioSavedPacket>,
+    // Checked by the just-finished transaction, including actual absence. Never peer-supplied.
+    pub(super) observed: Vec<(StudioTarget, u128)>,
+}
+impl StudioSavedTransaction {
+    /// No publication or implicit watch change for metadata-only recovery controls.
+    pub(crate) fn empty() -> Self {
+        Self {
+            view: None,
+            packets: Vec::new(),
+            observed: Vec::new(),
+        }
+    }
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    /// Consume at most two already-durable packets under the SAME source/Server/native custody
+    /// as Save. No receipt, membership, gate or snapshot mutation can interleave. Current full
+    /// author/MLS/routing checks still run inside the existing one-shot sender for every packet.
+    ///
+    /// The aggregate two-second injected-clock window bounds added network waiting, not the
+    /// synchronous save cost. A local save survives every timeout/refusal/cancellation; one-shot
+    /// admission is not delivery, and this function never retires an intent or retains ciphertext.
+    pub(crate) async fn publish_studio_save(
+        &mut self,
+        lease: &mut StudioVaultLease,
+        reply: &mut StudioReply,
+        saved: StudioSavedTransaction,
+    ) -> Option<StudioView> {
+        let clock = self.runtime_clock();
+        let deadline = clock.monotonic_ms().saturating_add(2_000);
+        // Successful Read/Save also establishes desired watches. Reconcile before returning so
+        // an ordinary successful local subscription does not depend on unrelated later traffic.
+        // Failure/timeout still reports the saved/read view, not a delivery or catch-up promise.
+        if !saved.observed.is_empty() && !reply.is_closed() && !lease.is_cancelled() {
+            let cancelled = async {
+                match lease.cancellation.as_mut() {
+                    Some(c) => c.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = reply.closed() => return saved.view,
+                _ = cancelled => return saved.view,
+                _ = clock.sleep(Duration::from_millis(2_000)) => return saved.view,
+                _ = self.flush_studio_subscriptions() => {}
+            }
+        }
+        for packet in saved.packets {
+            if reply.is_closed() || lease.is_cancelled() || clock.monotonic_ms() >= deadline {
+                break;
+            }
+            let remaining = deadline.saturating_sub(clock.monotonic_ms());
+            let cancelled = async {
+                match lease.cancellation.as_mut() {
+                    Some(c) => c.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = reply.closed() => break,
+                _ = cancelled => break,
+                _ = clock.sleep(Duration::from_millis(remaining)) => break,
+                _ = self.sync.publish_local_studio_once(packet.target, packet.epoch_id, packet.sealed) => {}
+            }
+        }
+        saved.view
+    }
+}

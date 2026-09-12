@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { fileAvailability, keptCopyLabel, fileInventoryRequests, mutateFileInventory, type KeptFiles } from "./file-availability";
   import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -23,11 +24,11 @@
   } from "./text-effect-keybinds";
   import {
     CHAT_MESSAGE_FRAMES_ENABLED, DEFAULT_MESSAGE_FRAME, defaultMessageFrameLayer, encodeMessageFrame,
-    messageFrameArrivalStyle, messageFrameLayerStyle,
+    messageFrameArrivalStyle, messageFrameLayerStyle, messageFrameMotionTraits,
     messageFramePosition, messageFrameScanGeometry, messageFrameStyle, parseMessageFrame, visibleMessageFrameMotion,
     visibleMessageFrameStyle, type MessageFrame, type MessageFrameArrival,
     type MessageFrameEasing, type MessageFrameEffectId, type MessageFrameEffectOptions,
-    type MessageFrameMotion, type MessageFrameShape,
+    type MessageFrameMotion, type MessageFrameMotionFamily, type MessageFrameMotionTraits, type MessageFrameShape,
   } from "./message-frame";
   import {
     CHAT_INITIAL_ROWS, CHAT_WINDOW_STEP, CoalescedAsyncRefresh, SanitizedMessageCache, nearScrollBottom,
@@ -38,6 +39,9 @@
   } from "./message-paging";
   import { ImageSrcCache } from "./image-src";
   import { pastedMedia, pastedName } from "./clipboard-media";
+  import {
+    confirmQuestion, confirmVerb, parseTally, placeMenu, tallyReaction, topReactions, typeaheadIndex,
+  } from "./context-menu";
   import { dismissOnBackdrop } from "./overlay-dismiss";
   import {
     DEFAULT_PUSH_TO_TALK, bindableKey, keyLabel, micTransmitting, parsePushToTalk,
@@ -57,6 +61,7 @@
     type SearchSpec,
   } from "./search-index";
   import { chatScopeKey, reconcileActiveChannel, scopeHoldsConversation } from "./chatscope";
+  import { resolveServerLabel, settleServerLabels } from "./serverlabel";
   import {
     WIKI_REVIEW_UNKNOWN,
     mayEditWikiStructure,
@@ -67,6 +72,11 @@
     unlockedScopeCurrent,
   } from "./viewscope";
   import { pastedImageUrl, safeRemoteUrl } from "./remote-media";
+  import {
+    EMBED_KEEPALIVE_MARGIN_PX, chatEmbedFor, chatEmbedLink, embedChipLabel, embedChipTitle,
+    embedKey, embedMayRender, type ChatEmbed,
+  } from "./chat-embeds";
+  import { youtubeEmbedUrl, youtubeRef } from "./youtube";
   import { scheduleNewsChime } from "./news-chime";
   import { acceptTickerReceipt, messageTickerId } from "./ticker";
   import {
@@ -86,8 +96,8 @@
   import { storageRepairNotice } from "./storage-local";
   import { disposeStreamAudioGraph } from "./stream-audio";
   import {
-    bufferIce, directionIdle, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState, videoSlotPlan,
-    VIDEO_BITRATE, type PeerState, type SlotDirection, type VideoKind,
+    bufferIce, directionIdle, hangupTargets, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState,
+    videoSlotPlan, VIDEO_BITRATE, type PeerState, type SlotDirection, type VideoKind,
   } from "./voice-signaling";
   import {
     DEFAULT_STREAM_SETTINGS, MAX_STREAM_AUDIO_SOURCES, PeerVideoBudgetController, captureResolutionKnownAfterConstraint,
@@ -99,13 +109,22 @@
     type StreamAudioMode, type StreamQuality, type StreamSettings,
   } from "./streaming";
   import {
-    deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, jukeClaimWins, mediaChoices,
+    deckAdvance, deckPosition, deckSurface, driftAction, entryAddress, entryKind, fetchPhase,
+    jukeClaimWins, mediaChoices,
     mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, queueChanged, queueDigest, resolveCallName,
-    stallChip, validJukeSeq, JAM_TAKE_EXT, JAM_TAKE_MIME, STALL_ANNOUNCE_MS,
+    stallChip, validJukeSeq, DRIFT_SEEK_S, JAM_TAKE_EXT, JAM_TAKE_MIME, JUKE_SOURCE_SOUNDCLOUD, JUKE_SOURCE_VIMEO, JUKE_SOURCE_YOUTUBE,
+    STALL_ANNOUNCE_MS,
     type FetchPhase, type JukeEntry, type MediaFilter, type MediaKind,
   } from "./jukebox";
   import {
+    deckDriver, deckPlayerBlocked, deckPlayerPosition, deckReported, deckSources,
+    deckTransportPlan, type DeckDriver, type DeckState,
+  } from "./deck-players";
+  import { soundcloudDeckUrl } from "./providers-audio";
+  import { vimeoFrameUrl } from "./providers-video";
+  import {
     CLOCK_SKEW_GRACE_MS, NO_READ_MARK, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
+    addLatePast, clearLatePast, lateArrivals,
     transitionApplied, transitionMismatch, unreadChannels, unreadDecision, unreadFromHeads,
     type ChannelChange, type ChannelHead, type ReadMark, type UnreadDecision, type UnreadState,
   } from "./unread";
@@ -157,6 +176,7 @@
     reachabilityEventAffectsReport, reachabilitySummary,
     switchboardEventRefreshDecision, withOrderedConnectivity, withOrderedRefreshedInvite,
   } from "./joinlog";
+  import { joinAttemptView, type JoinStep } from "./joinroutes";
   import { diffLines, diffStats, type DiffLine } from "./linediff";
   import {
     buildModerationGraph, buildModerationTimeline, filterModerationTimeline, openKickCases,
@@ -168,9 +188,10 @@
     NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
   } from "./window-close";
   import {
-    DEFAULT_FILE_TRUST_POLICY, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
-    mayLoadJukeboxFile, scopedMediaKey, toggleTrustedAuthor,
-    type FileTrustMode, type FileTrustPolicies, type FileTrustPolicy,
+    DEFAULT_FILE_TRUST_POLICY, authorOverride, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
+    mayLoadJukeboxFile, scopedMediaKey, setAuthorOverride,
+    type FileAuthorOverride, type FileTrustMode, type FileTrustPolicies, type FileTrustPolicy,
+    type PassiveFileClass,
   } from "./file-trust";
   import { acceptCapture, chooseMicrophoneSender, MediaCaptureSession } from "./media-capture";
   import {
@@ -222,9 +243,16 @@
   import { JamEngine, jamSequenceAccepted, type JamPlaybackPatchSet } from "./jam-engine";
   import { JamPeerBudget } from "./jam-budget";
   import { JamFrameDecoder, toggleJamPeerMute, type JamFrameDecode } from "./jam-wire";
-  import { jamPatchId, legacyJamPatch, validateJamPatch } from "./jam-patch";
+  import {
+    decodeJamPatchBase64, isJamPatchFile, jamPatchFileName, jamPatchId, legacyJamPatch,
+    mayFetchJamPatch, parseJamPatchJson, validateJamPatch,
+  } from "./jam-patch";
+  import {
+    EMPTY_STAGE_STASH, envOff, filterOff, keepSavedPatch, sendsOff, setFilterMode, toggleStage,
+    uniqueSavedName, type JamEditorStep, type JamStage, type JamStageStash,
+  } from "./jam-editor";
   import type { JamSourceChannel } from "./jam-channel";
-  import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_REMOTE_HOLD_MAX_MS, PATCH_OSC_WAVES, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
+  import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_PATCH_EXT, JAM_PATCH_MIME, JAM_PATCH_NAME_MAX_CHARS, JAM_REMOTE_HOLD_MAX_MS, JAM_SAVED_PATCHES_MAX, PATCH_CUTOFF_MAX_HZ, PATCH_OSC_WAVES, PATCH_PARAM, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
   import { JamClockProbeTracker, JamClockSync, JamMetronomeClock } from "./jam-clock";
   import { JamCallCuePlayer, JamClickPlayer } from "./jam-clicks";
   import {
@@ -234,8 +262,9 @@
   } from "./jam-recorder";
   import {
     decodeJamTakeBase64, jamTakePlaybackLeaseCurrent, JamTakeCache, JamTakeLoadCoordinator,
-    mayFetchJamTake, shouldApplyJamTakeProgress, shouldDispatchTakeEvent, takeDueBatchEnd,
-    takePlaybackIsRemote, takeReleaseTailMs, type JamTakePlaybackLease, type JamTakeProgressLease,
+    mayFetchJamTake, planTakeSeek, shouldApplyJamTakeProgress, shouldDispatchTakeEvent,
+    takeDueBatchEnd, takePlaybackIsRemote, takeReleaseTailMs,
+    type JamTakePlaybackLease, type JamTakeProgressLease, type JamTakeSeekVoice,
   } from "./jam-playback";
   import { JamCausalQueue, JamCausalQueueOverflow, JamInitialPublicationGate, JamLatestTaskQueue, JamOutboundEdge, JamPublicationGeneration, JamPublicationPacer, JamResettableCausalQueue, type JamPublishedFrame } from "./jam-publication";
   import { jamTakeSheetSvg } from "./jam-sheet";
@@ -306,6 +335,34 @@
   // before the wiki, file and device reads that share the switch; holding the chat pane's empty
   // state on all of them left "Loading messages..." on screen well after the messages were in hand.
   let messagesLoading = $state(false);
+  // Which message read owns that flag. The newest one issued does, whatever generation asked for
+  // it, so an older read landing last cannot release a claim that is no longer its own, and a
+  // superseded read that never lands cannot hold one forever.
+  let messagesLoadToken = 0;
+  let messagesWatchdog: ReturnType<typeof setTimeout> | undefined;
+  const MESSAGES_STALL_MS = 12_000;
+  /**
+   * Re-ask for a channel's rows when the read that was supposed to fill the pane never answered.
+   *
+   * A bridge command that is dropped rather than refused never settles: no rows, no error, and a
+   * pane that says "Loading messages…" for the rest of the session. That is not hypothetical on a
+   * busy server, where the per-server actor answers one command at a time and a sync burst can sit
+   * in front of the read. One retry, and only while the same conversation is still on screen and
+   * still waiting: a slow answer that arrives in the meantime takes the token with it and this
+   * finds nothing to do.
+   */
+  function armMessagesWatchdog(token: number, gen: number, server: number, retriesLeft = 1) {
+    clearTimeout(messagesWatchdog);
+    if (retriesLeft <= 0) return;
+    messagesWatchdog = setTimeout(() => {
+      if (messagesLoadToken !== token || !messagesLoading || !viewCurrent(gen, server)) return;
+      const retryToken = ++messagesLoadToken;
+      void refresh().finally(() => {
+        if (messagesLoadToken === retryToken) messagesLoading = false;
+      });
+      armMessagesWatchdog(retryToken, gen, server, retriesLeft - 1);
+    }, MESSAGES_STALL_MS);
+  }
   function beginViewSwitch(): number {
     return ++viewGeneration;
   }
@@ -361,11 +418,11 @@
   let startTab = $state<"join" | "found">("join"); // which start-surface tab is open; join is the common case
   // Chosen before founding/joining so no newly opened server can render shared media under an
   // implicit policy. Specific-member trust starts empty until the roster is authenticated.
-  let onboardingFileTrust = $state<FileTrustMode>("on-demand");
+  let onboardingFileTrust = $state<FileTrustMode>("media");
   /** How the folded onboarding summary names each choice, so folding it hides no decision. */
   const ONBOARDING_TRUST_LABELS: Record<FileTrustMode, string> = {
     "on-demand": "on demand",
-    specific: "specific people",
+    media: "media only",
     everyone: "everyone here",
   };
   let fileTrustPolicies = $state<FileTrustPolicies>({});
@@ -483,7 +540,7 @@
     | "news"
     | "quick"
     | "space"
-    | `surface:${"chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "moderation" | "storage" | "connectivity"}`
+    | `surface:${"chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "studio" | "moderation" | "storage" | "connectivity"}`
     | `settings:${string}`
     | `server:${string}`;
   type FeatureGuideItem = {
@@ -788,20 +845,21 @@
     }
   }
   let appearance = $state<Appearance>(loadAppearance());
+  // `sw` is the accent, `bg` the floor: the palette tiles draw both halves of a swatch.
   const PRESETS = [
-    { id: "", name: "Nightshade", sw: "#977df2" },
-    { id: "aurum", name: "Aurum", sw: "#e2a83d" },
-    { id: "verdant", name: "Verdant", sw: "#57c77a" },
-    { id: "garnet", name: "Garnet", sw: "#e0574b" },
-    { id: "slate", name: "Slate", sw: "#6ca0d8" },
+    { id: "", name: "Nightshade", sw: "#977df2", bg: "#131218" },
+    { id: "aurum", name: "Aurum", sw: "#e2a83d", bg: "#141109" },
+    { id: "verdant", name: "Verdant", sw: "#57c77a", bg: "#0f1512" },
+    { id: "garnet", name: "Garnet", sw: "#e0574b", bg: "#161012" },
+    { id: "slate", name: "Slate", sw: "#6ca0d8", bg: "#101318" },
   ];
   const ACCENT_CHOICES = ["#977df2", "#e2a83d", "#e0574b", "#57c77a", "#6ca0d8"];
   // Server livery (design-livery.md): the active server's published scheme. Every value is
   // UNTRUSTED (any member's client may have written the doc): sanitized on read, and only
   // ever able to recolor: preset id, accent, and an allow-list of colour tokens. Semantic
   // tokens (--ok/--warn/--danger) and layout are never livery-controllable.
-  type Livery = { preset: string; accent: string; tokens: Record<string, string>; icon: string; cursor: string; name: string };
-  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {}, icon: "", cursor: "", name: "" });
+  type Livery = { preset: string; accent: string; tokens: Record<string, string>; icon: string; cursor: string; name: string; banner: string };
+  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {}, icon: "", cursor: "", name: "", banner: "" });
   let livery = $state<Livery>(emptyLivery());
   // Rail icons for every (non-DM) server, fetched from each server's livery doc and kept
   // fresh by livery-changed events. Values are sanitized base64 (rendered as data: URLs).
@@ -825,7 +883,11 @@
   function serverLabel(entry: { id: number; name: string; isDm: boolean }): string {
     void railNameTick; // a rename is a localStorage write, which no rune would otherwise see
     if (entry.isDm) return entry.name; // a DM's label is the friend, and is never published
-    return loadLocalName(entry.id) || serverPublishedNames[entry.id] || entry.name;
+    return resolveServerLabel({
+      local: loadLocalName(entry.id),
+      published: serverPublishedNames[entry.id] ?? "",
+      created: entry.name,
+    });
   }
   /**
    * Settle each rail entry's own `name` on the label that should be showing.
@@ -836,15 +898,12 @@
    * an entry nobody has named either way keeps the label it was created with.
    */
   function applyServerLabels() {
-    let changed = false;
-    for (const s of servers) {
-      if (s.isDm) continue;
-      const label = serverLabel(s);
-      if (label && label !== s.name) {
-        s.name = label;
-        changed = true;
-      }
-    }
+    void railNameTick; // a rename is a localStorage write, which no rune would otherwise see
+    const changed = settleServerLabels(servers, (s) => ({
+      local: loadLocalName(s.id),
+      published: serverPublishedNames[s.id] ?? "",
+      created: s.name,
+    }));
     if (changed) servers = [...servers];
   }
   let liveryDraft = $state<Livery>(emptyLivery()); // Server-settings editor draft
@@ -860,7 +919,7 @@
   // the editor has this server's values in it, the buffer belongs to the user.
   function seedLiveryDraft(server: number) {
     if (!showServerSettings || liveryDraftFor === server) return;
-    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "", name: "" };
+    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "", name: "", banner: "" };
     // The published name is seeded on the same read, and only from one: opening the wrench
     // mid-switch would otherwise leave the box empty and one Publish away from clearing the
     // group's name for every member.
@@ -900,6 +959,9 @@
     }
     if (typeof l.icon === "string" && ICON_B64.test(l.icon)) out.icon = l.icon;
     if (typeof l.cursor === "string" && ICON_B64.test(l.cursor) && l.cursor.length <= 24000) out.cursor = l.cursor;
+    // The sidebar banner: base64 only, rendered as an image only, bounded a little above the
+    // icon (96 KiB decoded is about 131k base64 characters).
+    if (typeof l.banner === "string" && /^[A-Za-z0-9+/=]{0,132000}$/.test(l.banner)) out.banner = l.banner;
     // A published name is drawn as text in the rail, the crumbs and the cross-server inbox.
     // The backend already bounds it and refuses control characters; this is the read-side half
     // of the same rule, because any member's client may have written the document.
@@ -973,6 +1035,13 @@
       liveryCache.set(server, next);
       livery = next;
       liveryLoaded = true;
+      // The rail label rides this read too. Only `refreshServerIconFor` used to record the
+      // published name, so a group whose name never raised a `livery-changed` this session stayed
+      // under its placeholder however many times you opened it. Successful reads only: the catch
+      // below degrades to "no livery", which must not be read as "the group publishes no name".
+      if (next.name) serverPublishedNames[server] = next.name;
+      else delete serverPublishedNames[server];
+      applyServerLabels();
       seedLiveryDraft(server);
       // Deliberately not awaited. The cursor is decoration that arrives when it arrives, whereas
       // this function sits inside the switch barrier: validateCursor resolves an image with no
@@ -1046,11 +1115,101 @@
     const file = fileList?.[0];
     if (!file) return;
     try {
-      await setServerIcon(await fileToSquareJpegB64(file, 128));
+      const b64 = await fileToSquareJpegB64(file, 128);
+      // Founding: there is no server yet, so the image waits for `found` to publish it.
+      if (activeServerId === null || foundingHere) foundIcon = b64;
+      else await setServerIcon(b64);
     } catch (err) {
       error = String(err);
     }
   }
+  // The sidebar banner: a small landscape JPEG across the top of the channel list. Cover-fit
+  // into a fixed frame so the doc carries one bounded image whatever was uploaded.
+  async function fileToBannerJpegB64(file: File): Promise<string> {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve(null);
+        img.onerror = () => reject(new Error("could not load image"));
+        img.src = url;
+      });
+      const width = 480;
+      const height = 150;
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        const scale = Math.max(width / img.width, height / img.height);
+        const w = img.width * scale;
+        const h = img.height * scale;
+        ctx.drawImage(img, (width - w) / 2, (height - h) / 2, w, h);
+      }
+      return canvas.toDataURL("image/jpeg", 0.82).split(",")[1] ?? "";
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+  async function setServerBanner(banner: string) {
+    if (activeServerId === null) return;
+    try {
+      await invoke("set_server_banner", { server: activeServerId, banner });
+      await refreshLivery();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function loadServerBanner(fileList: FileList | null) {
+    const file = fileList?.[0];
+    if (!file) return;
+    try {
+      const b64 = await fileToBannerJpegB64(file);
+      if (activeServerId === null || foundingHere) foundBanner = b64;
+      else await setServerBanner(b64);
+    } catch (err) {
+      error = String(err);
+    }
+  }
+  // Images chosen while FOUNDING a server, before it exists. `found` publishes them right after
+  // `found_server` returns; until then the livery preview draws them from here. Kept apart from
+  // `livery` (the active server's published values) so a founding draft can never be mistaken
+  // for something already shared.
+  let foundIcon = $state("");
+  let foundBanner = $state("");
+  let foundCursor = $state("");
+  // True while the start surface's Found tab is the thing the livery panel is editing. The panel
+  // is one piece of markup shared with Server settings; this is how its upload handlers know
+  // whether to publish now or hold the image for `found`.
+  let foundingHere = $derived((servers.length === 0 || showAdd) && !showServerSettings);
+  function resetFoundingDraft() {
+    foundIcon = "";
+    foundBanner = "";
+    foundCursor = "";
+    liveryDraft = emptyLivery();
+    liveryDraftFor = null;
+  }
+  // Publish what was chosen while founding, right after `found_server` returns. Best-effort in
+  // the same sense as the name: a founded server whose look did not land is still a working
+  // server, so the failure is a toast that names where to put it right, never an error.
+  async function publishFoundingLivery(server: number, draft: Livery, icon: string, banner: string, cursor: string) {
+    const hasColours = !!(draft.preset || draft.accent || Object.keys(draft.tokens).length);
+    try {
+      if (hasColours) await invoke("set_livery", { server, preset: draft.preset, accent: draft.accent, tokens: draft.tokens });
+      if (icon) await invoke("set_server_icon", { server, icon });
+      if (banner) await invoke("set_server_banner", { server, banner });
+      if (cursor) await invoke("set_server_cursor", { server, cursor });
+      if (activeServerId === server) await refreshLivery();
+      await refreshServerIconFor(server);
+    } catch (e) {
+      toast(`The server is founded, but its look was not published: ${String(e)}. Set it in Server settings, Livery.`, "warn", 8000);
+    }
+  }
+  // A founding draft never inherits a settings draft, and never survives into the next founding:
+  // entering the start surface starts from the default look.
+  $effect(() => {
+    if (foundingHere) resetFoundingDraft();
+  });
   // Custom ground tint for a livery: two stops washed into Nightshade's grounds (floor
   // and rail toward the first, panels toward the second). The result is a plain #rrggbb
   // per token, so it rides the EXISTING colour allow-list: every client's read-side
@@ -1094,6 +1253,25 @@
     const tokens = { ...liveryDraft.tokens };
     for (const k of GROUND_KEYS) delete tokens[k];
     liveryDraft = { ...liveryDraft, tokens };
+  }
+  // The sliders are live: any intensity above zero tints the draft as you drag, and both at zero
+  // is no tint at all, so there is nothing to apply and nothing to forget to apply.
+  function syncTint() {
+    if (liveryTintBgS > 0 || liveryTintSideS > 0) applyTint();
+    else if (draftTinted) clearTint();
+  }
+  // The rocker. On brings the sliders to life at a visible strength if they were at zero; off
+  // clears the tint from the draft but keeps the slider positions for next time.
+  function setTintOn(on: boolean) {
+    if (on) {
+      if (liveryTintBgS === 0 && liveryTintSideS === 0) {
+        liveryTintBgS = 28;
+        liveryTintSideS = 28;
+      }
+      applyTint();
+    } else {
+      clearTint();
+    }
   }
   // The whole draft as inline custom properties for the Livery preview: colours, corners
   // and interface font, so every control previews before anything is published. The
@@ -1161,6 +1339,10 @@
       const b64 = await fileToCursorPngB64(file);
       if (!(await validateCursor(b64))) {
         error = "That image won't work as a cursor: it needs a visible (mostly opaque) shape.";
+        return;
+      }
+      if (activeServerId === null || foundingHere) {
+        foundCursor = b64;
         return;
       }
       await setServerCursor(b64);
@@ -2297,10 +2479,184 @@
   };
   let joinPreview = $state<InvitePreview | null>(null);
   let joinPreviewCode = $state("");
-  let joinSwitchboardConsent = $state(false);
+  // The member fallback is on by default: the consent card still names what the helping member
+  // learns (your IP address and timing), and unticking it is one click, but the common case is
+  // "I want in", and a join that fails for want of a box nobody noticed is the worse default.
+  let joinSwitchboardConsent = $state(true);
   type JoinReplyReady = { code: string; expires_at_ms: number; candidate_count: number };
   let joinReplyReady = $state<JoinReplyReady | null>(null);
   let joinAttemptPending = $state(false);
+  // The attempt as it runs: the bridge's step list so far (`join-progress`), and the error the
+  // command settled with. `joinAttemptView` folds them into the routes the start surface draws.
+  let joinSteps = $state<JoinStep[]>([]);
+  let joinError = $state("");
+  let joinView = $derived(
+    joinAttemptView({
+      steps: joinSteps,
+      pending: joinAttemptPending,
+      error: joinError,
+      fallbackOffered: (joinPreview?.switchboards ?? 0) > 0,
+      fallbackAllowed: joinSwitchboardConsent,
+    }),
+  );
+  // Whether the connection check fold on the start surface is open; the failure verdict's
+  // "open connection check" button sets it, since that is where the addresses live.
+  let startConnOpen = $state(false);
+  function resetJoinAttempt() {
+    joinPreview = null;
+    joinPreviewCode = "";
+    joinSwitchboardConsent = true;
+    joinSteps = [];
+    joinError = "";
+  }
+  // One arc per route in the join diagram: the rows fan out between "you" and "them", the first
+  // bowing highest. Returns the path and where its label sits (a hair above the curve's middle).
+  function routeArc(i: number, n: number): { d: string; ly: number } {
+    const cy = n <= 1 ? 80 : 18 + (i * 124) / (n - 1);
+    const mid = 0.25 * 80 + 0.75 * cy;
+    return { d: `M52 80 C 150 ${cy}, 270 ${cy}, 368 80`, ly: mid - 5 };
+  }
+  // The two topology diagrams on the Found tab: seven peers, drawn either as a full mesh or as
+  // spokes into a node, with packets travelling the edges. A Svelte action, so the canvas draws
+  // itself for as long as it is on screen and stops when the tab changes. Motion follows the
+  // viewer's preference: with motion off the frame is drawn once, a few packets in flight, and
+  // left alone.
+  function topoDiagram(canvas: HTMLCanvasElement, mode: string) {
+    const got = canvas.getContext("2d");
+    if (!got) return;
+    const ctx: CanvasRenderingContext2D = got;
+    const peers = 7;
+    let packets: { a: number; b: number; t: number; leg: number }[] = [];
+    let raf = 0;
+    let alive = true;
+    const still = () =>
+      appearance.motion === "off" ||
+      (typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches);
+    const token = (name: string, fallback: string) => getComputedStyle(canvas).getPropertyValue(name).trim() || fallback;
+    const pos = (i: number, w: number, h: number) => {
+      const a = (i / peers) * Math.PI * 2 - Math.PI / 2;
+      return { x: w / 2 + Math.cos(a) * (w * 0.36), y: h / 2 - 8 + Math.sin(a) * (h * 0.34) };
+    };
+    function frame() {
+      if (!alive) return;
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      if (!w || !h) {
+        raf = requestAnimationFrame(frame);
+        return;
+      }
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const accent = token("--accent", "#977df2");
+      const border = token("--border", "#3a3750");
+      const ok = token("--ok", "#5ec96e");
+      const bg = token("--bg-0", "#131218");
+      const elev = token("--bg-elev", "#232130");
+      const muted = token("--muted", "#8f8ba3");
+      const cx = w / 2;
+      const cy = h / 2 - 8;
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, w, h);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = border;
+      ctx.globalAlpha = 0.9;
+      if (mode === "mesh") {
+        for (let i = 0; i < peers; i++) {
+          for (let j = i + 1; j < peers; j++) {
+            const p1 = pos(i, w, h);
+            const p2 = pos(j, w, h);
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+          }
+        }
+      } else {
+        for (let k = 0; k < peers; k++) {
+          const pk = pos(k, w, h);
+          ctx.beginPath();
+          ctx.moveTo(pk.x, pk.y);
+          ctx.lineTo(cx, cy);
+          ctx.stroke();
+        }
+      }
+      ctx.globalAlpha = 1;
+      if (packets.length < 8 && Math.random() < 0.06) {
+        const a = Math.floor(Math.random() * peers);
+        let b = Math.floor(Math.random() * peers);
+        if (a === b) b = (b + 1) % peers;
+        packets.push({ a, b, t: 0, leg: 0 });
+      }
+      packets = packets.filter((p) => {
+        p.t += 0.014;
+        const from = mode === "mesh" || p.leg === 0 ? pos(p.a, w, h) : { x: cx, y: cy };
+        const to = mode === "mesh" ? pos(p.b, w, h) : p.leg === 0 ? { x: cx, y: cy } : pos(p.b, w, h);
+        const t = Math.min(p.t, 1);
+        ctx.beginPath();
+        ctx.arc(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t, 2.8, 0, Math.PI * 2);
+        ctx.fillStyle = accent;
+        ctx.fill();
+        if (t < 1) return true;
+        if (mode === "node" && p.leg === 0) {
+          p.leg = 1;
+          p.t = 0;
+          return true;
+        }
+        return false;
+      });
+      if (mode === "node") {
+        const r = 20;
+        ctx.beginPath();
+        for (let q = 0; q < 6; q++) {
+          const ang = (q / 6) * Math.PI * 2 - Math.PI / 2;
+          const hx = cx + Math.cos(ang) * r;
+          const hy = cy + Math.sin(ang) * r;
+          if (q) ctx.lineTo(hx, hy);
+          else ctx.moveTo(hx, hy);
+        }
+        ctx.closePath();
+        ctx.fillStyle = elev;
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+        ctx.fillStyle = muted;
+        ctx.font = "600 8px 'JetBrains Mono', Consolas, monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("NODE", cx, cy + 3);
+      }
+      for (let m = 0; m < peers; m++) {
+        const pm = pos(m, w, h);
+        ctx.beginPath();
+        ctx.arc(pm.x, pm.y, 9, 0, Math.PI * 2);
+        ctx.fillStyle = elev;
+        ctx.fill();
+        ctx.strokeStyle = border;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(pm.x, pm.y, 2.6, 0, Math.PI * 2);
+        ctx.fillStyle = ok;
+        ctx.fill();
+      }
+      if (!still()) raf = requestAnimationFrame(frame);
+    }
+    if (still()) {
+      // A still frame needs a few packets in flight to read as traffic at all.
+      for (let i = 0; i < 4; i++) packets.push({ a: i, b: (i + 3) % peers, t: (i + 1) / 5, leg: 0 });
+    }
+    frame();
+    return {
+      destroy() {
+        alive = false;
+        cancelAnimationFrame(raf);
+      },
+    };
+  }
   let joinReplyNow = $state(Date.now());
   let joinReplyExpired = $derived(
     joinReplyReady !== null && joinReplyIsExpired(joinReplyReady.expires_at_ms, joinReplyNow),
@@ -2412,11 +2768,12 @@
   function markMessageArrivals(ids: string[]) {
     if (!ids.length) return;
     arrivalMessageIds = new Set([...arrivalMessageIds, ...ids]);
+    // Outlives the longest arrival (1200ms): dropping the class mid-flight snaps the row to rest.
     setTimeout(() => {
       const next = new Set(arrivalMessageIds);
       for (const id of ids) next.delete(id);
       arrivalMessageIds = next;
-    }, 900);
+    }, 1500);
   }
   let messagesEl = $state<HTMLUListElement | undefined>(undefined);
   // In-channel message search (Ctrl+F): match indices into the loaded messages + the current one.
@@ -2868,6 +3225,7 @@
     { label: "Announcements", tab: "status" },
     { label: "Wiki", tab: "wiki" },
     { label: "Events", tab: "events" },
+    { label: "Studio", tab: "studio" },
     { label: "Transfers", tab: "downloads" },
   ];
   let quickItems = $derived.by(() => {
@@ -2932,6 +3290,133 @@
   function readMarkOf(key: string): ReadMark {
     return readMarks[key] ?? NO_READ_MARK;
   }
+  // History that arrived late: per conversation, the messages that landed BEHIND this device's
+  // read position and have not yet been in front of the person. A mesh delivers whenever two
+  // members finally meet, so a morning's messages can arrive in the evening and sort into a part
+  // of the log already scrolled past; unread state measures forward from the cursor, so they
+  // raise no badge. Ids only (the list reorders under positions and timestamps), sealed with the
+  // read marks so a restart does not clear the one thing that survived the desync.
+  let latePast = $state<Record<string, string[]>>({});
+  // Per-server "point out history that arrived late" preference, default on. Mine alone: it is
+  // about my attention, not group policy, so the owner cannot switch off somebody else's marker.
+  const latePastOffKey = (id: number) => `catcoms.latepast.off.${id}`;
+  let latePastMarkers = $state(true);
+  function loadLatePastMarkers(id: number) {
+    try { latePastMarkers = localStorage.getItem(latePastOffKey(id)) !== "1"; } catch { latePastMarkers = true; }
+  }
+  function setLatePastMarkers(v: boolean) {
+    latePastMarkers = v;
+    if (activeServerId === null) return;
+    try {
+      if (v) localStorage.removeItem(latePastOffKey(activeServerId));
+      else localStorage.setItem(latePastOffKey(activeServerId), "1");
+    } catch { /* best-effort */ }
+  }
+  /** The late ids of the conversation on screen, or none while the marker is switched off. */
+  let activeLate = $derived.by(() => {
+    const k = chanKey();
+    return new Set(latePastMarkers && k ? latePast[k] ?? [] : []);
+  });
+  /** The earliest-sorting late row that is loaded, for the header jump; else the oldest recorded. */
+  function firstLateId(): string {
+    if (!activeLate.size) return "";
+    const loaded = messages.find((m) => activeLate.has(m.id));
+    return loaded?.id ?? [...activeLate][0];
+  }
+  /**
+   * Record which of an update's arrivals landed in this person's past.
+   *
+   * Runs for every channel, on or off screen: the rows are fetched by id (they need not be
+   * loaded), placed against the conversation's read mark, and the late ones are kept until each
+   * has actually been in front of the person. Written down either way, because "a message
+   * arrived and nothing announced it" is exactly the report this exists to explain.
+   */
+  async function recordLateArrivals(server: number, channel: string, arrivals: string[]) {
+    const key = chatScopeKey(server, channel);
+    const mark = readMarkOf(key);
+    if (!mark.ts && !mark.id) return; // never read: its first history is not missed history
+    let rows: TailMsg[];
+    try {
+      rows = await fetchArrivals(server, channel, arrivals);
+    } catch (e) {
+      diagRecord({ section: "channels", code: "UI.LATE_PAST.LOOKUP_FAILED", level: "warn", fields: { server, channel, arrivals: arrivals.length, error: String(e) } });
+      return;
+    }
+    // The active conversation's ceiling is measured natively over the whole channel; elsewhere
+    // the fetched rows and the mark itself are what there is to measure against.
+    const ceiling = server === activeServerId && channel === cur?.active
+      ? readTsCeiling
+      : readCeiling([...rows.map((r) => r.ts), mark.ts], Date.now());
+    const late = lateArrivals(rows, mark, myFp, ceiling);
+    diagRecord({
+      section: "channels",
+      code: "UI.LATE_PAST.RECORDED",
+      level: late.length ? "info" : "debug",
+      fields: { server, channel, arrivals: arrivals.length, fetched: rows.length, late: late.length, mark_ts: mark.ts, markers_on: latePastMarkers },
+    });
+    if (!late.length) return;
+    const next = addLatePast(latePast[key] ?? [], late);
+    if (next === latePast[key]) return;
+    latePast = { ...latePast, [key]: next };
+    scheduleUiStateSave();
+  }
+  /** A late row has been in front of the person: forget it, durably. */
+  function markLateSeen(id: string) {
+    const k = chanKey();
+    if (!k) return;
+    const current = latePast[k];
+    if (!current) return;
+    const next = clearLatePast(current, [id]);
+    if (next === current) return;
+    diagRecord({ section: "channels", code: "UI.LATE_PAST.SEEN", level: "debug", fields: { key: k, remaining: next.length } });
+    const copy = { ...latePast };
+    if (next.length) copy[k] = next;
+    else delete copy[k];
+    latePast = copy;
+    scheduleUiStateSave();
+  }
+  /**
+   * Svelte action on a late row: it counts as seen once most of it has been inside the log's
+   * viewport, in a focused and visible window, for long enough to have been looked at rather than
+   * scrolled through. Scrolling past a row at speed is not seeing it.
+   */
+  const LATE_SEEN_DWELL_MS = 700;
+  let lateObserver: IntersectionObserver | null = null;
+  const lateDwell = new Map<Element, ReturnType<typeof setTimeout>>();
+  function lateSeenObserver(): IntersectionObserver {
+    if (lateObserver) return lateObserver;
+    lateObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const pending = lateDwell.get(entry.target);
+        if (!entry.isIntersecting) {
+          if (pending) { clearTimeout(pending); lateDwell.delete(entry.target); }
+          continue;
+        }
+        if (pending) continue;
+        lateDwell.set(entry.target, setTimeout(() => {
+          lateDwell.delete(entry.target);
+          if (!entry.target.isConnected || document.visibilityState !== "visible" || !document.hasFocus()) return;
+          const id = (entry.target as HTMLElement).dataset.lateId ?? "";
+          if (id) markLateSeen(id);
+        }, LATE_SEEN_DWELL_MS));
+      }
+    }, { root: messagesEl ?? null, threshold: 0.6 });
+    return lateObserver;
+  }
+  function lateSeen(node: HTMLLIElement, id: string) {
+    let watched = "";
+    const watch = (next: string) => {
+      if (watched) { lateSeenObserver().unobserve(node); const t = lateDwell.get(node); if (t) { clearTimeout(t); lateDwell.delete(node); } }
+      watched = next;
+      node.dataset.lateId = next;
+      if (next) lateSeenObserver().observe(node);
+    };
+    watch(id);
+    return {
+      update(next: string) { if (next !== watched) watch(next); },
+      destroy() { watch(""); },
+    };
+  }
   let dividerTs = $state(Number.POSITIVE_INFINITY);
   /** Id of the last message read here, frozen with `dividerTs`. See `captureDivider`. */
   let dividerId = $state("");
@@ -2958,7 +3443,7 @@
     return save;
   }
   function continuityJson(): string {
-    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies });
+    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad });
   }
   /**
    * Seal the current continuity snapshot without the ordinary typing/read-position debounce.
@@ -3016,6 +3501,8 @@
       readMarks = next.readMarks;
       statusCursors = next.statusCursors;
       fileTrustPolicies = next.fileTrustPolicies;
+      latePast = next.latePast;
+      embedAutoLoad = next.embedAutoLoad;
     } catch (e) {
       if (generation !== uiStateLoadGeneration || locked) return;
       console.warn("UI continuity load failed", e);
@@ -3023,6 +3510,8 @@
       readMarks = {};
       statusCursors = {};
       fileTrustPolicies = {};
+      latePast = {};
+      embedAutoLoad = false; // an unreadable record is not permission to start contacting anyone
       error = `Durable history could not be authenticated and was not loaded: ${e}`;
     } finally {
       if (generation === uiStateLoadGeneration && !locked) {
@@ -3164,10 +3653,6 @@
   let offlineRoster = $derived(filteredRoster.filter((m) => !deviceMap[m.fingerprint] && !memberOnline(m)));
   // Claimed paths connected here (self always counts), for the roster's diagnostic count.
   let onlineCount = $derived(roster.filter((m) => m.you || onlineMembers.has(m.fingerprint)).length);
-  // Compact mono abbreviation for a role badge in a narrow roster row (owner → OWN, admin → ADM).
-  function roleAbbr(role: string): string {
-    return role === "owner" ? "OWN" : role === "admin" ? "ADM" : role.slice(0, 3).toUpperCase();
-  }
   let profiles = $state<Record<string, Prof>>({});
   let files = $state<UiFile[]>([]);
   // The file index by content address. Embeds, posters, cards and chips all resolve a cid to its
@@ -3182,6 +3667,56 @@
   // Whether ≥1 live peer previously proved it could serve authenticated catch-up (a conservative
   // availability hint refreshed with the file list). This is stricter than `onlineMembers`.
   let hasPeers = $state(false);
+  let keptFiles = $state<KeptFiles | null>(null);
+  const fileInventoryGate = fileInventoryRequests();
+  let keptTransfer = $state<{ server: number; cid: string; cancellation: string } | null>(null);
+
+  function cancelKeptTransfer() {
+    const transfer = keptTransfer;
+    keptTransfer = null;
+    if (transfer) void invoke("cancel_inline_download", { cancellation: transfer.cancellation }).catch(() => {});
+  }
+  $effect(() => {
+    if (keptTransfer && (locked || keptTransfer.server !== activeServerId)) untrack(cancelKeptTransfer);
+  });
+
+  async function keepFileHere(cid: string) {
+    const server = activeServerId;
+    const gen = viewGeneration;
+    if (server === null || locked || keptTransfer) return;
+    const transfer = { server, cid, cancellation: `keep-${crypto.randomUUID()}` };
+    keptTransfer = transfer;
+    fileInventoryGate.invalidate();
+    try {
+      await invoke("begin_inline_download", { cancellation: transfer.cancellation });
+      if (keptTransfer?.cancellation !== transfer.cancellation || !unlockedViewCurrent(gen, server)) {
+        await invoke("cancel_inline_download", { cancellation: transfer.cancellation });
+        return;
+      }
+      await invoke("keep_file", { server, cid, cancellation: transfer.cancellation });
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    } catch (e) {
+      if (keptTransfer?.cancellation === transfer.cancellation && unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptTransfer?.cancellation === transfer.cancellation) keptTransfer = null;
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    }
+  }
+
+  async function forgetKeptFile(cid: string) {
+    const server = activeServerId;
+    const gen = viewGeneration;
+    if (server === null || locked || keptTransfer) return;
+    fileInventoryGate.invalidate();
+    try {
+      await mutateFileInventory(
+        () => invoke("forget_kept_file", { server, cid }), refreshFiles,
+        () => unlockedViewCurrent(gen, server),
+      );
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    }
+  }
   let uploading = $state(false);
   let folder = $state(""); // current folder in the Files tab
   let newFolder = $state(""); // new-folder name input
@@ -3208,13 +3743,74 @@
   let newEmojiSize = $state(0); // 0 = default inline size; else a pixel size up to the sticker max
   let showEmoji = $state(false);
 
-  // Right-click context menu (one shared instance). `onSelect` returning true keeps the menu
-  // open (used to swap in a confirm prompt for destructive actions).
+  // Right-click context menu (one shared instance). Rows are verbs; the head names what was hit.
+  // `onSelect` returning true keeps the menu open (a confirm prompt swaps itself in, a toggle
+  // rebuilds its rows). `hint` is shown on the row and, when it is a single letter, fires the row
+  // while the menu is open: only bindings that really exist belong there. `sub` is a one-level
+  // flyout; `react` is the recent-reactions strip; `slider` a per-peer level.
   type MenuItem =
     | { divider: true }
-    | { label: string; icon?: string; danger?: boolean; disabled?: boolean; onSelect: () => unknown };
-  let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+    | { section: string }
+    | { head: true; kind: string; title: string; fp?: string; info?: string; online?: boolean }
+    | { react: Msg }
+    | { slider: true; icon: string; label: string; value: number; max: number; onInput: (v: number) => void }
+    | {
+        label: string; icon?: string; hint?: string; danger?: boolean; disabled?: boolean; on?: boolean;
+        sub?: MenuItem[]; onSelect?: () => unknown;
+      };
+  type MenuRow = Exclude<Extract<MenuItem, { label: string }>, { slider: true }>;
+  const isMenuRow = (item: MenuItem | undefined): item is MenuRow => !!item && "label" in item && !("slider" in item);
+  let menu = $state<{ x: number; y: number; items: MenuItem[]; confirm?: boolean } | null>(null);
   let menuEl = $state<HTMLElement | undefined>();
+  let menuSub = $state(-1); // index of the top-level row whose flyout is open
+  let menuReactOpen = $state(false); // the reactions strip unfolded into the full picker
+  let menuField: HTMLInputElement | HTMLTextAreaElement | null = null; // the text field a menu opened on
+  // Menu icons: 16-grid stroke paths on currentColor, so they recolour with the palette. Emoji
+  // glyphs used to sit here; they ignored the theme and rendered differently on every machine.
+  const MENU_ICONS: Record<string, string> = {
+    reply: '<path d="M6 4L2.5 7.5 6 11"/><path d="M2.5 7.5H10a3.5 3.5 0 010 7"/>',
+    cat: '<path d="M3 6.5l-1-4 3.5 2M13 6.5l1-4-3.5 2"/><path d="M3 6.5a5 5 0 0110 0v2a5 5 0 01-10 0z"/><circle cx="6" cy="8" r="0.6" fill="currentColor"/><circle cx="10" cy="8" r="0.6" fill="currentColor"/><path d="M6.5 10.5c1 .8 2 .8 3 0"/>',
+    quote: '<path d="M3.5 11V7.5a2.5 2.5 0 012.5-2.5"/><path d="M9.5 11V7.5A2.5 2.5 0 0112 5"/><path d="M3.5 9h2.5v2H3.5zM9.5 9H12v2H9.5z"/>',
+    copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5a1 1 0 00-1-1h-6a1 1 0 00-1 1v6a1 1 0 001 1h2"/>',
+    link: '<path d="M6.5 9.5l3-3"/><path d="M7 4.5l1.2-1.2a2.5 2.5 0 013.5 3.5L10.5 8"/><path d="M9 11.5l-1.2 1.2a2.5 2.5 0 01-3.5-3.5L5.5 8"/>',
+    pin: '<path d="M9.5 2.5l4 4-3 1-2.5 2.5.5 3-6-6 3 .5L8 5z"/><path d="M6 10l-3.5 3.5"/>',
+    edit: '<path d="M3 13l1-4 7-7 3 3-7 7-4 1z"/><path d="M9.5 3.5l3 3"/>',
+    trash: '<path d="M3 4.5h10"/><path d="M6.5 4.5v-1a1 1 0 011-1h1a1 1 0 011 1v1"/><path d="M4.5 4.5l.6 8a1 1 0 001 .9h3.8a1 1 0 001-.9l.6-8"/>',
+    hash: '<path d="M6 2.5l-1 11M11 2.5l-1 11M3 6h10M3 10h10"/>',
+    verify: '<path d="M8 2l4.5 1.8v3.6c0 3-2 5.2-4.5 6.1C5.5 12.6 3.5 10.4 3.5 7.4V3.8z"/><path d="M6 8l1.5 1.5L10.5 6.5"/>',
+    user: '<circle cx="8" cy="5.5" r="2.5"/><path d="M3 13.5c.6-2.5 2.5-4 5-4s4.4 1.5 5 4"/>',
+    dm: '<rect x="2" y="3.5" width="12" height="9" rx="1.5"/><path d="M2.5 4.5L8 9l5.5-4.5"/>',
+    crown: '<path d="M2.5 11.5l1-7 3 3L8 3.5l1.5 4 3-3 1 7z"/><path d="M3.5 13.5h9"/>',
+    x: '<circle cx="8" cy="8" r="5.5"/><path d="M6 6l4 4M10 6l-4 4"/>',
+    eye: '<path d="M1.5 8s2.5-4 6.5-4 6.5 4 6.5 4-2.5 4-6.5 4-6.5-4-6.5-4z"/><circle cx="8" cy="8" r="2"/>',
+    search: '<circle cx="7" cy="7" r="4"/><path d="M10 10l3.5 3.5"/>',
+    cut: '<circle cx="4.5" cy="4.5" r="2"/><circle cx="4.5" cy="11.5" r="2"/><path d="M6 6l7.5 6.5M6 10l7.5-6.5"/>',
+    paste: '<rect x="3.5" y="3.5" width="9" height="10" rx="1.5"/><path d="M6 3.5V2.5h4v1"/><path d="M6 8h4M6 10.5h3"/>',
+    selall: '<rect x="2.5" y="2.5" width="11" height="11" rx="1.5" stroke-dasharray="2 2"/><rect x="5.5" y="5.5" width="5" height="5"/>',
+    ext: '<path d="M9 2.5h4.5V7"/><path d="M13.5 2.5L7 9"/><path d="M11.5 9v3.5a1 1 0 01-1 1h-7a1 1 0 01-1-1v-7a1 1 0 011-1H7"/>',
+    spark: '<path d="M8 2l1.3 3.7L13 7l-3.7 1.3L8 12l-1.3-3.7L3 7l3.7-1.3z"/>',
+    down: '<path d="M8 2.5v8M5 7.5l3 3 3-3"/><path d="M3 13.5h10"/>',
+    img: '<rect x="2.5" y="3.5" width="11" height="9" rx="1.5"/><circle cx="6" cy="7" r="1.2"/><path d="M13 11l-3-3-4 4"/>',
+    info: '<circle cx="8" cy="8" r="5.5"/><path d="M8 7v4M8 5.2v.1"/>',
+    at: '<circle cx="8" cy="8" r="2.5"/><path d="M10.5 8v1a1.5 1.5 0 003 0V8a5.5 5.5 0 10-2.2 4.4"/>',
+    gear: '<circle cx="8" cy="8" r="2"/><path d="M8 2v1.5M8 12.5V14M2 8h1.5M12.5 8H14M3.8 3.8l1 1M11.2 11.2l1 1M3.8 12.2l1-1M11.2 4.8l1-1"/>',
+    leave: '<path d="M6 2.5H3.5v11H6"/><path d="M9 5l3 3-3 3M12 8H6"/>',
+    orbit: '<circle cx="8" cy="8" r="2.5"/><ellipse cx="8" cy="8" rx="6.5" ry="2.5" transform="rotate(-30 8 8)"/>',
+    up: '<path d="M8 13V3.5M4.5 7L8 3.5 11.5 7"/>',
+    vol: '<path d="M2.5 6h2.5l3.5-3v10L5 10H2.5z"/><path d="M10.5 5.5a3.5 3.5 0 010 5M12.5 3.5a6 6 0 010 9"/>',
+    micoff: '<rect x="6" y="2" width="4" height="7" rx="2"/><path d="M3.5 7.5a4.5 4.5 0 009 0M8 12v2"/><path d="M3 3l10 10"/>',
+    piano: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M6 3v6M10 3v6"/>',
+    fp: '<path d="M4 9a4 4 0 018 0v1M6 9a2 2 0 014 0v3M8 9v4"/><path d="M3.5 5.5A5.5 5.5 0 0112.5 5"/>',
+    tray: '<path d="M2.5 9.5v2a1 1 0 001 1h9a1 1 0 001-1v-2"/><path d="M8 2.5v7M5.5 7l2.5 2.5L10.5 7"/>',
+    focus: '<circle cx="8" cy="8" r="2.5"/><path d="M8 2v2M8 12v2M2 8h2M12 8h2"/>',
+  };
+  function menuIconSvg(key: string | undefined): string {
+    const body = key ? MENU_ICONS[key] : undefined;
+    return body
+      ? `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`
+      : "";
+  }
+  const shortFp = (fp: string) => `${fp.slice(0, 4)}·${fp.slice(4, 8)}`;
   let composerEl = $state<HTMLTextAreaElement | undefined>();
   let editMessageEl = $state<HTMLTextAreaElement | undefined>();
   let announcementInputEl = $state<HTMLTextAreaElement | undefined>();
@@ -3494,8 +4090,27 @@
   });
 
   // The main pane shows one tab at a time.
-  type Tab = "chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "moderation" | "storage" | "connectivity";
+  type Tab = "chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "studio" | "moderation" | "storage" | "connectivity";
   let view = $state<Tab>("chat");
+  // The member column can be folded away to give the conversation the width back. The toggle
+  // lives on the surface strip's right edge, over the column it controls, and the preference
+  // is remembered: someone who works without the roster should not have to re-hide it.
+  let membersOpen = $state(loadMembersOpen());
+  function loadMembersOpen(): boolean {
+    try {
+      return localStorage.getItem("catcoms.ui.members") !== "hidden";
+    } catch {
+      return true; // storage unavailable: the roster stays visible
+    }
+  }
+  function toggleMembers() {
+    membersOpen = !membersOpen;
+    try {
+      localStorage.setItem("catcoms.ui.members", membersOpen ? "shown" : "hidden");
+    } catch {
+      /* storage unavailable */
+    }
+  }
   type StorageHealth = {
     listed_files: number; referenced_chunks: number; verified_chunks: number;
     missing_chunks: number; unreadable_chunks: number; invalid_manifests: number;
@@ -3900,7 +4515,170 @@
     { id: "fly", label: "Fly in", description: "Sweep in from the side", glyph: "→" },
     { id: "pop", label: "Pop", description: "A quick soft-scale arrival", glyph: "◇" },
     { id: "drift", label: "Drift", description: "Float diagonally into place", glyph: "↗" },
+    { id: "wipe", label: "Wipe", description: "Uncovered from one side to the other", glyph: "▐" },
+    { id: "split", label: "Split", description: "Opens from the centre line outward", glyph: "═" },
+    { id: "blinds", label: "Blinds", description: "Slats widen until the row is whole", glyph: "≡" },
+    { id: "checker", label: "Checker", description: "Alternate tiles land first, then the gaps fill", glyph: "▚" },
+    { id: "bars", label: "Bars", description: "Uneven bars resolve at different speeds", glyph: "▤" },
+    { id: "wheel", label: "Wheel", description: "A clock hand sweeps the row into view", glyph: "◔" },
+    { id: "dissolve", label: "Dissolve", description: "Speckles bloom until they cover the row", glyph: "⁘" },
+    { id: "blackout", label: "Blackout", description: "Arrives dark, then the lights come up", glyph: "◐" },
+    { id: "newsflash", label: "Newsflash", description: "Spins in from nothing, 1998 style", glyph: "✶" },
+    { id: "swivel", label: "Swivel", description: "Hinges open from one edge in perspective", glyph: "◫" },
+    { id: "flip", label: "Flip", description: "Falls forward like a split-flap board", glyph: "⊟" },
+    { id: "spiral", label: "Spiral", description: "Corkscrews in from a corner", glyph: "@" },
+    { id: "crawl", label: "Crawl", description: "Rises from below, tilted back into the distance", glyph: "⟰" },
+    { id: "bounce", label: "Bounce", description: "Drops in and settles on the second bounce", glyph: "⤓" },
+    { id: "boomerang", label: "Boomerang", description: "Flies past its spot and comes back", glyph: "↩" },
+    { id: "slam", label: "Slam", description: "Stamps down from huge with a short rattle", glyph: "◉" },
+    { id: "quake", label: "Earthquake", description: "Rattles into place", glyph: "≋" },
   ];
+  const MOTION_FAMILIES: { id: MessageFrameMotionFamily; label: string; hint: string }[] = [
+    { id: "quiet", label: "QUIET", hint: "a nudge and a fade" },
+    { id: "reveal", label: "WIPES & REVEALS", hint: "the row is uncovered in place" },
+    { id: "ceremony", label: "CEREMONY", hint: "the row makes an entrance" },
+    { id: "physical", label: "PHYSICAL", hint: "the row has mass" },
+  ];
+  // The one 4..80 slider means something different per family; the readout says what.
+  const DISTANCE_LABELS: Record<MessageFrameMotionTraits["distance"], string> = {
+    travel: "Travel", depth: "Depth", grain: "Grain", amplitude: "Amplitude", spin: "Spin", none: "Travel",
+  };
+  function arrivalDistanceReadout(kind: MessageFrameMotionTraits["distance"], d: number): string {
+    if (kind === "grain") return `${Math.max(6, Math.round(d * 0.6))}px`;
+    if (kind === "amplitude") return `${Math.max(1, Math.round(d / 6))}px`;
+    if (kind === "spin") return `${Math.round(180 + d * 12)}°`;
+    if (kind === "depth") return `${d}`;
+    if (kind === "none") return "n/a";
+    return `${d}px`;
+  }
+  function arrivalIsDefault(a: MessageFrameArrival): boolean {
+    const d = DEFAULT_MESSAGE_FRAME.arrival;
+    return a.duration === d.duration && a.distance === d.distance && a.fade === d.fade && a.direction === d.direction && a.easing === d.easing;
+  }
+  function resetArrival() {
+    updateFrame({ motion: "none", arrival: { ...DEFAULT_MESSAGE_FRAME.arrival } });
+  }
+
+  // The profile editor is one draft behind four tabs. Frame only appears while chat frames are
+  // switched on; a tab with unsaved changes carries a dot and the save bar names it.
+  type ProfileTabId = "identity" | "name" | "frame" | "arrival";
+  const PROFILE_TABS: { id: ProfileTabId; label: string }[] = [
+    { id: "identity", label: "Identity" },
+    { id: "name", label: "Name style" },
+    { id: "frame", label: "Frame" },
+    { id: "arrival", label: "Arrival" },
+  ];
+  let profileTab = $state<ProfileTabId>("identity");
+  let profileDirty = $derived.by(() => {
+    const me = profiles[myFp];
+    const savedFrame = parseMessageFrame(me?.bubble ?? "");
+    const frameKey = (f: MessageFrame) => JSON.stringify([f.surface, f.opacity, f.edge, f.shape, f.effects]);
+    const arrivalKey = (f: MessageFrame) => JSON.stringify([f.motion, f.arrival]);
+    // Mirrors syncProfileEditor, which keeps the draft's own value wherever the saved one is empty.
+    const identity = me
+      ? pName.trim() !== (me.name || pName).trim() || pColor !== (me.color || pColor) ||
+        pDescription.trim() !== (me.description ?? "").trim() || pAvatar !== (me.avatar || "") || pBanner !== (me.banner || "")
+      : !!(pAvatar || pBanner || pDescription.trim());
+    const name = me ? pFont !== (me.font || pFont) || pEffect !== (me.effect || pEffect) : pEffect !== "none";
+    const frame = frameKey(pFrame) !== frameKey(savedFrame);
+    const arrival = arrivalKey(pFrame) !== arrivalKey(savedFrame);
+    return { identity, name, frame, arrival, any: identity || name || frame || arrival };
+  });
+  const dirtyTabLabels = () => PROFILE_TABS.filter((t) => profileDirty[t.id]).map((t) => t.label).join(", ");
+  function discardProfileDraft() {
+    pAvatar = "";
+    pBanner = "";
+    pDescription = "";
+    pEffect = "none";
+    pEffects = [];
+    pBubble = "";
+    syncProfileEditor(); // restores every saved value; a never-saved profile just goes back to blank
+  }
+  // Centre a moving arrival on the message itself, not on the lane. The row's children (gutter
+  // and body) each carry the animation, so both receive the SAME absolute point as their origin:
+  // the pair then turns as one piece around the content's centre (or hinges on its edge for a
+  // swivel or flip) instead of each part spinning about its own box, and a short message's spin
+  // stays as small as the message. Measured with the animation switched off for the read, since
+  // the first keyframe (scale 0, rotated) would otherwise be what gets measured.
+  function arrivalOrigin(node: HTMLElement, motion: MessageFrameMotion) {
+    const apply = (current: MessageFrameMotion) => {
+      const traits = messageFrameMotionTraits(current);
+      if (current === "none" || current === "blackout" || traits.family === "reveal") return;
+      const body = node.querySelector<HTMLElement>(":scope > .m-body");
+      if (!body) return;
+      const parts = [...node.children].filter((child): child is HTMLElement => child instanceof HTMLElement);
+      for (const part of parts) part.style.animationName = "none";
+      // The message is its text plus the name above it, not the full-width lines they sit on: a
+      // Range over the text gives the ink's extent, and the union with the name box is the
+      // visual message. Anything without a text (an attachment-only row) falls back to the body.
+      let box: DOMRect | null = null;
+      const union = (r: DOMRect) => {
+        if (r.width <= 0 || r.height <= 0) return;
+        box = box
+          ? new DOMRect(Math.min(box.left, r.left), Math.min(box.top, r.top), Math.max(box.right, r.right) - Math.min(box.left, r.left), Math.max(box.bottom, r.bottom) - Math.min(box.top, r.top))
+          : r;
+      };
+      const text = body.querySelector<HTMLElement>(":scope > .text");
+      if (text) {
+        const range = document.createRange();
+        range.selectNodeContents(text);
+        union(range.getBoundingClientRect());
+      }
+      const name = body.querySelector<HTMLElement>(".author .author-link");
+      if (name) union(name.getBoundingClientRect());
+      if (!box) box = body.getBoundingClientRect();
+      box = box as DOMRect;
+      const mode = getComputedStyle(node).getPropertyValue("--message-arrival-origin").trim();
+      const cx = mode === "left center" ? box.left : mode === "right center" ? box.right : box.left + box.width / 2;
+      const cy = mode === "top center" ? box.top : mode === "bottom center" ? box.bottom : box.top + box.height / 2;
+      for (const part of parts) {
+        const r = part.getBoundingClientRect();
+        part.style.transformOrigin = `${Math.round(cx - r.left)}px ${Math.round(cy - r.top)}px`;
+        part.style.animationName = ""; // hand the animation back; it starts fresh with this origin
+      }
+    };
+    apply(motion);
+    return {
+      update(next: MessageFrameMotion) {
+        apply(next);
+      },
+    };
+  }
+  // Fills the accent track of every range in the editor up to its value: the styled slider
+  // paints from `--pct`, which the browser does not supply. Watches for sliders that appear
+  // later (an effect's settings unfold) and repaints on the key (Reset buttons move values
+  // without an input event).
+  function rangeFills(node: HTMLElement, key: string) {
+    const paint = (r: HTMLInputElement) => {
+      const min = Number(r.min || 0);
+      const max = Number(r.max || 100);
+      const pct = max > min ? ((Number(r.value) - min) / (max - min)) * 100 : 0;
+      r.style.setProperty("--pct", `${Math.max(0, Math.min(100, pct))}%`);
+    };
+    const paintAll = () => {
+      for (const r of node.querySelectorAll<HTMLInputElement>('input[type="range"]')) paint(r);
+    };
+    const onInput = (e: Event) => {
+      const t = e.target;
+      if (t instanceof HTMLInputElement && t.type === "range") paint(t);
+    };
+    node.addEventListener("input", onInput);
+    const observer = new MutationObserver(() => paintAll());
+    observer.observe(node, { childList: true, subtree: true });
+    paintAll();
+    let last = key;
+    return {
+      update(next: string) {
+        if (next === last) return;
+        last = next;
+        queueMicrotask(paintAll);
+      },
+      destroy() {
+        observer.disconnect();
+        node.removeEventListener("input", onInput);
+      },
+    };
+  }
   const FRAME_EASINGS: { id: MessageFrameEasing; label: string; description: string }[] = [
     { id: "soft", label: "Soft", description: "Gentle terminal easing" },
     { id: "snappy", label: "Snappy", description: "Fast response with a firm stop" },
@@ -4243,6 +5021,86 @@
 
   function deleteNameRecipe(id: string) {
     persistNameRecipes(savedNameRecipes.filter((recipe) => recipe.id !== id));
+  }
+
+  // The identity library: whole profile drafts (avatar, banner, name and its style, bio, arrival)
+  // saved on this device under a label, so a look made once can be loaded on any server. Same
+  // shape as the name recipes, kept local: nothing here is published until Save profile.
+  type SavedIdentity = {
+    id: string; label: string; savedAt: number;
+    name: string; color: string; font: string; effect: string; description: string; bubble: string; avatar: string; banner: string;
+  };
+  const IDENTITY_KEY = "catcoms.identities.v1";
+  const IDENTITY_MAX = 10; // avatars and banners are inline base64; ten keeps well under the storage quota
+  const B64_RE = /^[A-Za-z0-9+/=]*$/;
+  function loadIdentities(): SavedIdentity[] {
+    try {
+      const raw = JSON.parse(localStorage.getItem(IDENTITY_KEY) ?? "[]");
+      if (!Array.isArray(raw)) return [];
+      return raw.slice(0, IDENTITY_MAX).flatMap((value): SavedIdentity[] => {
+        if (!value || typeof value !== "object") return [];
+        const r = value as Partial<SavedIdentity>;
+        if (typeof r.label !== "string" || typeof r.name !== "string" || typeof r.color !== "string" || typeof r.effect !== "string") return [];
+        if (!/^#[0-9a-fA-F]{6}$/.test(r.color) || r.effect.length > 4096) return [];
+        const effects = decodeNameEffects(r.effect);
+        if (r.effect !== "none" && !effects.length) return [];
+        const avatar = typeof r.avatar === "string" && r.avatar.length <= 100_000 && B64_RE.test(r.avatar) ? r.avatar : "";
+        const banner = typeof r.banner === "string" && r.banner.length <= 360_000 && B64_RE.test(r.banner) ? r.banner : "";
+        return [{
+          id: typeof r.id === "string" ? r.id : crypto.randomUUID(),
+          label: r.label.slice(0, 32),
+          savedAt: typeof r.savedAt === "number" ? r.savedAt : 0,
+          name: r.name.slice(0, 64),
+          color: r.color.toLowerCase(),
+          font: typeof r.font === "string" && NAME_FONT_IDS.has(r.font) ? r.font : "system",
+          effect: encodeNameEffects(effects),
+          description: typeof r.description === "string" ? r.description.slice(0, 280) : "",
+          bubble: encodeMessageFrame(parseMessageFrame(typeof r.bubble === "string" ? r.bubble : "")),
+          avatar,
+          banner,
+        }];
+      });
+    } catch {
+      return [];
+    }
+  }
+  let savedIdentities = $state<SavedIdentity[]>(loadIdentities());
+  let identityLabelDraft = $state("");
+  let identityLibraryError = $state("");
+  function persistIdentities(next: SavedIdentity[]) {
+    savedIdentities = next.slice(-IDENTITY_MAX);
+    try {
+      localStorage.setItem(IDENTITY_KEY, JSON.stringify(savedIdentities));
+      identityLibraryError = "";
+    } catch {
+      // Quota, most likely: a few large banners fill it. The list still works for this session.
+      identityLibraryError = "This device's local storage is full, so that identity is kept for this session only. Remove one with a large avatar or banner to make room.";
+    }
+  }
+  function saveIdentity() {
+    const label = (identityLabelDraft.trim() || pName.trim()).slice(0, 32);
+    if (!label) return;
+    // Saving under an existing label replaces it: "update my work look" rather than a twin.
+    persistIdentities([...savedIdentities.filter((ident) => ident.label !== label), {
+      id: crypto.randomUUID(), label, savedAt: Date.now(),
+      name: pName, color: pColor, font: pFont, effect: pEffect, description: pDescription, bubble: pBubble, avatar: pAvatar, banner: pBanner,
+    }]);
+    identityLabelDraft = "";
+  }
+  function applyIdentity(ident: SavedIdentity) {
+    rememberNameStyle(`identity:${ident.id}`);
+    pName = ident.name;
+    pColor = ident.color;
+    pFont = ident.font;
+    pEffect = ident.effect;
+    pEffects = decodeNameEffects(ident.effect);
+    pDescription = ident.description;
+    pBubble = ident.bubble;
+    pAvatar = ident.avatar;
+    pBanner = ident.banner;
+  }
+  function deleteIdentity(id: string) {
+    persistIdentities(savedIdentities.filter((ident) => ident.id !== id));
   }
 
   const pick = <T,>(items: readonly T[]): T => items[Math.floor(Math.random() * items.length)];
@@ -4969,17 +5827,55 @@
     chatStickToBottom =
       tailLoaded &&
       nearScrollBottom(node.scrollTop, node.clientHeight, node.scrollHeight);
+    // Scrolling away from the bottom ends the settle loop in the same turn, so a reader who moves
+    // during the half-second after a message lands is not pulled back down by the next frame.
+    if (!chatStickToBottom) chatPinFramesLeft = 0;
   }
 
+  // Opening a channel has to land on the NEWEST message, and one scroll after one `tick()` is not
+  // enough to promise that. The rows are only the first thing the list gets: avatars, embedded
+  // media, emoji images and the reference cards are all resolved a frame or more later, and every
+  // one of them grows the list UNDER a scroll position that was correct when it was set. The
+  // reader was left looking at the middle of the history, or at the very top of it.
+  //
+  // So the pin is held rather than fired once: re-applied every frame for a short window, and
+  // re-armed by anything that lands late (a decoded image, a resolved embed). Growth below the
+  // viewport raises scrollHeight without moving scrollTop, which fires no scroll event, so this
+  // cannot fight the reader: the moment they actually scroll up, `onChatScroll` clears
+  // `chatStickToBottom` and the next frame of the loop stands down.
+  const CHAT_PIN_FRAMES = 30; // ~half a second of settling at 60Hz
+  let chatPinFramesLeft = 0;
+  let chatPinFrame = 0;
+  function pinChatToBottom(frames = CHAT_PIN_FRAMES) {
+    chatPinFramesLeft = Math.max(chatPinFramesLeft, frames);
+    // Pin once here as well as in the loop: `requestAnimationFrame` does not run while the window
+    // is hidden, and a chat opened behind a minimized window must still be at its newest row when
+    // the window comes back rather than waiting on a frame that never arrived.
+    if (messagesEl && chatStickToBottom && tailLoaded) messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (chatPinFrame) return;
+    const step = () => {
+      chatPinFrame = 0;
+      const node = messagesEl;
+      if (!node || !chatStickToBottom || !tailLoaded) {
+        chatPinFramesLeft = 0;
+        return;
+      }
+      node.scrollTop = node.scrollHeight;
+      chatPinFramesLeft -= 1;
+      if (chatPinFramesLeft > 0) chatPinFrame = requestAnimationFrame(step);
+    };
+    chatPinFrame = requestAnimationFrame(step);
+  }
+  // Images and media announce their own arrival, and they are the biggest late growth of all. The
+  // listener is a capture-phase one because `load` does not bubble.
+  function chatMediaSettled() {
+    if (chatStickToBottom) pinChatToBottom(4);
+  }
   $effect(() => {
     void messages;
     void pageStart;
     if (!chatStickToBottom) return;
-    tick().then(() => {
-      if (messagesEl && chatStickToBottom && tailLoaded) {
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-      }
-    });
+    tick().then(() => pinChatToBottom());
   });
 
   // Persist the rendezvous address as a reusable default (it's usually a stable infra node).
@@ -5038,6 +5934,9 @@
       resolveRemoteMedia(statusEl);
       resolveEmoji(statusEl);
       resolveRefCards(statusEl);
+      // Every one of those can add height to the log. Re-pin rather than leave the reader looking
+      // at whatever the newly inserted cards pushed the newest message past.
+      chatMediaSettled();
     });
   });
 
@@ -5428,6 +6327,8 @@
     readMarks = {};
     statusCursors = {}; // a reading habit, sealed beside the marks above and dropped with them
     fileTrustPolicies = {}; // member trust choices name relationships and leave the screen too
+    embedAutoLoad = false; // a locked app contacts nobody on its own; unlock re-reads the answer
+    embedGrants.clear();
     pendingStatusMarks.clear(); // and a mark still waiting on hydration is not replayed behind a lock
     uiStateReady = false;
     uiStateSaveFailed = false;
@@ -5459,9 +6360,17 @@
       // Publish it as the group's own name, so everyone who joins sees what it is called instead
       // of naming it themselves. Best-effort: a founded server with an unpublished name is still
       // a working server, and the owner can publish it from Server settings.
+      // A silent failure here is invisible from the founder's side, because the founder's own
+      // rail is showing its local label either way: the group would simply have no name for
+      // everyone who joins it. Say so, and name where to put it right.
       void invoke("set_shared_server_name", { server: r.server, name: serverName })
         .then(() => refreshServerIconFor(r.server))
-        .catch(() => {});
+        .catch(() => toast("This group has no published name yet, so people who join will name it themselves. Publish one in Server settings, Overview.", "warn", 7000));
+      // The look chosen while founding: colours, then each image, published in turn. Taken off
+      // the draft first, because resetting it below must not race the publish.
+      const draft: Livery = { ...liveryDraft, tokens: { ...liveryDraft.tokens } };
+      void publishFoundingLivery(r.server, draft, foundIcon, foundBanner, foundCursor);
+      resetFoundingDraft();
       newServerName = "";
     } catch (e) {
       if (sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) error = errorText(e);
@@ -5474,6 +6383,8 @@
     busy = true;
     error = "";
     joinReplyReady = null;
+    joinSteps = [];
+    joinError = "";
     const operationGeneration = viewGeneration;
     try {
       const { hex, turn } = unwrapInvite(joinInvite);
@@ -5482,7 +6393,7 @@
         joinPreview = await invoke<InvitePreview>("preview_invite", { inviteHex: hex });
         if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
         joinPreviewCode = hex;
-        joinSwitchboardConsent = false;
+        joinSwitchboardConsent = true;
       }
       const assistedAction = assistedJoinAction(
         previewMatchesCode,
@@ -5511,14 +6422,14 @@
       addServer(r, label, displayName);
       joinServerName = "";
       joinInvite = "";
-      joinPreview = null;
-      joinPreviewCode = "";
-      joinSwitchboardConsent = false;
+      resetJoinAttempt();
       joinReplyReady = null;
     } catch (e) {
       if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
       joinReplyReady = null;
-      error = String(e);
+      // The verdict panel carries the failure, in route terms; the bare error line under the
+      // surface would say the same thing twice.
+      joinError = String(e);
     } finally {
       joinAttemptPending = false;
       busy = false;
@@ -5658,21 +6569,33 @@
    */
   function addServer(r: Found, name: string, profileName: string = "") {
     const channels = r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }];
-    servers = [
-      ...servers,
-      { id: r.server, name, channels, active: r.channel, unread: [], invite: "", isDm: r.is_dm },
-    ];
+    if (!r.is_dm) {
+      // A numeric native id can be reused after a leave + restart, so an override left behind by
+      // a server that used to hold this id would silently rename the one being added now. What
+      // the caller was told to call this group is authoritative for it.
+      try { localStorage.removeItem(localNameKey(r.server)); } catch { /* nothing to clear */ }
+    }
+    // Settle the label the same way every other entry settles it. `join_server` runs the livery
+    // catch-up before it returns, so the group's published name can already have landed in
+    // `serverPublishedNames` while this entry did not yet exist for `applyServerLabels` to reach:
+    // that is how a joined group kept its placeholder ("New server") until the next restart.
+    const entry = { id: r.server, name, channels, active: r.channel, unread: [], invite: "", isDm: r.is_dm };
+    entry.name = serverLabel(entry) || name;
+    servers = [...servers, entry];
     if (!r.is_dm) {
       // A numeric native id can be reused after a leave + restart. Onboarding is authoritative for
       // this newly joined group and must overwrite any orphaned policy rather than inherit it.
       fileTrustPolicies = {
         ...fileTrustPolicies,
-        [r.server]: { mode: onboardingFileTrust, trustedAuthors: [] },
+        [r.server]: { mode: onboardingFileTrust, trustedAuthors: [], blockedAuthors: [] },
       };
       void saveUiStateImmediately();
+      // And read the livery once regardless: a published name that raised no `livery-changed`
+      // this session (it arrived during the join's own catch-up) is otherwise never fetched.
+      void refreshServerIconFor(r.server);
     }
     showAdd = false;
-    onboardingFileTrust = "on-demand";
+    onboardingFileTrust = "media";
     // Your profile takes the name you gave for YOURSELF, never the group's. A DM has no profile
     // name of its own to carry, so its caller passes none and this leaves the profile untouched.
     if (profileName) pName = profileName;
@@ -5856,6 +6779,9 @@
     deviceMap = {};
     files = [];
     hasPeers = false;
+    keptFiles = null;
+    fileInventoryGate.invalidate();
+    cancelKeptTransfer();
     wikiPinned = new Set();
     wikiPages = [];
     wikiMap = {}; // name -> body: the previous server's page CONTENT, not just its names
@@ -5881,6 +6807,7 @@
     moderationLoading = false;
     groupLoading = false; // a clear with no load behind it (no active group) is not "loading"
     messagesLoading = false;
+    clearTimeout(messagesWatchdog); // whatever it was going to re-ask for is not on screen any more
     // Livery is server branding: leaving it up paints the group you left over the one you opened.
     // followLiveryNow already drops to the default theme for DM-home and the inbox, so the brief
     // default between servers is that same transition rather than a new kind of flicker.
@@ -5966,6 +6893,7 @@
     loadServerSoundPreferences(id); // local message/mention/news overrides for this server
     loadSrvTurn(id); // this server's operator-set TURN (for the Server-settings editor)
     loadLiveryOptOut(id); // whether the user opted out of this server's livery
+    loadLatePastMarkers(id); // whether history that arrived late is pointed out here
     loadVerified(id); // this server's locally-verified members
     loadDraftFor(chanKey()); // restore this server's active-channel draft
     captureDivider(); // snapshot the read boundary for this server's active channel
@@ -5987,10 +6915,23 @@
     // file index, the event list and the device list were fetched: the messages had been on hand
     // for most of that wait, and the pane was lying about it. The other panes still make their
     // claims ("No members to show") only once everything has landed.
-    const messages = refresh().then(() => {
-      if (viewCurrent(gen, id)) messagesLoading = false;
+    // The flag is owned by the NEWEST message read, not by the generation that issued it. Releasing
+    // it only when `viewCurrent` still held meant a read that was superseded while it was in flight
+    // released nothing, and if the switch that superseded it never got as far as issuing its own
+    // (an unlock, a server removed under it, a throw anywhere in the batch below), the chat pane
+    // was left claiming to be loading a conversation nobody was waiting for. `finally`, because a
+    // read that failed has also stopped loading.
+    const loadToken = ++messagesLoadToken;
+    const messages = refresh().finally(() => {
+      if (messagesLoadToken === loadToken) messagesLoading = false;
     });
-    await Promise.all([
+    armMessagesWatchdog(loadToken, gen, id);
+    // `allSettled`, not `all`. Each of these reads is responsible for its own failure and says so
+    // in its own pane; the batch exists only to know when the group has finished arriving. Under
+    // `all`, one rejection abandoned the rest of this function, and the panes it had not reached
+    // yet kept their loading claim for the rest of the session: a roster that never stopped saying
+    // "Loading members…" on a server that had plenty of them.
+    await Promise.allSettled([
       messages,
       refreshMembers(),
       refreshProfiles(),
@@ -6195,11 +7136,15 @@
       if (!applyPage(page, token)) return;
       messageWindowScope = nextScope;
       void refreshPinned(server, channel);
-      if (animateArrivals) {
-        // Own posts already animate at optimistic insertion; excluding them prevents the
-        // acknowledged, server-assigned id from replaying the entrance a second time.
-        markMessageArrivals(page.rows.filter((message) => message.author !== myFp && !previous.has(message.id)).map((message) => message.id));
-      }
+      // Peers' rows animate only when the caller says this refresh answers a live update (a reload
+      // of history stays still). An own post animated at optimistic insertion, but the
+      // acknowledgement swaps that pending row for the server-assigned id within a few frames and
+      // would cut the entrance short, so the mark carries over to the new id for as long as the
+      // pending mark is still live; past that window the acknowledged row simply appears at rest.
+      const ownStillArriving = previousMessages.some((message) => message.id.startsWith("pending:") && arrivalMessageIds.has(message.id));
+      markMessageArrivals(page.rows
+        .filter((message) => !previous.has(message.id) && (message.author === myFp ? ownStillArriving : animateArrivals))
+        .map((message) => message.id));
       // Loading rows is not reading them. `settleReadState` decides which this was.
       settleReadState();
     } catch (e) {
@@ -6573,15 +7518,17 @@
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null) return;
+    const request = fileInventoryGate.begin();
     try {
       // Wiki-pinned content addresses are derived fresh from the wiki on the backend each call: a
       // file embedded in a live page never drops out of circulation, whatever its expiry says. It
       // is a second round-trip, so it rides alongside the listing rather than after it.
-      const [listing, pinned] = await Promise.allSettled([
+      const [listing, pinned, kept] = await Promise.allSettled([
         invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", { server }),
         invoke<string[]>("get_wiki_pinned_cids", { server }),
+        invoke<KeptFiles>("get_kept_files", { server }),
       ]);
-      if (!viewCurrent(gen, server)) return; // another group's shared files
+      if (!fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) return; // another group's shared files
       // Applied independently: a failing pin lookup must not blank the listing it only decorates.
       if (listing.status === "fulfilled") {
         files = listing.value.files;
@@ -6590,8 +7537,9 @@
         error = String(listing.reason);
       }
       if (pinned.status === "fulfilled") wikiPinned = new Set(pinned.value);
+      keptFiles = kept.status === "fulfilled" ? kept.value : null;
     } catch (e) {
-      if (viewCurrent(gen, server)) error = String(e);
+      if (fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) error = String(e);
     }
   }
   async function refreshStorageHealth() {
@@ -6668,12 +7616,7 @@
       return hasPeers
         ? { cls: "downloading", icon: "↓", label: "Waiting for source" }
         : { cls: "offline", icon: "○", label: "No proven member path" };
-    if (f.total > 0 && f.held >= f.total)
-      return { cls: "local", icon: "●", label: "On this device" };
-    if (f.held > 0)
-      return { cls: "partial", icon: "◐", label: `Partial ${f.held}/${f.total}` };
-    if (hasPeers) return { cls: "remote", icon: "○", label: "Downloadable" };
-    return { cls: "offline", icon: "○", label: "No proven member path" };
+    return fileAvailability(f.held, f.total, hasPeers);
   }
   async function refreshStatuses() {
     const gen = viewGeneration;
@@ -7256,28 +8199,58 @@
   // The ⋯ menu on an announcement card. Every entry here is also gated natively; this decides what
   // is worth offering, and a role read arriving late can only ever hide an action, never allow one.
   function statusMenu(s: Msg): MenuItem[] {
-    const items: MenuItem[] = [{ label: "Copy text", icon: "⧉", onSelect: () => copyText(s.text) }];
+    const items: MenuItem[] = [
+      { head: true, kind: "announcement", title: `${nameOf(s.author)} · ${fmtTime(s.ts)}`, fp: s.author },
+      { label: "Copy text", icon: "copy", onSelect: () => copyText(s.text) },
+    ];
     if (s.id) {
-      items.push({ label: "Copy link", icon: "🔗", onSelect: () => copyText(statusMarker(s.text, s.id)) });
-      items.push({ label: "React…", icon: "☺", onSelect: () => (statusReactionPickerFor = s.id) });
+      items.push({ label: "Copy link", icon: "link", onSelect: () => copyText(statusMarker(s.text, s.id)) });
+      items.push({ label: "React…", icon: "cat", onSelect: () => (statusReactionPickerFor = s.id) });
       if (canModerate) {
-        items.push({ label: s.pinned ? "Unpin" : "Pin to the top", icon: "📌", onSelect: () => toggleStatusPin(s) });
+        items.push({ label: s.pinned ? "Unpin" : "Pin to the top", icon: "pin", hint: "mod", onSelect: () => toggleStatusPin(s) });
       }
       if (s.author === myFp) {
         items.push({ divider: true });
-        items.push({ label: "Edit", icon: "✎", onSelect: () => startStatusEdit(s) });
+        items.push({ label: "Edit", icon: "edit", onSelect: () => startStatusEdit(s) });
       }
       if (s.author === myFp || canModerate) {
         if (s.author !== myFp) items.push({ divider: true });
         items.push({
           label: "Delete",
-          icon: "🗑",
+          icon: "trash",
           danger: true,
           onSelect: () => confirmInMenu("Delete this announcement?", () => deleteStatus(s)),
         });
       }
     }
     return items;
+  }
+
+  // The studio surface is a lazy chunk like Feedback and the debug console: its editor, codec
+  // and fixtures only load the first time the tab opens.
+  type StudioSurfaceComponent = (typeof import("./Studio.svelte"))["default"];
+  type StudioNavComponent = (typeof import("./StudioNav.svelte"))["default"];
+  let StudioSurface = $state<StudioSurfaceComponent | null>(null);
+  let StudioNav = $state<StudioNavComponent | null>(null);
+  let studioLoading = false;
+  async function loadStudio() {
+    if ((StudioSurface && StudioNav) || studioLoading) return;
+    studioLoading = true;
+    try {
+      const [s, n] = await Promise.all([import("./Studio.svelte"), import("./StudioNav.svelte")]);
+      StudioSurface = s.default;
+      StudioNav = n.default;
+    } catch (cause) {
+      toast(`The studio failed to load: ${String(cause)}`, "err");
+    } finally {
+      studioLoading = false;
+    }
+  }
+  $effect(() => {
+    if (view === "studio") void loadStudio();
+  });
+  function studioNotice(text: string, kind: "info" | "warn" | "error") {
+    toast(text, kind === "error" ? "err" : kind, kind === "info" ? 3500 : 5000);
   }
 
   function switchView(v: Tab) {
@@ -7834,7 +8807,52 @@
     if (items.length === 0) return;
     e.preventDefault();
     e.stopPropagation();
+    menuSub = -1;
+    menuReactOpen = false;
+    menuTypeahead = "";
+    clearTimeout(menuSubTimer);
     menu = { x: e.clientX, y: e.clientY, items };
+  }
+  /** Keep the menu open but rebuild its rows (a toggle just changed what they should say). */
+  function refreshMenu(build: () => MenuItem[]): true {
+    if (menu) menu = { ...menu, items: build() };
+    return true;
+  }
+  function pickMenuItem(item: MenuRow, depth: number, row: number) {
+    if (item.sub && depth === 0) {
+      if (menuSub === row) menuSub = -1;
+      else void openMenuSub(row);
+      return;
+    }
+    const keep = item.onSelect?.();
+    if (keep !== true) menu = null;
+  }
+  async function openMenuSub(row: number) {
+    clearTimeout(menuSubTimer);
+    menuSub = row;
+    await tick();
+    (menuEl?.querySelector(".ctx-sub .ctx-item:not([disabled])") as HTMLElement | null)?.focus();
+  }
+  // Hovering a row with a flyout opens it after a beat; hovering any other top-level row closes
+  // it after the same beat, so a diagonal move into the flyout does not slam it shut.
+  // Where the pointer last was over the log, so R / E can find the row beneath it. Cleared when
+  // the pointer leaves the log; resolved through elementFromPoint at key time, so anything that
+  // has since covered the log (a takeover, the stage) wins over a stale row.
+  let logPointer: { x: number; y: number } | null = null;
+  function messageUnderPointer(): Msg | undefined {
+    if (!logPointer || !messagesEl) return undefined;
+    const row = document.elementFromPoint(logPointer.x, logPointer.y)?.closest("li[data-mi]") as HTMLElement | null;
+    if (!row || !messagesEl.contains(row)) return undefined;
+    return messages[Number(row.getAttribute("data-mi")) - pageStart];
+  }
+  let menuSubTimer: ReturnType<typeof setTimeout> | undefined;
+  function hoverMenuRow(depth: number, row: number, hasSub: boolean) {
+    if (depth !== 0) return;
+    clearTimeout(menuSubTimer);
+    menuSubTimer = setTimeout(() => {
+      if (hasSub) menuSub = row;
+      else if (menuSub !== -1) menuSub = -1;
+    }, 120);
   }
 
   // Svelte action: open a context menu on right-click, with items built fresh at click time
@@ -7845,7 +8863,13 @@
       // An inline embed and a link card each build their own menu in handleRichContext, which is
       // delegated on the container above this node. Let the event bubble there instead of opening
       // (and stopping at) the row's menu; that handler folds this row's items in below its own.
-      if ((e.target as HTMLElement | null)?.closest("[data-embed-cid],.ref-card")) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("[data-embed-cid],.ref-card")) return;
+      // Selected text and web links get their own menus from the window fallback, which folds
+      // this row's verbs in underneath as "Message". Claiming the click here would hide them.
+      if (target?.closest("a[href]")) return;
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed && sel.rangeCount > 0 && sel.getRangeAt(0).intersectsNode(node) && sel.toString().trim()) return;
       openMenu(e, make());
     };
     node.addEventListener("contextmenu", h);
@@ -7859,30 +8883,81 @@
     };
   }
 
-  // Keep the menu on-screen + focus it once rendered (clamp against the viewport).
+  // Place the menu once rendered and whenever it changes shape (a flyout, the reactions grid).
+  // The corner stays on the pointer; near an edge the box mirrors to the other side of it rather
+  // than sliding over it, and a flyout mirrors with it (the flip-x class).
   $effect(() => {
     if (!menu || !menuEl) return;
-    const w = menuEl.offsetWidth;
-    const h = menuEl.offsetHeight;
-    const x = Math.max(4, Math.min(menu.x, window.innerWidth - w - 8));
-    const y = Math.max(4, Math.min(menu.y, window.innerHeight - h - 8));
-    menuEl.style.left = `${x}px`;
-    menuEl.style.top = `${y}px`;
-    menuEl.focus();
+    void menuSub;
+    void menuReactOpen;
+    const p = placeMenu(menu.x, menu.y, menuEl.offsetWidth, menuEl.offsetHeight, window.innerWidth, window.innerHeight);
+    menuEl.style.left = `${p.left}px`;
+    menuEl.style.top = `${p.top}px`;
+    menuEl.classList.toggle("flip-x", p.flipX);
+    menuEl.classList.toggle("flip-y", p.flipY);
+    if (menuSub < 0 && !menuEl.contains(document.activeElement)) menuEl.focus();
   });
 
+  // Keys inside the menu: arrows and Home/End walk the rows of whichever level has focus, Right
+  // opens a flyout and Left (or Escape) closes it, a bare letter fires the row wearing it as its
+  // hint, and otherwise letters type-ahead against the labels (one letter repeated cycles).
+  let menuTypeahead = "";
+  let menuTypeaheadAt = 0;
   function onMenuKey(e: KeyboardEvent) {
-    if (!menuEl) return;
-    const items = Array.from(menuEl.querySelectorAll<HTMLButtonElement>(".ctx-item:not([disabled])"));
-    if (items.length === 0) return;
-    const idx = items.indexOf(document.activeElement as HTMLButtonElement);
-    if (e.key === "ArrowDown") {
+    if (!menuEl || !menu) return;
+    const active = document.activeElement as HTMLElement | null;
+    const subEl = active?.closest(".ctx-sub") as HTMLElement | null;
+    const scope = subEl ?? menuEl;
+    const items = Array.from(scope.querySelectorAll<HTMLButtonElement>(":scope > .ctx-row > .ctx-item:not([disabled])"));
+    const idx = items.indexOf(active as HTMLButtonElement);
+    const focusAt = (i: number) => items[((i % items.length) + items.length) % items.length]?.focus();
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      items[(idx + 1) % items.length]?.focus();
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      items[(idx - 1 + items.length) % items.length]?.focus();
+      if (items.length) focusAt(idx + (e.key === "ArrowDown" ? 1 : -1));
+      return;
     }
+    if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      if (items.length) focusAt(e.key === "Home" ? 0 : items.length - 1);
+      return;
+    }
+    if (e.key === "ArrowRight" && !subEl) {
+      const row = Number(active?.getAttribute("data-row") ?? -1);
+      const item = row >= 0 ? menu.items[row] : undefined;
+      if (isMenuRow(item) && item.sub) {
+        e.preventDefault();
+        void openMenuSub(row);
+      }
+      return;
+    }
+    if ((e.key === "ArrowLeft" || e.key === "Escape") && subEl) {
+      e.preventDefault();
+      e.stopPropagation(); // the window handler would close the whole menu on Escape
+      const row = menuSub;
+      menuSub = -1;
+      void tick().then(() => (menuEl?.querySelector(`[data-row="${row}"]`) as HTMLElement | null)?.focus());
+      return;
+    }
+    if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey || e.key === " ") return;
+    e.preventDefault();
+    const k = e.key.toLowerCase();
+    const now = Date.now();
+    if (now - menuTypeaheadAt > 600) menuTypeahead = "";
+    menuTypeaheadAt = now;
+    // A bare accelerator fires its row; once you have started typing a label, letters only ever
+    // extend that prefix ("d" then "e" reaches Delete even though "e" alone is React).
+    if (!menuTypeahead) {
+      const hit = items.find((b) => (b.getAttribute("data-hint") ?? "").toLowerCase() === k);
+      if (hit) {
+        hit.click();
+        return;
+      }
+    }
+    menuTypeahead += k;
+    const labels = items.map((b) => b.querySelector(".ctx-label")?.textContent ?? "");
+    const uniform = /^(.)\1*$/.test(menuTypeahead);
+    const i = typeaheadIndex(labels, uniform ? menuTypeahead[0] : menuTypeahead, uniform ? idx : -1);
+    if (i >= 0) items[i].focus();
   }
 
   async function copyText(text: string) {
@@ -7905,16 +8980,23 @@
     }
   }
 
-  // Re-arm the open menu as a confirm/cancel prompt for a destructive action.
+  // Re-arm the open menu as a confirm prompt for a destructive action: the same box, a danger
+  // header asking the question, focus on the verb, Escape (or "Keep it") backing out.
   function confirmInMenu(label: string, action: () => void) {
     if (!menu) return true;
+    menuSub = -1;
+    menuReactOpen = false;
+    const verb = confirmVerb(label);
     menu = {
       ...menu,
+      confirm: true,
       items: [
-        { label, icon: "⚠", danger: true, onSelect: action },
-        { label: "Cancel", onSelect: () => {} },
+        { head: true, kind: "confirm", title: confirmQuestion(label) },
+        { label: verb, icon: verb === "Leave" ? "leave" : verb === "Remove" ? "x" : "trash", danger: true, hint: "⏎", onSelect: action },
+        { label: "Keep it", icon: "reply", hint: "esc", onSelect: () => {} },
       ],
     };
+    void tick().then(() => (menuEl?.querySelector(".ctx-item.danger") as HTMLElement | null)?.focus());
     return true; // keep the menu open to show the confirm
   }
 
@@ -7957,30 +9039,28 @@
 
   function messageMenu(m: Msg): MenuItem[] {
     const items: MenuItem[] = [
-      { label: "Copy text", icon: "⧉", onSelect: () => copyText(m.text) },
-      { label: "Quote in reply", icon: "❝", onSelect: () => appendToDraft(`> ${nameOf(m.author)}: ${m.text}`) },
-      { divider: true },
-      { label: "Copy sender fingerprint", icon: "#", onSelect: () => copyText(m.author) },
+      { head: true, kind: "message", title: `${nameOf(m.author)} · ${fmtTime(m.ts)}`, fp: m.author },
     ];
+    // Legacy rows without an id can be quoted and copied but not addressed.
     if (m.id) {
-      const top: MenuItem[] = [
-        { label: "Reply", icon: "↰", onSelect: () => startReply(m) },
-        { label: "React…", icon: "☺", onSelect: () => (reactionPickerFor = m.id) },
-      ];
-      // Owner/admin can pin/unpin any message (not in DMs).
-      if (canModerate && !cur?.isDm) {
-        top.push({ label: m.pinned ? "Unpin" : "Pin message", icon: "📌", onSelect: () => togglePin(m) });
-      }
-      top.push({ divider: true });
-      items.splice(0, 0, ...top);
+      items.push({ react: m });
+      items.push({ label: "Reply", icon: "reply", hint: "R", onSelect: () => startReply(m) });
     }
-    // Edit / delete your own messages (legacy ones without an id can't be targeted).
+    items.push({ label: "Quote in reply", icon: "quote", onSelect: () => appendToDraft(`> ${nameOf(m.author)}: ${m.text}`) });
+    items.push({ divider: true }, { section: "share" });
+    items.push({ label: "Copy text", icon: "copy", onSelect: () => copyText(m.text) });
+    items.push({ label: "Copy sender fingerprint", icon: "fp", onSelect: () => copyText(m.author) });
+    // Owner/admin can pin/unpin any message (not in DMs).
+    if (m.id && canModerate && !cur?.isDm) {
+      items.push({ divider: true });
+      items.push({ label: m.pinned ? "Unpin message" : "Pin message", icon: "pin", hint: "mod", onSelect: () => togglePin(m) });
+    }
     if (m.author === myFp && m.id) {
       items.push({ divider: true });
-      items.push({ label: "Edit", icon: "✎", onSelect: () => startEdit(m) });
+      items.push({ label: "Edit", icon: "edit", onSelect: () => startEdit(m) });
       items.push({
         label: "Delete",
-        icon: "🗑",
+        icon: "trash",
         danger: true,
         onSelect: () => confirmInMenu("Delete this message?", () => deleteMessage(m)),
       });
@@ -7988,8 +9068,8 @@
       // Owner/admin moderation: remove another member's message (not in DMs).
       items.push({ divider: true });
       items.push({
-        label: "Delete (moderator)",
-        icon: "🗑",
+        label: "Delete as moderator",
+        icon: "trash",
         danger: true,
         onSelect: () => confirmInMenu(`Delete ${nameOf(m.author)}'s message?`, () => deleteMessage(m)),
       });
@@ -8001,56 +9081,71 @@
     const isOnline = m.you || onlineMembers.has(m.fingerprint);
     const items: MenuItem[] = [
       {
-        label: presenceText(m.fingerprint, m.you),
-        icon: isOnline ? "●" : "○",
-        disabled: true,
-        onSelect: () => {},
+        head: true,
+        kind: m.you ? "you" : "member",
+        title: nameOf(m.fingerprint),
+        fp: m.fingerprint,
+        info: `${isOnline ? "●" : "○"} ${presenceText(m.fingerprint, m.you)} · ${shortFp(m.fingerprint)}`,
+        online: isOnline,
       },
-      { divider: true },
-      { label: "Copy fingerprint", icon: "#", onSelect: () => copyText(m.fingerprint) },
+      { label: "Profile card", icon: "user", onSelect: () => showProfile(m.fingerprint) },
     ];
+    // Add a friend in-band (only for an online member of a server: not in a DM, not yourself).
+    if (!m.you && !cur?.isDm && isOnline) {
+      items.push({ label: "Message", icon: "dm", onSelect: () => startDmWithMember(m.fingerprint) });
+    }
+    if (!m.you) items.push({ label: "Mention in composer", icon: "at", onSelect: () => mentionInComposer(m.fingerprint) });
+    items.push({ divider: true }, { section: "trust" });
     if (!m.you) {
       items.push({
         label: verifiedFps.has(m.fingerprint) ? "Verified: review…" : "Verify identity…",
-        icon: "✓",
+        icon: "verify",
+        on: verifiedFps.has(m.fingerprint),
         onSelect: () => (verifyFor = m.fingerprint),
       });
     }
-    // Add a friend in-band (only for an online member of a server: not in a DM, not yourself).
-    if (!m.you && !cur?.isDm && isOnline) {
-      items.push({ divider: true });
-      items.push({ label: "Add friend (DM)", icon: "👋", onSelect: () => startDmWithMember(m.fingerprint) });
-    }
+    items.push({ label: "Copy fingerprint", icon: "fp", onSelect: () => copyText(m.fingerprint) });
     const r = roles[m.fingerprint] ?? "member";
     if (myRole === "owner" && !m.you && r !== "owner") {
-      items.push({ divider: true });
-      items.push(
-        r === "admin"
-          ? { label: "Demote from admin", icon: "▾", onSelect: () => setAdmin(m.fingerprint, false) }
-          : { label: "Make admin", icon: "▴", onSelect: () => setAdmin(m.fingerprint, true) },
-      );
+      items.push({ divider: true }, { section: "server · owner" });
+      items.push({
+        label: "Roles",
+        icon: "crown",
+        sub: [
+          r === "admin"
+            ? { label: "Demote from admin", icon: "crown", onSelect: () => setAdmin(m.fingerprint, false) }
+            : { label: "Make admin", icon: "crown", onSelect: () => setAdmin(m.fingerprint, true) },
+        ],
+      });
       items.push({
         label: "Remove from server",
-        icon: "⨯",
+        icon: "x",
         danger: true,
         onSelect: () => confirmInMenu(`Remove ${nameOf(m.fingerprint)}`, () => removeMember(m.fingerprint)),
       });
     }
     return items;
   }
+  function mentionInComposer(fp: string) {
+    insertTarget = "chat";
+    view = "chat";
+    insertAtCaret(`@[${mentionName(nameOf(fp))}] `);
+  }
 
   function fileMenu(f: UiFile): MenuItem[] {
     const items: MenuItem[] = [
-      { label: "Open details", icon: "ⓘ", onSelect: () => openFileInfo(f) },
-      { label: "Download", icon: "↓", onSelect: () => downloadFile(f) },
-      { label: "Post to chat", icon: "➦", onSelect: () => appendToDraft(`![${f.name}](cid:${f.cid})`) },
+      { head: true, kind: "file", title: f.name },
+      { label: "Open details", icon: "info", onSelect: () => openFileInfo(f) },
+      { label: "Download", icon: "down", onSelect: () => downloadFile(f) },
+      { label: "Post to chat", icon: "reply", onSelect: () => appendToDraft(`![${f.name}](cid:${f.cid})`) },
       { divider: true },
-      { label: "Copy address (CID)", icon: "#", onSelect: () => copyText(f.cid) },
+      { label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(f.cid) },
     ];
     if (myRole === "owner" || myRole === "admin") {
+      items.push({ divider: true });
       items.push({
         label: "Delete file",
-        icon: "🗑",
+        icon: "trash",
         danger: true,
         onSelect: () => confirmInMenu(`Delete ${f.name}`, () => removeFile(f)),
       });
@@ -8060,34 +9155,286 @@
 
   function wikiPageMenu(p: string): MenuItem[] {
     return [
-      { label: "Open page", icon: "⊞", onSelect: () => openWikiPage(p) },
-      { label: "Post link to chat", icon: "➦", onSelect: () => appendToDraft(`[[${p}]]`) },
-      { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[[${p}]]`) },
+      { head: true, kind: "wiki", title: p },
+      { label: "Open page", icon: "ext", onSelect: () => openWikiPage(p) },
+      { label: "Post link to chat", icon: "reply", onSelect: () => appendToDraft(`[[${p}]]`) },
+      { label: "Copy link", icon: "link", onSelect: () => copyText(`[[${p}]]`) },
+      { divider: true },
       {
         label: "Rename page…",
-        icon: "✎",
+        icon: "edit",
         onSelect: () => void openWikiPage(p).then(() => startWikiRename()),
       },
       {
         label: "Delete page…",
-        icon: "✕",
+        icon: "trash",
+        danger: true,
         onSelect: () => void openWikiPage(p).then(() => armWikiDelete()), // confirmed in the page header
       },
     ];
   }
 
   function serverMenu(s: ServerState): MenuItem[] {
-    const items: MenuItem[] = [];
-    if (s.invite) items.push({ label: "Copy invite", icon: "⧉", onSelect: () => void copyFreshInvite(s.id) });
-    items.push({ label: "Server settings", icon: "⚙", onSelect: () => void openServerSettings(s.id) });
+    const items: MenuItem[] = [{ head: true, kind: s.isDm ? "dm" : "server", title: s.name }];
+    if (s.invite) items.push({ label: "Copy invite", icon: "link", onSelect: () => void copyFreshInvite(s.id) });
+    items.push({
+      label: "Mark all read",
+      icon: "eye",
+      disabled: s.unread.length === 0,
+      onSelect: () => { for (const c of [...s.unread]) clearChannelIndicators(s.id, c); },
+    });
+    items.push({ label: "Server space", icon: "orbit", hint: "Ctrl+O", onSelect: () => toggleSpace() });
+    items.push({ label: "Server settings", icon: "gear", onSelect: () => void openServerSettings(s.id) });
     items.push({ divider: true });
     items.push({
       label: "Leave server",
-      icon: "⤴",
+      icon: "leave",
       danger: true,
       onSelect: () => confirmInMenu(`Leave ${s.name}`, () => leaveServer(s.id)),
     });
     return items;
+  }
+
+  // A sidebar channel row. Channels are a frontend list keyed by name, so there is no backend
+  // read cursor to set here: "mark as read" clears the badge, which is what the row shows.
+  function channelMenu(c: Channel): MenuItem[] {
+    const sv = activeServerId;
+    if (sv === null || !cur) return [];
+    const unread = cur.unread.includes(c.id) || mentionChannels.has(c.id);
+    const vn = roomMembers(sv, c.id).length;
+    return [
+      { head: true, kind: "channel", title: `#${c.name}${unread ? " · unread" : ""}` },
+      { label: "Mark as read", icon: "eye", disabled: !unread, onSelect: () => clearChannelIndicators(sv, c.id) },
+      { label: "Search in channel", icon: "search", onSelect: () => void searchInChannel(c.id) },
+      { divider: true },
+      { label: "Edit topic…", icon: "edit", onSelect: () => void editTopicOf(c.id) },
+      { label: vn ? `Join voice · ${vn} in` : "Start voice here", icon: "vol", onSelect: () => void joinVoice(c.id, sv, c.name) },
+    ];
+  }
+  async function editTopicOf(id: string) {
+    if (cur?.active !== id) await switchTo(id);
+    view = "chat";
+    await tick();
+    topicDraft = channelTopic;
+    editingTopic = true;
+  }
+  async function searchInChannel(id: string) {
+    if (cur?.active !== id) await switchTo(id);
+    view = "chat";
+    openSearch();
+  }
+
+  // Empty space in the log: the open channel itself.
+  function logSurfaceMenu(): MenuItem[] {
+    const ch = cur?.active;
+    if (activeServerId === null || !cur || !ch) return [];
+    const name = cur.channels.find((c) => c.id === ch)?.name ?? "channel";
+    return [
+      { head: true, kind: `#${name}`, title: unreadCount > 0 ? `${unreadCount} unread` : "all read" },
+      {
+        label: "Jump to first unread",
+        icon: "up",
+        disabled: firstUnreadIdx < 0,
+        onSelect: () => void scrollToMatch(firstUnreadIdx),
+      },
+      { label: "Search here", icon: "search", hint: "Ctrl+F", onSelect: () => openSearch() },
+    ];
+  }
+
+  // A peer row on the voice stage: their two levels (for you only), the two mutes, and who they
+  // are. Toggles keep the menu open and rebuild it so the row says what it now does.
+  function peerMenu(fp: string): MenuItem[] {
+    const again = () => refreshMenu(() => peerMenu(fp));
+    return [
+      { head: true, kind: "in call", title: `${nameOf(fp)}${speaking[fp] ? " · speaking" : ""}`, fp },
+      {
+        slider: true, icon: "vol", label: `Voice volume for ${nameOf(fp)}`,
+        value: peerLevelFor(fp, "voice"), max: MAX_PEER_LEVEL,
+        onInput: (v) => { setPeerVolume(fp, v); again(); },
+      },
+      {
+        slider: true, icon: "piano", label: `Instrument volume for ${nameOf(fp)}`,
+        value: peerInstLevelFor(fp), max: 100,
+        onInput: (v) => { setPeerInstLevel(fp, v); again(); },
+      },
+      { divider: true },
+      {
+        label: voiceMutedPeers[fp] ? "Hear their voice again" : "Mute their voice",
+        icon: "micoff", on: !!voiceMutedPeers[fp],
+        onSelect: () => { toggleVoicePeer(fp); return again(); },
+      },
+      {
+        label: instPeerEffectivelyMuted(fp) ? "Hear their instrument again" : "Mute their instrument",
+        icon: "piano", on: instPeerEffectivelyMuted(fp),
+        onSelect: () => { toggleInstPeer(fp); return again(); },
+      },
+      { divider: true },
+      { label: "Profile card", icon: "user", onSelect: () => showProfile(fp) },
+      { label: "Copy fingerprint", icon: "fp", onSelect: () => copyText(fp) },
+    ];
+  }
+
+  // A text field: the four edit verbs the WebView's own menu used to provide, plus what the chat
+  // composer can do with a selection. A password field never offers to copy itself out.
+  const TEXT_INPUT_TYPES = new Set(["text", "search", "url", "email", "tel", "password", "number"]);
+  function textFieldMenu(el: HTMLInputElement | HTMLTextAreaElement): MenuItem[] {
+    menuField = el;
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? 0;
+    const hasSel = end > start;
+    const secret = el instanceof HTMLInputElement && el.type === "password";
+    const frozen = el.readOnly || el.disabled;
+    const isComposer = el === composerEl;
+    const channel = cur?.channels.find((c) => c.id === cur?.active)?.name;
+    const title = hasSel
+      ? `${end - start} selected`
+      : isComposer && channel ? `#${channel}` : el.getAttribute("aria-label") || el.placeholder || "text";
+    const items: MenuItem[] = [
+      { head: true, kind: isComposer ? "composer" : secret ? "secret" : "text", title },
+      { label: "Cut", icon: "cut", hint: "Ctrl+X", disabled: !hasSel || frozen || secret, onSelect: () => void fieldCut() },
+      { label: "Copy", icon: "copy", hint: "Ctrl+C", disabled: !hasSel || secret, onSelect: () => void fieldCopy() },
+      { label: "Paste", icon: "paste", hint: "Ctrl+V", disabled: frozen, onSelect: () => void fieldPaste() },
+      { label: "Select all", icon: "selall", hint: "Ctrl+A", onSelect: () => fieldSelectAll() },
+    ];
+    if (isComposer) {
+      items.push({ divider: true });
+      items.push({ label: "Text effect on selection", icon: "spark", disabled: !hasSel, onSelect: () => openTextEffectCatalog("chat") });
+      items.push({
+        label: "Insert",
+        icon: "img",
+        sub: [
+          { label: "Emoji", icon: "cat", onSelect: () => { showInsert = false; showEmoji = true; } },
+          { label: "Link or embed", icon: "link", onSelect: () => void toggleInsert("chat") },
+        ],
+      });
+    }
+    return items;
+  }
+  function fieldRestore(): HTMLInputElement | HTMLTextAreaElement | null {
+    const el = menuField;
+    if (!el || !el.isConnected) return null;
+    el.focus();
+    return el;
+  }
+  function fieldSelected(el: HTMLInputElement | HTMLTextAreaElement): string {
+    return el.value.slice(el.selectionStart ?? 0, el.selectionEnd ?? 0);
+  }
+  // setRangeText does not fire input, and every field here is a bind:value: the event is what
+  // hands the new text back to the state the field mirrors.
+  function fieldReplaceSelection(el: HTMLInputElement | HTMLTextAreaElement, text: string) {
+    el.setRangeText(text, el.selectionStart ?? 0, el.selectionEnd ?? 0, "end");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  async function fieldCut() {
+    const el = fieldRestore();
+    if (!el) return;
+    const t = fieldSelected(el);
+    if (!t) return;
+    try {
+      await copyTextRequired(t); // never delete what did not reach the clipboard
+    } catch {
+      return;
+    }
+    fieldReplaceSelection(el, "");
+  }
+  async function fieldCopy() {
+    const el = fieldRestore();
+    if (!el) return;
+    const t = fieldSelected(el);
+    if (t) await copyText(t);
+  }
+  async function fieldPaste() {
+    const el = fieldRestore();
+    if (!el) return;
+    let t = "";
+    try {
+      t = await navigator.clipboard.readText();
+    } catch {
+      toast("Clipboard read is blocked here: press Ctrl+V instead", "info", 3500);
+      return;
+    }
+    if (t) fieldReplaceSelection(el, t);
+  }
+  function fieldSelectAll() {
+    fieldRestore()?.select();
+  }
+
+  // Selected text anywhere in rendered content.
+  function selectionMenu(text: string, el: HTMLElement): MenuItem[] {
+    const trimmed = text.trim();
+    const row = el.closest("li[data-mi]") as HTMLElement | null;
+    const m = row ? messages[Number(row.getAttribute("data-mi")) - pageStart] : undefined;
+    const items: MenuItem[] = [
+      { head: true, kind: "selection", title: `"${trimmed.length > 48 ? `${trimmed.slice(0, 48)}…` : trimmed}"` },
+      { label: "Copy", icon: "copy", hint: "Ctrl+C", onSelect: () => copyText(text) },
+      { label: "Quote in reply", icon: "quote", onSelect: () => appendToDraft(m ? `> ${nameOf(m.author)}: ${trimmed}` : `> ${trimmed}`) },
+    ];
+    if (activeServerId !== null && cur) {
+      items.push({ label: "Search for it", icon: "search", onSelect: () => { view = "chat"; openSearch(); searchQuery = trimmed; } });
+    }
+    items.push(...rowActions(el));
+    return items;
+  }
+
+  // An http(s) link in rendered content (the renderer strips every other scheme).
+  function linkMenu(a: HTMLAnchorElement): MenuItem[] {
+    const url = a.href || a.getAttribute("href") || "";
+    let host = url;
+    try {
+      host = new URL(url).host || url;
+    } catch {
+      /* not a URL the browser can parse: show it as is */
+    }
+    const text = (a.textContent ?? "").trim();
+    return [
+      { head: true, kind: "link", title: host },
+      {
+        label: "Open in browser",
+        icon: "ext",
+        onSelect: () => void invoke("open_external_url", { url }).catch((err) => (error = String(err))),
+      },
+      { label: "Copy link", icon: "link", onSelect: () => copyText(url) },
+      { label: "Copy as markdown", icon: "copy", onSelect: () => copyText(text && text !== url ? `[${text}](${url})` : url) },
+      ...rowActions(a),
+    ];
+  }
+
+  // Every right-click the rows above did not claim lands here (window, bubble phase, so a row's
+  // own handler has already run and prevented the default). The WebView's grey menu never shows:
+  // a text field gets the edit menu, a selection or a link gets its own, empty space in the log
+  // gets the channel's, and anything else just swallows the click.
+  function onFallbackContext(e: MouseEvent) {
+    if (e.defaultPrevented) return;
+    const target = e.target as HTMLElement | null;
+    if (!target || typeof target.closest !== "function") return;
+    if (target.closest(".ctx-menu")) {
+      e.preventDefault();
+      return;
+    }
+    const field = target.closest("input, textarea") as HTMLInputElement | HTMLTextAreaElement | null;
+    if (field && (field instanceof HTMLTextAreaElement || TEXT_INPUT_TYPES.has(field.type))) {
+      openMenu(e, textFieldMenu(field));
+      return;
+    }
+    if (target.isContentEditable) return; // an editor that owns its own surface keeps the native menu
+    e.preventDefault();
+    if (locked) return;
+    const sel = window.getSelection();
+    const selText =
+      sel && !sel.isCollapsed && sel.rangeCount > 0 && sel.getRangeAt(0).intersectsNode(target) ? sel.toString() : "";
+    if (selText.trim()) {
+      openMenu(e, selectionMenu(selText, target));
+      return;
+    }
+    const a = target.closest("a[href]") as HTMLAnchorElement | null;
+    if (a) {
+      openMenu(e, linkMenu(a));
+      return;
+    }
+    if (target.closest(".messages, .channel")) {
+      const items = logSurfaceMenu();
+      if (items.length) openMenu(e, items);
+    }
   }
 
   // A reference chip's own label, without the leading icon glyph the renderer prepends.
@@ -8102,7 +9449,7 @@
   function rowActions(el: HTMLElement): MenuItem[] {
     const row = el.closest("li[data-mi]") as HTMLElement | null;
     const m = row ? messages[Number(row.getAttribute("data-mi")) - pageStart] : undefined;
-    return m ? [{ divider: true }, ...messageMenu(m)] : [];
+    return m ? [{ divider: true }, { label: "Message", icon: "reply", sub: messageMenu(m) }] : [];
   }
 
   // Context menu on rendered rich text: copy/post a [[wikilink]], copy a :emoji:, copy an embed,
@@ -8116,51 +9463,59 @@
       const cid = (el.getAttribute("data-file-cid") ?? "").toLowerCase();
       const label = chipLabel(el) || "file";
       openMenu(e, [
-        { label: "Properties", icon: "📄", onSelect: () => openFileRef(cid) },
-        { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](file:${cid})`) },
-        { label: "Copy address (CID)", icon: "#", onSelect: () => copyText(cid) },
+        { head: true, kind: "file", title: label },
+        { label: "Properties", icon: "info", onSelect: () => openFileRef(cid) },
+        { label: "Copy link", icon: "link", onSelect: () => copyText(`[${refLabel(label)}](file:${cid})`) },
+        { label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(cid) },
         ...rowActions(el),
       ]);
     } else if (el.hasAttribute("data-status-id")) {
       const id = el.getAttribute("data-status-id") ?? "";
       const label = chipLabel(el) || "status";
       openMenu(e, [
-        { label: "Open announcement", icon: "⊞", onSelect: () => openStatusRef(id) },
-        { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](status:${id})`) },
+        { head: true, kind: "announcement", title: label },
+        { label: "Open announcement", icon: "ext", onSelect: () => openStatusRef(id) },
+        { label: "Copy link", icon: "link", onSelect: () => copyText(`[${refLabel(label)}](status:${id})`) },
         ...rowActions(el),
       ]);
     } else if (el.hasAttribute("data-event-id")) {
       const id = el.getAttribute("data-event-id") ?? "";
       const label = chipLabel(el) || "event";
       openMenu(e, [
-        { label: "Open event", icon: "⧗", onSelect: () => openEventRef(id) },
-        { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](event:${id})`) },
+        { head: true, kind: "event", title: label },
+        { label: "Open event", icon: "ext", onSelect: () => openEventRef(id) },
+        { label: "Copy link", icon: "link", onSelect: () => copyText(`[${refLabel(label)}](event:${id})`) },
         ...rowActions(el),
       ]);
     } else if (el.hasAttribute("data-wikilink")) {
       const page = el.getAttribute("data-wikilink") ?? "";
       openMenu(e, [
-        { label: "Open page", icon: "⊞", onSelect: () => { view = "wiki"; openWikiPage(page); } },
-        { label: "Post link to chat", icon: "➦", onSelect: () => appendToDraft(`[[${page}]]`) },
-        { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[[${page}]]`) },
+        { head: true, kind: "wiki", title: page },
+        { label: "Open page", icon: "ext", onSelect: () => { view = "wiki"; openWikiPage(page); } },
+        { label: "Post link to chat", icon: "reply", onSelect: () => appendToDraft(`[[${page}]]`) },
+        { label: "Copy link", icon: "link", onSelect: () => copyText(`[[${page}]]`) },
         ...rowActions(el),
       ]);
     } else if (el.hasAttribute("data-emoji")) {
       const code = (el.getAttribute("data-emoji") ?? "").replace(/:/g, "");
-      openMenu(e, [{ label: `Copy :${code}:`, icon: "⧉", onSelect: () => copyText(`:${code}:`) }]);
+      openMenu(e, [
+        { head: true, kind: "emoji", title: `:${code}:` },
+        { label: "Copy code", icon: "copy", onSelect: () => copyText(`:${code}:`) },
+        ...rowActions(el),
+      ]);
     } else {
       // An inline embed (`![alt](cid:HEX)`) in chat, status or a wiki page : all three render
       // through this one context-menu path, so Properties works on every surface. Before the
       // blob resolves this is the placeholder span; after, it is the <img>/<video> itself.
       const cid = (el.getAttribute("data-embed-cid") ?? "").toLowerCase();
-      const items: MenuItem[] = [];
-      if (el instanceof HTMLImageElement) {
-        items.push({ label: "View image", icon: "⛶", onSelect: () => openLightbox(el) });
-      }
-      items.push({ label: "Properties", icon: "📄", onSelect: () => openFileRef(cid) });
       const embedded = filesByCid.get(cid);
-      if (embedded) items.push({ label: "Download", icon: "↓", onSelect: () => downloadFile(embedded) });
-      items.push({ label: "Copy address (CID)", icon: "#", onSelect: () => copyText(cid) });
+      const items: MenuItem[] = [{ head: true, kind: el instanceof HTMLImageElement ? "image" : "embed", title: embedded?.name ?? shortFp(cid) }];
+      if (el instanceof HTMLImageElement) {
+        items.push({ label: "View image", icon: "img", onSelect: () => openLightbox(el) });
+      }
+      items.push({ label: "Properties", icon: "info", onSelect: () => openFileRef(cid) });
+      if (embedded) items.push({ label: "Download", icon: "down", onSelect: () => downloadFile(embedded) });
+      items.push({ label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(cid) });
       // An image can cover its whole message row, so keep the message actions reachable here:
       // right-clicking the picture offers the same Reply/Edit/Delete as right-clicking the text.
       items.push(...rowActions(el));
@@ -9110,7 +10465,12 @@
   }
 
   function mayAutoLoadSharedFile(file: UiFile, server: number | null = activeServerId): boolean {
-    return server !== null && mayAutoLoadFile(fileTrustFor(server), file.author_identity, file.author_verified);
+    // "Media" for the media-only mode is what the renderer would decode inline: a declared
+    // image, audio or video type the safe list admits. Anything else waits for a click. This is
+    // screening only; the native catcoms-media handler re-checks the declared type against the
+    // real container bytes and stays the authority on what gets a body.
+    const fileClass: PassiveFileClass = safeMime(file.mime) !== "" ? "validated-media" : "non-media";
+    return server !== null && mayAutoLoadFile(fileTrustFor(server), file.author_identity, file.author_verified, fileClass);
   }
 
   function setFileTrustMode(mode: FileTrustMode) {
@@ -9124,12 +10484,12 @@
     void saveUiStateImmediately();
   }
 
-  function toggleTrustedFileAuthor(identity: string) {
+  function setFileAuthorOverride(identity: string, override: FileAuthorOverride) {
     if (activeServerId === null) return;
     const current = fileTrustFor(activeServerId);
     fileTrustPolicies = {
       ...fileTrustPolicies,
-      [activeServerId]: toggleTrustedAuthor(current, identity),
+      [activeServerId]: setAuthorOverride(current, identity, override),
     };
     revokePassiveMedia();
     void saveUiStateImmediately();
@@ -9167,6 +10527,17 @@
         image.replaceWith(remoteImageLoadChip(url, image.alt || "Remote image"));
       }
     }
+    // A player card is a live third-party frame, not a decoded still: it keeps talking to Spotify
+    // or Google for as long as it is mounted. Tightening trust therefore has to unmount it rather
+    // than just stop starting new ones, and the clicks that loaded them do not survive that. The
+    // chips come back and the member can decide again under the policy they have just chosen.
+    //
+    // The standing auto-load preference deliberately DOES survive: it is a device-wide answer
+    // about two named companies, not a judgement about this server's files, so a file-trust
+    // change is not an instruction about it. Turning it off lives in Settings, next to the
+    // sentence saying what it costs.
+    embedGrants.clear();
+    reconcileAllEmbeds();
     for (const image of Array.from(document.querySelectorAll<HTMLImageElement>("img.ref-card-thumb[data-thumb-cid]"))) {
       const cid = image.dataset.thumbCid ?? "";
       const file = filesByCid.get(cid);
@@ -9328,6 +10699,12 @@
     }
   }
 
+  // Every call site is behind `mayAutoLoadRemoteUrl`, which returns false in every mode, so this
+  // is currently unreachable. It stays because the call sites express the shape of the decision
+  // rather than a constant, but note what re-enabling it would now take: the production CSP no
+  // longer admits a remote host in img-src, so this would render a broken image and nothing else
+  // until that is widened too. Widening it re-opens the exfiltration channel described on
+  // `remoteImageLoadChip`, so the answer is a vetted native proxy, not a CSP edit.
   function remoteImage(url: string, alt: string): HTMLImageElement {
     const img = document.createElement("img");
     img.src = url;
@@ -9341,15 +10718,175 @@
     return img;
   }
 
+  // SEC-EXFIL-001. The chip opens the picture in the member's normal browser rather than pulling
+  // it into this window. The reason is the CSP: img-src no longer admits a remote host, because
+  // an image request is a one-way channel that a compromised renderer can use to post stolen
+  // bytes to an address of its choosing, and no rule of ours applies to a renderer running
+  // someone else's code. Removing that channel means removing it for the honest path too.
+  //
+  // What this costs the member is that the picture opens elsewhere. What it costs an attacker is
+  // the whole exfiltration route, so it is not a trade worth reversing for convenience.
   function remoteImageLoadChip(url: string, alt: string): HTMLButtonElement {
     const button = document.createElement("button");
     button.className = "embed-chip media-load-chip";
-    button.textContent = "Load remote image";
-    button.title = "Remote images disclose your IP to their host and are decoded by the platform image stack.";
+    button.textContent = "Open remote image in browser";
+    button.title = "Opens in your browser. Remote images disclose your IP to whoever hosts them, so Mewtual does not fetch them.";
     button.dataset.remoteUrl = url;
     button.dataset.remoteAlt = alt;
-    button.onclick = () => button.replaceWith(remoteImage(url, alt));
+    // The native side re-checks that this is an http(s) URL and hands it to the OS launcher
+    // without a shell, so a hostile string cannot become a command line here.
+    button.onclick = () => void invoke("open_external_url", { url }).catch((err) => (error = String(err)));
     return button;
+  }
+
+  // --- third-party player cards in chat --------------------------------------------------------
+  //
+  // A Spotify or YouTube link that stands alone on its line can be opened out into that service's
+  // own embedded player. The frame is built here in code from a parsed id (see chat-embeds.ts),
+  // never from anything a member wrote, so the sanitizer boundary is unchanged: chat markup still
+  // cannot create a frame, and the only addresses these can ever reach are the two services'.
+  //
+  // Two gates, and the second is the one that is easy to get wrong. A card needs a click before it
+  // may load at all, in every trust mode, for the same reason a remote image does: the frame tells
+  // the service this device's address and what it is looking at, and it runs a third party's
+  // script in the window. Unlike an image it then KEEPS running, so the click cannot be the end of
+  // it: a card is mounted only while it is on screen in a visible window, and goes back to being
+  // an inert chip the moment it is not. Scrolling away, switching to another tab or channel (the
+  // pane stops intersecting), and minimising the window all unmount it.
+  //
+  // The consequence worth knowing: a card that scrolls off screen stops playing. It comes back on
+  // its own when scrolled to again, because the member already consented to this entity in this
+  // session, but it restarts rather than resuming; a cross-origin frame will not tell us where it
+  // had got to.
+
+  /** Entities whose chip has been clicked in this session. Never persisted, never a trust mode. */
+  const embedGrants = new Set<string>();
+  let embedWatcher: IntersectionObserver | null = null;
+
+  /**
+   * Load cards without asking (Settings, Chat & Media). Sealed with the rest of UI continuity,
+   * device-wide, and off unless somebody turned it on.
+   *
+   * It replaces the click and nothing else: an auto-loaded card still exists only while it is on
+   * screen in a visible window, because that half of the rule is about frames running where
+   * nobody is looking rather than about permission. See `embedMayRender`.
+   */
+  let embedAutoLoad = $state(false);
+
+  /** Turning it off is a withdrawal, so this session's clicks go with it. */
+  function setEmbedAutoLoad(on: boolean) {
+    embedAutoLoad = on;
+    if (!on) embedGrants.clear();
+    reconcileAllEmbeds();
+    // The immediate path, like the trust modes: turning this off and closing the app straight
+    // afterwards must not leave the more permissive answer sealed on disk.
+    void saveUiStateImmediately();
+  }
+
+  function embedFrame(embed: ChatEmbed): HTMLIFrameElement {
+    const frame = document.createElement("iframe");
+    const { provider, ref } = embed;
+    frame.src = provider.frameUrl(ref);
+    frame.className = `chat-embed ${provider.id}-embed`;
+    // Zero means "a 16:9 picture", which the stylesheet sizes from the width; anything else is a
+    // fixed height the provider named because its player is a strip rather than a picture.
+    const height = provider.height(ref);
+    if (height > 0) frame.height = String(height);
+    else frame.classList.add("chat-embed-video");
+    frame.loading = "lazy";
+    // `origin`, not `no-referrer`. Players refuse to configure themselves for an embed that sends
+    // no referrer at all: YouTube answers with its "Video player configuration error, Error 153"
+    // card, which looks like a broken app and is really the player declining to be embedded by
+    // nobody. `origin` sends this app's origin and never a path, so what they learn is that a
+    // Mewtual window embedded them, not which channel or conversation it was in.
+    frame.referrerPolicy = "origin";
+    frame.allow = "encrypted-media; clipboard-write; picture-in-picture; fullscreen";
+    // allow-scripts and allow-same-origin are what these players need to run at all, and cost
+    // nothing here because the frame is a foreign origin either way. What is deliberately NOT
+    // granted is allow-top-navigation: a card cannot steer the window it sits in.
+    frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-popups allow-forms allow-presentation");
+    frame.title = `${provider.name} ${provider.noun(ref)}`;
+    armEmbed(frame, embed);
+    return frame;
+  }
+
+  function embedChip(embed: ChatEmbed): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.className = `embed-chip media-load-chip chat-embed-chip ${embed.provider.id}-chip`;
+    button.textContent = embedChipLabel(embed);
+    button.title = embedChipTitle(embed);
+    button.onclick = () => {
+      embedGrants.add(embedKey(embed));
+      reconcileEmbed(button);
+    };
+    armEmbed(button, embed);
+    return button;
+  }
+
+  /**
+   * Put the entity on the element and start watching it.
+   *
+   * Both halves of a card carry the same canonical link, so whichever one is currently in the DOM
+   * can rebuild the other. It is re-parsed on the way back in rather than trusted (see
+   * `chatEmbedLink`), and `data-embed-onscreen` rides along so a swap does not lose what the
+   * observer had already established about where this card sits.
+   */
+  function armEmbed(el: HTMLElement, embed: ChatEmbed): void {
+    el.dataset.embedLink = chatEmbedLink(embed);
+    embedObserver().observe(el);
+  }
+
+  function embedObserver(): IntersectionObserver {
+    if (embedWatcher) return embedWatcher;
+    embedWatcher = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const el = entry.target as HTMLElement;
+          el.dataset.embedOnscreen = entry.isIntersecting ? "1" : "";
+          reconcileEmbed(el);
+        }
+      },
+      { rootMargin: `${EMBED_KEEPALIVE_MARGIN_PX}px` },
+    );
+    return embedWatcher;
+  }
+
+  /**
+   * Make the DOM agree with the rule: a frame when the card may render, a chip when it may not.
+   *
+   * Everything that can change the answer routes through here (the click, the observer, the
+   * window losing visibility, a trust change), so there is one place where a live frame can be
+   * created or destroyed and no path that can leave one running by forgetting a condition.
+   */
+  function reconcileEmbed(el: HTMLElement) {
+    const embed = chatEmbedFor(el.dataset.embedLink ?? "");
+    if (!embed) {
+      embedObserver().unobserve(el);
+      return;
+    }
+    const live = el.tagName === "IFRAME";
+    const want = embedMayRender({
+      clicked: embedGrants.has(embedKey(embed)),
+      autoLoad: embedAutoLoad,
+      onScreen: el.dataset.embedOnscreen === "1",
+      windowVisible: typeof document === "undefined" || !document.hidden,
+    });
+    if (want === live) return;
+    const next = want ? embedFrame(embed) : embedChip(embed);
+    next.dataset.embedOnscreen = el.dataset.embedOnscreen ?? "";
+    embedObserver().unobserve(el);
+    // Dropping the address before the element leaves the document stops the load that is in
+    // flight, rather than leaving it to finish into a node nobody is holding any more.
+    if (live) el.removeAttribute("src");
+    el.replaceWith(next);
+  }
+
+  /** Re-decide every card at once: the window was hidden or shown, or trust was tightened. */
+  function reconcileAllEmbeds() {
+    if (typeof document === "undefined") return;
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>("[data-embed-link]"))) {
+      reconcileEmbed(el);
+    }
   }
 
   // Resolve explicit remote-image markdown and bare direct image/Giphy links. The renderer emits
@@ -9371,6 +10908,15 @@
     }
     for (const a of Array.from(container.querySelectorAll<HTMLAnchorElement>("a[href]:not([data-remote-checked])"))) {
       a.dataset.remoteChecked = "1";
+      // A Spotify or YouTube link on a line of its own opens out into a player; one written into
+      // a sentence is part of the prose and stays a link, exactly as an in-app reference chip
+      // does. A card is several hundred pixels tall, so unfurling it mid-paragraph would wreck
+      // the paragraph. It arrives as an inert chip either way: nothing is fetched until a click.
+      const embed = chatEmbedFor(a.href);
+      if (embed && standsAlone(a)) {
+        a.replaceWith(embedChip(embed));
+        continue;
+      }
       const url = pastedImageUrl(a.href);
       if (!url) continue;
       const allowed = mayAutoLoadRemoteUrl(fileTrustFor());
@@ -9888,7 +11434,7 @@
     } else {
       lines.push(`File size: ${formatBytes(t.size)}`);
       lines.push("Source: this device");
-      lines.push("Availability: members download these chunks on demand");
+      lines.push("Published in the shared index; remote copies are unconfirmed");
     }
     if (t.error) lines.push(`Detail: ${t.error}`);
     return lines.join("\n");
@@ -9899,6 +11445,7 @@
 
   async function openFileInfo(f: UiFile) {
     if (activeServerId === null) return;
+    cancelKeptTransfer();
     fileInfo = f;
     fileInfoAvail = null;
     fileInfoPreview = "";
@@ -9940,6 +11487,7 @@
   }
 
   function closeFileInfo() {
+    cancelKeptTransfer();
     fileInfo = null;
     fileInfoPreview = "";
     fileInfoPreviewError = false;
@@ -10731,6 +12279,54 @@
     const selfFp = callSelfFp;
     if (server !== null && selfFp) void broadcastOn(server, selfFp, msg);
   }
+  /**
+   * Say goodbye, on every route at once, before the room is torn down.
+   *
+   * Hanging up used to be one `bye` on the signalling path, addressed to whoever the server
+   * currently called online. That is the wrong set and the slow route. A peer you are talking to
+   * over a direct WebRTC edge does not have to be reachable over the mesh at that instant, and if
+   * they were not, they got no farewell at all: their end simply watched the ICE connection go to
+   * `disconnected` a few seconds later and drew LOST, which is the app's word for "this link died
+   * on its own". Leaving a call read as crashing out of one.
+   *
+   * So both routes are used, and the peer set is the union of the two things that mean "in this
+   * room with me": an open data channel, and a member the server says is online.
+   *
+   * - The **data channel** is instant and needs no round-trip: it is sent synchronously here, so
+   *   it goes out before the same call to `leaveVoice` closes the connections.
+   * - The **signalling path** is authenticated and durable, and reaches members who are in the
+   *   room but have no edge with me yet (a joiner still negotiating, someone the mesh routed
+   *   around). It needs the roster read, so it finishes after this function returns.
+   */
+  function announceHangup(server: number, selfFp: string, channel: string) {
+    const farewell = { callId: channel, type: "bye" };
+    const edges: string[] = [];
+    for (const [fp, peer] of Object.entries(callPeers)) {
+      edges.push(fp);
+      if (peer.dc?.readyState === "open") {
+        try { peer.dc.send(JSON.stringify({ t: "bye" })); } catch { /* edge already gone */ }
+      }
+    }
+    void (async () => {
+      // Peers with an edge are told whatever the roster read does, including nothing at all: an
+      // established edge is better evidence that someone is in this room than the online list is.
+      let members: string[] = [];
+      let online = new Set<string>();
+      try {
+        const [membersHere, onlineHere] = await Promise.all([
+          invoke<Member[]>("get_members", { server }),
+          invoke<string[]>("get_online_members", { server }),
+        ]);
+        members = membersHere.map((m) => m.fingerprint);
+        online = new Set(onlineHere);
+      } catch (e) {
+        console.warn("hangup could not read its server roster", { server, error: String(e) });
+      }
+      for (const fp of hangupTargets(edges, members, online, selfFp)) {
+        void sendSignal(server, fp, farewell);
+      }
+    })();
+  }
   // --- Audio devices ----------------------------------------------------------------------------
   // Which mic/speaker this install uses. Remembered locally (per machine, not per server), applied
   // when a call starts and hot-swappable mid-call via replaceTrack, so nothing ever renegotiates.
@@ -10822,20 +12418,16 @@
       }
     }
   }
-  async function ensureMic(
-    announce = true,
-    adopt = true,
-    joiningContext: { server: number; channel: string; callLease: number } | null = null,
-  ): Promise<MediaStream | null> {
+  async function ensureMic(announce = true, adopt = true): Promise<MediaStream | null> {
     if (localStream) return localStream;
     const lease = micCaptureSession.begin();
-    const server = joiningContext?.server ?? callServer;
-    const channel = joiningContext?.channel ?? callChannel;
-    const stillWanted = () => micCaptureSession.isCurrent(lease) && (
-      joiningContext
-        ? callLifecycleSession.isCurrent(joiningContext.callLease)
-        : inCall && callServer === server && callChannel === channel
-    );
+    const server = callServer;
+    const channel = callChannel;
+    // The room is entered before the microphone is asked for, so there is one rule for every
+    // caller: the answer is wanted only while this is still the same room. A prompt that resolves
+    // after the room was left fails this, and `acceptCapture` stops the tracks it returned.
+    const stillWanted = () =>
+      micCaptureSession.isCurrent(lease) && inCall && callServer === server && callChannel === channel;
     // Try the remembered input first; a device that has since vanished must not block the call.
     const tries: (MediaTrackConstraints | boolean)[] = micDev
       ? [{ deviceId: { exact: micDev } }, true]
@@ -10869,12 +12461,18 @@
    * Turn the microphone on for a room already joined. Adding a track raises negotiationneeded on
    * every existing peer, and the perfect-negotiation path already handles the renegotiation, so
    * this needs no signalling of its own.
+   *
+   * `explicit` separates the two callers. The dock's "No mic" button is a person asking for the
+   * microphone right now: a failure is worth saying out loud, and the request implies wanting to
+   * be heard, so it clears mute. Joining a room asks for it in the background instead, where a
+   * device that is missing or refused is an ordinary way to be in a room, and where the answer can
+   * arrive long enough after the join that the person may have muted themselves in between.
    */
-  async function enableMic() {
+  async function enableMic(explicit = true) {
     if (localStream || !inCall) return;
-    const stream = await ensureMic();
+    const stream = await ensureMic(explicit);
     if (!stream) return;
-    callMuted = false;
+    if (explicit) callMuted = false;
     // Through the gate, not straight to `true`: turning the microphone on under push to talk
     // must leave it closed until the key is actually held.
     for (const t of stream.getAudioTracks()) {
@@ -11162,6 +12760,28 @@
     custom: boolean;
   }>;
   let jamPublishedPatch: PublishedJamPatch | null = null;
+  // --- What the room is actually hearing, as a thing the UI can render ---------------------------
+  //
+  // Selecting a preset or turning a knob changes the tiles at once, but synthesis keeps using the
+  // last IMMUTABLE published recipe until the new one clears the editor debounce and the
+  // receiver-safe announce interval. That barrier is correct: an announce every keystroke would
+  // exhaust a receiver's patch budget, and a local sound that ran ahead of the recipe peers hold
+  // would make everyone else's rendering wrong. What was not correct is that the screen said the
+  // new patch was the sound for up to two and a half seconds before it was, so pressing a key right
+  // after picking a preset played the previous one and the editor looked broken.
+  //
+  // The barrier stays. The UI stops lying about it: the canonical bytes of what has been published
+  // are mirrored into state here, and the chip on the instrument row compares them against the
+  // draft. Deriving from the bytes rather than tracking a flag means no publication path can leave
+  // the badge stuck; whatever happens, it reports what the room is rendering.
+  let jamPublishedCanonical = $state<string | null>(null);
+  const jamDraftCanonical = $derived.by(() => {
+    const draft = validateJamPatch(myPatch ?? legacyJamPatch(myTimbre as LegacyWave));
+    return draft.ok ? draft.canonical : null;
+  });
+  const jamPatchApplying = $derived(
+    inCall && (jamPublishedCanonical === null || jamDraftCanonical !== jamPublishedCanonical),
+  );
   const jamPublicationGeneration = new JamPublicationGeneration();
   let jamPublicationQueue = new JamLatestTaskQueue<PublishedJamPatch | null>();
   const jamPublicationPacer = new JamPublicationPacer(JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS);
@@ -11484,7 +13104,13 @@
   }
   // --- Knobs: small-space value entry the pads screenshotted feedback asked for. Grab and drag
   // up/right to raise (Shift = fine), wheel steps, arrows step when focused. One drag at a time.
-  type JamKnobBinding = { label: string; value: number; min: number; max: number; disp: string; set: (v: number) => void };
+  // `hint` is what this knob does to the SOUND, shown on hover: the three-letter label under a
+  // 44px dial can only ever be an abbreviation, and a room full of them is why the editor read as
+  // a machine nobody had the manual for. `bipolar` says the rest position is the centre, so the
+  // lit arc grows out from twelve o'clock and a detune or a negative filter sweep shows which way
+  // it leans, not only how far. Optional PROPERTIES, which the TS strip is happy with; only
+  // optional parameters break the app at load.
+  type JamKnobBinding = { label: string; value: number; min: number; max: number; disp: string; hint?: string; bipolar?: boolean; set: (v: number) => void };
   let jamKnobDrag: { bind: JamKnobBinding; startX: number; startY: number; startVal: number } | null = null;
   function jamKnobDown(e: PointerEvent, bind: JamKnobBinding) {
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -11513,8 +13139,8 @@
       const raw = JSON.parse(localStorage.getItem("catcoms.jam.saved.v1") ?? "[]");
       if (!Array.isArray(raw)) return [];
       const out: { name: string; patch: JamPatch }[] = [];
-      for (const entry of raw.slice(0, 12)) {
-        const name = typeof entry?.name === "string" ? entry.name.slice(0, 12) : "";
+      for (const entry of raw.slice(0, JAM_SAVED_PATCHES_MAX)) {
+        const name = typeof entry?.name === "string" ? entry.name.slice(0, JAM_PATCH_NAME_MAX_CHARS) : "";
         const checked = validateJamPatch(entry?.patch);
         if (name && checked.ok && !out.some((s) => s.name === name)) out.push({ name, patch: checked.patch });
       }
@@ -11528,9 +13154,20 @@
     if (!myPatch) return;
     const checked = validateJamPatch(JSON.parse(JSON.stringify(myPatch)));
     if (!checked.ok) return;
-    const name = (jamSaveName.trim() || `PATCH ${jamSaved.length + 1}`).slice(0, 12).toUpperCase();
-    jamSaved = [...jamSaved.filter((s) => s.name !== name), { name, patch: checked.patch }].slice(-12);
-    try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
+    // A typed name that already exists is an intentional overwrite; a generated one must never be.
+    // `PATCH ${length + 1}` was not a name, it was a collision waiting for a full library: at the
+    // twelve-entry cap every unnamed save was called PATCH 13 and replaced the last one.
+    const typed = jamSaveName.trim().slice(0, JAM_PATCH_NAME_MAX_CHARS).toUpperCase();
+    const name = typed || jamUniqueSavedName("PATCH");
+    if (!jamKeepSaved(name, checked.patch)) {
+      toast(
+        `Patch library full at ${JAM_SAVED_PATCHES_MAX}: delete one, or save over a name you already have`,
+        "err",
+        7000,
+      );
+      jamCustomOpen = true; // the tiles it would have to choose between
+      return;
+    }
     jamSaveName = "";
     myPatchName = name;
     jamCustomOpen = true; // show the tile it just became
@@ -11540,6 +13177,124 @@
     jamSaved = jamSaved.filter((s) => s.name !== name);
     try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
     if (myPatchName === name) myPatchName = "CUSTOM"; // the sound keeps playing; only the label detaches
+  }
+  /**
+   * Keep a patch under `name`. False means the library is full and nothing was written.
+   *
+   * The rule itself lives in jam-editor.ts, next to the naming rule it has to compose with; this
+   * is the binding layer that persists the result.
+   */
+  function jamKeepSaved(name: string, patch: JamPatch): boolean {
+    const next = keepSavedPatch(jamSaved, name, patch);
+    if (!next) return false;
+    jamSaved = next;
+    try { localStorage.setItem("catcoms.jam.saved.v1", JSON.stringify(jamSaved)); } catch { /* optional */ }
+    return true;
+  }
+  const jamUniqueSavedName = (base: string) => uniqueSavedName(jamSaved.map((s) => s.name), base);
+  // --- Patches in the share: how a room trades sounds ------------------------------------------
+  //
+  // A patch announce already tells the room what YOUR notes should sound like, but it is a
+  // rendering instruction that lives for the length of the call: nobody can keep the sound, and
+  // nobody can play through it themselves. The only way to pass a patch to a friend was to read
+  // the knobs out loud.
+  //
+  // So a patch can be sealed into the server's own encrypted share, exactly as a take can. It is
+  // the same file path as everything else in the share (per-group encryption, the blob mesh,
+  // ordinary expiry), and the bytes are the canonical `jam-patch:v1` JSON the wire already
+  // carries, so the ONE validator admits it on the way back in.
+  let jamPatchBusy = $state(""); // the cid being fetched, or "share" while sealing
+  // The call's own server, whatever server is being viewed: the drawer belongs to the room.
+  let jamSharedPatches = $derived(callFiles.filter((f) => isJamPatchFile(f.name, f.mime)));
+  async function jamSharePatch() {
+    if (!myPatch || jamPatchBusy) return;
+    if (callServer === null) return;
+    if (activeServerId !== callServer) {
+      toast("Switch to the call's server first: the patch belongs in that share", "info", 6000);
+      return;
+    }
+    const checked = validateJamPatch(JSON.parse(JSON.stringify(myPatch)));
+    if (!checked.ok) {
+      toast(`That patch cannot be shared: ${checked.error}`, "err", 7000);
+      return;
+    }
+    // The name is the file's name, because a recipe has no identity beyond its id and a second
+    // copy of the name inside the bytes is one more thing that can disagree with the tile.
+    const stem = jamTakeSlug(jamSaveName.trim() || myPatchName || "patch");
+    const name = `${stem}${JAM_PATCH_EXT}`;
+    jamPatchBusy = "share";
+    const tid = toast(`Sealing ${name} into the share…`, "info", 0);
+    try {
+      // The canonical form, not the editor's object: the same bytes every id is taken over.
+      const payload = new File([checked.canonical], name, { type: JAM_PATCH_MIME });
+      await addSharedFile(payload, "", name, JAM_PATCH_MIME);
+      updateToast(tid, `${name} is in the share; anyone in this server can load it`, "ok");
+      void refreshFiles();
+      void refreshCallFiles();
+    } catch (e) {
+      updateToast(tid, `Could not share ${name}: ${errorText(e)}`, "err", 9000);
+    } finally {
+      jamPatchBusy = "";
+    }
+  }
+  async function jamLoadSharedPatch(file: UiFile) {
+    const server = callServer;
+    if (server === null || jamPatchBusy) return;
+    if (!mayFetchJamPatch(file.size)) {
+      toast(`${file.name} is too large to be a patch`, "err", 6000);
+      return;
+    }
+    // Three things this answer belongs to, captured before the await. The server alone was not
+    // one of them: leaving a room and joining another on the SAME server passed that check, and so
+    // did any newer selection or knob turn in the room you never left. A download that lands after
+    // either becomes the current sound and is persisted and published as the user's own, which is
+    // a stale request quietly winning an argument with a live one.
+    const callLease = activeCallLease;
+    const channel = callChannel;
+    const edit = jamPublicationGeneration.current();
+    jamPatchBusy = file.cid;
+    try {
+      const { value: base64 } = await invokeDebugged<string>("download_file", { server, cid: file.cid });
+      if (
+        !inCall || callServer !== server || callChannel !== channel ||
+        activeCallLease !== callLease || !callLifecycleSession.isCurrent(callLease)
+      ) return;
+      if (!jamPublicationGeneration.isCurrent(edit)) {
+        // Something newer is already the sound. Keeping the recipe without adopting it is the
+        // honest outcome: the download was asked for, and nothing on screen is overwritten.
+        const text = decodeJamPatchBase64(base64);
+        const late = text === null ? null : parseJamPatchJson(text);
+        if (late?.ok) {
+          const kept = jamKeepSaved(jamUniqueSavedName(jamPatchFileName(file.name)), late.patch);
+          toast(kept
+            ? `${file.name} was saved but not selected: you changed your sound while it loaded`
+            : `${file.name} was not kept: your patch library is full at ${JAM_SAVED_PATCHES_MAX}`,
+            kept ? "info" : "err", 7000);
+        }
+        return;
+      }
+      const text = decodeJamPatchBase64(base64);
+      const checked = text === null ? null : parseJamPatchJson(text);
+      if (!checked || !checked.ok) {
+        toast(`${file.name} is not a patch this build can play`, "err", 7000);
+        return;
+      }
+      const name = jamUniqueSavedName(jamPatchFileName(file.name));
+      // A full library does not block playing it. Loading a sound means playing it, and refusing
+      // the whole gesture over a storage cap would make the drawer look broken; only the keeping
+      // half is refused, and the toast says which half.
+      const kept = jamKeepSaved(name, checked.patch);
+      selectJamPreset(name, checked.patch); // adopt it now: loading a sound means playing it
+      jamCustomOpen = true;
+      toast(kept
+        ? `${name} loaded and kept on this device`
+        : `${name} is your sound, but not kept: your patch library is full at ${JAM_SAVED_PATCHES_MAX}`,
+        kept ? "ok" : "info", kept ? 5000 : 8000);
+    } catch (e) {
+      toast(`Could not load ${file.name}: ${errorText(e)}`, "err", 8000);
+    } finally {
+      jamPatchBusy = "";
+    }
   }
   // --- Takes: bounded ephemeral event-log recording (jam-recorder.ts owns every rule).
   //
@@ -11555,7 +13310,24 @@
   let jamRecGaps = $state(0);
   let jamRecClock = $state(0); // seconds, for the banner; a 1s ticker while the recorder lives
   let jamRecTimer: ReturnType<typeof setInterval> | undefined;
-  let jamTakes = $state<{ id: number; take: JamTake; gaps: number }[]>([]); // ephemeral: dies with the call
+  // Ephemeral: dies with the call. The `name` is the take's own, editable in the row and used for
+  // both the shared `.jamtake` and the sheet-music file, because "take 01" is the same label in
+  // every call in every room: a share full of `take-01.jamtake` is a share nobody can navigate.
+  let jamTakes = $state<{ id: number; take: JamTake; gaps: number; name: string }[]>([]);
+  /** The default name for a kept take: the room it was played in, and the time it was played. */
+  function jamTakeDefaultName(): string {
+    const now = new Date();
+    const room = (callChannelName || "jam").trim().slice(0, 18);
+    return `${room} ${pad2(now.getHours())}${pad2(now.getMinutes())}`;
+  }
+  /** A take's name as a filename stem: lowercase, no separators, never empty. */
+  function jamTakeSlug(name: string): string {
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+    return slug || "jam-take";
+  }
+  function jamRenameTake(id: number, name: string) {
+    jamTakes = jamTakes.map((t) => (t.id === id ? { ...t, name: name.slice(0, 40) } : t));
+  }
   let jamTakeSeq = 0;
   let jamTakesOpen = $state(false); // the fold: recording is loud, the machinery is quiet
   // Recorder recipe lookup is capability-scoped directly into the engine's validated LRU. A
@@ -11625,7 +13397,7 @@
         ? { ...take, events: take.events.map((event) => ({ ...event, ms: event.ms - lead })) }
         : take;
       jamTakeSeq += 1;
-      jamTakes = [...jamTakes, { id: jamTakeSeq, take: trimmed, gaps: jamRecGaps }];
+      jamTakes = [...jamTakes, { id: jamTakeSeq, take: trimmed, gaps: jamRecGaps, name: jamTakeDefaultName() }];
     }
     jamRecUi = "off";
     pushInstState();
@@ -11734,7 +13506,7 @@
       for (const chan of chans) if (chan) engine.setSourceLevel(chan.source, jukeVol);
     }
     const baseMs = Math.max(0, offsetMs);
-    const firstDue = take.events.findIndex((event) => event.ms >= baseMs);
+    const plan = planTakeSeek(take, baseMs);
     jamPlay = {
       id: localId,
       deckCid,
@@ -11743,7 +13515,7 @@
       patches,
       startMs: performance.now(),
       baseMs,
-      next: firstDue === -1 ? take.events.length : firstDue,
+      next: plan.next,
       timer: setInterval(() => { void jamPlayTick(); }, 40),
       catchupTimer: undefined,
       endTimer: undefined,
@@ -11753,7 +13525,37 @@
     };
     jamPendingPlay = null;
     jamPlayingId = localId;
+    // Before the first scheduled event, whatever the take was already holding at this offset. Only
+    // the jukebox deck ever starts anywhere but zero, and joining it mid-track used to mean hearing
+    // nothing until the next attack: the note-ons were behind the start point and only their
+    // note-offs were still due. Every gate a scheduled event passes applies here too.
+    jamOpenSeekVoices(jamPlay, engine, plan.sounding);
     void jamPlayTick();
+  }
+  /** Re-open the notes a seek landed in the middle of, at the age each has already reached. */
+  function jamOpenSeekVoices(
+    pl: NonNullable<typeof jamPlay>,
+    engine: JamEngine,
+    sounding: readonly JamTakeSeekVoice[],
+  ) {
+    for (const voice of sounding) {
+      const event = pl.take.events[voice.index];
+      if (!event || "d" in event || event.on !== 1) continue;
+      if (!shouldDispatchTakeEvent(event, callDeafened)) continue;
+      const chan = pl.chans[event.lane];
+      if (!chan) continue;
+      engine.noteOn(
+        {
+          channel: chan,
+          sequence: event.q,
+          note: event.n,
+          wave: event.w,
+          remote: takePlaybackIsRemote(pl.deckCid),
+          ageMs: voice.ageMs,
+        },
+        event.p === undefined ? undefined : { patches: pl.patches, index: event.p },
+      );
+    }
   }
   function jamPlayTake(entry: { id: number; take: JamTake }) {
     void jamStartTakePlayback(entry.take, 0, entry.id, null);
@@ -11853,12 +13655,13 @@
   }
   // Sheet music: the honest transcript (jam-sheet.ts states its own limits) rendered here and
   // saved by a command that only accepts this exporter's own output shape.
-  async function jamExportSheet(entry: { id: number; take: JamTake }) {
+  async function jamExportSheet(entry: { id: number; take: JamTake; name: string }) {
     const names = entry.take.parts.map((fp) => (fp === callSelfFp ? "you" : nameOf(fp)));
     const now = new Date();
-    const name = `mewtual-take-${pad2(entry.id)}-${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}.svg`;
+    const title = entry.name.trim() || `take ${pad2(entry.id)}`;
+    const name = `${jamTakeSlug(title)}-${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}.svg`;
     try {
-      const svg = jamTakeSheetSvg(entry.take, names, `take ${pad2(entry.id)} · ${callChannelName || "jam"}`);
+      const svg = jamTakeSheetSvg(entry.take, names, `${title} · ${callChannelName || "jam"}`);
       const saved = await invoke<{ path: string; displayed: boolean; warning?: string }>("save_jam_sheet", { name, svg });
       toast(saved.displayed ? "Sheet music saved to your Downloads folder" : `Sheet music saved to ${saved.path}`, saved.displayed ? "ok" : "info", 6000);
       if (saved.warning) toast(saved.warning, "info", 7000);
@@ -11869,13 +13672,13 @@
   // A .jamtake in the share is the take's JSON, sealed like any file and replayed by the jukebox
   // through everyone's own synth. The upload path is the ACTIVE server's, so the one guard is
   // that the user is looking at the call's server rather than silently sealing into another.
-  async function jamShareTake(entry: { id: number; take: JamTake }) {
+  async function jamShareTake(entry: { id: number; take: JamTake; name: string }) {
     if (callServer === null) return;
     if (activeServerId !== callServer) {
       toast("Switch to the call's server first: the take belongs in that share", "info", 6000);
       return;
     }
-    const name = `take-${pad2(entry.id)}${JAM_TAKE_EXT}`;
+    const name = `${jamTakeSlug(entry.name || `take ${pad2(entry.id)}`)}${JAM_TAKE_EXT}`;
     const tid = toast(`Sealing ${name} into the share…`, "info", 0);
     try {
       const payload = new File([JSON.stringify(entry.take)], name, { type: JAM_TAKE_MIME });
@@ -12043,22 +13846,42 @@
     myTimbre = w;
     myPatch = null;
     myPatchName = "";
+    jamResetStageStash(); // the stashes belonged to the recipe being dropped
     jamPublicationGeneration.advance();
     jamEditOpen = false;
     try { localStorage.setItem("catcoms.call.timbre", w); } catch { /* ignore */ }
     try { localStorage.removeItem("catcoms.jam.patch"); } catch { /* ignore */ }
     clearTimeout(jamAnnTimer);
-    jamAnnTimer = setTimeout(() => { void publishJamDraft(); }, 400);
+    void publishJamDraft(); // one click, one wave: ask now and let the pacer decide when
   }
   function selectJamPreset(name: string, patch: JamPatch) {
     myPatch = JSON.parse(JSON.stringify(patch)) as JamPatch;
     myPatchName = name;
-    jamPatchDirty();
+    // Adopting a whole recipe replaces every stage, so nothing that was stashed still belongs to
+    // anything on screen. Left standing, switching a stage off in one patch and then enabling that
+    // stage in a DIFFERENT patch restored the first patch's settings into the second, and the
+    // result was persisted and published as the user's own sound. The reset belongs here, at the
+    // selection boundary, and never in `jamPatchDirty`: clearing it on every edit would defeat the
+    // restore this exists for.
+    jamResetStageStash();
+    jamPatchDirty(true); // a whole recipe in one click: nothing more is coming to coalesce with
   }
-  function jamPatchDirty() {
+  /**
+   * Persist the draft and start it towards publication.
+   *
+   * `immediate` is for a DISCRETE change: picking a preset, a saved patch, a filter type, a wave.
+   * There is no next keystroke coming, so the 400 ms coalescing window buys nothing and costs the
+   * whole wait before the sound the tile claims is the sound the synth uses. Continuous changes
+   * (dragging a knob) keep the window, because those really do arrive dozens at a time.
+   *
+   * Either way the receiver-safe interval in `publishJamDraft` remains the authority on when a
+   * frame may leave: skipping the debounce asks earlier, it does not ask for an exemption.
+   */
+  function jamPatchDirty(immediate = false) {
     try { localStorage.setItem("catcoms.jam.patch", JSON.stringify({ name: myPatchName, patch: myPatch })); } catch { /* optional */ }
     jamPublicationGeneration.advance();
     clearTimeout(jamAnnTimer);
+    if (immediate) { void publishJamDraft(); return; }
     // Receivers cap announces at one per 2s (burst 3): coalesce a slider drag into one announce.
     jamAnnTimer = setTimeout(() => { void publishJamDraft(); }, 400);
   }
@@ -12074,7 +13897,7 @@
     myPatchName = "CUSTOM";
     jamPatchDirty();
   }
-  function jamEditOsc(index: number, key: "w" | "t" | "c" | "l", raw: string | number) {
+  function jamEditOsc(index: number, key: "w" | "t" | "c" | "l", raw: string | number, immediate = false) {
     if (!myPatch || !myPatch.o[index]) return;
     const value = Math.round(Number(raw));
     if (!Number.isFinite(value)) return;
@@ -12082,7 +13905,7 @@
     next.o[index][key] = value;
     myPatch = next;
     myPatchName = "CUSTOM";
-    jamPatchDirty();
+    jamPatchDirty(immediate);
   }
   function jamOscCount(count: number) {
     if (!myPatch) return;
@@ -12125,6 +13948,32 @@
     if (jamOscOpen !== null && jamOscOpen >= next.o.length) jamOscOpen = next.o.length - 1;
     jamPatchDirty();
   }
+  // --- Stage bypass: an OFF for each shaping stage ----------------------------------------------
+  //
+  // Every transition lives in jam-editor.ts as a pure function, so what a button does can be
+  // asserted without mounting anything. This is the binding layer: it holds the reactive state,
+  // marks the patch dirty and lets the announce pacing do the rest.
+  let jamStageStash = $state<JamStageStash>(EMPTY_STAGE_STASH);
+  const jamEnvOff = $derived(!!myPatch && envOff(myPatch));
+  const jamFilterOff = $derived(!!myPatch && filterOff(myPatch));
+  const jamSendsOff = $derived(!!myPatch && sendsOff(myPatch));
+  function jamResetStageStash() {
+    jamStageStash = EMPTY_STAGE_STASH;
+  }
+  function jamApplyEditorStep(step: JamEditorStep) {
+    jamStageStash = step.stash;
+    myPatch = step.patch;
+    myPatchName = "CUSTOM";
+    jamPatchDirty(true); // a stage button is one decision, not the first of a drag
+  }
+  function jamSetFilterMode(mode: number) {
+    if (!myPatch) return;
+    jamApplyEditorStep(setFilterMode(myPatch, jamStageStash, mode));
+  }
+  function jamToggleStage(stage: JamStage) {
+    if (!myPatch) return;
+    jamApplyEditorStep(toggleStage(myPatch, jamStageStash, stage));
+  }
   function setJamMode(mode: "keys" | "pads") {
     if (mode === jamMode) return;
     // Release under the OLD routing rule. Switching while a MIDI key or pedal is down must not
@@ -12165,6 +14014,28 @@
     applyPeerGain(fp, "voice");
     try { localStorage.setItem(peerLevelKey(fp, "voice"), String(value)); } catch { /* ignore */ }
   }
+  // Their instrument, for you only: a percentage like the voice trim, but capped at unity. The
+  // notes are synthesized here, on the engine's per-source gain (0..1), so there is nothing sent
+  // to amplify past 100%. Remembered per fingerprint like the other trims.
+  let peerInstLevels = $state<Record<string, number>>({});
+  const peerInstKey = (fp: string) => `catcoms.call.instlevel.${fp}`;
+  const clampInstLevel = (n: number) => (Number.isFinite(n) ? Math.min(100, Math.max(0, Math.round(n))) : 100);
+  function peerInstLevelFor(fp: string): number {
+    const held = peerInstLevels[fp];
+    if (held !== undefined) return held;
+    try {
+      const raw = localStorage.getItem(peerInstKey(fp));
+      return raw === null ? 100 : clampInstLevel(Number(raw));
+    } catch {
+      return 100;
+    }
+  }
+  function setPeerInstLevel(fp: string, level: number) {
+    const value = clampInstLevel(level);
+    peerInstLevels = { ...peerInstLevels, [fp]: value };
+    jamEngine?.setSourceLevel(fp, value / 100);
+    try { localStorage.setItem(peerInstKey(fp), String(value)); } catch { /* ignore */ }
+  }
   function setPeerShareVolume(fp: string, level: number) {
     const value = normalizePeerLevel(level);
     peerShareVolumes = { ...peerShareVolumes, [fp]: value };
@@ -12202,6 +14073,9 @@
     // or lifting it would come back at whatever the level was, at the wrong moment or not at all.
     applyAllPeerGains();
     if (jukeAudio) jukeAudio.muted = callDeafened; // the deck is part of "everyone", not an exception
+    // The video deck is part of it too, and its level lives inside its own document, so silence
+    // has to be sent rather than set.
+    if (jukeLinkDriver) jukeLinkPost(jukeLinkDriver.mute(callDeafened));
     // Deafen is one hard room gate: it cancels lookahead clicks and releases every engine voice,
     // including local previews, so no retained tail can emerge when the master reopens.
     if (callDeafened && synthCtx) {
@@ -12241,6 +14115,14 @@
     }
   }
   function handleInstState(fp: string, m: Record<string, unknown>) {
+    // A hangup over the edge itself. It arrives before the connection is closed, which is the
+    // whole point: without it this peer's departure is indistinguishable from their link failing,
+    // and the roster draws LOST over someone who simply left. Same handling as the signalled bye.
+    if (m.t === "bye") {
+      if (callServer !== null && callChannel) dropPresence(callServer, callChannel, fp);
+      removePeer(fp);
+      return;
+    }
     if (m.t !== "s") return; // unknown extension frames: paid for by the budget, then ignored
     const before = peerMeta[fp];
     const after = mergePeerState(before, m);
@@ -12533,6 +14415,7 @@
       // Publish atomically on this turn: wire announcement, local renderer and recorder events all
       // begin using this same immutable object only after validation, hashing and install succeed.
       jamPublishedPatch = publication;
+      jamPublishedCanonical = JSON.stringify(captured.descriptor);
       publishJamToEdges(publication);
       flushPendingJamEvents(publication);
       return publication;
@@ -13697,7 +15580,12 @@
   // the exception, and has to be: its own element is the position it announces, or a stall becomes
   // a place it says the room is and has never played.
   let jukeQueue = $state<JukeEntry[]>([]);
-  let jukeNow = $state<{ entry: string; cid: string; name: string; paused: boolean; dj: string } | null>(null); // dj: "" is me
+  // `link` is the linked-track half of the transport: a video id when the room is playing one,
+  // and "" for an ordinary shared file. It rides the frame rather than being looked up from the
+  // queue on arrival, because a listener can hear the transport before the channel document has
+  // caught up, and "the room is playing something I cannot identify yet" is exactly the state
+  // that used to leave a joiner silent until the next press.
+  let jukeNow = $state<{ entry: string; cid: string; src: string; link: string; name: string; paused: boolean; dj: string } | null>(null); // dj: "" is me
   let jukeStale = $state(false); // the DJ went quiet: the deck is frozen until someone presses
   let jukeDur = $state(0); // 0 until loadedmetadata knows
   let jukeVol = $state(loadJukeVol());
@@ -13737,7 +15625,17 @@
   // Audio or video, from the current track's name (a queue entry carries no mime) and the share's
   // declared type when the share is the one in view.
   let jukeKind = $derived<MediaKind>(
-    jukeNow ? mediaKind(jukeNow.name, callFiles.find((f) => f.cid === jukeNow?.cid)?.mime ?? "") : "other",
+    jukeNow
+      ? entryKind(
+          {
+            name: jukeNow.name,
+            cid: jukeNow.cid,
+            source: jukeNow.link ? JUKE_SOURCE_YOUTUBE : "",
+            link: jukeNow.link,
+          },
+          callFiles.find((f) => f.cid === jukeNow?.cid)?.mime ?? "",
+        )
+      : "other",
   );
   const JUKE_DJ_GONE_MS = 15000; // silence longer than three pings means the DJ walked away
 
@@ -13754,6 +15652,9 @@
     if (jamPlay?.deckCid) {
       for (const chan of jamPlay.chans) if (chan) jamEngine?.setSourceLevel(chan.source, jukeVol);
     }
+    // A linked video keeps its own volume inside its own document, so the slider has to be sent
+    // rather than set. Its scale is 0..100, not 0..1.
+    if (jukeLinkDriver) jukeLinkPost(jukeLinkDriver.volume(jukeVol));
     try { localStorage.setItem("catcoms.call.jukevol", String(jukeVol)); } catch { /* ignore */ }
   }
   // The one deck element, made on first play and appended like the per-peer call audio.
@@ -13823,16 +15724,21 @@
   function jukePos(): number {
     if (!jukeAdopted || !jukeNow) return 0;
     // A take has no element clock: ageing the adopted offset on the local clock is the position
-    // for EVERYONE, the DJ included (the scheduler runs on the same clock, so they agree).
+    // for EVERYONE, the DJ included (the scheduler runs on the same clock, so they agree). A
+    // linked video is the same shape of problem for a different reason: its clock lives in
+    // another document and arrives late, so the projection is the base answer and the player's
+    // own reading refines it when there is a fresh one.
     const takeOnDeck = jukeKind === "take";
-    return deckPosition({
-      isDj: takeOnDeck ? false : jukeIsDj(),
+    const videoOnDeck = jukeKind === "linked-video" || jukeKind === "linked-audio";
+    const projected = deckPosition({
+      isDj: takeOnDeck || videoOnDeck ? false : jukeIsDj(),
       paused: jukeNow.paused,
       stale: jukeStale,
       off: jukeAdopted.off,
       since: performance.now() - jukeAdopted.at,
-      element: takeOnDeck ? null : jukeElOn(jukeNow.cid),
+      element: takeOnDeck || videoOnDeck ? null : jukeElOn(jukeNow.cid),
     });
+    return videoOnDeck ? deckPlayerPosition(projected, jukeLinkReport, performance.now()) : projected;
   }
   // Where a load should land. The DJ starts exactly where it pressed; a listener has to age that
   // offset by however long its own load took, or it starts behind the room.
@@ -13923,6 +15829,56 @@
       error = errorText(e);
     }
   }
+  // Queueing a video by link. Deliberately separate from `jukeAddTrack`: that one queues content
+  // the group holds and can serve, this one queues a claim that a video exists somewhere else.
+  // Nothing is contacted here, so the queue cannot say whether the link is any good; it is found
+  // out at play time, on each listener, after that listener has agreed to ask Google.
+  let jukeLinkDraft = $state("");
+  let jukeLinkError = $state("");
+  let jukeLinkBusy = $state(false);
+
+  async function jukeAddLink() {
+    const server = callServer;
+    const channel = callChannel;
+    if (server === null || !channel || jukeLinkBusy) return;
+    // Any provider the deck can actually drive. A link to one it cannot (a Spotify track, say) is
+    // refused here with the reason rather than queued as something nobody can play: the deck needs
+    // play, pause, a seek and a position report to keep a room together, and not every embed has
+    // them. `chatEmbedFor` is reused so a link behaves identically in chat and in the queue.
+    const found = chatEmbedFor(jukeLinkDraft);
+    if (!found || !found.provider.deck) {
+      jukeLinkError = found
+        ? `${found.provider.name} cannot be queued: its player cannot be kept in sync with the room`
+        : "that is not a link the deck can play";
+      return;
+    }
+    const source = found.provider.id;
+    jukeLinkBusy = true;
+    jukeLinkError = "";
+    try {
+      // The name is the queue's only human-readable handle on a linked track. Nothing here can
+      // fetch the real title without contacting the provider on the whole room's behalf, so the
+      // member queueing it gets to write one, and the id is the honest fallback.
+      const name = jukeLinkName.trim() || `${found.provider.name}: ${found.ref.id}`;
+      await invokeDebugged<string>("jukebox_add_link", {
+        server,
+        channel,
+        source,
+        link: found.ref.id,
+        name: name.slice(0, 200),
+      });
+      jukeFailed.delete(`${source}:${found.ref.id}`); // a re-add is also a retry
+      jukeLinkDraft = "";
+      jukeLinkName = "";
+      await refreshJukebox();
+    } catch (e) {
+      jukeLinkError = errorText(e);
+    } finally {
+      jukeLinkBusy = false;
+    }
+  }
+  let jukeLinkName = $state("");
+
   async function jukeRemoveTrack(id: string) {
     const server = callServer;
     const channel = callChannel;
@@ -13936,11 +15892,11 @@
   }
   // Claim the deck: my press outranks everything I have heard, and I apply it to myself on the same
   // path a receiver does, so the DJ is never a special case in the player.
-  function jukeSend(entry: string, cid: string, name: string, off: number, paused: boolean) {
+  function jukeSend(entry: string, cid: string, src: string, link: string, name: string, off: number, paused: boolean) {
     if (!inCall || !callChannel) return;
     jukeSeq = nextJukeSeq(jukeSeq, jukeAdopted?.seq ?? null);
-    jukeAdopt(jukeSeq, callSelfFp, entry, cid, name, off, paused);
-    broadcast({ callId: callChannel, type: "juke", seq: jukeSeq, entry, cid, name, off, paused });
+    jukeAdopt(jukeSeq, callSelfFp, entry, cid, src, link, name, off, paused);
+    broadcast({ callId: callChannel, type: "juke", seq: jukeSeq, entry, cid, src, link, name, off, paused });
   }
   /**
    * Tell one peer what is playing, right now.
@@ -13960,13 +15916,15 @@
       seq: jukeAdopted.seq,
       entry: jukeNow.entry,
       cid: jukeNow.cid,
+      src: jukeNow.src,
+      link: jukeNow.link,
       name: jukeNow.name,
       off: jukePos(),
       paused: jukeNow.paused,
     });
   }
-  function jukeAdopt(seq: number, fromFp: string, entry: string, cid: string, name: string, off: number, paused: boolean) {
-    const same = jukeNow?.entry === entry && jukeNow?.cid === cid;
+  function jukeAdopt(seq: number, fromFp: string, entry: string, cid: string, src: string, link: string, name: string, off: number, paused: boolean) {
+    const same = jukeNow?.entry === entry && jukeNow?.cid === cid && jukeNow?.src === src && jukeNow?.link === link;
     const sameDeckLease = same && jukeAdopted?.seq === seq && jukeAdopted.fromFp === fromFp;
     // A pause/resume, replacement DJ or different track owns a new continuation epoch. The load
     // coordinator cancels the old native chunk operation before releasing its active slot.
@@ -13979,12 +15937,18 @@
       jukeLocalFail = "";
       jukeTrustBlocked = "";
     }
-    jukeNow = entry || cid ? { entry, cid, name, paused, dj: fromFp === callSelfFp ? "" : fromFp } : null;
+    jukeNow = entry || cid || link
+      ? { entry, cid, src, link, name, paused, dj: fromFp === callSelfFp ? "" : fromFp }
+      : null;
     if (!jukeNow) {
       jukeDur = 0;
       jukeStop(); // entry "" is the DJ saying the queue ran out
       return;
     }
+    // Moving off a linked video takes its player down with it. A frame left mounted would go on
+    // talking to Google about a track the room has already left, which is the one thing the click
+    // that started it was not consent for.
+    if (!link && jukeLinkFrame) jukeLinkPark();
     void jukeApply(same);
   }
   // Put the element where the adopted transport says it should be, fetching the blob first the one
@@ -13992,7 +15956,14 @@
   // newer press, so the track is rechecked after it.
   async function jukeApply(sameTrack: boolean) {
     const now = jukeNow;
-    if (!now || !now.cid) return;
+    if (!now) return;
+    // A linked video is not a file: there is nothing to look up in the share, nothing to fetch
+    // and no MIME to check, so it branches before all of that.
+    if (now.link) {
+      jukeApplyVideo(now);
+      return;
+    }
+    if (!now.cid) return;
     const cid = now.cid;
     const server = callServer;
     if (server === null) return;
@@ -14246,7 +16217,10 @@
   }
   function approveCurrentJukeboxTrack() {
     if (!jukeNow || callServer === null) return;
-    jukeExplicitApprovals.add(scopedMediaKey(callServer, jukeNow.cid));
+    // Keyed by the deck's address rather than by the content address, so the one approval path
+    // covers a linked video too. It is the only way a linked video ever plays: nothing about one
+    // is attested, so no trust mode can imply this click.
+    jukeExplicitApprovals.add(scopedMediaKey(callServer, jukeDeckAddress(jukeNow)));
     jukeTrustBlocked = "";
     void jukeApply(false);
   }
@@ -14276,6 +16250,13 @@
   /** The user's click, which is the one thing an autoplay policy is waiting for. */
   function jukeUnblock() {
     jukeWakeSynth(); // a blocked take deck is a suspended synth, not a refusing element
+    // A blocked video deck is a frame the webview would not let start. The click IS the gesture
+    // it was waiting for, so the command can go straight out; the player answers with its state
+    // and the chip clears itself.
+    if (jukeLinkDriver && jukeNow?.link) {
+      jukeLinkPost(jukeLinkDriver.play());
+      return;
+    }
     const el = jukeAudio;
     if (!el) return;
     void jukeStart(el);
@@ -14335,8 +16316,199 @@
    * there is one element rather than one per surface: folding the dock or opening focus must never
    * restart the room's film. On teardown it goes back to the body, still playing, still audible.
    */
+  // --- the linked-video deck --------------------------------------------------------------------
+  //
+  // A third backend for the same transport, alongside the media element and the take synth. The
+  // room's shape does not change: nothing is sent between peers, the DJ says what is playing and
+  // where it is, and every listener runs its own player against that. What changes is that this
+  // player is a document belonging to Google, so it can only be spoken to (postMessage) and
+  // believed at arm's length. See `deck-players.ts` for why it is driven directly rather than
+  // through their API script, and for what is and is not trusted in a reply.
+  //
+  // The consent story is the important half. A linked track has no group attestation of any kind:
+  // nobody here holds it, nothing signed it, and playing it means THIS device asking Google for a
+  // video because somebody else in the room said so. So it is never automatic in any trust mode,
+  // exactly like a remote image, and the deck stops on it until this member says yes.
+
+  let jukeLinkFrame: HTMLIFrameElement | null = null;
+  /** The provider driving the current frame, so replies can be read and commands addressed. */
+  let jukeLinkDriver: DeckDriver | null = null;
+  /** What the frame currently holds, so a re-press or a ping does not rebuild it. */
+  let jukeLinkOn = "";
+  let jukeLinkState = $state<DeckState>("unstarted");
+  let jukeLinkReport: { at: number; currentTime: number } | null = null;
+  let jukeLinkHandshake: ReturnType<typeof setInterval> | undefined;
+
+  /** How the deck addresses whatever is on it: a content address, or a linked track. */
+  function jukeDeckAddress(now: { cid: string; src: string; link: string }): string {
+    return entryAddress({ cid: now.cid, source: now.src, link: now.link });
+  }
+
+  /** A linked track is click-only, always: there is no attestation a policy could act on. */
+  function mayPlayLinkedVideo(now: { cid: string; src: string; link: string }): boolean {
+    return (
+      callServer !== null &&
+      jukeExplicitApprovals.has(scopedMediaKey(callServer, jukeDeckAddress(now)))
+    );
+  }
+
+  /** Commands go to the driver's own origin and nowhere else, even if the frame moved. */
+  function jukeLinkPost(command: string | null) {
+    if (command && jukeLinkDriver) {
+      jukeLinkFrame?.contentWindow?.postMessage(command, jukeLinkDriver.origin);
+    }
+  }
+
+  /**
+   * The address a controlled deck frame loads, per provider.
+   *
+   * Only the deck builds a driveable frame: a chat card is somebody watching by themselves, and a
+   * player that answers commands it will never be sent is a capability with no purpose. The offset
+   * is in the address rather than seeked afterwards, so a listener joining an hour into something
+   * starts there instead of starting at the top and jumping.
+   */
+  function jukeLinkSrc(src: string, link: string, start: number): string {
+    if (src === JUKE_SOURCE_VIMEO) {
+      return vimeoFrameUrl({ id: link, kind: "", extra: "", start }, { controlled: true, start });
+    }
+    if (src === JUKE_SOURCE_SOUNDCLOUD) {
+      return soundcloudDeckUrl(link, start);
+    }
+    return youtubeEmbedUrl({ id: link, start }, { controlled: true, origin: window.location.origin, start });
+  }
+
+  function jukeLinkEl(src: string, link: string, start: number): HTMLIFrameElement {
+    if (jukeLinkFrame && jukeLinkOn === `${src}:${link}`) return jukeLinkFrame;
+    jukeLinkPark();
+    const driver = deckDriver(src);
+    if (!driver) return document.createElement("iframe"); // unreachable: callers check first
+    const frame = document.createElement("iframe");
+    frame.id = "jukebox-video";
+    frame.className = `juke-link juke-link-${src}`;
+    frame.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+    // As for a chat card: what is withheld is allow-top-navigation, so the player cannot steer
+    // the window it is embedded in.
+    frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-popups allow-presentation");
+    // See the chat card: `no-referrer` is what YouTube answers with Error 153, because a player
+    // embedded by nobody declines to configure itself. `origin` gives it the window's origin and
+    // never a path.
+    frame.referrerPolicy = "origin";
+    frame.src = jukeLinkSrc(src, link, start);
+    document.body.appendChild(frame);
+    jukeLinkFrame = frame;
+    jukeLinkDriver = driver;
+    jukeLinkOn = `${src}:${link}`;
+    jukeLinkState = "unstarted";
+    jukeLinkReport = null;
+    window.addEventListener("message", jukeLinkMessage);
+    // Every one of these players ignores anything that arrives before its own player object is
+    // constructed, and none of them announce when that was. Repeating the handshake until one
+    // answers is cheaper than a protocol with no way to start; the first reply stops it.
+    clearInterval(jukeLinkHandshake);
+    const hello = () => { for (const message of driver.hello()) jukeLinkPost(message); };
+    jukeLinkHandshake = setInterval(hello, 500);
+    hello();
+    return frame;
+  }
+
+  /** Take the player down. Nothing is left mounted: a parked frame is still a live connection. */
+  function jukeLinkPark() {
+    clearInterval(jukeLinkHandshake);
+    jukeLinkHandshake = undefined;
+    window.removeEventListener("message", jukeLinkMessage);
+    if (jukeLinkFrame) {
+      jukeLinkFrame.removeAttribute("src");
+      jukeLinkFrame.remove();
+    }
+    jukeLinkFrame = null;
+    jukeLinkDriver = null;
+    jukeLinkOn = "";
+    jukeLinkState = "unstarted";
+    jukeLinkReport = null;
+  }
+
+  /**
+   * A message from the player frame.
+   *
+   * Both checks matter and neither is sufficient alone: the origin says it came from YouTube, and
+   * the source window says it came from OUR player rather than from some other frame served by
+   * the same origin. Everything past that is evidence, never instruction; the only thing a reply
+   * can move is this listener's own player.
+   */
+  function jukeLinkMessage(e: MessageEvent) {
+    const driver = jukeLinkDriver;
+    if (!driver || !jukeLinkFrame) return;
+    if (e.origin !== driver.origin || e.source !== jukeLinkFrame.contentWindow) return;
+    const report = driver.read(e.data);
+    if (!report) return;
+    // It is talking, so the handshake has landed and does not need repeating. This is also the
+    // first moment the player will accept the level, which is why volume is sent here rather than
+    // with the address.
+    if (jukeLinkHandshake !== undefined) {
+      clearInterval(jukeLinkHandshake);
+      jukeLinkHandshake = undefined;
+      jukeLinkPost(driver.volume(jukeVol));
+      if (callDeafened) jukeLinkPost(driver.mute(true));
+    }
+    if (report.duration !== undefined) jukeDur = report.duration;
+    if (report.currentTime !== undefined) {
+      jukeLinkReport = { at: performance.now(), currentTime: report.currentTime };
+      jukeBuffering = false; // it is telling us where it is, so it is not stuck
+    }
+    if (report.state !== undefined) {
+      jukeLinkState = report.state;
+      jukeBuffering = report.state === "buffering";
+      // Only the DJ moves the room on, exactly as for a media element's `ended`.
+      if (report.state === "ended" && inCall && jukeIsDj()) jukeAdvance(true);
+    }
+    const wants = !!jukeNow && !jukeNow.paused && !jukeStale;
+    jukeBlocked = deckPlayerBlocked(jukeLinkState, wants);
+  }
+
+  /**
+   * Put the player where the room says it is.
+   *
+   * A fresh frame is loaded with the offset already in its address, which is both simpler and
+   * better than seeking after the fact: the player starts at the right place instead of starting
+   * at the top and jumping, and a listener joining an hour into a video does not briefly stream
+   * the beginning of it.
+   */
+  function jukeApplyVideo(now: { cid: string; src: string; link: string; name: string; paused: boolean }) {
+    const driver = deckDriver(now.src);
+    if (!driver) {
+      // A source this build cannot drive is not a track it can play. Saying so beats a silent
+      // stall: the room moves on, and this listener is told why it is not hearing anything.
+      jukeTrustBlocked = "unavailable";
+      jukeLinkPark();
+      return;
+    }
+    if (!mayPlayLinkedVideo(now)) {
+      jukeTrustBlocked = "consent";
+      jukeLinkPark();
+      return;
+    }
+    jukeTrustBlocked = "";
+    if (jamDeckPlaybackCid()) jamStopPlayback(); // the room left whatever the take deck held
+    const target = Math.max(0, jukePos());
+    if (!jukeLinkFrame || jukeLinkOn !== `${now.src}:${now.link}`) {
+      jukeLinkEl(now.src, now.link, Math.floor(target));
+      return; // it comes up at the right place, playing; the next ping corrects whatever it did
+    }
+    for (const command of deckTransportPlan({
+      driver,
+      target,
+      at: deckReported(jukeLinkReport, performance.now()),
+      playing: !now.paused && !jukeStale,
+      state: jukeLinkState,
+      seekAfter: DRIFT_SEEK_S,
+    })) {
+      jukeLinkPost(command);
+    }
+  }
+
   function jukeHost(node: HTMLElement) {
-    const el = jukeEl();
+    // Whichever player is holding the current track: the one media element, or the video frame.
+    const el = jukeNow?.link ? jukeLinkEl(jukeNow.src, jukeNow.link, 0) : jukeEl();
     node.appendChild(el);
     return {
       destroy() {
@@ -14344,18 +16516,20 @@
         // back) mounts the new host before the old one tears down, and a teardown that re-homed
         // unconditionally would snatch the element straight back out of the surface that had just
         // adopted it, leaving a black box behind.
-        if (jukeAudio === el && el.parentElement === node) document.body.appendChild(el);
+        if ((jukeAudio === el || jukeLinkFrame === el) && el.parentElement === node) {
+          document.body.appendChild(el);
+        }
       },
     };
   }
   /** The deck could not play what the DJ named: drop it, and move the room on if the deck is mine. */
-  function jukeFail(cid: string) {
-    const onDeck = jukeNow?.cid === cid;
+  function jukeFail(address: string) {
+    const onDeck = !!jukeNow && jukeDeckAddress(jukeNow) === address;
     const advance = onDeck && jukeIsDj();
-    // Read the order BEFORE blacklisting this cid, or the track we are leaving is already out of
-    // the list and "the one after it" would be the top of the queue again.
+    // Read the order BEFORE blacklisting this address, or the track we are leaving is already out
+    // of the list and "the one after it" would be the top of the queue again.
     const list = jukePlayable();
-    jukeFailed.add(cid);
+    jukeFailed.add(address);
     jukeFetch = null;
     // Nobody heard it, and whoever holds the file may come back: it stays on the queue.
     if (advance) {
@@ -14366,7 +16540,7 @@
     // the track through its own vault and network path, so one of them can lack a provider or fail
     // to decode while the rest carry on. Saying so is the difference between a broken jukebox and
     // a track this machine could not get.
-    if (onDeck) jukeLocalFail = jukeNow?.name || cid;
+    if (onDeck) jukeLocalFail = jukeNow?.name || address;
   }
   // Seek + play state on an element that may have just been handed a new src (currentTime only
   // takes once there is metadata, hence the second run from the loadedmetadata listener).
@@ -14388,6 +16562,7 @@
     // progress here so emptying/replacing the deck cannot strand a LOADING chip indefinitely.
     jukeFetch = null;
     if (jamDeckPlaybackCid()) jamStopPlayback(); // the take deck stops with the transport
+    jukeLinkPark(); // and so does the linked deck: an unmounted frame is the only stopped one
     const el = jukeAudio;
     if (!el) return;
     el.pause();
@@ -14407,19 +16582,19 @@
     const e = jukeQueue.find((x) => x.id === id);
     if (!e) return;
     jukeWakeSynth();
-    jukeFailed.delete(e.cid); // an explicit press is also a retry of a track that would not fetch
-    jukeSend(e.id, e.cid, e.name, 0, false);
+    jukeFailed.delete(entryAddress(e)); // an explicit press is also a retry of a track that would not fetch
+    jukeSend(e.id, e.cid, e.source ?? "", e.link ?? "", e.name, 0, false);
   }
   function jukeToggle() {
     if (!inCall) return;
     jukeWakeSynth();
-    if (!jukeNow || !jukeNow.cid) {
+    if (!jukeNow || !(jukeNow.cid || jukeNow.link)) {
       const first = jukePlayable()[0];
       if (first) jukePlayEntry(first.id);
       return;
     }
     // A press on a stale deck resumes it (and claims it) rather than pausing an already dead DJ.
-    jukeSend(jukeNow.entry, jukeNow.cid, jukeNow.name, jukePos(), jukeStale ? false : !jukeNow.paused);
+    jukeSend(jukeNow.entry, jukeNow.cid, jukeNow.src, jukeNow.link, jukeNow.name, jukePos(), jukeStale ? false : !jukeNow.paused);
   }
   /**
    * Move the room on to the next track.
@@ -14432,8 +16607,8 @@
    */
   function jukeAdvance(played: boolean, list = jukePlayable()) {
     const { next, drop } = deckAdvance(list, jukeNow?.entry ?? "", played);
-    if (next) jukeSend(next.id, next.cid, next.name, 0, false);
-    else jukeSend("", "", "", 0, true); // queue exhausted: everyone stops
+    if (next) jukeSend(next.id, next.cid, next.source ?? "", next.link ?? "", next.name, 0, false);
+    else jukeSend("", "", "", "", "", 0, true); // queue exhausted: everyone stops
     if (drop) void jukeRemoveTrack(drop);
   }
   function jukeSkip() {
@@ -14452,6 +16627,11 @@
     const seq = msg.seq;
     const entry = msg.entry;
     const cid = msg.cid;
+    // Absent on a frame from a build that predates linked tracks, which is a file transport and
+    // reads as no link at all rather than as a malformed frame.
+    const link = msg.link ?? "";
+    // Absent on a frame from a build that only knew YouTube, which is what such a frame meant.
+    const src = msg.src ?? (msg.link ? JUKE_SOURCE_YOUTUBE : "");
     const name = msg.name;
     const off = msg.off;
     const paused = msg.paused;
@@ -14461,13 +16641,29 @@
     if (!validJukeSeq(seq)) return;
     if (typeof entry !== "string" || entry.length > 200) return;
     if (typeof cid !== "string" || (cid !== "" && !/^[0-9a-f]{1,128}$/.test(cid))) return;
+    // A link is checked to the exact shape an address is built from, here at the edge, because
+    // this is peer input and the frame is the only place it is checked before a URL is made of
+    // it. A frame naming both a file and a video is refused outright rather than resolved in
+    // favour of one: the two say different things about who fetches what from where, and picking
+    // one would be this device deciding what a peer meant.
+    // A link is checked to a shape an address can be built from, here at the edge, because this
+    // is peer input and the frame is the only place it is checked before a URL is made of it. The
+    // source has to be one this build can actually drive, or there is no player to hand it to.
+    if (typeof src !== "string" || typeof link !== "string") return;
+    if (link !== "" && !deckSources().includes(src)) return;
+    if (link !== "" && !/^[A-Za-z0-9_-]{1,64}(?:\/[A-Za-z0-9_.-]{1,64}){0,3}$/.test(link)) return;
+    if (link === "" && src !== "") return;
+    // A frame naming both a file and a linked track is refused outright rather than resolved in
+    // favour of one: the two say different things about who fetches what from where, and picking
+    // one would be this device deciding what a peer meant.
+    if (link !== "" && cid !== "") return;
     if (typeof name !== "string") return;
     if (typeof off !== "number" || !Number.isFinite(off) || off < 0) return;
     if (typeof paused !== "boolean") return;
     // Newest press wins; a tie goes to the higher fingerprint so every machine agrees. A frame
     // that is not newer is still taken from the DJ we already follow: that is the re-announce.
     if (!jukeClaimWins(jukeAdopted, { seq, fromFp })) return;
-    jukeAdopt(seq, fromFp, entry, cid, name.slice(0, 200), off, paused);
+    jukeAdopt(seq, fromFp, entry, cid, src, link, name.slice(0, 200), off, paused);
   }
   // Rides the 5s presence ping rather than owning a timer: as DJ I re-announce the transport (same
   // seq, fresh offset) so late joiners catch up and drift gets corrected; as a listener I use the
@@ -14475,7 +16671,7 @@
   function jukeTick() {
     if (!inCall || !jukeAdopted || !jukeNow) return;
     if (jukeIsDj()) {
-      broadcast({ callId: callChannel, type: "juke", seq: jukeAdopted.seq, entry: jukeNow.entry, cid: jukeNow.cid, name: jukeNow.name, off: jukePos(), paused: jukeNow.paused });
+      broadcast({ callId: callChannel, type: "juke", seq: jukeAdopted.seq, entry: jukeNow.entry, cid: jukeNow.cid, src: jukeNow.src, link: jukeNow.link, name: jukeNow.name, off: jukePos(), paused: jukeNow.paused });
       return;
     }
     if (jukeNow.paused || jukeStale || performance.now() - jukeHeard <= JUKE_DJ_GONE_MS) return;
@@ -14532,14 +16728,23 @@
   // handles both), narrowed to the kind being asked for, each piece of content listed once. The
   // share can list one content address several times over (two folders, or a concurrent double
   // add), and to the deck those are all one track.
-  const JUKE_PICK_KINDS: { key: MediaFilter; label: string }[] = [
+  // YouTube is a tab rather than a filter, because it is not a view of the share at all: the
+  // other four narrow a list of files this server holds, and this one is a form for naming a
+  // video nobody here holds. It sits in the same strip because from the member's side the
+  // question is the same one ("what goes on the queue"), and the difference in where the track
+  // comes from is what the panel itself explains.
+  type JukePickTab = MediaFilter | "youtube";
+  const JUKE_PICK_KINDS: { key: JukePickTab; label: string }[] = [
     { key: "all", label: "ALL" },
     { key: "audio", label: "AUDIO" },
     { key: "video", label: "VIDEO" },
     { key: "take", label: "TAKES" },
+    { key: "youtube", label: "LINK" },
   ];
-  let jukePickKind = $state<MediaFilter>("all");
-  let jukePickFiles = $derived(mediaChoices(files, jukePickKind));
+  let jukePickKind = $state<JukePickTab>("all");
+  // The YouTube tab lists nothing from the share. The empty list keeps every share-derived
+  // expression below well defined rather than conditionally absent.
+  let jukePickFiles = $derived(jukePickKind === "youtube" ? [] : mediaChoices(files, jukePickKind));
   // Counts on the toggle, so an empty list is legible as "none of that kind" rather than as a
   // broken picker, and so switching to a kind that has nothing is a choice you can decline.
   let jukePickCounts = $derived({
@@ -15468,6 +17673,7 @@
       delete jamPeerSn[fp];
       clearPeerJamUi(fp);
       jamApplyMutes(fp);
+      ensureJamEngine().setSourceLevel(fp, peerInstLevelFor(fp) / 100); // the trim you set for them last time
       const dc = peer.dc;
       dc.onopen = () => {
         pushInstState();
@@ -15744,17 +17950,20 @@
       error = "Couldn't identify this device on the voice room's server.";
       return;
     }
-    // A missing or refused microphone is no longer a reason not to join. The room is also where
-    // the jukebox and the instruments live, and neither needs one: the data channel carries the
-    // instruments and the deck rides the mesh, so a peer with no mic is a full participant in
-    // everything except talking. The dock offers the mic in place if one turns up later.
-    const joinedMic = await ensureMic(false, false, { server, channel, callLease: joinLease });
-    if (!callLifecycleSession.isCurrent(joinLease)) {
-      if (joinedMic) for (const track of joinedMic.getTracks()) track.stop();
-      return;
-    }
-    localStream = joinedMic;
-    micOn = joinedMic !== null;
+    // A missing or refused microphone is no longer a reason not to join, and waiting for one is no
+    // longer a reason not to be in the room yet. The room is also where the jukebox and the
+    // instruments live, and neither needs a microphone: the data channel carries the instruments
+    // and the deck rides the mesh, so a peer with no mic is a full participant in everything except
+    // talking. The dock offers the mic in place if one turns up later.
+    //
+    // `getUserMedia` has no timeout and is not cancellable. Immediately after a call is left its
+    // device is being torn down by the OS, and the next request for it can sit unanswered for a
+    // long time, or forever. Awaiting it here made joining the next room look BROKEN rather than
+    // slow: nothing was set, so the button did nothing, no error appeared, and the only visible
+    // fact was that leaving a call had cost the ability to join another one. So the room is entered
+    // first and the microphone attaches to it when (and if) the device answers.
+    localStream = null;
+    micOn = false;
     callServer = server;
     callSelfFp = selfFp;
     callChannel = channel;
@@ -15775,7 +17984,10 @@
     focusOpen = false;
     focusDismissed = false; // a new call earns a fresh chance to take the window
     voiceAlert = null;
-    if (localStream) addAnalyser("me", localStream);
+    // The room is live from here; the microphone joins it when the device answers. `enableMic`
+    // adds the track to every edge that already exists and renegotiates through the ordinary
+    // perfect-negotiation path, so an edge established before the mic arrived picks it up.
+    void enableMic(false);
     startMeters();
     navigator.mediaDevices?.addEventListener?.("devicechange", onDeviceChange);
     alertedRooms.delete(roomKey(server, channel));
@@ -15820,7 +18032,11 @@
     screenAudioCaptureSession.invalidate();
     micCaptureSession.invalidate();
     callLifecycleSession.invalidate();
-    if (callChannel) broadcast({ callId: callChannel, type: "bye" });
+    // First, and on every route: the room has to learn that this was a hangup, not a link that
+    // died. Sent before any teardown below, while the data channels are still open.
+    if (callChannel && callServer !== null && callSelfFp) {
+      announceHangup(callServer, callSelfFp, callChannel);
+    }
     releaseMappedCallPorts(); // give the router its ports back; the lease is bounded regardless
     instReleaseAll(); // lift my own notes (and tell peers) before the edges go down
     if (camStream) {
@@ -15855,6 +18071,7 @@
     jamMySn = "";
     jamMyQ = 0;
     jamPublishedPatch = null;
+    jamPublishedCanonical = null; // nothing is published into a call that has ended
     jamEnsurePublication = null;
     jamPublicationPacer.reset();
     jamPublicationGeneration.advance();
@@ -16322,10 +18539,24 @@
   function toggleReactionPicker(m: Msg) {
     reactionPickerFor = reactionPickerFor === m.id ? "" : m.id;
   }
+  // The right-click menu leads with the reactions you actually use: a local tally per emoji,
+  // seeded by the quick set until there is history. Only an ADDED reaction counts; taking one
+  // back is not a preference.
+  const REACT_TALLY_KEY = "catcoms.reactions.recent";
+  const REACT_STRIP_SIZE = 5;
+  let reactTally: Record<string, number> = {};
+  try { reactTally = parseTally(localStorage.getItem(REACT_TALLY_KEY)); } catch { /* ignore */ }
+  let reactRecent = $state(topReactions(reactTally, QUICK_EMOJI, REACT_STRIP_SIZE));
+  function noteReactionPick(emoji: string) {
+    reactTally = tallyReaction(reactTally, emoji);
+    reactRecent = topReactions(reactTally, QUICK_EMOJI, REACT_STRIP_SIZE);
+    try { localStorage.setItem(REACT_TALLY_KEY, JSON.stringify(reactTally)); } catch { /* ignore */ }
+  }
   async function toggleReaction(m: Msg, emoji: string) {
     const ch = cur?.active;
     reactionPickerFor = "";
     if (activeServerId === null || !ch || !m.id) return;
+    if (!m.reactions.some((r) => r.emoji === emoji && r.by.includes(myFp))) noteReactionPick(emoji);
     try {
       await invokeDebugged("toggle_reaction", { server: activeServerId, channel: ch, msgId: m.id, emoji });
     } catch (e) {
@@ -17615,6 +19846,12 @@
         // reacting to an old message, renaming the topic and queueing a track all used to look
         // exactly like somebody talking.
         const change = readChannelChange(e.payload);
+        // An arrival that sorts behind this device's read mark is history that was missed, and
+        // nothing below announces it: the badge measures forward from the cursor. Placed and
+        // recorded for every channel, on screen or not, before anything else decides.
+        if (change.messagesAppended && change.arrivals.length) {
+          void recordLateArrivals(server, channel, change.arrivals);
+        }
         // Why this update did or did not raise a badge. Read here, against the surface state that
         // actually decided it, and written down further below once the badge has had its chance to
         // move: "reacted to an old message", "the window was behind something" and "they were
@@ -17908,6 +20145,13 @@
         joinReplyReady = e.payload;
         notice = "Send the connection reply back to the inviter now; keep this app open.";
       }),
+      listen<{ steps: JoinStep[] }>("join-progress", (e) => {
+        // The attempt's steps so far, a snapshot each time, so the start surface can show which
+        // route is being tried while the native command stays pending. Ignored outside an
+        // attempt: a late snapshot must not repaint a surface that has moved on.
+        if (locked || !joinAttemptPending) return;
+        joinSteps = e.payload.steps;
+      }),
       // These two used to arrive as a bare server id, which is a payload with nowhere to put the
       // stream's bookkeeping: they were the two event families whose gaps could never be detected.
       listen<{ server: number }>("reachability-changed", (e) => {
@@ -18050,13 +20294,30 @@
         return;
       }
       if (handleSpaceKey(e)) return;
+      // R / E on the message under the pointer: reply, or the reaction picker. They are the hints
+      // that row's right-click menu shows, which is the whole reason they exist. Resolved from
+      // what is under the pointer NOW, so an overlay that has since covered the log wins.
+      if (!locked && !menu && logPointer && view === "chat" && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !typingTarget(e.target)) {
+        const k = e.key.toLowerCase();
+        if (k === "r" || k === "e") {
+          const m = messageUnderPointer();
+          if (m?.id) {
+            e.preventDefault();
+            if (k === "r") startReply(m);
+            else reactionPickerFor = m.id;
+            return;
+          }
+        }
+      }
       if (e.key === "Escape") {
-        if (textEffectTarget) { textEffectTarget = null; showTextEffectCatalog = false; }
+        // The context menu goes first: it opens over anything, including the text-effect bar
+        // on a composer selection, and one Escape must close the thing on top.
+        if (menu) menu = null;
+        else if (textEffectTarget) { textEffectTarget = null; showTextEffectCatalog = false; }
         else if (showQuickSwitch) closeQuickSwitch();
         else if (scanOpen) closeScan(null);
         else if (showLinkDevice) closeLinkDevice();
         else if (verifyFor) verifyFor = null;
-        else if (menu) menu = null;
         else if (lightbox && fileInfo) closeFileInfo(); // Properties opened over the viewer
         else if (lightbox) closeLightbox();
         else if (reactionPickerFor) reactionPickerFor = "";
@@ -18113,8 +20374,8 @@
         return;
       }
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
-        const tabs: Tab[] = ["chat", "files", "status", "wiki", "profile", "downloads", "events"];
-        if (e.key >= "1" && e.key <= "7") {
+        const tabs: Tab[] = ["chat", "files", "status", "wiki", "profile", "downloads", "events", "studio"];
+        if (e.key >= "1" && e.key <= "8") {
           e.preventDefault();
           if (activeServerId !== null) switchView(tabs[Number(e.key) - 1]);
         } else if (e.key.toLowerCase() === "l") {
@@ -18180,11 +20441,17 @@
     };
     // Minimised, or on another virtual desktop: the window can hold focus and still show nobody
     // anything, and read state must not treat that as having read the log.
-    const onVisibility = () => (documentVisible = document.visibilityState === "visible");
+    const onVisibility = () => {
+      documentVisible = document.visibilityState === "visible";
+      // A player card must not keep talking to Spotify or Google from a window nobody is looking
+      // at. The observer cannot see this: an occluded window still reports its rows as on screen.
+      reconcileAllEmbeds();
+    };
     document.addEventListener("visibilitychange", onVisibility);
     onVisibility();
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("contextmenu", onFallbackContext);
     window.addEventListener("blur", onBlur);
     window.addEventListener("mousedown", onMouseNav);
     const stopTextEffects = mountTextEffectRuntime();
@@ -18224,6 +20491,7 @@
     }, 4000);
     return () => {
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("contextmenu", onFallbackContext);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("mousedown", onMouseNav);
@@ -18593,9 +20861,71 @@
 <!-- The profile editor, rendered by BOTH the profile surface (Ctrl+5) and Settings → My
      Profile: one form, two doors, so the two can never drift apart. -->
 {#snippet profileEditor()}
-  <div class="profile-tab tab-pane">
+  {@const profileTabs = PROFILE_TABS.filter((t) => t.id !== "frame" || CHAT_MESSAGE_FRAMES_ENABLED)}
+  <div class="profile-tab tab-pane" use:rangeFills={`${pEffect}|${pBubble}|${profileTab}`}>
+    <div class="ptabs" role="tablist" aria-label="Profile sections">
+      {#each profileTabs as t (t.id)}
+        <button type="button" class="ptab" class:on={profileTab === t.id} role="tab" aria-selected={profileTab === t.id} onclick={() => (profileTab = t.id)}>
+          {t.label}
+          {#if profileDirty[t.id]}<span class="dirty" title="Unsaved changes"></span>{/if}
+        </button>
+      {/each}
+    </div>
+    {#if profileTab === "identity"}
+    <div class="ppanel">
+    <div class="field id-lib">
+      <span class="pf-k">Identity library <small>saved on this device, available on every server</small></span>
+      {#if savedIdentities.length}
+        <div class="id-tiles">
+          {#each savedIdentities as ident (ident.id)}
+            <span class="id-tile">
+              <button type="button" class="id-pick" title={`Load ${ident.label}`} onclick={() => applyIdentity(ident)}>
+                {#if ident.avatar}
+                  <img class="avatar" src={imgSrc(ident.avatar)} alt="" />
+                {:else}
+                  <span class="avatar fallback" style={`background:${ident.color}`}>{(ident.name || ident.label).slice(0, 1).toUpperCase()}</span>
+                {/if}
+                <span class="id-text">
+                  {@render styledName(ident.name || ident.label, ident.color, ident.font, ident.effect)}
+                  <small>{ident.label}</small>
+                </span>
+              </button>
+              <button type="button" class="recipe-delete" aria-label={`Delete saved identity ${ident.label}`} title="Delete this identity" onclick={() => deleteIdentity(ident.id)}>✕</button>
+            </span>
+          {/each}
+        </div>
+      {:else}
+        <span class="muted small">Nothing saved yet. Set up a look, then save it here to reuse it on another server or switch back to it later.</span>
+      {/if}
+      <div class="recipe-save">
+        <input value={identityLabelDraft} maxlength="32" placeholder={`Label, e.g. ${pName.trim() || "weekend me"}`} aria-label="New identity label" oninput={(e) => (identityLabelDraft = e.currentTarget.value)} onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveIdentity(); } }} />
+        <button type="button" class="ghost small" disabled={!(identityLabelDraft.trim() || pName.trim())} onclick={saveIdentity}>Save current identity</button>
+      </div>
+      {#if identityLibraryError}<span class="fx-warnings" role="status">{identityLibraryError}</span>{/if}
+      <span class="muted small">Saves everything on all three tabs. Loading one fills the draft; Save profile is what publishes it.</span>
+    </div>
     <div class="field">
-      <span class="muted">Banner</span>
+      <span class="pf-k">Avatar</span>
+      <div class="avatar-row">
+        {#if pAvatar}
+          <img class="avatar lg" src={imgSrc(pAvatar)} alt="" />
+        {:else}
+          <span class="avatar lg fallback" style={`background:${pColor}`}>
+            {(pName || displayName).slice(0, 1).toUpperCase()}
+          </span>
+        {/if}
+        <label class="upload-btn">
+          {pAvatar ? "Replace avatar" : "Upload avatar"}
+          <input type="file" accept="image/*" onchange={(e) => { const t = e.currentTarget; void loadAvatar(t.files).then(() => (t.value = "")); }} />
+        </label>
+        {#if pAvatar}
+          <button type="button" class="ghost small" onclick={() => (pAvatar = "")}>Remove</button>
+        {/if}
+      </div>
+      <span class="muted small">A GIF or WebP under 64KiB keeps its animation; anything else becomes a 128px square.</span>
+    </div>
+    <div class="field">
+      <span class="pf-k">Banner</span>
       {#if pBanner}
         <img class="banner-preview" src={imgSrc(pBanner)} alt="" />
       {/if}
@@ -18605,18 +20935,43 @@
           <input type="file" accept="image/*" onchange={(e) => { const t = e.currentTarget; void loadBanner(t.files).then(() => (t.value = "")); }} />
         </label>
         {#if pBanner}
-          <button type="button" class="ghost" onclick={() => (pBanner = "")}>Remove</button>
+          <button type="button" class="ghost small" onclick={() => (pBanner = "")}>Remove</button>
         {/if}
       </div>
       <span class="muted small">Tops your profile card. A small animated GIF or WebP stays animated.</span>
     </div>
     <label class="field">
-      <span class="muted">Name</span>
+      <span class="pf-k">Name</span>
       <input bind:value={pName} placeholder="display name" />
     </label>
+    <div class="field">
+      <span class="pf-k">Colour <small>the name's base colour, under any effect</small></span>
+      <div class="ns-swatches">
+        <input type="color" value={pColor} aria-label="Custom name colour" oninput={(e) => setNameColor(e.currentTarget.value)} />
+        {#each NAME_COLORS as c}
+          <button
+            type="button"
+            class="ns-swatch"
+            class:active={pColor === c}
+            title={c}
+            aria-label={`Name colour ${c}`}
+            aria-pressed={pColor === c}
+            style={`background:${c}`}
+            onclick={() => setNameColor(c)}
+          ></button>
+        {/each}
+      </div>
+    </div>
+    <div class="field text-fx-field">
+      <div class="text-fx-field-head"><label class="pf-k" for="profile-bio">About you</label>{@render textEffectButton("bio", "Bio text effects")}</div>
+      <textarea id="profile-bio" bind:this={profileBioEl} bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…" onselect={() => onTextEffectSelection("bio")}></textarea>
+    </div>
+    </div>
+    {:else if profileTab === "name"}
+    <div class="ppanel">
     <div class="field name-studio">
       <div class="name-studio-head">
-        <span class="muted">Name Style Studio</span>
+        <span class="pf-k">Name Style Studio</span>
         <div class="name-studio-actions">
           <button type="button" class="ghost small" disabled={!styleUndo.length} onclick={undoNameStyle} title="Undo the last unsaved style change">↶ Undo</button>
           <button type="button" class="ghost small" disabled={!styleRedo.length} onclick={redoNameStyle} title="Redo the last undone style change">↷ Redo</button>
@@ -18650,7 +21005,7 @@
       </div>
     </div>
     <div class="field">
-      <span class="muted">Font</span>
+      <span class="pf-k">Font</span>
       <div class="ns-tiles">
         {#each NAME_FONTS as f}
           <button
@@ -18666,21 +21021,21 @@
       </div>
     </div>
     <div class="field type-studio">
-      <span class="muted">Typography</span>
+      <span class="pf-k">Typography</span>
       <div class="fx-option-grid">
         <label class="fx-option"><span>Weight <output>{effectOptions(pEffects, "typography").weight}</output></span><input type="range" min="400" max="900" step="100" value={effectOptions(pEffects, "typography").weight} oninput={(e) => updateStudioOption("typography", "weight", e.currentTarget.valueAsNumber)} /></label>
         <label class="fx-option"><span>Letter spacing <output>{effectOptions(pEffects, "typography").tracking}px</output></span><input type="range" min="-1" max="6" step="0.1" value={effectOptions(pEffects, "typography").tracking} oninput={(e) => updateStudioOption("typography", "tracking", e.currentTarget.valueAsNumber)} /></label>
         <label class="fx-option"><span>Bubble thickness <output>{effectOptions(pEffects, "typography").bubble}px</output></span><input type="range" min="0" max="3" step="0.25" value={effectOptions(pEffects, "typography").bubble} oninput={(e) => updateStudioOption("typography", "bubble", e.currentTarget.valueAsNumber)} /></label>
       </div>
       <div class="type-toggles">
-        <label><input type="checkbox" checked={effectOptions(pEffects, "typography").italic} onchange={(e) => updateStudioOption("typography", "italic", e.currentTarget.checked)} /> Italic</label>
-        <label><input type="checkbox" checked={effectOptions(pEffects, "typography").uppercase} onchange={(e) => updateStudioOption("typography", "uppercase", e.currentTarget.checked)} /> Uppercase</label>
+        <button type="button" class="ptog" class:on={!!effectOptions(pEffects, "typography").italic} aria-pressed={!!effectOptions(pEffects, "typography").italic} onclick={() => updateStudioOption("typography", "italic", !effectOptions(pEffects, "typography").italic)}><i>Aa</i> Italic</button>
+        <button type="button" class="ptog" class:on={!!effectOptions(pEffects, "typography").uppercase} aria-pressed={!!effectOptions(pEffects, "typography").uppercase} onclick={() => updateStudioOption("typography", "uppercase", !effectOptions(pEffects, "typography").uppercase)}>AA Uppercase</button>
         <button type="button" class="ghost small" onclick={() => resetNameEffect("typography")}>Reset typography</button>
       </div>
     </div>
     <div class="field">
       <div class="effect-field-head">
-        <span class="muted">Effects</span>
+        <span class="pf-k">Effects</span>
         <button
           type="button"
           class="ghost small"
@@ -18874,28 +21229,9 @@
         <span class="fx-readable">✓ Readable at compact chat sizes</span>
       {/if}
     </div>
-    <div class="field">
-      <span class="muted">Colour</span>
-      <div class="ns-swatches">
-        <input type="color" value={pColor} aria-label="Custom name colour" oninput={(e) => setNameColor(e.currentTarget.value)} />
-        {#each NAME_COLORS as c}
-          <button
-            type="button"
-            class="ns-swatch"
-            class:active={pColor === c}
-            title={c}
-            aria-label={`Name colour ${c}`}
-            aria-pressed={pColor === c}
-            style={`background:${c}`}
-            onclick={() => setNameColor(c)}
-          ></button>
-        {/each}
-      </div>
     </div>
-    <div class="field text-fx-field">
-      <div class="text-fx-field-head"><label class="muted" for="profile-bio">About you</label>{@render textEffectButton("bio", "Bio text effects")}</div>
-      <textarea id="profile-bio" bind:this={profileBioEl} bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…" onselect={() => onTextEffectSelection("bio")}></textarea>
-    </div>
+    {:else if profileTab === "frame"}
+    <div class="ppanel">
     <div class="field message-frame-field frame-studio">
       <div class="message-frame-head">
         <div>
@@ -19058,41 +21394,56 @@
           {/each}
         </div>
       {/if}
+      <span class="muted small">Surface, chassis and layers travel with your profile. Viewers may flatten peer frames locally in Settings - Appearance.</span>
+    </div>
+    </div>
+    {:else if profileTab === "arrival"}
+    <div class="ppanel">
+    <div class="field message-frame-field frame-studio arrival-studio">
       <div class="message-frame-head motion-studio-head">
         <div>
           <span class="name-studio-label">MESSAGE ARRIVAL STUDIO</span>
-          <strong>New-message arrival</strong>
+          <strong>How your new messages show up</strong>
         </div>
-        <span class="message-frame-kicker">PROFILE MOTION</span>
+        <button type="button" class="ghost small" disabled={pFrame.motion === "none" && arrivalIsDefault(pFrame.arrival)} onclick={resetArrival}>Reset arrival</button>
       </div>
-      <div class="frame-motion-grid" aria-label="New message arrival animation">
-        {#each FRAME_MOTIONS as motion}
-          <button
-            type="button"
-            class="frame-motion-tile motion-demo-{motion.id}"
-            class:active={pFrame.motion === motion.id}
-            title={motion.description}
-            aria-pressed={pFrame.motion === motion.id}
-            onclick={() => updateFrame({ motion: motion.id })}
-          >
-            <span aria-hidden="true">{motion.glyph}</span>
-            <b>{motion.label}</b>
-          </button>
+      <span class="muted small">Plays once on the row, the moment a message of yours lands on someone's screen. Loaded history stays still.</span>
+      {#if appearance.messageMotion === "off"}
+        <span class="fx-warnings" role="status">Arrivals are switched off on this device (Settings → Appearance → Message arrivals), so you will not see yours or anyone else's here. Members who keep them on still see this one.</span>
+      {/if}
+      <div class="motion-catalog" aria-label="New message arrival animation">
+        {#each MOTION_FAMILIES as fam (fam.id)}
+          <div class="motion-group">
+            <span class="name-studio-label">{fam.label} <small>{fam.hint}</small></span>
+            <div class="frame-motion-grid">
+              {#each FRAME_MOTIONS.filter((motion) => messageFrameMotionTraits(motion.id).family === fam.id) as motion (motion.id)}
+                <button
+                  type="button"
+                  class="frame-motion-tile"
+                  class:active={pFrame.motion === motion.id}
+                  title={motion.description}
+                  aria-pressed={pFrame.motion === motion.id}
+                  onclick={() => updateFrame({ motion: motion.id })}
+                >
+                  <span aria-hidden="true">{motion.glyph}</span>
+                  <b>{motion.label}</b>
+                </button>
+              {/each}
+            </div>
+          </div>
         {/each}
       </div>
       {#if pFrame.motion !== "none"}
+        {@const traits = messageFrameMotionTraits(pFrame.motion)}
         <div class="arrival-settings">
           <div class="fx-option-grid">
             <label class="fx-option"><span>Duration <output>{pFrame.arrival.duration}ms</output></span><input type="range" min="240" max="1200" step="20" value={pFrame.arrival.duration} oninput={(e) => updateFrameArrival({ duration: e.currentTarget.valueAsNumber })} /></label>
-            <label class="fx-option"><span>{pFrame.motion === "pop" ? "Scale depth" : "Travel"} <output>{pFrame.arrival.distance}</output></span><input type="range" min="4" max="80" step="2" value={pFrame.arrival.distance} oninput={(e) => updateFrameArrival({ distance: e.currentTarget.valueAsNumber })} /></label>
-            <label class="fx-option"><span>Starting visibility <output>{pFrame.arrival.fade}%</output></span><input type="range" min="0" max="80" step="5" value={pFrame.arrival.fade} oninput={(e) => updateFrameArrival({ fade: e.currentTarget.valueAsNumber })} /></label>
+            <label class="fx-option" class:dim={traits.distance === "none"}><span>{DISTANCE_LABELS[traits.distance]} <output>{arrivalDistanceReadout(traits.distance, pFrame.arrival.distance)}</output></span><input type="range" min="4" max="80" step="2" value={pFrame.arrival.distance} disabled={traits.distance === "none"} oninput={(e) => updateFrameArrival({ distance: e.currentTarget.valueAsNumber })} /></label>
+            <label class="fx-option" class:dim={!traits.fade}><span>Starting visibility <output>{traits.fade ? `${pFrame.arrival.fade}%` : "n/a"}</output></span><input type="range" min="0" max="80" step="5" value={pFrame.arrival.fade} disabled={!traits.fade} oninput={(e) => updateFrameArrival({ fade: e.currentTarget.valueAsNumber })} /></label>
             <div class="arrival-direction">
               <span class="muted small">ENTRY VECTOR</span>
-              <button type="button" class="ghost small" disabled={pFrame.motion === "pop"} onclick={() => updateFrameArrival({ direction: pFrame.arrival.direction < 0 ? 1 : -1 })}>
-                {#if pFrame.motion === "fly"}{pFrame.arrival.direction < 0 ? "← from left" : "from right →"}
-                {:else if pFrame.motion === "glide"}{pFrame.arrival.direction < 0 ? "↑ from above" : "from below ↓"}
-                {:else if pFrame.motion === "drift"}{pFrame.arrival.direction < 0 ? "↖ drift left" : "drift right ↗"}
-                {:else}centred{/if}
+              <button type="button" class="ghost small" disabled={!traits.direction} onclick={() => updateFrameArrival({ direction: pFrame.arrival.direction < 0 ? 1 : -1 })}>
+                {traits.direction ? (pFrame.arrival.direction < 0 ? traits.vector[0] : traits.vector[1]) : "centred"}
               </button>
             </div>
           </div>
@@ -19106,26 +21457,19 @@
           </div>
         </div>
       {/if}
-      <span class="muted small">Chassis, layer stack, and arrival recipe travel with your profile. Viewers may flatten peer frames or disable arrivals locally in Settings - Appearance.</span>
+      <span class="muted small">Your arrival travels with your profile. Anyone can switch arrivals off for themselves in Settings - Appearance, and reduced motion keeps every row still.</span>
     </div>
-    <div class="field">
-      <span class="muted">Avatar</span>
-      <div class="avatar-row">
-        {#if pAvatar}
-          <img class="avatar lg" src={imgSrc(pAvatar)} alt="" />
-        {:else}
-          <span class="avatar lg fallback" style={`background:${pColor}`}>
-            {(pName || displayName).slice(0, 1).toUpperCase()}
-          </span>
-        {/if}
-        <input type="file" accept="image/*" onchange={(e) => loadAvatar(e.currentTarget.files)} />
-        {#if pAvatar}
-          <button type="button" class="ghost" onclick={() => (pAvatar = "")}>Remove</button>
-        {/if}
-      </div>
-      <span class="muted small">A GIF or WebP under 64KiB keeps its animation; anything else becomes a 128px square.</span>
     </div>
-    <button onclick={saveProfile}>Save profile</button>
+    {/if}
+    <div class="psave">
+      <span class="status">
+        {#if profileDirty.any}<span class="dirty" aria-hidden="true"></span>Unsaved changes in {dirtyTabLabels()}
+        {:else if cur && !cur.isDm}Saved on {cur.name}
+        {:else}Nothing to save yet{/if}
+      </span>
+      <button type="button" class="ghost small" disabled={!profileDirty.any} onclick={discardProfileDraft}>Discard</button>
+      <button type="button" class="primary" disabled={activeServerId === null} onclick={saveProfile}>Save profile</button>
+    </div>
   </div>
 {/snippet}
 
@@ -19148,16 +21492,12 @@
   {@const pv = messageFrameStyle(pBubble)}
   {@const previewMotion = pFrame.motion}
   <ul
-    class="messages stx-plog frame-motion-preview"
+    class="messages stx-plog frame-motion-preview {previewMotion === 'none' ? '' : 'arrival-' + previewMotion}"
     class:preview-arrival={previewMotion !== "none"}
-    class:arrival-glide={previewMotion === "glide"}
-    class:arrival-fly={previewMotion === "fly"}
-    class:arrival-pop={previewMotion === "pop"}
-    class:arrival-drift={previewMotion === "drift"}
     style={messageFrameArrivalStyle(pBubble)}
     use:channelScan
   >
-    <li class="frame-{pFrame.shape}" class:has-bubble={!!pv} class:frame-start={!!pv} style={pv}>
+    <li class="frame-{pFrame.shape}" class:has-bubble={!!pv} class:frame-start={!!pv} style={pv} use:arrivalOrigin={previewMotion}>
       <span class="t">
         <span class="gutter-avatar">
           {#if pAvatar}
@@ -19180,7 +21520,7 @@
         <span class="text">tea is ready when you are <span class="mention mention-me">@you</span></span>
       </div>
     </li>
-    <li class="grouped frame-{pFrame.shape}" class:has-bubble={!!pv} class:frame-end={!!pv} style={pv}>
+    <li class="grouped frame-{pFrame.shape}" class:has-bubble={!!pv} class:frame-end={!!pv} style={pv} use:arrivalOrigin={previewMotion}>
       <span class="t">{fmtTime(Date.now())}</span>
       <div class="m-body">{@render frameLayers(pFrame)}<span class="text">bringing biscuits too</span></div>
     </li>
@@ -19256,33 +21596,42 @@
   </div>
 {/snippet}
 
-<!-- One roster row in the member column (rendered under the online / offline group heads). -->
+<!--
+  One roster row in the member column (rendered under the online / offline group heads).
+  The whole row is the button, so anywhere in the strip opens the profile card. Standing
+  and identity are worn on the avatar rather than spelled out in text badges: a halo ring
+  marks you, a crown marks owner/admin. A 200px column has no room for word-shaped badges,
+  and the custom badge still reads in full on the profile card and in chat.
+-->
 {#snippet memberRow(m: Member, online: boolean)}
+  {@const role = roles[m.fingerprint] ?? "member"}
   <li
-    title={m.fingerprint}
+    title={`${nameOf(m.fingerprint)}\n${m.fingerprint}`}
     class:is-you={m.you}
     class="member-row"
     use:contextMenu={() => memberMenu(m)}
   >
-    <span class="presence" class:online title={presenceText(m.fingerprint, m.you)}>●</span>
     <button type="button" class="member-link" onclick={() => showProfile(m.fingerprint)}>
-      {@render avatarTag(m.fingerprint)}
-      {@render nameTag(m.fingerprint)}
+      <span class="presence" class:online title={presenceText(m.fingerprint, m.you)}>●</span>
+      <span class="member-face" class:is-you={m.you} title={m.you ? "This is you" : undefined}>
+        {@render avatarTag(m.fingerprint)}
+        {#if role === "owner" || role === "admin"}
+          <span class="role-crown {role}" title={role === "owner" ? "Server owner" : "Moderator"}>{@render icoCrown()}</span>
+        {/if}
+      </span>
+      <!-- Wrapper, not the styled name itself: the ellipsis clip lives out here so a name
+           effect's own overflow (the sparkle row, the wave's lift) still measures from the
+           name's box and is not shifted by the clip's breathing room. The wrapper carries the
+           member's colour too, because the browser paints the ellipsis in the clipping box's
+           colour: without it the "…" would break out of the name in plain text grey. -->
+      <span class="member-name" style={colorStyle(profiles[m.fingerprint]?.color ?? "")}>{@render nameTag(m.fingerprint)}</span>
+      {#if !m.you && verifiedFps.has(m.fingerprint)}
+        <span class="vf-check" title="You verified this member out of band">✓</span>
+      {/if}
+      {#if !m.you && !online && lastSeen[m.fingerprint]}
+        <span class="last-seen" title={presenceText(m.fingerprint, false)}>{relTime(nowTick - lastSeen[m.fingerprint])}</span>
+      {/if}
     </button>
-    {#if !m.you && verifiedFps.has(m.fingerprint)}
-      <span class="vf-check" title="You verified this member out of band">✓</span>
-    {/if}
-    {#if badges[m.fingerprint]}
-      {@const b = badges[m.fingerprint]}
-      <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""} title="Badge assigned by a server admin">{b.label}</span>
-    {/if}
-    {#if roles[m.fingerprint] && roles[m.fingerprint] !== "member"}
-      <span class="role-badge {roles[m.fingerprint]}" title={roles[m.fingerprint]}>{roleAbbr(roles[m.fingerprint])}</span>
-    {/if}
-    {#if m.you}<span class="you-badge">you</span>{/if}
-    {#if !m.you && !online && lastSeen[m.fingerprint]}
-      <span class="last-seen" title={presenceText(m.fingerprint, false)}>{relTime(nowTick - lastSeen[m.fingerprint])}</span>
-    {/if}
   </li>
 {/snippet}
 
@@ -19314,6 +21663,111 @@
 
 <!-- The brand cat, drawn down from the logo's own geometry (assets/cat/icon-cat.svg): same ear
      angle, same chubby head, same happy closed eyes. -->
+<!-- One level of the right-click menu. Depth 0 is the box itself; depth 1 is a flyout, which is
+     rendered inside its parent row so the two read as one shape and move together. -->
+{#snippet menuRows(items: MenuItem[], depth: number)}
+  {#each items as item, i}
+    {#if "divider" in item}
+      <div class="ctx-divider"></div>
+    {:else if "section" in item}
+      <div class="ctx-sec">{item.section}</div>
+    {:else if "head" in item}
+      <div class="ctx-head">
+        <span class="ctx-kind">{item.kind}</span>
+        {#if item.fp}{@render avatarTag(item.fp)}{/if}
+        <span class="ctx-title" title={item.title}>{item.title}</span>
+      </div>
+      {#if item.info}<div class="ctx-info" class:on={item.online}>{item.info}</div>{/if}
+    {:else if "react" in item}
+      {@const m = item.react}
+      <div class="ctx-react" role="group" aria-label="React">
+        {#each reactRecent as e (e)}
+          {@const code = customEmojiCode(e)}
+          <button
+            class="ctx-rx"
+            type="button"
+            class:on={m.reactions.some((r) => r.emoji === e && r.by.includes(myFp))}
+            title={`React with ${e}`}
+            aria-label={`React with ${e}`}
+            onclick={() => { void toggleReaction(m, e); menu = null; }}
+          >
+            {#if code}{#if emojiUrls[code]}<img src={emojiUrls[code]} alt={e} />{:else}<span class="muted small">{e}</span>{/if}{:else}{e}{/if}
+          </button>
+        {/each}
+        <button
+          class="ctx-rx ctx-rx-more"
+          type="button"
+          class:on={menuReactOpen}
+          title={menuReactOpen ? "Fewer reactions" : "All reactions"}
+          aria-label={menuReactOpen ? "Fewer reactions" : "All reactions"}
+          aria-expanded={menuReactOpen}
+          onclick={() => (menuReactOpen = !menuReactOpen)}
+        >{@render icoCat()}</button>
+      </div>
+      {#if menuReactOpen}
+        <div class="ctx-react-grid">
+          {#each Object.keys(emojiMap) as code (code)}
+            <button class="ctx-rx" type="button" aria-label={`React with :${code}:`} onclick={() => { void toggleReaction(m, `:${code}:`); menu = null; }}>
+              {#if emojiUrls[code]}<img src={emojiUrls[code]} alt={code} />{:else}<span class="muted small">:{code}:</span>{/if}
+            </button>
+          {/each}
+          {#each EMOJI_SETS as set (set.label)}
+            {#each set.list as e (e)}
+              <button class="ctx-rx" type="button" aria-label={`React with ${e}`} onclick={() => { void toggleReaction(m, e); menu = null; }}>{e}</button>
+            {/each}
+          {/each}
+        </div>
+      {/if}
+    {:else if "slider" in item}
+      <div class="ctx-slider">
+        <span class="ctx-ico" aria-hidden="true">{@html menuIconSvg(item.icon)}</span>
+        <input
+          type="range"
+          min="0"
+          max={item.max}
+          step="5"
+          value={item.value}
+          aria-label={item.label}
+          title={item.label}
+          oninput={(e) => item.onInput(Number(e.currentTarget.value))}
+        />
+        <span class="ctx-pct">{item.value}%</span>
+      </div>
+    {:else}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="ctx-row" onpointerenter={() => hoverMenuRow(depth, i, !!item.sub)}>
+        <button
+          class="ctx-item"
+          class:danger={item.danger}
+          class:on={item.on}
+          class:open={depth === 0 && menuSub === i}
+          role="menuitem"
+          tabindex="-1"
+          disabled={item.disabled}
+          data-row={depth === 0 ? i : undefined}
+          data-hint={item.hint && item.hint.length === 1 ? item.hint : undefined}
+          aria-haspopup={item.sub ? "menu" : undefined}
+          aria-expanded={item.sub ? depth === 0 && menuSub === i : undefined}
+          onclick={() => pickMenuItem(item, depth, i)}
+        >
+          <span class="ctx-ico" aria-hidden="true">{@html menuIconSvg(item.icon)}</span>
+          <span class="ctx-label">{item.label}</span>
+          {#if item.sub}
+            <svg class="ctx-chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5" /></svg>
+          {:else if item.hint}
+            <span class="ctx-hint">{item.hint}</span>
+          {:else}
+            <span></span>
+          {/if}
+        </button>
+        {#if depth === 0 && item.sub && menuSub === i}
+          <div class="ctx-menu ctx-sub" role="menu">{@render menuRows(item.sub, 1)}</div>
+        {/if}
+      </div>
+    {/if}
+  {/each}
+{/snippet}
+
 {#snippet icoCat()}
   <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M5.6 9.1 6.1 4.2l4.2 2.9c.55-.1 1.1-.15 1.7-.15s1.15.05 1.7.15l4.2-2.9.5 4.9c.9 1.2 1.4 2.7 1.4 4.3 0 4.2-3.5 7.4-7.8 7.4s-7.8-3.2-7.8-7.4c0-1.6.5-3.1 1.4-4.3Z" />
@@ -19454,6 +21908,209 @@
     <img class="brand-logo" src={logoUrl} alt="" draggable="false" />
     <span class="brand-name">Mewtual</span>
     {#if sub}<span class="brand-sub">{sub}</span>{/if}
+  </div>
+{/snippet}
+
+<!-- The livery panel, in three pieces shared by the Found tab and Server settings, Livery. Both
+     edit `liveryDraft`; the images differ by mode: while founding there is no server yet, so an
+     upload is held (`foundIcon` and friends) for `found` to publish, whereas in settings it is
+     published on the spot. -->
+{#snippet liveryPalette()}
+  <div class="preset-row">
+    {#each PRESETS as p (p.id)}
+      <button
+        type="button"
+        class="preset-btn"
+        class:active={liveryDraft.preset === p.id}
+        onclick={() => (liveryDraft = { ...liveryDraft, preset: p.id })}
+      >
+        <span class="preset-sw" style={`background:${p.sw};--sw-bg:${p.bg};--sw-acc:${p.sw}`}></span>{p.name}
+      </button>
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet liveryExtended(mode: string)}
+  {@const founding = mode === "found"}
+  {@const curBanner = founding ? foundBanner : livery.banner}
+  {@const curCursor = founding ? foundCursor : livery.cursor}
+  <div class="lv-grp">
+    <span class="lv-k">Sidebar banner</span>
+    <div class="lv-ctl">
+      <div class="avatar-row">
+        {#if curBanner}<img class="banner-preview" src={imgSrc(curBanner)} alt="" />{/if}
+        <label class="upload-btn">
+          {curBanner ? "Replace banner" : "Upload banner"}
+          <input type="file" accept="image/png,image/jpeg,image/webp" onchange={(e) => loadServerBanner(e.currentTarget.files)} />
+        </label>
+        {#if curBanner}
+          <button type="button" class="ghost small" disabled={busy} onclick={() => { if (founding) foundBanner = ""; else void setServerBanner(""); }}>Remove banner</button>
+        {/if}
+      </div>
+      <span class="muted small">A small image across the top of the channel list. Resized to a short landscape strip before it is shared; members who opt out of the livery do not see it.</span>
+    </div>
+  </div>
+  <div class="lv-grp">
+    <span class="lv-k">Accent</span>
+    <div class="lv-ctl">
+      <div class="accent-row">
+        {#each ACCENT_CHOICES as a (a)}
+          <button
+            type="button"
+            class="accent-sw"
+            class:active={liveryDraft.accent === a}
+            style={`background:${a}`}
+            aria-label={`Accent colour ${a}`}
+            title={a}
+            onclick={() => (liveryDraft = { ...liveryDraft, accent: liveryDraft.accent === a ? "" : a })}
+          ></button>
+        {/each}
+        <input
+          type="color"
+          class="accent-custom"
+          title="Custom accent colour"
+          aria-label="Custom accent colour"
+          value={liveryDraft.accent || "#977df2"}
+          oninput={(e) => (liveryDraft = { ...liveryDraft, accent: e.currentTarget.value })}
+        />
+        {#if liveryDraft.accent}
+          <button type="button" class="ghost small" onclick={() => (liveryDraft = { ...liveryDraft, accent: "" })}>Palette default</button>
+        {/if}
+      </div>
+      <span class="muted small">Optional. Overrides the palette's own accent for links, selection and this server's ring on the rail.</span>
+    </div>
+  </div>
+  <div class="lv-grp">
+    <span class="lv-k">Ground tint</span>
+    <div class="lv-ctl">
+      <label class="lv-rocker">
+        <input type="checkbox" role="switch" checked={draftTinted} onchange={(e) => setTintOn(e.currentTarget.checked)} />
+        <span class="lv-rocker-track" aria-hidden="true"></span>
+        <span>Tint the room in your own colour</span>
+      </label>
+      <div class="lv-tint" class:off={!draftTinted}>
+        <span class="muted small tint-lbl">Background</span>
+        <input type="color" value={liveryTintBgC} disabled={!draftTinted} aria-label="Background tint colour" oninput={(e) => { liveryTintBgC = e.currentTarget.value; syncTint(); }} />
+        <input type="range" class="lv-range" min="0" max="60" step="2" value={liveryTintBgS} disabled={!draftTinted} style={`--pct:${(liveryTintBgS / 60) * 100}%`} aria-label="Background tint intensity" oninput={(e) => { liveryTintBgS = +e.currentTarget.value; syncTint(); }} />
+        <span class="lv-pct">{liveryTintBgS}%</span>
+      </div>
+      <div class="lv-tint" class:off={!draftTinted}>
+        <span class="muted small tint-lbl">Sidebars</span>
+        <input type="color" value={liveryTintSideC} disabled={!draftTinted} aria-label="Sidebar tint colour" oninput={(e) => { liveryTintSideC = e.currentTarget.value; syncTint(); }} />
+        <input type="range" class="lv-range" min="0" max="60" step="2" value={liveryTintSideS} disabled={!draftTinted} style={`--pct:${(liveryTintSideS / 60) * 100}%`} aria-label="Sidebar tint intensity" oninput={(e) => { liveryTintSideS = +e.currentTarget.value; syncTint(); }} />
+        <span class="lv-pct">{liveryTintSideS}%</span>
+      </div>
+      <span class="muted small">Text colours are left alone, and green, gold and red keep their jobs.</span>
+    </div>
+  </div>
+  <div class="lv-grp">
+    <span class="lv-k">Corners</span>
+    <div class="lv-ctl">
+      <div class="cat-row">
+        {#each Object.keys(LIVERY_RADIUS) as rid (rid)}
+          <button
+            type="button"
+            class="preset-btn cat-tile"
+            class:active={(liveryDraft.tokens["radius"] ?? "soft") === rid}
+            onclick={() => setDraftToken("radius", rid === "soft" ? "" : rid)}
+          >{rid}</button>
+        {/each}
+      </div>
+    </div>
+  </div>
+  <div class="lv-grp">
+    <span class="lv-k">Typeface</span>
+    <div class="lv-ctl">
+      <div class="cat-row">
+        {#each Object.keys(LIVERY_FONTS) as fid (fid)}
+          <button
+            type="button"
+            class="preset-btn cat-tile"
+            class:active={(liveryDraft.tokens["font"] ?? "system") === fid}
+            style={`font-family:${LIVERY_FONTS[fid]}`}
+            onclick={() => setDraftToken("font", fid === "system" ? "" : fid)}
+          >{fid}</button>
+        {/each}
+      </div>
+    </div>
+  </div>
+  <div class="lv-grp">
+    <span class="lv-k">Pattern</span>
+    <div class="lv-ctl">
+      <div class="cat-row">
+        {#each LIVERY_PATTERNS as pid (pid)}
+          <button
+            type="button"
+            class="preset-btn cat-tile pat-{pid}"
+            class:active={(liveryDraft.tokens["pattern"] ?? "none") === pid}
+            onclick={() => setDraftToken("pattern", pid === "none" ? "" : pid)}
+          >{pid}</button>
+        {/each}
+      </div>
+      <span class="muted small">A faint texture behind the whole room.</span>
+    </div>
+  </div>
+  <div class="lv-grp">
+    <span class="lv-k">Cursor</span>
+    <div class="lv-ctl">
+      <div class="avatar-row">
+        {#if curCursor}<img class="cursor-preview" src={"data:image/png;base64," + curCursor} alt="" />{/if}
+        <label class="upload-btn">
+          {curCursor ? "Replace cursor" : "Upload cursor"}
+          <input type="file" accept="image/png,image/gif,image/webp" onchange={(e) => loadServerCursor(e.currentTarget.files)} />
+        </label>
+        {#if curCursor}
+          <button type="button" class="ghost small" disabled={busy} onclick={() => { if (founding) foundCursor = ""; else void setServerCursor(""); }}>Remove cursor</button>
+        {/if}
+      </div>
+      <span class="muted small">A small image members' pointers become while they are here. Part of the livery, so opting out removes it too.</span>
+    </div>
+  </div>
+{/snippet}
+
+{#snippet liveryPreview(mode: string)}
+  {@const founding = mode === "found"}
+  {@const pvIcon = founding ? foundIcon : livery.icon}
+  {@const pvBanner = founding ? foundBanner : livery.banner}
+  {@const draftPattern = liveryDraft.tokens["pattern"]}
+  <div
+    class="lv-preview"
+    data-preset={liveryDraft.preset || null}
+    data-livery-pattern={draftPattern && draftPattern !== "none" ? draftPattern : null}
+    style={liveryDraftVars()}
+  >
+    <div class="stx-ph"><i></i>AS MEMBERS SEE IT</div>
+    <div class="stx-pcard">
+      <div class="stx-pcap">CHROME</div>
+      <div class="stx-mini">
+        <div class="stx-mini-rail">
+          {#if pvIcon}<img class="mini-ico" src={imgSrc(pvIcon)} alt="" />{:else}<i class="on"></i>{/if}
+          <i></i><i></i>
+        </div>
+        <div class="stx-mini-side">
+          {#if pvBanner}<img class="mini-banner" src={imgSrc(pvBanner)} alt="" />{/if}
+          <i class="on" style="width:90%"></i><i style="width:70%"></i><i style="width:80%"></i><i style="width:55%"></i>
+        </div>
+        <div class="stx-mini-chat"><i class="nm"></i><i style="width:80%"></i><i style="width:60%"></i></div>
+      </div>
+    </div>
+    <div class="stx-pcard">
+      <div class="stx-pcap">MESSAGE</div>
+      {@render previewLog()}
+    </div>
+    <div class="stx-pcard">
+      <div class="stx-pcap">CONTROLS</div>
+      <div class="stx-pctl">
+        <button class="primary small" type="button">Send</button>
+        <button class="ghost small" type="button">Cancel</button>
+        <span class="stx-pdot"></span>
+      </div>
+    </div>
+    <p class="muted small stx-pnote">
+      {founding
+        ? "Published to everyone who joins, once the server is founded. Anyone can opt out in their own Appearance."
+        : "Rendered with your draft before you publish. Anyone can opt out in their own Appearance."}
+    </p>
   </div>
 {/snippet}
 
@@ -19700,6 +22357,25 @@
   </svg>
 {/snippet}
 
+{#snippet icoChevLeft()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M15.2 6 9.2 12l6 6" />
+  </svg>
+{/snippet}
+
+{#snippet icoChevRight()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M9.2 6l6 6-6 6" />
+  </svg>
+{/snippet}
+
+<!-- Roster standing worn on the avatar: filled so it still reads at 11px over a photo. -->
+{#snippet icoCrown()}
+  <svg class="ico" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+    <path d="M3 8.2 7 12l5-7.4L17 12l4-3.8-1.7 10.2H4.7z" />
+  </svg>
+{/snippet}
+
 <!-- Dock slot: a frame with one edge weighted, so the glyph reads as "which end it sits at".
      The CSS flips it vertically when the dock is already at the top. -->
 <!-- Fullscreen: the window losing its chrome, distinct from the focus view's layout. -->
@@ -19739,22 +22415,37 @@
 {/snippet}
 
 <!--
-  The instrument drawer, shared by both call surfaces: the stage docks it under the self block,
-  the focus view docks it under the control bar. One copy so the two can never drift, and so a
-  note held while switching surfaces is still the same held note.
+  One patch knob.
+
+  The lit arc runs from the knob's rest position to the tick: the left stop for a plain range,
+  twelve o'clock for a bipolar one, so a detuned layer or a negative filter sweep shows WHICH way
+  it leans and not only how far. The tooltip leads with what the knob does to the sound, because
+  the label under it is only the abbreviation that fits in 44 pixels, and a panel of those is a
+  machine with no manual.
+
+  The hint's opening term is also the accessible name, so a screen reader says "attack" rather
+  than "atk". `aria-description` would be the right home for the rest of the sentence, but the
+  slider role does not support it and the DOM typings do not know it, so it stays in `title`.
 -->
 {#snippet jamKnob(bind: JamKnobBinding)}
   {@const deg = -135 + 270 * ((bind.value - bind.min) / (bind.max - bind.min || 1))}
+  {@const from = bind.bipolar ? 0 : -135}
+  {@const a = (deg * Math.PI) / 180}
+  {@const b = (from * Math.PI) / 180}
+  {@const arc = `M${(16 + 13 * Math.sin(b)).toFixed(2)} ${(16 - 13 * Math.cos(b)).toFixed(2)} A13 13 0 ${Math.abs(deg - from) > 180 ? 1 : 0} ${deg > from ? 1 : 0} ${(16 + 13 * Math.sin(a)).toFixed(2)} ${(16 - 13 * Math.cos(a)).toFixed(2)}`}
   <div
     class="jam-knob"
+    class:bipolar={bind.bipolar}
     role="slider"
     tabindex="0"
-    aria-label={bind.label}
+    aria-label={bind.hint ? bind.hint.split(":")[0] : bind.label}
     aria-valuemin={bind.min}
     aria-valuemax={bind.max}
     aria-valuenow={bind.value}
     aria-valuetext={bind.disp}
-    title={`${bind.label}: drag up or right (Shift for fine), scroll, or arrow keys`}
+    title={bind.hint
+      ? `${bind.hint}\nDrag up or right (Shift for fine), scroll, or use the arrow keys.`
+      : `${bind.label}: drag up or right (Shift for fine), scroll, or arrow keys`}
     onpointerdown={(e) => jamKnobDown(e, bind)}
     onpointermove={jamKnobMove}
     onpointerup={jamKnobUp}
@@ -19767,6 +22458,7 @@
   >
     <svg class="jam-knob-face" viewBox="0 0 32 32" aria-hidden="true">
       <circle cx="16" cy="16" r="13" class="jam-knob-ring" />
+      <path d={arc} class="jam-knob-arc" />
       <g style={`transform: rotate(${deg}deg); transform-origin: 16px 16px`}>
         <line x1="16" y1="16" x2="16" y2="5.5" class="jam-knob-tick" />
       </g>
@@ -19774,6 +22466,93 @@
     <span class="jam-knob-lbl">{bind.label}</span>
     <span class="jam-knob-val">{bind.disp}</span>
   </div>
+{/snippet}
+
+<!--
+  A scope per patch stage: not a meter, a sketch of the setting the knobs beside it describe,
+  redrawn from `myPatch` on every edit. Four sections of bare numbers are what made this editor
+  read as slapped together; a picture of the pluck, the dark filter or the slow wobble is what a
+  person actually holds in their head while turning a knob.
+
+  All four draw into the same `0 0 100 28` box with `preserveAspectRatio="none"`, so one trace
+  fills either a small tile beside the knobs or a full-width strip above them; the CSS pins stroke
+  widths to screen pixels so the stretch never fattens a line. They are proportional to the patch
+  bounds, not measurements of the running graph: the shape is honest, the axes are not calibrated.
+-->
+
+<!-- Loudness over time, from the four envelope values: attack up, decay down to the sustain shelf,
+     a fixed hold so the shelf is always visible, then the release. The dashed rule is the key-up. -->
+{#snippet jamScopeEnv(e: JamPatch["e"])}
+  {@const x1 = (e.a / PATCH_PARAM.e.a.max) * 30}
+  {@const x2 = x1 + (e.d / PATCH_PARAM.e.d.max) * 25}
+  {@const x3 = x2 + 18}
+  {@const x4 = x3 + (e.r / PATCH_PARAM.e.r.max) * 27}
+  {@const sy = 26 - (e.s / PATCH_PARAM.e.s.max) * 20}
+  <svg class="jam-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+    <path class="jam-scope-grid" d="M0 26H100" />
+    <path class="jam-scope-fill" d={`M0 26 L${x1} 6 L${x2} ${sy} L${x3} ${sy} L${x4} 26 Z`} />
+    <path class="jam-scope-trace" d={`M0 26 L${x1} 6 L${x2} ${sy} L${x3} ${sy} L${x4} 26`} />
+    <path class="jam-scope-mark" d={`M${x3} ${sy} V26`} />
+  </svg>
+{/snippet}
+
+<!-- The filter's response over a log frequency axis (20 Hz to 18 kHz): a shoulder or a hump at the
+     cutoff, taller and narrower with resonance. The dashed run along the floor is how far each note
+     sweeps the cutoff, so a negative envelope amount visibly reaches the other way. -->
+{#snippet jamScopeFilter(f: JamPatch["f"])}
+  {@const decades = Math.log2(PATCH_PARAM.f.c.max / PATCH_PARAM.f.c.min)}
+  {@const xc = (Math.log2(Math.max(PATCH_PARAM.f.c.min, f.c) / PATCH_PARAM.f.c.min) / decades) * 100}
+  {@const peak = 9 - (f.q / PATCH_PARAM.f.q.max) * 18}
+  {@const hump = 12 - (f.q / PATCH_PARAM.f.q.max) * 10}
+  {@const w = 24 - (f.q / PATCH_PARAM.f.q.max) * 14}
+  {@const xe = Math.min(100, Math.max(0, xc + (f.e / PATCH_PARAM.f.e.max) * 61))}
+  {@const d = f.m === 1 ? `M100 9 L${xc + 6} 9 Q${xc} ${peak} ${xc - 3} 15 L${xc - 15} 26` : f.m === 2 ? `M${xc - w} 26 Q${xc} ${2 * hump - 26} ${xc + w} 26` : `M0 9 L${xc - 6} 9 Q${xc} ${peak} ${xc + 3} 15 L${xc + 15} 26`}
+  {@const close = f.m === 1 ? "L100 26" : f.m === 2 ? "" : "L0 26"}
+  <svg class="jam-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+    <path class="jam-scope-grid" d="M0 26H100" />
+    <path class="jam-scope-fill" d={`${d} ${close} Z`} />
+    <path class="jam-scope-trace" d={d} />
+    {#if f.e !== 0}
+      <path class="jam-scope-sweep" d={`M${xc} 27 H${xe}`} />
+    {/if}
+  </svg>
+{/snippet}
+
+<!-- The wobble itself: more cycles across the box as the rate rises, taller as the depth rises.
+     Off, or a depth of zero, draws flat, because that is exactly what the engine does with it. -->
+{#snippet jamScopeLfo(l: JamPatch["l"])}
+  {@const on = l.t !== 0 && l.d > 0}
+  {@const cycles = 1 + (l.r / PATCH_PARAM.l.r.max) * 6}
+  {@const amp = on ? 2 + (l.d / PATCH_PARAM.l.d.max) * 10 : 0}
+  {@const d = Array.from({ length: 41 }, (_u, i) => `${i ? "L" : "M"}${(i * 2.5).toFixed(1)} ${(14 - amp * Math.sin((i / 40) * cycles * 2 * Math.PI)).toFixed(2)}`).join(" ")}
+  <svg class="jam-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+    <path class="jam-scope-grid" d="M0 14H100" />
+    <path class={on ? "jam-scope-trace" : "jam-scope-mark"} d={d} />
+  </svg>
+{/snippet}
+
+<!-- What the room's effects do to one note after it is struck: the dry hit, a chorus twin beside
+     it, the reverb's short tail behind it, and the echo's repeats spaced down the box. Heights are
+     scaled to stay visible rather than measured; the shape is what the knobs change. -->
+{#snippet jamScopeSends(x: JamPatch["x"])}
+  {@const c = x.c / PATCH_PARAM.x.c.max}
+  {@const dl = x.d / PATCH_PARAM.x.d.max}
+  {@const rv = x.r / PATCH_PARAM.x.r.max}
+  <svg class="jam-scope" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+    <path class="jam-scope-grid" d="M0 26H100" />
+    {#if rv > 0}
+      <path class="jam-scope-tail" d={`M7 26 L7 ${26 - 14 * rv} L${7 + 22 * (0.4 + 0.6 * rv)} 26 Z`} />
+    {/if}
+    <path class="jam-scope-bar" d="M6 26 V6" />
+    {#if c > 0}
+      <path class="jam-scope-bar soft" d={`M9.5 26 V${26 - 20 * c}`} />
+    {/if}
+    {#each [0.7, 0.35, 0.18] as k, n (n)}
+      {#if dl * k * 20 >= 0.5}
+        <path class="jam-scope-bar soft" d={`M${6 + 28 * (n + 1)} 26 V${26 - 20 * dl * k}`} />
+      {/if}
+    {/each}
+  </svg>
 {/snippet}
 
 <!-- The recording honesty surface: rendered by BOTH call surfaces, drawer open or not. -->
@@ -19906,28 +22685,44 @@
           <span class="inst-wave-lbl">{pr.name}</span>
         </button>
       {/each}
-      {#if jamSaved.length}
+      {#if jamSaved.length || jamSharedPatches.length}
         <button
           class="ghost inst-wave"
           class:on={jamCustomOpen || jamSaved.some((sv) => !!myPatch && myPatchName === sv.name)}
           aria-expanded={jamCustomOpen}
-          title="Your saved patches (they open downward, not off the edge of this row)"
+          title="Your saved patches and the ones shared with this server (they open downward, not off the edge of this row)"
           onclick={() => (jamCustomOpen = !jamCustomOpen)}
         >
           <svg class="inst-wv" viewBox="0 0 26 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M0 9 Q5 3 9 8 T17 6 T26 8" />
           </svg>
-          <span class="inst-wave-lbl">CUSTOM · {jamSaved.length}</span>
+          <span class="inst-wave-lbl">CUSTOM · {jamSaved.length + jamSharedPatches.length}</span>
         </button>
       {/if}
-      {#if myPatch}
-        <button
-          class="ghost inst-wave jam-edit-btn"
-          class:on={jamEditOpen}
-          aria-pressed={jamEditOpen}
-          title="Shape this patch. Every edit mints a new patch id; friends hear it within a beat."
-          onclick={() => (jamEditOpen = !jamEditOpen)}
-        ><span class="inst-wave-lbl">EDIT</span></button>
+      <!-- Always on the row, so the editor is discoverable, but dead on the four plain waves: those
+           four ARE the clean, unshaped sounds, and turning one into an editable patch the moment
+           EDIT was pressed quietly took that away. It also stuck, because a patch is remembered
+           across sessions and a wave is not. Pick a preset or a saved patch to get the knobs. -->
+      <button
+        class="ghost inst-wave jam-edit-btn"
+        class:on={jamEditOpen}
+        aria-pressed={jamEditOpen}
+        disabled={!myPatch}
+        title={myPatch
+          ? "Shape this patch. Every edit mints a new patch id; friends hear it within a beat."
+          : "The four plain waves are not editable: they are the clean sounds. Pick a preset or a saved patch to get the knobs."}
+        onclick={() => (jamEditOpen = !jamEditOpen)}
+      ><span class="inst-wave-lbl">EDIT</span></button>
+      <!-- Which recipe your keys are actually being played through. A tile lights the moment it is
+           clicked, but a patch only becomes the sound once it has been hashed and announced, and
+           the announce interval belongs to the receivers. Without this the gap read as a broken
+           editor: the knob moved, the tile lit, and the note was the old sound. -->
+      {#if inCall}
+        {#if jamPatchApplying}
+          <span class="jam-met-chip warn" title="Your keys are still being played through the last announced recipe. A patch becomes the sound once it has been hashed and sent, which the room's announce interval paces to one every couple of seconds.">APPLYING</span>
+        {:else}
+          <span class="jam-met-chip ok" title="What you see is what your keys play, and what the room is rendering your notes through.">LIVE</span>
+        {/if}
       {/if}
       <span class="stage-spacer"></span>
       <button class="ghost small inst-oct-btn" title="Register down (z)" aria-label="Register down" onclick={() => setInstOctave(instOctave - 1)}>−</button>
@@ -19935,7 +22730,7 @@
       <button class="ghost small inst-oct-btn" title="Register up (x)" aria-label="Register up" onclick={() => setInstOctave(instOctave + 1)}>＋</button>
     </div>
 
-    {#if jamCustomOpen && jamSaved.length}
+    {#if jamCustomOpen && (jamSaved.length || jamSharedPatches.length)}
       <div class="jam-custom">
         {#each jamSaved as sv (sv.name)}
           <div class="jam-custom-tile">
@@ -19954,6 +22749,35 @@
             <button class="ghost jam-tile-del" title={`Forget the saved patch ${sv.name} (the sound keeps playing until you switch)`} aria-label={`Delete saved patch ${sv.name}`} onclick={() => jamDeleteSaved(sv.name)}>✕</button>
           </div>
         {/each}
+        {#if jamSharedPatches.length}
+          <!-- Patches other people put in this server's share. Loading one fetches its bytes,
+               validates them through the same patch validator the wire uses, keeps it on this
+               device and plays through it straight away. -->
+          <span class="jam-custom-sep">from the share</span>
+          <!-- Deliberately unkeyed. A CID is a content address, not a listing id: the share lists
+               one set of bytes under as many names and folders as people give it, and two patches
+               are especially likely to collide that way because a patch is the same few hundred
+               canonical bytes whenever two people build the same recipe. Keying by CID told Svelte
+               those distinct tiles were one. The list is a dozen buttons with no per-tile state,
+               so positional reconciliation is both correct and cheap. -->
+          {#each jamSharedPatches as sp}
+            {@const label = jamPatchFileName(sp.name)}
+            <div class="jam-custom-tile">
+              <button
+                class="ghost inst-wave"
+                class:on={!!myPatch && myPatchName === label}
+                disabled={!!jamPatchBusy}
+                title={`${sp.name} · shared by ${nameOf(sp.author)}. Load it: it is kept on this device and becomes your sound.`}
+                onclick={() => void jamLoadSharedPatch(sp)}
+              >
+                <svg class="inst-wv" viewBox="0 0 26 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M13 1.5v7" /><path d="M9.5 5.5 13 9l3.5-3.5" /><path d="M3 10.5h20" />
+                </svg>
+                <span class="inst-wave-lbl">{jamPatchBusy === sp.cid ? "…" : label}</span>
+              </button>
+            </div>
+          {/each}
+        {/if}
       </div>
     {/if}
 
@@ -19977,16 +22801,16 @@
                   <div class="jam-osc">
                     {#each INST_TILES as t (t.wave)}
                       {@const wi = jamWaveIndex(t.wave)}
-                      <button class="ghost jam-osc-w" class:on={osc.w === wi} title={`Layer ${i + 1}: ${t.wave}`} onclick={() => jamEditOsc(i, "w", wi)}>{t.label}</button>
+                      <button class="ghost jam-osc-w" class:on={osc.w === wi} title={`Layer ${i + 1}: ${t.wave}`} onclick={() => jamEditOsc(i, "w", wi, true)}>{t.label}</button>
                     {/each}
                     {#if (myPatch?.o.length ?? 1) > 1}
                       <button class="ghost jam-tile-del" title="Remove this layer" aria-label="Remove this layer" onclick={() => jamOscRemove(i)}>✕</button>
                     {/if}
                   </div>
                   <div class="jam-knobs">
-                    {@render jamKnob({ label: "st", value: osc.t, min: -24, max: 24, disp: String(osc.t), set: (v) => jamEditOsc(i, "t", v) })}
-                    {@render jamKnob({ label: "ct", value: osc.c, min: -50, max: 50, disp: String(osc.c), set: (v) => jamEditOsc(i, "c", v) })}
-                    {@render jamKnob({ label: "lvl", value: osc.l, min: 0, max: 100, disp: String(osc.l), set: (v) => jamEditOsc(i, "l", v) })}
+                    {@render jamKnob({ label: "st", value: osc.t, ...PATCH_PARAM.o.t, disp: String(osc.t), bipolar: true, hint: "Transpose: shifts this layer by whole semitones. +12 is an octave up, -12 an octave down; +7 against another layer gives a fifth.", set: (v) => jamEditOsc(i, "t", v) })}
+                    {@render jamKnob({ label: "ct", value: osc.c, ...PATCH_PARAM.o.c, disp: String(osc.c), bipolar: true, hint: "Detune: nudges this layer slightly sharp or flat, in hundredths of a semitone. A few cents against another layer makes the sound thicker and slowly beating; 0 is dead in tune.", set: (v) => jamEditOsc(i, "c", v) })}
+                    {@render jamKnob({ label: "lvl", value: osc.l, ...PATCH_PARAM.o.l, disp: String(osc.l), hint: "Level: how loud this layer is in the mix against the others. 0 silences it without removing it.", set: (v) => jamEditOsc(i, "l", v) })}
                   </div>
                 </div>
               {/if}
@@ -19996,42 +22820,90 @@
             <button class="ghost jam-layer-add" title="Add an oscillator layer (3 max)" onclick={jamOscAdd}>＋ layer</button>
           {/if}
         </div>
-        <div class="jam-sect">
-          <div class="jam-edit-hd"><span>envelope</span></div>
-          <div class="jam-knobs">
-            {@render jamKnob({ label: "atk", value: myPatch.e.a, min: 0, max: 5000, disp: `${(myPatch.e.a / 1000).toFixed(1)}s`, set: (v) => jamEditNum("e", "a", v) })}
-            {@render jamKnob({ label: "dec", value: myPatch.e.d, min: 0, max: 5000, disp: `${(myPatch.e.d / 1000).toFixed(1)}s`, set: (v) => jamEditNum("e", "d", v) })}
-            {@render jamKnob({ label: "sus", value: myPatch.e.s, min: 0, max: 100, disp: String(myPatch.e.s), set: (v) => jamEditNum("e", "s", v) })}
-            {@render jamKnob({ label: "rel", value: myPatch.e.r, min: 0, max: 8000, disp: `${(myPatch.e.r / 1000).toFixed(1)}s`, set: (v) => jamEditNum("e", "r", v) })}
-          </div>
-          <div class="jam-edit-hd"><span>filter</span></div>
-          <div class="jam-osc">
-            <button class="ghost jam-osc-w" class:on={myPatch.f.m === 0} title="Lowpass" onclick={() => jamEditNum("f", "m", 0)}>LP</button>
-            <button class="ghost jam-osc-w" class:on={myPatch.f.m === 1} title="Highpass" onclick={() => jamEditNum("f", "m", 1)}>HP</button>
-            <button class="ghost jam-osc-w" class:on={myPatch.f.m === 2} title="Bandpass" onclick={() => jamEditNum("f", "m", 2)}>BP</button>
-          </div>
-          <div class="jam-knobs">
-            {@render jamKnob({ label: "cut", value: myPatch.f.c, min: 20, max: 18000, disp: myPatch.f.c >= 1000 ? `${(myPatch.f.c / 1000).toFixed(1)}k` : String(myPatch.f.c), set: (v) => jamEditNum("f", "c", v) })}
-            {@render jamKnob({ label: "res", value: myPatch.f.q, min: 0, max: 100, disp: String(myPatch.f.q), set: (v) => jamEditNum("f", "q", v) })}
-            {@render jamKnob({ label: "env", value: myPatch.f.e, min: -100, max: 100, disp: String(myPatch.f.e), set: (v) => jamEditNum("f", "e", v) })}
-          </div>
-        </div>
-        <div class="jam-sect">
-          <div class="jam-edit-hd"><span>lfo</span></div>
-          <div class="jam-osc">
-            <button class="ghost jam-osc-w" class:on={myPatch.l.t === 0} title="LFO off" onclick={() => jamEditNum("l", "t", 0)}>OFF</button>
-            <button class="ghost jam-osc-w" class:on={myPatch.l.t === 1} title="LFO wobbles the filter cutoff" onclick={() => jamEditNum("l", "t", 1)}>CUT</button>
-            <button class="ghost jam-osc-w" class:on={myPatch.l.t === 2} title="LFO wobbles the pitch (a bounded vibrato)" onclick={() => jamEditNum("l", "t", 2)}>PIT</button>
-          </div>
-          <div class="jam-knobs">
-            {@render jamKnob({ label: "rate", value: myPatch.l.r, min: 1, max: 1200, disp: `${(myPatch.l.r / 100).toFixed(2)}hz`, set: (v) => jamEditNum("l", "r", v) })}
-            {@render jamKnob({ label: "dep", value: myPatch.l.d, min: 0, max: 100, disp: String(myPatch.l.d), set: (v) => jamEditNum("l", "d", v) })}
-          </div>
-          <div class="jam-edit-hd"><span>room sends</span></div>
-          <div class="jam-knobs">
-            {@render jamKnob({ label: "cho", value: myPatch.x.c, min: 0, max: 100, disp: String(myPatch.x.c), set: (v) => jamEditNum("x", "c", v) })}
-            {@render jamKnob({ label: "del", value: myPatch.x.d, min: 0, max: 100, disp: String(myPatch.x.d), set: (v) => jamEditNum("x", "d", v) })}
-            {@render jamKnob({ label: "rev", value: myPatch.x.r, min: 0, max: 100, disp: String(myPatch.x.r), set: (v) => jamEditNum("x", "r", v) })}
+        <!-- The oscillators make the raw tone; everything below is what each note is put through,
+             in order. These four used to be bare headings dropped into the same auto-fit grid as
+             the osc stack, which at this drawer's real width gave each about 186 pixels: less than
+             one row of four knobs, so the envelope wrapped 3+1 and the filter and the sends ended
+             up stapled under whichever section came first. They now wear the layer card's own
+             frame, so the editor reads as one family of cards, and each carries a scope that
+             redraws the setting its knobs describe: you can see a pluck, a dark filter or a slow
+             wobble before you hear it. -->
+        <div class="jam-sect jam-shape">
+          <div class="jam-edit-hd"><span>shape</span><span class="jam-edit-hd-sub">· every note runs through these in order</span></div>
+          <div class="jam-stages">
+            <div class="jam-stage">
+              <div class="jam-stage-hd">
+                <span class="jam-stage-nm">envelope</span>
+                <span class="jam-stage-sub">loudness over time</span>
+                <div class="jam-stage-modes">
+                  <button class="ghost jam-osc-w" class:on={jamEnvOff} aria-pressed={jamEnvOff} title="No shaping: the note is at full volume the instant it is pressed and gone the instant it is let go, like an organ key. Turning any of these four knobs brings the envelope back." onclick={() => jamToggleStage("e")}>OFF</button>
+                </div>
+              </div>
+              <div class="jam-stage-body">
+                {@render jamScopeEnv(myPatch.e)}
+                <div class="jam-knobs">
+                  {@render jamKnob({ label: "atk", value: myPatch.e.a, ...PATCH_PARAM.e.a, disp: `${(myPatch.e.a / 1000).toFixed(1)}s`, hint: "Attack: how long a note takes to reach full volume. 0 is an instant pluck; a few seconds is a slow swell.", set: (v) => jamEditNum("e", "a", v) })}
+                  {@render jamKnob({ label: "dec", value: myPatch.e.d, ...PATCH_PARAM.e.d, disp: `${(myPatch.e.d / 1000).toFixed(1)}s`, hint: "Decay: after the peak, how long the note takes to fall to the sustain level. Short is a snappy bite; long is a slow settle.", set: (v) => jamEditNum("e", "d", v) })}
+                  {@render jamKnob({ label: "sus", value: myPatch.e.s, ...PATCH_PARAM.e.s, disp: String(myPatch.e.s), hint: "Sustain: the volume a held note settles at, as a share of the peak. 100 holds at full; 0 fades out even while the key is down.", set: (v) => jamEditNum("e", "s", v) })}
+                  {@render jamKnob({ label: "rel", value: myPatch.e.r, ...PATCH_PARAM.e.r, disp: `${(myPatch.e.r / 1000).toFixed(1)}s`, hint: "Release: how long the note takes to fade after the key is let go. 0 stops dead; high leaves a tail hanging.", set: (v) => jamEditNum("e", "r", v) })}
+                </div>
+              </div>
+            </div>
+            <div class="jam-stage">
+              <div class="jam-stage-hd">
+                <span class="jam-stage-nm">filter</span>
+                <span class="jam-stage-sub">tone</span>
+                <div class="jam-stage-modes" aria-label="Filter">
+                  <button class="ghost jam-osc-w" class:on={jamFilterOff} aria-pressed={jamFilterOff} title="Wide open: the cutoff sits at the top of its range, well above anything you are playing, so the filter stays out of the way. It is not a bypass, because a patch has no way to say so: every note still runs through one gentle lowpass at that corner, and an output running at a low sample rate brings the corner down with it. Turning cut, res or env gives the filter a shape again." onclick={() => jamToggleStage("f")}>WIDE</button>
+                  <button class="ghost jam-osc-w" class:on={!jamFilterOff && myPatch.f.m === 0} aria-pressed={!jamFilterOff && myPatch.f.m === 0} title="Lowpass: keeps the lows and rolls off everything brighter than the cutoff. Warm and rounded; the classic synth tone." onclick={() => jamSetFilterMode(0)}>LP</button>
+                  <button class="ghost jam-osc-w" class:on={!jamFilterOff && myPatch.f.m === 1} aria-pressed={!jamFilterOff && myPatch.f.m === 1} title="Highpass: keeps the highs and rolls off everything below the cutoff. Thin and airy; it cuts through a busy room." onclick={() => jamSetFilterMode(1)}>HP</button>
+                  <button class="ghost jam-osc-w" class:on={!jamFilterOff && myPatch.f.m === 2} aria-pressed={!jamFilterOff && myPatch.f.m === 2} title="Bandpass: keeps only a band around the cutoff and rolls off both sides. Nasal and hollow, like a small speaker." onclick={() => jamSetFilterMode(2)}>BP</button>
+                </div>
+              </div>
+              <div class="jam-stage-body">
+                {@render jamScopeFilter(myPatch.f)}
+                <div class="jam-knobs">
+                  {@render jamKnob({ label: "cut", value: myPatch.f.c, ...PATCH_PARAM.f.c, disp: myPatch.f.c >= 1000 ? `${(myPatch.f.c / 1000).toFixed(1)}k` : String(myPatch.f.c), hint: "Cutoff: where the filter starts to bite, in Hz. On lowpass, lower is darker; on highpass, higher is thinner; on bandpass it is the centre of the band.", set: (v) => jamEditNum("f", "c", v) })}
+                  {@render jamKnob({ label: "res", value: myPatch.f.q, ...PATCH_PARAM.f.q, disp: String(myPatch.f.q), hint: "Resonance: a peak right at the cutoff. 0 is smooth; high makes the cutoff ring and whistle, and any sweep of it turns squelchy.", set: (v) => jamEditNum("f", "q", v) })}
+                  {@render jamKnob({ label: "env", value: myPatch.f.e, ...PATCH_PARAM.f.e, disp: String(myPatch.f.e), bipolar: true, hint: "Envelope amount: how far each note sweeps the cutoff. Positive opens the filter on the attack and closes it through the decay (the classic wow); negative dips it instead; 0 holds it still. Full is six octaves.", set: (v) => jamEditNum("f", "e", v) })}
+                </div>
+              </div>
+            </div>
+            <div class="jam-stage">
+              <div class="jam-stage-hd">
+                <span class="jam-stage-nm">lfo</span>
+                <span class="jam-stage-sub">movement</span>
+                <div class="jam-stage-modes" role="group" aria-label="What the LFO moves">
+                  <button class="ghost jam-osc-w" class:on={myPatch.l.t === 0} aria-pressed={myPatch.l.t === 0} title="No wobble: the sound holds steady once the envelope has settled." onclick={() => jamEditNum("l", "t", 0)}>OFF</button>
+                  <button class="ghost jam-osc-w" class:on={myPatch.l.t === 1} aria-pressed={myPatch.l.t === 1} title="The wobble sweeps the filter cutoff up and down: slow for a wah, fast for a growl. Depth sets how far, up to four octaves." onclick={() => jamEditNum("l", "t", 1)}>CUT</button>
+                  <button class="ghost jam-osc-w" class:on={myPatch.l.t === 2} aria-pressed={myPatch.l.t === 2} title="The wobble bends the pitch up and down for a vibrato. Even at full depth it stays within a quarter of a semitone." onclick={() => jamEditNum("l", "t", 2)}>PIT</button>
+                </div>
+              </div>
+              <div class="jam-stage-body">
+                {@render jamScopeLfo(myPatch.l)}
+                <div class="jam-knobs">
+                  {@render jamKnob({ label: "rate", value: myPatch.l.r, ...PATCH_PARAM.l.r, disp: `${(myPatch.l.r / 100).toFixed(2)}hz`, hint: "Rate: how fast the wobble cycles, in Hz. Under 1 is a slow drift, 5 to 7 is a vibrato, 12 is a buzz.", set: (v) => jamEditNum("l", "r", v) })}
+                  {@render jamKnob({ label: "dep", value: myPatch.l.d, ...PATCH_PARAM.l.d, disp: String(myPatch.l.d), hint: "Depth: how far the wobble reaches. 0 is none even with a target picked; 100 is the full sweep.", set: (v) => jamEditNum("l", "d", v) })}
+                </div>
+              </div>
+            </div>
+            <div class="jam-stage">
+              <div class="jam-stage-hd">
+                <span class="jam-stage-nm">room sends</span>
+                <span class="jam-stage-sub">space</span>
+                <div class="jam-stage-modes">
+                  <button class="ghost jam-osc-w" class:on={jamSendsOff} aria-pressed={jamSendsOff} title="Dry: none of this sound reaches the room's chorus, echo or reverb. Turning any send back up brings it in." onclick={() => jamToggleStage("x")}>OFF</button>
+                </div>
+              </div>
+              <div class="jam-stage-body">
+                {@render jamScopeSends(myPatch.x)}
+                <div class="jam-knobs">
+                  {@render jamKnob({ label: "cho", value: myPatch.x.c, ...PATCH_PARAM.x.c, disp: String(myPatch.x.c), hint: "Chorus send: how much of this sound goes to the room's shared chorus, which doubles it with a slowly drifting copy. Thicker and wider; 0 is dry.", set: (v) => jamEditNum("x", "c", v) })}
+                  {@render jamKnob({ label: "del", value: myPatch.x.d, ...PATCH_PARAM.x.d, disp: String(myPatch.x.d), hint: "Delay send: how much goes to the room's shared echo, a repeat about a quarter of a second later that trails off. 0 is dry.", set: (v) => jamEditNum("x", "d", v) })}
+                  {@render jamKnob({ label: "rev", value: myPatch.x.r, ...PATCH_PARAM.x.r, disp: String(myPatch.x.r), hint: "Reverb send: how much goes to the room's shared reverb, a small space that softens the edges. 0 is dry.", set: (v) => jamEditNum("x", "r", v) })}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
         <div class="jam-sect">
@@ -20039,8 +22911,14 @@
           <div class="jam-save">
             <input class="jam-save-name" type="text" maxlength="12" placeholder="patch name" bind:value={jamSaveName} />
             <button class="ghost jam-save-btn" title="Keep this patch as a tile on this device" onclick={jamSavePatch}>SAVE</button>
+            <button
+              class="ghost jam-save-btn"
+              disabled={!!jamPatchBusy || callServer === null}
+              title="Put this patch in the server's encrypted share, so anyone here can load and play through it"
+              onclick={() => void jamSharePatch()}
+            >{jamPatchBusy === "share" ? "SHARING…" : "SHARE"}</button>
           </div>
-          <div class="jam-edit-note">Saved patches live on this device only. Friends hear edits automatically; older builds hear your {myTimbre} wave.</div>
+          <div class="jam-edit-note">SAVE keeps the patch on this device. SHARE seals it into this server's share as a {JAM_PATCH_EXT}.</div>
         </div>
       </div>
     {/if}
@@ -20157,7 +23035,16 @@
                   <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.8 10.5 6 3 10.2z" fill="currentColor" /></svg>
                 </button>
               {/if}
-              <span class="jam-take-name">take {String(t.id).padStart(2, "0")} · {fmtTakeClock(takeDuration(t.take))} · {t.take.met.bpm}bpm</span>
+              <input
+                class="jam-take-name"
+                value={t.name}
+                maxlength="40"
+                spellcheck="false"
+                title="Name this jam: the name is what the saved sheet music and the shared .jamtake are called"
+                aria-label="Jam name"
+                oninput={(e) => jamRenameTake(t.id, e.currentTarget.value)}
+              />
+              <span class="jam-take-meta">{fmtTakeClock(takeDuration(t.take))} · {t.take.met.bpm}bpm</span>
               <span class="jam-take-who">{takePlayers(t.take)}</span>
               {#if t.gaps}<span class="jam-met-chip warn" title="Some events were lost in transit; the take has holes it does not hide">{t.gaps} lost</span>{/if}
               <span class="stage-spacer"></span>
@@ -20630,6 +23517,13 @@
   {:else if view === "downloads"}
     <h3><span>Transfers</span></h3>
     <button class="ghost small ctx-action" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
+  {:else if view === "studio"}
+    {#if StudioNav}
+      <StudioNav me={myFp} onopen={() => (view = "studio")} />
+    {:else}
+      <h3><span>Studio</span></h3>
+      <p class="muted small">Loading the studio…</p>
+    {/if}
   {:else if view === "events"}
     <h3><span>Upcoming</span></h3>
     {#each upcomingEvents.slice(0, 5) as e (e.id)}
@@ -20656,7 +23550,7 @@
     <h3><span>Channels</span> <span class="key">[ctrl+k]</span></h3>
     <ul class="channel-list">
       {#each cur?.channels ?? [] as c}
-        <li class="channel-row">
+        <li class="channel-row" use:contextMenu={() => channelMenu(c)}>
           <button
             class="channel-name"
             class:active={c.id === cur?.active && view === "chat"}
@@ -21276,49 +24170,60 @@
       <p class="muted small">Loading encrypted preferences before servers can fetch shared content.</p>
     </div>
   {:else if servers.length === 0 || showAdd}
-    <div class="start">
-      {@render brandMark(servers.length ? "" : "your vault is ready")}
-      {#if showAdd && servers.length}
-        <button class="ghost" onclick={() => (showAdd = false)}>← back</button>
-      {/if}
+    <!-- The start surface uses the window. It was a single 480px column stacking identity,
+         the trust choice, the tabs, the pane, pairing and diagnostics, which squeezed the one
+         real decision (how people connect) into two paragraphs each and pushed the primary
+         action below the fold. Now: an identity band, two wide path tabs, the chosen path owning
+         the width, and the secondary panels folded in a strip at the bottom. -->
+    <div class="start start-wide">
+      <div class="st-identity">
+        {@render brandMark(servers.length ? "" : "your vault is ready")}
+        <label class="field st-me">
+          <span class="muted">Display name</span>
+          <input bind:value={displayName} placeholder="display name" />
+          <small class="muted">Who you are to the people in a group, not what the group is called.</small>
+        </label>
+        <div class="st-identity-side">
+          <!-- Folded by default: the summary states the current answer, so folding it hides
+               nothing. Opened, it is one segmented choice and one line saying what it does. -->
+          <details class="start-trust">
+            <summary>
+              Shared media: <b>{ONBOARDING_TRUST_LABELS[onboardingFileTrust]}</b>
+              <span class="muted small">change</span>
+            </summary>
+            <fieldset class="st-trust">
+              <legend class="k">What this server may fetch without a click</legend>
+              <div class="st-trust-seg" role="radiogroup" aria-label="Shared media">
+                <label class:selected={onboardingFileTrust === "on-demand"}>
+                  <input type="radio" name="onboarding-file-trust" value="on-demand" bind:group={onboardingFileTrust} />On demand
+                </label>
+                <label class:selected={onboardingFileTrust === "media"}>
+                  <input type="radio" name="onboarding-file-trust" value="media" bind:group={onboardingFileTrust} />Media only
+                </label>
+                <label class:selected={onboardingFileTrust === "everyone"}>
+                  <input type="radio" name="onboarding-file-trust" value="everyone" bind:group={onboardingFileTrust} />Everyone here
+                </label>
+              </div>
+              <p class="muted small">
+                {#if onboardingFileTrust === "on-demand"}Nothing loads until you click it.
+                {:else if onboardingFileTrust === "media"}Pictures, audio and video load as they arrive. Other files wait for a click.
+                {:else}Every member's files load as they arrive. Links still need a click.{/if}
+                Always and never for individual people: Server settings, File trust.
+              </p>
+            </fieldset>
+          </details>
+          {#if showAdd && servers.length}
+            <button class="ghost" onclick={() => (showAdd = false)}>← back to my servers</button>
+          {/if}
+        </div>
+      </div>
       {#if syncIntent}
         <p class="muted">
           Vault created. Now hand the pairing code below to the device you already use: it
           shows the same code, you compare them, and it approves this one.
         </p>
       {/if}
-      <label class="field">
-        <span class="muted">Display name</span>
-        <input bind:value={displayName} placeholder="display name" />
-        <small class="muted">Who you are to the people in the group, not what the group is called.</small>
-      </label>
-      <!-- Folded by default. It is a real choice and it is made before anything is founded or
-           joined, but it is three cards of prose sitting directly above the primary action, and
-           at the default window size it pushed "Join / Found a server" below the fold entirely.
-           The summary states the current answer, so folding it hides nothing. -->
-      <details class="start-trust">
-        <summary>
-          Shared media: <b>{ONBOARDING_TRUST_LABELS[onboardingFileTrust]}</b>
-          <span class="muted small">change</span>
-        </summary>
-      <fieldset class="file-trust-onboarding">
-        <legend>Before this server can fetch shared media automatically</legend>
-        <label class:selected={onboardingFileTrust === "on-demand"}>
-          <input type="radio" name="onboarding-file-trust" value="on-demand" bind:group={onboardingFileTrust} />
-          <span><b>On demand</b><small>Fetch only after I press Load, Play, Open, or Download.</small></span>
-        </label>
-        <label class:selected={onboardingFileTrust === "specific"}>
-          <input type="radio" name="onboarding-file-trust" value="specific" bind:group={onboardingFileTrust} />
-          <span><b>Specific people</b><small>Start blocked; choose trusted members after the authenticated roster arrives.</small></span>
-        </label>
-        <label class:selected={onboardingFileTrust === "everyone"}>
-          <input type="radio" name="onboarding-file-trust" value="everyone" bind:group={onboardingFileTrust} />
-          <span><b>Everyone here</b><small>Allow every member's authenticated shared media to load automatically. External URLs still require a click.</small></span>
-        </label>
-        <p class="muted small">Files fetched into Mewtual stay encrypted in its vault. Opening or exporting content still hands untrusted bytes to a decoder or another app.</p>
-      </fieldset>
-      </details>
-      <div class="start-tabs" role="tablist" aria-label="Join or found a server">
+      <div class="start-tabs st-paths" role="tablist" aria-label="Join or found a server">
         <button
           type="button"
           role="tab"
@@ -21329,8 +24234,12 @@
           onclick={() => (startTab = "join")}
           onkeydown={startTabArrows}
         >
-          Join a server
-          <span class="st-hint">someone sent me an invite</span>
+          <svg class="st-path-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h11"/><path d="M11 8l4 4-4 4"/><rect x="15" y="4" width="6" height="16" rx="1.5"/></svg>
+          <span class="st-path-txt">
+            <span class="st-path-k">path a</span>
+            <span class="st-path-t">Join a server</span>
+            <span class="st-hint">Someone sent me an invite. I paste it and I'm in.</span>
+          </span>
         </button>
         <button
           type="button"
@@ -21342,197 +24251,377 @@
           onclick={() => (startTab = "found")}
           onkeydown={startTabArrows}
         >
-          Found a server
-          <span class="st-hint">I'm starting a new one</span>
+          <svg class="st-path-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v6"/><path d="M12 9l7 4v5l-7 3-7-3v-5z"/><path d="M5 13l7 3 7-3"/></svg>
+          <span class="st-path-txt">
+            <span class="st-path-k">path b</span>
+            <span class="st-path-t">Found a server</span>
+            <span class="st-hint">I'm starting a new one: I name it, dress it, and choose how people connect.</span>
+          </span>
         </button>
       </div>
       {#if startTab === "join"}
-        <div class="start-pane" role="tabpanel" id="start-panel-join" aria-labelledby="start-tab-join">
-          <p class="muted">
-            Paste the invite you were sent: it carries everything your app needs to find the group.
-          </p>
-          <label class="field">
-            <span class="muted">Name this group (optional)</span>
-            <input bind:value={joinServerName} placeholder="what you want to call it" />
-            <small class="muted">Your own label for the rail. An invite does not carry the group's name; you can change this later in Server settings.</small>
-          </label>
-          <textarea
-            class="invite-code"
-            bind:value={joinInvite}
-            oninput={() => {
-              joinPreview = null;
-              joinPreviewCode = "";
-              joinSwitchboardConsent = false;
-            }}
-            rows="3"
-            placeholder="paste invite here"
-          ></textarea>
-          {#if joinPreview?.switchboards}
-            <section class="repair-card switchboard-consent">
-              <div>
-                <h3>Direct first; member fallback only with your permission</h3>
+        <div class="start-pane st-join" role="tabpanel" id="start-panel-join" aria-labelledby="start-tab-join">
+          <div class="st-col">
+            <label class="field">
+              <span class="muted">Invite</span>
+              <textarea
+                class="invite-code st-invite"
+                bind:value={joinInvite}
+                oninput={resetJoinAttempt}
+                rows="4"
+                placeholder="paste the invite here, or scan its QR code"
+              ></textarea>
+              <small class="muted">Invites are single-use.</small>
+            </label>
+            {#if joinPreview}
+              <!-- What the invite says about itself, in kind terms: no address and no name. -->
+              <div class="st-readout">
+                <span class="k">signature</span><span class="v ok">valid · signed by the inviter's device</span>
+                <span class="k">expires</span><span class="v">{fmtTime(joinPreview.expires_at_ms)}</span>
+                <span class="k">routes</span>
+                <span class="v">
+                  {joinPreview.direct_routes} direct · {joinPreview.rendezvous_routes} via an introducer ·
+                  {joinPreview.switchboards} member switchboard{joinPreview.switchboards === 1 ? "" : "s"}
+                </span>
+              </div>
+            {/if}
+            {#if joinPreview?.switchboards}
+              <section class="st-consent">
+                <span class="k warn">this invite offers a fallback</span>
+                <h3>Direct first. Member fallback only if you allow it.</h3>
                 <p class="muted small">
-                  This signed invite offers {joinPreview.switchboards} standing switchboard{joinPreview.switchboards === 1 ? "" : "s"}.
-                  Mewtual will try the named inviter directly first. If that fails, a switchboard can
-                  forward the admission handshake and remain your first encrypted group connection.
-                  That member learns your IP address and connection timing and may carry encrypted
-                  catch-up traffic. It already has ordinary member access, but helping grants no
-                  additional content access, and it cannot admit you itself.
+                  Mewtual dials the inviter directly first. If that fails, one of the
+                  {joinPreview.switchboards} switchboard{joinPreview.switchboards === 1 ? "" : "s"} named in the invite can
+                  forward the admission handshake instead. That member learns your IP address and
+                  when you connected, and may carry encrypted catch-up traffic. Admission still goes
+                  through the inviter.
                 </p>
                 <label class="check-row">
                   <input type="checkbox" bind:checked={joinSwitchboardConsent} />
-                  Allow the signed member fallback after the direct attempt fails
+                  Allow the member fallback after the direct attempt fails
                 </label>
-                <p class="muted small">Leave this off to try direct routes only. You can retry with fallback later.</p>
-              </div>
-            </section>
-          {/if}
-          <div class="pc-actions">
-            <button onclick={join} disabled={busy || !joinInvite.trim()}>
-              {joinPreview?.switchboards
-                ? joinSwitchboardConsent
-                  ? "Join with fallback"
-                  : "Join directly"
-                : busy
-                  ? "Working…"
-                  : "Join"}
-            </button>
-            <button class="ghost" disabled={scanOpen} onclick={() => scanQr((t) => {
-              if (t) {
-                joinInvite = t;
-                joinPreview = null;
-                joinPreviewCode = "";
-                joinSwitchboardConsent = false;
-              }
-            })}>⛶ Scan invite QR</button>
-            <span class="aside muted small">invites are single-use and time-limited</span>
+              </section>
+            {/if}
+            <div class="pc-actions">
+              <button onclick={join} disabled={busy || !joinInvite.trim()}>
+                {busy
+                  ? "Dialling…"
+                  : joinPreview?.switchboards
+                    ? joinSwitchboardConsent
+                      ? "Join with fallback"
+                      : "Join directly"
+                    : "Join"}
+              </button>
+              <button class="ghost" disabled={scanOpen} onclick={() => scanQr((t) => {
+                if (t) {
+                  joinInvite = t;
+                  resetJoinAttempt();
+                }
+              })}>⛶ Scan invite QR</button>
+              {#if joinPreview?.switchboards && !joinAttemptPending && !joinSteps.length}
+                <span class="aside muted small">the first press read the invite; the next one joins</span>
+              {/if}
+            </div>
+            <label class="field">
+              <span class="muted">What I want to call it <span class="faint">(optional)</span></span>
+              <input bind:value={joinServerName} placeholder="a label for your rail" />
+              <small class="muted">An invite does not carry the group's name. If the group publishes one, it replaces this label.</small>
+            </label>
           </div>
-          {#if joinReplyReady && !joinReplyExpired}
-            <section class="repair-card reply-card">
-              <div>
-                <h3>Nobody answered: meet in the middle</h3>
-                <p class="muted small">
-                  Your invite is fine; the routes it carried did not answer. Send this reply code
-                  back to the person who invited you, in the same chat the invite arrived in. When
-                  they paste it, both apps dial at the same moment, which can open a path one-sided
-                  dialling cannot. A member whose app confirms a current live route to the named
-                  inviter can paste it instead. It offers {joinReplyCandidateLabel(joinReplyReady.candidate_count)};
-                  it dials rather than relays, so it cannot cross symmetric NAT/CGNAT on its own.
-                  It works for 60 seconds: keep both apps open.
-                </p>
-                <textarea class="invite-code" readonly rows="3" value={joinReplyReady.code}></textarea>
+          <div class="st-col">
+            <!-- The attempt, as it runs. `join_server` stays pending for as long as the dial, the
+                 reply window and the admission take; the routes below fill in from the bridge's
+                 `join-progress` snapshots, named by kind so no address or person is drawn. -->
+            <div class="st-attempt">
+              <div class="st-attempt-head">
+                <h3>Reaching the inviter</h3>
+                <span class="st-attempt-state" data-phase={joinView.phase}>
+                  {#if joinView.phase === "dialling"}<span class="st-spin"></span> dialling
+                  {:else if joinView.phase === "failed"}nobody answered
+                  {:else if joinView.phase === "connected"}connected
+                  {:else}waiting for Join{/if}
+                </span>
               </div>
-              <button class="ghost small" onclick={() => copyText(joinReplyReady?.code ?? "")}>Copy reply</button>
-            </section>
-          {:else if joinReplyReady}
-            <section class="repair-card reply-card">
-              <div><h3>Connection reply expired</h3><p class="muted small">Start the join again to mint a fresh 60-second route. The expired code is no longer copyable.</p></div>
-            </section>
-          {/if}
+              <div class="st-wire">
+                <svg viewBox="0 0 420 160" aria-hidden="true">
+                  {#each joinView.rows as r, i (r.kind)}
+                    {@const arc = routeArc(i, joinView.rows.length)}
+                    <path class="st-route {r.state}" d={arc.d} />
+                    <text class="st-rl {r.state}" x="210" y={arc.ly} text-anchor="middle">{r.label}</text>
+                    {#if r.state === "active"}
+                      <circle class="st-pk" r="3.2" style={`offset-path: path('${arc.d}')`} />
+                    {/if}
+                  {/each}
+                  {#if !joinView.rows.length}
+                    <path class="st-route" d="M52 80 C 150 80, 270 80, 368 80" />
+                    <text class="st-rl" x="210" y="72" text-anchor="middle">paste an invite and press Join</text>
+                  {/if}
+                  <circle class="st-node" cx="40" cy="80" r="13" /><text class="st-nl" x="40" y="83" text-anchor="middle">YOU</text>
+                  <circle class="st-node" cx="380" cy="80" r="13" /><text class="st-nl" x="380" y="83" text-anchor="middle">THEM</text>
+                </svg>
+              </div>
+              {#if joinView.rows.length}
+                <div class="st-routes">
+                  {#each joinView.rows as r (r.kind)}
+                    <div class="st-route-row {r.state}">
+                      <span class="ic" aria-hidden="true"></span>
+                      <span class="tg">{r.label}</span>
+                      <span class="why">{r.note || (r.state === "idle" ? "not tried yet" : "")}</span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+              {#if joinView.phase === "failed"}
+                <div class="st-verdict fail">
+                  <h3>{joinView.headline}</h3>
+                  {#if joinView.failedOn === "invite"}
+                    <p class="muted small">{joinError}</p>
+                  {:else if joinView.failedOn === "admission"}
+                    <p class="muted small">
+                      Only the serving node knows why. Ask the person who invited you to open
+                      Server settings → Join Log: the reason is recorded there, and deliberately not
+                      sent back to you.
+                    </p>
+                  {:else}
+                    <p class="muted small">
+                      Each route was tried in turn. The inviter's app is either closed, or on a
+                      network that cannot be reached from here without help. The addresses are in
+                      the connection check if you need them.
+                    </p>
+                    <ol>
+                      {#if joinReplyReady && !joinReplyExpired}
+                        <li>
+                          <b>Meet in the middle.</b> Send this reply code back in the same chat the
+                          invite came from. When they paste it, both apps dial at the same moment for
+                          60 seconds, which can open a path one-sided dialling cannot. It offers
+                          {joinReplyCandidateLabel(joinReplyReady.candidate_count)}. Keep this window open.
+                        </li>
+                      {/if}
+                      <li><b>Ask them to check their end.</b> If their app is open and shows nothing, your app never reached them.</li>
+                      {#if joinPreview?.switchboards && !joinSwitchboardConsent}
+                        <li><b>Allow the fallback and retry</b>, if you are happy for a member to see your IP address.</li>
+                      {:else}
+                        <li><b>Retry.</b> A person who was offline a minute ago may be back.</li>
+                      {/if}
+                    </ol>
+                  {/if}
+                  {#if joinReplyReady && !joinReplyExpired}
+                    <div class="st-reply">
+                      <textarea class="invite-code" readonly rows="2" value={joinReplyReady.code}></textarea>
+                      <button class="ghost small" onclick={() => copyText(joinReplyReady?.code ?? "")}>Copy reply</button>
+                    </div>
+                  {:else if joinReplyReady}
+                    <p class="muted small">The connection reply expired. Retry to mint a fresh 60-second one.</p>
+                  {/if}
+                  <div class="pc-actions">
+                    <button class="ghost small" disabled={busy || !joinInvite.trim()} onclick={join}>Retry</button>
+                    <button class="ghost small" onclick={() => (startConnOpen = true)}>Open connection check</button>
+                    <button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied!" : "Copy report"}</button>
+                  </div>
+                </div>
+              {:else if joinView.phase === "dialling" && joinReplyReady && !joinReplyExpired}
+                <!-- The reply window: the command is still pending, waiting for the inviter to dial
+                     back, so this is a wait rather than a verdict. -->
+                <div class="st-verdict wait">
+                  <h3>Nobody answered yet: meet in the middle</h3>
+                  <p class="muted small">
+                    Send this reply code back in the same chat the invite came from. When they paste
+                    it, both apps dial at the same moment. It offers
+                    {joinReplyCandidateLabel(joinReplyReady.candidate_count)} and works for 60 seconds:
+                    keep this window open.
+                  </p>
+                  <div class="st-reply">
+                    <textarea class="invite-code" readonly rows="2" value={joinReplyReady.code}></textarea>
+                    <button class="ghost small" onclick={() => copyText(joinReplyReady?.code ?? "")}>Copy reply</button>
+                  </div>
+                </div>
+              {/if}
+            </div>
+            <div class="st-card">
+              <span class="k">What happens when I press Join</span>
+              <ol class="st-steps">
+                <li><b>Your app reads the invite</b> and checks its signature and which routes it offers.</li>
+                <li><b>It dials the inviter</b>, one route at a time. Most joins finish here in a few seconds.</li>
+                <li><b>If nobody answers</b>, you get a 60-second reply code to send back, and a plain account of what failed.</li>
+                <li><b>The inviter's app admits you</b> under the group's rules. Refusals are logged on their side.</li>
+              </ol>
+            </div>
+          </div>
         </div>
       {:else}
-        <div class="start-pane" role="tabpanel" id="start-panel-found" aria-labelledby="start-tab-found">
-          <label class="field">
-            <span class="muted">Server name</span>
-            <input bind:value={newServerName} placeholder="what this group is called" />
-            <small class="muted">The group's own name, separate from your display name above.</small>
-          </label>
-          <div class="field">
-            <span class="muted">Who is this server for?</span>
-            <div class="mode-cards">
-              <label class="mode-card" class:selected={serverMode === "friends"}>
+        <div class="start-pane st-found" role="tabpanel" id="start-panel-found" aria-labelledby="start-tab-found">
+          <section class="st-sect">
+            <div class="st-sect-head">
+              <span class="k">1 · name and look</span>
+              <h2>What is this group called, and how should it look?</h2>
+              <span class="why muted small">Published to everyone who joins. All of it can be changed later in Server settings.</span>
+            </div>
+            <div class="st-look">
+              <div class="st-look-form">
+                <div class="st-row2">
+                  <label class="field">
+                    <span class="muted">Server name</span>
+                    <input bind:value={newServerName} placeholder="what this group is called" />
+                    <small class="muted">Left blank, it is labelled after you: "{displayName || "Your"}'s server".</small>
+                  </label>
+                  <div class="field">
+                    <span class="muted">Icon</span>
+                    <div class="st-icon-row">
+                      {#if foundIcon}
+                        <img class="avatar lg" src={imgSrc(foundIcon)} alt="" />
+                      {:else}
+                        <span class="avatar lg fallback">{monogram(newServerName.trim() || `${displayName}'s server`)}</span>
+                      {/if}
+                      <div class="pc-actions">
+                        <label class="upload-btn">
+                          {foundIcon ? "Replace image" : "Upload image"}
+                          <input type="file" accept="image/png,image/jpeg,image/webp" onchange={(e) => loadServerIcon(e.currentTarget.files)} />
+                        </label>
+                        {#if foundIcon}
+                          <button type="button" class="ghost small" onclick={() => (foundIcon = "")}>Use monogram</button>
+                        {/if}
+                      </div>
+                    </div>
+                    <small class="muted">Shown on everyone's rail. Resized before it is shared.</small>
+                  </div>
+                </div>
+                <div class="field">
+                  <span class="muted">Palette</span>
+                  {@render liveryPalette()}
+                </div>
+                <details class="st-fold">
+                  <summary>Customise the look <span class="k">banner · accent · tint · corners · type · pattern · cursor</span></summary>
+                  <div class="st-fold-body lv-panel">{@render liveryExtended("found")}</div>
+                </details>
+                <p class="muted small">Members can opt out of a server's livery in Settings → Appearance. Green, gold and red keep their jobs (presence, mentions, danger) under every palette.</p>
+              </div>
+              <div class="st-preview">{@render liveryPreview("found")}</div>
+            </div>
+          </section>
+          <section class="st-sect">
+            <div class="st-sect-head">
+              <span class="k">2 · how people connect</span>
+              <h2>Who carries the traffic?</h2>
+              <span class="why muted small">Neither is the safer one: they guard against different people.</span>
+            </div>
+            <div class="st-topo" role="radiogroup" aria-label="How people connect">
+              <label class="tcard" class:selected={serverMode === "friends"}>
                 <input type="radio" class="mc-radio" name="server-mode" value="friends" bind:group={serverMode} />
-                <span class="mc-pick">{serverMode === "friends" ? "◉" : "○"}</span>
-                <span class="mc-title">People I know</span>
-                <span class="mc-sub">friend circle</span>
-                <p>You connect to each other directly. Nothing to set up, nothing to run, no one in charge of the wires.</p>
-                <p class="mc-trade">Members may see each other's IP addresses, and bans depend on everyone's app playing fair.</p>
-                <span class="mc-foot">shields you from an operator · trusts your friends</span>
+                <div class="tc-head">
+                  <div><span class="k">peer to peer · no server</span><h3>Friend mesh</h3></div>
+                  <span class="tc-pick" aria-hidden="true"></span>
+                </div>
+                <div class="tc-diag">
+                  <canvas use:topoDiagram={"mesh"}></canvas>
+                  <div class="tc-cap">no server exists · the group is the truth</div>
+                </div>
+                <div class="tc-body">
+                  <p>Everyone connects to everyone. Each member's device keeps the encrypted history, so any one of them can catch the others up.</p>
+                  <dl class="tc-facts">
+                    <dt>Requires</dt><dd><b>Nothing.</b> No machine to run, no address to paste.</dd>
+                    <dt>Who sees</dt><dd>Members may see each other's IP addresses.</dd>
+                    <dt>Removal</dt><dd><span class="m">Cooperative.</span> A ban depends on every member's app playing fair.</dd>
+                    <dt>Offline</dt><dd>Catch-up waits until another member is online. Works on a LAN with no internet.</dd>
+                    <dt>Files</dt><dd>Circulation dates are metadata. Files need a reachable holder; local kept copies are opt-in.</dd>
+                  </dl>
+                </div>
+                <div class="tc-foot"><span>best for</span><span class="who">friend circles · small crews</span></div>
               </label>
-              <label class="mode-card" class:selected={serverMode === "hosted"}>
+              <label class="tcard" class:selected={serverMode === "hosted"}>
                 <input type="radio" class="mc-radio" name="server-mode" value="hosted" bind:group={serverMode} />
-                <span class="mc-pick">{serverMode === "hosted" ? "◉" : "○"}</span>
-                <span class="mc-title">People I don't know</span>
-                <span class="mc-sub">hosted community</span>
-                <p>Everyone connects through a node you run. Removing someone takes effect instantly: the group changes its keys, and they're locked out of everything said afterwards.</p>
-                <p class="mc-trade">You, the operator, can see who is a member and who talks to whom, never what is said.</p>
-                <span class="mc-foot">removal that holds · trusts you</span>
+                <div class="tc-head">
+                  <div><span class="k">decentralised server · your node</span><h3>Community node</h3></div>
+                  <span class="tc-pick" aria-hidden="true"></span>
+                </div>
+                <div class="tc-diag">
+                  <canvas use:topoDiagram={"node"}></canvas>
+                  <div class="tc-cap">node forwards encrypted traffic · holds no group keys</div>
+                </div>
+                <div class="tc-body">
+                  <p>Everyone connects through an always-on machine you run. It relays traffic, keeps members' IP addresses from each other, and serves signed snapshots so catch-up works when nobody else is online.</p>
+                  <dl class="tc-facts">
+                    <dt>Requires</dt><dd><b>A node you operate.</b> A small always-on box running <span class="fp">catcomsctl relay</span>, and its address.</dd>
+                    <dt>Who sees</dt><dd>The operator sees who is a member, who talks to whom, when, and how much. Messages are encrypted before they reach the node.</dd>
+                    <dt>Removal</dt><dd><span class="y">Holds.</span> The group rotates keys and the node stops carrying the removed person's traffic.</dd>
+                    <dt>Offline</dt><dd>24/7 catch-up. Voice rooms larger than a mesh can carry.</dd>
+                    <dt>Lose it</dt><dd>Members still hold the history; the group keeps working between whoever is online.</dd>
+                  </dl>
+                </div>
+                <div class="tc-foot"><span>best for</span><span class="who">bigger communities · people you don't know</span></div>
               </label>
             </div>
-            <p class="muted small">Neither is the safer one: they guard against different people.</p>
-          </div>
-          {#if serverMode === "hosted"}
-            <label class="field">
-              <span class="muted small">
-                Your node's address: a hosted community runs through a small always-on machine you
-                operate. Set one up with <span class="fp">catcomsctl relay</span>; if you don't have
-                one yet, pick "People I know" instead.
-              </span>
-              <input bind:value={relay} placeholder="/dns4/your-host/udp/7220/quic-v1/p2p/12D3Koo…" />
-            </label>
-          {/if}
-          <details>
-            <summary>Advanced: connectivity</summary>
-            <label class="field">
-              <span class="muted small">
-                Known address (optional): if this machine already has a reachable address, a LAN IP
-                or a public host:port you've forwarded, paste it to skip discovery.
-              </span>
-              <input bind:value={advertise} placeholder="192.168.1.5 or example.net:7220" />
-            </label>
-            {#if serverMode === "friends"}
-              <label class="field">
-                <span class="muted small">
-                  Relay node (optional): a relay's address makes this server reachable over the
-                  internet with no port-forward.
-                </span>
-                <input bind:value={relay} placeholder="/ip4/…/udp/…/quic-v1/p2p/… (optional)" />
-              </label>
+            {#if serverMode === "hosted"}
+              <div class="st-node-req">
+                <label class="field">
+                  <span class="muted">Your node's address</span>
+                  <input bind:value={relay} placeholder="/dns4/your-host/udp/7220/quic-v1/p2p/12D3Koo…" />
+                  <small class="muted">
+                    Set a node up with <span class="fp">catcomsctl relay</span>; it prints this line.
+                    No node yet? Pick Friend mesh instead.
+                  </small>
+                </label>
+              </div>
             {/if}
-            <label class="field">
-              <span class="muted small">
-                Introducer node (optional): register at a rendezvous node so people can join with
-                <em>just the invite</em>, no address needed. Saved as your default.
-              </span>
-              <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
-            </label>
+          </section>
+          <details class="st-fold">
+            <summary>Advanced: connectivity <span class="k">optional</span></summary>
+            <div class="st-fold-body st-adv">
+              <label class="field">
+                <span class="muted">Known address</span>
+                <input bind:value={advertise} placeholder="192.168.1.5 or example.net:7220" />
+                <small class="muted">If this machine already has a reachable address, a LAN IP or a public host:port you've forwarded, paste it to skip discovery.</small>
+              </label>
+              <label class="field">
+                <span class="muted">Introducer node</span>
+                <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/…" />
+                <small class="muted">Register at a rendezvous node so people can join with <em>just the invite</em>, no address needed. Saved as your default.</small>
+              </label>
+              {#if serverMode === "friends"}
+                <label class="field">
+                  <span class="muted">Relay node</span>
+                  <input bind:value={relay} placeholder="/ip4/…/udp/…/quic-v1/p2p/…" />
+                  <small class="muted">A relay's address makes a mesh reachable over the internet with no port-forward. The relay carries encrypted traffic only.</small>
+                </label>
+              {/if}
+            </div>
           </details>
-          <div class="pc-actions">
-            <button onclick={found} disabled={busy}>
+          <div class="st-found-foot">
+            <div class="st-summary">
+              <span>Founding</span>
+              <span class="chip">
+                <span class="sw" style={`background:${liveryDraft.accent || PRESETS.find((p) => p.id === liveryDraft.preset)?.sw || "#977df2"}`}></span>
+                <b>{newServerName.trim() || `${displayName}'s server`}</b>
+              </span>
+              <span class="chip">
+                {PRESETS.find((p) => p.id === liveryDraft.preset)?.name ?? "Nightshade"}{liveryDraft.accent ? " · custom accent" : ""}{foundIcon ? " · icon" : ""}{foundBanner ? " · banner" : ""}{foundCursor ? " · cursor" : ""}
+              </span>
+              <span class="chip">{serverMode === "hosted" ? "community node" : "friend mesh"}</span>
+              {#if serverMode === "hosted" && !relay.trim()}
+                <span class="warnline">needs a node address before it can be founded</span>
+              {/if}
+            </div>
+            <button onclick={found} disabled={busy || (serverMode === "hosted" && !relay.trim())}>
               {busy ? "Working…" : "Found server"}
             </button>
-            <span class="aside muted small">most people never open Advanced</span>
           </div>
         </div>
       {/if}
-      <hr />
-      {#if servers.length && activeServerId !== null}
-        <details class="conn-panel reply-apply">
-          <summary>I received a connection reply</summary>
-          <p class="muted small">
-            Paste the reply from the person joining <b>{cur?.name ?? "the active server"}</b>.
-            Their app must still be waiting. If this device did not issue the invite, it acts only
-            as a handshake helper; the named inviter and normal MLS admission rules still decide.
-          </p>
-          <textarea class="invite-code" rows="3" bind:value={joinReplyInput} placeholder="paste mewtual-reply-v1 code"></textarea>
-          <div class="pc-actions">
-            <button class="ghost small" disabled={joinReplyApplying || !joinReplyInput.trim()} onclick={() => applyJoinReply(false)}>
-              {joinReplyApplying ? "Dialling…" : "Dial joiner"}
-            </button>
-            {#if joinReplyNeedsReplace}
-              <button class="ghost small danger-btn" disabled={joinReplyApplying} onclick={() => applyJoinReply(true)}>
-                Confirm different joiner
-              </button>
-            {/if}
-          </div>
-        </details>
-      {/if}
+      <!-- The secondary strip. An inviter pastes a joiner's connection reply in Server settings,
+           Invites, where the invite came from; it has no business on the join surface. -->
+      <div class="st-secondary">
       <details open={syncIntent}>
-        <summary>Link this device to another device you own</summary>
+        <summary>
+          <svg class="st-sec-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="12" height="9" rx="1.5"/><path d="M9 17v2M6 19h6"/><rect x="16" y="9" width="5" height="9" rx="1.5"/></svg>
+          <span class="st-sec-txt">
+            <span class="ttl">Link this device to another device you own</span>
+            <span class="sub">Your other device stays the master and approves this one with a code.</span>
+          </span>
+          <span class="k">pairing</span>
+        </summary>
         <p class="muted small">
-          Your other device stays the master: it will show a code and ask permission before
-          this device gets anything. Once approved, open the grant here and join its servers;
-          admission completes when each server's owner is online to serialize it safely.
+          Your other device will show a code and ask permission before this device gets anything.
+          Once approved, open the grant here and join its servers; admission completes when each
+          server's owner is online.
         </p>
         {#if !pairBlob}
           <button class="ghost" onclick={pairBegin}>Generate pairing code</button>
@@ -21576,8 +24665,15 @@
           {/if}
         {/if}
       </details>
-      <details class="conn-panel">
-        <summary>Connection check</summary>
+      <details class="conn-panel" bind:open={startConnOpen}>
+        <summary>
+          <svg class="st-sec-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>
+          <span class="st-sec-txt">
+            <span class="ttl">Connection check</span>
+            <span class="sub">{connectivity && connectivity.action ? "The last attempt, with the addresses it used." : "Nothing tried yet this session."}</span>
+          </span>
+          <span class="k">diagnostics</span>
+        </summary>
         <p class="muted small">
           What this app knows about reaching, and being reached by, other people. Open it when a
           server you founded cannot be joined, or when an invite you pasted times out.
@@ -21613,6 +24709,7 @@
           </p>
         {/if}
       </details>
+      </div>
       {#if error}<p class="muted" style="color:#ff6b6b">{error}</p>{/if}
     </div>
   {:else}
@@ -21893,6 +24990,11 @@
             {@render youPanel()}
           {/if}
         {:else}
+        {#if followLiveryNow && livery.banner}
+          <!-- The published sidebar banner: part of the livery, so the per-server opt-out hides
+               it with the rest. Rendered as an image only, like the icon. -->
+          <img class="server-banner" src={imgSrc(livery.banner)} alt="" draggable="false" />
+        {/if}
         <div class="server-head">
           <strong class="server-title" title={cur?.name}>{cur?.name ?? ""}</strong>
           <button class="ghost icon-btn" title="Server settings" onclick={() => openServerSettings()}>{@render icoWrench()}</button>
@@ -21958,10 +25060,26 @@
               <span class="sb-ico">⧗</span>events
               {#if upcomingEvents.length}<span class="tab-count">{upcomingEvents.length}</span>{/if}
             </button>
+            <button type="button" class:active={view === "studio"} onclick={() => switchView("studio")} title="Flipnotes and scores made together (in-memory preview)">
+              <span class="sb-ico">◫</span>studio
+            </button>
             <button type="button" class:active={view === "downloads"} onclick={() => switchView("downloads")}>
               <span class="sb-ico">↓</span>transfers
               {#if activeTransfers}<span class="tab-count">{activeTransfers}</span>{/if}
             </button>
+            <!-- Pinned to the strip's right edge, directly over the column it folds away. Only
+                 where there is a roster to fold: a DM's two people need no member column. -->
+            {#if !cur.isDm}
+              <span class="sb-spacer"></span>
+              <button
+                type="button"
+                class="sb-members"
+                aria-expanded={membersOpen}
+                title={membersOpen ? "Hide the member list" : "Show the member list"}
+                aria-label={membersOpen ? "Hide the member list" : "Show the member list"}
+                onclick={toggleMembers}
+              >{#if membersOpen}{@render icoChevRight()}{:else}{@render icoChevLeft()}{/if}</button>
+            {/if}
           </nav>
         {/if}
         {#if view === "chat"}
@@ -21992,6 +25110,9 @@
             <span class="head-actions">
               {#if firstUnreadIdx >= 0}
                 <button class="ghost small jump-unread" title="Jump to where you left off" onclick={() => void scrollToMatch(firstUnreadIdx)}>↑ {unreadCount} new</button>
+              {/if}
+              {#if activeLate.size}
+                <button class="ghost small jump-late" title="Messages that arrived after you had read past them. Click to go to the earliest." onclick={() => void jumpToMessageId(firstLateId())}>↑ {activeLate.size} arrived late</button>
               {/if}
               <span class="chip ok" title="Messages in this group are end-to-end encrypted (MLS)">MLS · E2E</span>
               <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F · Ctrl+Shift+F for filters)" aria-label="Search messages" onclick={() => openSearch()}>{@render icoSearch()}</button>
@@ -22194,6 +25315,9 @@
             use:richClicks
             use:channelScan
             onscroll={onChatScroll}
+            onloadcapture={chatMediaSettled}
+            onpointermove={(e) => (logPointer = { x: e.clientX, y: e.clientY })}
+            onpointerleave={() => (logPointer = null)}
             ondragover={(e) => { e.preventDefault(); dragOver = true; }}
             ondragleave={() => (dragOver = false)}
             ondrop={(e) => onComposerDrop("chat", e)}
@@ -22215,6 +25339,9 @@
               {#if mi === firstUnreadIdx}
                 <li class="unread-divider" aria-hidden="true"><span>new · {unreadCount} unread</span></li>
               {/if}
+              {#if activeLate.has(m.id) && !(prev && activeLate.has(prev.id))}
+                <li class="late-divider" aria-hidden="true"><span>arrived late · you had not seen this</span></li>
+              {/if}
               {@const grouped =
                 !!prev &&
                 mi !== firstUnreadIdx &&
@@ -22235,7 +25362,7 @@
               {@const ident = identityOf(m.author)}
               {@const warning = warningFor(cur?.active ?? "", m.id)}
               <li
-                class="frame-{messageFrame.shape}"
+                class="frame-{messageFrame.shape} {arrival === 'none' ? '' : 'arrival-' + arrival}"
                 data-mi={mi}
                 data-author={m.author}
                 class:own={m.author === myFp}
@@ -22247,16 +25374,15 @@
                 class:frame-middle={!!bubble && framePosition === "middle"}
                 class:frame-end={!!bubble && framePosition === "end"}
                 class:message-arrival={arrival !== "none"}
-                class:arrival-glide={arrival === "glide"}
-                class:arrival-fly={arrival === "fly"}
-                class:arrival-pop={arrival === "pop"}
-                class:arrival-drift={arrival === "drift"}
                 class:search-match={showSearch && searchMatchSet.has(mi)}
                 class:search-current={showSearch && searchCur?.ch === cur?.active && searchCur?.idx === mi}
                 class:flash={!!m.id && m.id === flashId}
+                class:late={activeLate.has(m.id)}
                 style={[bubble, arrivalVars].filter(Boolean).join(";")}
                 use:contextMenu={() => messageMenu(m)}
                 use:resolveChatRow={m}
+                use:arrivalOrigin={arrival}
+                use:lateSeen={activeLate.has(m.id) ? m.id : ""}
               >
                 {#if grouped}
                   <span class="t" title={new Date(m.ts).toLocaleString()}>
@@ -22892,6 +26018,21 @@
               {/each}
             </nav>
           </div>
+          {#if keptFiles?.supported}
+            <details class="kept-copies-panel">
+              <summary>Kept on this device ? {keptFiles.files.length}/32 ? {fmtSize(keptFiles.allocated_bytes)} of {fmtSize(keptFiles.limit_bytes)} allocated</summary>
+              <p class="muted small">These encrypted copies survive ordinary cache cleanup and shared-list removal. Export still requires a shared listing. Releasing a copy frees its reserved storage; other cached bytes may remain.</p>
+              {#if keptFiles.error}<p role="alert">{keptFiles.error}</p>{/if}
+              {#each keptFiles.files as copy (copy.cid)}
+                <div class="kept-copy-row">
+                  <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}? (unlisted)`} ? {keptCopyLabel(copy)}</span>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptFiles.error} onclick={() => keepFileHere(copy.cid)}>Check and repair</button>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)}>Release kept copy</button>
+                </div>
+              {/each}
+              {#if keptTransfer}<button class="ghost small" onclick={cancelKeptTransfer}>Cancel keeping</button>{/if}
+            </details>
+          {/if}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <ul
             class="file-list tab-pane"
@@ -23344,6 +26485,13 @@
               {@render profilePreview()}
             </aside>
           </div>
+        {:else if view === "studio"}
+          {#if StudioSurface}
+            <StudioSurface me={myFp} nameOf={nameOf} colorOf={(fp) => profiles[fp]?.color || "var(--muted)"} onnotice={studioNotice} />
+          {:else}
+            <h2>Studio</h2>
+            <p class="muted">Loading the studio…</p>
+          {/if}
         {:else if view === "events"}
           <h2>Events</h2>
           <div class="events-tab tab-pane">
@@ -23514,7 +26662,7 @@
         {/if}
       </section>
 
-      {#if !dmHome && cur && !cur.isDm}
+      {#if !dmHome && cur && !cur.isDm && membersOpen}
         <aside class="members-col" aria-label="Members">
           <h3><span>Members · {onlineCount}/{members} claimed here</span></h3>
           {#if roster.length > 6}
@@ -23612,7 +26760,7 @@
         {#if micOn}
           <button class="ghost small btn-ico stage-mute" class:muted={callMuted} title={callMuted ? "Unmute" : "Mute"} onclick={toggleMute}>{#if callMuted}{@render icoMicOff()} Muted{:else}{@render icoMic()} Mute{/if}</button>
         {:else}
-          <button class="ghost small btn-ico stage-mute nomic" title="You are in this room without a microphone: the jukebox and the instruments still work. Click to turn a mic on." onclick={enableMic}>{@render icoMicOff()} No mic</button>
+          <button class="ghost small btn-ico stage-mute nomic" title="You are in this room without a microphone: the jukebox and the instruments still work. Click to turn a mic on." onclick={() => void enableMic()}>{@render icoMicOff()} No mic</button>
         {/if}
         <button class="call-hangup btn-ico" title="Leave voice" onclick={leaveVoice}>{@render icoHangup()} Leave</button>
         <button class="ghost stage-chev" title="Open the voice stage" aria-label="Open the voice stage" onclick={() => (stageOpen = true)}>{#if callDockTop}{@render icoChevDown()}{:else}{@render icoChevUp()}{/if}</button>
@@ -23705,7 +26853,7 @@
               {@const vol = peerVolumes[fp] ?? DEFAULT_PEER_LEVEL}
               {@const shareVol = peerShareVolumes[fp] ?? DEFAULT_PEER_LEVEL}
               {@const hasShare = peerHasShareAudio(fp)}
-              <li class="stage-peer">
+              <li class="stage-peer" use:contextMenu={() => peerMenu(fp)}>
                 <div class="stage-row">
                   <span class="stage-av" class:talking={speaking[fp]}>{@render catEars(fp)}{@render callAvatarTag(fp)}</span>
                   <span class="stage-nm">{@render callNameTag(fp)}</span>
@@ -23802,15 +26950,20 @@
           <div class="stage-acts">
             <!-- Under push to talk the button still means mute, but the label has to say which
                  of the two gates is currently closed, or a silent microphone looks like a bug. -->
+            <!-- The push-to-talk state is a CAPTION on the mute button, not a control beside it.
+                 As its own chip it took one of the six action cells, which pushed Leave onto a
+                 second row: a setting nobody can click was rearranging the controls people can.
+                 It belongs to mute in any case, because the two are the same question, which of
+                 the gates in front of the microphone is currently closed. -->
             <button class="ghost stage-act" class:muted={callMuted} title={callMuted ? "Unmute" : "Mute your microphone"} onclick={toggleMute}>
               {#if callMuted}{@render icoMicOff()}{:else}{@render icoMic()}{/if}
               <span class="stage-act-lbl">{callMuted ? "Muted" : "Mute"}</span>
+              {#if pushToTalk.mode === "ptt" && !callMuted}
+                <span class="stage-ptt-cap" class:live={pttHeld} title={`Push to talk: hold ${keyLabel(pushToTalk.key)} to speak`}>
+                  {pttHeld ? "ON AIR" : `HOLD ${keyLabel(pushToTalk.key).toUpperCase()}`}
+                </span>
+              {/if}
             </button>
-            {#if pushToTalk.mode === "ptt" && !callMuted}
-              <span class="stage-chip" class:struck={!pttHeld} title={`Push to talk: hold ${keyLabel(pushToTalk.key)} to speak`}>
-                {pttHeld ? "ON AIR" : `HOLD ${keyLabel(pushToTalk.key).toUpperCase()}`}
-              </span>
-            {/if}
             <button class="ghost stage-act" class:muted={callDeafened} title={callDeafened ? "Hear the room again" : "Deafen: stop hearing everyone"} onclick={toggleDeafen}>
               {@render icoSpeaker()}
               <span class="stage-act-lbl">{callDeafened ? "Deafened" : "Deafen"}</span>
@@ -23867,10 +27020,12 @@
         <!-- The deck sits between what you do and what you play: it is the room's, not yours. -->
         {@render jukeDock()}
 
-        <!-- The drawer itself is the shared instDrawer snippet; the fold strip below owns its state. -->
-        {#if instOpen}
-          {@render instDrawer()}
-        {/if}
+        <!-- The fold strip owns the drawer's state, and sits ABOVE what it opens. It used to be
+             rendered after the drawer, which put the control that says INSTRUMENTS below the whole
+             keyboard, the takes and the patch editor: the heading for a section you had to scroll
+             past the section to find, and the one strip that reads as a section header pointing at
+             nothing. Every other fold in the app (TAKES, the wiki contents) opens downward from its
+             own header, and this now does too. -->
         <div class="stage-fold">
           <button class="ghost stage-fold-btn" aria-expanded={instOpen} title={instOpen ? "Close the instruments" : "Open the instruments"} onclick={toggleInstDrawer}>
             {#if instOpen}{@render icoChevDown()}{:else}{@render icoChevUp()}{/if}
@@ -23882,6 +27037,9 @@
             <span class="stage-label">{instRxMuted ? "INST MUTED" : "HEARING ALL"}</span>
           </button>
         </div>
+        {#if instOpen}
+          {@render instDrawer()}
+        {/if}
       </div>
     {/if}
 
@@ -24044,7 +27202,9 @@
           </header>
           <div class="overlay-body">
             <!-- Audio and video are two different plans for the room (one plays in the background,
-                 the other asks everyone to watch), so the picker lets you ask for one of them. -->
+                 the other asks everyone to watch), so the picker lets you ask for one of them.
+                 YouTube is the odd tab out: it holds a form rather than a list, because there is
+                 no share to browse for something nobody here holds. -->
             <div class="juke-pick-tabs" role="tablist" aria-label="Kind of media">
               {#each JUKE_PICK_KINDS as k (k.key)}
                 <button
@@ -24052,11 +27212,54 @@
                   role="tab"
                   aria-selected={jukePickKind === k.key}
                   class:active={jukePickKind === k.key}
+                  class:link-tab={k.key === "youtube"}
                   onclick={() => (jukePickKind = k.key)}
-                >{k.label} <span class="juke-pick-n">{jukePickCounts[k.key]}</span></button>
+                >{k.label}{#if k.key !== "youtube"} <span class="juke-pick-n">{jukePickCounts[k.key]}</span>{/if}</button>
               {/each}
             </div>
-            {#if jukePickFiles.length === 0}
+            {#if jukePickKind === "youtube"}
+              <!-- Queueing a link is not queueing a file, and the panel says so rather than
+                   hiding it: nothing here is shared with the room, and every listener who plays it
+                   will be asking Google for it themselves, from their own address, after agreeing
+                   to. -->
+              <form
+                class="juke-link-add"
+                onsubmit={(e) => { e.preventDefault(); void jukeAddLink(); }}
+              >
+                <label class="juke-link-lbl" for="juke-link-url">Paste a YouTube, SoundCloud or Vimeo link</label>
+                <div class="juke-link-row">
+                  <input
+                    id="juke-link-url"
+                    class="juke-link-url"
+                    type="text"
+                    placeholder="https://youtu.be/... or soundcloud.com/..."
+                    bind:value={jukeLinkDraft}
+                    oninput={() => (jukeLinkError = "")}
+                  />
+                  <input
+                    class="juke-link-nm"
+                    type="text"
+                    placeholder="name it (optional)"
+                    maxlength="200"
+                    bind:value={jukeLinkName}
+                  />
+                  <button type="submit" class="juke-link-go" disabled={!jukeLinkDraft.trim() || jukeLinkBusy}>
+                    {jukeLinkBusy ? "Adding" : "Queue"}
+                  </button>
+                </div>
+                {#if jukeLinkError}
+                  <p class="juke-link-err">{jukeLinkError}</p>
+                {:else}
+                  <p class="juke-link-note">
+                    Not shared through this server, so it does not use your fileshare and cannot
+                    expire out of it. Everyone who plays it fetches it from the provider
+                    themselves, and each of them is asked before their own player loads. Spotify
+                    and Apple Music cannot be queued: their players cannot be kept in sync with a
+                    room.
+                  </p>
+                {/if}
+              </form>
+            {:else if jukePickFiles.length === 0}
               <p class="juke-pick-empty">
                 {jukePickKind === "all"
                   ? "no audio or video in this server's share yet: drop a file in chat or the Files surface to share it"
@@ -25083,6 +28286,25 @@
                   a static visual identity and stays silent. Plain shows ordinary readable text.
                 </p>
               </section>
+              <section class="set-section">
+                <h3>Message arrivals</h3>
+                <p class="muted small">
+                  Each member picks how their new messages show up (My Profile → Arrival). This is
+                  whether that plays on this device at all. Separate from text effects above: an
+                  arrival moves the whole row once as it lands, a text effect lives inside the words.
+                </p>
+                <div class="field">
+                  <span class="muted small">Playback</span>
+                  <div class="stx-seg text-fx-mode">
+                    <button type="button" class:on={appearance.messageMotion !== "off"} onclick={() => (appearance = { ...appearance, messageMotion: "" })}>PLAY</button>
+                    <button type="button" class:on={appearance.messageMotion === "off"} onclick={() => (appearance = { ...appearance, messageMotion: "off" })}>STILL</button>
+                  </div>
+                </div>
+                <p class="muted small">
+                  Still keeps every row where it lands, including your own, and tells nobody. The
+                  operating system's reduced-motion preference forces Still as well.
+                </p>
+              </section>
               {#if liveryActive && activeServerId !== null && !cur?.isDm}
                 <section class="set-section">
                   <h3>Livery</h3>
@@ -25099,6 +28321,20 @@
                     </span>
                   </label>
                   <p class="muted small">Opting out is yours alone; nobody is told.</p>
+                </section>
+              {/if}
+              {#if activeServerId !== null}
+                <section class="set-section">
+                  <h3>Missed history</h3>
+                  <label class="toggle">
+                    <input
+                      type="checkbox"
+                      checked={latePastMarkers}
+                      onchange={() => setLatePastMarkers(!latePastMarkers)}
+                    />
+                    <span>Point out messages that arrive after you had already read past them</span>
+                  </label>
+                  <p class="muted small">Members connect at different times, so a message written this morning can reach you tonight and sort into history you have already read. This marks those rows until you have looked at them. Yours alone, per server.</p>
                 </section>
               {/if}
               <section class="set-section">
@@ -25126,14 +28362,6 @@
                     onchange={() => (appearance = { ...appearance, motion: appearance.motion === "off" ? "" : "off" })}
                   />
                   <span>Hover motion: icons lift and turn under the pointer</span>
-                </label>
-                <label class="toggle">
-                  <input
-                    type="checkbox"
-                    checked={appearance.messageMotion !== "off"}
-                    onchange={() => (appearance = { ...appearance, messageMotion: appearance.messageMotion === "off" ? "" : "off" })}
-                  />
-                  <span>Message arrivals: let each member's messages use that member's chosen entrance</span>
                 </label>
                 <label class="toggle">
                   <input
@@ -25473,6 +28701,32 @@
                   <li><code>[[Page]]</code> → link to a wiki page</li>
                   <li><code>- item</code> / <code>1. item</code> → bullet / numbered lists</li>
                 </ul>
+              </section>
+              <!-- Says what it costs rather than what it saves. The default is off because the
+                   cost is paid to someone the app otherwise never contacts, and a preference that
+                   starts network requests has to be asked for rather than drifted into. -->
+              <section class="set-section">
+                <h3>Spotify &amp; YouTube cards</h3>
+                <p class="muted small">
+                  A Spotify or YouTube link on a line of its own can open out into that service's
+                  own player. Normally you get a chip and clicking it is what contacts them.
+                </p>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked={embedAutoLoad}
+                    onchange={(e) => setEmbedAutoLoad(e.currentTarget.checked)}
+                  />
+                  <span>Load these cards without asking</span>
+                </label>
+                <p class="muted small">
+                  This tells Spotify and Google your address, and what you are looking at, for
+                  every such link that comes past; they have no way to know it was not you who
+                  chose it. Cards still load only while they are on screen in a visible window, so
+                  scrolling away or minimising still unloads them. Applies on this device, to
+                  every server. Shared files are separate and stay under each server's
+                  <b>Server settings → File Trust</b>.
+                </p>
               </section>
             {:else if settingsPage === "keybinds"}
               <div class="stx-crumb">SETTINGS // APP // KEYBINDS</div>
@@ -25984,25 +29238,30 @@
                   </div>
                 {/if}
                 <div class="file-trust-modes">
-                  <button type="button" class:active={fileTrustFor().mode === "on-demand"} onclick={() => setFileTrustMode("on-demand")}><b>On demand</b><small>Nothing passive</small></button>
-                  <button type="button" class:active={fileTrustFor().mode === "specific"} onclick={() => setFileTrustMode("specific")}><b>Specific people</b><small>Only selected origins</small></button>
-                  <button type="button" class:active={fileTrustFor().mode === "everyone"} onclick={() => setFileTrustMode("everyone")}><b>Everyone</b><small>All authenticated member media; external URLs stay click-only</small></button>
+                  <button type="button" class:active={fileTrustFor().mode === "on-demand"} onclick={() => setFileTrustMode("on-demand")}><b>On demand</b><small>Nothing loads until you click</small></button>
+                  <button type="button" class:active={fileTrustFor().mode === "media"} onclick={() => setFileTrustMode("media")}><b>Media only</b><small>Pictures, audio and video load; other files wait</small></button>
+                  <button type="button" class:active={fileTrustFor().mode === "everyone"} onclick={() => setFileTrustMode("everyone")}><b>Everyone</b><small>Every member's shared file; external URLs stay click-only</small></button>
                 </div>
-                {#if fileTrustFor().mode === "specific"}
-                  <div class="file-trust-members">
-                    {#each roster as member (member.identity)}
-                      <label>
-                        <input type="checkbox" checked={fileTrustFor().trustedAuthors.includes(member.identity)} onchange={() => toggleTrustedFileAuthor(member.identity)} />
-                        <span>
-                          {@render nameTag(member.fingerprint)}
-                          <small class="fp" title={`Full device identity: ${member.identity}`}>{member.identity}</small>
-                        </span>
-                      </label>
-                    {:else}
-                      <p class="muted small">No authenticated members are available to choose yet.</p>
-                    {/each}
-                  </div>
-                {/if}
+                <h3>People</h3>
+                <p class="muted small">An override for one person holds whatever the setting above says: <b>always</b> loads their attested files even on demand, <b>never</b> keeps them click-only even under everyone.</p>
+                <div class="file-trust-members">
+                  {#each roster as member (member.identity)}
+                    {@const override = authorOverride(fileTrustFor(), member.identity)}
+                    <label class="file-trust-person" class:always={override === "always"} class:never={override === "never"}>
+                      <span>
+                        {@render nameTag(member.fingerprint)}
+                        <small class="fp" title={`Full device identity: ${member.identity}`}>{member.identity}</small>
+                      </span>
+                      <select value={override} onchange={(e) => setFileAuthorOverride(member.identity, e.currentTarget.value as FileAuthorOverride)}>
+                        <option value="follow">Follow the setting</option>
+                        <option value="always">Always load</option>
+                        <option value="never">Never load</option>
+                      </select>
+                    </label>
+                  {:else}
+                    <p class="muted small">No authenticated members are available to choose yet.</p>
+                  {/each}
+                </div>
                 <p class="muted small"><b>At-rest protection:</b> fetched chunks are authenticated and encrypted as one vault copy. An explicit export creates a separate plaintext copy in Downloads. This policy does not sandbox a media decoder.</p>
               </section>
             {:else if serverSettingsPage === "livery"}
@@ -26030,120 +29289,12 @@
                     {/if}
                   </div>
                 </div>
-                <div class="preset-row">
-                  {#each PRESETS as p (p.id)}
-                    <button
-                      type="button"
-                      class="preset-btn"
-                      class:active={liveryDraft.preset === p.id}
-                      onclick={() => (liveryDraft = { ...liveryDraft, preset: p.id })}
-                    >
-                      <span class="preset-sw" style={`background:${p.sw}`}></span>{p.name}
-                    </button>
-                  {/each}
-                </div>
-                <div class="field" style="margin-top:8px">
-                  <span class="muted small">Accent (optional)</span>
-                  <div class="accent-row">
-                    {#each ACCENT_CHOICES as a (a)}
-                      <button
-                        type="button"
-                        class="accent-sw"
-                        class:active={liveryDraft.accent === a}
-                        style={`background:${a}`}
-                        aria-label={`Accent colour ${a}`}
-                        title={a}
-                        onclick={() => (liveryDraft = { ...liveryDraft, accent: liveryDraft.accent === a ? "" : a })}
-                      ></button>
-                    {/each}
-                    <input
-                      type="color"
-                      class="accent-custom"
-                      title="Custom accent colour"
-                      aria-label="Custom accent colour"
-                      value={liveryDraft.accent || "#977df2"}
-                      oninput={(e) => (liveryDraft = { ...liveryDraft, accent: e.currentTarget.value })}
-                    />
-                  </div>
-                </div>
-                <div class="field" style="margin-top:8px">
-                  <span class="muted small">Ground tint: wash the room in your own colours, background and sidebars separately.</span>
-                  <div class="grad-maker">
-                    <span class="muted small tint-lbl">Background</span>
-                    <input type="color" value={liveryTintBgC} aria-label="Background tint colour" oninput={(e) => { liveryTintBgC = e.currentTarget.value; if (draftTinted) applyTint(); }} />
-                    <input type="range" min="0" max="60" step="2" value={liveryTintBgS} aria-label="Background tint intensity" oninput={(e) => { liveryTintBgS = +e.currentTarget.value; if (draftTinted) applyTint(); }} />
-                    <span class="muted small">{liveryTintBgS}%</span>
-                  </div>
-                  <div class="grad-maker">
-                    <span class="muted small tint-lbl">Sidebars</span>
-                    <input type="color" value={liveryTintSideC} aria-label="Sidebar tint colour" oninput={(e) => { liveryTintSideC = e.currentTarget.value; if (draftTinted) applyTint(); }} />
-                    <input type="range" min="0" max="60" step="2" value={liveryTintSideS} aria-label="Sidebar tint intensity" oninput={(e) => { liveryTintSideS = +e.currentTarget.value; if (draftTinted) applyTint(); }} />
-                    <span class="muted small">{liveryTintSideS}%</span>
-                  </div>
-                  <div class="grad-maker">
-                    {#if draftTinted}
-                      <button type="button" class="ghost small" onclick={clearTint}>Clear tint</button>
-                    {:else}
-                      <button type="button" class="ghost small" onclick={applyTint}>Apply tint</button>
-                    {/if}
-                  </div>
-                  <span class="muted small">Intensity is how far the colour sinks in. A tint mixes into the default dark grounds and stands in for the preset's own, so the preview on the right is the truth: text tokens stay untouched, and green, gold and red keep their jobs.</span>
-                </div>
-                <div class="field" style="margin-top:8px">
-                  <span class="muted small">Corners</span>
-                  <div class="cat-row">
-                    {#each Object.keys(LIVERY_RADIUS) as rid (rid)}
-                      <button
-                        type="button"
-                        class="preset-btn cat-tile"
-                        class:active={(liveryDraft.tokens["radius"] ?? "soft") === rid}
-                        onclick={() => setDraftToken("radius", rid === "soft" ? "" : rid)}
-                      >{rid}</button>
-                    {/each}
-                  </div>
-                </div>
+                <!-- The same panel the Found tab uses, with every group open. -->
                 <div class="field">
-                  <span class="muted small">Interface font</span>
-                  <div class="cat-row">
-                    {#each Object.keys(LIVERY_FONTS) as fid (fid)}
-                      <button
-                        type="button"
-                        class="preset-btn cat-tile"
-                        class:active={(liveryDraft.tokens["font"] ?? "system") === fid}
-                        style={`font-family:${LIVERY_FONTS[fid]}`}
-                        onclick={() => setDraftToken("font", fid === "system" ? "" : fid)}
-                      >{fid}</button>
-                    {/each}
-                  </div>
+                  <span class="muted small">Palette: the base scheme. Everything below adjusts it.</span>
+                  {@render liveryPalette()}
                 </div>
-                <div class="field">
-                  <span class="muted small">Background pattern</span>
-                  <div class="cat-row">
-                    {#each LIVERY_PATTERNS as pid (pid)}
-                      <button
-                        type="button"
-                        class="preset-btn cat-tile pat-{pid}"
-                        class:active={(liveryDraft.tokens["pattern"] ?? "none") === pid}
-                        onclick={() => setDraftToken("pattern", pid === "none" ? "" : pid)}
-                      >{pid}</button>
-                    {/each}
-                  </div>
-                </div>
-                <div class="field">
-                  <span class="muted small">Custom cursor: a small image members' pointers become here (they can opt out of the whole livery)</span>
-                  <div class="avatar-row">
-                    {#if livery.cursor}
-                      <img class="cursor-preview" src={"data:image/png;base64," + livery.cursor} alt="" />
-                    {/if}
-                    <label class="upload-btn">
-                      {livery.cursor ? "Replace cursor" : "Upload cursor"}
-                      <input type="file" accept="image/png,image/gif,image/webp" onchange={(e) => loadServerCursor(e.currentTarget.files)} />
-                    </label>
-                    {#if livery.cursor}
-                      <button class="ghost small" disabled={busy} onclick={() => setServerCursor("")}>Remove cursor</button>
-                    {/if}
-                  </div>
-                </div>
+                <div class="lv-panel">{@render liveryExtended("settings")}</div>
                 <div class="invite-actions">
                   <button class="ghost small" disabled={busy} onclick={publishLivery}>Publish livery</button>
                   {#if liveryActive}
@@ -26449,38 +29600,8 @@
             {/if}
           </div>
           {#if serverSettingsPage === "livery"}
-            {@const draftPattern = liveryDraft.tokens["pattern"]}
-            <aside
-              class="stx-prev"
-              data-preset={liveryDraft.preset || null}
-              data-livery-pattern={draftPattern && draftPattern !== "none" ? draftPattern : null}
-              style={liveryDraftVars()}
-            >
-              <div class="stx-ph"><i></i>AS MEMBERS SEE IT</div>
-              <div class="stx-pcard">
-                <div class="stx-pcap">CHROME</div>
-                <div class="stx-mini">
-                  <div class="stx-mini-rail">
-                    {#if livery.icon}<img class="mini-ico" src={imgSrc(livery.icon)} alt="" />{:else}<i class="on"></i>{/if}
-                    <i></i><i></i>
-                  </div>
-                  <div class="stx-mini-side"><i class="on" style="width:90%"></i><i style="width:70%"></i><i style="width:80%"></i><i style="width:55%"></i></div>
-                  <div class="stx-mini-chat"><i class="nm"></i><i style="width:80%"></i><i style="width:60%"></i></div>
-                </div>
-              </div>
-              <div class="stx-pcard">
-                <div class="stx-pcap">MESSAGE</div>
-                {@render previewLog()}
-              </div>
-              <div class="stx-pcard">
-                <div class="stx-pcap">CONTROLS</div>
-                <div class="stx-pctl">
-                  <button class="primary small" type="button">Send</button>
-                  <button class="ghost small" type="button">Cancel</button>
-                  <span class="stx-pdot"></span>
-                </div>
-              </div>
-              <p class="muted small stx-pnote">Rendered with your draft before you publish. Anyone can opt out in their own Appearance.</p>
+            <aside class="stx-prev">
+              {@render liveryPreview("settings")}
             </aside>
           {/if}
           <button type="button" class="stx-esc" onclick={() => (showServerSettings = false)} title="Close (Esc)">
@@ -26543,7 +29664,7 @@
             {#if previewKind}
               <div class="file-preview">
                 {#if fileInfoPreviewError}
-                  <p class="muted small">Preview unavailable: the file isn't downloaded yet and no peer is sharing it right now.</p>
+                  <p class="muted small">Preview unavailable. The file may be missing, unreachable, unsupported, or unable to pass verification.</p>
                 {:else if !fileInfoPreview}
                   <p class="muted small">Loading preview…</p>
                 {:else if previewKind === "image"}
@@ -26605,7 +29726,7 @@
                 {:else if fileTextState === "binary"}
                   <p class="muted small file-text-note">This isn't readable text: download it and open it in the right app.</p>
                 {:else if fileTextState === "error"}
-                  <p class="muted small file-text-note">Can't read it: the file isn't downloaded yet and no peer is sharing it right now.</p>
+                  <p class="muted small file-text-note">Unable to read this file. Its contents may be unreachable or may have failed verification.</p>
                 {:else if fileTextState === "ready"}
                   {#if !fileText.trim()}
                     <p class="muted small file-text-note">This file is empty.</p>
@@ -26624,10 +29745,21 @@
                 {#if fileInfoAvail === null}
                   <span class="muted">checking…</span>
                 {:else if fileInfoAvail}
-                  <span class="avail yes">● Available on this device</span>
+                  <span class="avail yes">● Cached here; checked when opened</span>
                 {:else}
-                  <span class="avail no">○ Not downloaded: fetched from a peer on demand</span>
+                  <span class="avail no">○ {hasPeers ? "Remote copy unconfirmed; a fetch can be attempted" : "Not cached; no connected provider"}</span>
                 {/if}
+              </dd>
+              <dt>Kept copy</dt>
+              <dd>
+                <span>{keptCopyLabel(keptFiles?.files.find((copy) => copy.cid === fileInfo?.cid))}</span>
+                {#if keptFiles?.supported && !keptFiles.error}
+                  <button class="ghost small" disabled={!!keptTransfer} onclick={() => fileInfo && keepFileHere(fileInfo.cid)}>
+                    {keptFiles.files.some((copy) => copy.cid === fileInfo?.cid) ? "Check and repair copy" : "Keep on this device"}
+                  </button>
+                  {#if keptTransfer?.cid === fileInfo.cid}<button class="ghost small" onclick={cancelKeptTransfer}>Cancel keeping</button>{/if}
+                  <p class="muted small">Stores a verified encrypted copy within this server's 1 GiB / 32-file limit. Checking may fetch missing chunks. Remote copies remain unconfirmed.</p>
+                {:else if keptFiles?.error}<p class="muted small">{keptFiles.error}</p>{/if}
               </dd>
               <dt>Uploaded by</dt>
               <dd>{nameOf(fileInfo.author)}</dd>
@@ -26830,28 +29962,15 @@
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div
         class="ctx-menu"
+        class:confirm={menu.confirm}
         bind:this={menuEl}
         role="menu"
         tabindex="-1"
         style="left:{menu.x}px; top:{menu.y}px"
         onkeydown={onMenuKey}
       >
-        {#each menu.items as item}
-          {#if "divider" in item}
-            <div class="ctx-divider"></div>
-          {:else}
-            <button
-              class="ctx-item"
-              class:danger={item.danger}
-              role="menuitem"
-              tabindex="-1"
-              disabled={item.disabled}
-              onclick={() => { const keep = item.onSelect(); if (keep !== true) menu = null; }}
-            >
-              {#if item.icon}<span class="ctx-icon">{item.icon}</span>{/if}<span class="ctx-label">{item.label}</span>
-            </button>
-          {/if}
-        {/each}
+        {@render menuRows(menu.items, 0)}
+        <div class="ctx-foot" aria-hidden="true"><span>↑↓ move</span><span>⏎ pick</span><span>type to jump</span><span class="sp"></span><span>esc</span></div>
       </div>
     {/if}
   {/if}

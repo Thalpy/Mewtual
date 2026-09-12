@@ -25,8 +25,8 @@ use catcoms_app::{
     Livery, PairingLedger, PairingSecrets, PerServerGrant, Profile, ReconnectPolicy,
     ReconnectRoute, Server, ServerActor, ServerNet, ServerRecord, ServerStore, StorageHealth,
     StorageSnapshot, CHUNK_BYTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES,
-    MAX_RECONNECT_ROUTES, MAX_RECONNECT_ROUTE_BYTES, MAX_SERVER_CURSOR_BYTES,
-    MAX_SERVER_ICON_BYTES,
+    MAX_RECONNECT_ROUTES, MAX_RECONNECT_ROUTE_BYTES, MAX_SERVER_BANNER_BYTES,
+    MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{
     parse_peer_dial_route, Candidate, DialEndpoint, DiscoveryPolicy, EndpointDialScheduler,
@@ -53,7 +53,11 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
 use zeroize::Zeroizing;
 
+mod creative_blobs;
 mod errors;
+mod media_decode;
+mod security_intent;
+mod studio;
 mod tasks;
 use errors::{codes, AppError, ErrorCode};
 
@@ -329,7 +333,7 @@ impl Drop for InlineDownloadLeaseInner {
 /// on-disk store once the user has unlocked it with a passphrase (`None` = in-memory only).
 #[derive(Default)]
 struct AppState {
-    servers: Mutex<HashMap<u64, ServerEntry>>,
+    servers: Arc<Mutex<HashMap<u64, ServerEntry>>>,
     /// Monotonic process-local source for [`ServerEntry::instance`]. Wrapping would require more
     /// actor installations than the process can perform in its lifetime; zero has no special
     /// meaning and is permitted after that theoretical wrap.
@@ -380,7 +384,7 @@ struct AppState {
     /// writes did not even serialize against each other. Here they do, and the incarnation check
     /// inside the lock then decides which of them is still entitled to write.
     persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
-    store: Mutex<Option<ServerStore>>,
+    store: Arc<Mutex<Option<ServerStore>>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
     session_resumable: Mutex<bool>,
@@ -394,7 +398,7 @@ struct AppState {
     /// Orders the externally-visible parts of a long command against explicit lock completion.
     /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
     /// reply event or server registration to occur after `lock_session` itself has completed.
-    ui_session_commit: Mutex<()>,
+    ui_session_commit: Arc<Mutex<()>>,
     /// The newest exact Ctrl+L/close snapshot registered before either command waits on the shared
     /// commit mutex. A remounted close can consume it even though its JS coordinator is gone.
     pending_ui_lock_snapshot: Mutex<Option<PendingUiLockSnapshot>>,
@@ -898,6 +902,29 @@ struct Connectivity {
     trace: String,
 }
 
+/// A join attempt's steps so far, as the `join-progress` event carries them.
+///
+/// `join_server` stays pending for as long as the dial, the reply window and the admission take,
+/// which can be well over a minute, and until now the only account of it arrived afterwards in
+/// `get_connectivity`. This is the same step list, sent as it grows, so the start surface can show
+/// which route is being tried and which ones have already failed while the person waits. It is a
+/// snapshot rather than a delta so a listener that missed one is never out of step.
+#[derive(Serialize, Clone)]
+struct JoinProgress {
+    steps: Vec<DiagStep>,
+}
+
+/// Send the attempt's steps so far to the webview. Best-effort: a webview that is not listening
+/// loses nothing, because the same steps land in `get_connectivity` when the attempt ends.
+fn emit_join_progress(app: &AppHandle, diag: &Connectivity) {
+    let _ = app.emit(
+        "join-progress",
+        JoinProgress {
+            steps: diag.steps.clone(),
+        },
+    );
+}
+
 #[derive(Serialize)]
 struct SwitchboardMember {
     fingerprint: String,
@@ -1187,6 +1214,9 @@ struct UiLivery {
     /// local label). Untrusted like everything else here: the backend bounds its length and
     /// refuses control characters, and the frontend renders it as text only.
     name: String,
+    /// The shared sidebar banner as base64 image bytes (empty = none). Untrusted exactly like
+    /// the icon: render it as an image only, never interpret it.
+    banner: String,
 }
 
 /// One member's custom badge as serialized to the frontend, keyed by fingerprint in
@@ -1230,6 +1260,12 @@ struct UiEvent {
 /// the queued file (downloaded through the same `download_file` path as any other embed),
 /// `added_ms` is epoch-millis, and `author` is the adder's device fingerprint, resolved to a
 /// display name via the profiles map exactly like a message author.
+///
+/// `source` and `link` are the linked-track half: an entry with an empty `source` is a shared
+/// file addressed by `cid` (every entry written before linked tracks existed reads this way), and
+/// `"youtube"` means the deck plays a video id from `link` through the embedded player instead,
+/// with no `cid` at all. The frontend re-validates `link` against the exact id shape before it
+/// builds an address from it.
 #[derive(Serialize, Clone)]
 struct UiJukeEntry {
     id: String,
@@ -1237,6 +1273,8 @@ struct UiJukeEntry {
     name: String,
     author: String,
     added_ms: u64,
+    source: String,
+    link: String,
 }
 
 /// A shared file as serialized to the frontend. `cid` is the hex content address used to
@@ -1422,9 +1460,32 @@ fn build_storage_report(
     let mut ambiguous = HashSet::<String>::new();
     for file in files {
         match unique.entry(file.cid.clone()) {
-            std::collections::hash_map::Entry::Occupied(existing) => {
-                if existing.get().manifest_version != file.manifest_version {
-                    ambiguous.insert(file.cid);
+            std::collections::hash_map::Entry::Occupied(mut existing) => {
+                if existing.get().manifest_version != file.manifest_version
+                    && !(health
+                        .resolvable_manifest_versions
+                        .contains(&existing.get().manifest_version)
+                        && health
+                            .resolvable_manifest_versions
+                            .contains(&file.manifest_version))
+                {
+                    ambiguous.insert(file.cid.clone());
+                }
+                // Choose the exact variant authenticated in this same actor snapshot. A healthy
+                // repair may coexist with an unavailable original; never lend its key verdict to
+                // that original reference or to a conflicting plaintext claim.
+                let verified = |candidate: &UiFile| {
+                    candidate.total > 0
+                        && candidate.held == candidate.total
+                        && health
+                            .verified_manifest_versions
+                            .contains(&candidate.manifest_version)
+                };
+                if verified(&file)
+                    && (!verified(existing.get())
+                        || file.manifest_version < existing.get().manifest_version)
+                {
+                    existing.insert(file);
                 }
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
@@ -1979,6 +2040,7 @@ fn install_reconnect_capture_worker(app: &AppHandle, server: u64, actor: ServerA
 fn forward_events(
     app: AppHandle,
     server: u64,
+    instance: u64,
     mut events: mpsc::Receiver<catcoms_app::TracedEvent>,
 ) {
     let task = tokio::spawn(async move {
@@ -2029,6 +2091,22 @@ fn forward_events(
                 continue;
             }
             match ev.event {
+                event @ (AppEvent::StudioUpdated { .. }
+                | AppEvent::StudioReceivePaused
+                | AppEvent::SettlementChanged { .. }) => {
+                    let state = app.state::<AppState>();
+                    studio::forward_if_current(&state, server, instance, || match event {
+                        AppEvent::SettlementChanged { target, state } => emit_tracked(
+                            &app, "settlement-changed", studio::settlement::payload(server, target, state), trace,
+                        ),
+                        AppEvent::StudioUpdated { channel, object } => emit_tracked(
+                            &app, "studio-updated",
+                            serde_json::json!({"server": server, "channel": channel.to_string(), "object": object.map(hex::encode)}), trace,
+                        ),
+                        AppEvent::StudioReceivePaused => emit_tracked(&app, "studio-receive-paused", ServerEvt { server }, trace),
+                        _ => unreachable!(),
+                    }).await;
+                }
                 AppEvent::ChannelsUpdated => {
                     emit_tracked(&app, "channels-changed", ServerEvt { server }, trace);
                 }
@@ -3079,7 +3157,7 @@ async fn register_server(
     };
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
     supervise("server_actor", id, task);
-    forward_events(app.clone(), id, events);
+    forward_events(app.clone(), id, instance, events);
     let timer_actor = actor.clone();
     state.servers.lock().await.insert(
         id,
@@ -3102,6 +3180,7 @@ async fn register_server(
         },
     );
     install_reconnect_capture_worker(app, id, timer_actor.clone());
+    studio::spawn_receiver(app.clone(), id, instance, timer_actor.clone());
     // Start only after the entry exists. A zero-millisecond randomized first tick must not race
     // the registry insertion and silently skip the initial interface/discovery refresh.
     spawn_discovery_timer(app.clone(), id, timer_actor);
@@ -5790,6 +5869,7 @@ async fn join_server_inner(
             "standing member fallbacks were present but the joiner did not consent to contact them",
         ));
     }
+    emit_join_progress(app, diag);
 
     // A joiner gets its own per-server identity + stable port too: it is a full member afterwards,
     // so its peer record has to keep resolving across restarts exactly like the founder's.
@@ -5917,6 +5997,7 @@ async fn join_server_inner(
         let no_direct_route = addrs.is_empty();
         (mesh, inviter, Vec::new(), true, no_direct_route)
     };
+    emit_join_progress(app, diag);
 
     // Prepare the future member's own reachability *before* waiting on the one-way invite route.
     // On timeout this exact transport and stable identity stay alive for a 60-second two-way reply
@@ -5953,6 +6034,7 @@ async fn join_server_inner(
                     "none of the dialled addresses answered within 20s"
                 },
             ));
+            emit_join_progress(app, diag);
 
             // Direct-first is deliberate: member fallback reveals the joiner's IP/timing to an
             // additional group member and may spend their bandwidth. Only routes separately
@@ -6002,6 +6084,7 @@ async fn join_server_inner(
                         "none of the inviter-endorsed standing fallbacks answered within 15s",
                     )),
                 }
+                emit_join_progress(app, diag);
             }
 
             let mut candidates = external_addrs(&joiner_addrs);
@@ -6066,6 +6149,7 @@ async fn join_server_inner(
                     ready.candidate_count
                 ),
             ));
+                emit_join_progress(app, diag);
 
                 let remaining = reply.expires_at_ms.saturating_sub(SystemClock.now_ms());
                 join_contact = wait_for_reply_peer(
@@ -6096,6 +6180,7 @@ async fn join_server_inner(
             "connected to an existing member helper; it will forward only the admission handshake"
         };
         diag.steps.push(DiagStep::ok("connect", "", detail));
+        emit_join_progress(app, diag);
     }
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
@@ -6232,6 +6317,7 @@ async fn join_server_inner(
     }
     diag.steps
         .push(DiagStep::ok("join", "", "admitted to the group"));
+    emit_join_progress(app, diag);
     // A joiner has to subscribe the control topic like the founder does. Without this,
     // `control_subscribed` stays false, `desired_routing_topics()` omits the control topics, and
     // this member never receives another membership commit for as long as it runs: a third person
@@ -7100,13 +7186,40 @@ async fn set_livery(
             preset,
             accent,
             tokens,
-            // Ignored by `set_livery`, which reads all three back out of the document and
+            // Ignored by `set_livery`, which reads all four back out of the document and
             // writes them again unchanged. Publishing colours never touches them.
             icon: String::new(),
             cursor: String::new(),
             name: String::new(),
+            banner: String::new(),
         })
         .await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Set (or clear, with `""`) the shared sidebar banner (owner/admin only); re-seals the server.
+/// `banner` is base64-encoded image bytes, capped a little above the icon (it is a small
+/// landscape image, not artwork).
+#[tauri::command]
+async fn set_server_banner(
+    state: State<'_, AppState>,
+    server: u64,
+    banner: String,
+) -> Result<(), String> {
+    if !banner.is_empty() {
+        let bytes = B64
+            .decode(banner.as_bytes())
+            .map_err(|e| format!("bad server banner: {e}"))?;
+        if bytes.len() > MAX_SERVER_BANNER_BYTES {
+            return Err(format!(
+                "server banner too large: {} bytes (max {MAX_SERVER_BANNER_BYTES})",
+                bytes.len()
+            ));
+        }
+    }
+    let actor = actor_of(&state, server).await?;
+    actor.set_server_banner(banner).await?;
     persist_server(&state, server).await;
     Ok(())
 }
@@ -7173,6 +7286,7 @@ async fn get_livery(state: State<'_, AppState>, server: u64) -> Result<UiLivery,
         icon: l.icon,
         cursor: l.cursor,
         name: l.name,
+        banner: l.banner,
     })
 }
 
@@ -8315,7 +8429,120 @@ async fn dismiss_dm_request(
     Ok(())
 }
 
-/// Whether a shared file's blob is held locally (openable without a network fetch).
+#[derive(Serialize)]
+struct UiKeptFile {
+    cid: String,
+    manifest_version: String,
+    checked: bool,
+}
+
+#[derive(Serialize)]
+struct UiKeptFiles {
+    supported: bool,
+    allocated_bytes: u64,
+    limit_bytes: u64,
+    files: Vec<UiKeptFile>,
+    error: Option<String>,
+}
+
+fn bridge_kept_files(view: catcoms_storage::kept::KeptFiles) -> UiKeptFiles {
+    UiKeptFiles {
+        supported: view.supported,
+        allocated_bytes: view.allocated_bytes,
+        limit_bytes: view.limit_bytes,
+        files: view
+            .files
+            .into_iter()
+            .map(|file| UiKeptFile {
+                cid: file.plan.cid.to_hex(),
+                manifest_version: hex::encode(file.plan.version),
+                checked: file.checked,
+            })
+            .collect(),
+        error: view.error,
+    }
+}
+
+fn kept_cid(cid: &str) -> Result<Vec<u8>, String> {
+    if cid.len() != 64 || !cid.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("bad content address".into());
+    }
+    hex::decode(cid).map_err(|_| "bad content address".into())
+}
+
+/// Local retention inventory includes unlisted copies so explicit release remains possible. Never
+/// return wrapped manifests/keys through this UI projection or treat it as media authorization.
+#[tauri::command]
+async fn get_kept_files(state: State<'_, AppState>, server: u64) -> Result<UiKeptFiles, String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let view = actor.kept_files().await;
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    if state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|entry| entry.instance)
+        != Some(instance)
+    {
+        return Err("server changed".into());
+    }
+    Ok(bridge_kept_files(view))
+}
+
+/// One explicit, quota-reserved copy. The shared native cancellation lease closes the lock/sweep
+/// race and retains accounting through lower transport retirement. No UI commit guard spans I/O.
+#[tauri::command]
+async fn keep_file(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+    cancellation: String,
+) -> Result<(), String> {
+    let raw = kept_cid(&cid)?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (lease, receiver) = claim_inline_download(&state, &cancellation)?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    drop(require_ui_session_generation(&state, generation).await?);
+    actor
+        .keep_file(
+            raw,
+            Some(RequestCancellation::new(
+                receiver,
+                Some(lease.request_keepalive()),
+            )),
+        )
+        .await?;
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    if state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|entry| entry.instance)
+        != Some(instance)
+    {
+        return Err("server changed".into());
+    }
+    Ok(())
+}
+
+/// Explicit local release only; unrelated cached chunks or replicated listings are unchanged.
+#[tauri::command]
+async fn forget_kept_file(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+) -> Result<(), String> {
+    let raw = kept_cid(&cid)?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let actor = actor_of(&state, server).await?;
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    actor.forget_kept_file(raw).await
+}
+
+/// Cheap local presence only. This does not authenticate each chunk or prove remote availability.
 #[tauri::command]
 async fn file_available(
     state: State<'_, AppState>,
@@ -9562,6 +9789,11 @@ const _: () = assert!(MEDIA_WINDOW_BYTES <= CHUNK_BYTES);
 /// most an ordinary `<img>` may cost at once.
 const MAX_WHOLE_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 
+// The handler must not assemble a body the transcoder will then refuse to look at: a member would
+// see a chip with no reason, and the reason would be two constants disagreeing in different files.
+const _: () =
+    assert!(MAX_WHOLE_IMAGE_BYTES == media_decode::DecodeBounds::DEFAULT.max_input_bytes as u64,);
+
 /// Whether a request must be answered with the whole file rather than one window.
 ///
 /// `<img>` issues a plain GET with no `Range` header, takes the response body as the entire
@@ -9701,6 +9933,50 @@ fn parse_range_header(raw: &str, total: u64) -> Option<(u64, usize)> {
     Some((start, len))
 }
 
+/// At most this many images decode at once.
+///
+/// The bounds in `media_decode` cap one transcode. They say nothing about forty arriving together
+/// when somebody scrolls a gallery, and the decode now happens in our process rather than the
+/// webview's. Two permits keeps the worst-case transient near 400 MB and leaves the blocking pool
+/// with threads for everything else.
+const MEDIA_TRANSCODE_PERMITS: usize = 2;
+
+/// How long the scheme handler waits for a transcode before answering without one.
+///
+/// Naming the limit of this honestly: the decode is not interruptible. If this fires, the response
+/// is a denial but the blocking thread keeps running until the decoder returns on its own. That is
+/// the reason for the permit cap above, not a detail of it.
+const MEDIA_TRANSCODE_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn media_transcode_permits() -> &'static tokio::sync::Semaphore {
+    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| tokio::sync::Semaphore::new(MEDIA_TRANSCODE_PERMITS))
+}
+
+/// Decode a shared image in Rust and return the PNG to serve in its place.
+///
+/// `spawn_blocking` rather than the async pool: a 25 MP photo is hundreds of milliseconds of CPU,
+/// and the runtime thread it would otherwise occupy is the one the server actor and every other
+/// command share. The whole point of moving the decode in-process is undone if it stalls the deck.
+async fn transcoded_image_body(
+    declared: &str,
+    body: Vec<u8>,
+) -> Result<media_decode::DecodedImage, media_decode::DecodeRefusal> {
+    let Ok(_permit) = media_transcode_permits().acquire().await else {
+        return Err(media_decode::DecodeRefusal::DeadlineExceeded);
+    };
+    let declared = declared.to_string();
+    let handle = tauri::async_runtime::spawn_blocking(move || {
+        media_decode::transcode_inline_image(&declared, &body)
+    });
+    match tokio::time::timeout(MEDIA_TRANSCODE_TIMEOUT, handle).await {
+        Ok(Ok(result)) => result,
+        // The module contains its own unwinds, so this is the blocking pool itself failing.
+        Ok(Err(_)) => Err(media_decode::DecodeRefusal::DecoderPanicked),
+        Err(_) => Err(media_decode::DecodeRefusal::DeadlineExceeded),
+    }
+}
+
 /// Serve one media request. Split out from the protocol registration so the whole path is
 /// testable and so every failure returns a status rather than panicking inside the webview's
 /// scheme handler.
@@ -9747,7 +10023,24 @@ async fn serve_media(
 
     // An image asked for without a Range is asked for whole. Served chunk by chunk like every
     // other read, so the actor still returns to its loop between decrypts.
-    if serves_whole_image(&mime, range.is_some(), total) {
+    // Images never reach the platform decoder as the peer wrote them. The bytes are assembled here,
+    // decoded by `media_decode` in Rust, and re-encoded into a PNG this app produced, so what
+    // WebView2 parses is our output. A file that is a valid PNG or JPEG and also exploits the
+    // platform decoder has nothing left to exploit; a file that will not decode gets no body at
+    // all, which the frontend shows as the click-to-load chip rather than as a broken image.
+    //
+    // This does not make media safe. It removes one bug class from still images. Audio and video
+    // still stream to the platform decoders untouched, and denial of service is bounded rather
+    // than eliminated: see `media_decode::DecodeBounds`.
+    if mime.starts_with("image/") {
+        // A Range over an image is meaningless once the body is re-encoded, because the offsets
+        // would address the source file and not the response. Images are whole or nothing, and
+        // `serves_whole_image` is asked with `ranged = false` deliberately: the caller's Range is
+        // ignored rather than honoured, and a file too large to assemble is refused instead of
+        // falling back to a raw window, which is the hole this closes.
+        if !serves_whole_image(&mime, false, total) {
+            return deny(http::StatusCode::PAYLOAD_TOO_LARGE);
+        }
         // Every chunk read below carries the generation guard of its own, and the response is
         // built under the same commit the windowed path holds, so there is nothing extra to take
         // here: the size this is about to allocate is already bounded by `serves_whole_image`.
@@ -9774,21 +10067,37 @@ async fn serve_media(
                 break;
             }
         }
+        let decoded = match transcoded_image_body(&mime, body).await {
+            Ok(decoded) => decoded,
+            Err(refusal) => {
+                // Worth a log line every time. A refusal is either a peer sending something we
+                // will not decode, or a bug in a decoder reached by a peer's file, and the only
+                // moment the distinction exists is here.
+                tracing::warn!(
+                    target: "catcoms_media",
+                    "inline image {cid} ({mime}, {total} bytes) not served: {refusal}"
+                );
+                return deny(http::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            }
+        };
         // The same last authorization point the windowed path holds, for the same reason: no
-        // plaintext crosses the scheme boundary if an explicit lock completed during the reads.
+        // plaintext crosses the scheme boundary if an explicit lock completed during the reads or
+        // during the transcode, which is the longest await on this path.
         let _response_commit = match require_ui_session_generation(state, generation).await {
             Ok(commit) => commit,
             Err(_) => return deny(http::StatusCode::FORBIDDEN),
         };
         return http::Response::builder()
             .status(http::StatusCode::OK)
-            .header("Content-Type", mime)
-            .header("Accept-Ranges", "bytes")
-            .header("Content-Length", body.len().to_string())
+            // Our type, not the peer's. The body is a PNG whatever went in.
+            .header("Content-Type", decoded.mime())
+            // Ranges are not answerable over a re-encoded body, so do not advertise them.
+            .header("Accept-Ranges", "none")
+            .header("Content-Length", decoded.png.len().to_string())
             .header("Cache-Control", "no-store")
             .header("Access-Control-Allow-Origin", "null")
             .header("X-Content-Type-Options", "nosniff")
-            .body(body)
+            .body(decoded.png)
             .expect("response builds");
     }
 
@@ -10036,13 +10345,22 @@ fn safe_media_mime(declared: &str) -> String {
     let base = lowered.split(';').next().unwrap_or("").trim().to_string();
     // Explicit allowlist: notably excludes SVG/XML and playlist formats, which can contain active
     // links or markup and are not inert merely because their top-level type says "image/audio".
+    //
+    // AVIF is absent, and its absence is the one entry here that is about the decoder rather than
+    // about active content. Every image type listed below is decoded in Rust by `media_decode`
+    // before it is served, so the platform never parses what a peer wrote. AVIF has no pure-Rust
+    // decoder available to us: the usual one is a binding to the C libdav1d, which would put an
+    // attacker-chosen file back in front of a C parser and undo the whole arrangement. So an AVIF
+    // is not served inline at all; it stays a file to download and open deliberately.
+    //
+    // `DetectedMediaContainer::Avif` deliberately stays. Recognising AVIF bytes is still wanted so
+    // that a file declaring PNG with AVIF content reads as a mismatch rather than as unrecognised.
     let ok = matches!(
         base.as_str(),
         "image/png"
             | "image/jpeg"
             | "image/gif"
             | "image/webp"
-            | "image/avif"
             | "image/bmp"
             | "image/tiff"
             | "image/x-icon"
@@ -10942,6 +11260,44 @@ async fn jukebox_add(
     Ok(entry)
 }
 
+/// Queue a **linked** track (a video id on a third-party service) in a channel's jukebox. **Any
+/// member may**, like queueing a file; rejected when the source is not a known one, the link is
+/// not 1..=64 URL-safe base64 characters, the name is blank or over 200 UTF-8 bytes, or the queue
+/// already holds 64 entries. Replies with the new entry's id.
+///
+/// This command reaches no network and cannot: it stores a video id and nothing else. It does not
+/// know whether the video exists, and looking would mean this device contacting that service on a
+/// peer's behalf, which is the disclosure each listener gets to decide about separately at play
+/// time. A queued link is therefore a claim by whoever queued it, exactly like a track name.
+#[tauri::command]
+async fn jukebox_add_link(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    source: String,
+    link: String,
+    name: String,
+    trace: Option<String>,
+) -> Result<String, AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "jukebox_add_link",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    // As for a file add: the track's name is a user's words and never reaches the record. The
+    // video id does not either, since what a room chose to watch is not a diagnostic.
+    let entry = actor
+        .jukebox_add_link(id, source, link, name)
+        .await
+        .map_err(|e| op.fail(codes::JUKEBOX_ADD_REJECTED, e))?;
+    persist_server(&state, server).await;
+    op.succeeded("JUKEBOX.ADD.PERSISTED");
+    Ok(entry)
+}
+
 /// Remove a jukebox entry (by entry id) from a channel; any member, and idempotent.
 #[tauri::command]
 async fn jukebox_remove(
@@ -10987,6 +11343,8 @@ async fn get_jukebox(
             name: e.name,
             author: e.author,
             added_ms: e.added_ms,
+            source: e.source,
+            link: e.link,
         })
         .collect())
 }
@@ -11576,13 +11934,14 @@ async fn reload_one(
 
     // Register under the SAME id as on disk (don't allocate a new one).
     supervise("server_actor", record.id, task);
-    forward_events(app.clone(), record.id, events);
+    let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
+    forward_events(app.clone(), record.id, instance, events);
     let timer_actor = actor.clone();
     state.servers.lock().await.insert(
         record.id,
         ServerEntry {
             actor,
-            instance: state.next_server_instance.fetch_add(1, Ordering::Relaxed),
+            instance,
             group_id,
             device_id,
             invite: presented_invite,
@@ -11602,6 +11961,7 @@ async fn reload_one(
         },
     );
     install_reconnect_capture_worker(app, record.id, timer_actor.clone());
+    studio::spawn_receiver(app.clone(), record.id, instance, timer_actor.clone());
     spawn_discovery_timer(app.clone(), record.id, timer_actor);
     // Re-seal if the port moved. (The reserved peer-record sequence block was already sealed by
     // `load_or_init_server_net`, before the transport came up.)
@@ -15597,6 +15957,7 @@ pub fn run() {
             set_livery,
             set_server_icon,
             set_server_cursor,
+            set_server_banner,
             get_livery,
             set_shared_server_name,
             get_file_size_limit,
@@ -15627,10 +15988,27 @@ pub fn run() {
             cancel_inline_download,
             download_file,
             file_available,
+            get_kept_files,
+            keep_file,
+            forget_kept_file,
             delete_file,
             set_file_expiry,
             get_file_usage,
             get_wiki_pinned_cids,
+            creative_blobs::publish_pix,
+            creative_blobs::request_blob_bounded,
+            studio::studio_list,
+            studio::studio_read,
+            studio::studio_create,
+            studio::studio_apply,
+            studio::studio_apply_index,
+            studio::recovery::studio_recovery_list,
+            studio::recovery::studio_recovery_preview,
+            studio::recovery::studio_recovery_apply,
+            studio::recovery::studio_recovery_restore_pointer,
+            studio::recovery::studio_recovery_read,
+            studio::recovery::studio_recovery_export,
+            studio::recovery::studio_recovery_acknowledge,
             post_status,
             get_statuses,
             edit_status,
@@ -15703,6 +16081,7 @@ pub fn run() {
             set_channel_topic,
             get_channel_topic,
             jukebox_add,
+            jukebox_add_link,
             jukebox_remove,
             get_jukebox,
             get_inbox,
@@ -15733,6 +16112,44 @@ pub fn run() {
 mod tests {
     use super::*;
     use catcoms_rt::ManualClock;
+
+    #[test]
+    fn kept_inventory_exposes_no_wrapped_manifest_or_keys() {
+        let value = bridge_kept_files(catcoms_storage::kept::KeptFiles {
+            supported: true,
+            allocated_bytes: 12,
+            limit_bytes: 100,
+            files: vec![catcoms_storage::kept::KeptFile {
+                plan: catcoms_storage::kept::KeepPlan {
+                    cid: catcoms_storage::Cid::of(b"file"),
+                    version: [7; 32],
+                    manifest: b"secret wrapped file keys".to_vec(),
+                    chunks: vec![(catcoms_storage::Cid::of(b"ciphertext"), 20)],
+                },
+                checked: false,
+            }],
+            error: None,
+        });
+        let json = serde_json::to_value(value).unwrap();
+        assert_eq!(json["files"][0]["checked"], false);
+        assert_eq!(json["files"][0].as_object().unwrap().len(), 3);
+        assert!(json["files"][0].get("manifest").is_none());
+        assert!(!json.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn kept_file_commands_bound_content_addresses_before_decode() {
+        assert_eq!(kept_cid(&"ab".repeat(32)).unwrap(), vec![0xab; 32]);
+        for bad in [
+            "ab".repeat(33),
+            "../file".into(),
+            "é".repeat(32),
+            "g".repeat(64),
+            String::new(),
+        ] {
+            assert!(kept_cid(&bad).is_err());
+        }
+    }
 
     /// A burst of sends must cost the writes it needs, and no send may be told it is durable by a
     /// write that predates it. The interleaving that matters: three changes land, the first writer
@@ -17712,6 +18129,92 @@ mod tests {
         let response = serve_media(&state, &format!("/1/{cid}"), None).await;
         assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
         assert!(response.body().is_empty());
+    }
+
+    /// The proof that the transcode happens on the path that actually serves bytes.
+    ///
+    /// `media_decode` has its own tests for every format and bound. What those cannot show is that
+    /// the scheme handler reaches them: the whole arrangement is worth nothing if the glue passes
+    /// the peer's file through, and a pass-through looks identical to success from the outside.
+    /// So this asserts the served body is NOT the bytes that went in.
+    #[tokio::test]
+    async fn an_inline_image_is_re_encoded_rather_than_passed_through() {
+        let pixels = image::RgbaImage::from_fn(8, 8, |x, y| {
+            image::Rgba([(x * 8) as u8, (y * 8) as u8, 0, 255])
+        });
+        let encode = |format: image::ImageFormat| {
+            let mut out = Vec::new();
+            image::DynamicImage::ImageRgba8(pixels.clone())
+                .to_rgb8()
+                .write_to(&mut std::io::Cursor::new(&mut out), format)
+                .expect("fixture encodes");
+            out
+        };
+
+        // A JPEG in must come back as a PNG. Nothing about that outcome is reachable by passing
+        // the peer's bytes through, so it is the unambiguous proof that a decode happened.
+        //
+        // Note what the earlier version of this test got wrong, because it is an easy trap: a
+        // trivial PNG re-encoded by the same crate at the same settings is byte-identical to the
+        // input, so asserting "output differs from input" on a PNG passes for the wrong reason
+        // when it passes at all, and fails on a correct implementation.
+        let jpeg = encode(image::ImageFormat::Jpeg);
+        let from_jpeg = transcoded_image_body("image/jpeg", jpeg)
+            .await
+            .expect("a valid JPEG transcodes");
+        assert_eq!(
+            from_jpeg.mime(),
+            "image/png",
+            "the response type is ours, not the peer's"
+        );
+        assert!(
+            from_jpeg.png.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "the served body must be a PNG whatever went in",
+        );
+
+        // A PNG carrying a comment must come back without it: the served body is re-encoded from
+        // pixels, so anything the peer attached alongside them is simply not carried over.
+        let mut annotated = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut annotated, 8, 8);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .add_text_chunk("Comment".into(), "peer supplied metadata".into())
+                .expect("fixture text chunk");
+            let mut writer = encoder.write_header().expect("fixture header");
+            writer
+                .write_image_data(pixels.as_raw())
+                .expect("fixture pixels");
+        }
+        assert!(
+            annotated.windows(4).any(|w| w == b"tEXt"),
+            "the fixture must actually contain the chunk this is about to look for",
+        );
+        let from_png = transcoded_image_body("image/png", annotated)
+            .await
+            .expect("a valid PNG transcodes");
+        assert!(
+            !from_png.png.windows(4).any(|w| w == b"tEXt"),
+            "the served body carried the peer's text chunk through, so it is not a re-encode",
+        );
+
+        // Bytes that are not the type they claim get no body, which the frontend shows as the
+        // click-to-load chip rather than as a broken image.
+        assert!(
+            transcoded_image_body("image/png", b"not a png at all".to_vec())
+                .await
+                .is_err(),
+            "a declared PNG that is not one must be refused rather than served",
+        );
+        // And the type we deliberately cannot decode safely is refused by name, whatever the bytes
+        // are. A real AVIF and a PNG wearing the label get the same answer: no body.
+        assert!(
+            transcoded_image_body("image/avif", encode(image::ImageFormat::Png))
+                .await
+                .is_err(),
+            "AVIF has no pure-Rust decoder and must never reach a transcode",
+        );
     }
 
     /// Walk a file the way a player does and report which chunks had to be decrypted.
@@ -21199,6 +21702,28 @@ mod tests {
             unverified.local_files.is_empty(),
             "held-chunk existence alone must not admit a file into local inventory"
         );
+
+        for reversed in [false, true] {
+            let mut missing = file("unavailable-original", [3; 32]);
+            missing.held = 0;
+            let mut rows = vec![missing, file("verified-repair", [4; 32])];
+            if reversed {
+                rows.reverse();
+            }
+            let repaired = build_storage_report(
+                StorageHealth {
+                    verified_manifest_versions: HashSet::from([[4; 32]]),
+                    resolvable_manifest_versions: HashSet::from([[3; 32], [4; 32]]),
+                    ..StorageHealth::default()
+                },
+                rows,
+                &HashSet::new(),
+                3,
+            );
+            assert_eq!(repaired.local_files.len(), 1);
+            assert_eq!(repaired.local_files[0].name, "verified-repair");
+            assert_eq!(repaired.local_estimated_bytes, 20);
+        }
     }
 
     #[test]

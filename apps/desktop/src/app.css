@@ -920,6 +920,35 @@ select:focus {
   font-family: var(--mono);
 }
 
+/* History that arrived late: a row that sorted behind the read position after it was read past.
+   The divider names the run and the row keeps a hairline until it has been looked at. */
+.messages li.late-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 2px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  color: var(--warn, var(--accent));
+}
+
+.messages li.late-divider::before,
+.messages li.late-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: color-mix(in oklab, var(--warn, var(--accent)) 45%, transparent);
+}
+
+.messages li.late {
+  box-shadow: inset 2px 0 0 color-mix(in oklab, var(--warn, var(--accent)) 70%, transparent);
+}
+
+.jump-late {
+  color: var(--warn, var(--accent));
+}
+
 .messages li:hover {
   background: color-mix(in oklab, var(--bg-elev) 55%, transparent);
 }
@@ -1517,7 +1546,7 @@ button.ghost:hover {
 }
 
 .profile-tab {
-  max-width: 420px;
+  max-width: 620px;
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
@@ -1753,6 +1782,19 @@ button.attach:hover {
   flex-wrap: wrap;
 }
 
+.kept-copies-panel {
+  margin: 0.5rem 0 0.8rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  font-size: 0.8rem;
+  max-height: 12rem;
+  overflow: auto;
+}
+.kept-copies-panel summary { cursor: pointer; }
+.kept-copy-row { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; padding: 0.25rem 0; }
+.kept-copy-row > span { flex: 1 1 14rem; overflow-wrap: anywhere; }
+
 .breadcrumb {
   display: flex;
   align-items: center;
@@ -1801,6 +1843,81 @@ button.attach:hover {
 
 .embed-chip:hover {
   background: var(--bg-elev);
+}
+
+/* --- third-party player cards in chat (see chat-embeds.ts) ---
+   A card only exists while it is on screen, so these two states swap back and forth as the log
+   scrolls. Both are laid out to the same width so the swap does not move the rows around it. */
+
+.chat-embed-chip,
+.chat-embed {
+  display: block;
+  width: 100%;
+  max-width: 480px;
+  margin: 0.35rem 0;
+}
+
+.chat-embed-chip {
+  text-align: left;
+}
+
+/* The provider dot: which service the click is about to reach, before reading the label. */
+.chat-embed-chip::before {
+  content: "";
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  margin-right: 0.45rem;
+  vertical-align: baseline;
+  background: var(--muted);
+}
+
+/* Each service's own mark, so the dot is recognisable before the label is read. Literal colours
+   rather than tokens on purpose: these identify a third party and must not shift with the theme
+   the way a semantic token should. */
+.spotify-chip::before {
+  background: #1db954;
+}
+
+.youtube-chip::before {
+  background: #ff0033;
+}
+
+.soundcloud-chip::before {
+  background: #ff5500;
+}
+
+.vimeo-chip::before {
+  background: #1ab7ea;
+}
+
+.mixcloud-chip::before {
+  background: #5000ff;
+}
+
+.applemusic-chip::before {
+  background: #fa2d48;
+}
+
+.bluesky-chip::before {
+  background: #0085ff;
+}
+
+.chat-embed {
+  border: 0;
+  border-radius: 12px;
+  background: var(--bg-0);
+  color-scheme: normal; /* the frame is a foreign document; do not force our scheme onto it */
+}
+
+/* A provider that names a height (a Spotify track, a SoundCloud strip, an Apple Music record) gets
+   it as the element's height attribute and needs nothing here. A video names none, because what it
+   wants is a shape rather than a number: the box supplies 16:9 from whatever width it is given, so
+   the picture fills it instead of letterboxing inside a default 300x150. */
+.chat-embed-video {
+  aspect-ratio: 16 / 9;
+  height: auto;
 }
 
 /* --- Phase 10d: wiki overhaul --- */
@@ -2288,7 +2405,10 @@ button.primary:hover:not(:disabled) {
   gap: 6px;
 }
 
-/* Right-click context menu */
+/* Right-click context menu: one shared instance, every surface. Tokens only, so presets and
+   livery repaint it; the terminal chrome adds brackets and a key legend. The box floats on the
+   panel colour like every other floating panel (.msg-actions, tooltips), one step below
+   --bg-elev, which is what a hovered row lifts to. */
 .ctx-backdrop {
   position: fixed;
   inset: 0;
@@ -2297,58 +2417,348 @@ button.primary:hover:not(:disabled) {
 .ctx-menu {
   position: fixed;
   z-index: 901;
-  min-width: 180px;
-  max-width: 280px;
+  min-width: 208px;
+  max-width: 300px;
+  box-sizing: border-box;
   padding: 4px;
-  background: var(--bg-elev);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px color-mix(in oklab, var(--accent) 10%, transparent);
+  font-size: 0.82rem;
+  color: var(--text);
   outline: none;
+  animation: ctx-in 80ms ease-out;
 }
-.ctx-item {
+@keyframes ctx-in {
+  from { opacity: 0; transform: translateY(-2px); }
+}
+:root[data-motion="off"] .ctx-menu {
+  animation: none;
+}
+.ctx-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  min-height: 30px;
+  box-sizing: border-box;
+  padding: 0 8px 4px;
+  margin-bottom: 3px;
+  border-bottom: 1px solid var(--border-soft);
+  min-width: 0;
+}
+.ctx-kind {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.ctx-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.76rem;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-head .avatar {
+  width: 18px;
+  height: 18px;
+  font-size: 0.6rem;
+  flex: none;
+}
+.ctx-info {
+  padding: 0 8px 4px;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-info.on {
+  color: var(--ok);
+}
+.ctx-sec {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px 2px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.ctx-sec::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-soft);
+}
+.ctx-row {
+  position: relative;
+}
+.ctx-item {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
   width: 100%;
-  padding: 7px 10px;
+  min-height: 26px;
+  box-sizing: border-box;
+  padding: 0 8px;
   border: none;
   border-radius: var(--r);
   background: transparent;
-  color: inherit;
+  color: var(--text);
   font: inherit;
+  font-size: 0.82rem;
+  font-weight: 400;
   text-align: left;
   cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-ico {
+  width: 14px;
+  height: 14px;
+  display: block;
+  color: var(--muted);
+}
+.ctx-ico svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.ctx-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-hint {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+}
+.ctx-chev {
+  width: 12px;
+  height: 12px;
+  color: var(--faint);
+}
+.ctx-menu.flip-x .ctx-chev {
+  transform: scaleX(-1);
 }
 .ctx-item:hover:not(:disabled),
-.ctx-item:focus-visible {
+.ctx-item:focus-visible,
+.ctx-item.open {
   background: var(--accent-dim);
+  color: var(--text);
   outline: none;
+}
+.ctx-item:hover:not(:disabled) .ctx-ico,
+.ctx-item:focus-visible .ctx-ico,
+.ctx-item.open .ctx-ico {
+  color: var(--accent-hi);
+}
+.ctx-item:focus-visible {
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .ctx-item:disabled {
   opacity: 0.4;
   cursor: default;
 }
+.ctx-item.on .ctx-ico {
+  color: var(--ok);
+}
 .ctx-item.danger {
+  color: var(--danger);
+}
+.ctx-item.danger .ctx-ico {
   color: var(--danger);
 }
 .ctx-item.danger:hover:not(:disabled),
 .ctx-item.danger:focus-visible {
   background: var(--danger-dim);
+  color: var(--danger);
 }
-.ctx-icon {
-  width: 1.1em;
-  text-align: center;
-  opacity: 0.85;
-  flex: none;
+.ctx-item.danger:hover:not(:disabled) .ctx-ico,
+.ctx-item.danger:focus-visible .ctx-ico {
+  color: var(--danger-hi);
 }
-.ctx-label {
-  flex: 1;
+.ctx-item.danger:focus-visible {
+  box-shadow: inset 2px 0 0 var(--danger);
 }
 .ctx-divider {
   height: 1px;
-  margin: 4px 6px;
+  margin: 3px 6px;
   background: var(--border);
+}
+/* A flyout lives inside its parent row: it overlaps the row by a few pixels so the eye reads
+   the two as one shape, and mirrors to the left when the menu itself had to. */
+.ctx-sub {
+  position: absolute;
+  top: -5px;
+  left: calc(100% + 2px);
+  min-width: 176px;
+  animation: none;
+}
+.ctx-menu.flip-x .ctx-sub {
+  left: auto;
+  right: calc(100% + 2px);
+}
+.ctx-menu.flip-y .ctx-sub {
+  top: auto;
+  bottom: -5px;
+}
+/* Confirm in place: the same box re-armed as a question. */
+.ctx-menu.confirm .ctx-head {
+  margin: -4px -4px 3px;
+  min-height: 40px;
+  padding: 0 10px;
+  border-radius: 7px 7px 0 0;
+  background: var(--danger-dim);
+  border-bottom: 1px solid var(--danger-brd);
+}
+.ctx-menu.confirm .ctx-kind {
+  color: var(--danger);
+}
+.ctx-menu.confirm .ctx-title {
+  color: var(--text);
+}
+/* Per-peer levels on the voice stage menu. */
+.ctx-slider {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 26px;
+  padding: 0 8px;
+}
+.ctx-slider input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.ctx-pct {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--faint);
+  min-width: 30px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* Recent reactions strip on a message, and the full picker it unfolds into. */
+.ctx-react {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px 3px;
+}
+.ctx-rx {
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: inherit;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.ctx-rx img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+.ctx-rx:hover,
+.ctx-rx:focus-visible {
+  background: var(--bg-elev);
+  color: var(--text);
+  outline: none;
+}
+.ctx-rx.on {
+  background: var(--accent-dim);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 40%, transparent);
+  color: var(--accent-hi);
+}
+.ctx-rx-more {
+  margin-left: auto;
+}
+.ctx-rx-more .ico {
+  width: 15px;
+  height: 15px;
+}
+.ctx-react-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  max-height: 176px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 4px;
+  margin-top: 1px;
+  border-top: 1px solid var(--border-soft);
+}
+/* Key legend: terminal chrome only; clean chrome drops it. */
+.ctx-foot {
+  display: none;
+  gap: 8px;
+  padding: 4px 8px 0;
+  margin-top: 2px;
+  border-top: 1px solid var(--border-soft);
+  font-family: var(--mono);
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.ctx-foot .sp {
+  flex: 1;
+}
+:root[data-density="compact"] .ctx-menu {
+  font-size: 0.78rem;
+}
+:root[data-density="compact"] .ctx-item {
+  min-height: 22px;
+}
+:root[data-chrome="terminal"] .ctx-menu {
+  border-radius: var(--r);
+}
+:root[data-chrome="terminal"] .ctx-item {
+  border-radius: 0;
+}
+:root[data-chrome="terminal"] .ctx-kind::before {
+  content: "▮ ";
+}
+:root[data-chrome="terminal"] .ctx-hint::before {
+  content: "[";
+}
+:root[data-chrome="terminal"] .ctx-hint::after {
+  content: "]";
+}
+:root[data-chrome="terminal"] .ctx-divider {
+  margin: 3px 0;
+  background: repeating-linear-gradient(90deg, var(--border) 0 4px, transparent 4px 7px);
+}
+:root[data-chrome="terminal"] .ctx-foot {
+  display: flex;
 }
 .roster li.is-you {
   background: rgba(255, 255, 255, 0.04);
@@ -4285,24 +4695,42 @@ button.primary:hover:not(:disabled) {
   border-color: var(--text);
 }
 
-/* The clickable avatar+name inside a roster row (unstyled button → opens the profile card). */
+/* The roster row IS the button: it carries the row's own padding so every pixel of the strip
+   opens the profile card, rather than only the avatar+name sliver. (Unstyled, no chrome.) */
+.members-col li.member-row:not(.companion) {
+  padding: 0;
+}
 .member-link {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 0.4rem;
   border: none;
   background: none;
-  padding: 0;
+  padding: var(--row-pad) 4px;
   margin: 0;
   cursor: pointer;
   color: inherit;
   font: inherit;
   min-width: 0;
+  width: 100%;
   flex: 1;
   text-align: left;
 }
-.member-link:hover {
+.member-link:hover .name {
   text-decoration: underline;
+}
+/* A name too long for a 200px column ends in an ellipsis rather than pushing the row's marks
+   off the edge; the whole name is on the row's tooltip. The vertical padding (cancelled by an
+   equal negative margin, so the row keeps its height) is headroom for name effects that draw
+   above the line: the mexican wave's lift, the sparkle row, fire's glow. */
+.member-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-block: 1em;
+  margin-block: -1em;
 }
 
 /* Custom profile surfaces become restrained operator-terminal frames in the content lane.
@@ -4533,71 +4961,232 @@ button.primary:hover:not(:disabled) {
   animation-play-state: paused !important;
 }
 
-/* Live-only arrival classes are applied to newly inserted rows, never to loaded history. */
-.messages li.message-arrival.arrival-glide,
-.messages li.message-arrival.arrival-fly,
-.messages li.message-arrival.arrival-pop,
-.messages li.message-arrival.arrival-drift {
-  animation-duration: var(--message-arrival-duration, 480ms);
+/* ============================================================
+   Message arrivals. One keyframe set per motion serves both the live log (a newly inserted row
+   runs it once; loaded history never gets the class) and the profile editor's looping preview.
+   The motion occupies the first quarter of `--message-arrival-cycle` (four times the chosen
+   duration) and the rest is a hold at rest, so the preview reads "arrive, sit, repeat" while a
+   live row simply arrives and sits until its arrival class is dropped.
+
+   Every per-message value arrives as an inline custom property from messageFrameArrivalStyle():
+   x/y/scale for the movers, the entry clip for wipes, slat direction and grain for the masks,
+   the hinge origin for the swivels, and a signed `--message-arrival-dir` for anything that turns.
+   ============================================================ */
+/* Resting value 1 = fully revealed: anything that stops the animation (the fixture's freeze, a
+   paused preview, a stylesheet that zeroes animations) leaves the row visible, never masked. */
+@property --arr-p { syntax: "<number>"; inherits: false; initial-value: 1; }
+
+/* Two hosts for the animation. Reveals and the blackout run on the row itself (a mask, a clip or
+   a filter never changes the row's box). Anything that MOVES runs on the row's children (the
+   gutter and the body), with the row clipping at its own edge: a row spun or scaled as a whole
+   grows the scroller's height mid-flight and shoves the scrollbar, whereas its children moving
+   inside a clipped, unchanged box cannot be seen by the scroller at all. */
+.messages li.message-arrival > *,
+.messages li.message-arrival:is(.arrival-wipe, .arrival-split, .arrival-blinds, .arrival-checker, .arrival-bars, .arrival-wheel, .arrival-dissolve, .arrival-blackout),
+.frame-motion-preview.preview-arrival > li,
+.frame-motion-preview.preview-arrival:is(.arrival-wipe, .arrival-split, .arrival-blinds, .arrival-checker, .arrival-bars, .arrival-wheel, .arrival-dissolve, .arrival-blackout) {
+  animation-duration: var(--message-arrival-cycle, 1920ms);
   animation-timing-function: var(--message-arrival-ease, cubic-bezier(0.16, 0.84, 0.24, 1));
   animation-fill-mode: both;
+  transform-origin: var(--message-arrival-origin, center center);
 }
-.messages li.message-arrival.arrival-glide { animation-name: message-arrival-glide; }
-.messages li.message-arrival.arrival-fly { animation-name: message-arrival-fly; }
-.messages li.message-arrival.arrival-pop { animation-name: message-arrival-pop; }
-.messages li.message-arrival.arrival-drift { animation-name: message-arrival-drift; }
-@keyframes message-arrival-glide {
-  from { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 0), var(--message-arrival-y, 30px)); }
-  to { opacity: 1; transform: translateY(0); }
+.messages li.message-arrival,
+.frame-motion-preview.preview-arrival > li { overflow: clip; }
+/* A live row plays exactly the motion quarter and then holds its final keyframe as a finished,
+   filling animation: no longer "current", so nothing stays a stacking context once at rest, and
+   a popover opened from the row cannot slip under the next row. The preview loops. */
+.messages li.message-arrival > *,
+.messages li.message-arrival:is(.arrival-wipe, .arrival-split, .arrival-blinds, .arrival-checker, .arrival-bars, .arrival-wheel, .arrival-dissolve, .arrival-blackout) {
+  animation-iteration-count: 0.25;
+  animation-fill-mode: forwards;
 }
-@keyframes message-arrival-fly {
-  from { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 30px), var(--message-arrival-y, 0)); }
-  to { opacity: 1; transform: translate(0, 0); }
+.frame-motion-preview.preview-arrival > li,
+.frame-motion-preview.preview-arrival:is(.arrival-wipe, .arrival-split, .arrival-blinds, .arrival-checker, .arrival-bars, .arrival-wheel, .arrival-dissolve, .arrival-blackout) {
+  animation-iteration-count: infinite;
 }
-@keyframes message-arrival-pop {
-  from { opacity: var(--message-arrival-opacity, 0.12); transform: scale(var(--message-arrival-scale, 0.95)); }
-  to { opacity: 1; transform: scale(1); }
-}
-@keyframes message-arrival-drift {
-  from { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 30px), var(--message-arrival-y, -10px)); }
-  to { opacity: 1; transform: translate(0, 0); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .messages li.message-arrival { animation: none !important; }
-}
+/* A row sliding in from beyond the lane must not grow the lane a scrollbar for half a second. */
+.messages { overflow-x: hidden; }
 
-/* The profile editor loops its draft arrival so the choice remains visible after the sub-second
-   real animation has finished. This is preview-only: live message rows still animate once. */
-.frame-motion-preview.preview-arrival {
-  transform-origin: center left;
-}
-.frame-motion-preview.preview-arrival.arrival-glide {
-  animation: frame-preview-glide var(--message-arrival-cycle, 1920ms) var(--message-arrival-ease, ease-out) infinite;
-}
-.frame-motion-preview.preview-arrival.arrival-fly {
-  animation: frame-preview-fly var(--message-arrival-cycle, 1920ms) var(--message-arrival-ease, ease-out) infinite;
-}
-.frame-motion-preview.preview-arrival.arrival-pop {
-  animation: frame-preview-pop var(--message-arrival-cycle, 1920ms) var(--message-arrival-ease, ease-out) infinite;
-}
-.frame-motion-preview.preview-arrival.arrival-drift {
-  animation: frame-preview-drift var(--message-arrival-cycle, 1920ms) var(--message-arrival-ease, ease-out) infinite;
-}
-@keyframes frame-preview-glide {
+/* quiet */
+.messages li.message-arrival.arrival-glide > *, .frame-motion-preview.preview-arrival.arrival-glide > li { animation-name: message-arrival-glide; }
+.messages li.message-arrival.arrival-fly > *, .frame-motion-preview.preview-arrival.arrival-fly > li { animation-name: message-arrival-fly; }
+.messages li.message-arrival.arrival-pop > *, .frame-motion-preview.preview-arrival.arrival-pop > li { animation-name: message-arrival-pop; }
+.messages li.message-arrival.arrival-drift > *, .frame-motion-preview.preview-arrival.arrival-drift > li { animation-name: message-arrival-drift; }
+@keyframes message-arrival-glide {
   0% { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 0), var(--message-arrival-y, 30px)); }
   25%, 100% { opacity: 1; transform: translate(0, 0); }
 }
-@keyframes frame-preview-fly {
+@keyframes message-arrival-fly {
   0% { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 30px), var(--message-arrival-y, 0)); }
   25%, 100% { opacity: 1; transform: translate(0, 0); }
 }
-@keyframes frame-preview-pop {
+@keyframes message-arrival-pop {
   0% { opacity: var(--message-arrival-opacity, 0.12); transform: scale(var(--message-arrival-scale, 0.95)); }
   25%, 100% { opacity: 1; transform: scale(1); }
 }
-@keyframes frame-preview-drift {
+@keyframes message-arrival-drift {
   0% { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 30px), var(--message-arrival-y, -10px)); }
   25%, 100% { opacity: 1; transform: translate(0, 0); }
+}
+
+/* wipes and reveals: the row is fully painted and a clip or mask uncovers it. The masks are
+   driven by one registered progress number so they share a single keyframe set. */
+.messages li.message-arrival.arrival-wipe, .frame-motion-preview.preview-arrival.arrival-wipe,
+.messages li.message-arrival.arrival-split, .frame-motion-preview.preview-arrival.arrival-split { animation-name: message-arrival-clip; }
+@keyframes message-arrival-clip {
+  0% { clip-path: var(--message-arrival-clip-from, inset(0 100% 0 0)); }
+  25%, 100% { clip-path: inset(0 0 0 0); }
+}
+.messages li.message-arrival:is(.arrival-blinds, .arrival-checker, .arrival-bars, .arrival-wheel, .arrival-dissolve),
+.frame-motion-preview.preview-arrival:is(.arrival-blinds, .arrival-checker, .arrival-bars, .arrival-wheel, .arrival-dissolve) {
+  animation-name: message-arrival-progress;
+  --arr-g: var(--message-arrival-grain, 18px);
+}
+@keyframes message-arrival-progress {
+  0% { --arr-p: 0; }
+  25%, 100% { --arr-p: 1; }
+}
+.messages li.message-arrival.arrival-blinds, .frame-motion-preview.preview-arrival.arrival-blinds {
+  mask-image: repeating-linear-gradient(
+    var(--message-arrival-blind-dir, to bottom),
+    #000 0 calc(var(--arr-p) * var(--arr-g)),
+    transparent calc(var(--arr-p) * var(--arr-g)) var(--arr-g)
+  );
+}
+/* Two tiled quadrant masks, offset by half a tile: the first fills its cells in the opening
+   third, the second in the middle third, and both close their gaps in the last. */
+.messages li.message-arrival.arrival-checker, .frame-motion-preview.preview-arrival.arrival-checker {
+  --arr-c1: calc(100% - clamp(0%, var(--arr-p) * 150%, 50%) - clamp(0%, (var(--arr-p) - 0.6667) * 150%, 50%));
+  --arr-c2: calc(100% - clamp(0%, (var(--arr-p) - 0.3333) * 150%, 50%) - clamp(0%, (var(--arr-p) - 0.6667) * 150%, 50%));
+  mask-image:
+    conic-gradient(from 90deg at var(--arr-c1) var(--arr-c1), #000 25%, transparent 0),
+    conic-gradient(from 90deg at var(--arr-c2) var(--arr-c2), #000 25%, transparent 0);
+  mask-size: calc(var(--arr-g) * 2) calc(var(--arr-g) * 2), calc(var(--arr-g) * 2) calc(var(--arr-g) * 2);
+  mask-position: 0 0, var(--arr-g) var(--arr-g);
+  mask-repeat: repeat;
+}
+/* Three bar periods resolving at three speeds read as random; they all complete by the hold. */
+.messages li.message-arrival.arrival-bars, .frame-motion-preview.preview-arrival.arrival-bars {
+  --arr-b1: calc(var(--arr-g) * 0.4);
+  --arr-b2: calc(var(--arr-g) * 0.7);
+  --arr-b3: var(--arr-g);
+  mask-image:
+    repeating-linear-gradient(to bottom, #000 0 clamp(0px, var(--arr-p) * 1.1 * var(--arr-b1), var(--arr-b1)), transparent 0 var(--arr-b1)),
+    repeating-linear-gradient(to bottom, #000 0 clamp(0px, var(--arr-p) * 1.6 * var(--arr-b2), var(--arr-b2)), transparent 0 var(--arr-b2)),
+    repeating-linear-gradient(to bottom, #000 0 clamp(0px, var(--arr-p) * 1.3 * var(--arr-b3), var(--arr-b3)), transparent 0 var(--arr-b3));
+}
+.messages li.message-arrival.arrival-wheel, .frame-motion-preview.preview-arrival.arrival-wheel {
+  mask-image: conic-gradient(
+    from calc(180deg - var(--message-arrival-dir, 1) * 180deg - (0.5 - var(--message-arrival-dir, 1) * 0.5) * var(--arr-p) * 360deg),
+    #000 calc(var(--arr-p) * 360deg),
+    transparent 0
+  );
+}
+.messages li.message-arrival.arrival-dissolve, .frame-motion-preview.preview-arrival.arrival-dissolve {
+  --arr-d1: calc(var(--arr-p) * var(--arr-g) * 0.75);
+  --arr-d2: calc(min(1, var(--arr-p) * 1.3) * var(--arr-g) * 1.2);
+  mask-image:
+    radial-gradient(circle, #000 var(--arr-d1), transparent calc(var(--arr-d1) + 0.6px)),
+    radial-gradient(circle, #000 var(--arr-d2), transparent calc(var(--arr-d2) + 0.6px));
+  mask-size: var(--arr-g) var(--arr-g), calc(var(--arr-g) * 1.6) calc(var(--arr-g) * 1.6);
+  mask-position: 0 0, calc(var(--arr-g) * 0.6) calc(var(--arr-g) * 0.7);
+  mask-repeat: repeat;
+}
+
+/* ceremony */
+.messages li.message-arrival.arrival-blackout, .frame-motion-preview.preview-arrival.arrival-blackout { animation-name: message-arrival-blackout; }
+@keyframes message-arrival-blackout {
+  0% { opacity: 0; filter: brightness(0); }
+  10% { opacity: 1; filter: brightness(0); }
+  25%, 100% { opacity: 1; filter: brightness(1); }
+}
+.messages li.message-arrival.arrival-newsflash > *, .frame-motion-preview.preview-arrival.arrival-newsflash > li {
+  animation-name: message-arrival-newsflash;
+  animation-timing-function: cubic-bezier(0.18, 0.9, 0.2, 1.08);
+}
+@keyframes message-arrival-newsflash {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: rotate(calc(var(--message-arrival-spin, 540deg) * -1 * var(--message-arrival-dir, 1))) scale(0); }
+  25%, 100% { opacity: 1; transform: none; }
+}
+.messages li.message-arrival.arrival-swivel > *, .frame-motion-preview.preview-arrival.arrival-swivel > li { animation-name: message-arrival-swivel; }
+@keyframes message-arrival-swivel {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: perspective(600px) rotateY(calc(84deg * var(--message-arrival-dir, 1))); }
+  25%, 100% { opacity: 1; transform: none; }
+}
+.messages li.message-arrival.arrival-flip > *, .frame-motion-preview.preview-arrival.arrival-flip > li { animation-name: message-arrival-flip; }
+@keyframes message-arrival-flip {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: perspective(600px) rotateX(calc(-90deg * var(--message-arrival-dir, 1))); }
+  25%, 100% { opacity: 1; transform: none; }
+}
+.messages li.message-arrival.arrival-spiral > *, .frame-motion-preview.preview-arrival.arrival-spiral > li { animation-name: message-arrival-spiral; }
+@keyframes message-arrival-spiral {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: translate(var(--message-arrival-x, 70px), var(--message-arrival-y, -30px)) rotate(calc(200deg * var(--message-arrival-dir, 1))) scale(0.15); }
+  11% { opacity: 1; transform: translate(calc(var(--message-arrival-x, 70px) * -0.35), calc(var(--message-arrival-y, -30px) * -0.6)) rotate(calc(80deg * var(--message-arrival-dir, 1))) scale(0.55); }
+  25%, 100% { opacity: 1; transform: none; }
+}
+.messages li.message-arrival.arrival-crawl > *, .frame-motion-preview.preview-arrival.arrival-crawl > li { animation-name: message-arrival-crawl; }
+@keyframes message-arrival-crawl {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: perspective(300px) rotateX(48deg) translateY(var(--message-arrival-y, 50px)) scale(0.75); }
+  25%, 100% { opacity: 1; transform: none; }
+}
+
+/* physical */
+.messages li.message-arrival.arrival-bounce > *, .frame-motion-preview.preview-arrival.arrival-bounce > li {
+  animation-name: message-arrival-bounce;
+  animation-timing-function: ease-out;
+}
+@keyframes message-arrival-bounce {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: translateY(var(--message-arrival-y, -36px)); }
+  9% { opacity: 1; transform: none; }
+  14% { transform: translateY(calc(var(--message-arrival-y, -36px) * 0.33)); }
+  19% { transform: none; }
+  22% { transform: translateY(calc(var(--message-arrival-y, -36px) * 0.11)); }
+  25%, 100% { transform: none; }
+}
+.messages li.message-arrival.arrival-boomerang > *, .frame-motion-preview.preview-arrival.arrival-boomerang > li { animation-name: message-arrival-boomerang; }
+@keyframes message-arrival-boomerang {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: translateX(var(--message-arrival-x, 90px)); }
+  11% { opacity: 1; transform: translateX(calc(var(--message-arrival-x, 90px) * -0.18)); }
+  19% { transform: translateX(calc(var(--message-arrival-x, 90px) * 0.08)); }
+  25%, 100% { transform: none; }
+}
+.messages li.message-arrival.arrival-slam > *, .frame-motion-preview.preview-arrival.arrival-slam > li {
+  animation-name: message-arrival-slam;
+  animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
+}
+@keyframes message-arrival-slam {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: scale(var(--message-arrival-zoom, 2.2)); }
+  8% { opacity: 1; transform: scale(1); }
+  10% { transform: translate(-3px, 2px); }
+  12% { transform: translate(3px, -2px); }
+  14% { transform: translate(-2px, 1px); }
+  16%, 100% { transform: none; }
+}
+.messages li.message-arrival.arrival-quake > *, .frame-motion-preview.preview-arrival.arrival-quake > li {
+  animation-name: message-arrival-quake;
+  animation-timing-function: linear;
+}
+@keyframes message-arrival-quake {
+  0% { opacity: var(--message-arrival-opacity, 0.12); transform: none; }
+  4% { opacity: 1; transform: translate(calc(var(--message-arrival-shake, 5px) * -1), calc(var(--message-arrival-shake, 5px) * 0.5)); }
+  8% { transform: translate(var(--message-arrival-shake, 5px), calc(var(--message-arrival-shake, 5px) * -0.7)); }
+  12% { transform: translate(calc(var(--message-arrival-shake, 5px) * -0.8), calc(var(--message-arrival-shake, 5px) * 0.5)); }
+  16% { transform: translate(calc(var(--message-arrival-shake, 5px) * 0.7), calc(var(--message-arrival-shake, 5px) * 0.25)); }
+  20% { transform: translate(calc(var(--message-arrival-shake, 5px) * -0.5), calc(var(--message-arrival-shake, 5px) * -0.25)); }
+  24% { transform: translate(calc(var(--message-arrival-shake, 5px) * 0.25), calc(var(--message-arrival-shake, 5px) * 0.25)); }
+  28%, 100% { transform: none; }
+}
+
+/* The renderer already resolves arrivals to Still under reduced motion and the Appearance motion
+   switch; this is the belt for a class that slipped through, so a mask never hides a row. */
+@media (prefers-reduced-motion: reduce) {
+  .messages li.message-arrival,
+  .messages li.message-arrival > * {
+    animation: none !important;
+    mask-image: none !important;
+    clip-path: none !important;
+    filter: none !important;
+  }
 }
 .name-preview-paused .frame-motion-preview {
   animation-play-state: paused !important;
@@ -4649,7 +5238,7 @@ button.call-start {
 .call-avatars {
   display: flex;
 }
-.call-avatars :global(.avatar) {
+.call-avatars .avatar {
   margin-left: -6px;
   border: 2px solid var(--ok-dim);
 }
@@ -4971,6 +5560,22 @@ button.call-start {
   font-size: 0.72rem;
   font-weight: 700;
 }
+/* Member-column control, pinned to the strip's far right so it sits over the column it folds
+   away. It is chrome, not a surface, so it never takes the active underline. */
+.surface-bar .sb-spacer {
+  flex: 1;
+}
+.surface-bar .sb-members {
+  padding: 0.3rem 0.5rem;
+  color: var(--faint);
+}
+.surface-bar .sb-members:hover {
+  color: var(--text);
+}
+.surface-bar .sb-members .ico {
+  width: 14px;
+  height: 14px;
+}
 
 /* --- Contextual sidebar blocks (pages · folders · transfers) --- */
 /* The wiki help "?" sits past the h3's ruled line, on the section's right edge. */
@@ -5104,10 +5709,49 @@ button.you-panel:hover {
 }
 
 /* --- Member column: online / offline groups --- */
-/* The role badge sits on the row's right edge (abbreviated OWN / ADM in the markup). */
-.member-row .role-badge {
-  margin-left: auto;
+/* Standing is worn on the avatar, not spelled out beside it: a 200px column has no room for
+   word-shaped badges, and the marks stay legible while the name keeps the width. */
+.member-face {
+  position: relative;
+  display: inline-flex;
   flex: none;
+  line-height: 0;
+  /* Room for the halo on every row, ringed or not, so avatars stay in one column. */
+  margin-inline: 3px;
+}
+/* The halo: a ring held off the avatar by a panel-coloured gap, so it reads as a ring rather
+   than a border thickening the photo. */
+.member-face.is-you .avatar {
+  box-shadow:
+    0 0 0 1.5px var(--panel),
+    0 0 0 3px var(--accent);
+}
+.members-col li:hover .member-face.is-you .avatar {
+  box-shadow:
+    0 0 0 1.5px var(--bg-elev),
+    0 0 0 3px var(--accent);
+}
+/* The crown perches on the avatar's top-right corner: owner gold, moderator accent. Its own
+   dark outline keeps it readable over a bright avatar. */
+.role-crown {
+  position: absolute;
+  top: -4px;
+  right: -3px;
+  width: 11px;
+  height: 11px;
+  line-height: 0;
+  pointer-events: none;
+}
+.role-crown .ico {
+  width: 11px;
+  height: 11px;
+  filter: drop-shadow(0 0 1.5px rgba(0, 0, 0, 0.85));
+}
+.role-crown.owner {
+  color: var(--warn);
+}
+.role-crown.admin {
+  color: var(--accent-hi);
 }
 
 /* --- Quick switcher (Ctrl+K): channels · surfaces · servers · DMs --- */
@@ -7865,6 +8509,26 @@ button.stage-act:hover {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+/* The push-to-talk caption, under the mute label inside the same button. Struck through while the
+   key is up, because that is the state where the microphone is closed and the label alone would
+   read as an instruction rather than a status; lit while it is held, because "your voice is
+   leaving this machine right now" is the one thing here worth seeing from across the room. */
+.stage-ptt-cap {
+  font-family: var(--mono);
+  font-size: 0.5rem;
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  text-decoration: line-through;
+}
+.stage-ptt-cap.live {
+  color: var(--ok);
+  text-decoration: none;
+}
 /* Mute and deafen are states you must be able to spot from across the room. */
 button.stage-act.muted,
 button.stage-act.muted:hover {
@@ -8849,6 +9513,16 @@ button.focus-leave:hover {
   align-items: center;
   gap: 8px;
 }
+/* One person's override: the name and identity on the left, the choice on the right. The
+   colour says what the choice does; the select says it in words. */
+.file-trust-person select {
+  margin-left: auto;
+  flex: none;
+  font-size: 0.78rem;
+  padding: 3px 6px;
+}
+.file-trust-person.always select { border-color: var(--ok-brd); color: var(--ok); }
+.file-trust-person.never select { border-color: var(--danger-brd); color: var(--danger); }
 
 @media (max-width: 760px) {
   .file-trust-onboarding,
@@ -9778,6 +10452,69 @@ button.juke-q:hover {
 }
 /* Kind toggle: the same tab idiom the insert panel uses, because it is the same gesture. The
    count rides each tab so an empty list reads as "none of that kind" and not as a broken picker. */
+/* The YouTube tab's panel: a form where the other tabs have a list, because there is no share to
+   browse for something nobody here holds. */
+.juke-link-add {
+  margin: 0;
+  padding: 0.25rem 0 0;
+}
+
+.juke-link-lbl {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+
+.juke-link-row {
+  display: flex;
+  gap: 0.35rem;
+  align-items: stretch;
+}
+
+.juke-link-url {
+  flex: 2 1 0;
+  min-width: 0;
+}
+
+.juke-link-nm {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.juke-link-go {
+  flex: 0 0 auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text-1);
+  padding: 0.25rem 0.7rem;
+  cursor: pointer;
+}
+
+.juke-link-go:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.juke-link-note,
+.juke-link-err {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.juke-link-note {
+  color: var(--muted);
+}
+
+.juke-link-err {
+  color: var(--danger);
+}
+
 .juke-pick-tabs {
   display: flex;
   align-items: center;
@@ -9813,6 +10550,15 @@ button.juke-q:hover {
   color: var(--accent);
 }
 
+/* The YouTube tab is separated from the four that browse this server's share, because what it
+   queues comes from somewhere else entirely. The rule is the boundary; the tab is not otherwise
+   special-cased, so it still reads as one of the strip. */
+.juke-pick-tabs button[role="tab"].link-tab {
+  margin-left: auto;
+  padding-left: 0.75rem;
+  border-left: 1px solid var(--border-soft);
+}
+
 /* The deck's own screen, for a film outside the focus view. Same shape as the focus band, sized
    to the dock: the picture is the point, so it takes the dock's full width. */
 .juke-screen {
@@ -9826,7 +10572,12 @@ button.juke-q:hover {
   aspect-ratio: 16 / 9;
   max-height: 34vh;
 }
-.juke-screen :global(video) {
+/* The deck's player, whichever kind it is. Plain descendant selectors on purpose: this file is a
+   standalone stylesheet (`main.ts` imports it), so Svelte's global escape hatch is never compiled
+   out of it and a browser discards the whole rule as invalid CSS. The deck element is re-parented
+   in here imperatively rather than rendered by a component, so an ordinary selector reaches it.
+   `source-hygiene.test.ts` keeps that syntax out of this file for good. */
+.juke-screen video {
   display: block;
   width: 100%;
   height: 100%;
@@ -14144,7 +14895,9 @@ button.fx-order {
 .text-fx-selection-bar {
   --fx-room: 400px;
   position: fixed;
-  z-index: 1200;
+  /* Under the context menu (901): a right-click on the selection opens over this bar, and
+     the bar used to paint through the menu's rows. Still above every dialog and overlay. */
+  z-index: 899;
   transform: translate(-50%, -100%);
   display: flex;
   flex-direction: column;
@@ -14566,8 +15319,21 @@ button.juke-play.mini {
 
 /* Idle home. The element lives on the body between adopters so playback survives a surface
    change; it is only visible once a surface re-parents it. */
-body > #jukebox-media {
+body > #jukebox-media,
+body > #jukebox-video {
   display: none;
+}
+
+/* The linked-video deck fills whichever surface adopted it, exactly as the video element does.
+   It carries no border of its own: the surface already draws one, and the player paints its own
+   black behind the picture. */
+.juke-screen iframe.juke-link,
+.focus-deck iframe.juke-link {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #000;
 }
 
 /* Kind chip: video names itself in the queue and the folded row. Audio stays bare, because it is
@@ -14606,7 +15372,7 @@ body > #jukebox-media {
   flex: 1 1 auto;
   min-height: 120px;
 }
-.focus-deck :global(video) {
+.focus-deck video {
   display: block;
   width: 100%;
   height: 100%;
@@ -15792,10 +16558,32 @@ button.jam-take-play.on {
   border-color: var(--accent);
   color: var(--accent-hi);
 }
-.jam-take-name {
+/* The take's name is typed in place: it reads as the label it is until it is focused, because a
+   row of boxed inputs would make the fold look like a form rather than a list of what was played. */
+input.jam-take-name {
   font-family: var(--mono);
   font-size: 0.64rem;
   color: var(--text);
+  white-space: nowrap;
+  width: 10.5rem;
+  min-width: 0;
+  padding: 1px 3px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+}
+input.jam-take-name:hover {
+  border-color: var(--border-soft);
+}
+input.jam-take-name:focus {
+  outline: none;
+  background: var(--bg-elev);
+  border-color: var(--accent);
+}
+.jam-take-meta {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  color: var(--muted);
   white-space: nowrap;
 }
 .jam-take-who {
@@ -15861,6 +16649,17 @@ button.jam-take-play.on {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+/* Breaks the wrapped tile row so what came off the share reads as a separate shelf from what is
+   kept on this device: the two are loaded from different places and have different lifetimes. */
+.jam-custom-sep {
+  flex-basis: 100%;
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-top: 2px;
 }
 /* Osc stack as layers: collapsed rows read like mixer channels; one unfolds at a time. */
 .jam-layer {
@@ -15978,4 +16777,1154 @@ button.jam-cog.live {
 .stage,
 .focus-dock {
   scrollbar-gutter: stable;
+}
+
+/* --- Patch editor: the SHAPE stages ------------------------------------------------------------
+   One column of full-width bands. At the 284 to 444 px this drawer actually gets, the earlier
+   two-column auto-fit grid gave a section about 186 px, less than a row of four knobs, so every
+   section wrapped and the editor read as scraps. This supersedes both earlier .jam-edit
+   grid-template-columns rules (its padding still applies); the shape panel below picks its own
+   columns from its real width. */
+.jam-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.jam-edit-hd-sub {
+  text-transform: none;
+  letter-spacing: 0.02em;
+  color: var(--faint);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The four stages after the oscillators wear the layer card's frame, so the editor is one family
+   of cards: layers, then stages, in signal order. Two across only where a card can hold a row of
+   four knobs (the wider focus dock); the narrower stage dock gets one under another. */
+.jam-stages {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 6px;
+}
+.jam-stage {
+  container-type: inline-size; /* the scope decides tile-or-strip from the card's own width */
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 5px 9px 7px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-elev);
+}
+.jam-stage-hd {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap; /* OFF + three filter types will not fit beside the name in a narrow card */
+  gap: 4px 6px;
+  min-width: 0;
+}
+.jam-stage-nm {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.jam-stage-sub {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.56rem;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Mode buttons sit in the card head rather than on a row of their own; the osc-stack tile rule
+   stretches .jam-osc-w to fill its row, which a head must not do. */
+.jam-stage-modes {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 3px;
+  flex: none;
+  margin-left: auto;
+}
+.jam-stage-modes .jam-osc-w {
+  flex: none;
+  padding: 1px 6px;
+}
+.jam-osc-w:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.jam-stage-body {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.jam-stage .jam-knobs {
+  gap: 4px 4px; /* four knobs beside a scope, or four in a 200px card, need the tighter pitch */
+}
+
+/* A scope per stage: not a meter, a sketch of the setting the knobs beside it describe, redrawn
+   from the patch on every edit. It takes the row's slack beside the knobs up to a cap, and the box
+   is stretched to whatever it gets, so strokes are pinned to screen pixels instead of fattening. */
+.jam-scope {
+  flex: 1 1 72px;
+  min-width: 72px;
+  max-width: 150px;
+  height: 32px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-0);
+}
+.jam-scope path {
+  vector-effect: non-scaling-stroke;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.jam-scope .jam-scope-grid { fill: none; stroke: var(--border); stroke-width: 1; }
+.jam-scope .jam-scope-trace { fill: none; stroke: var(--accent-hi); stroke-width: 1.5; }
+.jam-scope .jam-scope-fill { fill: var(--accent-dim); stroke: none; }
+.jam-scope .jam-scope-tail { fill: var(--accent-dim); stroke: none; }
+.jam-scope .jam-scope-mark { fill: none; stroke: var(--faint); stroke-width: 1; stroke-dasharray: 2 2; }
+.jam-scope .jam-scope-sweep { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 3 2; }
+.jam-scope .jam-scope-bar { fill: none; stroke: var(--accent-hi); stroke-width: 2.5; }
+.jam-scope .jam-scope-bar.soft { stroke: var(--accent); opacity: 0.6; }
+/* Without room for a scope beside four knobs (a 200px card, or a narrow dock) the scope becomes a
+   strip above them instead of forcing the knobs to wrap. */
+@container (max-width: 299px) {
+  .jam-scope {
+    flex-basis: 100%;
+    max-width: none;
+    height: 26px;
+  }
+}
+
+/* The knob's lit arc: rest position to tick. Drawn on the ring's own circle so it reads as the
+   ring filling rather than as a second ring around it. */
+.jam-knob-arc {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  opacity: 0.85;
+}
+
+/* ============================================================
+   Start surface, widened (join / found). `.start` alone stays the
+   480px column the unlock and setup gates use; `.start-wide` is the
+   join/found surface, which uses the window: an identity band, two
+   wide path tabs, the chosen path owning the width, and the
+   secondary panels folded into a strip at the bottom.
+   ============================================================ */
+.start.start-wide {
+  max-width: 1240px;
+  padding: 1.25rem 1.75rem 1.5rem;
+  gap: 1rem;
+}
+/* The surface scrolls as a whole. Without this, a child that clips its own overflow (the tabs
+   grid) has a minimum height of zero as a flex item and gets squeezed to nothing whenever the
+   Found pane is taller than the window: the tabs were cut to two lines, then to one. */
+.start.start-wide > * { flex-shrink: 0; }
+/* Field labels on this surface are mono micro-labels, as in the mockup. */
+.start.start-wide .field > span.muted {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.start.start-wide .field > span.muted .faint { text-transform: none; letter-spacing: 0; }
+.st-identity {
+  display: grid;
+  grid-template-columns: auto minmax(220px, 420px) 1fr;
+  gap: 22px;
+  align-items: center;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.st-identity .brand {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  text-align: left;
+}
+.st-identity .brand-logo { width: 48px; height: 48px; }
+.st-identity .brand-name { font-size: 1.05rem; }
+.st-identity-side {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+/* The shared-media choice as a compact chip beside the back button, not the boxed <details>
+   the rest of the app draws. Opened, its fieldset drops below the whole band. */
+.st-identity-side .start-trust {
+  border: none;
+  padding: 0;
+  background: none;
+  width: auto;
+  position: relative;
+}
+.st-identity-side .start-trust > summary {
+  margin: 0;
+  gap: 0.6rem;
+  white-space: nowrap;
+}
+.st-identity-side .start-trust > summary > .muted { margin-left: 0; color: var(--accent-hi); }
+/* Opened: a dropdown under the chip, one segmented choice and one line. Anchored rather than
+   flowed, so the band keeps its height and the back button keeps its place. */
+.st-trust {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 5;
+  width: min(560px, 80vw);
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+.st-trust > legend {
+  float: left;
+  width: 100%;
+  padding: 0;
+  margin-bottom: 2px;
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.st-trust-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  overflow: hidden;
+  background: var(--panel);
+}
+.st-trust-seg label {
+  padding: 6px 12px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.st-trust-seg label + label { border-left: 1px solid var(--border-soft); }
+.st-trust-seg label.selected {
+  color: var(--text);
+  background: var(--accent-dim);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.st-trust-seg label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.st-trust-seg input { position: absolute; opacity: 0; pointer-events: none; }
+.st-trust > p { margin: 0; flex: 1 1 260px; }
+@media (max-width: 900px) {
+  .st-identity { grid-template-columns: 1fr 1fr; }
+  .st-identity-side { grid-column: 1 / -1; justify-content: flex-start; }
+}
+
+/* Helper lines under fields: whisper volume, as in the mockup. */
+.start.start-wide .field > small { color: var(--faint); font-size: 0.74rem; }
+.start.start-wide p.small,
+.start.start-wide .st-sect-head .why { font-size: 0.8rem; }
+
+/* The two path tabs, each carrying an icon and its one-line promise. Built on .start-tabs,
+   restated so the title reads in the UI face at full size rather than as a mono micro-label. */
+.st-paths button {
+  flex-direction: row;
+  align-items: center;
+  text-align: left;
+  padding: 12px 16px;
+  gap: 12px;
+}
+.st-path-ic {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  color: var(--muted);
+}
+.st-paths button[aria-selected="true"] .st-path-ic { color: var(--accent-hi); }
+.st-path-txt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.st-path-k {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  color: var(--faint);
+}
+.st-path-t {
+  font-family: var(--ui);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.st-paths .st-hint { font-size: 0.8rem; }
+
+/* Mono micro-labels inside the surface. */
+.st-join .k, .st-found .k, .st-card .k, .st-consent .k, .st-readout .k {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.st-consent .k.warn { color: var(--warn); }
+.faint { color: var(--faint); font-weight: 400; }
+
+/* --- Join: the invite on the left, the attempt on the right. --- */
+.st-join {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 0.95fr);
+  gap: 24px;
+  align-items: start;
+}
+.st-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+.st-invite { min-height: 110px; }
+.st-readout {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  font-size: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 8px 12px;
+  background: var(--bg-0);
+}
+.st-readout .v { color: var(--text-2); }
+.st-readout .v.ok { color: var(--ok); }
+.st-consent {
+  border: 1px solid var(--warn-brd);
+  background: var(--warn-dim);
+  border-radius: var(--r-lg);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.st-consent h3 { margin: 0; font-size: 0.92rem; }
+.st-consent .check-row { display: flex; gap: 8px; align-items: flex-start; font-size: 0.84rem; }
+.st-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.st-steps {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 0.84rem;
+  color: var(--text-2);
+  display: grid;
+  gap: 6px;
+}
+.st-steps b { color: var(--text); }
+
+/* The attempt: a diagram of the routes between you and the inviter, one row per route, and a
+   verdict once it settles. Route colours are semantic: accent = being tried, green = answered,
+   red = did not, a dotted hairline = deliberately skipped. */
+.st-attempt {
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  overflow: hidden;
+}
+.st-attempt-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.st-attempt-head h3 { margin: 0; font-size: 0.9rem; }
+.st-attempt-state {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.st-attempt-state[data-phase="dialling"] { color: var(--accent-hi); }
+.st-attempt-state[data-phase="failed"] { color: var(--danger); }
+.st-attempt-state[data-phase="connected"] { color: var(--ok); }
+.st-spin {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  animation: st-spin 0.8s linear infinite;
+}
+@keyframes st-spin { to { transform: rotate(360deg); } }
+.st-wire { background: var(--bg-0); }
+.st-wire svg { width: 100%; height: auto; display: block; }
+.st-route { fill: none; stroke: var(--border); stroke-width: 1.4; }
+.st-route.active { stroke: var(--accent); }
+.st-route.failed { stroke: var(--danger); stroke-dasharray: 3 4; }
+.st-route.ok { stroke: var(--ok); }
+.st-route.skipped { stroke: var(--border-soft); stroke-dasharray: 1 5; }
+.st-rl {
+  font-family: var(--mono);
+  font-size: 7.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  fill: var(--muted);
+}
+.st-rl.failed { fill: var(--danger); }
+.st-rl.ok { fill: var(--ok); }
+.st-rl.active { fill: var(--accent-hi); }
+.st-node { fill: var(--bg-elev); stroke: var(--border); stroke-width: 1.5; }
+.st-nl { font-family: var(--mono); font-size: 8px; fill: var(--text-2); }
+/* The packet rides the route being tried: offset-path is the arc's own path, set inline. */
+.st-pk {
+  fill: var(--accent);
+  offset-distance: 0%;
+  animation: st-travel 1.6s linear infinite;
+}
+@keyframes st-travel { to { offset-distance: 100%; } }
+.st-routes { display: flex; flex-direction: column; }
+.st-route-row {
+  display: grid;
+  grid-template-columns: 18px 170px 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 0.8rem;
+}
+.st-route-row .ic {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--faint);
+  display: grid;
+  place-items: center;
+  font-size: 0.6rem;
+  line-height: 1;
+}
+.st-route-row.active .ic { border-color: var(--accent); }
+.st-route-row.active .ic::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: st-blink 0.9s ease-in-out infinite;
+}
+@keyframes st-blink { 50% { opacity: 0.25; } }
+.st-route-row.failed .ic { border-color: var(--danger); color: var(--danger); }
+.st-route-row.failed .ic::after { content: "✕"; }
+.st-route-row.ok .ic { border-color: var(--ok); color: var(--ok); }
+.st-route-row.ok .ic::after { content: "✓"; }
+.st-route-row.skipped .ic { border-style: dashed; }
+.st-route-row .tg { font-family: var(--mono); font-size: 0.72rem; color: var(--text-2); }
+.st-route-row .why { color: var(--muted); }
+.st-route-row.failed .why { color: var(--text-2); }
+.st-verdict {
+  border-top: 1px solid var(--border-soft);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.st-verdict.fail { background: var(--danger-dim); }
+.st-verdict.wait { background: var(--warn-dim); }
+.st-verdict h3 { margin: 0; font-size: 0.92rem; }
+.st-verdict ol {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-2);
+  font-size: 0.83rem;
+  display: grid;
+  gap: 6px;
+}
+.st-verdict ol b { color: var(--text); }
+.st-reply {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+/* Motion off: the packet parks mid-route and nothing blinks; the colours carry the state. */
+:root[data-motion="off"] .st-pk { animation: none; offset-distance: 50%; }
+:root[data-motion="off"] .st-spin,
+:root[data-motion="off"] .st-route-row.active .ic::after { animation: none; }
+
+/* --- Found: name and look, then how people connect, then the fold and the footer. --- */
+.st-found { gap: 1.25rem; }
+.st-sect { display: flex; flex-direction: column; gap: 12px; }
+.st-sect-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.st-sect-head .k { color: var(--accent-hi); }
+.st-sect-head h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+.st-look {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 22px;
+  align-items: start;
+}
+.st-look-form { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+/* The palette tiles in one row here; the two-column grid is sized for the settings column. */
+.st-look-form .preset-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.st-look-form .preset-btn { padding: 6px 12px 6px 8px; }
+.st-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.st-icon-row { display: flex; gap: 12px; align-items: center; }
+.st-preview .stx-pcard { margin: 0; }
+.st-preview .stx-ph,
+.st-preview .stx-pnote { padding: 0; }
+/* Folds: one slim row until opened. The app's default <details> padding and child margins are
+   cleared so the row is the summary and nothing else. */
+.st-fold {
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  padding: 0;
+}
+.st-fold > * { margin-top: 0; }
+.st-fold > summary {
+  cursor: pointer;
+  padding: 9px 14px;
+  font-size: 0.86rem;
+  font-weight: 500;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  list-style: none;
+}
+.st-fold > summary::-webkit-details-marker { display: none; }
+.st-fold > summary::before { content: "▸"; color: var(--muted); font-size: 0.7rem; }
+.st-fold[open] > summary::before { content: "▾"; }
+.st-fold > summary .k { margin-left: auto; }
+.st-fold-body { border-top: 1px solid var(--border-soft); padding: 14px; }
+.st-adv { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.st-adv input { font-family: var(--mono); font-size: 0.8rem; }
+
+/* The two topology cards: a radio pair wearing card clothes, the diagram on top and the facts
+   below. The real radio is visually hidden (.mc-radio) so keyboard and screen-reader behaviour
+   stay native. */
+.st-topo { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.tcard {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  cursor: pointer;
+  overflow: hidden;
+  text-align: left;
+}
+.tcard:hover { border-color: var(--faint); }
+/* The real radio is visually hidden; the card is the label. */
+.tcard .mc-radio {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.tcard.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+.tcard:has(.mc-radio:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tc-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: start;
+  padding: 12px 14px 0;
+}
+.tc-head h3 { margin: 2px 0 0; font-size: 0.95rem; }
+.tc-pick {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--faint);
+  display: grid;
+  place-items: center;
+  margin-top: 4px;
+}
+.tcard.selected .tc-pick { border-color: var(--accent); }
+.tcard.selected .tc-pick::after {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.tc-diag {
+  height: 210px;
+  margin: 10px 14px 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  position: relative;
+  overflow: hidden;
+}
+.tc-diag canvas { width: 100%; height: 100%; display: block; }
+.tc-cap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 8px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.tc-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+}
+.tc-body p { margin: 0; font-size: 0.82rem; color: var(--text-2); line-height: 1.45; }
+.tc-facts {
+  display: grid;
+  grid-template-columns: 82px 1fr;
+  gap: 5px 12px;
+  margin: 0;
+  font-size: 0.79rem;
+}
+.tc-facts dt {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-top: 3px;
+}
+.tc-facts dd { margin: 0; color: var(--text-2); }
+.tc-facts dd b { color: var(--text); }
+.tc-facts .y { color: var(--ok); font-weight: 600; }
+.tc-facts .m { color: var(--warn); font-weight: 600; }
+.tc-foot {
+  border-top: 1px solid var(--border-soft);
+  padding: 9px 14px;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tc-foot .who { color: var(--text-2); }
+.st-node-req {
+  border: 1px solid color-mix(in oklab, var(--accent) 40%, var(--panel));
+  background: var(--accent-dim);
+  border-radius: var(--r-lg);
+  padding: 12px 14px;
+}
+.st-node-req input { font-family: var(--mono); font-size: 0.8rem; }
+.st-found-foot {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 16px;
+  align-items: center;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 14px;
+}
+.st-summary {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 0.84rem;
+  color: var(--text-2);
+}
+.st-summary .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px 3px 6px;
+  background: var(--bg-elev);
+  font-size: 0.8rem;
+}
+.st-summary .chip .sw { width: 12px; height: 12px; border-radius: 50%; }
+.st-summary .warnline { color: var(--warn); }
+
+/* --- The secondary strip: pairing, connection check, and the reply-apply box. --- */
+.st-secondary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 14px;
+}
+.st-secondary > details {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  background: color-mix(in oklab, var(--panel) 60%, var(--bg-0));
+  padding: 0;
+  min-width: 0;
+}
+.st-secondary > details > * { margin: 0 14px 10px; }
+.st-secondary > details > summary {
+  cursor: pointer;
+  margin: 0;
+  padding: 10px 14px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  list-style: none;
+  font-weight: 500;
+}
+.st-secondary > details > summary::-webkit-details-marker { display: none; }
+.st-secondary > details[open] > summary { border-bottom: 1px solid var(--border-soft); margin-bottom: 10px; }
+.st-sec-ic { width: 18px; height: 18px; color: var(--muted); flex: none; }
+.st-sec-txt { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.st-sec-txt .ttl { font-weight: 600; font-size: 0.88rem; }
+.st-sec-txt .sub { color: var(--muted); font-size: 0.78rem; }
+.st-secondary .k {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+/* The palette tiles here show both halves of a swatch: the floor and the accent. */
+.st-look-form .preset-sw {
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(135deg, var(--sw-bg) 50%, var(--sw-acc) 50%) !important;
+}
+
+@media (max-width: 1000px) {
+  .st-join, .st-look, .st-topo, .st-row2, .st-adv, .st-secondary { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
+   Livery panel: one piece of markup for the Found tab and Server
+   settings, Livery. Label column on the left, controls on the right.
+   ============================================================ */
+.lv-panel { display: flex; flex-direction: column; gap: 16px; }
+.lv-grp {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 6px 16px;
+  align-items: start;
+}
+.lv-k {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-top: 6px;
+}
+.lv-ctl { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+
+/* Tint rows: label, colour well, slider, percentage. The slider is drawn with the app's own
+   tokens rather than the browser's chrome: a hairline track, the accent filling it up to the
+   value (`--pct`, set inline), and a round accent thumb. */
+.lv-tint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.lv-tint.off { opacity: 0.45; }
+.lv-tint input:disabled { cursor: default; }
+
+/* The rocker: a track with a knob that slides to the accent when on. The real checkbox stays
+   in the tree for keyboard and screen readers; the track is what you see. */
+.lv-rocker {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 0.84rem;
+  user-select: none;
+}
+.lv-rocker input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.lv-rocker-track {
+  position: relative;
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  transition: background 0.15s, border-color 0.15s;
+  flex: none;
+}
+.lv-rocker-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.15s, background 0.15s;
+}
+.lv-rocker input:checked + .lv-rocker-track {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+.lv-rocker input:checked + .lv-rocker-track::after {
+  transform: translateX(16px);
+  background: var(--accent);
+}
+.lv-rocker input:focus-visible + .lv-rocker-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+:root[data-motion="off"] .lv-rocker-track,
+:root[data-motion="off"] .lv-rocker-track::after { transition: none; }
+.lv-tint .tint-lbl { width: 76px; flex: none; }
+.lv-tint > .muted:not(.tint-lbl) { flex: 1; }
+.lv-tint input[type="color"] {
+  width: 30px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--bg-elev);
+  cursor: pointer;
+  flex: none;
+}
+.lv-tint input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
+.lv-tint input[type="color"]::-webkit-color-swatch { border: none; border-radius: 2px; }
+.lv-pct {
+  width: 34px;
+  flex: none;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.lv-range,
+.profile-tab input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  min-width: 100px;
+  max-width: 220px;
+  height: 18px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.lv-range::-webkit-slider-runnable-track,
+.profile-tab input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--accent) var(--pct, 0%), var(--border) var(--pct, 0%));
+}
+.lv-range::-webkit-slider-thumb,
+.profile-tab input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.lv-range::-moz-range-track,
+.profile-tab input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+}
+.lv-range::-moz-range-progress,
+.profile-tab input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.lv-range::-moz-range-thumb,
+.profile-tab input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.lv-range:focus-visible,
+.profile-tab input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+/* ============================================================
+   Profile editor: one tab strip over four rooms (Identity, Name style, Frame, Arrival), a
+   sticky save bar, and controls drawn with the app's own tokens rather than the browser's.
+   ============================================================ */
+.profile-tab input[type="range"] { width: 100%; max-width: none; min-width: 0; }
+.profile-tab input[type="range"]:disabled { opacity: 0.4; cursor: default; }
+.profile-tab .fx-option.dim { opacity: 0.55; }
+.pf-k {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pf-k small {
+  font-family: var(--ui);
+  font-size: 0.74rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--faint);
+}
+.ptabs {
+  display: flex;
+  gap: 2px;
+  margin: 0 0 4px;
+  border-bottom: 1px solid var(--border);
+}
+button.ptab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 -1px;
+  padding: 8px 12px 9px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+button.ptab:hover { color: var(--text-2); background: transparent; }
+button.ptab.on { color: var(--text); border-bottom-color: var(--accent); }
+button.ptab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ptab .dirty,
+.psave .dirty {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+  flex: none;
+}
+.ppanel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+/* Sticks to the bottom of whichever scroller hosts the editor (the settings column, or the
+   profile surface's own pane), so Save is never three studios away. */
+.psave {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  padding: 10px 0 8px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-0);
+}
+.psave .status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+button.ptog {
+  padding: 4px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-2);
+  font-size: 0.76rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+button.ptog i { font-style: italic; margin-right: 2px; }
+button.ptog:hover { border-color: var(--accent-hi); background: var(--bg-elev); }
+button.ptog.on { border-color: var(--accent); background: var(--accent-dim); color: var(--text); }
+/* Tiles carry effects that reach above the glyph (sparkles, flames): room for them, and a clip
+   at the tile's own edge rather than a spill over the neighbour's border. */
+.ns-tile {
+  height: auto;
+  min-height: 38px;
+  padding: 10px 10px 5px;
+  border-width: 1px;
+  overflow: hidden;
+}
+.ns-tile.active { background: var(--accent-dim); }
+.name-recipe { min-height: 38px; padding: 7px 8px; }
+.name-studio-label { font-size: 0.62rem; color: var(--muted); }
+.motion-catalog { display: grid; gap: 10px; }
+.motion-group .name-studio-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.motion-group .name-studio-label small {
+  font-family: var(--ui);
+  font-size: 0.72rem;
+  letter-spacing: 0;
+  color: var(--faint);
+}
+.frame-motion-grid { grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); }
+.frame-motion-tile { min-height: 50px; background: var(--panel); }
+.frame-motion-tile.active { background: var(--accent-dim); }
+/* Identity library tiles: avatar, the styled name, the label underneath, delete in the corner. */
+.id-lib {
+  padding: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  background: color-mix(in oklab, var(--panel) 72%, transparent);
+}
+.id-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  gap: 6px;
+}
+.id-tile { position: relative; min-width: 0; }
+button.id-pick {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 26px 6px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--panel);
+  color: var(--text);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+}
+button.id-pick:hover { border-color: var(--accent-hi); background: var(--bg-elev); }
+button.id-pick .avatar { width: 28px; height: 28px; flex: none; }
+.id-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.id-text .name {
+  font-size: 0.86rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.id-text small {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.id-tile .recipe-delete { top: 50%; transform: translateY(-50%); }
+.banner-preview {
+  width: 160px;
+  height: 50px;
+  object-fit: cover;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  flex: none;
+}
+@media (max-width: 640px) {
+  .lv-grp { grid-template-columns: 1fr; }
+  .lv-k { padding-top: 0; }
+}
+
+/* The livery preview, in the Found tab's right column and in the settings aside. It carries the
+   draft's tokens inline, so `--ui` and the palette reach everything inside it. */
+.lv-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-family: var(--ui);
+}
+/* The banner in the preview's mini sidebar: bleeds to the sidebar's edges like the real one. */
+.stx-mini-side .mini-banner {
+  width: calc(100% + 10px);
+  height: 24px;
+  object-fit: cover;
+  margin: -6px -5px 2px;
+  display: block;
+  border-radius: 0;
+  background: none;
+}
+.lv-preview[data-livery-pattern="grid"] .stx-mini-chat,
+.lv-preview[data-livery-pattern="grid"] .stx-plog {
+  background-image:
+    repeating-linear-gradient(0deg, color-mix(in oklab, var(--accent) 4%, transparent) 0 1px, transparent 1px 12px),
+    repeating-linear-gradient(90deg, color-mix(in oklab, var(--accent) 4%, transparent) 0 1px, transparent 1px 12px);
+}
+.lv-preview[data-livery-pattern="diag"] .stx-mini-chat,
+.lv-preview[data-livery-pattern="diag"] .stx-plog {
+  background-image: repeating-linear-gradient(45deg, color-mix(in oklab, var(--accent) 3%, transparent) 0 1px, transparent 1px 10px);
+}
+.lv-preview[data-livery-pattern="dots"] .stx-mini-chat,
+.lv-preview[data-livery-pattern="dots"] .stx-plog {
+  background-image: radial-gradient(color-mix(in oklab, var(--accent) 7%, transparent) 1px, transparent 1.5px);
+  background-size: 12px 12px;
+}
+
+/* The published sidebar banner, across the top of the channel list. Bleeds to the sidebar's
+   edges (the sidebar has --panel-pad of padding) and stays a fixed height so a tall upload
+   cannot push the channels down. */
+.server-banner {
+  display: block;
+  width: calc(100% + 2 * var(--panel-pad));
+  height: 64px;
+  object-fit: cover;
+  margin: calc(-1 * var(--panel-pad)) calc(-1 * var(--panel-pad)) 0;
+  border-bottom: 1px solid var(--border-soft);
+  user-select: none;
+  -webkit-user-drag: none;
+  flex: none;
 }

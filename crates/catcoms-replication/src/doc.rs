@@ -17,6 +17,7 @@ use automerge::{ActorId, AutoCommit, Change, ChangeHash, ReadDoc, ScalarValue, V
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_rt::CryptoRngCore;
+use catcoms_storage::pad;
 use catcoms_wire::{Decoder, DocType, Encoder};
 
 use crate::epoch::{
@@ -24,6 +25,7 @@ use crate::epoch::{
 };
 use crate::op::{SealedOp, SignedOp};
 use crate::ReplError;
+use crate::{CheckpointOrigin, VerifiedCheckpoint};
 
 /// Cap on how many changes one [`EncryptedDoc::holders_of`] query may ask about; each
 /// target takes one bit of the propagation mask the single DAG pass carries.
@@ -64,6 +66,9 @@ pub struct EncryptedDoc {
     /// documents (whose bytes are the ones worth not duplicating) are simply re-encoded.
     /// Derived state; never persisted.
     snapshot_cache: Option<(SnapshotKey, Vec<u8>)>,
+    /// Receipt-authorized seed identity; absent for epoch zero and legacy documents. Its raw
+    /// change is in Automerge, not the signed user-op log, and must survive vault restore.
+    checkpoint: Option<CheckpointOrigin>,
 }
 
 /// What a serialization of a document depends on: its automerge heads and its op-log length.
@@ -88,7 +93,151 @@ impl EncryptedDoc {
             change_authors: HashMap::new(),
             authors_indexed: 0,
             snapshot_cache: None,
+            checkpoint: None,
         }
+    }
+
+    /// Open a checkpoint only after receipt and typed projection verification. This creates a
+    /// separate DAG, rebinds the local writer, and leaves the source epoch untouched; settlement
+    /// must persist excluded content before replacing its own current-document pointer.
+    pub fn from_checkpoint(
+        checkpoint: &VerifiedCheckpoint,
+        actor: &DeviceId,
+    ) -> Result<Self, ReplError> {
+        let origin = checkpoint.origin();
+        let change = crate::checkpoint::validate_change(origin, checkpoint.bytes())?;
+        let mut result = Self::new(origin.document().doc_type, origin.doc_id(), actor);
+        result
+            .doc
+            .apply_changes([change])
+            .map_err(crate::checkpoint::am_error)?;
+        result.checkpoint = Some(origin.clone());
+        Ok(result)
+    }
+
+    /// The authenticated origin required to exclude the one seed from close accounting.
+    pub fn checkpoint_origin(&self) -> Option<&CheckpointOrigin> {
+        self.checkpoint.as_ref()
+    }
+
+    /// Borrow the complete accepted log for the bounded registry restart format. Its order is
+    /// dependency-complete because registry admission refuses unavailable predecessors.
+    pub(crate) fn signed_log(&self) -> &[SignedOp] {
+        &self.log
+    }
+
+    /// Rebuild an authenticated vault log, not an independently serialized Automerge image.
+    /// Historical roster/share exemptions have already been admitted and are checked against
+    /// the saved gate by the coordinator. Recheck signatures, exact semantics and dependencies;
+    /// no absent, unsigned or queued change may contribute to the reconstructed projection.
+    pub(crate) fn restore_domain_log<V>(
+        &mut self,
+        logical: &LogicalDocument,
+        operations: Vec<SignedOp>,
+        mut validate: V,
+    ) -> Result<Vec<AdmittedOperation>, ReplError>
+    where
+        V: FnMut(&DomainOp, &Change, &AutoCommit, bool) -> Result<(), ReplError>,
+    {
+        if !self.log.is_empty() || operations.len() > crate::epoch::MAX_EPOCH_OPERATIONS {
+            return Err(ReplError::EpochBound);
+        }
+        let mut total = 0usize;
+        let mut metadata = Vec::new();
+        let mut ids = HashSet::new();
+        for op in operations {
+            self.check_doc(op.doc_type, op.doc_id)?;
+            let encoded_len = op.encode().len();
+            total = total.saturating_add(encoded_len);
+            if encoded_len > MAX_SIGNED_EPOCH_OP_BYTES || total > crate::epoch::MAX_EPOCH_BYTES {
+                return Err(ReplError::EpochBound);
+            }
+            if !op.verify() {
+                return Err(ReplError::BadSignature);
+            }
+            let domain = op.parsed_domain_op()?.ok_or(ReplError::Malformed)?;
+            if domain.doc_type != logical.doc_type || domain.logical_key != logical.logical_key {
+                return Err(ReplError::EpochScope);
+            }
+            let change = Change::from_bytes(op.delta.clone()).map_err(|_| ReplError::Malformed)?;
+            if change.actor_id().to_bytes() != op.author_device.as_bytes() {
+                return Err(ReplError::EpochAuthority);
+            }
+            let domain_op_id = domain.id(&op.author_device);
+            // Presence comes from Automerge's accepted change graph, not a saved index.
+            // Reconstructing each predecessor's raw operations would add historical scans just
+            // to answer existence. Metadata is sufficient here: this graph starts with only a
+            // verified seed, and each accepted predecessor has passed this loop's full checks.
+            if !ids.insert(domain_op_id)
+                || self.applied.contains(&op.hash())
+                || self.doc.get_change_meta_by_hash(&change.hash()).is_some()
+                || (self.checkpoint.is_some() && change.deps().is_empty())
+                || change
+                    .deps()
+                    .iter()
+                    .any(|h| self.doc.get_change_meta_by_hash(h).is_none())
+            {
+                return Err(ReplError::Malformed);
+            }
+            // Historical reads perform causal visibility work for each property. When a change
+            // depends on the ENTIRE actual frontier, its causal view is exactly the current
+            // committed view. Derive that fact here, after authentication/dependency checks,
+            // never from saved metadata or a peer assertion. No mutation occurs before the
+            // immutable validator uses it. Concurrent/older branches still use historical reads.
+            let mut deps = change.deps().to_vec();
+            deps.sort_unstable();
+            let current_view = self.doc.get_heads() == deps;
+            validate(&domain, &change, &self.doc, current_view)?;
+            self.doc
+                .apply_changes([change])
+                .map_err(crate::checkpoint::am_error)?;
+            if !self.has_domain_marker(&domain_op_id)? {
+                return Err(ReplError::Malformed);
+            }
+            metadata.push(AdmittedOperation {
+                op_hash: op.hash(),
+                domain_op_id,
+                author: op.author_device,
+                encoded_len,
+            });
+            self.record(op);
+        }
+        Ok(metadata)
+    }
+
+    /// Serve the checkpoint's raw seed by hash without duplicating it in the user-op log.
+    pub fn checkpoint_bytes(&mut self) -> Result<Option<Vec<u8>>, ReplError> {
+        self.checkpoint
+            .as_ref()
+            .map(|origin| {
+                self.doc
+                    .get_change_by_hash(&ChangeHash(origin.seed_hash()))
+                    .map(|change| change.raw_bytes().to_vec())
+                    .ok_or(ReplError::Malformed)
+            })
+            .transpose()
+    }
+
+    /// Reconstruct only a previously verified closure, preserving the one checkpoint seed.
+    /// This is a read-only projection workspace and never inherits the source's excluded heads.
+    pub(crate) fn projection_for_closure(
+        &mut self,
+        operations: &[SignedOp],
+    ) -> Result<AutoCommit, ReplError> {
+        let mut projection = AutoCommit::new().with_actor(ActorId::from(vec![0; 32]));
+        if let Some(seed) = self.checkpoint_bytes()? {
+            projection
+                .apply_changes([Change::from_bytes(seed).map_err(|_| ReplError::Malformed)?])
+                .map_err(crate::checkpoint::am_error)?;
+        }
+        for op in operations {
+            projection
+                .apply_changes([
+                    Change::from_bytes(op.delta.clone()).map_err(|_| ReplError::Malformed)?
+                ])
+                .map_err(crate::checkpoint::am_error)?;
+        }
+        Ok(projection)
     }
 
     /// Borrow the underlying automerge document (for reads/projection).
@@ -178,6 +327,9 @@ impl EncryptedDoc {
         heads: &[[u8; 32]],
         unsigned_seed: Option<[u8; 32]>,
     ) -> Result<Vec<SignedOp>, ReplError> {
+        if unsigned_seed != self.checkpoint.as_ref().map(CheckpointOrigin::seed_hash) {
+            return Err(ReplError::EpochScope);
+        }
         // Walk the named closure explicitly. `AutoCommit::fork_at` would select the same graph but
         // deliberately creates a random actor id, which is both unnecessary for a read-only walk
         // and outside Mewtual's injected RNG seam.
@@ -378,6 +530,13 @@ impl EncryptedDoc {
             e.put_bytes(&op.encode())
                 .map_err(|_| ReplError::Malformed)?;
         }
+        // Legacy/epoch-zero snapshots remain byte-for-byte unchanged. The optional extension is
+        // local vault format only; new checkpoints cannot be interpreted as seedless snapshots.
+        if let Some(origin) = &self.checkpoint {
+            e.put_u8(1);
+            e.put_bytes(&origin.encode()?)
+                .map_err(|_| ReplError::Malformed)?;
+        }
         Ok(e.finish())
     }
 
@@ -397,6 +556,23 @@ impl EncryptedDoc {
             applied.insert(op.hash());
             log.push(op);
         }
+        let checkpoint = if d.is_empty() {
+            None
+        } else {
+            if d.get_u8().map_err(|_| ReplError::Malformed)? != 1 {
+                return Err(ReplError::Malformed);
+            }
+            let origin =
+                CheckpointOrigin::decode(d.get_bytes().map_err(|_| ReplError::Malformed)?)?;
+            if origin.document().doc_type != doc_type || origin.doc_id() != doc_id {
+                return Err(ReplError::EpochScope);
+            }
+            let seed = doc
+                .get_change_by_hash(&ChangeHash(origin.seed_hash()))
+                .ok_or(ReplError::Malformed)?;
+            crate::checkpoint::validate_change(&origin, seed.raw_bytes())?;
+            Some(origin)
+        };
         d.finish().map_err(|_| ReplError::Malformed)?;
         Ok(Self {
             doc_type,
@@ -407,6 +583,7 @@ impl EncryptedDoc {
             change_authors: HashMap::new(),
             authors_indexed: 0,
             snapshot_cache: None,
+            checkpoint,
         })
     }
 
@@ -495,6 +672,39 @@ impl EncryptedDoc {
         F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
         V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
     {
+        self.edit_domain_preflight_gated(
+            logical_document,
+            gate,
+            device,
+            group,
+            rng,
+            domain_op,
+            edit,
+            validate_change,
+            |_| Ok(()),
+        )
+    }
+
+    /// Typed P1 edit with a rollback-safe preflight of the entire prospective projection.
+    /// Consumers encode their exact next checkpoint here, before admission or publication.
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_domain_preflight_gated<F, V, P>(
+        &mut self,
+        logical_document: &LogicalDocument,
+        gate: &EpochGate,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        rng: &mut impl CryptoRngCore,
+        domain_op: &DomainOp,
+        edit: F,
+        validate_change: V,
+        preflight: P,
+    ) -> Result<(SealedOp, ChangeHash), ReplError>
+    where
+        F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
+        V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
+        P: FnOnce(&AutoCommit) -> Result<(), ReplError>,
+    {
         if logical_document.doc_type != self.doc_type
             || logical_document.server_id != group.group_id()
             || domain_op.doc_type != self.doc_type
@@ -503,6 +713,12 @@ impl EncryptedDoc {
             return Err(ReplError::EpochScope);
         }
         gate.verify_scope(logical_document, self.doc_id)?;
+        self.verify_checkpoint_scope(logical_document, gate)?;
+        if group.member_signature_key(&device.device_id()).as_deref()
+            != Some(device.public_key_bytes().as_slice())
+        {
+            return Err(ReplError::EpochAuthority);
+        }
         if self.has_domain_marker(&domain_op.id(&device.device_id()))? {
             return Err(ReplError::NoChange);
         }
@@ -517,6 +733,10 @@ impl EncryptedDoc {
         staged.commit();
         let change = staged.get_last_local_change().ok_or(ReplError::NoChange)?;
         validate_change(domain_op, &change)?;
+        if change.actor_id().to_bytes() != device.device_id().as_bytes() {
+            return Err(ReplError::EpochAuthority);
+        }
+        preflight(&staged)?;
         let change_hash = change.hash();
         let op = SignedOp::sign_domain(
             device,
@@ -560,28 +780,69 @@ impl EncryptedDoc {
     where
         V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
     {
+        self.ingest_domain_preflight_gated(
+            logical_document,
+            gate,
+            sealed,
+            group,
+            device,
+            validate_change,
+            |_| Ok(()),
+        )
+    }
+
+    /// Inbound counterpart of [`Self::edit_domain_preflight_gated`]; a remote change cannot bypass
+    /// the exact checkpoint-size and schema preflight used by the editor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ingest_domain_preflight_gated<V, P>(
+        &mut self,
+        logical_document: &LogicalDocument,
+        gate: &EpochGate,
+        sealed: &SealedOp,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        validate_change: V,
+        preflight: P,
+    ) -> Result<Admission, ReplError>
+    where
+        V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
+        P: FnOnce(&AutoCommit) -> Result<(), ReplError>,
+    {
         self.check_doc(sealed.doc_type, sealed.doc_id)?;
         if logical_document.server_id != group.group_id() {
             return Err(ReplError::EpochScope);
         }
         gate.verify_scope(logical_document, self.doc_id)?;
+        self.verify_checkpoint_scope(logical_document, gate)?;
         if sealed.epoch != group.epoch() {
             return Err(ReplError::EpochUnavailable(sealed.epoch));
         }
         let key = group.channel_secret(device, self.doc_type, self.doc_id)?;
         let op = sealed.open(&key)?;
-        self.apply_domain_gated(logical_document, gate, op, validate_change)
+        // Possession of the group sealing key authenticates the relay, not the inner author.
+        // New open-epoch content must come from an admitted device so identity churn cannot
+        // mint fresh per-device shares. Previously accepted history remains valid after removal;
+        // historical seed/close authorization is a separate receipt-bound path.
+        if !self.applied.contains(&op.hash())
+            && group.member_signature_key(&op.author_device).as_deref()
+                != Some(op.author_pubkey.as_slice())
+        {
+            return Err(ReplError::EpochAuthority);
+        }
+        self.apply_domain_gated(logical_document, gate, op, validate_change, preflight)
     }
 
-    fn apply_domain_gated<V>(
+    fn apply_domain_gated<V, P>(
         &mut self,
         logical_document: &LogicalDocument,
         gate: &EpochGate,
         op: SignedOp,
         validate_change: V,
+        preflight: P,
     ) -> Result<Admission, ReplError>
     where
         V: FnOnce(&DomainOp, &Change) -> Result<(), ReplError>,
+        P: FnOnce(&AutoCommit) -> Result<(), ReplError>,
     {
         self.check_doc(op.doc_type, op.doc_id)?;
         gate.verify_scope(logical_document, self.doc_id)?;
@@ -608,6 +869,18 @@ impl EncryptedDoc {
         if change.actor_id().to_bytes() != op.author_device.as_bytes() {
             return Err(ReplError::EpochAuthority);
         }
+        if self.checkpoint.is_some()
+            && (change.deps().is_empty()
+                || change
+                    .deps()
+                    .iter()
+                    .any(|hash| self.doc.get_change_by_hash(hash).is_none()))
+        {
+            // Every accepted checkpoint edit must descend from the seed. Known descendants
+            // preserve this inductively; an independent root or unavailable predecessor cannot
+            // enter the document while its semantic projection is being checked.
+            return Err(ReplError::EpochScope);
+        }
         validate_change(&domain_op, &change)?;
         // Loading an inbound change authors nothing locally, so preserve the existing actor and
         // avoid `fork()`'s ambient random actor generation.
@@ -626,6 +899,7 @@ impl EncryptedDoc {
         if !marker_is_one {
             return Err(ReplError::Malformed);
         }
+        preflight(&staged)?;
         let admission = gate.admit_inbound_and_commit(
             AdmittedOperation {
                 op_hash,
@@ -757,19 +1031,7 @@ impl EncryptedDoc {
         device: &MlsDevice,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Vec<SealedOp>, ReplError> {
-        let mut have: HashSet<ChangeHash> = HashSet::new();
-        let mut stack: Vec<ChangeHash> = have_heads.iter().copied().map(ChangeHash).collect();
-        while let Some(hash) = stack.pop() {
-            if self.doc.get_change_by_hash(&hash).is_none() || !have.insert(hash) {
-                continue;
-            }
-            let deps = self
-                .doc
-                .get_change_by_hash(&hash)
-                .map(|change| change.deps().to_vec())
-                .unwrap_or_default();
-            stack.extend(deps);
-        }
+        let have = self.held_closure(have_heads);
         let mut out = Vec::new();
         for op in &self.log {
             let carried = Change::from_bytes(op.delta.clone()).ok().map(|c| c.hash());
@@ -779,6 +1041,80 @@ impl EncryptedDoc {
             out.push(SealedOp::seal(op, group, device, rng)?);
         }
         Ok(out)
+    }
+
+    /// [`Self::export_catchup_since`], resumable and bounded: begin at `from` in this node's log,
+    /// take sealed operations until `budget` bytes are used, and report where to resume.
+    ///
+    /// The difference between this and capping the output of `export_catchup_since` is the whole
+    /// point, and it is what makes a wide frontier survivable. That function recomputes the entire
+    /// difference every call, so a caller that can only send a prefix of it sends the *same*
+    /// prefix every time. When the frontier is truncated, that prefix is history the requester
+    /// already holds, and the operations it actually needs sit behind a wall of duplicates it can
+    /// never get past. Resuming by position means every exchange consumes log, so an all-duplicate
+    /// page is still progress and the wall is finite.
+    ///
+    /// The log is append-only, so a position stays meaningful as the document grows. It is
+    /// meaningful only against **this** node's log, though: the same operation sits at different
+    /// positions on different members. Callers must not replay a position to a peer that did not
+    /// issue it; the sync layer binds each one to the peer and the runtime that produced it.
+    ///
+    /// A page may legitimately be empty while still returning a resume point, because a run of
+    /// operations the requester already holds is skipped rather than sent.
+    pub fn export_catchup_page(
+        &mut self,
+        have_heads: &[[u8; 32]],
+        from: usize,
+        budget: usize,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(Vec<SealedOp>, Option<usize>), ReplError> {
+        let have = self.held_closure(have_heads);
+        let mut position = from.min(self.log.len());
+        let mut out = Vec::new();
+        let mut used = 0usize;
+        while position < self.log.len() {
+            let op = &self.log[position];
+            let carried = Change::from_bytes(op.delta.clone()).ok().map(|c| c.hash());
+            if carried.is_some_and(|hash| have.contains(&hash)) {
+                position += 1;
+                continue;
+            }
+            // The sealed size is deterministic from the unsealed one, so the budget is applied
+            // before paying for the seal rather than after. Same accounting as the registry pager
+            // and as the sync layer's own `size_capped_ops`: the padded body plus a 58-byte
+            // envelope, the 4-byte pad footer, the 16-byte tag and 4 bytes of list framing.
+            let bytes = pad::padded_len(op.encode().len(), pad::OP_PAD_FLOOR, pad::OP_PAD_CEILING)
+                .saturating_add(82);
+            if !out.is_empty() && used.saturating_add(bytes) > budget {
+                break;
+            }
+            out.push(SealedOp::seal(op, group, device, rng)?);
+            used = used.saturating_add(bytes);
+            position += 1;
+        }
+        let next = (position < self.log.len()).then_some(position);
+        Ok((out, next))
+    }
+
+    /// Every change at or behind `heads` that this node can actually resolve.
+    ///
+    /// A head this node has never seen selects nothing: it is a change the *requester* has and
+    /// this node does not, so nothing can be excluded on its account and the requester keeps it.
+    fn held_closure(&self, have_heads: &[[u8; 32]]) -> HashSet<ChangeHash> {
+        let mut have: HashSet<ChangeHash> = HashSet::new();
+        let mut stack: Vec<ChangeHash> = have_heads.iter().copied().map(ChangeHash).collect();
+        while let Some(hash) = stack.pop() {
+            let Some(change) = self.doc.get_change_by_hash(&hash) else {
+                continue;
+            };
+            if !have.insert(hash) {
+                continue;
+            }
+            stack.extend(change.deps().iter().copied());
+        }
+        have
     }
 
     /// Apply a catch-up bundle produced by [`EncryptedDoc::export_catchup`].
@@ -871,6 +1207,24 @@ impl EncryptedDoc {
     fn check_doc(&self, doc_type: DocType, doc_id: u128) -> Result<(), ReplError> {
         if doc_type != self.doc_type || doc_id != self.doc_id {
             return Err(ReplError::WrongDocument);
+        }
+        Ok(())
+    }
+
+    fn verify_checkpoint_scope(
+        &self,
+        logical: &LogicalDocument,
+        gate: &EpochGate,
+    ) -> Result<(), ReplError> {
+        if let Some(origin) = &self.checkpoint {
+            if origin.document() != logical || origin.epoch() != gate.epoch() {
+                return Err(ReplError::EpochScope);
+            }
+        } else if gate.epoch() != 0
+            || self.doc_id != crate::epoch_zero_id(logical.doc_type, &logical.logical_key)
+        {
+            // A caller cannot open an empty successor and author an independent unsigned root.
+            return Err(ReplError::EpochScope);
         }
         Ok(())
     }
@@ -1159,5 +1513,305 @@ mod tests {
             .map(|operation| operation.hash())
             .collect();
         assert_eq!(left_order, right_order);
+    }
+
+    /// What a frontier wider than its own cap costs.
+    ///
+    /// [`EncryptedDoc::sync_frontier`] caps the hashes a requester may name, and a serving peer
+    /// subtracts only what is causally behind the hashes it was given. Past the cap the requester
+    /// cannot describe everything it holds, so an honest peer answers by re-sending history the
+    /// requester already has. That is safe on its own, because duplicates are dropped on arrival.
+    /// It matters because it is the first half of the composition recorded in
+    /// `docs/MESSAGE-FLOW.md` section 8: a catch-up round that applies nothing is exactly what the
+    /// sync layer's non-progress bound counts against a source.
+    ///
+    /// This test establishes the replication half of that: truncation is reachable, the re-send
+    /// follows from it, the re-send is pure duplicate, and it repeats identically because nothing
+    /// about the exchange moved the requester's frontier.
+    #[test]
+    fn a_frontier_wider_than_its_cap_makes_a_peer_resend_history_already_held() {
+        // Above the 64-hash cap. Each branch contributes one head; they share one ancestor, which
+        // deduplicates to a single extra entry, so the cap bites at roughly this many writers.
+        const BRANCHES: usize = 80;
+        let author = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&author).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(11);
+
+        // One shared ancestor, so every branch below is concurrent with every other.
+        let mut ancestor = EncryptedDoc::new(DocType::Channel, 5, &author.device_id());
+        ancestor
+            .edit(&author, &group, &mut rng, |d| d.put(ROOT, "seed", 0u64))
+            .unwrap();
+        let seed = ancestor.export_catchup(&group, &author, &mut rng).unwrap();
+
+        // Concurrent writers. Distinct automerge actor ids are what make these changes
+        // concurrent; which device signs them is irrelevant to the frontier arithmetic under
+        // test here, and the sealing key is per group rather than per author.
+        let mut every_op = seed.clone();
+        for i in 0..BRANCHES {
+            let actor = DeviceId::from_public_key_bytes(&[(i as u8).wrapping_add(1); 32]);
+            let mut branch = EncryptedDoc::new(DocType::Channel, 5, &actor);
+            branch.import_catchup(&seed, &group, &author).unwrap();
+            branch
+                .edit(&author, &group, &mut rng, |d| {
+                    d.put(ROOT, format!("k{i}"), i as u64)
+                })
+                .unwrap();
+            let ops = branch.export_catchup(&group, &author, &mut rng).unwrap();
+            every_op.push(ops.last().expect("the branch's own op").clone());
+        }
+
+        // Two nodes holding byte-for-byte the same history. Nothing is missing anywhere.
+        let mut requester = EncryptedDoc::new(DocType::Channel, 5, &author.device_id());
+        requester
+            .import_catchup(&every_op, &group, &author)
+            .unwrap();
+        let mut server = EncryptedDoc::new(
+            DocType::Channel,
+            5,
+            &DeviceId::from_public_key_bytes(&[0xAA; 32]),
+        );
+        server.import_catchup(&every_op, &group, &author).unwrap();
+        assert_eq!(requester.op_count(), BRANCHES + 1);
+        assert_eq!(requester.op_count(), server.op_count());
+
+        // The requester cannot say so. Its frontier is capped below the number of heads it holds.
+        let frontier = requester.sync_frontier(64);
+        assert_eq!(frontier.len(), 64, "the frontier is capped");
+        assert!(
+            requester.heads().len() > frontier.len(),
+            "and the cap is below what this node actually holds"
+        );
+
+        // So an honest peer, subtracting only what it was told about, sends back history the
+        // requester already has.
+        let resent = server
+            .export_catchup_since(&frontier, &group, &author, &mut rng)
+            .unwrap();
+        assert!(
+            !resent.is_empty(),
+            "the peer cannot subtract branches it was never told about"
+        );
+        assert_eq!(
+            requester.import_catchup(&resent, &group, &author).unwrap(),
+            0,
+            "an entire round that moves the requester nowhere"
+        );
+
+        // And it is not a one-off. Nothing in that exchange changed either side, so the next
+        // round is identical, and so is the round after it. An unbroken run of these is what the
+        // sync layer's non-progress bound is counting.
+        let next = requester.sync_frontier(64);
+        assert_eq!(
+            next, frontier,
+            "the frontier did not move, so nor will this"
+        );
+        let again = server
+            .export_catchup_since(&next, &group, &author, &mut rng)
+            .unwrap();
+        assert_eq!(again.len(), resent.len(), "the same answer, indefinitely");
+        assert_eq!(
+            requester.import_catchup(&again, &group, &author).unwrap(),
+            0
+        );
+    }
+
+    /// The second half of that composition, and the part that can actually starve a requester.
+    ///
+    /// A serving peer walks its own log in its own insertion order and the sync layer sends a
+    /// size-capped **prefix** of what comes out. History the requester already holds but could not
+    /// name sits at the front of that walk, because it was accepted before whatever the requester
+    /// is actually missing. So the genuinely new operation is at the tail, behind a block of
+    /// duplicates whose size the requester cannot influence and the server has no reason to skip.
+    ///
+    /// If that duplicate block does not fit inside one chunk, every answer is a prefix of the
+    /// duplicates, every round applies nothing, and the new operation is never reached. The
+    /// requester is not merely paying for bandwidth; it cannot converge with this peer at all,
+    /// and because the duplicates come from history every member holds, the next source it tries
+    /// answers exactly the same way.
+    #[test]
+    fn a_truncated_frontier_puts_the_missing_operation_behind_a_wall_of_duplicates() {
+        const BRANCHES: usize = 80;
+        let author = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&author).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(12);
+
+        let mut ancestor = EncryptedDoc::new(DocType::Channel, 6, &author.device_id());
+        ancestor
+            .edit(&author, &group, &mut rng, |d| d.put(ROOT, "seed", 0u64))
+            .unwrap();
+        let seed = ancestor.export_catchup(&group, &author, &mut rng).unwrap();
+
+        let mut every_op = seed.clone();
+        for i in 0..BRANCHES {
+            let actor = DeviceId::from_public_key_bytes(&[(i as u8).wrapping_add(1); 32]);
+            let mut branch = EncryptedDoc::new(DocType::Channel, 6, &actor);
+            branch.import_catchup(&seed, &group, &author).unwrap();
+            branch
+                .edit(&author, &group, &mut rng, |d| {
+                    d.put(ROOT, format!("k{i}"), i as u64)
+                })
+                .unwrap();
+            let ops = branch.export_catchup(&group, &author, &mut rng).unwrap();
+            every_op.push(ops.last().expect("the branch's own op").clone());
+        }
+
+        let mut requester = EncryptedDoc::new(DocType::Channel, 6, &author.device_id());
+        requester
+            .import_catchup(&every_op, &group, &author)
+            .unwrap();
+        let mut server = EncryptedDoc::new(
+            DocType::Channel,
+            6,
+            &DeviceId::from_public_key_bytes(&[0xBB; 32]),
+        );
+        server.import_catchup(&every_op, &group, &author).unwrap();
+
+        // The one thing the requester is actually missing, authored last and therefore last in
+        // the server's log.
+        server
+            .edit(&author, &group, &mut rng, |d| {
+                d.put(ROOT, "the_message_that_matters", "here")
+            })
+            .unwrap();
+
+        let frontier = requester.sync_frontier(64);
+        let bundle = server
+            .export_catchup_since(&frontier, &group, &author, &mut rng)
+            .unwrap();
+        // Sixteen branches the frontier had no room to name, plus the one genuinely new
+        // operation. The proportion is what matters: the duplicate block grows with the number of
+        // concurrent writers, while the useful payload stays one operation.
+        assert_eq!(
+            bundle.len(),
+            BRANCHES - 64 + 1,
+            "duplicates the requester could not name, and one operation it needs"
+        );
+
+        // Every strict prefix of that answer is worthless. A chunk budget that cannot fit the
+        // whole duplicate block therefore delivers nothing, however many times it is asked.
+        let saved = requester.snapshot().unwrap();
+        for take in 0..bundle.len() {
+            let mut attempt = EncryptedDoc::restore_for_actor(&saved, &author.device_id()).unwrap();
+            assert_eq!(
+                attempt
+                    .import_catchup(&bundle[..take], &group, &author)
+                    .unwrap(),
+                0,
+                "a chunk holding {take} operations still carries nothing usable"
+            );
+            assert_eq!(
+                attempt.sync_frontier(64),
+                frontier,
+                "and leaves the frontier exactly where it was, so the next round repeats"
+            );
+        }
+        // Only an answer large enough to clear the entire duplicate block makes progress.
+        assert_eq!(
+            requester.import_catchup(&bundle, &group, &author).unwrap(),
+            1,
+            "the whole bundle, and only the whole bundle, converges"
+        );
+    }
+
+    /// The fix for the wall above: page by position instead of recomputing the difference.
+    ///
+    /// Same fixture, same truncated frontier, and a budget deliberately far too small to clear the
+    /// duplicate block in one answer, which is precisely the condition under which
+    /// `export_catchup_since` can never converge. Because each page resumes where the last one
+    /// stopped, the duplicates are consumed rather than re-offered, and the operation behind them
+    /// is reached in a bounded number of rounds.
+    #[test]
+    fn paging_by_position_gets_past_the_wall_that_defeats_a_recomputed_difference() {
+        const BRANCHES: usize = 80;
+        let author = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&author).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(13);
+
+        let mut ancestor = EncryptedDoc::new(DocType::Channel, 7, &author.device_id());
+        ancestor
+            .edit(&author, &group, &mut rng, |d| d.put(ROOT, "seed", 0u64))
+            .unwrap();
+        let seed = ancestor.export_catchup(&group, &author, &mut rng).unwrap();
+
+        let mut every_op = seed.clone();
+        for i in 0..BRANCHES {
+            let actor = DeviceId::from_public_key_bytes(&[(i as u8).wrapping_add(1); 32]);
+            let mut branch = EncryptedDoc::new(DocType::Channel, 7, &actor);
+            branch.import_catchup(&seed, &group, &author).unwrap();
+            branch
+                .edit(&author, &group, &mut rng, |d| {
+                    d.put(ROOT, format!("k{i}"), i as u64)
+                })
+                .unwrap();
+            let ops = branch.export_catchup(&group, &author, &mut rng).unwrap();
+            every_op.push(ops.last().expect("the branch's own op").clone());
+        }
+
+        let mut requester = EncryptedDoc::new(DocType::Channel, 7, &author.device_id());
+        requester
+            .import_catchup(&every_op, &group, &author)
+            .unwrap();
+        let mut server = EncryptedDoc::new(
+            DocType::Channel,
+            7,
+            &DeviceId::from_public_key_bytes(&[0xCC; 32]),
+        );
+        server.import_catchup(&every_op, &group, &author).unwrap();
+        server
+            .edit(&author, &group, &mut rng, |d| {
+                d.put(ROOT, "the_message_that_matters", "here")
+            })
+            .unwrap();
+
+        let frontier = requester.sync_frontier(64);
+        assert_eq!(frontier.len(), 64, "the same truncated frontier as above");
+
+        // One operation per page: `budget` is smaller than any sealed operation, and the pager
+        // always takes at least one so it can never stall on an oversized entry.
+        let mut position = 0usize;
+        let mut applied = 0usize;
+        let mut rounds = 0usize;
+        let mut first_page_applied = None;
+        loop {
+            let (page, next) = server
+                .export_catchup_page(&frontier, position, 1, &group, &author, &mut rng)
+                .unwrap();
+            let landed = requester.import_catchup(&page, &group, &author).unwrap();
+            first_page_applied.get_or_insert(landed);
+            applied += landed;
+            rounds += 1;
+            assert!(rounds <= BRANCHES + 2, "paging must terminate");
+            match next {
+                Some(resume) => {
+                    assert!(resume > position, "every page consumes log");
+                    position = resume;
+                }
+                None => break,
+            }
+        }
+
+        // The first page is pure duplicate, which is exactly the round that defeats the
+        // recomputing path. Here it is progress anyway, because the position moved.
+        assert_eq!(
+            first_page_applied,
+            Some(0),
+            "the wall is still in front, it is just no longer infinite"
+        );
+        assert_eq!(applied, 1, "and the operation behind it arrives");
+        assert!(
+            requester
+                .doc()
+                .get(ROOT, "the_message_that_matters")
+                .unwrap()
+                .is_some(),
+            "the requester converged"
+        );
+        assert_eq!(
+            rounds,
+            BRANCHES - 64 + 1,
+            "one round per operation offered: sixteen duplicates, then the one that matters, \
+             whose page also reports the end because it exhausts the log"
+        );
     }
 }

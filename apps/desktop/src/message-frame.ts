@@ -1,5 +1,54 @@
-export const MESSAGE_FRAME_MOTIONS = ["none", "glide", "fly", "pop", "drift"] as const;
+export const MESSAGE_FRAME_MOTIONS = [
+  "none", "glide", "fly", "pop", "drift",
+  "wipe", "split", "blinds", "checker", "bars", "wheel", "dissolve",
+  "blackout", "newsflash", "swivel", "flip", "spiral", "crawl",
+  "bounce", "boomerang", "slam", "quake",
+] as const;
 export type MessageFrameMotion = (typeof MESSAGE_FRAME_MOTIONS)[number];
+
+export type MessageFrameMotionFamily = "quiet" | "reveal" | "ceremony" | "physical";
+
+/**
+ * What the shared arrival knobs mean for one motion. `distance` names the job the 4..80 slider
+ * does ("none" greys it out), `fade` and `direction` say whether starting visibility and the
+ * entry vector apply at all, and `vector` is the pair of labels the direction toggle shows.
+ */
+export type MessageFrameMotionTraits = {
+  family: MessageFrameMotionFamily;
+  distance: "travel" | "depth" | "grain" | "amplitude" | "spin" | "none";
+  fade: boolean;
+  direction: boolean;
+  vector: [string, string];
+};
+
+const TRAITS: Record<MessageFrameMotion, MessageFrameMotionTraits> = {
+  none: { family: "quiet", distance: "none", fade: false, direction: false, vector: ["", ""] },
+  glide: { family: "quiet", distance: "travel", fade: true, direction: true, vector: ["↑ from above", "from below ↓"] },
+  fly: { family: "quiet", distance: "travel", fade: true, direction: true, vector: ["← from left", "from right →"] },
+  pop: { family: "quiet", distance: "depth", fade: true, direction: false, vector: ["centred", "centred"] },
+  drift: { family: "quiet", distance: "travel", fade: true, direction: true, vector: ["↖ drift left", "drift right ↗"] },
+  wipe: { family: "reveal", distance: "none", fade: false, direction: true, vector: ["← from the right", "from the left →"] },
+  split: { family: "reveal", distance: "none", fade: false, direction: true, vector: ["↔ open sideways", "open up and down ↕"] },
+  blinds: { family: "reveal", distance: "grain", fade: false, direction: true, vector: ["∥ vertical slats", "horizontal slats ≡"] },
+  checker: { family: "reveal", distance: "grain", fade: false, direction: false, vector: ["", ""] },
+  bars: { family: "reveal", distance: "grain", fade: false, direction: false, vector: ["", ""] },
+  wheel: { family: "reveal", distance: "none", fade: false, direction: true, vector: ["↺ anticlockwise", "clockwise ↻"] },
+  dissolve: { family: "reveal", distance: "grain", fade: false, direction: false, vector: ["", ""] },
+  blackout: { family: "ceremony", distance: "none", fade: false, direction: false, vector: ["", ""] },
+  newsflash: { family: "ceremony", distance: "spin", fade: true, direction: true, vector: ["↺ spin left", "spin right ↻"] },
+  swivel: { family: "ceremony", distance: "none", fade: true, direction: true, vector: ["hinge on the right", "hinge on the left"] },
+  flip: { family: "ceremony", distance: "none", fade: true, direction: true, vector: ["hinge at the bottom", "hinge at the top"] },
+  spiral: { family: "ceremony", distance: "travel", fade: true, direction: true, vector: ["↖ from top left", "from top right ↗"] },
+  crawl: { family: "ceremony", distance: "travel", fade: true, direction: false, vector: ["", ""] },
+  bounce: { family: "physical", distance: "travel", fade: true, direction: true, vector: ["↑ dropped from above", "tossed from below ↓"] },
+  boomerang: { family: "physical", distance: "travel", fade: true, direction: true, vector: ["← from left", "from right →"] },
+  slam: { family: "physical", distance: "depth", fade: true, direction: false, vector: ["", ""] },
+  quake: { family: "physical", distance: "amplitude", fade: true, direction: false, vector: ["", ""] },
+};
+
+export function messageFrameMotionTraits(id: MessageFrameMotion): MessageFrameMotionTraits {
+  return TRAITS[id] ?? TRAITS.none;
+}
 
 export const MESSAGE_FRAME_SHAPES = ["terminal", "bracket", "packet", "holo", "signal"] as const;
 export type MessageFrameShape = (typeof MESSAGE_FRAME_SHAPES)[number];
@@ -111,6 +160,15 @@ function safeSurface(raw: unknown): string | null {
   return surface;
 }
 
+/**
+ * A motion id this build does not know arrives as Still, never as a rejected frame: the motion
+ * catalogue grows over time, and a peer on a newer build must not lose their whole surface and
+ * chassis on older screens just because they picked an arrival that was added after this build.
+ */
+function knownMotion(raw: string): MessageFrameMotion {
+  return MOTIONS.has(raw) ? (raw as MessageFrameMotion) : "none";
+}
+
 function boundedInteger(raw: unknown, min: number, max: number, fallback: number): number {
   const value = typeof raw === "number" ? raw : Number(raw);
   return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : fallback;
@@ -205,13 +263,13 @@ export function parseMessageFrame(raw: unknown): MessageFrame {
   if (parts[0] === FRAME_PREFIX_V1) {
     if (parts.length !== 5) return defaultFrame();
     const surface = safeSurface(parts[1]);
-    if (surface === null || !MOTIONS.has(parts[4])) return defaultFrame();
+    if (surface === null) return defaultFrame();
     return {
       ...defaultFrame(),
       surface,
       opacity: boundedInteger(parts[2], 20, 90, DEFAULT_MESSAGE_FRAME.opacity),
       edge: boundedInteger(parts[3], 0, 100, DEFAULT_MESSAGE_FRAME.edge),
-      motion: parts[4] as MessageFrameMotion,
+      motion: knownMotion(parts[4]),
     };
   }
 
@@ -220,7 +278,6 @@ export function parseMessageFrame(raw: unknown): MessageFrame {
     const surface = safeSurface(parts[1]);
     if (
       surface === null ||
-      !MOTIONS.has(parts[4]) ||
       !SHAPES.has(parts[5]) ||
       !EFFECTS.has(parts[6])
     ) return defaultFrame();
@@ -229,7 +286,7 @@ export function parseMessageFrame(raw: unknown): MessageFrame {
       surface,
       opacity: boundedInteger(parts[2], 20, 90, DEFAULT_MESSAGE_FRAME.opacity),
       edge: boundedInteger(parts[3], 0, 100, DEFAULT_MESSAGE_FRAME.edge),
-      motion: parts[4] as MessageFrameMotion,
+      motion: knownMotion(parts[4]),
       shape: parts[5] as MessageFrameShape,
       effects: parts[6] === "none" ? [] : [defaultMessageFrameLayer(parts[6] as MessageFrameEffectId)],
     };
@@ -239,7 +296,6 @@ export function parseMessageFrame(raw: unknown): MessageFrame {
   const surface = safeSurface(parts[1]);
   if (
     surface === null ||
-    !MOTIONS.has(parts[4]) ||
     !SHAPES.has(parts[5])
   ) return defaultFrame();
   const [duration, distance, fade, direction, easing] = parts[6].split(".");
@@ -247,7 +303,7 @@ export function parseMessageFrame(raw: unknown): MessageFrame {
     surface,
     opacity: boundedInteger(parts[2], 20, 90, DEFAULT_MESSAGE_FRAME.opacity),
     edge: boundedInteger(parts[3], 0, 100, DEFAULT_MESSAGE_FRAME.edge),
-    motion: parts[4] as MessageFrameMotion,
+    motion: knownMotion(parts[4]),
     shape: parts[5] as MessageFrameShape,
     effects: parseCompactLayers(parts[7]),
     arrival: sanitizeArrival({
@@ -335,18 +391,54 @@ export function messageFrameArrivalStyle(raw: unknown): string {
     x = direction * distance;
     y = -Math.round(distance * 0.35);
   }
+  if (frame.motion === "spiral") {
+    x = direction * Math.round(distance * 2.3);
+    y = -distance;
+  }
+  if (frame.motion === "crawl") y = Math.round(distance * 1.7);
+  if (frame.motion === "bounce") y = -direction * Math.round(distance * 1.2);
+  if (frame.motion === "boomerang") x = direction * distance * 3;
   const scale = Math.max(0.84, 1 - distance / 600);
+  const traits = messageFrameMotionTraits(frame.motion);
+  // Reveals do not fade: they are fully painted behind their mask. Forcing the start opacity
+  // to 1 keeps the shared keyframes honest when a viewer switches motion mid-preview.
+  const opacity = traits.fade ? fade / 100 : 1;
   const curve = easing === "snappy"
     ? "cubic-bezier(0.2,0.95,0.25,1)"
     : easing === "spring" ? "cubic-bezier(0.18,0.9,0.2,1.12)" : "cubic-bezier(0.16,0.84,0.24,1)";
+  // The one slider reads differently per family: slat/tile/speckle size for reveals, shake
+  // amplitude for the quake, zoom depth for the slam and the newsflash spin.
+  const grain = Math.max(6, Math.round(distance * 0.6));
+  const shake = Math.max(1, Math.round(distance / 6));
+  const zoom = (1 + distance / 25).toFixed(2);
+  const spin = Math.round(180 + distance * 12);
+  const clipFrom = frame.motion === "wipe"
+    ? (direction < 0 ? "inset(0 0 0 100%)" : "inset(0 100% 0 0)")
+    : frame.motion === "split"
+      ? (direction < 0 ? "inset(0 50%)" : "inset(50% 0)")
+      : "inset(0)";
+  const blindDir = direction < 0 ? "to right" : "to bottom";
+  const origin = frame.motion === "swivel"
+    ? (direction < 0 ? "right center" : "left center")
+    : frame.motion === "flip"
+      ? (direction < 0 ? "bottom center" : "top center")
+      : frame.motion === "crawl" ? "bottom center" : "center center";
   return [
     `--message-arrival-duration:${duration}ms`,
     `--message-arrival-cycle:${duration * 4}ms`,
-    `--message-arrival-opacity:${fade / 100}`,
+    `--message-arrival-opacity:${opacity}`,
     `--message-arrival-x:${x}px`,
     `--message-arrival-y:${y}px`,
     `--message-arrival-scale:${scale.toFixed(3)}`,
     `--message-arrival-ease:${curve}`,
+    `--message-arrival-dir:${direction}`,
+    `--message-arrival-grain:${grain}px`,
+    `--message-arrival-shake:${shake}px`,
+    `--message-arrival-zoom:${zoom}`,
+    `--message-arrival-spin:${spin}deg`,
+    `--message-arrival-clip-from:${clipFrom}`,
+    `--message-arrival-blind-dir:${blindDir}`,
+    `--message-arrival-origin:${origin}`,
   ].join(";");
 }
 

@@ -52,9 +52,18 @@ use catcoms_wire::DocType;
 use thiserror::Error;
 
 mod actor;
+pub mod creative;
+mod file_resolution;
 mod moderation;
 pub mod pairing;
+pub mod registry_catchup;
+pub mod registry_head;
+pub mod registry_ingress;
+pub mod registry_replay;
+pub mod registry_seed;
 pub mod store;
+pub mod studio;
+pub mod studio_exchange;
 pub use actor::{spawn, AppCommand, AppEvent, Envelope, ServerActor, Trace, TracedEvent};
 pub use moderation::{
     ModerationEvent, ModerationState, ModerationVote, MAX_MOD_EVIDENCE_BYTES, MAX_MOD_EVIDENCE_IDS,
@@ -470,6 +479,8 @@ const JB_CID: &str = "cid";
 const JB_NAME: &str = "name";
 const JB_AUTHOR: &str = "author";
 const JB_ADDED: &str = "added_ms";
+const JB_SOURCE: &str = "source";
+const JB_LINK: &str = "link";
 
 /// Maximum length of a channel topic, in UTF-8 bytes. The topic lives in the channel
 /// document, so this bounds what every member replicates; the same reason the livery and
@@ -486,6 +497,48 @@ pub const MAX_JUKEBOX_NAME_BYTES: usize = 200;
 /// Maximum number of entries one channel's jukebox holds. The whole queue is replicated with
 /// every change, so this bounds what a full playlist costs each member.
 pub const MAX_JUKEBOX_ENTRIES: usize = 64;
+/// Maximum length of a linked track's provider id. A YouTube id is eleven characters; the budget
+/// is loose enough to outlive a change at a provider's end and tight enough that the field can
+/// never become a place to store something else.
+pub const MAX_JUKEBOX_LINK_CHARS: usize = 64;
+
+/// The source a queue entry names: where a listener's deck is supposed to get the track.
+///
+/// This is a small closed set on purpose. It decides which player a listener builds, so an
+/// unrecognised value must never be a track anyone tries to play: a queue entry is written by a
+/// peer, and the deck reading it has no way to check what a peer meant by a word it does not
+/// know. Anything not listed here reads as "not a playable track" and is skipped, exactly as an
+/// entry with no content address is.
+pub const JUKE_SOURCE_FILE: &str = "";
+/// A video played from YouTube's embedded player, by video id, rather than from a shared file.
+/// Unlike a file, nothing about it is content-addressed or held by the group: every listener
+/// fetches it from Google themselves, which is a disclosure their client gates locally.
+pub const JUKE_SOURCE_YOUTUBE: &str = "youtube";
+/// A track played from SoundCloud's embedded widget, by the track's own path.
+pub const JUKE_SOURCE_SOUNDCLOUD: &str = "soundcloud";
+/// A video played from Vimeo's embedded player, by video id.
+pub const JUKE_SOURCE_VIMEO: &str = "vimeo";
+
+/// Every linked source a queue entry may name.
+///
+/// The membership test lives here rather than being spelled out at each site, because there are
+/// now three places that have to agree about it (the writer, the reader, and the actor command)
+/// and a list that is enumerated twice is a list that will eventually disagree with itself. A
+/// source outside this set is not a track: see the note on [`JUKE_SOURCE_FILE`].
+///
+/// Deliberately absent: Spotify. Its embed plays a preview of about thirty seconds unless the
+/// listener's own webview holds a Premium session, so a room cannot listen to it together; it is
+/// a chat card only. See `spotify.ts`.
+pub const JUKE_LINK_SOURCES: [&str; 3] = [
+    JUKE_SOURCE_YOUTUBE,
+    JUKE_SOURCE_SOUNDCLOUD,
+    JUKE_SOURCE_VIMEO,
+];
+
+/// Whether `source` names a linked provider this build can queue and play.
+pub fn is_juke_link_source(source: &str) -> bool {
+    JUKE_LINK_SOURCES.contains(&source)
+}
 
 /// Append a `{id, author, text, ts}` message to a channel document (the canonical edit).
 pub fn append_message(
@@ -779,12 +832,19 @@ fn set_topic_in_doc(doc: &mut AutoCommit, topic: &str) -> Result<(), AutomergeEr
 /// blob has not arrived yet still lists fine; it just cannot play yet. The `author` is the
 /// adder's **device fingerprint**, resolved to a display name at render time like a message
 /// author.
+///
+/// An entry is one of two things, and `source` says which. A **file** entry is the original kind:
+/// content the group already holds, addressed by `cid`, served to the deck out of the vault. A
+/// **linked** entry names a video on somebody else's service by id in `link` and has no `cid` at
+/// all, because there is nothing to hold: each listener's own client fetches it, and whether it
+/// may is that client's decision, not the queue's. The two never mix, so a reader that only
+/// understands one of them cannot mistake the other for a track it can play.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JukeEntry {
     /// A stable per-entry id (random hex), minted like a message id; so a removal addresses
     /// exactly one entry under concurrent merges.
     pub id: String,
-    /// The lowercase hex content address of the queued file.
+    /// The lowercase hex content address of the queued file. Empty for a linked entry.
     pub cid: String,
     /// The display name shown in the queue (never empty in a stored entry).
     pub name: String,
@@ -792,6 +852,11 @@ pub struct JukeEntry {
     pub author: String,
     /// When the entry was queued, epoch-millis (the adder's injected clock).
     pub added_ms: u64,
+    /// Where the track comes from: [`JUKE_SOURCE_FILE`] (the default, and what every entry
+    /// written before linked tracks existed reads as) or [`JUKE_SOURCE_YOUTUBE`].
+    pub source: String,
+    /// The provider's id for a linked track. Empty for a file entry.
+    pub link: String,
 }
 
 /// Add one jukebox entry to a channel document, keyed by its id. The queue is a map at the
@@ -807,6 +872,13 @@ fn add_juke_entry_in_doc(doc: &mut AutoCommit, e: &JukeEntry) -> Result<(), Auto
     doc.put(&entry, JB_NAME, e.name.as_str())?;
     doc.put(&entry, JB_AUTHOR, e.author.as_str())?;
     doc.put(&entry, JB_ADDED, e.added_ms as i64)?;
+    // Written only for a linked entry, so a file entry is byte-for-byte the document an older
+    // build wrote and every member still replicates the same thing for the same playlist. The
+    // absent keys read back as [`JUKE_SOURCE_FILE`], which is what they mean.
+    if !e.source.is_empty() {
+        doc.put(&entry, JB_SOURCE, e.source.as_str())?;
+        doc.put(&entry, JB_LINK, e.link.as_str())?;
+    }
     Ok(())
 }
 
@@ -833,8 +905,23 @@ fn read_jukebox(doc: &AutoCommit) -> Vec<JukeEntry> {
             if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&queue, &id) {
                 let cid = juke_cid_field(doc, &entry, JB_CID);
                 let name = str_field(doc, &entry, JB_NAME);
-                if cid.is_empty() || name.is_empty() {
+                let source = str_field(doc, &entry, JB_SOURCE);
+                let link = str_field(doc, &entry, JB_LINK);
+                if name.is_empty() {
                     continue; // a cleared/malformed entry is not a playable track
+                }
+                // An entry has to name exactly one way of getting the track, and it has to be a
+                // way this build knows. A source nobody here understands is skipped rather than
+                // guessed at, and an entry carrying BOTH a content address and a link is skipped
+                // too: a reader that picked one of them would be picking which of two things a
+                // peer meant, and the two disagree about who fetches what from where.
+                let playable = if source == JUKE_SOURCE_FILE {
+                    !cid.is_empty() && link.is_empty()
+                } else {
+                    is_juke_link_source(&source) && cid.is_empty() && valid_juke_link(&link)
+                };
+                if !playable {
+                    continue;
                 }
                 out.push(JukeEntry {
                     id,
@@ -842,6 +929,8 @@ fn read_jukebox(doc: &AutoCommit) -> Vec<JukeEntry> {
                     name,
                     author: str_field(doc, &entry, JB_AUTHOR),
                     added_ms: int_field(doc, &entry, JB_ADDED),
+                    source,
+                    link,
                 });
             }
         }
@@ -869,6 +958,53 @@ fn valid_juke_cid(cid: &str) -> bool {
     !cid.is_empty()
         && cid.len() <= MAX_JUKEBOX_CID_CHARS
         && cid.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The most path segments a stored link may hold. A SoundCloud set is the longest real case at
+/// three (`artist/sets/name`); the rest are one.
+const MAX_JUKEBOX_LINK_SEGMENTS: usize = 4;
+
+/// Whether `link` is a storable provider id: up to [`MAX_JUKEBOX_LINK_CHARS`] characters, as one
+/// to [`MAX_JUKEBOX_LINK_SEGMENTS`] segments of the URL-safe base64 alphabet joined by `/`.
+///
+/// The alphabet is the substance. A link is placed into an address on every listener's device, so
+/// what matters is that it cannot escape the part of the address it is written into: no query, no
+/// fragment, no dot-run that could traverse, nothing percent-encoded, so there is no unescaping
+/// step for a client to get wrong.
+///
+/// The slash is allowed because not every provider addresses a track by a single token: a
+/// SoundCloud track IS a path (`artist/track`), and it reaches that widget as a percent-encoded
+/// query parameter rather than as a path. Permitting it here therefore does not widen what a link
+/// can reach; the segment rules are what keep the guarantee. An empty segment and a segment that
+/// is only dots are both refused, which is what stops `a//b`, `a/../b` and a leading or trailing
+/// slash from being storable in the first place.
+///
+/// It deliberately does NOT pin the exact id format any provider currently uses. This layer stores
+/// a queue; it is not the right place to encode a third party's format, and a change at their end
+/// should not turn every stored entry into an unreadable one. The client that builds the actual
+/// address checks the exact shape it needs (see `youtube.ts` and `providers-audio.ts`), which is
+/// the check that has to be right and is next to the code that depends on it.
+fn valid_juke_link(link: &str) -> bool {
+    if link.is_empty() || link.len() > MAX_JUKEBOX_LINK_CHARS {
+        return false;
+    }
+    let mut segments = 0;
+    for part in link.split('/') {
+        segments += 1;
+        if segments > MAX_JUKEBOX_LINK_SEGMENTS || part.is_empty() {
+            return false;
+        }
+        if part.bytes().all(|b| b == b'.') {
+            return false; // "." and ".." traverse; nothing else made only of dots is an id
+        }
+        if !part
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Edit the text of the message with `id` in a channel document, stamping `edited`. Returns
@@ -1392,6 +1528,9 @@ const L_CURSOR: &str = "cursor";
 /// lacks the key, which reads as "the owner has published no name" and leaves every member on
 /// whatever local label it already had.
 const L_NAME: &str = "name";
+/// The shared **sidebar banner** (base64 image bytes), drawn across the top of the channel list.
+/// Additive like the icon, cursor and name: an older doc lacks the key and reads as "no banner".
+const L_BANNER: &str = "banner";
 
 /// Maximum length of a livery preset id (a short key like `nightshade`).
 pub const MAX_LIVERY_PRESET_BYTES: usize = 32;
@@ -1413,6 +1552,11 @@ pub const MAX_SERVER_ICON_BYTES: usize = 64 * 1024;
 /// tighter budget than the icon; and, like the icon, it rides *inline* (base64) in the livery
 /// document, so this also bounds what gossips.
 pub const MAX_SERVER_CURSOR_BYTES: usize = 16 * 1024;
+/// Maximum **decoded** size of a sidebar banner accepted by [`Server::set_server_banner`]. A
+/// banner is wider than an icon (the UI produces a small landscape JPEG), so it gets a little
+/// more room than the icon; like every image here it rides *inline* in the livery document, so
+/// this also bounds what gossips.
+pub const MAX_SERVER_BANNER_BYTES: usize = 96 * 1024;
 /// Maximum length of a published server name. Long enough for a real group name, short enough
 /// that it cannot be used to push prose through the rail or the cross-server inbox.
 pub const MAX_SERVER_NAME_BYTES: usize = 64;
@@ -1445,12 +1589,16 @@ pub struct Livery {
     /// to be named after its reader. A member may still relabel a server for themselves; this is
     /// what the group is called when nobody has.
     pub name: String,
+    /// The shared sidebar banner as base64 image bytes; empty = no banner. Set/cleared only by
+    /// [`Server::set_server_banner`], with the same independent lifetime as the icon and the
+    /// cursor: [`Server::set_livery`] preserves whatever is stored.
+    pub banner: String,
 }
 
 /// Write the livery document (last-writer-wins on each field; the token map is replaced
-/// wholesale so removing an override actually removes it). Writes **every** field, the icon
-/// and cursor included, so callers that must not disturb the stored images read them back
-/// into `l.icon`/`l.cursor` first (see [`Server::set_livery`]).
+/// wholesale so removing an override actually removes it). Writes **every** field, the images
+/// included, so callers that must not disturb the stored images read them back into
+/// `l.icon`/`l.cursor`/`l.banner` first (see [`Server::set_livery`]).
 fn write_livery(doc: &mut AutoCommit, l: &Livery) -> Result<(), AutomergeError> {
     doc.put(ROOT, L_V, LIVERY_VERSION)?;
     doc.put(ROOT, L_PRESET, l.preset.as_str())?;
@@ -1458,6 +1606,7 @@ fn write_livery(doc: &mut AutoCommit, l: &Livery) -> Result<(), AutomergeError> 
     doc.put(ROOT, L_ICON, l.icon.as_str())?;
     doc.put(ROOT, L_CURSOR, l.cursor.as_str())?;
     doc.put(ROOT, L_NAME, l.name.as_str())?;
+    doc.put(ROOT, L_BANNER, l.banner.as_str())?;
     let tokens = doc.put_object(ROOT, L_TOKENS, ObjType::Map)?;
     for (k, v) in &l.tokens {
         doc.put(&tokens, k.as_str(), v.as_str())?;
@@ -1491,6 +1640,14 @@ fn write_server_name(doc: &mut AutoCommit, name: &str) -> Result<(), AutomergeEr
     Ok(())
 }
 
+/// Write **only** the sidebar banner (`""` clears it), leaving everything else untouched; the
+/// third image with the same independent lifetime as the icon and the cursor.
+fn write_server_banner(doc: &mut AutoCommit, banner: &str) -> Result<(), AutomergeError> {
+    doc.put(ROOT, L_V, LIVERY_VERSION)?;
+    doc.put(ROOT, L_BANNER, banner)?;
+    Ok(())
+}
+
 /// Materialize the livery document (a missing/foreign-shaped field reads as empty; so a
 /// doc written before the icon/cursor keys existed reads back with neither).
 fn read_livery(doc: &AutoCommit) -> Livery {
@@ -1508,6 +1665,7 @@ fn read_livery(doc: &AutoCommit) -> Livery {
         icon: str_field(doc, &ROOT, L_ICON),
         cursor: str_field(doc, &ROOT, L_CURSOR),
         name: str_field(doc, &ROOT, L_NAME),
+        banner: str_field(doc, &ROOT, L_BANNER),
     }
 }
 
@@ -2767,7 +2925,7 @@ fn storage_ref_index(files: &[FileEntry]) -> StorageRefIndex {
 
 /// Index metadata that authorizes one inline-media representation.
 ///
-/// `manifest_version` binds every later range read to the exact chunk manifest that supplied the
+/// `manifest_version` binds every later range read to the complete compatible manifest set supplying the
 /// size and MIME. The plaintext CID is member-authored until a whole-file download verifies it,
 /// so it cannot safely serve as that version by itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2812,9 +2970,9 @@ pub struct FileEntry {
 }
 
 /// A listed file plus how many of its chunks this device already holds locally, for the file
-/// browser's availability indicator. `held_chunks == total_chunks` ⇒ openable with no network
-/// fetch; `0 < held < total` ⇒ partially downloaded; `held == 0` ⇒ not yet downloaded. The counts
-/// are a pure local blob-store check (zero network cost).
+/// browser's availability indicator. Equal counts mean every ciphertext CID is present, not that
+/// the stored bytes have passed verification. Partial counts indicate an incomplete local cache.
+/// These are presence-only checks with zero network cost; opening still authenticates every chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileListing {
     /// The file index entry (metadata).
@@ -2855,6 +3013,10 @@ pub struct StorageHealth {
     /// ciphertext-address and file-layer authentication in this scan. Plaintext CIDs are not used
     /// here: another member can claim the same CID while supplying a different wrapped key/ref.
     pub verified_manifest_versions: HashSet<[u8; 32]>,
+    /// Exact manifest digests admitted by the same bounded equivalence policy as downloads.
+    /// This is metadata compatibility, not possession; inventory must also require exact
+    /// membership in `verified_manifest_versions` before offering a local copy.
+    pub resolvable_manifest_versions: HashSet<[u8; 32]>,
     /// Bytes of verified encrypted file-chunk content (not filesystem allocation or unrelated
     /// avatar/banner blobs).
     pub verified_bytes: u64,
@@ -2950,6 +3112,49 @@ fn write_file_size_limit(doc: &mut AutoCommit, bytes: u64) -> Result<(), Automer
     Ok(())
 }
 
+/// Concurrent first uploads can create distinct List objects at ROOT/FILES. Preserve every such
+/// list rather than treating Automerge's winning object as the whole index. Object-id ordering is
+/// stable across replicas and survives save/load; it also defines the shared bounded row prefix.
+///
+/// Automerge 0.10 internally materializes all conflicting property values in both get/get_all.
+/// This limits application-level list/row work, not the dependency's inherited history allocation.
+fn file_index_lists(doc: &AutoCommit) -> Result<Vec<ObjId>, AutomergeError> {
+    let values = doc.get_all(ROOT, FILES)?;
+    if values.len() > MAX_FILE_ENTRIES {
+        return Err(AutomergeError::Fail);
+    }
+    let mut lists: Vec<_> = values
+        .into_iter()
+        .filter_map(|(value, object)| {
+            matches!(value, Value::Object(ObjType::List)).then_some(object)
+        })
+        .collect();
+    lists.sort_by_key(ToString::to_string);
+    Ok(lists)
+}
+
+/// Snapshot locations before decoding or mutation. Malformed rows still consume the ONE shared
+/// 256-row budget. Deletion walks this snapshot backwards, never newly revealed tail rows.
+fn file_index_positions(
+    doc: &AutoCommit,
+) -> Result<Vec<(ObjId, usize, Option<ObjId>)>, AutomergeError> {
+    let mut positions = Vec::new();
+    for list in file_index_lists(doc)? {
+        let limit = doc.length(&list).min(MAX_FILE_ENTRIES - positions.len());
+        for index in 0..limit {
+            let row = match doc.get(&list, index)? {
+                Some((Value::Object(ObjType::Map), row)) => Some(row),
+                _ => None,
+            };
+            positions.push((list.clone(), index, row));
+        }
+        if positions.len() == MAX_FILE_ENTRIES {
+            break;
+        }
+    }
+    Ok(positions)
+}
+
 /// Append a file entry (name + author + folder path + encoded `FileRef` + circulation expiry)
 /// to the index doc.
 fn write_file_entry(
@@ -2961,9 +3166,9 @@ fn write_file_entry(
     expires: FileExpiry,
     attestation: Option<(&[u8], &[u8])>,
 ) -> Result<(), AutomergeError> {
-    let list = match doc.get(ROOT, FILES)? {
-        Some((Value::Object(ObjType::List), id)) => id,
-        _ => doc.put_object(ROOT, FILES, ObjType::List)?,
+    let list = match file_index_lists(doc)?.pop() {
+        Some(id) => id,
+        None => doc.put_object(ROOT, FILES, ObjType::List)?,
     };
     let index = doc.length(&list);
     let entry = doc.insert_object(&list, index, ObjType::Map)?;
@@ -3046,9 +3251,9 @@ fn bounded_file_bytes(doc: &AutoCommit, obj: &ObjId, key: &str, max: usize) -> O
 /// decoded `FileRef`; entries with a malformed ref are skipped).
 fn read_file_entries(doc: &AutoCommit, group_id: &[u8]) -> Vec<FileEntry> {
     let mut out = Vec::new();
-    if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, FILES) {
-        for i in 0..doc.length(&list).min(MAX_FILE_ENTRIES) {
-            if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&list, i) {
+    if let Ok(positions) = file_index_positions(doc) {
+        for (_, _, row) in positions {
+            if let Some(entry) = row {
                 let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES)
                 else {
                     continue;
@@ -3118,9 +3323,12 @@ fn read_file_entries(doc: &AutoCommit, group_id: &[u8]) -> Vec<FileEntry> {
 }
 
 fn raw_file_index_row_count(doc: &AutoCommit) -> usize {
-    match doc.get(ROOT, FILES) {
-        Ok(Some((Value::Object(ObjType::List), list))) => doc.length(&list),
-        _ => 0,
+    match file_index_lists(doc) {
+        Ok(lists) => lists
+            .iter()
+            .fold(0usize, |count, list| count.saturating_add(doc.length(list))),
+        // Unreadable/over-conflicted metadata must not make a successful append invisible.
+        Err(_) => MAX_FILE_ENTRIES + 1,
     }
 }
 
@@ -3137,12 +3345,8 @@ fn delete_file_entry(
     cid: &[u8],
     folder: Option<&str>,
 ) -> Result<(), AutomergeError> {
-    let list = match doc.get(ROOT, FILES)? {
-        Some((Value::Object(ObjType::List), id)) => id,
-        _ => return Ok(()),
-    };
-    for i in (0..doc.length(&list).min(MAX_FILE_ENTRIES)).rev() {
-        if let Some((Value::Object(ObjType::Map), entry)) = doc.get(&list, i)? {
+    for (list, i, row) in file_index_positions(doc)?.into_iter().rev() {
+        if let Some(entry) = row {
             let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES) else {
                 continue;
             };
@@ -3171,12 +3375,8 @@ fn set_file_entry_expiry(
     folder: &str,
     expires: FileExpiry,
 ) -> Result<(), AutomergeError> {
-    let list = match doc.get(ROOT, FILES)? {
-        Some((Value::Object(ObjType::List), id)) => id,
-        _ => return Ok(()),
-    };
-    for i in 0..doc.length(&list).min(MAX_FILE_ENTRIES) {
-        if let Some((Value::Object(ObjType::Map), entry)) = doc.get(&list, i)? {
+    for (_, _, row) in file_index_positions(doc)? {
+        if let Some(entry) = row {
             let Some(ref_bytes) = bounded_file_bytes(doc, &entry, F_REF, MAX_FILE_REF_BYTES) else {
                 continue;
             };
@@ -3807,6 +4007,39 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.send_reply(channel, text, "").await
     }
 
+    /// The timestamp a new message in `channel` is written with: never earlier than the newest
+    /// message this device has already seen there.
+    ///
+    /// The wall clock alone is not enough, because the log is **ordered by timestamp**
+    /// ([`read_messages`]) and no two members' clocks agree. A device running a few minutes behind
+    /// posts into the past: what it says appears above conversation that had already happened, so
+    /// a reply sorts above the thing it replied to and the sender has to scroll up to find their
+    /// own message. Reconnecting is where this becomes obvious rather than subtle, because
+    /// catch-up hands the returning member a block of history whose newest row is later than their
+    /// own clock, and everything they then say lands inside it.
+    ///
+    /// A Lamport-style step over the wall clock fixes the ordering without needing the clocks to
+    /// agree: a message is stamped `max(now, newest_seen + 1)`. When the clocks do agree this is
+    /// exactly `now` and nothing changes. When they do not, causality still reads correctly,
+    /// because anything this device has seen necessarily happened before what it says next.
+    ///
+    /// Bounded on purpose. A peer whose clock is far in the future would otherwise drag every
+    /// other member's stamps along with it, permanently: one bad clock, and a group's whole
+    /// timeline is years ahead with no way back. The step may therefore carry a stamp at most
+    /// [`CLOCK_SKEW_GRACE_MS`] past this device's own clock, the same grace the unread ceiling
+    /// already applies to a row it is asked to believe. Past that the message sorts under the
+    /// out-of-range row rather than chasing it, which is the same thing the reader sees today.
+    ///
+    /// Not a substitute for a proper causal ordering key, and it does not claim to be one: two
+    /// members who both send while neither has seen the other still order by their clocks alone.
+    fn next_message_ts(&self, channel: u128) -> u64 {
+        let now = self.sync.now_ms();
+        // The list is timestamp-ordered, so its last row carries the newest stamp.
+        let newest = self.with_messages(channel, |msgs| msgs.last().map_or(0, |m| m.ts));
+        let ceiling = now.saturating_add(CLOCK_SKEW_GRACE_MS);
+        now.max(newest.saturating_add(1).min(ceiling))
+    }
+
     /// Send a chat message that replies to `reply_to` (the parent message's id; empty for a plain
     /// message). The pointer is advisory display metadata; it doesn't affect ordering or delivery.
     pub async fn send_reply(
@@ -3816,7 +4049,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         reply_to: &str,
     ) -> Result<(), AppError> {
         let author = self.my_fingerprint();
-        let ts = self.sync.now_ms();
+        let ts = self.next_message_ts(channel);
         let id = self.sync.random_id();
         let reply_to = reply_to.to_string();
         let change = self
@@ -4045,6 +4278,55 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "a jukebox entry must name a file content address".into(),
             ));
         }
+        let name = self.check_juke_room(channel, name)?;
+        self.queue_juke_entry(channel, cid.to_string(), String::new(), String::new(), name)
+            .await
+    }
+
+    /// Queue a **linked** track: a video on somebody else's service, named by id rather than by
+    /// content address. Replies with the entry's fresh id. Any member may, exactly as for a file.
+    ///
+    /// What this does not do is worth stating, because the asymmetry with [`Server::jukebox_add`]
+    /// is the whole design. A file entry names content the group holds and can serve; a linked
+    /// entry names something no member has, and playing it means every listener fetching it from
+    /// a third party themselves. This call therefore reaches no network and checks nothing about
+    /// the video: it cannot say whether the id exists, and it must not, because finding out would
+    /// mean this device contacting that service on a peer's behalf. Whether a listener ever makes
+    /// that request is decided on the listener, at play time, by its own policy.
+    ///
+    /// Rejects a `source` that is not a known one, a `link` that is not
+    /// 1..=[`MAX_JUKEBOX_LINK_CHARS`] URL-safe base64 characters, a blank name or one over
+    /// [`MAX_JUKEBOX_NAME_BYTES`] UTF-8 bytes, and any add to a full queue.
+    pub async fn jukebox_add_link(
+        &mut self,
+        channel: u128,
+        source: &str,
+        link: &str,
+        name: &str,
+    ) -> Result<String, AppError> {
+        if !is_juke_link_source(source) {
+            return Err(AppError::Invalid(format!(
+                "unknown jukebox source: {source:?}"
+            )));
+        }
+        if !valid_juke_link(link) {
+            return Err(AppError::Invalid(
+                "a linked jukebox entry must name a video id".into(),
+            ));
+        }
+        let name = self.check_juke_room(channel, name)?;
+        self.queue_juke_entry(
+            channel,
+            String::new(),
+            source.to_string(),
+            link.to_string(),
+            name,
+        )
+        .await
+    }
+
+    /// The checks both kinds of add share: a usable name, and a queue with room left in it.
+    fn check_juke_room(&self, channel: u128, name: &str) -> Result<String, AppError> {
         let name = name.trim();
         if name.is_empty() {
             return Err(AppError::Invalid("a jukebox entry needs a name".into()));
@@ -4060,12 +4342,27 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "the jukebox is full (max {MAX_JUKEBOX_ENTRIES} entries)"
             )));
         }
+        Ok(name.to_string())
+    }
+
+    /// Mint the entry and post it. Both adds land here so one place decides what a stored entry
+    /// looks like, and neither can drift into writing a shape the reader will not accept.
+    async fn queue_juke_entry(
+        &mut self,
+        channel: u128,
+        cid: String,
+        source: String,
+        link: String,
+        name: String,
+    ) -> Result<String, AppError> {
         let entry = JukeEntry {
             id: self.sync.random_id(),
-            cid: cid.to_string(),
-            name: name.to_string(),
+            cid,
+            name,
             author: self.my_fingerprint(),
             added_ms: self.sync.now_ms(),
+            source,
+            link,
         };
         let id = entry.id.clone();
         self.sync
@@ -4251,9 +4548,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// The check is against this device's view of the index, so two devices adding the same
     /// bytes concurrently can still produce two entries; the same pre-existing situation
     /// [`delete_file`](Self::delete_file) already handles by unlisting every entry for a cid.
-    /// Reuse also means the listing inherits the *first* upload's declared mime, and that a
-    /// dedup against content this device has never downloaded adds a listing whose chunks are
-    /// held elsewhere (re-fetchable, like any other file this device does not hold locally).
+    /// Reuse requires a complete locally authenticated manifest, including whole-file hashing.
+    /// If only metadata or unreadable chunks remain, re-upload publishes a fresh attested repair
+    /// with the same plaintext chunk identities. Other uploaders' attestations stay unchanged.
+    /// Repeated repairs replace only a fully verified local-device row at the same name/path;
+    /// new rows receive a fresh deadline, while replacement preserves the existing deadline.
+    /// A conflicting MIME/chunk layout or over-cap variant set fails with an explicit error.
     ///
     /// **Circulation expiry**: every listing this creates is stamped
     /// `now + `[`FILE_EXPIRY_DEFAULT_MS`] (one month), adjustable afterwards per listing via
@@ -4305,8 +4605,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// As [`add_file`](Self::add_file), but reports completed local upload work as
     /// `(steps_done, steps_total)`. Each sealed/stored chunk is one step and publishing the file
-    /// index entry is the final step, so `done == total` means the file is actually visible to the
-    /// group rather than merely copied into local storage.
+    /// index entry is the final step. `done == total` means verified local possession and local
+    /// publication in the replicated index; it does not acknowledge any remote holder.
     pub async fn add_file_with_progress(
         &mut self,
         name: &str,
@@ -4347,6 +4647,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // Clock-injected (never ambient): the default one-month circulation deadline.
         let expires = FileExpiry::At(self.sync.now_ms().saturating_add(FILE_EXPIRY_DEFAULT_MS));
         let plaintext_cid = Cid::of(bytes);
+        let mut chunk_identities: Vec<_> = bytes
+            .chunks(CHUNK_BYTES)
+            .map(|chunk| (Cid::of(chunk), chunk.len() as u64))
+            .collect();
+        if chunk_identities.is_empty() {
+            chunk_identities.push((Cid::of(&[]), 0));
+        }
         let index_rows = self.file_index_row_count();
         // Dedup on the plaintext cid against the live index (a deleted entry is removed from the
         // list, so only still-shared files match; re-storing after a delete is harmless anyway).
@@ -4355,7 +4662,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .iter()
             .filter(|e| e.cid.as_slice() == plaintext_cid.as_bytes())
             .collect();
-        if let Some(twin) = twins.first() {
+        if let Some(twin) = file_resolution::reusable_upload_entry(
+            &listed,
+            &plaintext_cid,
+            bytes.len() as u64,
+            &chunk_identities,
+            |manifest| self.manifest_held_verified(manifest),
+        ) {
             if let Some(p) = progress {
                 let _ = p.send((0, 1)).await;
             }
@@ -4393,7 +4706,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
             return Ok(plaintext_cid);
         }
-        if index_rows >= MAX_FILE_ENTRIES {
+        if index_rows >= MAX_FILE_ENTRIES
+            && self
+                .owned_upload_slot(name, &folder, &plaintext_cid)
+                .is_none()
+        {
             return Err(AppError::Invalid(format!(
                 "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
             )));
@@ -4473,6 +4790,77 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.clear_staged_blobs().unwrap_or(0)
     }
 
+    /// Local possession means every exact reference opens and the concatenation has the claimed
+    /// identity. Keep only one plaintext chunk in memory; neither metadata nor `has_blob` proves
+    /// this. Publication currently pays this bounded local verification inside the actor.
+    fn manifest_held_verified(&self, manifest: &FileManifest) -> bool {
+        let mut address = catcoms_storage::CidHasher::new();
+        for chunk in &manifest.chunks {
+            let Some(ciphertext) = self.sync.get_blob(&chunk.ciphertext_cid) else {
+                return false;
+            };
+            let Ok(plaintext) = self.sync.open_file(&ciphertext, chunk) else {
+                return false;
+            };
+            address.update(&plaintext);
+        }
+        address.cid() == manifest.plaintext_cid
+    }
+
+    /// A repeat repair may update our own exact slot, never another device's signature. Matching
+    /// the short display fingerprint is insufficient: verify the full local key and attestation.
+    fn owned_upload_slot(&self, name: &str, folder: &str, cid: &Cid) -> Option<ObjId> {
+        let doc = self.sync.doc(DocType::FileIndex, FILE_INDEX_DOC)?.doc();
+        let key = self.sync.my_public_key();
+        let author = self.my_fingerprint();
+        for (_, _, row) in file_index_positions(doc).ok()? {
+            let Some(row) = row else {
+                continue;
+            };
+            if bounded_file_string(doc, &row, F_NAME, MAX_FILE_NAME_BYTES).as_deref() != Some(name)
+                || bounded_file_string(doc, &row, F_PATH, MAX_FILE_PATH_BYTES).as_deref()
+                    != Some(folder)
+                || bounded_file_string(doc, &row, F_AUTHOR, MAX_FILE_AUTHOR_BYTES).as_deref()
+                    != Some(&author)
+                || bounded_file_bytes(doc, &row, F_SIGNER_KEY, 32).as_deref()
+                    != Some(key.as_slice())
+            {
+                continue;
+            }
+            let Some(reference) = bounded_file_bytes(doc, &row, F_REF, MAX_FILE_REF_BYTES) else {
+                continue;
+            };
+            if !FileManifest::decode_or_legacy(&reference)
+                .is_ok_and(|manifest| manifest.plaintext_cid == *cid)
+            {
+                continue;
+            }
+            let Some(signature) = bounded_file_bytes(doc, &row, F_SIGNATURE, 64) else {
+                continue;
+            };
+            if signature
+                .as_slice()
+                .try_into()
+                .is_ok_and(|signature: &[u8; 64]| {
+                    verify_with_public_bytes(
+                        &key,
+                        &file_entry_attestation_payload(
+                            &self.sync.group_id(),
+                            name,
+                            &author,
+                            folder,
+                            &reference,
+                        ),
+                        signature,
+                    )
+                })
+            {
+                return Some(row);
+            }
+        }
+        None
+    }
+
     /// Publish the file-index entry for an upload whose chunks are already sealed and stored,
     /// making it visible to the group. `plaintext_cid` is the address of the **whole** file (a
     /// streaming caller accumulates it with [`CidHasher`](catcoms_storage::CidHasher)) and becomes
@@ -4481,9 +4869,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Content dedup works the same way, with one difference forced by streaming: a streamed
     /// upload only learns its whole-file address after its last chunk, so the twin check lands
     /// *after* sealing rather than before it. When a twin is found the new listing reuses the
-    /// twin's ref (or is skipped entirely, for an identical name + folder) and the chunk blobs
-    /// this upload just wrote are garbage-collected, so a dedup still ends with exactly one sealed
-    /// copy of the content rather than a second, byte-different one.
+    /// twin's ref only after verifying its complete local copy. Otherwise the staged chunks are
+    /// retained and published as a compatible repair. Up to four encrypted variants are admitted;
+    /// MIME, total size and ordered plaintext chunk identities must agree. Publication verifies
+    /// locally, not through remote acknowledgements. Verification currently runs inside this actor
+    /// call with one plaintext chunk in memory; off-actor transfer scheduling remains future work.
     pub async fn publish_upload(
         &mut self,
         name: &str,
@@ -4520,40 +4910,53 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // Clock-injected (never ambient): the default one-month circulation deadline.
         let expires = FileExpiry::At(self.sync.now_ms().saturating_add(FILE_EXPIRY_DEFAULT_MS));
         let index_rows = self.file_index_row_count();
+        let manifest = FileManifest {
+            plaintext_cid,
+            total_size,
+            mime: mime.to_string(),
+            chunks,
+        };
+        if manifest.validate_layout().is_err() {
+            self.discard_upload_chunks(&manifest.chunks);
+            return Err(AppError::Invalid(
+                "the upload's chunk layout is invalid".into(),
+            ));
+        }
         let listed = self.files();
-        let twin = listed
+        let chunk_identities: Vec<_> = manifest
+            .chunks
             .iter()
-            .find(|e| e.cid.as_slice() == plaintext_cid.as_bytes())
-            .map(|e| {
-                (
-                    e.file_ref.clone(),
-                    listed
-                        .iter()
-                        .any(|o| o.cid == e.cid && o.name == name && o.path == folder),
-                )
-            });
-        if let Some((twin_ref, already_here)) = twin {
-            self.discard_upload_chunks(&chunks);
-            if already_here {
-                return Ok(plaintext_cid); // already shared under this exact name + folder
+            .map(|chunk| (chunk.plaintext_cid, chunk.size))
+            .collect();
+        if let Some(twin) = file_resolution::reusable_upload_entry(
+            &listed,
+            &plaintext_cid,
+            total_size,
+            &chunk_identities,
+            |manifest| self.manifest_held_verified(manifest),
+        ) {
+            // Only verified possession makes the fresh encrypted copy redundant.
+            self.discard_upload_chunks(&manifest.chunks);
+            if listed.iter().any(|entry| {
+                entry.cid == plaintext_cid.as_bytes() && entry.name == name && entry.path == folder
+            }) {
+                return Ok(plaintext_cid);
             }
             if index_rows >= MAX_FILE_ENTRIES {
                 return Err(AppError::Invalid(format!(
                     "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
                 )));
             }
-            // Same content, new name/folder: list it again against the SAME sealed blobs; but
-            // with its own fresh deadline, not the twin's.
             let (public_key, signature) =
-                self.file_entry_attestation(name, &author, &folder, &twin_ref)?;
+                self.file_entry_attestation(name, &author, &folder, &twin.file_ref)?;
             self.sync
-                .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                .post(DocType::FileIndex, FILE_INDEX_DOC, |doc| {
                     write_file_entry(
-                        d,
+                        doc,
                         name,
                         &author,
                         &folder,
-                        &twin_ref,
+                        &twin.file_ref,
                         expires,
                         Some((&public_key, &signature)),
                     )
@@ -4561,48 +4964,107 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 .await?;
             return Ok(plaintext_cid);
         }
-        if index_rows >= MAX_FILE_ENTRIES {
-            self.discard_upload_chunks(&chunks);
+        // Repair publishes a new reference; fresh ciphertext can never use the old address.
+        let replacement = self.owned_upload_slot(name, &folder, &plaintext_cid);
+        let replaced_chunks = replacement
+            .as_ref()
+            .and_then(|row| {
+                self.sync
+                    .doc(DocType::FileIndex, FILE_INDEX_DOC)
+                    .and_then(|doc| bounded_file_bytes(doc.doc(), row, F_REF, MAX_FILE_REF_BYTES))
+                    .and_then(|reference| FileManifest::decode_or_legacy(&reference).ok())
+            })
+            .map(|manifest| manifest.chunks)
+            .unwrap_or_default();
+        if replacement.is_none() && index_rows >= MAX_FILE_ENTRIES {
+            self.discard_upload_chunks(&manifest.chunks);
             return Err(AppError::Invalid(format!(
                 "file index has reached its {MAX_FILE_ENTRIES}-entry limit"
             )));
         }
-        let manifest = FileManifest {
-            plaintext_cid,
-            total_size,
-            mime: mime.to_string(),
-            chunks,
-        };
-        // Never publish a listing this node's own reader would reject. A streamed upload assembles
-        // its chunks across many commands, so this is also where a caller that mis-sliced the file
-        // is caught, rather than every peer discovering it at download time.
-        manifest
-            .validate_layout()
-            .map_err(|_| AppError::Invalid("the upload's chunk layout is invalid".into()))?;
-        // Promote before posting, never after. The window between the two is the only one left in
-        // which a crash strands anything, and this ordering makes that window strand *orphans*
-        // (blobs nothing names, harmless) rather than a *published listing whose chunks are still
-        // in staging*, which the next startup sweep would delete out from under the only device
-        // that holds them.
+        if listed
+            .iter()
+            .any(|entry| entry.cid == plaintext_cid.as_bytes())
+        {
+            let Some(resolved) = file_resolution::resolve(&listed, &plaintext_cid) else {
+                self.discard_upload_chunks(&manifest.chunks);
+                return Err(AppError::Invalid(
+                    "conflicting file manifests prevent repair".into(),
+                ));
+            };
+            if !file_resolution::equivalent(&resolved.variants[0].1, &manifest) {
+                self.discard_upload_chunks(&manifest.chunks);
+                return Err(AppError::Invalid(
+                    "repair upload differs from the listed chunk layout or MIME".into(),
+                ));
+            }
+            // Other names may still reference an owned row's old manifest. Reserve a variant
+            // unless replacing this row really removes the last reference to that encryption.
+            let old_ref = replacement.as_ref().and_then(|row| {
+                self.sync
+                    .doc(DocType::FileIndex, FILE_INDEX_DOC)
+                    .and_then(|doc| bounded_file_bytes(doc.doc(), row, F_REF, MAX_FILE_REF_BYTES))
+            });
+            let removes_variant = old_ref.as_ref().is_some_and(|reference| {
+                listed
+                    .iter()
+                    .filter(|entry| &entry.file_ref == reference)
+                    .count()
+                    == 1
+            });
+            if resolved.variants.len() >= file_resolution::MAX_MANIFEST_VARIANTS && !removes_variant
+            {
+                self.discard_upload_chunks(&manifest.chunks);
+                return Err(AppError::Invalid(
+                    "too many encrypted variants to publish a repair".into(),
+                ));
+            }
+        }
+        // Promote before posting. A crash may leave orphans, never a successful listing that
+        // depends on staging a restart clears. Verify the supplied whole-file claim as well.
         for chunk in &manifest.chunks {
-            self.sync.promote_staged_blob(&chunk.ciphertext_cid)?;
+            if let Err(error) = self.sync.promote_staged_blob(&chunk.ciphertext_cid) {
+                self.discard_upload_chunks(&manifest.chunks);
+                return Err(error.into());
+            }
+        }
+        if !self.manifest_held_verified(&manifest) {
+            self.discard_upload_chunks(&manifest.chunks);
+            return Err(AppError::Invalid(
+                "upload chunks are unavailable or failed integrity verification".into(),
+            ));
         }
         let ref_bytes = manifest.encode();
         let (public_key, signature) =
             self.file_entry_attestation(name, &author, &folder, &ref_bytes)?;
-        self.sync
+        let posted = self
+            .sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                write_file_entry(
-                    d,
-                    name,
-                    &author,
-                    &folder,
-                    &ref_bytes,
-                    expires,
-                    Some((&public_key, &signature)),
-                )
+                if let Some(row) = &replacement {
+                    d.put(row, F_REF, ScalarValue::Bytes(ref_bytes.clone()))?;
+                    d.put(row, F_SIGNER_KEY, ScalarValue::Bytes(public_key.clone()))?;
+                    d.put(row, F_SIGNATURE, ScalarValue::Bytes(signature.to_vec()))?;
+                    // Existing per-listing expiry is deliberately preserved on repair.
+                    Ok(())
+                } else {
+                    write_file_entry(
+                        d,
+                        name,
+                        &author,
+                        &folder,
+                        &ref_bytes,
+                        expires,
+                        Some((&public_key, &signature)),
+                    )
+                }
             })
-            .await?;
+            .await;
+        if let Err(error) = posted {
+            self.discard_upload_chunks(&manifest.chunks);
+            return Err(error.into());
+        }
+        // Other names may still depend on the previous encryption; use the existing live-ref GC.
+        self.discard_upload_chunks(&replaced_chunks);
         Ok(plaintext_cid)
     }
 
@@ -4676,17 +5138,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         cid: &Cid,
         progress: Option<&tokio::sync::mpsc::Sender<(usize, usize, Option<String>)>>,
     ) -> Result<Vec<u8>, AppError> {
-        let Some(entry) = self
-            .files()
-            .into_iter()
-            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
-        else {
-            return Err(AppError::Invalid(
-                "no such file in this server's index".into(),
-            ));
-        };
-        let manifest = FileManifest::decode_or_legacy(&entry.file_ref)
-            .map_err(|_| AppError::Invalid("corrupt file reference".into()))?;
+        let resolved = file_resolution::resolve(&self.files(), cid).ok_or_else(|| {
+            AppError::Invalid("no unambiguous file manifest in this server's index".into())
+        })?;
+        let manifest = &resolved.variants[0].1;
         // `total_size` is attacker-controlled (a member authors the manifest); reject an absurd
         // value BEFORE pre-allocating, so a hostile listing can't OOM the downloader's actor.
         if manifest.total_size > MAX_FILE_BYTES as u64 {
@@ -4699,8 +5154,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             let _ = p.send((0, total, None)).await;
         }
         let mut out = Vec::with_capacity(manifest.total_size as usize);
-        for (i, chunk_ref) in manifest.chunks.iter().enumerate() {
-            let (chunk, provider) = self.fetch_and_open_chunk(chunk_ref, i).await?;
+        for i in 0..manifest.chunks.len() {
+            let (chunk, provider) = self.fetch_resolved_chunk(&resolved, i, None).await?;
             out.extend_from_slice(&chunk);
             if let Some(p) = progress {
                 let _ = p.send((i + 1, total, provider)).await;
@@ -4713,18 +5168,6 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         }
         Ok(out)
-    }
-
-    /// Fetch (if not readable) + decrypt one chunk, returning its plaintext bytes and the signed
-    /// provider that served it. The single exclusive-state need on the fetch path is `blobs.put`;
-    /// everything else is read-only. Shared by the all-in-one download and the per-chunk path.
-    async fn fetch_and_open_chunk(
-        &mut self,
-        chunk_ref: &FileRef,
-        idx: usize,
-    ) -> Result<(Vec<u8>, Option<String>), AppError> {
-        self.fetch_and_open_chunk_cancellable(chunk_ref, idx, None)
-            .await
     }
 
     /// Cancellable chunk path for bounded whole-file reads. Local blobs complete normally; a
@@ -4773,14 +5216,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// orchestrator fetches the chunks one per command (see [`Server::fetch_file_chunk`]) so the
     /// actor stays responsive between chunks instead of blocking for the whole download.
     pub fn file_download_plan(&self, cid: &Cid) -> Option<(usize, u64)> {
-        let entry = self
-            .files()
-            .into_iter()
-            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])?;
-        let manifest = FileManifest::decode_or_legacy(&entry.file_ref).ok()?;
-        if manifest.total_size > MAX_FILE_BYTES as u64 {
-            return None;
-        }
+        let resolved = file_resolution::resolve(&self.files(), cid)?;
+        let manifest = &resolved.variants[0].1;
         Some((manifest.chunks.len(), manifest.total_size))
     }
 
@@ -4796,37 +5233,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// too: a file every byte of which was already on this disk could still stall the deck. This
     /// touches no blob, no disk and no network.
     pub fn file_head(&self, cid: &Cid) -> Option<FileMediaHead> {
-        let (entry, manifest, manifest_version) = self.unique_media_entry(cid)?;
+        let resolved = file_resolution::resolve(&self.files(), cid)?;
+        let (entry, manifest) = &resolved.variants[0];
         Some(FileMediaHead {
             total_size: manifest.total_size,
-            mime: entry.mime,
-            manifest_version,
+            mime: entry.mime.clone(),
+            manifest_version: resolved.version,
         })
-    }
-
-    /// Resolve one CID to exactly one current chunk manifest.
-    ///
-    /// A replicated index may contain several legitimate names/paths for identical content, but
-    /// every such row must carry byte-identical `file_ref` bytes. A malicious member can otherwise
-    /// repeat a benign plaintext CID while naming different encrypted chunks; treating the CID as
-    /// the cache identity would authorize those replacement bytes under a stale MIME decision.
-    fn unique_media_entry(&self, cid: &Cid) -> Option<(FileEntry, FileManifest, [u8; 32])> {
-        let mut entries = self
-            .files()
-            .into_iter()
-            .filter(|entry| entry.cid.as_slice() == &cid.as_bytes()[..]);
-        let entry = entries.next()?;
-        let manifest_version = file_manifest_version(&entry.file_ref);
-        if entries.any(|candidate| file_manifest_version(&candidate.file_ref) != manifest_version) {
-            return None;
-        }
-        let manifest = FileManifest::decode_or_legacy(&entry.file_ref).ok()?;
-        // The same guard `read_file_range` applies: a member authors the manifest, so an absurd
-        // declared size must not become a `Content-Range` the player then chases.
-        if manifest.total_size > MAX_FILE_BYTES as u64 {
-            return None;
-        }
-        Some((entry, manifest, manifest_version))
     }
 
     /// Read a byte range of a listed file's plaintext.
@@ -4834,7 +5247,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// This is the media path: a player asks for the window it is about to show rather than the
     /// whole file, so playback can start on the first chunk and a seek costs one chunk instead of
     /// a re-download. It goes through exactly the same local-first fetch as a download
-    /// ([`Server::fetch_and_open_chunk`]), so a chunk already in the vault never touches the
+    /// ([`Server::fetch_file_chunk`]), so a chunk already in the vault never touches the
     /// network and a corrupt one is re-fetched, and every chunk is AEAD-opened before it is
     /// served. What it does *not* do is the whole-file content-address check a download ends
     /// with: that check needs every byte, and the point here is to not have every byte. Chunk
@@ -4847,16 +5260,24 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         start: u64,
         max_len: usize,
     ) -> Result<FileRange, AppError> {
-        let Some((entry, manifest, manifest_version)) = self.unique_media_entry(cid) else {
+        // The media bridge requests one chunk-sized window. Bound this public seam too: a
+        // caller-controlled range must not allocate a whole file, especially with parallel reads.
+        if max_len > CHUNK_BYTES {
             return Err(AppError::Invalid(
-                "no unique file manifest in this server's index".into(),
+                "media range exceeds the response window limit".into(),
+            ));
+        }
+        let Some(resolved) = file_resolution::resolve(&self.files(), cid) else {
+            return Err(AppError::Invalid(
+                "no unambiguous file manifest in this server's index".into(),
             ));
         };
-        if manifest_version != expected_manifest_version {
+        if resolved.version != expected_manifest_version {
             return Err(AppError::Invalid(
                 "file manifest changed after media authorization".into(),
             ));
         }
+        let (entry, manifest) = &resolved.variants[0];
         let mime = entry.mime.clone();
         let total_size = manifest.total_size;
         if total_size > MAX_FILE_BYTES as u64 {
@@ -4864,7 +5285,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "file declares an implausible size".into(),
             ));
         }
-        if start >= total_size {
+        if start >= total_size || max_len == 0 {
             // A player probing past the end is normal, not an error; an empty tail says so.
             return Ok(FileRange {
                 bytes: Vec::new(),
@@ -4879,10 +5300,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let mut buf = Vec::with_capacity((end - start) as usize);
         let mut provider = None;
         for idx in first..=last {
-            let Some(chunk_ref) = manifest.chunks.get(idx).cloned() else {
-                return Err(AppError::Invalid(format!("chunk {idx} is out of range")));
-            };
-            let (chunk, from) = self.fetch_and_open_chunk(&chunk_ref, idx).await?;
+            let (chunk, from) = self.fetch_resolved_chunk(&resolved, idx, None).await?;
             // Every chunk but the last is exactly CHUNK_BYTES (`bytes.chunks(CHUNK_BYTES)` on the
             // way in), which is the whole basis for turning a byte offset into a chunk index
             // without reading everything before it. Check it rather than trust it: if the two ever
@@ -4930,37 +5348,26 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // Re-resolve the manifest each call (cheap vs. a chunk fetch). Deliberate: it keeps the
         // per-chunk path current with the index, so a file unlisted mid-download fails cleanly here
         // rather than serving from a stale manifest.
-        let Some(entry) = self
-            .files()
-            .into_iter()
-            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
-        else {
-            return Err(AppError::Invalid(
-                "no such file in this server's index".into(),
-            ));
-        };
-        let manifest = FileManifest::decode_or_legacy(&entry.file_ref)
-            .map_err(|_| AppError::Invalid("corrupt file reference".into()))?;
-        let Some(chunk_ref) = manifest.chunks.get(idx).cloned() else {
-            return Err(AppError::Invalid(format!("chunk {idx} is out of range")));
-        };
-        self.fetch_and_open_chunk_cancellable(&chunk_ref, idx, cancellation)
+        let resolved = file_resolution::resolve(&self.files(), cid).ok_or_else(|| {
+            AppError::Invalid("no unambiguous file manifest in this server's index".into())
+        })?;
+        self.fetch_resolved_chunk(&resolved, idx, cancellation)
             .await
     }
 
-    /// Whether this device already holds **all** of the file's chunk blobs locally; i.e. it can
-    /// be opened/previewed without a network fetch. (A listed file whose chunks aren't all held
-    /// yet is still downloadable from peers that have them.)
+    /// Cheap local presence hint across compatible encrypted variants. Every chunk must have at
+    /// least one locally present ciphertext. This does not authenticate its storage or file key;
+    /// actual reads and upload dedup verify before treating those bytes as usable.
     pub fn file_available(&self, cid: &Cid) -> bool {
-        let Some(entry) = self
-            .files()
-            .into_iter()
-            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
-        else {
+        let Some(resolved) = file_resolution::resolve(&self.files(), cid) else {
             return false;
         };
-        let (held, total) = self.chunk_holding(&entry);
-        held == total // vacuously true for a (degenerate) zero-chunk file, matching `all()`
+        (0..resolved.variants[0].1.chunks.len()).all(|idx| {
+            resolved
+                .variants
+                .iter()
+                .any(|(_, manifest)| self.sync.has_blob(&manifest.chunks[idx].ciphertext_cid))
+        })
     }
 
     /// How many of a listed file's chunks this device holds locally, as `(held, total)`. A pure
@@ -5085,6 +5492,23 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .then_some(manifest)
             })
             .collect();
+        let mut seen = HashSet::new();
+        for entry in files {
+            let Ok(raw) = entry.cid.as_slice().try_into() else {
+                continue;
+            };
+            let cid = Cid::from_bytes(raw);
+            if seen.insert(cid) {
+                if let Some(resolved) = file_resolution::resolve(files, &cid) {
+                    health.resolvable_manifest_versions.extend(
+                        resolved
+                            .variants
+                            .iter()
+                            .map(|(entry, _)| file_manifest_version(&entry.file_ref)),
+                    );
+                }
+            }
+        }
         health
     }
 
@@ -6335,6 +6759,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     icon: str_field(d, &ROOT, L_ICON),
                     cursor: str_field(d, &ROOT, L_CURSOR),
                     name: str_field(d, &ROOT, L_NAME),
+                    banner: str_field(d, &ROOT, L_BANNER),
                     ..livery
                 };
                 write_livery(d, &kept)
@@ -6427,6 +6852,35 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync
             .post(DocType::Livery, LIVERY_DOC, |d| {
                 write_server_cursor(d, &cursor)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Set (or clear, with `""`) the shared **sidebar banner**; base64 image bytes stored in
+    /// the livery document beside the icon and the cursor, with the same independent lifetime.
+    /// **Owner or admin only**. Rejects malformed base64 and anything over
+    /// [`MAX_SERVER_BANNER_BYTES`] decoded bytes.
+    pub async fn set_server_banner(&mut self, banner: String) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can set the server banner".into(),
+            ));
+        }
+        if !banner.is_empty() {
+            let bytes = B64
+                .decode(banner.as_bytes())
+                .map_err(|e| AppError::Invalid(format!("bad server banner: {e}")))?;
+            if bytes.len() > MAX_SERVER_BANNER_BYTES {
+                return Err(AppError::Invalid(format!(
+                    "server banner too large: {} bytes (max {MAX_SERVER_BANNER_BYTES})",
+                    bytes.len()
+                )));
+            }
+        }
+        self.sync
+            .post(DocType::Livery, LIVERY_DOC, |d| {
+                write_server_banner(d, &banner)
             })
             .await?;
         Ok(())
@@ -9036,6 +9490,217 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_linked_jukebox_entry_names_a_video_and_never_a_file() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+
+        let id = alice
+            .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, "dQw4w9WgXcQ", "A Video")
+            .await
+            .unwrap();
+        let queue = alice.jukebox(GENERAL);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, id);
+        assert_eq!(queue[0].source, JUKE_SOURCE_YOUTUBE);
+        assert_eq!(queue[0].link, "dQw4w9WgXcQ");
+        assert_eq!(queue[0].name, "A Video");
+        assert_eq!(queue[0].author, alice.my_fingerprint());
+        assert_eq!(
+            queue[0].cid, "",
+            "nothing here holds it, so there is nothing to address"
+        );
+        // Queueing a link is not sending a message, exactly as queueing a file is not.
+        assert!(alice.messages(GENERAL).is_empty());
+
+        // Removal works the same way for either kind: the id is the address.
+        alice.jukebox_remove(GENERAL, &id).await.unwrap();
+        assert!(alice.jukebox(GENERAL).is_empty());
+
+        // A source nobody here understands is refused at the door rather than stored to confuse
+        // a reader later. Spotify is on this list deliberately and not by omission: its embed
+        // plays a thirty-second preview unless the listener holds a Premium session, so a room
+        // cannot listen to it together and it is a chat card only.
+        for source in ["", "spotify", "bandcamp", "YOUTUBE", "youtube "] {
+            assert!(
+                alice
+                    .jukebox_add_link(GENERAL, source, "dQw4w9WgXcQ", "V")
+                    .await
+                    .is_err(),
+                "source {source:?} is not one this build knows"
+            );
+        }
+        // A link is placed into an address on every listener's device. These are the ways out of
+        // the part it is written into, and the segment rules are what close them. The slash
+        // itself is allowed, because a SoundCloud track IS a path; what is not allowed is any
+        // shape that could traverse or produce an empty segment.
+        for bad in [
+            "",
+            "has?query",
+            "has#frag",
+            "has%2f",
+            "has space",
+            "a//b",
+            "/leading",
+            "trailing/",
+            "a/../b",
+            "..",
+            ".",
+            "a/./b",
+            "a/b/c/d/e",
+        ] {
+            assert!(
+                alice
+                    .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, bad, "V")
+                    .await
+                    .is_err(),
+                "link {bad:?} could leave its path segment"
+            );
+        }
+        let long_link = "a".repeat(MAX_JUKEBOX_LINK_CHARS + 1);
+        assert!(alice
+            .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, &long_link, "V")
+            .await
+            .is_err());
+        // The name rules are the ones a file entry has, because they bound the same document.
+        assert!(alice
+            .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, "dQw4w9WgXcQ", "  ")
+            .await
+            .is_err());
+        let over = "n".repeat(MAX_JUKEBOX_NAME_BYTES + 1);
+        assert!(alice
+            .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, "dQw4w9WgXcQ", &over)
+            .await
+            .is_err());
+        assert!(alice.jukebox(GENERAL).is_empty(), "nothing was queued");
+
+        // Both kinds share one queue and one cap: a room cannot get more room by mixing them.
+        for i in 0..MAX_JUKEBOX_ENTRIES {
+            if i % 2 == 0 {
+                alice
+                    .jukebox_add(GENERAL, &format!("bee{i:x}"), &format!("File {i}"))
+                    .await
+                    .unwrap();
+            } else {
+                alice
+                    .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, &format!("vid{i:0>8}"), "V")
+                    .await
+                    .unwrap();
+            }
+        }
+        assert_eq!(alice.jukebox(GENERAL).len(), MAX_JUKEBOX_ENTRIES);
+        assert!(alice
+            .jukebox_add_link(GENERAL, JUKE_SOURCE_YOUTUBE, "dQw4w9WgXcQ", "V")
+            .await
+            .is_err());
+        assert_eq!(alice.jukebox(GENERAL).len(), MAX_JUKEBOX_ENTRIES);
+    }
+
+    #[tokio::test]
+    async fn a_linked_entry_may_name_any_source_this_build_can_play() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+
+        // Every source in the closed set round-trips, so adding one to the list is all it takes.
+        for source in JUKE_LINK_SOURCES {
+            alice
+                .jukebox_add_link(GENERAL, source, "someid", &format!("{source} track"))
+                .await
+                .unwrap();
+        }
+        let queue = alice.jukebox(GENERAL);
+        assert_eq!(queue.len(), JUKE_LINK_SOURCES.len());
+        let mut sources: Vec<&str> = queue.iter().map(|e| e.source.as_str()).collect();
+        sources.sort_unstable();
+        let mut expected: Vec<&str> = JUKE_LINK_SOURCES.to_vec();
+        expected.sort_unstable();
+        assert_eq!(sources, expected);
+        assert!(queue.iter().all(|e| e.cid.is_empty()));
+
+        // A SoundCloud track is addressed by a path, not a token, so a slash has to survive
+        // storage. It is the shape of the segments that keeps the guarantee, not the absence of
+        // the separator; see `valid_juke_link`.
+        let id = alice
+            .jukebox_add_link(
+                GENERAL,
+                JUKE_SOURCE_SOUNDCLOUD,
+                "artist/sets/a-mix",
+                "A Mix",
+            )
+            .await
+            .unwrap();
+        let stored = alice
+            .jukebox(GENERAL)
+            .into_iter()
+            .find(|e| e.id == id)
+            .expect("the path-addressed entry is readable back");
+        assert_eq!(stored.link, "artist/sets/a-mix");
+        assert_eq!(stored.source, JUKE_SOURCE_SOUNDCLOUD);
+    }
+
+    #[tokio::test]
+    async fn a_queue_entry_that_claims_to_be_both_kinds_is_not_a_track() {
+        // A peer writes the channel document directly, so the reader is the boundary, not the
+        // add call. An entry naming BOTH a file and a video says two different things about who
+        // fetches what from where; resolving it in favour of either would be this device deciding
+        // what that peer meant, so it is not a playable track at all.
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        alice
+            .jukebox_add(GENERAL, "deadbeef", "Real Track")
+            .await
+            .unwrap();
+
+        let confused = JukeEntry {
+            id: "e_confused".into(),
+            cid: "deadbeef".into(),
+            name: "Both At Once".into(),
+            author: alice.my_fingerprint(),
+            added_ms: 1_000,
+            source: JUKE_SOURCE_YOUTUBE.into(),
+            link: "dQw4w9WgXcQ".into(),
+        };
+        // A source this build does not know, which is the other half of the same rule.
+        let unknown = JukeEntry {
+            id: "e_unknown".into(),
+            cid: String::new(),
+            name: "From The Future".into(),
+            author: alice.my_fingerprint(),
+            added_ms: 1_000,
+            source: "vimeo".into(),
+            link: "12345678".into(),
+        };
+        // A linked entry whose link is junk: stored shape is checked on the way out too.
+        let junk = JukeEntry {
+            id: "e_junk".into(),
+            cid: String::new(),
+            name: "Bad Link".into(),
+            author: alice.my_fingerprint(),
+            added_ms: 1_000,
+            source: JUKE_SOURCE_YOUTUBE.into(),
+            link: "../../etc/passwd".into(),
+        };
+        for entry in [confused, unknown, junk] {
+            let written = entry.clone();
+            alice
+                .sync
+                .post(DocType::Channel, GENERAL, move |d| {
+                    add_juke_entry_in_doc(d, &written)
+                })
+                .await
+                .unwrap();
+        }
+
+        let queue = alice.jukebox(GENERAL);
+        assert_eq!(
+            queue.len(),
+            1,
+            "only the well-formed entry is a track; got {:?}",
+            queue.iter().map(|e| &e.id).collect::<Vec<_>>()
+        );
+        assert_eq!(queue[0].cid, "deadbeef");
+    }
+
+    #[tokio::test]
     async fn a_jukebox_queue_round_trips_between_two_members() {
         let hub = Hub::new();
         let alice_peer = PeerId::from_u64(1);
@@ -9133,6 +9798,57 @@ mod tests {
         // Editing/deleting an unknown (or not-your-own) message is refused.
         assert!(alice.edit_message(GENERAL, "deadbeef", "x").await.is_err());
         assert!(alice.delete_message(GENERAL, "deadbeef").await.is_err());
+    }
+
+    /// A send is never stamped before what this device has already seen, and the step is bounded.
+    ///
+    /// The log is ordered by timestamp, so a clock running behind wrote straight into the past:
+    /// what was said last appeared above conversation that had already happened, and a reply sorted
+    /// above its own parent. Nothing about it shows until two clocks disagree, which is why it was
+    /// a reconnect that made it visible.
+    #[tokio::test]
+    async fn a_send_is_never_stamped_before_what_this_device_has_already_seen() {
+        let hub = Hub::new();
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_on(&hub, PeerId::from_u64(1), &clock, 1);
+        alice.open_channel(GENERAL).await.unwrap();
+        alice.send_message(GENERAL, "first").await.unwrap();
+        assert_eq!(
+            alice.messages(GENERAL)[0].ts,
+            T0,
+            "an agreeing clock is used as it is"
+        );
+
+        // The clock is corrected backwards a minute: NTP, a suspended VM, a dual boot.
+        clock.set_wall_ms(T0 - 60_000);
+        alice.send_message(GENERAL, "second").await.unwrap();
+        let msgs = alice.messages(GENERAL);
+        assert_eq!(
+            msgs[1].text, "second",
+            "what was said last still reads last"
+        );
+        assert_eq!(
+            msgs[1].ts,
+            T0 + 1,
+            "stamped one past the row it followed, not into the past"
+        );
+
+        // Bounded, so a peer whose clock is far ahead cannot drag this device's stamps with it and
+        // leave the group's whole timeline permanently in the future.
+        clock.set_wall_ms(T0 + 30 * 86_400_000);
+        alice.send_message(GENERAL, "a month ahead").await.unwrap();
+        clock.set_wall_ms(T0);
+        alice.send_message(GENERAL, "corrected").await.unwrap();
+        let corrected = alice
+            .messages(GENERAL)
+            .into_iter()
+            .find(|m| m.text == "corrected")
+            .expect("the message is in the log");
+        assert_eq!(
+            corrected.ts,
+            T0 + CLOCK_SKEW_GRACE_MS,
+            "the step stops at the clock grace rather than chasing an out-of-range row"
+        );
     }
 
     #[tokio::test]
@@ -9891,6 +10607,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repaired_upload_survives_vault_reopen_with_manifest_and_attestation_intact() {
+        // Exercise both publication paths through the desktop's persistent blob-store seam.
+        // A renamed repair retains the unavailable old manifest; a same-name repair replaces
+        // our own signed row. Neither may rely on staging or in-memory decryption state.
+        for streamed in [false, true] {
+            for renamed in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let data = b"repair persisted across a complete vault close";
+                let (cid, snapshot, entries, version) = {
+                    let mut rng = ChaCha20Rng::seed_from_u64(71);
+                    let store =
+                        ServerStore::open(dir.path(), b"repair-test-secret", &mut rng).unwrap();
+                    let mut alice = founder();
+                    alice.set_blob_store(store.blob_store("repair-group").unwrap());
+                    alice.open_files().await.unwrap();
+                    let cid = stream_upload(&mut alice, "original.bin", "", data).await;
+                    let original_version = alice.file_head(&cid).unwrap().manifest_version;
+                    for blob in alice.sync.blob_cids() {
+                        alice.sync.delete_blob(&blob).unwrap();
+                    }
+                    let name = if renamed {
+                        "repair.bin"
+                    } else {
+                        "original.bin"
+                    };
+                    if streamed {
+                        stream_upload(&mut alice, name, "", data).await;
+                    } else {
+                        alice
+                            .add_file(name, "application/octet-stream", "", data)
+                            .await
+                            .unwrap();
+                    }
+                    let version = alice.file_head(&cid).unwrap().manifest_version;
+                    assert_ne!(version, original_version);
+                    let entries = alice.files();
+                    assert_eq!(entries.len(), if renamed { 2 } else { 1 });
+                    // A separate abandoned upload must be collected on restore without taking
+                    // any promoted repair bytes with it.
+                    alice
+                        .seal_upload_chunk(b"unfinished upload", "application/octet-stream")
+                        .unwrap();
+                    (cid, alice.snapshot().unwrap(), entries, version)
+                };
+
+                let mut rng = ChaCha20Rng::seed_from_u64(72);
+                let store = ServerStore::open(dir.path(), b"repair-test-secret", &mut rng).unwrap();
+                let hub = Hub::new();
+                let mut restored = Server::restore(
+                    &snapshot,
+                    hub.join(PeerId::from_u64(9)),
+                    ChaCha20Rng::seed_from_u64(73),
+                    Box::new(ManualClock::new(2_000)),
+                    "alice",
+                )
+                .unwrap();
+                restored.set_blob_store(store.blob_store("repair-group").unwrap());
+                assert_eq!(
+                    restored.clear_staged_uploads(),
+                    1,
+                    "startup sweeps only the abandoned upload"
+                );
+                assert_eq!(restored.clear_staged_uploads(), 0);
+                assert_eq!(
+                    restored.files(),
+                    entries,
+                    "exact manifest bytes and verified identities survive"
+                );
+                assert!(restored.files().iter().all(|entry| entry.author_verified));
+                assert_eq!(restored.file_head(&cid).unwrap().manifest_version, version);
+                assert!(restored.file_available(&cid));
+                assert_eq!(restored.download_file(&cid).await.unwrap(), data);
+                assert_eq!(
+                    restored
+                        .read_file_range(&cid, version, 0, data.len())
+                        .await
+                        .unwrap()
+                        .bytes,
+                    data
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn the_owner_removes_a_member_and_a_non_owner_cannot() {
         let hub = Hub::new();
         let alice_peer = PeerId::from_u64(1);
@@ -10138,6 +10939,7 @@ mod tests {
             icon: String::new(),
             cursor: String::new(),
             name: String::new(),
+            banner: String::new(),
         };
         alice.set_livery(l.clone()).await.unwrap();
         assert_eq!(alice.livery(), l);
@@ -10255,6 +11057,53 @@ mod tests {
             alice.livery(),
             Livery::default(),
             "no rejected cursor write landed"
+        );
+
+        // --- the sidebar banner (the third image, same independent lifetime) ---------
+        let banner = B64.encode([0xff, 0xd8, 0xff, 0xe0, 4, 5, 6]); // stand-in JPEG bytes
+        alice.set_server_banner(banner.clone()).await.unwrap();
+        assert_eq!(alice.livery().banner, banner, "the banner reads back");
+        alice.set_livery(l.clone()).await.unwrap();
+        assert_eq!(
+            alice.livery().banner,
+            banner,
+            "the banner survived a colour publish"
+        );
+        alice.set_livery(Livery::default()).await.unwrap();
+        assert_eq!(
+            alice.livery().banner,
+            banner,
+            "removing the livery keeps the banner"
+        );
+        alice.set_server_icon(icon.clone()).await.unwrap();
+        alice.set_server_cursor(cursor.clone()).await.unwrap();
+        let after = alice.livery();
+        assert_eq!(after.banner, banner, "the other images kept the banner");
+        assert_eq!(after.icon, icon);
+        assert_eq!(after.cursor, cursor);
+        alice.set_server_banner(String::new()).await.unwrap();
+        let after = alice.livery();
+        assert_eq!(after.banner, "", "`\"\"` clears the banner");
+        assert_eq!(after.icon, icon, "clearing the banner kept the icon");
+        assert_eq!(after.cursor, cursor, "clearing the banner kept the cursor");
+        alice.set_server_icon(String::new()).await.unwrap();
+        alice.set_server_cursor(String::new()).await.unwrap();
+        assert_eq!(alice.livery(), Livery::default());
+
+        // The banner has its own decoded-size cap, and rejects non-base64 like the others.
+        let too_big = B64.encode(vec![0u8; MAX_SERVER_BANNER_BYTES + 1]);
+        assert!(matches!(
+            alice.set_server_banner(too_big).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.set_server_banner("not base64!!".into()).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert_eq!(
+            alice.livery(),
+            Livery::default(),
+            "no rejected banner write landed"
         );
     }
 
@@ -12232,6 +13081,474 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reupload_repairs_missing_bytes_for_whole_and_streamed_uploads() {
+        for streamed in [false, true] {
+            for renamed in [false, true] {
+                let mut alice = founder();
+                alice.open_files().await.unwrap();
+                let data = b"obtained again outside the group";
+                let cid = stream_upload(&mut alice, "original.bin", "", data).await;
+                let original = alice.files().remove(0);
+                for chunk in chunk_cids(&alice, &cid, "") {
+                    alice.sync.delete_blob(&chunk).unwrap();
+                }
+                assert!(!alice.file_available(&cid));
+                let name = if renamed {
+                    "repair.bin"
+                } else {
+                    "original.bin"
+                };
+                if streamed {
+                    assert_eq!(stream_upload(&mut alice, name, "", data).await, cid);
+                } else {
+                    assert_eq!(
+                        alice
+                            .add_file(name, "application/octet-stream", "", data)
+                            .await
+                            .unwrap(),
+                        cid
+                    );
+                }
+                assert!(
+                    alice.file_available(&cid),
+                    "successful reupload must retain readable bytes"
+                );
+                let head = alice.file_head(&cid).expect("repair remains previewable");
+                assert_eq!(
+                    alice
+                        .read_file_range(&cid, head.manifest_version, 0, data.len())
+                        .await
+                        .unwrap()
+                        .bytes,
+                    data
+                );
+                assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+                if renamed {
+                    assert!(alice
+                        .files()
+                        .iter()
+                        .any(|entry| entry.file_ref == original.file_ref));
+                }
+                assert!(alice.files().iter().all(|entry| entry.author_verified));
+                assert_eq!(
+                    alice.clear_staged_uploads(),
+                    0,
+                    "repair bytes must survive startup cleanup"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn independent_identical_uploads_converge_without_breaking_previews() {
+        for shared_seed in [false, true] {
+            let clock = ManualClock::new(T0);
+            let (mut alice, mut bob, alice_peer) = wiki_duo(&clock).await;
+            alice.open_files().await.unwrap();
+            bob.open_files().await.unwrap();
+            if shared_seed {
+                alice
+                    .add_file("seed.txt", "text/plain", "", b"initialize shared list")
+                    .await
+                    .unwrap();
+                let (catchup, _) =
+                    tokio::join!(bob.request_files_catchup(alice_peer), alice.sync_once());
+                catchup.unwrap();
+                assert_eq!(
+                    bob.files().len(),
+                    1,
+                    "both uploads start from the same shared list"
+                );
+            }
+            let data = b"\x89PNG\r\n\x1a\nindependently shared";
+            let cid = alice
+                .add_file("alice.png", "image/png", "alice", data)
+                .await
+                .unwrap();
+            bob.add_file("bob.png", "image/png", "bob", data)
+                .await
+                .unwrap();
+            let alice_ref = alice
+                .files()
+                .into_iter()
+                .find(|entry| entry.cid == cid.as_bytes())
+                .unwrap()
+                .file_ref;
+            let bob_ref = bob
+                .files()
+                .into_iter()
+                .find(|entry| entry.cid == cid.as_bytes())
+                .unwrap()
+                .file_ref;
+            assert_ne!(
+                alice_ref, bob_ref,
+                "fresh encryption must remain randomized"
+            );
+            drain_sync(&mut alice).await;
+            drain_sync(&mut bob).await;
+            tokio::select! {
+                result = alice.request_files_catchup(PeerId::from_u64(2)) => { result.unwrap(); }
+                _ = async { loop { bob.sync_once().await.unwrap(); } } => unreachable!(),
+            }
+            tokio::select! {
+                result = bob.request_files_catchup(alice_peer) => { result.unwrap(); }
+                _ = async { loop { alice.sync_once().await.unwrap(); } } => unreachable!(),
+            }
+            let expected_rows = if shared_seed { 3 } else { 2 };
+            assert_eq!(alice.files().len(), expected_rows);
+            assert_eq!(bob.files().len(), expected_rows);
+            assert_eq!(alice.file_index_row_count(), expected_rows);
+            assert_eq!(bob.file_index_row_count(), expected_rows);
+            let head = alice
+                .file_head(&cid)
+                .expect("compatible encrypted variants resolve");
+            assert_eq!(
+                bob.file_head(&cid).unwrap().manifest_version,
+                head.manifest_version
+            );
+            // Neither peer runs its responder here: each must use its own authenticated copy.
+            for server in [&mut alice, &mut bob] {
+                assert_eq!(
+                    server
+                        .read_file_range(&cid, head.manifest_version, 0, data.len())
+                        .await
+                        .unwrap()
+                        .bytes,
+                    data
+                );
+                assert_eq!(server.download_file(&cid).await.unwrap(), data);
+            }
+            // Leave only the non-canonical encryption at the remote provider. This forces the
+            // missing canonical network attempt to fall through to a separately authenticated ref.
+            let canonical = file_resolution::resolve(&alice.files(), &cid)
+                .unwrap()
+                .variants[0]
+                .0
+                .file_ref
+                .clone();
+            let (requester, provider) = if canonical == alice_ref {
+                (&mut alice, &mut bob)
+            } else {
+                (&mut bob, &mut alice)
+            };
+            for blob in requester.sync.blob_cids() {
+                requester.sync.delete_blob(&blob).unwrap();
+            }
+            let (_cancel, cancellation) = tokio::sync::watch::channel(true);
+            assert!(requester
+                .fetch_file_chunk_cancellable(
+                    &cid,
+                    0,
+                    Some(RequestCancellation::new(cancellation, None))
+                )
+                .await
+                .is_err());
+            assert!(
+                requester.sync.blob_cids().is_empty(),
+                "cancelled fallback stores nothing"
+            );
+            let provider_author = provider.my_fingerprint();
+            let (bytes, from) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::select! {
+                    result = requester.fetch_file_chunk(&cid, 0) => result,
+                    _ = async { loop { provider.sync_once().await.unwrap(); } } => unreachable!(),
+                }
+            })
+            .await
+            .expect("remote variant fallback is bounded")
+            .unwrap();
+            assert_eq!(bytes, data);
+            assert_eq!(from.as_deref(), Some(provider_author.as_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn reupload_repairs_remote_metadata_without_rewriting_its_author() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob, alice_peer) = wiki_duo(&clock).await;
+        alice.open_files().await.unwrap();
+        bob.open_files().await.unwrap();
+        let data = b"a copy obtained outside the unavailable group";
+        let cid = stream_upload(&mut alice, "shared.bin", "", data).await;
+        tokio::select! {
+            result = bob.request_files_catchup(alice_peer) => { result.unwrap(); }
+            _ = async { loop { alice.sync_once().await.unwrap(); } } => unreachable!(),
+        }
+        let original = bob.files().remove(0);
+        assert!(!bob.file_available(&cid));
+        drop(alice);
+        for _ in 0..6 {
+            // Repeated loss/repair must reuse Bob's signed slot, preserving Alice's identity.
+            for blob in bob.sync.blob_cids() {
+                bob.sync.delete_blob(&blob).unwrap();
+            }
+            stream_upload(&mut bob, "shared.bin", "", data).await;
+            assert_eq!(bob.files().len(), 2);
+            assert!(bob
+                .files()
+                .iter()
+                .any(|entry| entry.file_ref == original.file_ref
+                    && entry.author_identity == original.author_identity
+                    && entry.author_verified));
+            assert_eq!(bob.download_file(&cid).await.unwrap(), data);
+            let health = bob.storage_health();
+            assert_eq!(health.verified_manifest_versions.len(), 1);
+            assert_eq!(health.resolvable_manifest_versions.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn reupload_checks_keys_and_never_replaces_forged_local_ownership() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"present ciphertext with an unusable key";
+        let cid = stream_upload(&mut alice, "shared.bin", "", data).await;
+        let original = alice.files().remove(0);
+        let mut bad = FileManifest::decode_or_legacy(&original.file_ref).unwrap();
+        bad.chunks[0].wrapped_key.ciphertext[0] ^= 1;
+        // A modified peer changes only the reference; the copied local signature is now invalid.
+        let row = alice.owned_upload_slot("shared.bin", "", &cid).unwrap();
+        alice
+            .sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |doc| {
+                doc.put(&row, F_REF, ScalarValue::Bytes(bad.encode()))
+            })
+            .await
+            .unwrap();
+        assert!(
+            alice.file_available(&cid),
+            "existence alone is not verification"
+        );
+        assert!(!alice.manifest_held_verified(&bad));
+        stream_upload(&mut alice, "shared.bin", "", data).await;
+        assert_eq!(
+            alice.files().len(),
+            2,
+            "forged local ownership is never a replacement slot"
+        );
+        assert!(alice
+            .files()
+            .iter()
+            .any(|entry| entry.file_ref == bad.encode() && !entry.author_verified));
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn upload_publication_rejects_missing_or_misidentified_chunks() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"must actually be present";
+        let chunk = alice.seal_upload_chunk(data, "text/plain").unwrap();
+        alice.discard_upload_chunks(std::slice::from_ref(&chunk));
+        assert!(alice
+            .publish_upload(
+                "missing",
+                "text/plain",
+                "",
+                Cid::of(data),
+                data.len() as u64,
+                vec![chunk]
+            )
+            .await
+            .is_err());
+        let chunk = alice.seal_upload_chunk(data, "text/plain").unwrap();
+        assert!(alice
+            .publish_upload(
+                "wrong",
+                "text/plain",
+                "",
+                Cid::of(b"a different file"),
+                data.len() as u64,
+                vec![chunk]
+            )
+            .await
+            .is_err());
+        assert!(alice.files().is_empty());
+        assert!(alice.sync.blob_cids().is_empty());
+        assert_eq!(alice.clear_staged_uploads(), 0);
+    }
+
+    #[tokio::test]
+    async fn reupload_repairs_a_missing_tail_and_reclaims_replaced_orphans() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = vec![37; CHUNK_BYTES + 29];
+        let cid = stream_upload(&mut alice, "two.bin", "", &data).await;
+        let old = chunk_cids(&alice, &cid, "");
+        alice.sync.delete_blob(&old[1]).unwrap();
+        stream_upload(&mut alice, "two.bin", "", &data).await;
+        assert_eq!(alice.files().len(), 1);
+        assert_eq!(
+            alice.sync.blob_cids().len(),
+            2,
+            "old unreferenced head is reclaimed"
+        );
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn full_index_permits_owned_repair_but_rejects_new_repair_rows() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"repair without growing a full index";
+        let cid = stream_upload(&mut alice, "same.bin", "", data).await;
+        alice
+            .sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |doc| {
+                let (_, list) = doc.get(ROOT, FILES)?.unwrap();
+                for index in 1..MAX_FILE_ENTRIES {
+                    doc.insert_object(&list, index, ObjType::Map)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        for blob in alice.sync.blob_cids() {
+            alice.sync.delete_blob(&blob).unwrap();
+        }
+        alice
+            .add_file("same.bin", "application/octet-stream", "", data)
+            .await
+            .unwrap();
+        assert_eq!(alice.file_index_row_count(), MAX_FILE_ENTRIES);
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+        for blob in alice.sync.blob_cids() {
+            alice.sync.delete_blob(&blob).unwrap();
+        }
+        let chunk = alice
+            .seal_upload_chunk(data, "application/octet-stream")
+            .unwrap();
+        assert!(alice
+            .publish_upload(
+                "new.bin",
+                "application/octet-stream",
+                "",
+                cid,
+                data.len() as u64,
+                vec![chunk]
+            )
+            .await
+            .is_err());
+        assert_eq!(alice.clear_staged_uploads(), 0);
+        assert!(alice.sync.blob_cids().is_empty());
+        assert_eq!(alice.file_index_row_count(), MAX_FILE_ENTRIES);
+    }
+
+    #[tokio::test]
+    async fn manifest_resolution_binds_the_set_and_rejects_incompatible_or_excess_variants() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"same plaintext, independent encryptions";
+        let cid = stream_upload(&mut alice, "shared.bin", "", data).await;
+        let original = alice.files().remove(0);
+        let old_version = alice.file_head(&cid).unwrap().manifest_version;
+        let base = FileManifest::decode_or_legacy(&original.file_ref).unwrap();
+        let mut entries = vec![original.clone()];
+        for _ in 1..file_resolution::MAX_MANIFEST_VARIANTS {
+            let mut manifest = base.clone();
+            manifest.chunks = vec![alice
+                .seal_upload_chunk(data, "application/octet-stream")
+                .unwrap()];
+            let mut entry = original.clone();
+            entry.file_ref = manifest.encode();
+            entries.push(entry);
+        }
+        let resolved = file_resolution::resolve(&entries, &cid).unwrap();
+        assert_ne!(resolved.version, old_version);
+        entries.reverse();
+        assert_eq!(
+            file_resolution::resolve(&entries, &cid).unwrap().version,
+            resolved.version
+        );
+        let mut hostile = base.clone();
+        for change in 0..3 {
+            match change {
+                0 => hostile.chunks[0].plaintext_cid = Cid::of(b"substituted bytes"),
+                1 => {
+                    hostile = base.clone();
+                    hostile.mime = "image/png".into();
+                }
+                _ => {
+                    hostile = base.clone();
+                    hostile.chunks[0].mime = "image/png".into();
+                }
+            }
+            let mut entry = original.clone();
+            entry.file_ref = hostile.encode();
+            assert!(file_resolution::resolve(&[original.clone(), entry], &cid).is_none());
+        }
+        let mut fifth = original;
+        let mut manifest = base;
+        manifest.chunks = vec![alice
+            .seal_upload_chunk(data, "application/octet-stream")
+            .unwrap()];
+        fifth.file_ref = manifest.encode();
+        entries.push(fifth);
+        assert!(file_resolution::resolve(&entries, &cid).is_none());
+    }
+
+    #[tokio::test]
+    async fn upload_reuse_rejects_hostile_work_plans_before_verification() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"tiny upload";
+        let cid = stream_upload(&mut alice, "tiny.bin", "", data).await;
+        let entry = alice.files().remove(0);
+        let mut manifest = FileManifest::decode_or_legacy(&entry.file_ref).unwrap();
+        manifest.total_size = MAX_FILE_BYTES as u64;
+        let mut repeated = manifest.chunks[0].clone();
+        repeated.size = CHUNK_BYTES as u64;
+        manifest.chunks = vec![repeated; MAX_FILE_BYTES / CHUNK_BYTES];
+        let mut hostile = entry.clone();
+        hostile.file_ref = manifest.encode();
+        let mut attempts = 0;
+        assert!(file_resolution::reusable_upload_entry(
+            &[hostile],
+            &cid,
+            data.len() as u64,
+            &[(Cid::of(data), data.len() as u64)],
+            |_| {
+                attempts += 1;
+                true
+            }
+        )
+        .is_none());
+        assert_eq!(
+            attempts, 0,
+            "a tiny upload must never open a hostile large plan"
+        );
+
+        let mut wrong_chunk = FileManifest::decode_or_legacy(&entry.file_ref).unwrap();
+        wrong_chunk.chunks[0].plaintext_cid = Cid::of(b"same size, different chunk");
+        let mut hostile = entry.clone();
+        hostile.file_ref = wrong_chunk.encode();
+        assert!(file_resolution::reusable_upload_entry(
+            &[hostile],
+            &cid,
+            data.len() as u64,
+            &[(Cid::of(data), data.len() as u64)],
+            |_| {
+                attempts += 1;
+                true
+            }
+        )
+        .is_none());
+        assert_eq!(attempts, 0, "equal sizes do not establish chunk identity");
+        assert!(file_resolution::reusable_upload_entry(
+            &[entry],
+            &cid,
+            data.len() as u64,
+            &[(Cid::of(data), data.len() as u64)],
+            |_| {
+                attempts += 1;
+                true
+            }
+        )
+        .is_some());
+        assert_eq!(attempts, 1);
+    }
+
+    #[tokio::test]
     async fn a_sealed_chunk_is_not_held_content_until_its_upload_publishes() {
         // The distinction staging exists to make. A chunk on disk that no manifest names must not
         // look like a chunk this device holds: that is what let an interrupted upload leave blobs
@@ -12991,6 +14308,94 @@ mod tests {
         }
     }
 
+    #[test]
+    fn concurrent_file_lists_share_one_budget_and_mutate_the_same_visible_rows() {
+        let bytes = b"independent first lists";
+        let (chunk, _) = catcoms_storage::seal_file(
+            bytes,
+            "text/plain",
+            &[9; 32],
+            &mut ChaCha20Rng::seed_from_u64(88),
+        )
+        .unwrap();
+        let reference = FileManifest {
+            plaintext_cid: Cid::of(bytes),
+            total_size: bytes.len() as u64,
+            mime: "text/plain".into(),
+            chunks: vec![chunk],
+        }
+        .encode();
+        let mut left = AutoCommit::new();
+        left.set_actor(automerge::ActorId::from(vec![1]));
+        let mut right = AutoCommit::new();
+        right.set_actor(automerge::ActorId::from(vec![2]));
+        for doc in [&mut left, &mut right] {
+            for _ in 0..150 {
+                write_file_entry(
+                    doc,
+                    "same.txt",
+                    "author",
+                    "docs",
+                    &reference,
+                    FileExpiry::Never,
+                    None,
+                )
+                .unwrap();
+            }
+        }
+        left.merge(&mut right).unwrap();
+        assert_eq!(file_index_lists(&left).unwrap().len(), 2);
+        assert_eq!(raw_file_index_row_count(&left), 300);
+        assert_eq!(
+            read_file_entries(&left, b"test group").len(),
+            MAX_FILE_ENTRIES
+        );
+        set_file_entry_expiry(
+            &mut left,
+            Cid::of(bytes).as_bytes(),
+            "docs",
+            FileExpiry::At(7),
+        )
+        .unwrap();
+        assert!(read_file_entries(&left, b"test group")
+            .iter()
+            .all(|row| row.expires == FileExpiry::At(7)));
+        // Save/load and another merge preserve every list identity and the same bounded prefix.
+        let mut restored = AutoCommit::load(&left.save()).unwrap();
+        restored.merge(&mut right).unwrap();
+        assert_eq!(
+            read_file_entries(&restored, b"test group"),
+            read_file_entries(&left, b"test group")
+        );
+        delete_file_entry(&mut restored, Cid::of(bytes).as_bytes(), Some("docs")).unwrap();
+        assert_eq!(raw_file_index_row_count(&restored), 300 - MAX_FILE_ENTRIES);
+        assert!(
+            read_file_entries(&restored, b"test group")
+                .iter()
+                .all(|row| row.expires == FileExpiry::Never),
+            "deletion cannot walk newly revealed tail rows or reset the budget for each list"
+        );
+    }
+
+    #[test]
+    fn malformed_rows_in_another_first_list_still_consume_the_shared_budget() {
+        let mut left = AutoCommit::new();
+        left.set_actor(automerge::ActorId::from(vec![1]));
+        let mut right = AutoCommit::new();
+        right.set_actor(automerge::ActorId::from(vec![2]));
+        let list = left.put_object(ROOT, FILES, ObjType::List).unwrap();
+        for index in 0..MAX_FILE_ENTRIES {
+            left.insert(&list, index, "malformed").unwrap();
+        }
+        let list = right.put_object(ROOT, FILES, ObjType::List).unwrap();
+        right.insert_object(&list, 0, ObjType::Map).unwrap();
+        left.merge(&mut right).unwrap();
+        assert_eq!(raw_file_index_row_count(&left), MAX_FILE_ENTRIES + 1);
+        let positions = file_index_positions(&left).unwrap();
+        assert_eq!(positions.len(), MAX_FILE_ENTRIES);
+        assert!(positions.iter().all(|(_, _, row)| row.is_none()));
+    }
+
     #[tokio::test]
     async fn oversized_file_listing_fields_fail_closed() {
         let clock = ManualClock::new(T0);
@@ -13302,6 +14707,168 @@ mod tests {
             HashSet::from([a.clone()]),
             "both grammars hit (case-folded); an empty/non-hex/unterminated marker and a \
              status ref do not"
+        );
+    }
+
+    /// Three members whose clocks disagree wildly, converging after writing separately.
+    ///
+    /// Convergence itself is never in doubt: timestamps decide presentation order and nothing
+    /// else, so no clock can make a message disappear. What a bad clock can reach is everything
+    /// downstream of that order, which is where a lost message actually looks like a lost message:
+    /// the read boundary, the newest-row anchor, and the stamp this device writes next.
+    ///
+    /// The case is a partition heal, so the writes happen before anyone has seen anyone else. That
+    /// matters because [`Server::next_message_ts`] steps over the newest row this device has
+    /// already seen; a member who has synchronized first cannot post into the past by accident,
+    /// and this test is about the member who has not.
+    #[tokio::test]
+    async fn divergent_clocks_converge_and_cannot_park_the_read_boundary() {
+        const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+        const YEAR_MS: u64 = 365 * DAY_MS;
+
+        let hub = Hub::new();
+        // Joining is an authenticated exchange with a freshness window, so everyone joins in
+        // agreement and the clocks diverge afterwards. `set_wall_ms` is the right seam for that:
+        // it models an administrator or NTP correction and leaves elapsed time alone, so the
+        // monotonic invariant the sync layer's cooldowns rely on still holds.
+        let alice_clock = ManualClock::new(T0);
+        let bob_clock = ManualClock::new(T0);
+        let carol_clock = ManualClock::new(T0);
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder_on(&hub, alice_peer, &alice_clock, 1);
+        alice.subscribe_control().await.unwrap();
+        alice.open_channel(GENERAL).await.unwrap();
+
+        let bob_invite = alice.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(bob_clock.clone()),
+                "bob",
+                alice_peer,
+                &bob_invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = bob.unwrap();
+        bob.subscribe_control().await.unwrap();
+        bob.open_channel(GENERAL).await.unwrap();
+
+        let carol_invite = alice.mint_invite([8u8; 16], u64::MAX, vec![]).unwrap();
+        let (carol, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(3)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(3),
+                Box::new(carol_clock.clone()),
+                "carol",
+                alice_peer,
+                &carol_invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut carol = carol.unwrap();
+        carol.subscribe_control().await.unwrap();
+        carol.open_channel(GENERAL).await.unwrap();
+        assert!(bob.sync_once().await.unwrap(), "Bob applies Carol's Add");
+
+        // Now the clocks diverge: three days behind, and a year ahead.
+        bob_clock.set_wall_ms(T0 - 3 * DAY_MS);
+        carol_clock.set_wall_ms(T0 + YEAR_MS);
+
+        // Alice and Carol write and reach each other. Bob never synchronizes at all, so his own
+        // list stays empty and his stamp is his own clock rather than a step over anything he has
+        // seen: he is the isolated micelle.
+        alice
+            .send_message(GENERAL, "from the present")
+            .await
+            .unwrap();
+        carol
+            .send_message(GENERAL, "from the future")
+            .await
+            .unwrap();
+        for _ in 0..8 {
+            if alice.messages(GENERAL).len() >= 2 {
+                break;
+            }
+            assert!(alice.sync_once().await.unwrap());
+        }
+        let before_heal = alice.messages(GENERAL);
+        assert_eq!(before_heal.len(), 2, "Alice's own message and Carol's");
+        let carol_row = before_heal.last().expect("Carol sorts last").clone();
+        assert_eq!(carol_row.text, "from the future");
+
+        // Alice reads everything, so her cursor names the newest row from somebody else.
+        let read_mark = UnreadProbe {
+            divider_id: carol_row.id.clone(),
+            divider_ts: carol_row.ts,
+            now_ms: alice_clock.now_ms(),
+        };
+
+        // The heal arrives: Bob writes three days in the past and only now reaches anyone.
+        assert!(bob.messages(GENERAL).is_empty(), "Bob has seen nobody");
+        bob.send_message(GENERAL, "from the past").await.unwrap();
+        for _ in 0..8 {
+            if alice.messages(GENERAL).len() >= 3 {
+                break;
+            }
+            assert!(alice.sync_once().await.unwrap());
+        }
+        let healed = alice.messages(GENERAL);
+        assert_eq!(healed.len(), 3, "nothing a bad clock touched went missing");
+        assert_eq!(
+            healed.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+            vec!["from the past", "from the present", "from the future"],
+            "presentation order is by timestamp, so the heal lands in the past"
+        );
+
+        let page = alice.message_page(
+            GENERAL,
+            &MessagePageQuery {
+                anchor: PageAnchor::Tail,
+                before: 16,
+                after: 0,
+                unread: Some(read_mark),
+            },
+        );
+        let unread = page.unread.expect("the query asked for it");
+
+        // A year-ahead stamp cannot become the boundary. If it could, every legitimate message
+        // after it would fail the "newer than the mark" test and the indicator would go quiet
+        // exactly when it matters.
+        assert!(
+            unread.ceiling_ts <= alice_clock.now_ms() + CLOCK_SKEW_GRACE_MS,
+            "the ceiling stays within the grace, not a year out"
+        );
+        assert_eq!(
+            unread.ceiling_ts, healed[1].ts,
+            "it settles on the newest plausible row, which is Alice's own"
+        );
+
+        // And the contract the desktop's late-arrival path exists to cover. Bob's message arrived
+        // after the mark was taken, but it sorts before it, and the cursor rule is positional; so
+        // the native summary does not count it. `lateArrivals` in `apps/desktop/src/unread.ts` is
+        // what reports it instead. That division is deliberate, and it is load-bearing rather than
+        // decorative: without it this arrival is silently already-read.
+        assert_eq!(
+            unread.count, 0,
+            "a row that heals into the past is not ordinary unread"
+        );
+        assert_eq!(unread.first_index, None);
+
+        // Finally, one hostile clock must not drag the group's timeline with it. Alice has now
+        // seen a stamp a year ahead, and her next message still lands at her own clock.
+        alice.send_message(GENERAL, "after the heal").await.unwrap();
+        let latest = alice
+            .messages(GENERAL)
+            .into_iter()
+            .find(|m| m.text == "after the heal")
+            .expect("Alice's own message");
+        assert!(
+            latest.ts <= alice_clock.now_ms() + CLOCK_SKEW_GRACE_MS,
+            "the Lamport step is bounded by the grace, so one bad clock cannot move the group"
         );
     }
 }

@@ -28,6 +28,50 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::AppError;
 
+mod creative_references;
+mod epoch_intents;
+mod epoch_owner;
+mod epoch_recovery;
+mod epoch_registry;
+#[cfg(test)]
+pub(crate) use epoch_registry::registry_full_loads_for_test;
+#[cfg(test)]
+pub(crate) use epoch_registry::tests::performance::save_inventory_fixture;
+pub(crate) use epoch_registry::{RegistrySourceCapture, RegistrySourceStamp};
+mod epoch_studio;
+pub use creative_references::{CreativeReferences, MAX_CREATIVE_REFERENCES};
+pub use epoch_intents::{EpochIntentBudget, EpochIntentState, MAX_VAULT_INTENT_BYTES};
+pub use epoch_owner::EpochOwnerReceiptState;
+pub use epoch_recovery::cleanup::{
+    EpochStorageCleanup, EpochStorageCleanup as EpochRecoveryCleanup, EpochStorageCleanupProgress,
+    EpochStorageCleanupProgress as RecoveryCleanupProgress,
+};
+pub use epoch_recovery::inventory::{
+    EpochInventoryCoverage, EpochRecordKind, EpochStorageInventory,
+    EpochStorageInventory as EpochRecoveryInventory, EpochStorageInventoryEntry,
+    EpochStorageInventoryEntry as RecoveryInventoryEntry, EpochStorageOrphan,
+    EpochStorageOrphan as RecoveryOrphan, EpochStorageScan, EpochStorageScan as EpochRecoveryScan,
+    EpochStorageScanProgress, EpochStorageScanProgress as RecoveryScanProgress,
+};
+pub use epoch_recovery::{EpochRecoveryAction, EpochRecoveryState, EpochRecoveryUpdate};
+pub use epoch_registry::{
+    EpochRegistryState, RegistryAdoptionOutcome, RegistryInstallOutcome,
+    RegistryOwnerRotationOutcome, RegistryPageAdmission, RegistryReplayHold, RegistryReplayOutcome,
+    RegistryReplayPass, RegistryReplayProgress, RegistryReplayStep, RegistryReplayTicket,
+};
+#[cfg(test)]
+pub(crate) use epoch_studio::source::studio_full_restores_for_test;
+#[cfg(test)]
+pub(crate) use epoch_studio::tests::performance::{
+    fill_studio_epoch_fixture, save_studio_source_fixture, studio_owner_decision_fixture,
+};
+pub use epoch_studio::{
+    EpochStudioBudget, EpochStudioState, StudioAdoptionOutcome, StudioPageAdmission,
+    StudioRotationOutcome,
+};
+pub(crate) use epoch_studio::{PreparedStudioSource, StudioSourceCapture};
+pub mod epoch_budget;
+
 /// One persisted server in the registry: enough to relist it in the UI and reload its
 /// sealed snapshot. `invite` is the founder's own invite text (empty for a joiner).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,6 +405,22 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 pub struct ServerStore {
     dir: PathBuf,
     keys: KeyHierarchy,
+    // Process-local freshness only, never wire authority. Replaced before any intent-file I/O;
+    // budgets made from older scans (or another mounted vault) cannot authorize a new write.
+    intent_generation: std::sync::Arc<()>,
+    // Studio budget minting/write attempts and five-family cleanup invalidate captured scans.
+    // Other raw P1 adapters still require the same sole coordinator/exclusive accounting owner.
+    studio_generation: std::sync::Arc<()>,
+    // Pure validation metadata; every reuse requires freshly authenticated identical bytes.
+    // Never substitutes for an inventory, generation check, source load or write budget.
+    inventory_cache: epoch_recovery::inventory::cache::RecordCache,
+    // One owned verified Studio graph, never a cloned writable gate. Mount drop releases it.
+    // Exact authenticated bytes and live context are rechecked before automatic ingest.
+    studio_source: Option<epoch_studio::source::RetainedSource>,
+    creative_protection: creative_references::SharedProtection,
+    // Stable only for this physical mount, unlike the rotating intent-inventory token. Replay
+    // passes are local work cursors, not authority across reopen or the native UI-lock boundary.
+    replay_mount: std::sync::Arc<()>,
     // This OS lock is intentionally held until the store is dropped. The in-process Tauri mutex
     // serializes commands, while this guard prevents a second app process from forking durable MLS,
     // invite-ledger, registry, or transport state from the same starting snapshot.
@@ -368,6 +428,12 @@ pub struct ServerStore {
 }
 
 impl ServerStore {
+    /// Crate-private physical-mount identity for ephemeral registry receive handles. Not an
+    /// inventory freshness token or native unlock lease: explicit UI lock can retain this mount.
+    pub(crate) fn registry_mount(&self) -> std::sync::Arc<()> {
+        self.replay_mount.clone()
+    }
+
     /// Open (or initialize) the store at `dir`, unlocking the vault with `passphrase`. A
     /// wrong passphrase for an existing vault is an error (the DEK never decrypts), never a
     /// silent re-init that would orphan the existing sealed servers.
@@ -386,8 +452,14 @@ impl ServerStore {
         // first-launch power loss could retain a synced record but forget the newly created parent.
         sync_directory(&dir).map_err(|error| AppError::Io(error.to_string()))?;
         Ok(Self {
+            creative_protection: creative_references::Protection::new(&dir.join("servers")),
             dir,
             keys,
+            intent_generation: std::sync::Arc::new(()),
+            studio_generation: std::sync::Arc::new(()),
+            inventory_cache: Default::default(),
+            studio_source: None,
+            replay_mount: std::sync::Arc::new(()),
             _session: session,
         })
     }
@@ -621,9 +693,29 @@ impl ServerStore {
     /// vault's `blob_key` (content-addressed by plaintext CID, so the mesh fetch is
     /// unchanged); the bytes survive restart and are opaque without the passphrase.
     pub fn blob_store(&self, key: &str) -> Result<Box<dyn BlobStore + Send>, AppError> {
+        // A namespace alias must not bypass full-group deletion protection. Legacy local/test
+        // names remain supported, but separators/dot components are never a blob namespace.
+        if key.is_empty()
+            || key.len() > 512
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(AppError::Invalid("invalid blob namespace".into()));
+        }
         let dir = self.dir.join("blobs").join(key);
-        let store = SealingBlobStore::open(dir, self.keys.blob_key()?, OsCryptoRng)?;
-        Ok(Box::new(store))
+        let store = SealingBlobStore::open(&dir, self.keys.blob_key()?, OsCryptoRng)?;
+        let inner = Box::new(catcoms_storage::kept::KeptBlobStore::open(
+            Box::new(store),
+            dir.join("kept"),
+            self.keys.blob_key()?,
+            OsCryptoRng,
+        ));
+        Ok(Box::new(creative_references::ProtectedBlobs {
+            inner,
+            group: hex::decode(key).unwrap_or_else(|_| key.as_bytes().to_vec()),
+            protection: self.creative_protection.clone(),
+        }))
     }
 
     /// Read + unseal the registry (empty if none yet).
@@ -635,6 +727,16 @@ impl ServerStore {
         let sealed = unframe(&bytes)?;
         let plain = Zeroizing::new(unseal(&self.keys.db_key()?, &sealed)?);
         decode_registry(&plain)
+    }
+}
+
+impl Drop for ServerStore {
+    fn drop(&mut self) {
+        // A blob handle may outlive its vault mount. It must not delete under stale pins after
+        // a new mount has written metadata. This does not grant old handles new read authority.
+        if let Ok(mut state) = self.creative_protection.lock() {
+            state.unknown();
+        }
     }
 }
 

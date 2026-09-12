@@ -19,19 +19,26 @@
 //! proposal/commit linearization of MLS membership changes and the anti-entropy
 //! sync protocol over the network.
 
+mod bounded_change;
+pub mod checkpoint;
 pub mod doc;
 pub mod epoch;
 pub mod op;
+pub mod registry;
+pub mod registry_epoch;
+pub mod studio;
 
 use thiserror::Error;
 
+pub use checkpoint::{CheckpointOrigin, CheckpointSeed, VerifiedCheckpoint, MAX_CHECKPOINT_BYTES};
 pub use doc::{AppliedOp, EncryptedDoc, MAX_DELIVERY_TARGETS};
 pub use epoch::{
     epoch_id, epoch_zero_id, tenure_id, Admission, AdmittedOperation, CloseRecord, ClosureStats,
     DomainOp, EpochGate, EpochPhase, InheritedCheckpoint, IntentLedger, LocalIntent,
     LogicalDocument, OwnerReceiptJournal, Receipt, ReceiptBook, ReceiptHeadProof, ReceiptIngest,
-    ReceiptRepair, RecoveryConflict, RecoveryConflictValue, RecoveryElement, RecoveryReason,
-    RecoverySlots, RecoverySnapshot, RecoveryTombstone, RecoveryTransition, VerifiedReceipt,
+    ReceiptRepair, ReceiptRepairIngest, RecoveryConflict, RecoveryConflictValue, RecoveryElement,
+    RecoveryReason, RecoverySlots, RecoverySnapshot, RecoveryTombstone, RecoveryTransition,
+    VerifiedReceipt,
 };
 pub use op::{SealedOp, SignedOp};
 

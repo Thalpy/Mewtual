@@ -72,7 +72,7 @@ fn is_epoch_managed_doc_type(doc_type: DocType) -> bool {
     )
 }
 
-fn hash_parts(domain: &str, parts: &[&[u8]]) -> Hash32 {
+pub(crate) fn hash_parts(domain: &str, parts: &[&[u8]]) -> Hash32 {
     let mut h = Sha256::new();
     for part in std::iter::once(domain.as_bytes()).chain(parts.iter().copied()) {
         let len = u32::try_from(part.len()).expect("P1 hash parts are protocol-bounded");
@@ -279,6 +279,11 @@ pub struct IntentLedger {
 }
 
 impl IntentLedger {
+    /// Full scope authenticated by the enclosing vault record, including for an empty ledger.
+    pub fn document(&self) -> &LogicalDocument {
+        &self.document
+    }
+
     /// Create an empty ledger for one server-bound logical document.
     pub fn new(document: LogicalDocument) -> Self {
         Self {
@@ -333,9 +338,24 @@ impl IntentLedger {
 
     /// Remove intents proven final by a receipted closure.
     ///
-    /// This method performs no persistence itself. Settlement must first persist excluded content
-    /// in recovery and atomically commit the returned ledger state with the installed checkpoint.
+    /// This method performs no persistence itself or full-envelope comparison. Settlement must
+    /// verify the covered envelopes, flush the entire receipted source, persist excluded recovery,
+    /// then durably save this monotonic retirement BEFORE atomically replacing that source with
+    /// its checkpoint. Until replacement the source is the restart proof. Markers/acks are not.
     pub fn remove_receipted(&mut self, operation_ids: &BTreeSet<Hash32>) -> usize {
+        self.remove_ids(operation_ids)
+    }
+
+    /// Remove entries moved to manual recovery, NOT proven final. The exclusive store caller
+    /// must first match complete own envelopes against actual typed recovery, durably flush
+    /// that record, and exclude any operation present in the current signed log. The bounded
+    /// recovery/eviction policy now owns the remaining copy. This helper performs no I/O or
+    /// authorization; unlike remove_receipted it makes no receipt/finality assertion.
+    pub fn remove_to_manual_recovery(&mut self, operation_ids: &BTreeSet<Hash32>) -> usize {
+        self.remove_ids(operation_ids)
+    }
+
+    fn remove_ids(&mut self, operation_ids: &BTreeSet<Hash32>) -> usize {
         let before = self.intents.len();
         self.intents.retain(|id, intent| {
             if operation_ids.contains(id) {
@@ -625,6 +645,10 @@ impl CloseRecord {
             || self.doc_type != logical_document.doc_type
             || encrypted_doc.doc_type() != self.doc_type
             || encrypted_doc.doc_id() != self.doc_id
+            || encrypted_doc
+                .checkpoint_origin()
+                .map_or(0, |origin| origin.epoch())
+                != self.closed_epoch
         {
             return Err(ReplError::EpochScope);
         }
@@ -672,11 +696,8 @@ impl CloseRecord {
         let owner = group
             .designated_committer()
             .ok_or(ReplError::EpochAuthority)?;
-        let reached_lower_bound = operations.len() >= 10_000
-            || encoded_bytes >= 2 * 1024 * 1024
-            || by_device.iter().any(|(author, (count, bytes))| {
-                *author != owner && (*count >= MAX_DEVICE_OPERATIONS || *bytes >= MAX_DEVICE_BYTES)
-            });
+        let reached_lower_bound =
+            close_lower_bound_reached(operations.len(), encoded_bytes, &by_device, owner);
         if !reached_lower_bound {
             return Err(ReplError::EpochBound);
         }
@@ -812,6 +833,31 @@ pub struct VerifiedReceipt {
     closed_epoch: u64,
     close_record_hash: Hash32,
     receipt_hash: Hash32,
+    seed_change_hash: Hash32,
+}
+
+impl VerifiedReceipt {
+    /// Scope authenticated by owner/tenure verification. Existing verified state may be retained
+    /// after succession; a newly received receipt must still pass current-owner verification.
+    pub fn document(&self) -> &LogicalDocument {
+        &self.document
+    }
+    /// The one epoch closed by this receipt.
+    pub fn closed_epoch(&self) -> u64 {
+        self.closed_epoch
+    }
+    /// Exact close that derives the authorized checkpoint document id.
+    pub fn close_record_hash(&self) -> Hash32 {
+        self.close_record_hash
+    }
+    /// Exact Automerge change hash authorized as the checkpoint's only unsigned root.
+    pub fn seed_change_hash(&self) -> Hash32 {
+        self.seed_change_hash
+    }
+    /// Receipt identity used by the settlement journal.
+    pub fn receipt_hash(&self) -> Hash32 {
+        self.receipt_hash
+    }
 }
 
 /// Owner-signed choice that resolves one visible receipt-equivocation fault.
@@ -821,6 +867,9 @@ pub struct ReceiptRepair {
     pub document: LogicalDocument,
     /// Tenure in which both conflicting receipts were signed.
     pub tenure_id: Hash32,
+    /// V2 binds the repairing owner's tenure separately from the faulting receipts' tenure.
+    /// `None` is historical v1 only; it cannot authorize live repair after A-to-B-to-A succession.
+    pub issuer_tenure_start_group_epoch: Option<u64>,
     /// Conflicting receipt hashes, stored ascending so delivery order cannot affect the record.
     pub receipt_hashes: [Hash32; 2],
     /// One of `receipt_hashes`, selected by the current owner.
@@ -1064,12 +1113,22 @@ impl Receipt {
             || group.member_signature_key(&owner).as_deref() != Some(&self.owner_public_key)
             || self.tenure_start_group_epoch != expected_tenure_start_group_epoch
             || self.tenure_start_group_epoch > group.epoch()
-            || self.tenure_id
-                != tenure_id(
-                    &self.document.server_id,
-                    &self.owner_public_key,
-                    self.tenure_start_group_epoch,
-                )
+        {
+            return Err(ReplError::EpochAuthority);
+        }
+        self.restore_verified_from_vault()
+    }
+
+    /// Recreate a previously verified capability from an authenticated local restart unit.
+    /// This deliberately does not assert present-day owner authority. Never use it on network
+    /// receipts: succession must not erase locally verified history, nor authorize new history.
+    pub(crate) fn restore_verified_from_vault(&self) -> Result<VerifiedReceipt, ReplError> {
+        if self.tenure_id
+            != tenure_id(
+                &self.document.server_id,
+                &self.owner_public_key,
+                self.tenure_start_group_epoch,
+            )
             || self.closed_epoch == u64::MAX
             || self.inherited.epoch() > self.closed_epoch
             || !verify_with_public_bytes(
@@ -1085,6 +1144,7 @@ impl Receipt {
             closed_epoch: self.closed_epoch,
             close_record_hash: self.close_record_hash,
             receipt_hash: self.hash(),
+            seed_change_hash: self.seed_change_hash,
         })
     }
 
@@ -1155,7 +1215,8 @@ impl Receipt {
 }
 
 impl ReceiptRepair {
-    /// Sign a repair after the application has durably persisted the choice it is about to make.
+    /// Encode a legacy v1 repair for historical compatibility. New live repair must use
+    /// [`Self::sign_in_tenure`]; a v1 record carries no proof of which tenure authorized it.
     pub fn sign(
         document: LogicalDocument,
         tenure_id: Hash32,
@@ -1173,6 +1234,7 @@ impl ReceiptRepair {
         let mut repair = Self {
             document,
             tenure_id,
+            issuer_tenure_start_group_epoch: None,
             receipt_hashes,
             selected_receipt_hash,
             repair_sequence,
@@ -1186,15 +1248,53 @@ impl ReceiptRepair {
         Ok(repair)
     }
 
+    /// Prepare a tenure-bound repair. The application must durably persist these exact bytes
+    /// before publishing or changing the selected source; signing alone grants no I/O authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_in_tenure(
+        document: LogicalDocument,
+        fault_tenure_id: Hash32,
+        receipt_hashes: [Hash32; 2],
+        selected_receipt_hash: Hash32,
+        repair_sequence: u64,
+        issuer_tenure_start_group_epoch: u64,
+        owner: &MlsDevice,
+    ) -> Result<Self, ReplError> {
+        if repair_sequence == 0 {
+            return Err(ReplError::ReceiptConflict);
+        }
+        let mut repair = Self::sign(
+            document,
+            fault_tenure_id,
+            receipt_hashes,
+            selected_receipt_hash,
+            repair_sequence,
+            owner,
+        )?;
+        repair.issuer_tenure_start_group_epoch = Some(issuer_tenure_start_group_epoch);
+        repair.signature = owner.sign(&repair.signature_hash())?;
+        if repair.encode().len() > MAX_RECEIPT_BYTES {
+            return Err(ReplError::EpochBound);
+        }
+        Ok(repair)
+    }
+
     fn unsigned_bytes(&self) -> Vec<u8> {
         let mut e = Encoder::new();
-        e.put_u8(1);
+        e.put_u8(if self.issuer_tenure_start_group_epoch.is_some() {
+            2
+        } else {
+            1
+        });
         e.put_bytes(&self.document.server_id)
             .expect("server id was bounded");
         e.put_u16(self.document.doc_type.tag());
         e.put_bytes(&self.document.logical_key)
             .expect("logical key was bounded");
         put_hash(&mut e, &self.tenure_id);
+        if let Some(start) = self.issuer_tenure_start_group_epoch {
+            e.put_u64(start);
+        }
         put_hash(&mut e, &self.receipt_hashes[0]);
         put_hash(&mut e, &self.receipt_hashes[1]);
         put_hash(&mut e, &self.selected_receipt_hash);
@@ -1205,25 +1305,60 @@ impl ReceiptRepair {
 
     fn signature_hash(&self) -> Hash32 {
         let unsigned = self.unsigned_bytes();
-        hash_parts("catcoms-repair-sig:v1", &[&unsigned])
+        let domain = if self.issuer_tenure_start_group_epoch.is_some() {
+            "catcoms-repair-sig:v2"
+        } else {
+            "catcoms-repair-sig:v1"
+        };
+        hash_parts(domain, &[&unsigned])
     }
 
     /// Stable repair record hash.
     pub fn hash(&self) -> Hash32 {
         let unsigned = self.unsigned_bytes();
-        hash_parts("catcoms-repair:v1", &[&unsigned, &self.signature])
+        let domain = if self.issuer_tenure_start_group_epoch.is_some() {
+            "catcoms-repair:v2"
+        } else {
+            "catcoms-repair:v1"
+        };
+        hash_parts(domain, &[&unsigned, &self.signature])
     }
 
-    /// Verify document scope, current-owner authority, canonical hash order and signature.
-    pub fn verify_current_owner(&self, group: &ServerGroup) -> Result<(), ReplError> {
+    /// Verify live authority against a tenure observed independently of this record. Historical
+    /// v1 and an old tenure of the same owner key both fail closed. Newcomers without a verified
+    /// issuer-tenure observation must hold, never substitute the repair's own claimed epoch.
+    pub fn verify_current_owner(
+        &self,
+        group: &ServerGroup,
+        expected_issuer_tenure_start: u64,
+    ) -> Result<(), ReplError> {
         if self.document.server_id != group.group_id() {
             return Err(ReplError::EpochScope);
         }
         let owner = DeviceId::from_public_key_bytes(&self.owner_public_key);
-        if self.receipt_hashes[0] >= self.receipt_hashes[1]
-            || !self.receipt_hashes.contains(&self.selected_receipt_hash)
+        if self.issuer_tenure_start_group_epoch != Some(expected_issuer_tenure_start)
+            || expected_issuer_tenure_start > group.epoch()
             || group.designated_committer() != Some(owner)
             || group.member_signature_key(&owner).as_deref() != Some(&self.owner_public_key)
+        {
+            return Err(ReplError::EpochAuthority);
+        }
+        self.verify_historical()
+    }
+
+    /// Historical signature/shape checking is not current-owner authority. Used only when
+    /// restoring sealed evidence; it cannot manufacture a network repair capability.
+    fn verify_historical(&self) -> Result<(), ReplError> {
+        // Public Rust values can bypass the decoder's allocation cap. Bound fields BEFORE
+        // encoding them, just as receipt/close owner adapters do at their public boundaries.
+        if self.document.server_id.is_empty()
+            || self.document.server_id.len() > MAX_SERVER_ID_BYTES
+            || self.document.logical_key.is_empty()
+            || self.document.logical_key.len() > MAX_LOGICAL_KEY_BYTES
+            || self.owner_public_key.len() != 32
+            || self.encode().len() > MAX_RECEIPT_BYTES
+            || self.receipt_hashes[0] >= self.receipt_hashes[1]
+            || !self.receipt_hashes.contains(&self.selected_receipt_hash)
             || !verify_with_public_bytes(
                 &self.owner_public_key,
                 &self.signature_hash(),
@@ -1254,7 +1389,8 @@ impl ReceiptRepair {
         let signature = get_fixed(&mut outer)?;
         outer.finish().map_err(|_| ReplError::Malformed)?;
         let mut d = Decoder::new(unsigned);
-        if d.get_u8().map_err(|_| ReplError::Malformed)? != 1 {
+        let version = d.get_u8().map_err(|_| ReplError::Malformed)?;
+        if version != 1 && version != 2 {
             return Err(ReplError::Malformed);
         }
         let server_id = d.get_bytes().map_err(|_| ReplError::Malformed)?.to_vec();
@@ -1263,6 +1399,11 @@ impl ReceiptRepair {
         let logical_key = d.get_bytes().map_err(|_| ReplError::Malformed)?.to_vec();
         let document = LogicalDocument::new(server_id, doc_type, logical_key)?;
         let tenure_id = get_fixed(&mut d)?;
+        let issuer_tenure_start_group_epoch = if version == 2 {
+            Some(d.get_u64().map_err(|_| ReplError::Malformed)?)
+        } else {
+            None
+        };
         let receipt_hashes = [get_fixed(&mut d)?, get_fixed(&mut d)?];
         let selected_receipt_hash = get_fixed(&mut d)?;
         let repair_sequence = d.get_u64().map_err(|_| ReplError::Malformed)?;
@@ -1277,6 +1418,7 @@ impl ReceiptRepair {
         let repair = Self {
             document,
             tenure_id,
+            issuer_tenure_start_group_epoch,
             receipt_hashes,
             selected_receipt_hash,
             repair_sequence,
@@ -1374,6 +1516,16 @@ fn canonical_receipt_pair(a: Receipt, b: Receipt) -> (Receipt, Receipt) {
     }
 }
 
+/// Same-epoch alternatives or changed inheritance within a tenure are equivocation. Ordinary
+/// successive receipts, and choices in different owner tenures, are not fault evidence.
+fn receipts_conflict(a: &Receipt, b: &Receipt) -> bool {
+    a.document == b.document
+        && a.tenure_id == b.tenure_id
+        && a.hash() != b.hash()
+        && (a.closed_epoch == b.closed_epoch
+            || TenureSelection::from(a) != TenureSelection::from(b))
+}
+
 /// Result of atomically ingesting a receipt and transitioning its epoch gate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiptIngest {
@@ -1387,6 +1539,15 @@ pub enum ReceiptIngest {
     Fault,
 }
 
+/// Bookkeeping result only. Neither outcome changes an epoch gate or proves durable recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiptRepairIngest {
+    /// The exact fault pair was resolved; a recovery-first installer must change the gate.
+    Applied,
+    /// Exact latest repair already held, with no new fault. Later receipt progress is untouched.
+    Duplicate,
+}
+
 /// Constant-sized peer receipt state for one logical document.
 #[derive(Clone, Debug, Default)]
 pub struct ReceiptBook {
@@ -1396,6 +1557,9 @@ pub struct ReceiptBook {
     previous_until_installed: Option<Receipt>,
     fault: Option<(Receipt, Receipt)>,
     repair_sequence: u64,
+    // One latest signed disposition, not an unbounded history of all owner mistakes. Full
+    // receipts preserve losing-baseline screening after latest/opening advance and restart.
+    resolved_repair: Option<repair_state::ResolvedRepair>,
 }
 
 impl ReceiptBook {
@@ -1425,7 +1589,7 @@ impl ReceiptBook {
         Ok((outcome, operations))
     }
 
-    fn ingest_verified(&mut self, receipt: Receipt) -> Result<ReceiptIngest, ReplError> {
+    pub(crate) fn ingest_verified(&mut self, receipt: Receipt) -> Result<ReceiptIngest, ReplError> {
         if self
             .document
             .as_ref()
@@ -1439,6 +1603,9 @@ impl ReceiptBook {
             // Fault is a terminal read-only state until a signed repair. Do not let a third
             // receipt mutate which evidence or provisional head survives based on delivery order.
             return Ok(ReceiptIngest::Fault);
+        }
+        if self.is_repaired_loser(&receipt) {
+            return Ok(ReceiptIngest::Stale);
         }
         let selection = TenureSelection::from(&receipt);
         if let Some(current) = &self.tenure {
@@ -1483,6 +1650,50 @@ impl ReceiptBook {
         Ok(ReceiptIngest::Advanced)
     }
 
+    /// Recheck the retained opening receipt even while a later receipt seals the successor.
+    /// Do not feed it through the high-water filter: that would hide delayed equivocation.
+    /// Only this immediately preceding, seed-bound receipt is kept, not an audit history.
+    pub(crate) fn check_opening_receipt(
+        &mut self,
+        receipt: Receipt,
+        opening: &Receipt,
+        group: &ServerGroup,
+        tenure_start: u64,
+        gate: &EpochGate,
+    ) -> Result<ReceiptIngest, ReplError> {
+        receipt.verify_current_owner(group, tenure_start)?;
+        if receipt.document != gate.document
+            || receipt.document != opening.document
+            || receipt.closed_epoch != opening.closed_epoch
+            || opening.closed_epoch.checked_add(1) != Some(gate.epoch)
+            || receipt.tenure_id != opening.tenure_id
+        {
+            return Err(ReplError::EpochScope);
+        }
+        let mut inner = gate.inner.lock().expect("epoch gate poisoned");
+        if self.is_faulted() {
+            return Ok(ReceiptIngest::Fault);
+        }
+        if self.is_repaired_loser(&receipt) {
+            return Ok(ReceiptIngest::Stale);
+        }
+        if !matches!(inner.phase, EpochPhase::Open | EpochPhase::Closing) {
+            return Err(ReplError::EpochClosed);
+        }
+        if &receipt == opening {
+            return Ok(ReceiptIngest::Duplicate);
+        }
+        if !receipts_conflict(opening, &receipt) {
+            return Err(ReplError::ReceiptConflict);
+        }
+        // Keep latest/tenure/previous intact: latest may be the successor's sealing receipt.
+        // Fault evidence is separately bounded. Fault clears the gate seal, not accepted work.
+        self.fault = Some(canonical_receipt_pair(opening.clone(), receipt));
+        inner.phase = EpochPhase::Fault;
+        inner.receipt_hash = None;
+        Ok(ReceiptIngest::Fault)
+    }
+
     /// Latest verified receipt, if any.
     pub fn latest(&self) -> Option<&Receipt> {
         self.latest.as_ref()
@@ -1506,9 +1717,18 @@ impl ReceiptBook {
         &mut self,
         repair: &ReceiptRepair,
         group: &ServerGroup,
-    ) -> Result<Receipt, ReplError> {
-        repair.verify_current_owner(group)?;
+        expected_issuer_tenure_start: u64,
+    ) -> Result<(ReceiptRepairIngest, Receipt), ReplError> {
+        // Authority must precede the retry shortcut: a returning key is not its old tenure.
+        repair.verify_current_owner(group, expected_issuer_tenure_start)?;
+        if let Some(resolved) = &self.resolved_repair {
+            if &resolved.repair == repair && self.fault.is_none() {
+                return Ok((ReceiptRepairIngest::Duplicate, resolved.losing.clone()));
+            }
+        }
         let (a, b) = self.fault.clone().ok_or(ReplError::ReceiptConflict)?;
+        a.restore_verified_from_vault()?;
+        b.restore_verified_from_vault()?;
         if repair.document != a.document
             || repair.document != b.document
             || repair.tenure_id != a.tenure_id
@@ -1530,18 +1750,52 @@ impl ReceiptBook {
             return Err(ReplError::ReceiptConflict);
         };
         self.tenure = Some(TenureSelection::from(&selected));
-        self.latest = Some(selected);
+        self.latest = Some(selected.clone());
         self.previous_until_installed = None;
         self.fault = None;
         self.repair_sequence = repair.repair_sequence;
-        Ok(losing)
+        self.resolved_repair = Some(repair_state::ResolvedRepair {
+            repair: repair.clone(),
+            selected,
+            losing: losing.clone(),
+        });
+        Ok((ReceiptRepairIngest::Applied, losing))
     }
 
     /// Canonical peer-local state. The caller vault-seals these bytes and re-verifies held
     /// receipts against the current group before using them as network authority after restore.
     pub fn encode(&self) -> Result<Vec<u8>, ReplError> {
+        self.encode_mode(false)
+    }
+
+    // Version 3 is confined to the registry's explicitly tagged checkpoint-adoption unit.
+    // It can retain a distant target above an opening/prior-target fault. The enclosing unit
+    // must bind that evidence to its actual retained source; ordinary books cannot decode it.
+    pub(crate) fn encode_adoption(&self) -> Result<Vec<u8>, ReplError> {
+        self.encode_mode(true)
+    }
+
+    fn encode_mode(&self, adoption: bool) -> Result<Vec<u8>, ReplError> {
         let mut e = Encoder::new();
-        e.put_u8(1);
+        // v2 adds a retained high-water receipt above an opening-epoch fault pair. Old readers
+        // reject that state explicitly; ordinary v1 books remain byte compatible.
+        let historical_fault = self
+            .fault
+            .as_ref()
+            .is_some_and(|(a, b)| self.latest.as_ref().is_some_and(|r| r != a && r != b));
+        e.put_u8(if self.resolved_repair.is_some() {
+            if adoption {
+                5
+            } else {
+                4
+            }
+        } else if adoption {
+            3
+        } else if historical_fault {
+            2
+        } else {
+            1
+        });
         put_tenure(&mut e, self.tenure.as_ref());
         put_receipt(&mut e, self.latest.as_ref());
         put_receipt(&mut e, self.previous_until_installed.as_ref());
@@ -1556,6 +1810,9 @@ impl ReceiptBook {
             }
         }
         e.put_u64(self.repair_sequence);
+        if let Some(resolved) = &self.resolved_repair {
+            resolved.encode_into(&mut e);
+        }
         let bytes = e.finish();
         if bytes.len() > MAX_RECEIPT_BOOK_BYTES {
             return Err(ReplError::EpochBound);
@@ -1565,11 +1822,24 @@ impl ReceiptBook {
 
     /// Restore peer-local receipt/fault state without trusting redundant derived fields.
     pub fn decode(bytes: &[u8]) -> Result<Self, ReplError> {
+        Self::decode_mode(bytes, false)
+    }
+
+    pub(crate) fn decode_adoption(bytes: &[u8]) -> Result<Self, ReplError> {
+        Self::decode_mode(bytes, true)
+    }
+
+    fn decode_mode(bytes: &[u8], adoption: bool) -> Result<Self, ReplError> {
         if bytes.len() > MAX_RECEIPT_BOOK_BYTES {
             return Err(ReplError::EpochBound);
         }
         let mut d = Decoder::new(bytes);
-        if d.get_u8().map_err(|_| ReplError::Malformed)? != 1 {
+        let version = d.get_u8().map_err(|_| ReplError::Malformed)?;
+        if if adoption {
+            version != 3 && version != 5
+        } else {
+            version != 1 && version != 2 && version != 4
+        } {
             return Err(ReplError::Malformed);
         }
         let tenure = get_tenure(&mut d)?;
@@ -1584,6 +1854,11 @@ impl ReceiptBook {
             _ => return Err(ReplError::Malformed),
         };
         let repair_sequence = d.get_u64().map_err(|_| ReplError::Malformed)?;
+        let resolved_repair = if version == 4 || version == 5 {
+            Some(repair_state::ResolvedRepair::decode_from(&mut d)?)
+        } else {
+            None
+        };
         d.finish().map_err(|_| ReplError::Malformed)?;
 
         let document = latest.as_ref().map(|receipt| receipt.document.clone());
@@ -1599,12 +1874,27 @@ impl ReceiptBook {
             if a.hash() >= b.hash()
                 || a.document != b.document
                 || a.tenure_id != b.tenure_id
+                // Two successive, consistent receipts are progress, not equivocation. A
+                // spliced vault book must not turn that ordinary history into a durable fault.
+                || !receipts_conflict(a, b)
                 || latest
                     .as_ref()
-                    .is_none_or(|latest| latest.hash() != a.hash() && latest.hash() != b.hash())
+                    .is_none_or(|latest| {
+                        latest != a && latest != b && !adoption && !((version == 2 || version == 4)
+                            && a.closed_epoch == b.closed_epoch
+                            && a.closed_epoch.checked_add(1) == Some(latest.closed_epoch)
+                            && (TenureSelection::from(latest) == TenureSelection::from(a)
+                                || TenureSelection::from(latest) == TenureSelection::from(b)))
+                    })
             {
                 return Err(ReplError::Malformed);
             }
+        }
+        let historical_fault = fault
+            .as_ref()
+            .is_some_and(|(a, b)| latest.as_ref().is_some_and(|r| r != a && r != b));
+        if !adoption && version != 4 && (version == 2) != historical_fault {
+            return Err(ReplError::Malformed);
         }
         if [&previous_until_installed]
             .into_iter()
@@ -1614,6 +1904,9 @@ impl ReceiptBook {
         {
             return Err(ReplError::Malformed);
         }
+        if let Some(resolved) = &resolved_repair {
+            resolved.verify(document.as_ref(), repair_sequence)?;
+        }
         Ok(Self {
             document,
             tenure,
@@ -1621,6 +1914,7 @@ impl ReceiptBook {
             previous_until_installed,
             fault,
             repair_sequence,
+            resolved_repair,
         })
     }
 }
@@ -1659,13 +1953,6 @@ impl OwnerReceiptJournal {
         {
             return Err(ReplError::EpochScope);
         }
-        if let Some(pending) = &self.in_flight {
-            return if pending.hash() == receipt.hash() {
-                Ok(())
-            } else {
-                Err(ReplError::ReceiptConflict)
-            };
-        }
         let selection = TenureSelection::from(&receipt);
         let changes_tenure = self
             .tenure
@@ -1678,6 +1965,18 @@ impl OwnerReceiptJournal {
                 }))
         {
             return Err(ReplError::ReceiptConflict);
+        }
+        // A previous tenure's unfinished publication must not strand a returning owner. Only
+        // an externally verified, strictly newer tenure may replace it, under the same durable
+        // persist-before-publish transition. Within a tenure the pending choice is irrevocable.
+        if !changes_tenure {
+            if let Some(pending) = &self.in_flight {
+                return if pending.hash() == receipt.hash() {
+                    Ok(())
+                } else {
+                    Err(ReplError::ReceiptConflict)
+                };
+            }
         }
         if !changes_tenure {
             if let Some(high_water) = &self.high_water {
@@ -1719,8 +2018,23 @@ impl OwnerReceiptJournal {
         self.in_flight.as_ref()
     }
 
+    /// Latest completed publication, retained as the constant-sized high-water decision.
+    /// This is historical local state, not proof that the signer is still the current owner.
+    pub fn published(&self) -> Option<&Receipt> {
+        self.high_water.as_ref()
+    }
+
     /// Mark the exact in-flight receipt published, advancing constant-sized high-water state.
+    /// An exact completed retry is inert, including when a later receipt is pending. The store
+    /// must still re-save on retry: its previous rename may have preceded a failed directory sync.
     pub fn mark_published(&mut self, receipt_hash: Hash32) -> Result<(), ReplError> {
+        if self
+            .high_water
+            .as_ref()
+            .is_some_and(|r| r.hash() == receipt_hash)
+        {
+            return Ok(());
+        }
         let pending = self.in_flight.take().ok_or(ReplError::ReceiptConflict)?;
         if pending.hash() != receipt_hash {
             self.in_flight = Some(pending);
@@ -1842,6 +2156,21 @@ struct EpochGateInner {
     quarantine: VecDeque<Hash32>,
 }
 
+// Shared by exact closure validation and the local scheduler's cheap eligibility hint. The
+// hint never replaces signature/dependency/typed-seed checks when actually closing an epoch.
+fn close_lower_bound_reached(
+    count: usize,
+    bytes: usize,
+    by_device: &BTreeMap<DeviceId, (usize, usize)>,
+    owner: DeviceId,
+) -> bool {
+    count >= 10_000
+        || bytes >= 2 * 1024 * 1024
+        || by_device.iter().any(|(author, (count, bytes))| {
+            *author != owner && (*count >= MAX_DEVICE_OPERATIONS || *bytes >= MAX_DEVICE_BYTES)
+        })
+}
+
 /// One per-document mutex used by local edits, inbound ingest, and receipt settlement.
 #[derive(Debug)]
 pub struct EpochGate {
@@ -1891,6 +2220,135 @@ impl EpochGate {
     /// Current lifecycle phase.
     pub fn phase(&self) -> EpochPhase {
         self.inner.lock().expect("epoch gate poisoned").phase
+    }
+
+    /// A scheduling hint over already admitted counters. It supplies no close authority and
+    /// does not build a projection, copy history, or claim the complete head set fits its cap.
+    pub(crate) fn close_candidate_ready(&self) -> bool {
+        let inner = self.inner.lock().expect("epoch gate poisoned");
+        inner.phase == EpochPhase::Open
+            && close_lower_bound_reached(
+                inner.operations.len(),
+                inner.total_bytes,
+                &inner.by_device,
+                inner.owner,
+            )
+    }
+
+    /// Check the pieces of a registry restart unit together. Matching only operation hashes
+    /// would leave share/byte accounting or the receipt seal independently replaceable. The
+    /// opening receipt is retained separately even once the book advances to the closing one.
+    pub(crate) fn verify_restart(
+        &self,
+        operations: &[AdmittedOperation],
+        book: &ReceiptBook,
+        opening: Option<&Receipt>,
+    ) -> Result<(), ReplError> {
+        self.verify_restart_mode(operations, book, opening, false)
+    }
+
+    pub(crate) fn verify_adoption_restart(
+        &self,
+        operations: &[AdmittedOperation],
+        book: &ReceiptBook,
+        opening: Option<&Receipt>,
+    ) -> Result<(), ReplError> {
+        self.verify_restart_mode(operations, book, opening, true)
+    }
+
+    fn verify_restart_mode(
+        &self,
+        operations: &[AdmittedOperation],
+        book: &ReceiptBook,
+        opening: Option<&Receipt>,
+        adoption: bool,
+    ) -> Result<(), ReplError> {
+        let inner = self.inner.lock().expect("epoch gate poisoned");
+        if operations.len() != inner.operations.len()
+            || operations
+                .iter()
+                .any(|op| inner.operations.get(&op.op_hash) != Some(op))
+            || book
+                .document
+                .as_ref()
+                .is_some_and(|doc| doc != &self.document)
+        {
+            return Err(ReplError::Malformed);
+        }
+        if let Some(receipt) = opening {
+            if receipt.document != self.document
+                || receipt.closed_epoch.checked_add(1) != Some(self.epoch)
+            {
+                return Err(ReplError::EpochScope);
+            }
+            receipt.restore_verified_from_vault()?;
+        } else if self.epoch != 0 {
+            return Err(ReplError::EpochScope);
+        }
+        if adoption {
+            return book.verify_adoption_state(&self.document, &inner, opening);
+        }
+        // A book may keep the opening receipt as its previous head. No unrelated older head
+        // belongs in this one-epoch unit; long-term owner issuance is a separate journal.
+        if book
+            .previous_until_installed
+            .as_ref()
+            .is_some_and(|r| Some(r) != opening)
+        {
+            return Err(ReplError::Malformed);
+        }
+        // A delayed fault may name the immediately preceding epoch, but one evidence member
+        // must be EXACTLY the opening receipt that authenticated this unit's seed.
+        let opening_fault = book.fault.as_ref().is_some_and(|(a, b)| {
+            (Some(a) == opening || Some(b) == opening)
+                && a.closed_epoch == b.closed_epoch
+                && receipts_conflict(a, b)
+        });
+        for receipt in book
+            .latest
+            .iter()
+            .chain(book.previous_until_installed.iter())
+            .chain(book.fault.iter().flat_map(|(a, b)| [a, b]))
+        {
+            if receipt.document != self.document
+                || (receipt.closed_epoch != self.epoch
+                    && Some(receipt) != opening
+                    && !(opening_fault
+                        && book
+                            .fault
+                            .as_ref()
+                            .is_some_and(|(a, b)| receipt == a || receipt == b)))
+            {
+                return Err(ReplError::EpochScope);
+            }
+            receipt.restore_verified_from_vault()?;
+        }
+        let valid = match inner.phase {
+            EpochPhase::Open => !book.is_faulted() && book.latest.as_ref() == opening,
+            EpochPhase::Closing => {
+                !book.is_faulted()
+                    && book.latest.as_ref().is_some_and(|r| {
+                        r.closed_epoch == self.epoch
+                            && Some(r.hash()) == inner.receipt_hash
+                            && opening.is_none_or(|prior| {
+                                prior.tenure_id != r.tenure_id
+                                    || TenureSelection::from(prior) == TenureSelection::from(r)
+                            })
+                    })
+            }
+            EpochPhase::Fault => book.fault.as_ref().is_some_and(|(a, b)| {
+                receipts_conflict(a, b)
+                    && (a.closed_epoch == self.epoch
+                        || b.closed_epoch == self.epoch
+                        || opening_fault)
+            }),
+            // Settlement/pruning is intentionally unavailable through the registry coordinator.
+            EpochPhase::Settled => false,
+        };
+        if !valid {
+            return Err(ReplError::Malformed);
+        }
+        Ok(())
     }
 
     /// Update the owner whose operations are exempt from the per-device share.
@@ -1980,7 +2438,11 @@ impl EpochGate {
                 Self::admit_open(inner, owner, op)
             }
             EpochPhase::Closing => {
-                if inner.quarantine.len() == MAX_QUARANTINED {
+                // Re-announced ciphertext is not another pending operation. Apart from wasting
+                // the bounded slots, duplicates made our own canonical snapshot undecodable.
+                if inner.quarantine.contains(&op.op_hash) {
+                    Ok(Admission::Quarantined)
+                } else if inner.quarantine.len() == MAX_QUARANTINED {
                     Ok(Admission::RejectedQuarantineFull)
                 } else {
                     inner.quarantine.push_back(op.op_hash);
@@ -2339,7 +2801,7 @@ pub struct RecoveryConflict {
 }
 
 /// Canonical, vault-sealed recovery materialization for one logical document.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecoverySnapshot {
     /// Logical target.
     pub doc_type: DocType,
@@ -2361,6 +2823,20 @@ pub struct RecoverySnapshot {
     pub conflicts: Vec<RecoveryConflict>,
     /// Operations already reflected in the projection.
     pub applied_ops: Vec<Hash32>,
+}
+
+impl std::fmt::Debug for RecoverySnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Snapshots can travel through generic Option/Result and command diagnostics. Never
+        // dump private projection bytes, keys, authors or conflict content through those paths.
+        f.debug_struct("RecoverySnapshot")
+            .field("doc_type", &self.doc_type)
+            .field("epoch", &self.epoch)
+            .field("reason", &self.reason)
+            .field("projection_bytes", &self.projection.len())
+            .field("applied_operations", &self.applied_ops.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl RecoverySnapshot {
@@ -2411,6 +2887,9 @@ impl RecoverySnapshot {
         {
             return Err(ReplError::EpochBound);
         }
+        // Charge the exact encoding before allocating it. Per-field caps alone could otherwise
+        // allocate hundreds of MiB of conflict values before noticing the aggregate 6 MiB cap.
+        self.check_encoded_size()?;
         let mut e = Encoder::new();
         e.put_u8(1);
         e.put_u16(self.doc_type.tag());
@@ -2466,6 +2945,34 @@ impl RecoverySnapshot {
             return Err(ReplError::EpochBound);
         }
         Ok(bytes)
+    }
+
+    /// Preflight fixed fields, length framing and variable payloads without constructing bytes.
+    fn check_encoded_size(&self) -> Result<(), ReplError> {
+        let mut remaining = MAX_RECOVERY_SNAPSHOT_BYTES;
+        let mut charge = |bytes: usize| -> Result<(), ReplError> {
+            remaining = remaining.checked_sub(bytes).ok_or(ReplError::EpochBound)?;
+            Ok(())
+        };
+        charge(1 + 2 + 4 + 8 + 1 + 1 + 4 + 4 * 4)?;
+        charge(self.logical_key.len())?;
+        charge(self.projection.len())?;
+        if self.base_close_record_hash.is_some() {
+            charge(36)?;
+        }
+        // A length-framed element id is 20 bytes; each hash/device id is 36 bytes.
+        charge(self.tombstones.len() * 92)?;
+        for element in &self.elements {
+            charge(93 + if element.predecessor.is_some() { 20 } else { 0 })?;
+        }
+        for conflict in &self.conflicts {
+            charge(5 + conflict.target.len())?;
+            for value in &conflict.values {
+                charge(76)?;
+                charge(value.value.len())?;
+            }
+        }
+        charge(self.applied_ops.len() * 36)
     }
 
     /// Strict decoding with count checks before allocation.
@@ -2734,6 +3241,15 @@ impl RecoverySlots {
         self.staged.as_ref().map(|staged| &staged.snapshot)
     }
 
+    /// Reconstruct the exact persisted warning without advancing time or mutating a slot.
+    /// A reopened store uses this to resurface the original ids and deadline, not restart grace.
+    pub fn eviction_pending(&self) -> Result<Option<RecoveryTransition>, ReplError> {
+        self.staged
+            .as_ref()
+            .map(|_| self.pending_transition())
+            .transpose()
+    }
+
     /// Canonical plaintext transition state; callers vault-seal before persistence.
     pub fn encode(&self) -> Result<Vec<u8>, ReplError> {
         if self.retained.len() > 2 || (self.staged.is_some() && self.retained.len() != 2) {
@@ -2822,9 +3338,78 @@ impl RecoverySlots {
     }
 }
 
+mod adoption;
+mod repair_state;
+pub(crate) mod succession;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_receipt_matrix_requires_real_equivocation_and_cannot_hide_it_in_closing() {
+        let owner = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&owner).unwrap();
+        let document =
+            LogicalDocument::new(group.group_id(), DocType::DocRegistry, b"matrix".to_vec())
+                .unwrap();
+        let sign = |epoch, inherited| {
+            Receipt::sign(
+                document.clone(),
+                epoch,
+                [epoch as u8; 32],
+                [9; 32],
+                0,
+                inherited,
+                &owner,
+            )
+            .unwrap()
+        };
+        let opening = sign(0, InheritedCheckpoint::EpochZero);
+        let normal = sign(1, InheritedCheckpoint::EpochZero);
+        let conflict = sign(
+            1,
+            InheritedCheckpoint::Checkpoint {
+                epoch: 1,
+                close_record_hash: [7; 32],
+                seed_change_hash: [8; 32],
+            },
+        );
+        let gate = EpochGate::new(document.clone(), 1, 1, owner.device_id());
+
+        // An ordinary opening -> closing pair cannot be relabelled as persisted equivocation.
+        let pair = canonical_receipt_pair(opening.clone(), normal);
+        let fake_fault = ReceiptBook {
+            document: Some(document.clone()),
+            tenure: Some(TenureSelection::from(&pair.0)),
+            latest: Some(pair.0.clone()),
+            fault: Some(pair),
+            ..ReceiptBook::default()
+        };
+        gate.inner.lock().unwrap().phase = EpochPhase::Fault;
+        assert!(ReceiptBook::decode(&fake_fault.encode().unwrap()).is_err());
+        assert!(gate
+            .verify_restart(&[], &fake_fault, Some(&opening))
+            .is_err());
+
+        // Conversely, different inherited fields in the SAME tenure must not restore Closing.
+        let mut hidden_fault = ReceiptBook {
+            document: Some(document),
+            tenure: Some(TenureSelection::from(&conflict)),
+            latest: Some(conflict.clone()),
+            previous_until_installed: Some(opening.clone()),
+            ..ReceiptBook::default()
+        };
+        {
+            let mut inner = gate.inner.lock().unwrap();
+            inner.phase = EpochPhase::Closing;
+            inner.receipt_hash = Some(conflict.hash());
+        }
+        hidden_fault = ReceiptBook::decode(&hidden_fault.encode().unwrap()).unwrap();
+        assert!(gate
+            .verify_restart(&[], &hidden_fault, Some(&opening))
+            .is_err());
+    }
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -2981,5 +3566,54 @@ mod tests {
             vec![3, 2]
         );
         assert!(restored.staged().is_none());
+    }
+
+    #[test]
+    fn recovery_encoding_preflights_the_exact_aggregate_including_metadata() {
+        let mut snapshot = sample_snapshot(1);
+        snapshot.base_close_record_hash = Some([4; 32]);
+        snapshot.tombstones = vec![RecoveryTombstone {
+            element_id: [1; 16],
+            op_id: [2; 32],
+            author: DeviceId::from_bytes([3; 32]),
+        }];
+        snapshot.elements = vec![
+            RecoveryElement {
+                element_id: [5; 16],
+                predecessor: None,
+                op_id: [6; 32],
+                author: DeviceId::from_bytes([7; 32]),
+            },
+            RecoveryElement {
+                element_id: [8; 16],
+                predecessor: Some([5; 16]),
+                op_id: [9; 32],
+                author: DeviceId::from_bytes([10; 32]),
+            },
+        ];
+        snapshot.conflicts = vec![RecoveryConflict {
+            target: b"title".to_vec(),
+            values: vec![RecoveryConflictValue {
+                value: b"moon".to_vec(),
+                op_id: [11; 32],
+                author: DeviceId::from_bytes([12; 32]),
+            }],
+        }];
+        snapshot.applied_ops = vec![[13; 32]];
+        snapshot.projection.clear();
+        let overhead = snapshot.encode().unwrap().len();
+        snapshot
+            .projection
+            .resize(MAX_RECOVERY_SNAPSHOT_BYTES - overhead, 0);
+        assert_eq!(
+            snapshot.encode().unwrap().len(),
+            MAX_RECOVERY_SNAPSHOT_BYTES
+        );
+        snapshot.conflicts[0].values[0].value.push(0);
+        assert!(matches!(
+            snapshot.check_encoded_size(),
+            Err(ReplError::EpochBound)
+        ));
+        assert!(matches!(snapshot.encode(), Err(ReplError::EpochBound)));
     }
 }
