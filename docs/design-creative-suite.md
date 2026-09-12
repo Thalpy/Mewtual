@@ -55,6 +55,10 @@ tighten the Registry/refused-Apply and completed-Hint observations. The user re-
 closes TEST-001/TEST-002 and PR-001 (design only). The capacity checkpoint adds the shared three-of-four
 capacity reservation; fetching, scheduler fairness, lifecycle fencing and provisional native reads
 remain pending. Gate 4 remains active.
+The user accepted `1c90c41`'s capacity foundation without requested changes. The next checkpoint
+adds authenticated provisional head discovery and scoped candidate custody, including watch and
+app mount/server checks. It still supplies no parsed preview or native unconfirmed-history state;
+receipt attribution, seed/tail validation and runtime scheduling remain acceptance obligations.
 
 UI reference (2026-09-05): the owner's `Main.html`, `Inspector.html`, `Timeline.html`,
 `Palette.html` and `Tools.html`, with matching PNGs, were drafted as a scratch preview outside

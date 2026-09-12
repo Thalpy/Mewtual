@@ -10,7 +10,46 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-12)
 
-- **Gate 4 provisional capacity foundation (2026-09-12; checkpoint, awaiting user review).**
+- **Gate 4 provisional head discovery (2026-09-12; checkpoint, awaiting user review).**
+  The user accepted `1c90c41`'s allocation foundation without requested changes; the reviewer
+  inspected source and did not run Cargo. The next sync/app slice uses that quota for real
+  provisional head requests and opaque, volatile candidate metadata. Shared response
+  authentication remains separate from current-owner selection: provisional completion cannot
+  mint/supersede a selection. Proof/repair/absent-receipt answers return no candidate and release
+  custody, requiring the future scheduler's normal fresh authoritative retry. Receipt signature
+  and historical/current ownership claims remain unverified; no seed or preview is exposed.
+  The fixed 60-second candidate lifetime starts at preparation; head completion keeps its
+  10-second deadline. Watch/attempt generations, membership, endpoint and sync-instance checks
+  fence completion/use; any newer same-target head attempt invalidates the candidate. App
+  wrappers check mount/server/channel and detach without retaining Server/store borrows.
+  Tests cover actual authenticated member delivery, hostile signed responses, stale generations
+  and capacity held by unpolled/completed/candidate/cancelled transport owners. Preview parsing,
+  actor scheduling/fairness and native delivery remain pending. No UI/native contract change.
+  These adapters are currently exercised directly, not scheduled by the actor receiver.
+  Restored-source validation uses `cargo test --locked -j 4` with
+  `--config 'profile.test.package.catcoms-sync.debug=0' -p catcoms-sync --lib`:
+  `receipt_head:: -- --test-threads=4 --nocapture` passes 24 (7 new; 2.24 seconds;
+  `logs/gate4-provisional-discovery-head-final.log`), and `registry_seed::` with the same test
+  flags passes 24 (2.79 seconds; `logs/gate4-provisional-discovery-seed-regression.log`).
+  App runs use `--config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib`:
+  `studio_provisional_discovery -- --test-threads=2 --nocapture` passes 2 (9.57 seconds;
+  `logs/gate4-provisional-discovery-app-final.log`); `studio_discovery` with 4 threads passes 7
+  (10.49 seconds; `logs/gate4-provisional-discovery-app-regression.log`);
+  `studio_exchange::tests::succession` with 4 threads passes 10 with 2 ignored preview cases
+  (70.57 seconds; `logs/gate4-provisional-discovery-succession.log`);
+  `studio_actors_new_member` with 2 threads passes 2 (4.15 seconds;
+  `logs/gate4-provisional-discovery-new-member.log`). Total: 69 passes, 9 new tests.
+  Three temporary mutations fail at their intended assertions: bypassing response signature
+  verification, accepting a same-key stale-watch candidate and donating an unaccounted token to
+  lower transport. Source restoration was checked byte-for-byte;
+  `logs/gate4-provisional-discovery-mutation-*.log` record the failures. Explicit preview-gap
+  tests were not re-run; their last execution remains `7393165`. The documented process-only
+  `$env:_LINK_ = '/DEBUG:NONE'` workaround is still used; no toolchain/build-profile changes.
+  Root formatting and `cargo clippy --locked -j 4 -p catcoms-sync -p catcoms-app --lib --tests
+  -- -D warnings` pass (18.69 seconds; `logs/gate4-provisional-discovery-clippy.log`).
+  Full Gate 4 acceptance and the competing-class actor capacity/fairness regression remain open.
+
+- **Gate 4 provisional capacity foundation (`1c90c41`, 2026-09-12; user review passed).**
   The user re-review of `7393165` passes and closes TEST-001/TEST-002 and PR-001 as a design
   finding, with no further closure changes requested. The reviewer inspected source without
   running Cargo. The accepted proposal now proceeds with the shared capacity prerequisite:

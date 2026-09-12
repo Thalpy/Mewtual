@@ -1,6 +1,6 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-12 against `7393165`; test/instrumentation and revised proposal reviews passed.
+Last checked: 2026-09-12 against `1c90c41`; shared capacity foundation accepted by user review.
 Behavioral checkpoint: `39ceb76`
 (`fix(studio): bound the recovery hold and make replay slot-order proof`). Owner rotation and recovery
 inspection landed in `cbed5b7`; recovery controls, own-intent replay and settlement events are
@@ -28,6 +28,13 @@ The capacity checkpoint adds a shared three-of-four provisional reservation and 
 existing authenticated seed paths alongside it. It adds no preview result, confirmation field,
 native command or event. Scheduler, lifecycle and provisional-read integration remain pending.
 Refused-Apply guards cover specified document/journal state; server snapshot writes may still occur.
+The user review of `1c90c41` passed without requested changes. The next discovery checkpoint
+connects provisional reservations to authenticated head requests and opaque candidate metadata.
+Its sync/app inspection seam checks the original watch, request, membership, provider and
+mount/server bindings. It supplies no seed, Studio view, native command or confirmation field.
+Receipt signer/tenure claims remain unverified. Preview fetch/parsing, actor scheduling and late
+native delivery are still pending; this metadata inspection seam is not a renderer hook.
+The adapters are currently exercised directly; the actor receiver does not schedule them yet.
 The joining fixture exposed an additional owner change: a new invitee can reuse the removed
 founder's low MLS leaf. The newcomer then has Unknown tenure and cannot load the previous owner's
 checkpoint through the current read seam. Two cases pass for known-CID PIX fetch and offline reopen;

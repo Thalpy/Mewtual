@@ -329,7 +329,7 @@ and did not run Cargo. Refused-Apply assertions cover unchanged specified docume
 the app may still save its server snapshot before rejection. The Hint observation is historical
 test evidence, not a lifecycle capability.
 
-**Provisional capacity foundation (checkpoint; awaiting user review):** an opaque reservation can hold
+**Provisional capacity foundation (`1c90c41`; user review passed):** an opaque reservation can hold
 at most three of the existing four retained seed slots per sync instance. Ordinary authenticated
 discovery uses the same pool and can use all four; its current Hint result releases its slot.
 The reservation alone grants no content or installation authority. Allocation tests exercise
@@ -338,6 +338,22 @@ failed preparation, completed seed custody and transport cancellation/expiry. A 
 multiple parser/delivery keepalives; these lower provisional paths do not yet exist. This does
 not implement previews, actor fairness, lifecycle invalidation or native delivery, nor complete
 the required competing-class actor installation regression. No callable UI hook changes.
+
+**Provisional head discovery (checkpoint; awaiting user review):** the accepted capacity guard
+now follows a real detached head request through completion and an opaque candidate result.
+Preparation requires a current Studio watch and acquires one of the three eligible slots before
+requesting. The existing authenticated response decoder is shared with authoritative discovery;
+the provisional branch cannot mint or supersede an owner selection. Owner-proof, repair and
+absent-receipt responses yield no candidate and release custody; the future scheduler must retry
+through fresh authoritative discovery. Raw authoritative Hints cannot convert into this context.
+Candidates retain the original request/provider/member/sync-instance and copied watch generation,
+with a fixed 60-second receiver-clock lifetime; head completion retains its 10-second deadline.
+Any later head preparation for the same target revokes a candidate, even if that attempt fails.
+The app wrapper also checks mount, server and channel before preparation, completion and scoped
+inspection. These are unconfirmed receipt claims, not verified receipt signatures/history or a
+parsed preview. Seed/tail fetching, parser bounds, scheduler fairness and native preview delivery
+remain separate work. No UI layout, command, event or returned StudioView changed.
+The adapters are exercised directly; the actor receiver does not yet schedule this discovery path.
 
 #### Landed on the way: Studio owner settlement preparation (`9799c6f`)
 

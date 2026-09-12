@@ -3,7 +3,8 @@
 Status: user re-review of `7393165` passed. TEST-001 and TEST-002 are closed for the tests and
 instrumentation; PR-001 is closed as a design finding. No further closure changes were requested.
 The reviewer inspected source and did not execute Cargo. The approved provisional-read path
-remains unimplemented; the next bounded checkpoint adds its shared capacity foundation below.
+remains unfinished. The user accepted the capacity foundation in `1c90c41` without requested
+changes. The next checkpoint connects real provisional head discovery and candidate custody.
 
 ## Reproduced boundary
 
@@ -58,7 +59,7 @@ before store-level rejection. The observed Hint is historical test evidence, nev
 lifecycle capability. Explicit preview/trust assertions and the lifecycle scenarios below remain
 required when the runtime result exists.
 
-## Capacity foundation (checkpoint; awaiting user review)
+## Capacity foundation (`1c90c41`; user review passed)
 
 `registry_seed/capacity.rs` adds an opaque provisional memory reservation within the existing
 four-slot sync pool. Provisional reservations can use only three slots; ordinary authoritative
@@ -70,7 +71,7 @@ releases that reservation on completion.
 Tests exercise both authenticated Studio and Registry seed paths while three provisional
 reservations remain held, a real Hint in the fourth slot, failed preparation, completed-result
 custody and lower-transport custody after cancellation/expiry. An allocator test models cloned
-parser/delivery keepalives; no provisional parser or transport exists yet. These are allocation
+parser/delivery keepalives; that checkpoint added no provisional parser or transport. Those are allocation
 tests, not the full actor scheduling/install regression required below. Preview fetching, ready
 preview ownership, priority/fairness, lifecycle fencing and native delivery remain pending.
 
@@ -79,10 +80,50 @@ and both ordinary newcomer regressions pass. The 2 provisional-read cases remain
 explicit expected failures were last run at `7393165`. The new cross-class seed test rejects two
 temporary mutations: a fourth provisional reservation and unaccounted authoritative discovery.
 Source restoration and local toolchain/disk workarounds are recorded in [HANDOVER](HANDOVER.md).
-Root formatting and sync/app library/test Clippy pass. The checkpoint awaits user adversarial
-review before the next provisional discovery/fetch integration slice.
+Root formatting and sync/app library/test Clippy pass. The reviewer inspected source without
+running Cargo and accepted this allocation-only scope with no new finding or requested change.
 
-## Proposed implementation boundary
+## Provisional head discovery (checkpoint; awaiting user review)
+
+Distinct sync and app prepare/fetch/complete types now acquire provisional capacity before a
+real head request, pass its keepalive to the existing cancellation-aware transport and retain it
+in completed responses and opaque candidates. No raw receipt or authoritative Hint can construct
+the candidate context. The shared head authentication checks request transcript, response
+signature, bounded canonical encoding, logical scope, member/provider identity, sync instance,
+membership epoch and attempt generation. This proves member delivery only: the candidate receipt's
+own signature and claimed current/historical ownership remain unverified at this metadata stage.
+
+An owner-proof, repair or absent-receipt response produces no candidate and releases its custody.
+This branch neither creates nor supersedes an owner selection; the future scheduler must use
+fresh authoritative discovery when appropriate. Existing selected passes retain their authority
+under the normal rules. Candidate expiry is fixed at 60 seconds from preparation; a head response
+must still complete within its original 10-second deadline. Retrying cannot renew a candidate.
+
+The copied Studio watch is checked at prepare, completion and inspection. Same-key rewatch and
+any later head preparation revoke the old candidate, even if a replacement request is dropped.
+That attempt binding also prevents a candidate from surviving a later owner selection; existing
+authoritative selections retain their separate generation and are not revoked by hint attempts.
+Current membership, proven endpoint identity and sync instance are rechecked on inspection.
+The app wrapper adds mount/server/channel checks without holding a Server/store borrow across
+the network wait. Eligibility can disappear while capacity remains charged to lower owners.
+
+These adapters are exercised directly; the actor receiver does not schedule them yet.
+This checkpoint stops at scoped, unconfirmed candidate metadata. It implements no seed/tail
+fetch, parser, ready preview, actor fairness, native result/event or late-delivery fence. It does
+not make the two ignored provisional-read cases pass or satisfy the full competing-class actor
+progress regression. Those obligations, including receipt/seed verification before preview,
+remain below.
+
+Discovery validation: 24 head tests (7 new), 24 shared seed regressions, 2 new app candidate tests,
+7 existing app discovery tests, 10 active succession cases and 2 ordinary newcomer regressions
+pass on restored source (69 total). The 2 preview cases remain ignored; this checkpoint does not
+claim a new explicit run of those known failures. Three temporary mutations fail at the intended
+guards: skipped response-signature checking, candidate use after same-key rewatch and unaccounted
+lower transport custody. Sources were restored byte-for-byte. Commands and logs are in HANDOVER.
+Root formatting and sync/app library/test Clippy pass. User adversarial review is requested for
+this discovery/custody boundary before seed validation and preview integration continue.
+
+## Approved implementation boundary
 
 Implement a bounded **read-only provisional fallback** for a known Studio logical key through
 the existing receiver and native read seam. This is the first part of the existing design's

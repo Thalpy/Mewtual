@@ -11,12 +11,17 @@ use receipt_head::{HeadSelection, ReceiptHeadAnswer};
 use registry_ingress::Rate;
 mod capacity;
 mod detached;
+mod provisional;
 mod service;
 mod wire;
 pub use capacity::ProvisionalCheckpointCapacity;
 pub use detached::{
     CompletedCheckpointDiscovery, CompletedCheckpointSeed, PendingCheckpointDiscovery,
     PendingCheckpointSeed,
+};
+pub use provisional::{
+    CompletedProvisionalStudioDiscovery, PendingProvisionalStudioDiscovery, ProvisionalStudioHint,
+    ProvisionalStudioHintUse,
 };
 use wire::*;
 

@@ -19,6 +19,7 @@ mod actor_save;
 mod controls;
 mod discovery;
 mod pages;
+mod provisional;
 mod receiver;
 mod reconnect;
 mod registry_runtime;

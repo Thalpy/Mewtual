@@ -7,11 +7,16 @@ const PROVISIONAL_SLOTS: usize = 3;
 /// One of the three preview-eligible slots inside this sync instance's four retained slots.
 ///
 /// This is only a memory reservation, not a hint, owner selection or installation capability.
-/// There is no preview fetch/read API yet. Future provisional discovery must retain this
-/// reservation through transport, parsing and delivery instead of creating a separate cache.
+/// Provisional head discovery retains this through its transport and candidate result. Seed
+/// fetching, parsing and preview delivery must keep the same reservation when implemented.
 /// Dropping or expiring an operation must not recycle the slot while another owner holds it.
 pub struct ProvisionalCheckpointCapacity {
     _capacity: Arc<()>,
+}
+impl ProvisionalCheckpointCapacity {
+    pub(super) fn keepalive(&self) -> Arc<()> {
+        self._capacity.clone()
+    }
 }
 impl fmt::Debug for ProvisionalCheckpointCapacity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

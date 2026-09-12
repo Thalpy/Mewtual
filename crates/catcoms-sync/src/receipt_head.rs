@@ -11,6 +11,7 @@ use registry_ingress::Rate;
 mod detached;
 mod service;
 mod wire;
+pub(crate) use detached::AuthenticatedCheckpointHint;
 pub use detached::{CompletedCheckpointHead, PendingCheckpointHead};
 pub use wire::ReceiptHeadAnswer;
 use wire::*;
