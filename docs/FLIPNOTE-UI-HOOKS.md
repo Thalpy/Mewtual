@@ -1,6 +1,6 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-12 against `48fcc2e`; ownership/known-CID evidence accepted, proposal revised for re-review.
+Last checked: 2026-09-12 against `7393165`; test/instrumentation and revised proposal reviews passed.
 Behavioral checkpoint: `39ceb76`
 (`fix(studio): bound the recovery hold and make replay slot-order proof`). Owner rotation and recovery
 inspection landed in `cbed5b7`; recovery controls, own-intent replay and settlement events are
@@ -22,7 +22,12 @@ assertions. The revised proposal reserves authoritative capacity and permits pre
 generation fencing and lower-layer keepalives are explicit. TEST-001 now compares the Registry
 source and both documents' journals after discovery, Read, refused Apply and reopen. TEST-002
 requires a bounded observation of the authenticated completed hint with exact provider/receipt.
-These are test observations, not events or callable UI hooks. The proposal awaits re-review.
+These are test observations, not events or callable UI hooks. The user re-review of `7393165`
+closes TEST-001/TEST-002 and PR-001 (design only), with no further closure changes requested.
+The capacity checkpoint adds a shared three-of-four provisional reservation and exercises
+existing authenticated seed paths alongside it. It adds no preview result, confirmation field,
+native command or event. Scheduler, lifecycle and provisional-read integration remain pending.
+Refused-Apply guards cover specified document/journal state; server snapshot writes may still occur.
 The joining fixture exposed an additional owner change: a new invitee can reuse the removed
 founder's low MLS leaf. The newcomer then has Unknown tenure and cannot load the previous owner's
 checkpoint through the current read seam. Two cases pass for known-CID PIX fetch and offline reopen;
@@ -181,7 +186,7 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 | Canonical UI surface | Backend availability / next hook |
 |---|---|
 | Settlement chip / rotation progress | `settlement-changed` invalidates the actual phase/recovery listing. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
-| Current owner has not confirmed history | No `awaitingTenureReceipt` event or returned confirmation field exists yet. The post-succession recycled-leaf join reproduces missing provisional metadata loading; fetching a fixture-known PIX CID does not fill that gap. The [provisional-read proposal](GATE4-PROVISIONAL-READ-REVIEW.md) awaits user review. Keep this Gate 4 dependency pending. |
+| Current owner has not confirmed history | No `awaitingTenureReceipt` event or returned confirmation field exists yet. The post-succession recycled-leaf join reproduces missing provisional metadata loading; fetching a fixture-known PIX CID does not fill that gap. The [provisional-read proposal](GATE4-PROVISIONAL-READ-REVIEW.md) passed user review; capacity foundation work does not implement a read fallback. Keep this Gate 4 dependency pending. |
 | History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available; signed repair has no actor/native command or `repairing` event yet. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
 | Local overlay while rotating | Keep editor work separately. Persisted overlay/replay orchestration is not yet a native command. Shared apply may refuse Closing/Fault. |
 | Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |

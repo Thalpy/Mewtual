@@ -1,10 +1,9 @@
 # Gate 4: post-succession newcomer review
 
-Status: revised proposal; PR-001 addressed in the contract below, awaiting user re-review before
-implementation. The user accepted `48fcc2e` for ownership transitions and known-CID byte
-persistence, requested changes to the preview-capacity policy, and identified TEST-001/TEST-002
-as acceptance-test weaknesses. The revision adds test-only observations/assertions and documentation;
-the provisional runtime path remains unimplemented.
+Status: user re-review of `7393165` passed. TEST-001 and TEST-002 are closed for the tests and
+instrumentation; PR-001 is closed as a design finding. No further closure changes were requested.
+The reviewer inspected source and did not execute Cargo. The approved provisional-read path
+remains unimplemented; the next bounded checkpoint adds its shared capacity foundation below.
 
 ## Reproduced boundary
 
@@ -44,7 +43,7 @@ checking the missing preview (TEST-002). No hint or selection is injected. The f
 fetch still restores identity from an in-memory snapshot: it proves blob persistence after
 vault reopen, not persistence/recovery of the newcomer's complete identity/session state.
 
-Revision validation: all ten active succession cases and both ordinary newcomer discovery
+Validation of accepted `7393165`: all ten active succession cases and both ordinary newcomer discovery
 regressions pass. Explicitly enabling the two preview cases still fails at the missing-read
 assertion, after the new hint/Registry/Apply guards and byte checks pass. Three temporary
 counterexamples fail at the intended assertions: suppressing Studio head requests, writing a
@@ -52,6 +51,36 @@ signed Registry pointer from the hint and persisting an orphan intent before the
 refusal. Source restoration is byte-for-byte. Formatting and library/test clippy pass; commands
 and logs are recorded in [HANDOVER](HANDOVER.md). No preview allocator or capacity-progress
 implementation is included or claimed to pass by this revision.
+
+The refused-Apply guards establish unchanged specified Studio/Registry document and journal
+state, not literally zero filesystem writes: the app transaction may persist its server snapshot
+before store-level rejection. The observed Hint is historical test evidence, never a current
+lifecycle capability. Explicit preview/trust assertions and the lifecycle scenarios below remain
+required when the runtime result exists.
+
+## Capacity foundation (checkpoint; awaiting user review)
+
+`registry_seed/capacity.rs` adds an opaque provisional memory reservation within the existing
+four-slot sync pool. Provisional reservations can use only three slots; ordinary authoritative
+discovery uses the same allocator and can still use all four. This reservation authenticates
+nothing and exposes no seed, preview, read or installation operation. Existing discovery retains
+its reservation through head/seed jobs, completions and transport cancellation. A raw Hint still
+releases that reservation on completion.
+
+Tests exercise both authenticated Studio and Registry seed paths while three provisional
+reservations remain held, a real Hint in the fourth slot, failed preparation, completed-result
+custody and lower-transport custody after cancellation/expiry. An allocator test models cloned
+parser/delivery keepalives; no provisional parser or transport exists yet. These are allocation
+tests, not the full actor scheduling/install regression required below. Preview fetching, ready
+preview ownership, priority/fairness, lifecycle fencing and native delivery remain pending.
+
+Capacity validation: all 24 shared seed tests pass (6 new), all 10 active succession cases pass,
+and both ordinary newcomer regressions pass. The 2 provisional-read cases remain ignored; their
+explicit expected failures were last run at `7393165`. The new cross-class seed test rejects two
+temporary mutations: a fourth provisional reservation and unaccounted authoritative discovery.
+Source restoration and local toolchain/disk workarounds are recorded in [HANDOVER](HANDOVER.md).
+Root formatting and sync/app library/test Clippy pass. The checkpoint awaits user adversarial
+review before the next provisional discovery/fetch integration slice.
 
 ## Proposed implementation boundary
 

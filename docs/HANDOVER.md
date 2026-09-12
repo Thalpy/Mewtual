@@ -10,7 +10,43 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-12)
 
-- **Gate 4 joining review revision (2026-09-12; awaiting user re-review).** The user accepted
+- **Gate 4 provisional capacity foundation (2026-09-12; checkpoint, awaiting user review).**
+  The user re-review of `7393165` passes and closes TEST-001/TEST-002 and PR-001 as a design
+  finding, with no further closure changes requested. The reviewer inspected source without
+  running Cargo. The accepted proposal now proceeds with the shared capacity prerequisite:
+  `registry_seed/capacity.rs` supplies an opaque three-of-four provisional memory reservation,
+  and existing authoritative discovery allocates from that same four-slot pool. It grants no
+  hint, seed or installation authority. Provisional fetching/parsing, scheduler fairness,
+  lifecycle validity and native preview reads remain unimplemented. Tests distinguish allocator
+  keepalive modelling from the existing real authenticated head/seed and transport paths.
+  The full competing-class actor progress regression remains pending; no native/UI changes.
+  The review's remaining obligations are retained: explicit unconfirmed-history assertions,
+  same-key rewatch, membership changes during parsing and late native delivery. Refused Apply
+  preserves specified document/journal state but may persist the app's server snapshot.
+  Validation on restored source: `cargo test --locked -j 4
+  --config 'profile.test.package.catcoms-sync.debug=0' -p catcoms-sync --lib registry_seed::
+  -- --test-threads=4 --nocapture` passes all 24 tests (6 new; 2.92 seconds;
+  `logs/gate4-provisional-capacity-sync-final.log`). The app command uses
+  `--config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib`:
+  `studio_exchange::tests::succession -- --test-threads=4 --nocapture` passes 10 with 2 preview
+  cases still ignored (70.16 seconds; `logs/gate4-provisional-capacity-succession.log`), and
+  `studio_actors_new_member -- --test-threads=2 --nocapture` passes both (4.32 seconds;
+  `logs/gate4-provisional-capacity-new-member.log`). The explicit preview failures were not
+  re-run for this allocator-only change; their last execution is recorded under `7393165`.
+  Two temporary mutations are killed at the expected assertions: permitting a fourth preview
+  reservation and bypassing shared accounting for authoritative discovery. Sources were restored
+  byte-for-byte; `logs/gate4-provisional-capacity-mutation-*.log` record the failures (0.10/0.15s).
+  Local execution also needed test-process-only `$env:_LINK_ = '/DEBUG:NONE'` after the Windows
+  linker reported LNK1318/PDB LIMIT. [MSVC documents this option](https://learn.microsoft.com/en-us/cpp/build/reference/debug-generate-debug-info?view=msvc-170)
+  as disabling PDB generation. Disk-full attempts were resolved by deleting only generated PDBs
+  and the verified Rust incremental cache. A disk-full documentation write truncated this file;
+  it was restored exactly from HEAD and this entry reapplied before diff verification.
+  No dependency, repository build-profile or installed-toolchain change was required.
+  Root formatting and `cargo clippy --locked -j 4 -p catcoms-sync -p catcoms-app --lib --tests
+  -- -D warnings` pass (28.74 seconds; `logs/gate4-provisional-capacity-clippy.log`).
+  Full-gate acceptance and the actor capacity/fairness regression are not claimed.
+
+- **Gate 4 joining review revision (`7393165`, 2026-09-12; user re-review passed).** The user accepted
   `48fcc2e`'s ownership-transition and known-CID byte-persistence claims. PR-001 requests changes
   to the proposed preview policy: all four retained slots could be filled by previews whose
   replacement needed one of those same slots before even sending a head query. The revised

@@ -9,9 +9,11 @@ use catcoms_rt::Responder;
 use catcoms_storage::pad::{self, OP_PAD_CEILING, OP_PAD_FLOOR};
 use receipt_head::{HeadSelection, ReceiptHeadAnswer};
 use registry_ingress::Rate;
+mod capacity;
 mod detached;
 mod service;
 mod wire;
+pub use capacity::ProvisionalCheckpointCapacity;
 pub use detached::{
     CompletedCheckpointDiscovery, CompletedCheckpointSeed, PendingCheckpointDiscovery,
     PendingCheckpointSeed,

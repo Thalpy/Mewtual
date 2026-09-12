@@ -292,7 +292,7 @@ that missing loading/confirmation contract.
 The concrete next runtime proposal and adversarial-review focus are in
 [GATE4-PROVISIONAL-READ-REVIEW.md](GATE4-PROVISIONAL-READ-REVIEW.md). It introduces a bounded,
 separate unconfirmed read fallback without granting installation, Apply or settlement authority.
-It is proposed, not implemented. Overlay editing and independent evidence for a newly joined
+Its design is accepted; the read fallback is not implemented. Overlay editing and independent evidence for a newly joined
 owner with Unknown tenure remain subsequent work; neither may be fabricated from a hint.
 
 Local test compilation needed `--config 'profile.test.package.catcoms-app.debug=0'` after two
@@ -301,7 +301,7 @@ test debug symbols; no repository build profile or dependency changed. The expli
 failures and final validation results are recorded in the current HANDOVER entry. Full Gate 4
 suites and final acceptance remain open.
 
-**Joining review revision (PR-001 / TEST-001 / TEST-002; awaiting re-review):** the user accepted
+**Joining review revision (PR-001 / TEST-001 / TEST-002; closed by user re-review of `7393165`):** the user accepted
 the ownership-transition and byte-persistence claims of `48fcc2e`, while requesting a concrete
 preview-capacity policy and stronger provisional acceptance guards. PR-001 concerns the proposal,
 not a production exploit introduced by that test-only commit. The revised contract allows at
@@ -322,6 +322,22 @@ exact receipt and absent current-owner proof before checking the missing preview
 injected into discovery; no production authority, API or native event changes. The two ignored
 preview cases still need runtime implementation and explicit confirmation-state assertions before
 they can count as gate acceptance. Final revision validation is recorded in HANDOVER.
+
+The re-review passes the tests/instrumentation and the revised proposal, with no further changes
+requested for closure. PR-001 is closed at the design level only. The reviewer inspected source
+and did not run Cargo. Refused-Apply assertions cover unchanged specified document/journal state;
+the app may still save its server snapshot before rejection. The Hint observation is historical
+test evidence, not a lifecycle capability.
+
+**Provisional capacity foundation (checkpoint; awaiting user review):** an opaque reservation can hold
+at most three of the existing four retained seed slots per sync instance. Ordinary authenticated
+discovery uses the same pool and can use all four; its current Hint result releases its slot.
+The reservation alone grants no content or installation authority. Allocation tests exercise
+both Studio and Registry head/seed paths with three held provisional reservations, Hint release,
+failed preparation, completed seed custody and transport cancellation/expiry. A unit test models
+multiple parser/delivery keepalives; these lower provisional paths do not yet exist. This does
+not implement previews, actor fairness, lifecycle invalidation or native delivery, nor complete
+the required competing-class actor installation regression. No callable UI hook changes.
 
 #### Landed on the way: Studio owner settlement preparation (`9799c6f`)
 

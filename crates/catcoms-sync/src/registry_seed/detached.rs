@@ -104,14 +104,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: PeerId,
         target: CheckpointTarget,
     ) -> Result<PendingCheckpointDiscovery<T>, SyncError> {
-        let slot = self
-            .registry_seeds
-            .retained
-            .iter_mut()
-            .find(|s| s.strong_count() == 0)
-            .ok_or(SyncError::Malformed)?;
-        let capacity = Arc::new(());
-        *slot = Arc::downgrade(&capacity);
+        let capacity = self.registry_seeds.reserve_retained(false)?;
         let expires = self
             .clock
             .monotonic_ms()
