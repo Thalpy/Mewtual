@@ -10,7 +10,29 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-12)
 
-- **Gate 4 succession assertion review (2026-09-12; fixes validated, re-review pending).**
+- **Gate 4 Index/checkpoint succession and restored-actor editing (2026-09-12;
+  validation passed, review pending).** The matrix adds six cases to the reviewed Flipnote pair: Index
+  Open/Closing epoch-zero takeover and Index/Flipnote Open/Closing takeover of epoch one.
+  It checks inherited epoch/close/seed against the installed old-owner checkpoint and binds
+  the successor's physical document id to the newly issued receipt. Every case then restores a
+  fresh actor, saves another independently checked operation, and reopens the vault to require
+  the exact operation and pending intent with unchanged receipt/pointer. The eligible-history
+  fixture now supports typed Index edits; its old-owner close helper accepts the previous
+  receipt for same-tenure preparation. New-owner decisions still come from the runtime, and the
+  staged-Remove fixture restores strict single-committer policy before Studio runs. Production
+  code and native hooks are unchanged. All eight cases pass with
+  `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --test-threads=4 --nocapture`
+  (51.29 seconds; `logs/gate4-succession-expanded-tests.log`). The shared-fixture solo three-rotation
+  test also passes (35.66 seconds; `logs/gate4-succession-expanded-solo.log`). Root formatting and
+  `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass
+  (`logs/gate4-succession-expanded-clippy.log`). Broader suites were not repeated for this test-only
+  slice; the previous ambient-check limitation remains below. User-provided review is pending.
+  This does not cover repeated owner changes, post-succession joining/PIX availability or
+  interrupted successor installation. Signed repair and full Gate 4 acceptance remain open.
+
+- **Gate 4 succession assertion review (2026-09-12; SUC-001/SUC-002 closed).**
+  The user-provided re-review accepts `5d65998` and requests no further code changes for either
+  finding. This closes the narrow test slice; broader Gate 4 implementation and acceptance remain open.
   The user-provided source review of `d7ea514` requested SUC-001 (Open expected projection could
   accept a no-op Save) and SUC-002 (Closing accepted any error without immediate source/intent
   comparison). The revised tests independently check the requested title and its author/nonce/id,
@@ -30,7 +52,8 @@ and ranks the live hazards in that path.
   coverage is an observed transition plus old-owner Open/Closing source, followed by completed
   takeover and orderly shutdown/reopen. It does not interrupt the successor installation or
   edit through a freshly restored successor actor, and proves no new multi-peer convergence.
-  Gate 4 remains unaccepted. Push this correction checkpoint for the user's re-review.
+  The correction checkpoint is on `origin/Create-suite-2`. Next work is the remaining runtime
+  succession coverage, then signed fault/repair integration and full-gate acceptance.
 
 - **Gate 4 audit and actor succession tests (`d7ea514`, 2026-09-12; initial evidence).** The backend
   checklist now records the omitted `dba52e5` frozen-owner core/store work and distinguishes

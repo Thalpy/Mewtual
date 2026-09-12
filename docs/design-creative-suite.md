@@ -36,6 +36,12 @@ still pending. ReceiptRepair v2's codec/book support does not implement runtime 
 remaining overlay, provisional newcomer and tenure/repair-label requirements below remain
 acceptance obligations. See the progress audit in `BACKEND-IMPLEMENTATION.md` and the current
 callable/unavailable controls in `FLIPNOTE-UI-HOOKS.md`; no percentage is inferred from commits.
+The subsequent actor test slice (`d7ea514`/`5d65998`) now has user-provided review closure for
+SUC-001/SUC-002. It covers header-only Flipnote Open/Closing takeover after restart and completed
+takeover surviving vault reopen; it does not close the broader succession or Gate 4 obligations.
+The next test slice expands the matrix to Index, installed-checkpoint inheritance and
+editing through a freshly restored successor actor; eight cases pass and review remains pending. It adds
+no native command or UI layout and does not close the remaining runtime succession scenarios.
 
 UI reference (2026-09-05): the owner's `Main.html`, `Inspector.html`, `Timeline.html`,
 `Palette.html` and `Tools.html`, with matching PNGs, were drafted as a scratch preview outside

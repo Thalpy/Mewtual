@@ -151,6 +151,25 @@ pub(crate) fn fill_studio_epoch_fixture(
     let logical = unit.document().clone();
     for n in 0..10 {
         let mut op = title_op(target, n);
+        if let StudioProjection::Index(index) = unit.projection().unwrap() {
+            op.body = if index.objects.contains_key(&[7; 16]) {
+                IndexOp::SetTitle {
+                    object: [7; 16],
+                    title: format!("index history {n}"),
+                }
+            } else {
+                IndexOp::PutObject {
+                    object: [7; 16],
+                    kind: catcoms_replication::studio::StudioKind::Flipnote,
+                    title: format!("index history {n}"),
+                    created_by: device.device_id(),
+                    ts: 100,
+                    expiry: catcoms_replication::studio::StudioExpiry::Unrecorded,
+                }
+            }
+            .encode()
+            .unwrap();
+        }
         op.nonce[8..].copy_from_slice(&unit.epoch().to_be_bytes());
         let mut copy =
             StudioEpoch::restore(&unit.snapshot().unwrap(), group, target, device.device_id())
@@ -205,13 +224,14 @@ pub(crate) fn studio_owner_decision_fixture(
     group: &ServerGroup,
     owner: &MlsDevice,
     target: StudioTarget,
+    previous: Option<&Receipt>,
 ) -> catcoms_replication::studio::StudioOwnerDecision {
     store
         .load_studio_epoch(server, group, target, owner)
         .unwrap()
         .unwrap()
         .unit
-        .new_owner_decision(group, owner, 0, None)
+        .new_owner_decision(group, owner, 0, previous)
         .unwrap()
 }
 

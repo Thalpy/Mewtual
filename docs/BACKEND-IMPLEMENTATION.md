@@ -192,11 +192,11 @@ acceptance have not been rerun or closed by this audit.
 | Ordinary owner rotation | Watched Index/art rotation, durable decisions, recovery-first installation and solo installed-head completion are connected. | Full production-adapter acceptance across owner absence, partitions and lifecycle failures. |
 | Registry maintenance | Derived pointers, current-tail paging and Create after Index rotation are connected. | Include these in succession/restart acceptance; preserve per-bucket Fault isolation. |
 | Recovery and own-intent replay | Seven native recovery commands, settlement invalidations, conservative replay/manual disposition and persisted eviction deadlines are connected. | Final combined acceptance and remaining fairness/backpressure/cold-source follow-ups in HANDOVER. |
-| Owner succession | `dba52e5` already supplies core and store takeover of a frozen source, exact decision retries and whole-source recovery. | Exercise the actor/idle worker after a witnessed owner transition, including Open and Closing sources, restart and a post-succession joiner. |
+| Owner succession | `dba52e5` supplies core/store frozen-source takeover. The reviewed `d7ea514`/`5d65998` pair is now expanded to eight passing Index/Flipnote cases covering Open/Closing, installed-checkpoint inheritance and restored-actor editing; this expansion awaits review. | A-to-B-to-A, post-succession joining/PIX availability, interrupted successor installation and combined acceptance. |
 | Signed fault/repair | ReceiptRepair v2 and bounded receipt-book loser screening have protocol regressions. | Durable repair issuance/application, recovery-before-replacement, distribution, owner-journal handling and runtime exit from Fault. Restore/Copy does not supply these. |
 | Remaining UI state and gate acceptance | Current phase/recovery invalidations exist; every current view is provisional. | Persisted Closing overlays, provisional old-owner newcomer reads and specialized tenure/repair observations still need integration evidence. Then run the complete gate scenarios, required suites and user-provided adversarial review. |
 
-**Current test slice (review fixes awaiting re-review):** two tests in
+**Reviewed baseline test slice (`d7ea514`/`5d65998`; SUC-001/SUC-002 closed):** the original two tests in
 [studio_exchange/tests/succession.rs](../crates/catcoms-app/src/studio_exchange/tests/succession.rs)
 pass through the actor Ready/lease and idle worker after an observed MLS owner transition and
 restart. One preserves an ordinary own Save in an Open epoch; the other refuses Save in the
@@ -211,6 +211,8 @@ operation id independently of the returned view, then checks the saved exact env
 pending intent before settlement. SUC-002 now requires the actor's `EpochClosed` error string
 and immediately compares the physical document id, phase, operation count, projection and whole
 pending-intent journal before/after refusal, explicitly excluding the rejected operation.
+The user-provided re-review of `5d65998` closes both findings with no further code changes
+requested. This accepts the narrow test slice; Gate 4 remains unaccepted.
 Both revised cases passed locally. Three temporary mutations then failed at the intended new
 assertions: replacing Open Apply with Read failed the requested-title check; substituting an
 unrelated Closing error failed the exact-error check; moving edit validation after intent
@@ -241,7 +243,30 @@ passes 138 tests, with one existing opt-in profiling test ignored (710.89 second
 `Instant::now()` calls in native `media_decode.rs` (333, 426,
 444, 504), outside this diff. Full-gate acceptance remains pending. Rust 1.89.0 and the standalone
 Windows build tools/SDK are installed for local tests; application builds are left to GitHub
-at the user's request. The next boundary is user-provided re-review of the assertion fixes.
+at the user's request. Next work is the remaining running-app succession coverage, followed by
+signed fault/repair integration and full-gate acceptance; this test slice needs no further changes.
+
+**Current succession slice (validation passed; review pending):** the actor matrix now adds
+Index Open/Closing takeover and installed-checkpoint inheritance for both Index and Flipnote,
+for eight cases including the reviewed epoch-zero Flipnote pair. The previous owner's opening
+is a prepared checkpoint fixture; the new owner's receipt and Registry pointer still come from
+the ordinary actor idle worker. Inheritance must match that installed opening's epoch, close
+hash and seed hash, including when a later old-owner close has frozen the source. The eligible
+history helper now authors typed Index creation/title operations as well as Flipnote headers.
+
+Every case additionally restores a new actor from the saved MLS snapshot after completed
+takeover, reads the installed successor, saves an independently checked exact title/author/nonce/id,
+and reopens the vault again. That new operation and intent must survive while the receipt and
+Registry pointer remain unchanged. The original SUC-001/SUC-002 assertions remain in the shared
+matrix. The eight cases pass with `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --test-threads=4 --nocapture`
+(51.29 seconds; `logs/gate4-succession-expanded-tests.log`). The shared-fixture regression
+`studio_solo_owner_rotates_repeatedly_on_idle_and_reopens_latest_checkpoint` also passes
+(35.66 seconds; `logs/gate4-succession-expanded-solo.log`), as do root formatting and
+`cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings`
+(`logs/gate4-succession-expanded-clippy.log`). Broader suites have not been repeated for this
+test-only slice. These remain isolated metadata-only fixtures: repeated owner
+changes, new joiners/PIX availability and interruption during successor installation are still
+open, alongside signed repair, the remaining UI state contracts and full-gate acceptance.
 
 #### Landed on the way: Studio owner settlement preparation (`9799c6f`)
 

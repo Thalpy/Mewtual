@@ -1,6 +1,6 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-12 against `d7ea514` plus the assertion review fixes below.
+Last checked: 2026-09-12 against `5d65998`; SUC-001/SUC-002 closed by user-provided re-review.
 Behavioral checkpoint: `39ceb76`
 (`fix(studio): bound the recovery hold and make replay slot-order proof`). Owner rotation and recovery
 inspection landed in `cbed5b7`; recovery controls, own-intent replay and settlement events are
@@ -9,11 +9,13 @@ is slot-order independent as of `39ceb76`. Frozen-owner takeover core/store path
 in `dba52e5`. Two actor tests in `d7ea514` cover header-only Flipnote takeover from
 Open/Closing epoch zero after restart, including recovery and Registry pointer persistence;
 the source review requested stronger Save/refusal assertions (SUC-001/SUC-002). Both revised
-cases pass and reject the review's counterexamples; user re-review remains pending. These
-assertion changes add no native hook or production behavior.
-Completed takeover survives vault reopen; interruption during successor installation and
-post-reopen actor editing remain outside this coverage. Broader runtime succession, signed
-repair and full Gate 4 acceptance remain pending.
+cases pass and reject the review's counterexamples. The re-review closes both findings with
+no further code changes requested. These assertion changes add no native hook or production behavior.
+The current slice expands this to eight Index/Flipnote Open/Closing cases, including an
+installed old-owner checkpoint and editing through a newly restored actor after takeover.
+All eight cases pass; user review is pending. This adds backend evidence without changing callable
+commands, events or UI layout. Repeated owner changes, post-succession joining/PIX availability,
+interruption during successor installation, signed repair and full Gate 4 acceptance remain pending.
 This is the maintained frontend integration map, not a replacement UI design. The user's
 canonical HTML/mockups remain authoritative for layout and interaction. Update this guide in
 the same slice that adds or changes a native command, event or returned state.
