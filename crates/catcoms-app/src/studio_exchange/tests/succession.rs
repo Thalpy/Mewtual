@@ -67,6 +67,7 @@ async fn successor(closing: bool) {
     p.bob.sync_once().await.unwrap();
     p.bob.sync.set_config(catcoms_sync::SyncConfig::default());
     assert!(p.bob.is_owner());
+    let new_owner_id = p.bob.sync.with_registry_context(|_, d, _, _| d.device_id());
     let tenure = p.bob.sync.observed_owner_tenure_start().unwrap();
     assert!(tenure > 0);
 
@@ -115,6 +116,22 @@ async fn successor(closing: bool) {
         }
     );
     let own = title(91, "saved after succession");
+    let (source_before, intents_before) = {
+        let guard = store.lock().await;
+        let held = guard.as_ref().unwrap();
+        let source = verifier.sync.with_registry_context(|g, d, _, _| {
+            held.load_studio_epoch(SERVER, g, target(), d)
+                .unwrap()
+                .unwrap()
+        });
+        (source, held.load_epoch_intents(SERVER, &logical).unwrap())
+    };
+    assert!(!source_before
+        .contains_exact_operation(new_owner_id, &own)
+        .unwrap());
+    assert!(!intents_before
+        .pending()
+        .any(|(id, _)| *id == own.id(&new_owner_id)));
     let saved = save(
         &actor,
         &store,
@@ -126,14 +143,72 @@ async fn successor(closing: bool) {
         },
     )
     .await;
-    let mut expected = if closing {
-        assert!(
-            saved.is_err(),
-            "a takeover must not reopen the frozen source to edits"
-        );
-        original.clone()
-    } else {
-        saved.unwrap().unwrap().projection
+    // Inspect the durable result before any idle pass can settle or replay an intent.
+    let mut expected = {
+        let guard = store.lock().await;
+        let held = guard.as_ref().unwrap();
+        let source_after = verifier.sync.with_registry_context(|g, d, _, _| {
+            held.load_studio_epoch(SERVER, g, target(), d)
+                .unwrap()
+                .unwrap()
+        });
+        let intents_after = held.load_epoch_intents(SERVER, &logical).unwrap();
+        assert_eq!(source_after.doc_id(), source_before.doc_id());
+        assert_eq!(source_after.phase(), source_before.phase());
+        if closing {
+            assert_eq!(
+                saved.expect_err("a takeover must not reopen the frozen source to edits"),
+                format!(
+                    "epoch studio: {}",
+                    catcoms_replication::ReplError::EpochClosed
+                )
+            );
+            assert_eq!(source_after.op_count(), source_before.op_count());
+            assert_eq!(
+                source_after.projection().unwrap(),
+                source_before.projection().unwrap()
+            );
+            assert!(!source_after
+                .contains_exact_operation(new_owner_id, &own)
+                .unwrap());
+            assert_eq!(
+                intents_after.pending().collect::<Vec<_>>(),
+                intents_before.pending().collect::<Vec<_>>(),
+                "a rejected Closing Save must leave the intent journal unchanged"
+            );
+            assert!(!intents_after
+                .pending()
+                .any(|(id, _)| *id == own.id(&new_owner_id)));
+            original.clone()
+        } else {
+            let saved = saved
+                .expect("Open Save must succeed")
+                .expect("Open Save must return a view");
+            let StudioProjection::Flipnote(art) = &saved.projection else {
+                panic!("expected a Flipnote projection")
+            };
+            let selected = &art.title.as_ref().expect("title must exist").selected;
+            assert_eq!(selected.value.as_str(), "saved after succession");
+            assert_eq!(selected.source.author, new_owner_id);
+            assert_eq!(selected.source.nonce, own.nonce);
+            assert_eq!(selected.source.op_id, own.id(&new_owner_id));
+            assert!(source_after
+                .contains_exact_operation(new_owner_id, &own)
+                .unwrap());
+            assert_eq!(source_after.op_count(), source_before.op_count() + 1);
+            assert_eq!(source_after.projection().unwrap(), saved.projection);
+            assert_eq!(
+                intents_after.pending().len(),
+                intents_before.pending().len() + 1
+            );
+            let (_, intent) = intents_after
+                .pending()
+                .find(|(id, _)| **id == own.id(&new_owner_id))
+                .expect("the exact Save must be pending before settlement retires it");
+            assert_eq!(intent.author, new_owner_id);
+            assert_eq!(intent.operation, own);
+            saved.projection
+        }
     };
     let StudioProjection::Flipnote(art) = &mut expected else {
         panic!()

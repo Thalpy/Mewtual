@@ -10,7 +10,29 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-12)
 
-- **Gate 4 audit and actor succession tests (2026-09-12; review pending).** The backend
+- **Gate 4 succession assertion review (2026-09-12; fixes validated, re-review pending).**
+  The user-provided source review of `d7ea514` requested SUC-001 (Open expected projection could
+  accept a no-op Save) and SUC-002 (Closing accepted any error without immediate source/intent
+  comparison). The revised tests independently check the requested title and its author/nonce/id,
+  the durable exact operation and pending intent before rotation, and the precise Closing refusal
+  with unchanged physical document id, phase, operation count, projection and intent journal.
+  Production code and the transition/close fixtures are unchanged. Both revised cases passed.
+  Three temporary mutations failed at the intended new assertions: Open Apply replaced by Read,
+  an unrelated Closing error, and validation delayed until after intent persistence. The runner
+  restored both source files byte-for-byte (`logs/gate4-succession-mutation-*.log`). The final
+  `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --nocapture` run passes
+  both cases (25.07 seconds; `logs/gate4-succession-review-final-tests.log`). Root formatting and
+  `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass
+  (`logs/gate4-succession-review-clippy.log`). Two compile attempts exhausted disk space before
+  tests; clearing only the generated Rust incremental cache allowed the reruns. Broader suites
+  were not repeated for this assertion-only correction; their prior results remain below.
+  The reviewer did not run Cargo; the prior local passes below are author evidence. Restart
+  coverage is an observed transition plus old-owner Open/Closing source, followed by completed
+  takeover and orderly shutdown/reopen. It does not interrupt the successor installation or
+  edit through a freshly restored successor actor, and proves no new multi-peer convergence.
+  Gate 4 remains unaccepted. Push this correction checkpoint for the user's re-review.
+
+- **Gate 4 audit and actor succession tests (`d7ea514`, 2026-09-12; initial evidence).** The backend
   checklist now records the omitted `dba52e5` frozen-owner core/store work and distinguishes
   connected rotation/recovery from runtime succession, signed repair and full-gate acceptance.
   `studio_exchange/tests/succession.rs` adds two passing actor Ready/lease/idle-worker cases:

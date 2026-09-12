@@ -196,7 +196,7 @@ acceptance have not been rerun or closed by this audit.
 | Signed fault/repair | ReceiptRepair v2 and bounded receipt-book loser screening have protocol regressions. | Durable repair issuance/application, recovery-before-replacement, distribution, owner-journal handling and runtime exit from Fault. Restore/Copy does not supply these. |
 | Remaining UI state and gate acceptance | Current phase/recovery invalidations exist; every current view is provisional. | Persisted Closing overlays, provisional old-owner newcomer reads and specialized tenure/repair observations still need integration evidence. Then run the complete gate scenarios, required suites and user-provided adversarial review. |
 
-**Current test slice (adversarial review pending):** two tests in
+**Current test slice (review fixes awaiting re-review):** two tests in
 [studio_exchange/tests/succession.rs](../crates/catcoms-app/src/studio_exchange/tests/succession.rs)
 pass through the actor Ready/lease and idle worker after an observed MLS owner transition and
 restart. One preserves an ordinary own Save in an Open epoch; the other refuses Save in the
@@ -205,14 +205,34 @@ the new owner's durable receipt, Open successor and Registry pointer, then reope
 check them again. The only added helper prepares an eligible old-owner close over the existing
 source fixture. The successor receipt and installation are produced by the existing runtime.
 
+The user-provided source review of `d7ea514` requested two assertion fixes, without identifying
+a production defect. SUC-001 now checks the requested title, new-owner attribution, nonce and
+operation id independently of the returned view, then checks the saved exact envelope and its
+pending intent before settlement. SUC-002 now requires the actor's `EpochClosed` error string
+and immediately compares the physical document id, phase, operation count, projection and whole
+pending-intent journal before/after refusal, explicitly excluding the rejected operation.
+Both revised cases passed locally. Three temporary mutations then failed at the intended new
+assertions: replacing Open Apply with Read failed the requested-title check; substituting an
+unrelated Closing error failed the exact-error check; moving edit validation after intent
+persistence failed the unchanged-journal check. The mutation runner restored the test and store
+source files byte-for-byte. Logs: `logs/gate4-succession-mutation-*.log`. On the restored tree,
+`cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --nocapture` passes
+both cases (25.07 seconds; `logs/gate4-succession-review-final-tests.log`), root formatting
+passes, and `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` passes
+(`logs/gate4-succession-review-clippy.log`). The broader suite results below belong to the
+original checkpoint; this assertion-only correction does not claim a fresh full-gate run.
+
 The transition uses the existing staged-Remove protocol as a **test fixture**, then restores
 the strict single-committer configuration before the Studio actor runs. Production owner-transfer
 policy is unchanged. These are header-only Flipnote fixtures, epoch zero to checkpoint one;
 they do not establish post-succession PIX availability. Index takeover, inheritance from an
 already installed checkpoint, A-to-B-to-A runtime behavior, a post-succession joiner and signed
 repair remain outstanding. These two passes do not close running-app succession.
+The final vault reopen follows completed takeover and orderly actor shutdown; interruption
+inside the new owner's installation and editing through a newly restored successor actor are
+not covered. The isolated actor/verifier pair supplies no new multi-peer convergence evidence.
 
-Fresh evidence: `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --nocapture`
+Original `d7ea514` evidence: `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --nocapture`
 passes both cases; log: `logs/gate4-succession-focused.log`. Frontend tests pass 1,189/1,189,
 root formatting and `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass.
 The broader `cargo test --locked -j 4 -p catcoms-app --lib studio_ -- --test-threads=4` run
@@ -221,7 +241,7 @@ passes 138 tests, with one existing opt-in profiling test ignored (710.89 second
 `Instant::now()` calls in native `media_decode.rs` (333, 426,
 444, 504), outside this diff. Full-gate acceptance remains pending. Rust 1.89.0 and the standalone
 Windows build tools/SDK are installed for local tests; application builds are left to GitHub
-at the user's request. The next boundary is user-provided adversarial review of this test slice.
+at the user's request. The next boundary is user-provided re-review of the assertion fixes.
 
 #### Landed on the way: Studio owner settlement preparation (`9799c6f`)
 

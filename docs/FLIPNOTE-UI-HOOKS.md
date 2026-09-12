@@ -1,14 +1,19 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-12 against `acdb7f8`. Behavioral checkpoint: `39ceb76`
+Last checked: 2026-09-12 against `d7ea514` plus the assertion review fixes below.
+Behavioral checkpoint: `39ceb76`
 (`fix(studio): bound the recovery hold and make replay slot-order proof`). Owner rotation and recovery
 inspection landed in `cbed5b7`; recovery controls, own-intent replay and settlement events are
 committed in `ccddd23`, not worktree-only; the eviction grace is now actually enforced and replay
 is slot-order independent as of `39ceb76`. Frozen-owner takeover core/store paths also landed
-in `dba52e5`. Two new actor tests, pending adversarial review, pass for header-only Flipnote takeover from
+in `dba52e5`. Two actor tests in `d7ea514` cover header-only Flipnote takeover from
 Open/Closing epoch zero after restart, including recovery and Registry pointer persistence;
-this adds evidence, no new native hook. Broader runtime succession, signed repair and full
-Gate 4 acceptance remain pending.
+the source review requested stronger Save/refusal assertions (SUC-001/SUC-002). Both revised
+cases pass and reject the review's counterexamples; user re-review remains pending. These
+assertion changes add no native hook or production behavior.
+Completed takeover survives vault reopen; interruption during successor installation and
+post-reopen actor editing remain outside this coverage. Broader runtime succession, signed
+repair and full Gate 4 acceptance remain pending.
 This is the maintained frontend integration map, not a replacement UI design. The user's
 canonical HTML/mockups remain authoritative for layout and interaction. Update this guide in
 the same slice that adds or changes a native command, event or returned state.
