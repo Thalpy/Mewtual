@@ -4,7 +4,9 @@ Status: user re-review of `7393165` passed. TEST-001 and TEST-002 are closed for
 instrumentation; PR-001 is closed as a design finding. No further closure changes were requested.
 The reviewer inspected source and did not execute Cargo. The approved provisional-read path
 remains unfinished. The user accepted the capacity foundation in `1c90c41` without requested
-changes. The next checkpoint connects real provisional head discovery and candidate custody.
+changes. Published checkpoint `0b32bad` connects real provisional head discovery and candidate
+custody; its user adversarial review is pending. The separate interrupted-successor tests do
+not imply acceptance of this discovery boundary.
 
 ## Reproduced boundary
 

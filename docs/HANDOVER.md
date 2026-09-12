@@ -8,9 +8,53 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-09-12)
+## Status (latest entry: 2026-09-13)
 
-- **Gate 4 provisional head discovery (2026-09-12; checkpoint, awaiting user review).**
+- **Gate 4 successor interruption acceptance (2026-09-13; awaiting user review).** Remote branch
+  `Create-suite-2` now contains exact local discovery commit `0b32bad`; the earlier publishing
+  block is resolved. Its adversarial review has been requested from the user with a copyable
+  message; no discovery PASS has been received. Independent work now extends the accepted
+  succession harness with real actor I/O interruptions before/after recovery and successor
+  writes. Four new tests cover eight Index/Flipnote scenarios with an installed epoch-one
+  old-owner checkpoint and a later Closing source. Only old history and the observed MLS
+  transition are fixtures; the actor constructs the successor's receipt and performs each
+  challenged write. The one-shot failure is scoped to a target and physical store, compiled
+  only under `cfg(test)`, and creates no receipt or source. It either returns an I/O error
+  before the chosen write or completes the real atomic write and then returns that error.
+  Immediate checks require the exact durable prefix: pending receipt/encoded close, untouched
+  frozen history until successor replacement, and full typed recovery before any successor
+  write. The actor/store are dropped and reopened; ordinary Read and idle passes must finish
+  that same decision, local publication and Registry pointer. The accepted harness also checks
+  full recovery, another fresh actor's edit and durable reopen. No fake actor completion,
+  replacement receipt or warm-store transfer is injected. This models I/O error plus loss of
+  volatile state, not process-abort or power-loss behavior.
+  The initial four-test run passes all eight cases (70.25 seconds;
+  `logs/gate4-successor-interruption-cases.log`). Two deliberate production mutations fail:
+  suppressing adoption recovery fails the pre-successor retained-snapshot assertion (27.23s),
+  and dropping the pending-owner retry fails local publication after a completed successor
+  write (61.37s). Both source files were restored byte-for-byte with SHA-256 verification;
+  the script/logs are `logs/gate4-successor-interruption-mutations.ps1` and
+  `logs/gate4-successor-interruption-mutation-*.log`. On restored source, filter
+  `studio_exchange::tests::succession` passes 14 tests with the two unfinished preview cases
+  still ignored (134.26 seconds; `logs/gate4-successor-interruption-succession-final.log`).
+  The original eight accepted succession cases and both known-CID newcomer cases still pass.
+  Filter `studio_frozen_owner_store` with `-- --test-threads=3 --nocapture` passes all three
+  existing store tests, including the full frozen-takeover write-failure matrix (411.01 seconds;
+  `logs/gate4-successor-interruption-store-final.log`). Total restored-source validation:
+  17 passes, four new tests/eight new interruption scenarios, and two ignored preview cases.
+  Root formatting and `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings`
+  pass (36.37 seconds; `logs/gate4-successor-interruption-clippy.log`).
+  All app test commands use `cargo test --locked -j 4
+  --config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib` with the indicated
+  filter and `-- --test-threads=4 --nocapture` unless noted above. The initial compile ran out of disk while
+  writing Rust's query cache; only the verified generated `target/debug/incremental` directory
+  was removed. These runs set process-only `CARGO_INCREMENTAL=0` and `_LINK_=/DEBUG:NONE`.
+  No repository build profile, toolchain installation or dependency changed.
+  Direct A-to-B-to-A through rejoining encounters the already documented Unknown-tenure
+  dependency; neither the Welcome nor the old owner's reused key establishes its new tenure.
+  No authority inference or native/UI contract change is introduced.
+
+- **Gate 4 provisional head discovery (`0b32bad`, 2026-09-12; published, awaiting user review).**
   The user accepted `1c90c41`'s allocation foundation without requested changes; the reviewer
   inspected source and did not run Cargo. The next sync/app slice uses that quota for real
   provisional head requests and opaque, volatile candidate metadata. Shared response

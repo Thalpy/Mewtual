@@ -1,6 +1,6 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-12 against `1c90c41`; shared capacity foundation accepted by user review.
+Last checked: 2026-09-13; published discovery checkpoint `0b32bad` is awaiting review.
 Behavioral checkpoint: `39ceb76`
 (`fix(studio): bound the recovery hold and make replay slot-order proof`). Owner rotation and recovery
 inspection landed in `cbed5b7`; recovery controls, own-intent replay and settlement events are
@@ -15,7 +15,8 @@ The current slice expands this to eight Index/Flipnote Open/Closing cases, inclu
 installed old-owner checkpoint and editing through a newly restored actor after takeover.
 All eight cases pass; the user accepted `e3f6669`. This adds backend evidence without changing callable
 commands, events or UI layout. Repeated owner changes, post-succession joining/PIX availability,
-interruption during successor installation, signed repair and full Gate 4 acceptance remain pending.
+review of successor-installation interruption evidence, signed repair and full Gate 4 acceptance
+remain pending.
 The user accepted `48fcc2e` for ownership transitions and known-CID byte persistence, while
 requesting PR-001 changes to the proposed preview capacity and TEST-001/TEST-002 acceptance
 assertions. The revised proposal reserves authoritative capacity and permits preview eviction;
@@ -35,6 +36,13 @@ mount/server bindings. It supplies no seed, Studio view, native command or confi
 Receipt signer/tenure claims remain unverified. Preview fetch/parsing, actor scheduling and late
 native delivery are still pending; this metadata inspection seam is not a renderer hook.
 The adapters are currently exercised directly; the actor receiver does not schedule them yet.
+The independent successor-installation slice adds four passing actor tests covering eight
+failures before/after recovery and successor writes. They require fresh-mount resume of the
+exact receipt, preserved recovery, Registry pointer completion and editing after another restart.
+These are test-only I/O hooks and backend evidence awaiting review, with no new callable hook,
+returned field or UI layout change. They do not claim process-abort or power-loss coverage.
+A direct A-to-B-to-A rejoin also encounters the Unknown-tenure dependency described below:
+returning with the same owner key does not establish the start of its new tenure.
 The joining fixture exposed an additional owner change: a new invitee can reuse the removed
 founder's low MLS leaf. The newcomer then has Unknown tenure and cannot load the previous owner's
 checkpoint through the current read seam. Two cases pass for known-CID PIX fetch and offline reopen;

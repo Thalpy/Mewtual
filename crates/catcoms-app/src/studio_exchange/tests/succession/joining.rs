@@ -493,7 +493,7 @@ async fn newcomer(closing: bool, require_preview: bool) {
     }
 }
 
-async fn step(actor: &crate::ServerActor, store: &Arc<Mutex<Option<ServerStore>>>) {
+pub(super) async fn step(actor: &crate::ServerActor, store: &Arc<Mutex<Option<ServerStore>>>) {
     actor
         .studio_receive_begin()
         .await
@@ -507,7 +507,7 @@ async fn step(actor: &crate::ServerActor, store: &Arc<Mutex<Option<ServerStore>>
         .unwrap();
 }
 
-fn drain_events(
+pub(super) fn drain_events(
     mut events: tokio::sync::mpsc::Receiver<crate::TracedEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

@@ -180,7 +180,7 @@ deliberately the losing one so the extra evidence is the only difference.
 
 Remaining for Gate 4: running-app succession, signed fault/repair, and full-gate acceptance.
 
-#### Gate 4 progress audit (2026-09-12)
+#### Gate 4 progress audit (2026-09-13)
 
 Most rotation/recovery plumbing is connected; the gate remains unaccepted. The rows below
 describe observable boundaries, not equal portions of work or a percentage of time remaining.
@@ -192,7 +192,7 @@ acceptance have not been rerun or closed by this audit.
 | Ordinary owner rotation | Watched Index/art rotation, durable decisions, recovery-first installation and solo installed-head completion are connected. | Full production-adapter acceptance across owner absence, partitions and lifecycle failures. |
 | Registry maintenance | Derived pointers, current-tail paging and Create after Index rotation are connected. | Include these in succession/restart acceptance; preserve per-bucket Fault isolation. |
 | Recovery and own-intent replay | Seven native recovery commands, settlement invalidations, conservative replay/manual disposition and persisted eviction deadlines are connected. | Final combined acceptance and remaining fairness/backpressure/cold-source follow-ups in HANDOVER. |
-| Owner succession | `dba52e5` supplies core/store frozen-source takeover. User-accepted `e3f6669` covers eight Index/Flipnote Open/Closing cases, installed-checkpoint inheritance and restored-actor editing. The current joining fixture separately checks known-CID PIX fetch/reopen and reproduces missing provisional metadata reads when the join recycles the founder's leaf. | A-to-B-to-A, provisional newcomer metadata/editing, interrupted successor installation and combined acceptance. Known-CID bytes alone do not close joining acceptance. |
+| Owner succession | `dba52e5` supplies core/store frozen-source takeover. User-accepted `e3f6669` covers eight Index/Flipnote Open/Closing cases, installed-checkpoint inheritance and restored-actor editing. The joining fixture checks known-CID PIX fetch/reopen and reproduces missing provisional metadata reads when the join recycles the founder's leaf. The new interruption slice adds actor recovery/successor write failures and restart; review is pending. | A-to-B-to-A, provisional newcomer metadata/editing, review of the bounded interruption slice and combined acceptance. Known-CID bytes alone do not close joining acceptance. |
 | Signed fault/repair | ReceiptRepair v2 and bounded receipt-book loser screening have protocol regressions. | Durable repair issuance/application, recovery-before-replacement, distribution, owner-journal handling and runtime exit from Fault. Restore/Copy does not supply these. |
 | Remaining UI state and gate acceptance | Current phase/recovery invalidations exist; every current view is provisional. | Persisted Closing overlays, provisional old-owner newcomer reads and specialized tenure/repair observations still need integration evidence. Then run the complete gate scenarios, required suites and user-provided adversarial review. |
 
@@ -339,7 +339,7 @@ multiple parser/delivery keepalives; these lower provisional paths do not yet ex
 not implement previews, actor fairness, lifecycle invalidation or native delivery, nor complete
 the required competing-class actor installation regression. No callable UI hook changes.
 
-**Provisional head discovery (checkpoint; awaiting user review):** the accepted capacity guard
+**Provisional head discovery (`0b32bad`; published, awaiting user review):** the accepted capacity guard
 now follows a real detached head request through completion and an opaque candidate result.
 Preparation requires a current Studio watch and acquires one of the three eligible slots before
 requesting. The existing authenticated response decoder is shared with authoritative discovery;
@@ -354,6 +354,24 @@ inspection. These are unconfirmed receipt claims, not verified receipt signature
 parsed preview. Seed/tail fetching, parser bounds, scheduler fairness and native preview delivery
 remain separate work. No UI layout, command, event or returned StudioView changed.
 The adapters are exercised directly; the actor receiver does not yet schedule this discovery path.
+
+**Independent successor interruption slice (awaiting user review):** four tests cover eight
+Index/Flipnote cases with an installed old-owner checkpoint and later Closing source. A
+per-mount, one-shot `cfg(test)` hook fails the actual actor's rotation before/after recovery or
+successor writes. The tests check the durable prefix immediately, discard actor/store custody,
+reopen from the saved MLS snapshot and require ordinary Read/idle work to finish the exact
+journaled receipt and encoded close. They preserve full typed recovery, complete local
+availability and the Registry pointer, then check a further actor restart, Apply and reopen.
+The restored-source succession group passes 14 tests with two unfinished preview cases ignored;
+both deliberate mutations are caught. Three existing frozen-owner store tests also pass,
+including the write-failure matrix. Formatting and Clippy pass; commands are in HANDOVER.
+This is an I/O-error/restart model, not process-abort or power-loss qualification.
+No production policy, native hook, schema or UI layout changes.
+The direct A-to-B-to-A rejoin route shares the known Unknown-tenure dependency: the returned
+device's Welcome and reused owner key do not prove the beginning of its new tenure. No test may
+fill that gap with a caller-supplied tenure or a receipt's own claim. Repeated succession remains
+open alongside provisional-read integration. Discovery checkpoint `0b32bad` still needs its own
+user review before the dependent seed/preview slice proceeds.
 
 #### Landed on the way: Studio owner settlement preparation (`9799c6f`)
 

@@ -55,10 +55,16 @@ tighten the Registry/refused-Apply and completed-Hint observations. The user re-
 closes TEST-001/TEST-002 and PR-001 (design only). The capacity checkpoint adds the shared three-of-four
 capacity reservation; fetching, scheduler fairness, lifecycle fencing and provisional native reads
 remain pending. Gate 4 remains active.
-The user accepted `1c90c41`'s capacity foundation without requested changes. The next checkpoint
+The user accepted `1c90c41`'s capacity foundation without requested changes. Published `0b32bad`
 adds authenticated provisional head discovery and scoped candidate custody, including watch and
 app mount/server checks. It still supplies no parsed preview or native unconfirmed-history state;
 receipt attribution, seed/tail validation and runtime scheduling remain acceptance obligations.
+Its user review is pending. Separately, the 2026-09-13 interruption slice adds four actor tests
+covering eight failures before/after recovery and successor writes. A fresh mount/actor must
+resume the exact journaled decision, preserve typed recovery and finish the Registry pointer;
+another restart must remain editable. This bounded I/O-error/restart evidence awaits review and
+does not close Gate 4. Direct A-to-B-to-A by rejoining still shares the Unknown-tenure gap:
+the same returned owner key and a Welcome cannot establish its new tenure's start.
 
 UI reference (2026-09-05): the owner's `Main.html`, `Inspector.html`, `Timeline.html`,
 `Palette.html` and `Tools.html`, with matching PNGs, were drafted as a scratch preview outside

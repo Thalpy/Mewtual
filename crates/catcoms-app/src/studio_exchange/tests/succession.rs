@@ -9,6 +9,7 @@ use catcoms_replication::studio::StudioRecovery;
 use catcoms_replication::{EpochPhase, InheritedCheckpoint};
 use tokio::sync::Mutex;
 
+mod interrupted;
 mod joining;
 
 #[tokio::test]
@@ -52,6 +53,15 @@ async fn studio_actor_new_owner_inherits_closing_index_checkpoint_after_restart(
 }
 
 async fn successor(selected_target: StudioTarget, checkpoint: bool, closing: bool) {
+    successor_with_interruption(selected_target, checkpoint, closing, None).await;
+}
+
+async fn successor_with_interruption(
+    selected_target: StudioTarget,
+    checkpoint: bool,
+    closing: bool,
+    interruption: Option<interrupted::Interruption>,
+) {
     let mut p = Pair::new().await;
     let logical = selected_target.document(&p.bob.group_id()).unwrap();
     // Only the PREVIOUS owner's checkpoint is a fixture. The new tenure must derive its
@@ -171,9 +181,9 @@ async fn successor(selected_target: StudioTarget, checkpoint: bool, closing: boo
         "read-only verifier",
     )
     .unwrap();
-    let store = Arc::new(Mutex::new(Some(reopened)));
-    let (actor, mut events, task) = crate::spawn(restored);
-    let drain = tokio::spawn(async move {
+    let mut store = Arc::new(Mutex::new(Some(reopened)));
+    let (mut actor, mut events, mut task) = crate::spawn(restored);
+    let mut drain = tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             assert!(!matches!(event.event, crate::AppEvent::StudioReceivePaused));
         }
@@ -296,6 +306,44 @@ async fn successor(selected_target: StudioTarget, checkpoint: bool, closing: boo
         StudioProjection::Index(index) => index.epoch = successor_epoch,
     }
     let pointer = PointerKey::new(logical.doc_type, logical.logical_key.clone()).unwrap();
+    let interrupted_decision = if let Some(interruption) = interruption {
+        let decision = interruption
+            .reach_write(&actor, &store, &mut verifier, &p.clock, selected_target)
+            .await;
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
+        // Drop every actor, warm source and physical mount before resuming. Only the sealed
+        // files and independently observed MLS snapshot survive this injected I/O error.
+        drop(store.lock().await.take());
+        let reopened = open(p.b_root.path());
+        let restored = Node::restore(
+            &reopened.load_server(SERVER).unwrap(),
+            Net::new(Hub::new().join(PeerId::from_u64(24))),
+            rng(),
+            Box::new(p.clock.clone()),
+            "successor after interrupted installation",
+        )
+        .unwrap();
+        assert_eq!(restored.sync.observed_owner_tenure_start(), Some(tenure));
+        store = Arc::new(Mutex::new(Some(reopened)));
+        (actor, events, task) = crate::spawn(restored);
+        drain = joining::drain_events(events);
+        let read = save(
+            &actor,
+            &store,
+            StudioRequest::Read {
+                target: selected_target,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        interruption.assert_reopened(&read, &original, initial_epoch, &decision.0);
+        Some(decision)
+    } else {
+        None
+    };
     let mut installed = false;
     for _ in 0..60 {
         p.clock.advance_ms(1000);
@@ -347,6 +395,13 @@ async fn successor(selected_target: StudioTarget, checkpoint: bool, closing: boo
         "solo availability completes without a peer query"
     );
     let receipt = journal.published().unwrap().clone();
+    if let Some((selected, close)) = &interrupted_decision {
+        assert_eq!(
+            &receipt, selected,
+            "restart must resume the exact journaled decision"
+        );
+        assert_eq!(&journal.close_for(&receipt).unwrap().encode(), close);
+    }
     assert_eq!(receipt.tenure_start_group_epoch, tenure);
     assert_eq!(receipt.closed_epoch, initial_epoch);
     assert_eq!(receipt.inherited, inherited);

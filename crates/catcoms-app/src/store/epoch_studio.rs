@@ -26,6 +26,8 @@ mod recovery_disposition;
 mod registry;
 mod rotation;
 pub use adoption::StudioAdoptionOutcome;
+#[cfg(test)]
+pub(crate) use rotation::interruption::{StudioRotationBoundary, StudioRotationInterruption};
 pub use rotation::StudioRotationOutcome;
 mod receive;
 pub(crate) use preparation::{PreparedStudioSource, StudioSourceCapture};
