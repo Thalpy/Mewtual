@@ -314,6 +314,7 @@ async fn newcomer(closing: bool, require_preview: bool) {
     );
     tick.unwrap();
     let mut newcomer = joined.unwrap();
+    let provider_peer = provider.local_peer();
     // Adding into Alice's recycled leaf changes Bob -> newcomer. A Welcome is not an
     // independently witnessed tenure transition, even when it makes its recipient owner.
     assert!(newcomer.is_owner());
@@ -339,11 +340,12 @@ async fn newcomer(closing: bool, require_preview: bool) {
             .load_studio_epoch(SERVER, g, target(), d)
             .unwrap()
             .is_none());
-        assert!(newcomer_store
-            .load_registry_epoch(SERVER, g, pointer.bucket(), d)
-            .unwrap()
-            .is_none());
     });
+    let registry_before = registry_baseline(&mut newcomer, &newcomer_store, &logical);
+    assert!(
+        registry_before.is_none(),
+        "fixture begins without a Registry bucket"
+    );
     newcomer.set_blob_store(newcomer_store.blob_store(&group_key).unwrap());
     assert!(!newcomer_store.blob_store(&group_key).unwrap().has(&cid));
     let mut newcomer_verifier = Node::restore(
@@ -371,10 +373,24 @@ async fn newcomer(closing: bool, require_preview: bool) {
         tokio::join!(step(&a, &a_store), step(&b, &b_store));
         tokio::join!(a.wait_studio_preparation(), b.wait_studio_preparation());
     }
+    let hint = b.observed_studio_hint_for_test().expect(
+        "authenticated Studio Hint must reach completed discovery before checking a preview",
+    );
+    assert_eq!(
+        hint.target,
+        catcoms_sync::checkpoint_exchange::CheckpointTarget::Studio(target())
+    );
+    assert_eq!(hint.peer, provider_peer);
+    assert_eq!(hint.provider, new_owner);
+    assert_eq!(hint.receipt.as_ref(), Some(&receipt));
+    assert!(
+        hint.proof_absent,
+        "former-owner hint has no current-owner proof"
+    );
     {
         let guard = b_store.lock().await;
         let held = guard.as_ref().unwrap();
-        assert_unconfirmed(&mut newcomer_verifier, held, &logical);
+        assert_unconfirmed(&mut newcomer_verifier, held, &logical, &registry_before);
         assert!(
             !held.blob_store(&group_key).unwrap().has(&cid),
             "metadata discovery must not invent pixel possession"
@@ -383,6 +399,38 @@ async fn newcomer(closing: bool, require_preview: bool) {
     let provisional_read = save(&b, &b_store, StudioRequest::Read { target: target() })
         .await
         .unwrap();
+    {
+        let guard = b_store.lock().await;
+        assert_unconfirmed(
+            &mut newcomer_verifier,
+            guard.as_ref().unwrap(),
+            &logical,
+            &registry_before,
+        );
+    }
+    let refused = title(100, "a preview cannot authorize this Apply");
+    let error = save(
+        &b,
+        &b_store,
+        StudioRequest::Apply {
+            target: target(),
+            epoch_id: successor_id,
+            nonce: refused.nonce,
+            body: refused.body,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, "epoch studio: edit belongs to a retired epoch");
+    {
+        let guard = b_store.lock().await;
+        assert_unconfirmed(
+            &mut newcomer_verifier,
+            guard.as_ref().unwrap(),
+            &logical,
+            &registry_before,
+        );
+    }
     // The CID is supplied by this fixture, not discovered by the newcomer. Availability is
     // useful evidence, but does not claim that the current app can display this Flipnote.
     let fetched = b
@@ -405,7 +453,12 @@ async fn newcomer(closing: bool, require_preview: bool) {
     bd.await.unwrap();
     drop(b_store.lock().await.take());
     let reopened = open(root.path());
-    assert_unconfirmed(&mut newcomer_verifier, &reopened, &logical);
+    assert_unconfirmed(
+        &mut newcomer_verifier,
+        &reopened,
+        &logical,
+        &registry_before,
+    );
     // With no provider on this final network, a second fetch can only use persisted bytes.
     let mut offline = Node::restore(
         &newcomer_snapshot,
@@ -491,7 +544,13 @@ fn assert_unconfirmed(
     verifier: &mut Node,
     store: &ServerStore,
     logical: &catcoms_replication::LogicalDocument,
+    registry_before: &RegistryBaseline,
 ) {
+    assert_eq!(
+        &registry_baseline(verifier, store, logical),
+        registry_before,
+        "hint discovery, Read and refused Apply must preserve Registry state"
+    );
     verifier.sync.with_registry_context(|g, d, _, _| {
         assert!(
             store
@@ -501,6 +560,16 @@ fn assert_unconfirmed(
             "an unconfirmed hint cannot install an authoritative epoch"
         );
     });
+    let pointer = PointerKey::new(logical.doc_type, logical.logical_key.clone()).unwrap();
+    let registry =
+        catcoms_replication::registry::registry_document(&verifier.group_id(), pointer.bucket())
+            .unwrap();
+    for document in [logical, &registry] {
+        assert_empty_journals(store, document);
+    }
+}
+
+fn assert_empty_journals(store: &ServerStore, logical: &catcoms_replication::LogicalDocument) {
     let journal = store.load_epoch_owner_receipts(SERVER, logical).unwrap();
     assert!(journal.pending().is_none() && journal.published().is_none());
     assert_eq!(
@@ -511,12 +580,42 @@ fn assert_unconfirmed(
             .len(),
         0
     );
-    assert_eq!(
+    let recovery = store.load_epoch_recovery(SERVER, logical).unwrap();
+    assert_eq!(recovery.retained().len(), 0);
+    assert!(recovery.staged().is_none());
+    assert!(recovery.eviction_pending().unwrap().is_none());
+}
+
+// Compare source identity, authority/admission state AND projection, not only the pointer's
+// selected value. In this fixture the captured absence must survive discovery/read/refusal/reopen.
+type RegistryBaseline = Option<(
+    u128,
+    u64,
+    EpochPhase,
+    usize,
+    usize,
+    catcoms_replication::registry::RegistryProjection,
+)>;
+
+fn registry_baseline(
+    verifier: &mut Node,
+    store: &ServerStore,
+    logical: &catcoms_replication::LogicalDocument,
+) -> RegistryBaseline {
+    let pointer = PointerKey::new(logical.doc_type, logical.logical_key.clone()).unwrap();
+    verifier.sync.with_registry_context(|g, d, _, _| {
         store
-            .load_epoch_recovery(SERVER, logical)
+            .load_registry_epoch(SERVER, g, pointer.bucket(), d)
             .unwrap()
-            .retained()
-            .len(),
-        0
-    );
+            .map(|state| {
+                (
+                    state.doc_id(),
+                    state.epoch(),
+                    state.phase(),
+                    state.op_count(),
+                    state.quarantined_len(),
+                    state.projection().unwrap(),
+                )
+            })
+    })
 }

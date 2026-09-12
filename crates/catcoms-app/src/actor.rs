@@ -1065,6 +1065,10 @@ pub struct ServerActor {
     studio_pending: tokio::sync::watch::Receiver<bool>,
     #[cfg(test)]
     studio_preparing: tokio::sync::watch::Receiver<bool>,
+    #[cfg(test)]
+    studio_hints: tokio::sync::watch::Receiver<
+        Option<crate::studio_exchange::discovery::StudioHintObservation>,
+    >,
 }
 
 impl ServerActor {
@@ -1111,6 +1115,12 @@ impl ServerActor {
             .await
             .expect("Studio actor stopped during preparation");
     }
+    #[cfg(test)]
+    pub(crate) fn observed_studio_hint_for_test(
+        &self,
+    ) -> Option<crate::studio_exchange::discovery::StudioHintObservation> {
+        self.studio_hints.borrow().clone()
+    }
     async fn studio_ready(
         &self,
         request: Option<crate::studio::StudioRequest>,
@@ -1137,6 +1147,8 @@ impl ServerActor {
             studio_pending: self.studio_pending.clone(),
             #[cfg(test)]
             studio_preparing: self.studio_preparing.clone(),
+            #[cfg(test)]
+            studio_hints: self.studio_hints.clone(),
             cmd_tx: CommandSender {
                 tx: self.cmd_tx.tx.clone(),
                 trace: Trace(trace),
@@ -3408,8 +3420,12 @@ where
     let (studio_signal, studio_pending) = tokio::sync::watch::channel(false);
     #[cfg(test)]
     let (studio_preparation_signal, studio_preparing) = tokio::sync::watch::channel(false);
+    #[cfg(test)]
+    let (studio_hint_signal, studio_hints) = tokio::sync::watch::channel(None);
     let handle = tokio::spawn(async move {
         let mut studio_receiver = crate::studio::StudioReceiver::default();
+        #[cfg(test)]
+        studio_receiver.observe_hints_for_test(studio_hint_signal);
         let mut studio_jobs = tokio::task::JoinSet::<crate::studio::StudioBackgroundResult>::new();
         // Per open channel: a content signature of its messages, topic and jukebox (see
         // `channel_delta`), so an edit/delete/add all surface a `ChannelUpdated` that says which
@@ -5019,6 +5035,8 @@ where
             studio_pending,
             #[cfg(test)]
             studio_preparing,
+            #[cfg(test)]
+            studio_hints,
             cmd_tx: CommandSender {
                 tx: cmd_tx,
                 trace: Trace::NONE,
@@ -5734,6 +5752,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         let actor = ServerActor {
+            studio_hints: tokio::sync::watch::channel(None).1,
             studio_pending: tokio::sync::watch::channel(false).1,
             studio_preparing: tokio::sync::watch::channel(false).1,
             cmd_tx: CommandSender {

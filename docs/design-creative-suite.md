@@ -47,6 +47,11 @@ the removed founder's low MLS leaf. Known-CID pixel availability and provisional
 are separate obligations: the latter currently fails because the receiver discards unconfirmed
 Studio head hints. [The proposed next runtime slice](GATE4-PROVISIONAL-READ-REVIEW.md) adds a bounded,
 explicitly unconfirmed read fallback; it awaits user-provided adversarial review and is not implemented.
+The user accepted `48fcc2e`'s transition/byte evidence but requested PR-001 changes to that proposal:
+previews must not retain all capacity needed for authoritative discovery. The revision caps all
+provisional custody at three of the four shared slots, reserves authoritative progress across Studio
+and Registry, and separates preview eviction from successful authoritative replacement. TEST-001/002
+tighten the Registry/refused-Apply and completed-Hint observations. Runtime implementation awaits re-review.
 
 UI reference (2026-09-05): the owner's `Main.html`, `Inspector.html`, `Timeline.html`,
 `Palette.html` and `Tools.html`, with matching PNGs, were drafted as a scratch preview outside

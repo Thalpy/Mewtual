@@ -1,6 +1,6 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-12 against `e3f6669`; both succession test slices passed user-provided review.
+Last checked: 2026-09-12 against `48fcc2e`; ownership/known-CID evidence accepted, proposal revised for re-review.
 Behavioral checkpoint: `39ceb76`
 (`fix(studio): bound the recovery hold and make replay slot-order proof`). Owner rotation and recovery
 inspection landed in `cbed5b7`; recovery controls, own-intent replay and settlement events are
@@ -16,7 +16,14 @@ installed old-owner checkpoint and editing through a newly restored actor after 
 All eight cases pass; the user accepted `e3f6669`. This adds backend evidence without changing callable
 commands, events or UI layout. Repeated owner changes, post-succession joining/PIX availability,
 interruption during successor installation, signed repair and full Gate 4 acceptance remain pending.
-The next joining fixture exposed an additional owner change: a new invitee can reuse the removed
+The user accepted `48fcc2e` for ownership transitions and known-CID byte persistence, while
+requesting PR-001 changes to the proposed preview capacity and TEST-001/TEST-002 acceptance
+assertions. The revised proposal reserves authoritative capacity and permits preview eviction;
+generation fencing and lower-layer keepalives are explicit. TEST-001 now compares the Registry
+source and both documents' journals after discovery, Read, refused Apply and reopen. TEST-002
+requires a bounded observation of the authenticated completed hint with exact provider/receipt.
+These are test observations, not events or callable UI hooks. The proposal awaits re-review.
+The joining fixture exposed an additional owner change: a new invitee can reuse the removed
 founder's low MLS leaf. The newcomer then has Unknown tenure and cannot load the previous owner's
 checkpoint through the current read seam. Two cases pass for known-CID PIX fetch and offline reopen;
 the provisional metadata cases remain explicit expected failures. The proposed fallback and its

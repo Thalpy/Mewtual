@@ -24,6 +24,15 @@ pub(crate) struct StudioReceiver {
     replay_turn: bool,
 }
 impl StudioReceiver {
+    #[cfg(test)]
+    pub(crate) fn observe_hints_for_test(
+        &mut self,
+        observer: tokio::sync::watch::Sender<
+            Option<crate::studio_exchange::discovery::StudioHintObservation>,
+        >,
+    ) {
+        self.catchup.hint_observer = Some(observer);
+    }
     /// Recovery writes deliberately reuse ordinary Save's watch, storage and one-shot
     /// publication path. Read-only controls carry no fake document or saved packets.
     pub(crate) fn control<T: MeshTransport, R: CryptoRngCore>(

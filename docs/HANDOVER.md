@@ -10,7 +10,43 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-12)
 
-- **Gate 4 post-succession joining / PIX checkpoint (2026-09-12; review pending).**
+- **Gate 4 joining review revision (2026-09-12; awaiting user re-review).** The user accepted
+  `48fcc2e`'s ownership-transition and known-CID byte-persistence claims. PR-001 requests changes
+  to the proposed preview policy: all four retained slots could be filled by previews whose
+  replacement needed one of those same slots before even sending a head query. The revised
+  [proposal](GATE4-PROVISIONAL-READ-REVIEW.md) caps provisional custody at three of the four
+  shared slots, reserves authoritative Studio/Registry progress and separates eviction from
+  successful authoritative replacement. It retains resource keepalives and explicit generation
+  checks, including same-key rewatch, membership changes during parsing and late delivery.
+  The requested capacity/lifecycle runtime regressions are obligations, not claimed passes.
+  TEST-001 now checks captured Registry state and empty Studio/Registry owner, intent and
+  recovery journals after discovery, Read, refused Apply and reopen. The refusal must be the
+  exact retired-epoch error, with no orphan intent or staged recovery. TEST-002 adds a bounded
+  `cfg(test)` watch observation at actual authenticated Studio Hint completion, requiring the
+  expected target, peer, full provider identity and exact receipt without current-owner proof.
+  It never injects a hint or manufactures a selection. No production runtime semantics, native
+  command, event or UI layout changes. Preview reading/editing, Unknown-tenure evidence,
+  repeated-owner scenarios, interruption, signed repair and full Gate 4 acceptance remain open.
+  Final validation on the restored tree uses
+  `cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib`:
+  filter `studio_exchange::tests::succession -- --test-threads=4 --nocapture` passes 10 with the
+  2 explicit preview cases ignored (78.14 seconds; `logs/gate4-joining-review-final-succession.log`);
+  filter `studio_actors_new_member -- --test-threads=2 --nocapture` passes both ordinary
+  Index/Flipnote discovery/install/tail regressions (4.31 seconds;
+  `logs/gate4-joining-review-new-member-regression.log`). Explicitly enabling
+  `studio_actor_post_succession_joiner_reads_ -- --ignored --test-threads=2 --nocapture` still
+  fails both at the missing-preview assertion, now AFTER exact authenticated Hint observation,
+  Registry/Read/refused-Apply guards and byte persistence checks
+  (`logs/gate4-joining-review-provisional-gap.log`). Three temporary counterexamples each failed
+  at the intended strengthened guard: dropped Studio head requests, an injected signed Registry
+  pointer write and persisting an intent before the correct retired-epoch refusal. Each modified
+  source was restored byte-for-byte; logs are `logs/gate4-joining-review-mutation-*.log`.
+  Root formatting and `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings`
+  pass, covering both production-library and test configurations
+  (`logs/gate4-joining-review-clippy.log`). No fresh full-gate suite or capacity-runtime pass is claimed.
+
+- **Gate 4 post-succession joining / PIX checkpoint (`48fcc2e`, 2026-09-12;
+  ownership/known-CID evidence accepted; original proposal requested changes).**
   `studio_exchange/tests/succession/joining.rs` adds two availability cases and two explicitly
   ignored provisional-read acceptance cases. A real frame and its PIX bytes reach Bob before
   takeover; Bob's actor issues the successor receipt/pointer and saves an independently checked

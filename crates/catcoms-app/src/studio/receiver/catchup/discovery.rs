@@ -88,6 +88,8 @@ impl CatchupRuntime {
         }
         if let Some(completed) = self.head_result.take() {
             let target = completed.target();
+            #[cfg(test)]
+            let peer = completed.peer;
             let registry = matches!(target, CheckpointTarget::Registry(_));
             let result = server.complete_checkpoint_discovery(store, id, *completed);
             match result {
@@ -99,7 +101,24 @@ impl CatchupRuntime {
                 Ok(Some(ServerCheckpointDiscovery::Hint(_))) if registry => {
                     self.discovery_plan = self.after_registry.take()
                 }
-                Ok(Some(ServerCheckpointDiscovery::Hint(_))) => {
+                Ok(Some(ServerCheckpointDiscovery::Hint(_answer))) => {
+                    #[cfg(test)]
+                    if let Some(observer) = &self.hint_observer {
+                        // Emitted only after the existing watch/mount/current-member/request
+                        // authentication checks and actual classification as a Studio Hint.
+                        observer.send_replace(Some(
+                            crate::studio_exchange::discovery::StudioHintObservation {
+                                target,
+                                peer,
+                                provider: server
+                                    .sync
+                                    .registry_page_peer_device(peer)
+                                    .expect("completed discovery authenticated this member"),
+                                receipt: _answer.receipt.clone(),
+                                proof_absent: _answer.proof.is_none(),
+                            },
+                        ));
+                    }
                     self.next_at = now.saturating_add(5_000);
                 }
                 _ if registry && self.registry_attempts < 3 => {

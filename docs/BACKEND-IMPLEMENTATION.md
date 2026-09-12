@@ -268,7 +268,7 @@ test-only slice. These remain isolated metadata-only fixtures: repeated owner
 changes, new joiners/PIX availability and interruption during successor installation are still
 open, alongside signed repair, the remaining UI state contracts and full-gate acceptance.
 
-**Current joining checkpoint (tests/documentation; review pending):**
+**Reviewed joining checkpoint (`48fcc2e`; transition/known-CID evidence accepted):**
 [succession/joining.rs](../crates/catcoms-app/src/studio_exchange/tests/succession/joining.rs)
 adds Open/Closing variants with a real Alice-authored frame and real PIX bytes. Bob receives the
 frame and fetches its bytes before the observed Alice-to-Bob transition. Ordinary actor work
@@ -300,6 +300,28 @@ default-debug compiles exhausted free disk space. This command-line override cha
 test debug symbols; no repository build profile or dependency changed. The explicit acceptance
 failures and final validation results are recorded in the current HANDOVER entry. Full Gate 4
 suites and final acceptance remain open.
+
+**Joining review revision (PR-001 / TEST-001 / TEST-002; awaiting re-review):** the user accepted
+the ownership-transition and byte-persistence claims of `48fcc2e`, while requesting a concrete
+preview-capacity policy and stronger provisional acceptance guards. PR-001 concerns the proposal,
+not a production exploit introduced by that test-only commit. The revised contract allows at
+most three provisional custodians in the four shared retained slots, reserves authoritative
+Studio/Registry discovery and installation capacity, prioritizes and rotates those classes, and
+permits preview eviction independently of successful authoritative replacement. Cancellation
+invalidates eligibility immediately; actual lower-layer owners retain their capacity until release.
+Same-key unwatch/rewatch, membership changes during parsing and late native delivery must retain
+the existing generation fences. Those allocator/lifecycle regressions remain future runtime work.
+
+TEST-001 captures Registry absence before discovery and compares identity, epoch, phase, admitted/
+quarantined counts and full projection afterward, after Read, after a specifically refused Apply
+and after reopen. Studio and Registry owner/intent/recovery journals must also stay empty,
+including staged recovery and eviction warnings. TEST-002 adds a `cfg(test)` single-value
+observation at the actual completed Studio Hint branch, after the existing authentication and
+watch checks. The tests require the expected logical target, endpoint, full responding member,
+exact receipt and absent current-owner proof before checking the missing preview. Nothing is
+injected into discovery; no production authority, API or native event changes. The two ignored
+preview cases still need runtime implementation and explicit confirmation-state assertions before
+they can count as gate acceptance. Final revision validation is recorded in HANDOVER.
 
 #### Landed on the way: Studio owner settlement preparation (`9799c6f`)
 

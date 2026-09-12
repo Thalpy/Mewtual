@@ -127,6 +127,12 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
 
 #[derive(Default)]
 pub(super) struct CatchupRuntime {
+    #[cfg(test)]
+    pub(super) hint_observer: Option<
+        tokio::sync::watch::Sender<
+            Option<crate::studio_exchange::discovery::StudioHintObservation>,
+        >,
+    >,
     pub(super) settlement: SettlementNotices,
     provider: Option<ServerStudioPageProvider>,
     pass: Option<ServerStudioReceive>,
