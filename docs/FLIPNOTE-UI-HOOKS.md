@@ -1,10 +1,14 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-11. Checkpoint: `39ceb76` (`fix(studio): bound the recovery hold and make
-replay slot-order proof`), the newest Studio commit on this branch. Owner rotation and recovery
+Last checked: 2026-09-12 against `acdb7f8`. Behavioral checkpoint: `39ceb76`
+(`fix(studio): bound the recovery hold and make replay slot-order proof`). Owner rotation and recovery
 inspection landed in `cbed5b7`; recovery controls, own-intent replay and settlement events are
 committed in `ccddd23`, not worktree-only; the eviction grace is now actually enforced and replay
-is slot-order independent as of `39ceb76`. Gate 4 is not yet accepted.
+is slot-order independent as of `39ceb76`. Frozen-owner takeover core/store paths also landed
+in `dba52e5`. Two new actor tests, pending adversarial review, pass for header-only Flipnote takeover from
+Open/Closing epoch zero after restart, including recovery and Registry pointer persistence;
+this adds evidence, no new native hook. Broader runtime succession, signed repair and full
+Gate 4 acceptance remain pending.
 This is the maintained frontend integration map, not a replacement UI design. The user's
 canonical HTML/mockups remain authoritative for layout and interaction. Update this guide in
 the same slice that adds or changes a native command, event or returned state.
@@ -157,6 +161,8 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 | Canonical UI surface | Backend availability / next hook |
 |---|---|
 | Settlement chip / rotation progress | `settlement-changed` invalidates the actual phase/recovery listing. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
+| Current owner has not confirmed history | No `awaitingTenureReceipt` event or returned confirmation field exists yet. Core/store takeover support does not establish newcomer provisional loading or provide a UI confirmation signal. Keep this Gate 4 dependency pending. |
+| History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available; signed repair has no actor/native command or `repairing` event yet. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
 | Local overlay while rotating | Keep editor work separately. Persisted overlay/replay orchestration is not yet a native command. Shared apply may refuse Closing/Fault. |
 | Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |
 | Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Refresh after the action and matching `settlement-changed` events. |

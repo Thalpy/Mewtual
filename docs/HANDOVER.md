@@ -8,7 +8,36 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-09-10)
+## Status (latest entry: 2026-09-12)
+
+- **Gate 4 audit and actor succession tests (2026-09-12; review pending).** The backend
+  checklist now records the omitted `dba52e5` frozen-owner core/store work and distinguishes
+  connected rotation/recovery from runtime succession, signed repair and full-gate acceptance.
+  `studio_exchange/tests/succession.rs` adds two passing actor Ready/lease/idle-worker cases:
+  an Open art source remains editable after an observed owner transition/restart, and an old
+  owner's Closing source stays closed to Save until takeover preserves it in recovery. Both
+  require a current-owner receipt, Open checkpoint, Registry pointer and durable reopen. Reuses
+  the eligible-history fixture plus a test-only helper preparing the actual old-owner close.
+  The staged-Remove fixture restores strict single-committer configuration before running Studio;
+  no product owner-transfer policy, native command or UI component changes. Fixtures are
+  header-only Flipnotes; post-succession PIX availability is not proved. Index, nonzero
+  inheritance, A-to-B-to-A, post-succession newcomer and signed repair remain open.
+  Focused command: `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --nocapture`
+  (2 passed; `logs/gate4-succession-focused.log`). The first fixture attempt correctly hit the
+  per-author cap when authored by a non-owner; it now uses the old owner's eligible history.
+  Frontend tests pass 1,189/1,189; root formatting and app-test Clippy with warnings denied pass
+  (`logs/gate4-succession-clippy.log`). Broader command:
+  `cargo test --locked -j 4 -p catcoms-app --lib studio_ -- --test-threads=4`
+  passes 138 tests, with one existing opt-in profiling test ignored (710.89 seconds;
+  `logs/gate4-audit-studio-tests.log`).
+  Ambient check fails on existing native `media_decode.rs` uses of `Instant::now()` at 333,
+  426, 444 and 504; no full-suite or gate-completion claim. This computer was initially missing
+  Rust/MSVC; Rust 1.89.0, rustfmt, Clippy and standalone Build Tools/SDK are now installed, with
+  no Visual Studio IDE. The initial Rust attempt failed before tests because the linker was
+  not yet installed. Application builds are left to GitHub per the user's direction.
+  The user supplies the adversarial review for this slice. At the user's request, commit and
+  push review checkpoints to `origin/Create-suite-2` when requesting review; a review request
+  no longer waits on an uncommitted local diff. Review findings still gate the next slice.
 
 - **The membership chain a member cannot complete is now typed and reported (`ed7f7d6`,
   `f61e5dc`, `6576a46`, 2026-09-10).** A member behind by more than every reached peer's

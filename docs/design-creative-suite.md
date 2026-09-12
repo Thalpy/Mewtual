@@ -29,6 +29,14 @@ limited to those dependencies. The broader design below is preserved as backlog,
 active completion target. `BACKEND-IMPLEMENTATION.md` defines seven evidence-based delivery
 gates, starting with typed documents and durable one-device Save/Load. UI remains user-owned.
 
+Gate 4 audit (2026-09-12, `acdb7f8`): watched owner rotation, Registry maintenance,
+recovery controls, conservative own-intent replay and eviction grace are connected. Frozen-owner
+takeover also has core/store coverage (`dba52e5`); running-app succession and signed repair are
+still pending. ReceiptRepair v2's codec/book support does not implement runtime repair. The
+remaining overlay, provisional newcomer and tenure/repair-label requirements below remain
+acceptance obligations. See the progress audit in `BACKEND-IMPLEMENTATION.md` and the current
+callable/unavailable controls in `FLIPNOTE-UI-HOOKS.md`; no percentage is inferred from commits.
+
 UI reference (2026-09-05): the owner's `Main.html`, `Inspector.html`, `Timeline.html`,
 `Palette.html` and `Tools.html`, with matching PNGs, were drafted as a scratch preview outside
 the repo (a session-scoped temp directory) and may no longer exist. They are not a durable

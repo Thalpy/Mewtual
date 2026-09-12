@@ -2,8 +2,8 @@
 
 This is an acceptance checklist, not a count of source files. UI layout, components and the
 canonical Flipnote mockups remain user-owned. No item is complete merely because its core
-helper exists. As of 2026-09-11 (`39ceb76`), the active scope is **Flipnote and the P1 paths it
-requires**, not completion of the entire Creative Suite.
+helper exists. Audited on 2026-09-12 against `acdb7f8`; the active scope is **Flipnote and the P1
+paths it requires**, not completion of the entire Creative Suite.
 
 Frontend integration is tracked separately in [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md): actual
 native commands/events, retry rules and explicitly unavailable controls. Update it alongside
@@ -77,10 +77,10 @@ micro-optimization alone is not a reason to postpone Studio integration.
 
 ## Completed-work ledger: reuse before adding
 
-Audited against this branch's committed history through `39ceb76` (2026-09-11), the newest Studio
-commit. The per-commit rows below stop at `b6f137b`; the four Gate 4 commits after them
-(`9799c6f`, `cbed5b7`, `ccddd23`, `39ceb76`) are described in the active-slice section rather than
-as ledger rows. This groups the P1/Flipnote `feat` and `perf` commits from `57e51ad` onward, plus the
+The Gate 4 implementation checkpoints are recorded through `39ceb76`, checked against HEAD
+`acdb7f8` on 2026-09-12. The per-commit rows below stop at `b6f137b`; the five Gate 4 commits
+(`9799c6f`, `cbed5b7`, `ccddd23`, `dba52e5`, `39ceb76`) are described in the active-slice section
+rather than as ledger rows. This groups the P1/Flipnote `feat` and `perf` commits from `57e51ad` onward, plus the
 original P1 commit `a67e284` and the performance probe. It is not a repository-wide release changelog: unrelated
 voice, files, release and user-owned UI work is not marked as Flipnote progress. Commit subjects
 are discovery aids, not proof of completion; the current contracts and limitations below govern.
@@ -137,13 +137,14 @@ Paths below use `rep/` = `crates/catcoms-replication/src/`, `app/` = `crates/cat
 
 ### Gate 4 active slice: bounded recovery hold and slot-order-proof replay (`39ceb76`)
 
-Gate 4 has run four committed slices, all on this branch and all ancestors of HEAD:
+Gate 4 has five committed implementation checkpoints, all on this branch and all ancestors of HEAD:
 
 | Slice | Commit | What it added |
 |---|---|---|
 | Owner settlement preparation | `9799c6f` | Typed owner close/receipt core adapter and recovery-bound successors |
 | Owner rotation and recovery inspection | `cbed5b7` | Registry pointer/tail maintenance in the idle worker; native recovery List/Read/Export/Ack |
 | Recovery controls, replay and settlement events | `ccddd23` | Per-item Restore/Copy, separately retryable pointer restoration, own-intent replay, `settlement-changed` |
+| Frozen-owner succession foundations | `dba52e5` | Shared installed-opening inheritance checks; Studio/Registry frozen-source takeover and exact-journal restart through the accounted store; paced replay follow-ups. This is not running-app succession acceptance. |
 | Bounded recovery hold, slot-order-proof replay | `39ceb76` | **Current slice.** Enforces the eviction grace and removes a slot-ordering dependency from replay |
 
 **Current slice (`39ceb76`), two fixes.** First, the seven-day eviction grace was never enforced:
@@ -178,6 +179,49 @@ frame births and object creations held Manual in both slot orderings, with the r
 deliberately the losing one so the extra evidence is the only difference.
 
 Remaining for Gate 4: running-app succession, signed fault/repair, and full-gate acceptance.
+
+#### Gate 4 progress audit (2026-09-12)
+
+Most rotation/recovery plumbing is connected; the gate remains unaccepted. The rows below
+describe observable boundaries, not equal portions of work or a percentage of time remaining.
+The table audits the implementation checkpoints; fresh test evidence follows it. Full-gate suites and
+acceptance have not been rerun or closed by this audit.
+
+| Area | Current boundary | Evidence still needed |
+|---|---|---|
+| Ordinary owner rotation | Watched Index/art rotation, durable decisions, recovery-first installation and solo installed-head completion are connected. | Full production-adapter acceptance across owner absence, partitions and lifecycle failures. |
+| Registry maintenance | Derived pointers, current-tail paging and Create after Index rotation are connected. | Include these in succession/restart acceptance; preserve per-bucket Fault isolation. |
+| Recovery and own-intent replay | Seven native recovery commands, settlement invalidations, conservative replay/manual disposition and persisted eviction deadlines are connected. | Final combined acceptance and remaining fairness/backpressure/cold-source follow-ups in HANDOVER. |
+| Owner succession | `dba52e5` already supplies core and store takeover of a frozen source, exact decision retries and whole-source recovery. | Exercise the actor/idle worker after a witnessed owner transition, including Open and Closing sources, restart and a post-succession joiner. |
+| Signed fault/repair | ReceiptRepair v2 and bounded receipt-book loser screening have protocol regressions. | Durable repair issuance/application, recovery-before-replacement, distribution, owner-journal handling and runtime exit from Fault. Restore/Copy does not supply these. |
+| Remaining UI state and gate acceptance | Current phase/recovery invalidations exist; every current view is provisional. | Persisted Closing overlays, provisional old-owner newcomer reads and specialized tenure/repair observations still need integration evidence. Then run the complete gate scenarios, required suites and user-provided adversarial review. |
+
+**Current test slice (adversarial review pending):** two tests in
+[studio_exchange/tests/succession.rs](../crates/catcoms-app/src/studio_exchange/tests/succession.rs)
+pass through the actor Ready/lease and idle worker after an observed MLS owner transition and
+restart. One preserves an ordinary own Save in an Open epoch; the other refuses Save in the
+old owner's Closing source and requires its full historical projection in recovery. Both require
+the new owner's durable receipt, Open successor and Registry pointer, then reopen the vault and
+check them again. The only added helper prepares an eligible old-owner close over the existing
+source fixture. The successor receipt and installation are produced by the existing runtime.
+
+The transition uses the existing staged-Remove protocol as a **test fixture**, then restores
+the strict single-committer configuration before the Studio actor runs. Production owner-transfer
+policy is unchanged. These are header-only Flipnote fixtures, epoch zero to checkpoint one;
+they do not establish post-succession PIX availability. Index takeover, inheritance from an
+already installed checkpoint, A-to-B-to-A runtime behavior, a post-succession joiner and signed
+repair remain outstanding. These two passes do not close running-app succession.
+
+Fresh evidence: `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --nocapture`
+passes both cases; log: `logs/gate4-succession-focused.log`. Frontend tests pass 1,189/1,189,
+root formatting and `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass.
+The broader `cargo test --locked -j 4 -p catcoms-app --lib studio_ -- --test-threads=4` run
+passes 138 tests, with one existing opt-in profiling test ignored (710.89 seconds;
+`logs/gate4-audit-studio-tests.log`). The ambient-dependency gate fails on four pre-existing
+`Instant::now()` calls in native `media_decode.rs` (333, 426,
+444, 504), outside this diff. Full-gate acceptance remains pending. Rust 1.89.0 and the standalone
+Windows build tools/SDK are installed for local tests; application builds are left to GitHub
+at the user's request. The next boundary is user-provided adversarial review of this test slice.
 
 #### Landed on the way: Studio owner settlement preparation (`9799c6f`)
 

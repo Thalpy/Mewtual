@@ -196,6 +196,25 @@ pub(crate) fn fill_studio_epoch_fixture(
     store.retain_studio_source(group, device, state);
 }
 
+/// An actual eligible close over the retained source, signed by its current owner. Runtime
+/// takeover tests use this only to arrange an interrupted old-owner seal, never to manufacture
+/// the successor owner's receipt or bypass the ordinary idle-worker installation.
+pub(crate) fn studio_owner_decision_fixture(
+    store: &ServerStore,
+    server: u64,
+    group: &ServerGroup,
+    owner: &MlsDevice,
+    target: StudioTarget,
+) -> catcoms_replication::studio::StudioOwnerDecision {
+    store
+        .load_studio_epoch(server, group, target, owner)
+        .unwrap()
+        .unwrap()
+        .unit
+        .new_owner_decision(group, owner, 0, None)
+        .unwrap()
+}
+
 fn measure(count: usize, clock: &dyn Clock) {
     let f = Fixture::new(true);
     let start = clock.monotonic_ms();

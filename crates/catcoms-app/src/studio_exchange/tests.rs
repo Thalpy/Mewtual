@@ -23,6 +23,7 @@ mod receiver;
 mod reconnect;
 mod registry_runtime;
 mod replay;
+mod succession;
 mod unopened;
 
 const SERVER: u64 = 83;
