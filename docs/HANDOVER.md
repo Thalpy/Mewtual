@@ -10,8 +10,40 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-12)
 
-- **Gate 4 Index/checkpoint succession and restored-actor editing (2026-09-12;
-  validation passed, review pending).** The matrix adds six cases to the reviewed Flipnote pair: Index
+- **Gate 4 post-succession joining / PIX checkpoint (2026-09-12; review pending).**
+  `studio_exchange/tests/succession/joining.rs` adds two availability cases and two explicitly
+  ignored provisional-read acceptance cases. A real frame and its PIX bytes reach Bob before
+  takeover; Bob's actor issues the successor receipt/pointer and saves an independently checked
+  tail. The provider then restarts with sealed source/receipt/pointer/tail/pixels intact. A fresh
+  invitee joins after that restart, on a new network without Alice. This recycles Alice's low leaf
+  and changes ownership again: the newcomer becomes owner with Unknown tenure, while Bob
+  independently observes that transition. No authority is manufactured from the old receipt.
+  The known-CID tests fetch exact PIX bytes through the actor and again from the newcomer's
+  reopened vault with no provider connected, while checking that an unconfirmed hint did not
+  install a canonical Studio source or write owner/intent/recovery journals. The CID comes from
+  the fixture; successful byte fetch is not discovery or a usable Flipnote.
+  The provisional metadata read is a reproduced gap: Studio's `Hint` branch does not load the
+  hinted history, so Read returns None. The opt-in acceptance cases must remain visibly pending.
+  [The concrete next runtime proposal](GATE4-PROVISIONAL-READ-REVIEW.md) awaits user-provided
+  adversarial review; it adds a bounded, separately typed, unconfirmed read fallback. Durable
+  overlays and independent tenure evidence remain subsequent integration work. No production
+  code, native command or UI layout changes in this checkpoint. Gate 4 remains incomplete.
+  Local default-debug compilation twice exhausted disk space. Tests use a command-line-only
+  `--config 'profile.test.package.catcoms-app.debug=0'` override; build profiles are unchanged.
+  Final validation: `cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
+  -p catcoms-app --lib studio_actor_post_succession_joiner -- --test-threads=2 --nocapture`
+  passes 2, ignores the 2 explicitly unfinished acceptance cases (23.48 seconds;
+  `logs/gate4-succession-joining-tests.log`). The same command with filter `studio_actor_new_owner`
+  and `--test-threads=4` passes all 8 accepted cases (52.92 seconds;
+  `logs/gate4-succession-joining-regression.log`). Explicitly running filter
+  `studio_actor_post_succession_joiner_reads_` with `--ignored --test-threads=2 --nocapture`
+  fails both at the intended missing-provisional-read assertion, after the PIX checks succeed
+  (23.70 seconds; `logs/gate4-succession-joining-provisional-gap.log`). Root formatting and
+  `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass (9.65 seconds;
+  `logs/gate4-succession-joining-clippy.log`). Broader full-gate suites are not claimed.
+
+- **Gate 4 Index/checkpoint succession and restored-actor editing (`e3f6669`, 2026-09-12;
+  user accepted).** The matrix adds six cases to the reviewed Flipnote pair: Index
   Open/Closing epoch-zero takeover and Index/Flipnote Open/Closing takeover of epoch one.
   It checks inherited epoch/close/seed against the installed old-owner checkpoint and binds
   the successor's physical document id to the newly issued receipt. Every case then restores a
@@ -26,7 +58,7 @@ and ranks the live hazards in that path.
   test also passes (35.66 seconds; `logs/gate4-succession-expanded-solo.log`). Root formatting and
   `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass
   (`logs/gate4-succession-expanded-clippy.log`). Broader suites were not repeated for this test-only
-  slice; the previous ambient-check limitation remains below. User-provided review is pending.
+  slice; the previous ambient-check limitation remains below. User-provided review passed.
   This does not cover repeated owner changes, post-succession joining/PIX availability or
   interrupted successor installation. Signed repair and full Gate 4 acceptance remain open.
 

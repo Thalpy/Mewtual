@@ -192,7 +192,7 @@ acceptance have not been rerun or closed by this audit.
 | Ordinary owner rotation | Watched Index/art rotation, durable decisions, recovery-first installation and solo installed-head completion are connected. | Full production-adapter acceptance across owner absence, partitions and lifecycle failures. |
 | Registry maintenance | Derived pointers, current-tail paging and Create after Index rotation are connected. | Include these in succession/restart acceptance; preserve per-bucket Fault isolation. |
 | Recovery and own-intent replay | Seven native recovery commands, settlement invalidations, conservative replay/manual disposition and persisted eviction deadlines are connected. | Final combined acceptance and remaining fairness/backpressure/cold-source follow-ups in HANDOVER. |
-| Owner succession | `dba52e5` supplies core/store frozen-source takeover. The reviewed `d7ea514`/`5d65998` pair is now expanded to eight passing Index/Flipnote cases covering Open/Closing, installed-checkpoint inheritance and restored-actor editing; this expansion awaits review. | A-to-B-to-A, post-succession joining/PIX availability, interrupted successor installation and combined acceptance. |
+| Owner succession | `dba52e5` supplies core/store frozen-source takeover. User-accepted `e3f6669` covers eight Index/Flipnote Open/Closing cases, installed-checkpoint inheritance and restored-actor editing. The current joining fixture separately checks known-CID PIX fetch/reopen and reproduces missing provisional metadata reads when the join recycles the founder's leaf. | A-to-B-to-A, provisional newcomer metadata/editing, interrupted successor installation and combined acceptance. Known-CID bytes alone do not close joining acceptance. |
 | Signed fault/repair | ReceiptRepair v2 and bounded receipt-book loser screening have protocol regressions. | Durable repair issuance/application, recovery-before-replacement, distribution, owner-journal handling and runtime exit from Fault. Restore/Copy does not supply these. |
 | Remaining UI state and gate acceptance | Current phase/recovery invalidations exist; every current view is provisional. | Persisted Closing overlays, provisional old-owner newcomer reads and specialized tenure/repair observations still need integration evidence. Then run the complete gate scenarios, required suites and user-provided adversarial review. |
 
@@ -246,7 +246,7 @@ Windows build tools/SDK are installed for local tests; application builds are le
 at the user's request. Next work is the remaining running-app succession coverage, followed by
 signed fault/repair integration and full-gate acceptance; this test slice needs no further changes.
 
-**Current succession slice (validation passed; review pending):** the actor matrix now adds
+**Reviewed succession expansion (`e3f6669`; user accepted):** the actor matrix now adds
 Index Open/Closing takeover and installed-checkpoint inheritance for both Index and Flipnote,
 for eight cases including the reviewed epoch-zero Flipnote pair. The previous owner's opening
 is a prepared checkpoint fixture; the new owner's receipt and Registry pointer still come from
@@ -267,6 +267,39 @@ matrix. The eight cases pass with `cargo test --locked -j 4 -p catcoms-app --lib
 test-only slice. These remain isolated metadata-only fixtures: repeated owner
 changes, new joiners/PIX availability and interruption during successor installation are still
 open, alongside signed repair, the remaining UI state contracts and full-gate acceptance.
+
+**Current joining checkpoint (tests/documentation; review pending):**
+[succession/joining.rs](../crates/catcoms-app/src/studio_exchange/tests/succession/joining.rs)
+adds Open/Closing variants with a real Alice-authored frame and real PIX bytes. Bob receives the
+frame and fetches its bytes before the observed Alice-to-Bob transition. Ordinary actor work
+then issues/installs Bob's receipt and pointer; a checked current-tail edit follows. The provider
+restarts with its sealed source, receipt, pointer, tail and pixels intact on a network without Alice.
+
+A genuinely new invitee reuses Alice's low leaf, so the invite itself changes ownership from Bob
+to that newcomer. The tests require that transition and the Welcome recipient's Unknown tenure.
+They do not invent current-owner evidence for Bob's now-former-owner receipt. Known-CID PIX
+fetch and subsequent offline vault-reopen fetch work, while newcomer canonical source and
+owner/intent/recovery journals remain untouched. The CID is supplied by the fixture; this does
+not prove that the newcomer discovers or displays the Flipnote.
+
+The desired provisional metadata read currently fails. Two explicitly ignored, opt-in acceptance
+cases preserve that obligation, including exact frame and tail projection checks; they are not
+passes or completed coverage. The runtime's Studio `Hint` branch currently schedules another
+attempt without fetching the hinted history. A fresh member therefore receives no view from
+the native-facing Read path in this scenario. No existing `provisional: true` DTO flag fills
+that missing loading/confirmation contract.
+
+The concrete next runtime proposal and adversarial-review focus are in
+[GATE4-PROVISIONAL-READ-REVIEW.md](GATE4-PROVISIONAL-READ-REVIEW.md). It introduces a bounded,
+separate unconfirmed read fallback without granting installation, Apply or settlement authority.
+It is proposed, not implemented. Overlay editing and independent evidence for a newly joined
+owner with Unknown tenure remain subsequent work; neither may be fabricated from a hint.
+
+Local test compilation needed `--config 'profile.test.package.catcoms-app.debug=0'` after two
+default-debug compiles exhausted free disk space. This command-line override changes only app
+test debug symbols; no repository build profile or dependency changed. The explicit acceptance
+failures and final validation results are recorded in the current HANDOVER entry. Full Gate 4
+suites and final acceptance remain open.
 
 #### Landed on the way: Studio owner settlement preparation (`9799c6f`)
 

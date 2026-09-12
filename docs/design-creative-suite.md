@@ -39,9 +39,14 @@ callable/unavailable controls in `FLIPNOTE-UI-HOOKS.md`; no percentage is inferr
 The subsequent actor test slice (`d7ea514`/`5d65998`) now has user-provided review closure for
 SUC-001/SUC-002. It covers header-only Flipnote Open/Closing takeover after restart and completed
 takeover surviving vault reopen; it does not close the broader succession or Gate 4 obligations.
-The next test slice expands the matrix to Index, installed-checkpoint inheritance and
-editing through a freshly restored successor actor; eight cases pass and review remains pending. It adds
+The user-accepted `e3f6669` expands the matrix to Index, installed-checkpoint inheritance and
+editing through a freshly restored successor actor; all eight cases pass. It adds
 no native command or UI layout and does not close the remaining runtime succession scenarios.
+The next joining fixture demonstrates that an invite can itself change ownership again by reusing
+the removed founder's low MLS leaf. Known-CID pixel availability and provisional metadata loading
+are separate obligations: the latter currently fails because the receiver discards unconfirmed
+Studio head hints. [The proposed next runtime slice](GATE4-PROVISIONAL-READ-REVIEW.md) adds a bounded,
+explicitly unconfirmed read fallback; it awaits user-provided adversarial review and is not implemented.
 
 UI reference (2026-09-05): the owner's `Main.html`, `Inspector.html`, `Timeline.html`,
 `Palette.html` and `Tools.html`, with matching PNGs, were drafted as a scratch preview outside
