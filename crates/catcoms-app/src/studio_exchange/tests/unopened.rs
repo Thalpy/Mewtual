@@ -528,7 +528,7 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
     });
 }
 
-fn prepared_registry(p: &mut Pair, target: StudioTarget, large: bool) -> u8 {
+pub(super) fn prepared_registry(p: &mut Pair, target: StudioTarget, large: bool) -> u8 {
     use catcoms_replication::{
         registry::{registry_document, PointerKey, RegistryOp},
         registry_epoch::RegistryEpoch,

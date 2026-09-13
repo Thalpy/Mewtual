@@ -437,7 +437,10 @@ impl CatchupRuntime {
         server: &Server<T, R>,
         watches: &VecDeque<(ServerStudioWatch, u128)>,
     ) -> bool {
-        if self.preview.pending() && !self.in_flight && !self.preparing {
+        if self.preview.pending(server.runtime_clock().monotonic_ms())
+            && !self.in_flight
+            && !self.preparing
+        {
             return true;
         }
         if self.prepared.is_some() || self.registry_prepared.is_some() {

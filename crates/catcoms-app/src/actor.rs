@@ -228,6 +228,11 @@ impl EventSink {
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
 pub enum AppCommand {
+    #[cfg(test)]
+    StudioSchedulingForTest {
+        pause_parse: Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+        reply: oneshot::Sender<(Vec<catcoms_replication::studio::StudioTarget>, usize)>,
+    },
     /// No vault guard may be queued. The dedicated Ready/lease exchange starts only in this arm.
     Studio {
         /// None drives one authenticated inbox packet; it accepts no renderer packet/scope.
@@ -1073,6 +1078,18 @@ pub struct ServerActor {
 }
 
 impl ServerActor {
+    #[cfg(test)]
+    pub(crate) async fn studio_scheduling_for_test(
+        &self,
+        pause_parse: Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    ) -> (Vec<catcoms_replication::studio::StudioTarget>, usize) {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::StudioSchedulingForTest { pause_parse, reply })
+            .await
+            .unwrap();
+        result.await.unwrap()
+    }
     /// Queue only bounded intent metadata, never a vault/lifecycle lock. The receiver must use
     /// fail-fast lock acquisition after Ready. Dropping this future leaves queued work powerless.
     pub async fn studio_begin(
@@ -4003,6 +4020,10 @@ where
                             .seal_upload_chunk(&bytes, &mime)
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
+                    }
+                    #[cfg(test)]
+                    Some(AppCommand::StudioSchedulingForTest { pause_parse, reply }) => {
+                        let _ = reply.send(studio_receiver.scheduling_for_test(&mut server, pause_parse));
                     }
                     Some(command @ (AppCommand::Studio { .. } | AppCommand::StudioControl { .. })) => {
                         use crate::studio::{StudioDispatch, StudioReply, StudioResponse};

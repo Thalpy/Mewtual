@@ -1,5 +1,6 @@
 use super::*;
 use crate::studio::{PreviewHarness, StudioPreview};
+use catcoms_rt::Clock;
 
 #[tokio::test]
 async fn studio_preview_index_read_fallback_preserves_installed_source_priority() {
@@ -164,9 +165,9 @@ async fn drive(p: &mut Pair, runtime: &mut PreviewHarness) -> StudioProjection {
         .sync
         .watch_studio(p.watch.target, op.doc_id)
         .unwrap();
-    runtime.queue(&p.watch, p.alice.local_peer());
+    runtime.queue(&p.watch, p.alice.local_peer(), p.clock.monotonic_ms());
     // Duplicate triggers cannot add work or reset this candidate's position.
-    runtime.queue(&p.watch, p.alice.local_peer());
+    runtime.queue(&p.watch, p.alice.local_peer(), p.clock.monotonic_ms());
     for stage in 0..5 {
         p.clock.advance_ms(1000);
         runtime.step(&mut p.bob, &p.b_store, SERVER);

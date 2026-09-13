@@ -128,7 +128,7 @@ impl CatchupRuntime {
                             server: id,
                             target,
                         };
-                        self.preview.queue(&watch, peer);
+                        self.preview.queue(&watch, peer, now);
                     }
                     self.next_at = now.saturating_add(5_000);
                 }

@@ -96,6 +96,7 @@ struct Retry {
     peer: PeerId,
     epoch: u64,
     expires: u64,
+    head_after: u64,
 }
 struct Ready {
     target: StudioTarget,
@@ -110,6 +111,11 @@ enum Next {
 #[derive(Default)]
 pub(in crate::studio::receiver) struct PreviewRuntime {
     generation: Arc<()>,
+    #[cfg(test)]
+    pause_parse: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
     #[cfg(test)]
     pools: Option<(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>)>,
     queue: VecDeque<Retry>,
@@ -141,7 +147,12 @@ impl PreviewRuntime {
         )
     }
 
-    pub(in crate::studio::receiver) fn queue(&mut self, watch: &ServerStudioWatch, peer: PeerId) {
+    pub(in crate::studio::receiver) fn queue(
+        &mut self,
+        watch: &ServerStudioWatch,
+        peer: PeerId,
+        now: u64,
+    ) {
         // Duplicate hints cannot reset a retry's position or displace another watched key.
         if self.queue.iter().any(|r| r.watch.target == watch.target)
             || self
@@ -164,13 +175,17 @@ impl PreviewRuntime {
             peer,
             epoch: 0,
             expires: 0,
+            // Registry + Studio head discovery can spend the provider's two-request burst.
+            // Its shared requester rail refills one token/second. Preserve this bounded retry
+            // until then, without reserving a slot or resetting its place on duplicate Hints.
+            head_after: now.saturating_add(1_000),
         });
     }
-    pub(in crate::studio::receiver) fn pending(&self) -> bool {
+    pub(in crate::studio::receiver) fn pending(&self, now: u64) -> bool {
         self.completed.is_some()
             || self.next.is_some()
             || self.job.is_some()
-            || !self.queue.is_empty()
+            || self.queue.front().is_some_and(|r| now >= r.head_after)
     }
     pub(in crate::studio::receiver) fn defers(&self, target: StudioTarget, now: u64) -> bool {
         self.active
@@ -326,7 +341,16 @@ impl PreviewRuntime {
                         return true;
                     };
                     match pool.try_acquire_owned() {
-                        Ok(permit) => Some(PreviewJob::Prepare(work, permit, preview_permit)),
+                        Ok(permit) => {
+                            #[cfg(test)]
+                            let work = match self.pause_parse.take() {
+                                Some((entered, release)) => {
+                                    PreviewPreparation::Paused(Box::new(work), entered, release)
+                                }
+                                None => work,
+                            };
+                            Some(PreviewJob::Prepare(work, permit, preview_permit))
+                        }
                         Err(_) => {
                             self.next = Some(Next::Prepare(work));
                             return true;
@@ -338,6 +362,13 @@ impl PreviewRuntime {
                 self.active = None;
             }
             return true;
+        }
+        if self
+            .queue
+            .front()
+            .is_some_and(|r| server.runtime_clock().monotonic_ms() < r.head_after)
+        {
+            return false;
         }
         let Some(mut retry) = self.queue.pop_front() else {
             return false;
@@ -363,6 +394,39 @@ impl PreviewRuntime {
             self.active = Some(retry);
         }
         true
+    }
+}
+
+#[cfg(test)]
+impl StudioReceiver {
+    /// Observe the actual actor cache and probe its own capacity allocator. The temporary
+    /// reservations are released before returning; no source, queue, selection or clock changes.
+    /// An optional barrier pauses the next real parser only after it owns both worker permits.
+    pub(crate) fn scheduling_for_test<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        pause_parse: Option<(
+            tokio::sync::oneshot::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    ) -> (Vec<StudioTarget>, usize) {
+        if pause_parse.is_some() {
+            assert!(self.catchup.preview.pause_parse.is_none());
+            self.catchup.preview.pause_parse = pause_parse;
+        }
+        let ready = self
+            .catchup
+            .preview
+            .ready
+            .iter()
+            .filter(|r| r.seed.unconfirmed_is_unexpired())
+            .map(|r| r.target)
+            .collect();
+        let mut free = Vec::new();
+        while let Ok(slot) = server.sync.reserve_provisional_checkpoint_capacity() {
+            free.push(slot);
+        }
+        (ready, free.len())
     }
 }
 
@@ -407,8 +471,8 @@ impl PreviewHarness {
             self.0.preparation_pools().1.try_acquire_owned().unwrap(),
         )
     }
-    pub(crate) fn queue(&mut self, watch: &ServerStudioWatch, peer: PeerId) {
-        self.0.queue(watch, peer);
+    pub(crate) fn queue(&mut self, watch: &ServerStudioWatch, peer: PeerId, now: u64) {
+        self.0.queue(watch, peer, now);
     }
     pub(crate) fn step<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
