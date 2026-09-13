@@ -4138,6 +4138,7 @@ dependencies = [
  "catcoms-log",
  "catcoms-mls",
  "catcoms-net",
+ "catcoms-replication",
  "catcoms-rt",
  "catcoms-storage",
  "catcoms-sync",

@@ -3,6 +3,7 @@ use catcoms_rt::{Hub, ManualClock, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::future::Future;
+mod preview;
 mod receiver;
 mod recovery;
 mod recovery_restore;

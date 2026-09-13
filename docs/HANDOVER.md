@@ -10,6 +10,31 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-13)
 
+- **Actor/native implementation PASS; NATIVE-TEST-001 follow-up (2026-09-13).**
+  The user accepts `a89bde68dc1083f6eaab9b15f5cada3f1ca9d704` against
+  `2a1814efc9fa1f22aed3c7ca5bbed627ae92f5d6`, finding no blocking production defect.
+  The review inspected source and recorded execution evidence; it did not rerun Cargo/mutations.
+  NATIVE-TEST-001 (P3) correctly observes that the earlier native conversion test only reads an
+  ordinary synthetic Index and therefore cannot detect preview trust-state/final-fence mutations.
+  No production change is requested. The implementation PASS stands; this finding remains open
+  pending test validation and re-review.
+
+  The follow-up shares a test-only authenticated provider/actor fixture between a lightweight
+  app integration test and native tests. Both Index and Flipnote use real head/seed/signed-tail
+  exchange, cold parsing, actor admission and native `invoke_custody`/`read_view`. Successful
+  conversion must identify `AwaitingTenureReceipt`, retain complete content and seed/tail claims,
+  emit both preview flags and omit phase/publication. The negative variant advances only the
+  injected clock after successful conversion; native must reject the now-expired preview while
+  the session, actor instance and view-request generation remain valid. Focused GitHub CI also
+  changes the trust flag and removes only the final preview-validity condition in separate
+  mutations, requires the intended assertion failures, restores source bytes and reruns tests.
+  Local shared-fixture integration passes for Index and Flipnote (2.05s):
+  `cargo test --locked -j 4 -p catcoms-app --test studio_preview_fixture -- --nocapture`.
+  Focused integration-test Clippy passes with `-D warnings`; root/native formatting, locked
+  native manifest metadata, and mutation-script syntax/unique-anchor checks pass. Local Rust
+  uses `_LINK_=/DEBUG:NONE` and `CARGO_INCREMENTAL=0`. Native execution/mutations are pending. Gate 4's combined authoritative-progress regression remains open, along with Closing
+  overlays/repeated tenure, signed repair and full acceptance.
+
 - **Gate 4 actor scheduling and native previews (2026-09-13; awaiting adversarial review).**
   Published implementation: `be03b0b`; the workflow command-scalar correction is `febbd70`.
   [Studio native validation on `febbd70`](https://github.com/Thalpy/Mewtual/actions/runs/34767022661)

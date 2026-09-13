@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/studio-native.yml'
+      - '.github/scripts/check-studio-preview-mutations.py'
       - 'crates/catcoms-app/**'
       - 'crates/catcoms-sync/**'
       - 'crates/catcoms-replication/**'
@@ -42,3 +43,5 @@ jobs:
       - name: Test native Studio boundaries
         run: |
           cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib studio:: -- --test-threads=4
+      - name: Verify preview regression mutations and restore source
+        run: python3 .github/scripts/check-studio-preview-mutations.py

@@ -1,8 +1,11 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-13. Actor scheduling and native preview delivery are implemented in the
-current checkpoint and awaiting adversarial review. TAIL-TEST-001 is closed by the user's PASS
-for `2a1814e` against `47bf098`; no further changes were required for that finding.
+Last checked: 2026-09-13. The user's review accepts actor scheduling and native preview
+implementation at `a89bde6` against `2a1814e`, with no blocking production defect.
+NATIVE-TEST-001 is a non-blocking P3: the prior native conversion test used an ordinary Index
+response. A test-only follow-up now exercises real actor previews through native conversion
+for Index and Flipnote, including expiry after conversion. Validation/re-review are pending;
+the implementation PASS stands. TAIL-TEST-001 remains closed.
 
 The actor now schedules the reviewed provisional head, seed and signed-tail adapters through
 its detached job queue. A ready preview owns its shared seed reservation, releases its parser
@@ -211,7 +214,7 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 | Canonical UI surface | Backend availability / next hook |
 |---|---|
 | Settlement chip / rotation progress | `settlement-changed` invalidates the actual phase/recovery listing. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
-| Current owner has not confirmed history | No `awaitingTenureReceipt` event or returned confirmation field exists yet. The post-succession recycled-leaf join reproduces missing provisional metadata loading; fetching a fixture-known PIX CID does not fill that gap. The [provisional-read proposal](GATE4-PROVISIONAL-READ-REVIEW.md) passed user review; capacity foundation work does not implement a read fallback. Keep this Gate 4 dependency pending. |
+| Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Actor/native implementation passed review at `a89bde6`; NATIVE-TEST-001 tracks independent native serialization/final-fence regression coverage. Frontend wiring and combined scheduling acceptance remain pending. |
 | History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available; signed repair has no actor/native command or `repairing` event yet. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
 | Local overlay while rotating | Keep editor work separately. Persisted overlay/replay orchestration is not yet a native command. Shared apply may refuse Closing/Fault. |
 | Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |
