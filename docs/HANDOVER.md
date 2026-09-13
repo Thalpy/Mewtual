@@ -11,6 +11,16 @@ and ranks the live hazards in that path.
 ## Status (latest entry: 2026-09-13)
 
 - **Gate 4 actor scheduling and native previews (2026-09-13; awaiting adversarial review).**
+  Published implementation: `be03b0b`; the workflow command-scalar correction is `febbd70`.
+  [Studio native validation on `febbd70`](https://github.com/Thalpy/Mewtual/actions/runs/34767022661)
+  passes all 17 native Studio tests (4.32s), including the new view-generation and late-conversion
+  rejection cases. Two-client acceptance also passes. The existing strict Linux native job still
+  stops on unused future `security_intent.rs` APIs, as it did on the parent; full PR CI is not green.
+  A targeted mutation changed the real worker's permit binding to an immediate drop. The paused-
+  worker test then failed at `cancelled waiter cannot refund the running worker`. The source was
+  restored byte-for-byte in `finally`; all four runtime tests pass again (5.09s). Evidence is in
+  `logs/gate4-preview-worker-mutation.log` and `logs/gate4-preview-runtime-restored.log`.
+
   The receiver now queues a bounded target retry when authoritative discovery yields a Studio
   Hint, releases that discovery's reservation, then separately prepares provisional head/seed/tail
   jobs. Network waits and cold parsing leave native vault custody; generation fencing discards

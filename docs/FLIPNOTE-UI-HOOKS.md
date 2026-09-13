@@ -8,8 +8,10 @@ The actor now schedules the reviewed provisional head, seed and signed-tail adap
 its detached job queue. A ready preview owns its shared seed reservation, releases its parser
 permit, and remains separate from installed Studio history. The two former-owner newcomer
 preview cases are enabled and pass alongside the two known-CID PIX fetch/reopen cases.
-Local native checking requires uncached dependencies; the focused Studio native workflow validates
-the native workspace on GitHub.
+Local native checking requires uncached dependencies. The focused
+[Studio native workflow](https://github.com/Thalpy/Mewtual/actions/runs/34767022661) passes all 17
+native Studio tests on `febbd70`; two-client acceptance also passes. Broader strict CI remains
+blocked by existing unused security-intent APIs, so these results do not mean the whole PR is green.
 See [HANDOVER](HANDOVER.md) for exact commands and current validation status.
 
 Gate 4 remains open. Remaining acceptance includes competing authoritative Studio/Registry
