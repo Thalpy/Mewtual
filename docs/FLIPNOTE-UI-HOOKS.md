@@ -4,8 +4,10 @@ Last checked: 2026-09-13. The user's review accepts actor scheduling and native 
 implementation at `a89bde6` against `2a1814e`, with no blocking production defect.
 NATIVE-TEST-001 is a non-blocking P3: the prior native conversion test used an ordinary Index
 response. A test-only follow-up now exercises real actor previews through native conversion
-for Index and Flipnote, including expiry after conversion. Validation/re-review are pending;
-the implementation PASS stands. TAIL-TEST-001 remains closed.
+for Index and Flipnote, including expiry after conversion. [Validation on `c60de4e`](https://github.com/Thalpy/Mewtual/actions/runs/34779683539)
+passes all 19 native Studio tests and detects both isolated trust-flag/final-fence mutations.
+Source restoration and both regression reruns pass. User re-review is pending; the implementation
+PASS stands. TAIL-TEST-001 remains closed.
 
 The actor now schedules the reviewed provisional head, seed and signed-tail adapters through
 its detached job queue. A ready preview owns its shared seed reservation, releases its parser

@@ -17,7 +17,7 @@ and ranks the live hazards in that path.
   NATIVE-TEST-001 (P3) correctly observes that the earlier native conversion test only reads an
   ordinary synthetic Index and therefore cannot detect preview trust-state/final-fence mutations.
   No production change is requested. The implementation PASS stands; this finding remains open
-  pending test validation and re-review.
+  pending user re-review of the tested correction.
 
   The follow-up shares a test-only authenticated provider/actor fixture between a lightweight
   app integration test and native tests. Both Index and Flipnote use real head/seed/signed-tail
@@ -32,8 +32,19 @@ and ranks the live hazards in that path.
   `cargo test --locked -j 4 -p catcoms-app --test studio_preview_fixture -- --nocapture`.
   Focused integration-test Clippy passes with `-D warnings`; root/native formatting, locked
   native manifest metadata, and mutation-script syntax/unique-anchor checks pass. Local Rust
-  uses `_LINK_=/DEBUG:NONE` and `CARGO_INCREMENTAL=0`. Native execution/mutations are pending. Gate 4's combined authoritative-progress regression remains open, along with Closing
-  overlays/repeated tenure, signed repair and full acceptance.
+  uses `_LINK_=/DEBUG:NONE` and `CARGO_INCREMENTAL=0`.
+  [Native validation on `c60de4e`](https://github.com/Thalpy/Mewtual/actions/runs/34779683539) passes all
+  19 Studio tests (3.95s), including both new cases for Index and Flipnote. Two-client acceptance
+  also passes. Changing only the preview trust flag to false fails at `preview trust-state flag`
+  (0.75s); removing only the final preview-delivery condition fails at
+  `expired preview escaped final native delivery fence` (0.72s). In the latter mutation native
+  returns the converted value, demonstrating that session/instance/request checks did not mask
+  the missing preview check. Each mutation restores native source byte-for-byte in `finally`.
+  Both restored regressions pass (1.45s and 1.35s); mutation command:
+  `python3 .github/scripts/check-studio-preview-mutations.py`.
+  This is test/CI/documentation work only; runtime production logic is unchanged. NATIVE-TEST-001
+  awaits user re-review. Gate 4's combined authoritative-progress regression remains open, along
+  with Closing overlays/repeated tenure, signed repair and full acceptance.
 
 - **Gate 4 actor scheduling and native previews (2026-09-13; awaiting adversarial review).**
   Published implementation: `be03b0b`; the workflow command-scalar correction is `febbd70`.

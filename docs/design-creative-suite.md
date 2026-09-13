@@ -4,7 +4,8 @@
 review found no blocking production defect. NATIVE-TEST-001 is a non-blocking P3 regression gap:
 the old native test converted an ordinary Index, so preview serialization and final delivery
 validity needed independent coverage. The test-only follow-up exercises real actor-produced
-Index/Flipnote previews and expiry after successful conversion; validation/re-review are pending.
+Index/Flipnote previews and expiry after successful conversion. All 19 native tests and both
+mutation checks pass on `c60de4e`; source restoration/reruns pass. User re-review is pending.
 This acceptance does not close the combined scheduling regression or Gate 4. TAIL-TEST-001
 is closed by the user's PASS of `2a1814e` against `47bf098`. The existing receiver now schedules
 provisional discovery, seed fetching and finite signed tails outside vault custody; cold workers
