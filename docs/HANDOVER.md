@@ -10,7 +10,38 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-13)
 
-- **Combined actor scheduling checkpoint `6b71d96` (2026-09-13; awaiting user review).**
+- **Combined scheduling accepted; Closing overlay design checkpoint (2026-09-13).**
+  The user's review of `134394e...6b71d96`, with documentation at `a40909e`, passes pacing,
+  queued retry preservation, pending authoritative priority, the three retained-custody actor
+  scenarios and the native abort-test eventual-release correction. No actionable production
+  or regression finding and no further changes are required. NATIVE-TEST-001 and TAIL-TEST-001
+  remain closed. The reviewer inspected source and actual GitHub native job logs, without
+  rerunning Cargo locally. The ignored local scheduler mutation logs were unavailable at the
+  published reference; their results remain recorded evidence. The 165-test broad run belongs
+  to `487cb0e`; the final `6b71d96` targeted/native evidence is listed below.
+
+  Keep the acceptance bounds: authoritative Index plus Registry, Index/Flipnote preview
+  pressure, controlled cancelled lower-transport ownership, 40 seconds of simulated scheduler
+  time, and priority of pending work rather than preemption. This closes block 1 of the four
+  remaining work areas. Durable Closing overlays/repeated tenure, runtime signed repair and
+  final combined acceptance remain; Gate 4 is not complete.
+
+  `GATE4-CLOSING-OVERLAY-REVIEW.md` proposes the next core/store foundation. An explicit local
+  branch must be distinguished from an unaccepted intent left by failed ordinary Save. It uses
+  a checked known-Closing expected seed, an optional local intent-record extension, unchanged
+  combined storage ceilings, ordered exact retries and restart/reference protection. It defines
+  required implementation tests and holds annotated intents until overlay-aware transitions
+  exist. The proposal awaits user adversarial design review before implementation. It does not
+  add native commands, enable preview writes, implement replay, or resolve Unknown tenure.
+
+  Frontend integration has landed separately (`0b6e870`):
+  `studio-native.ts` and `studio-session.ts` connect the existing Flipnote surface to native
+  commands/events. UI hooks now link those seams instead of describing only fixture stores.
+  This documentation checkpoint does not independently accept the UI or prove a live two-client
+  flow. No production/frontend/test code changes; validation is documentation links and diff
+  checks. Existing Rust/native results are historical evidence, not fresh runs of this checkpoint.
+
+- **Combined actor scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).**
   The new `studio_exchange/tests/scheduling.rs` fixture joins three real MLS members and proves
   the receiver's two peers over authenticated catch-up. The current owner has different, prepared
   Studio Index and Registry checkpoints; another member supplies unconfirmed head/seed/signed-tail
@@ -71,7 +102,7 @@ and ranks the live hazards in that path.
   [Two-client acceptance](https://github.com/Thalpy/Mewtual/actions/runs/34784331297) passes all
   Linux/Windows/NAT jobs. These targeted results do not claim the entire PR CI is green.
 
-  NATIVE-TEST-001 and TAIL-TEST-001 remain closed. This checkpoint requires user adversarial review;
+  NATIVE-TEST-001 and TAIL-TEST-001 remain closed. The user accepts this bounded checkpoint;
   it does not close durable Closing overlays/repeated tenure, signed repair or full Gate 4 acceptance.
   The core UI can proceed using `FLIPNOTE-UI-BUILDER-PROMPT.md` and `FLIPNOTE-UI-HOOKS.md`.
   Concurrent frontend changes are owned by the UI agent and are excluded from this backend commit.

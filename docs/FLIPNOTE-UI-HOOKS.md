@@ -1,6 +1,8 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-13. Actor scheduling and native preview implementation passed review
+Last checked: 2026-09-13. Combined scheduling at `6b71d96` now passes user review without
+required changes. Block 1 of the four remaining Gate 4 work areas is accepted; three remain.
+Actor scheduling and native preview implementation passed review
 at `a89bde6`. The user's re-review of `a89bde6...134394e` closes NATIVE-TEST-001 with no further
 changes required, for both Index and Flipnote. The reviewer inspected source and the GitHub job
 logs: 19 native tests passed, both mutations failed at their intended assertions, and restored
@@ -9,14 +11,18 @@ The reviewer did not independently rerun Cargo. TAIL-TEST-001 also remains close
 
 ## Handoff to the UI agent
 
-Copy the [UI builder prompt](FLIPNOTE-UI-BUILDER-PROMPT.md) to start integration of the existing
-mockup. Gate 4 backend work continues separately; coordinate edits to Rust/native and shared docs.
+The existing mockup now has a native integration implementation (`0b6e870`).
+The typed adapter is [studio-native.ts](../apps/desktop/src/studio-native.ts);
+request/session/event coordination is [studio-session.ts](../apps/desktop/src/studio-session.ts).
+Continue from those files and the connected surface. The [original UI builder prompt](FLIPNOTE-UI-BUILDER-PROMPT.md)
+records the handoff scope; do not introduce a second adapter or restart the mockup.
 
-Core Flipnote UI implementation and native integration can start now. Use the command/result
-and event tables below as the integration contract; use `design-creative-suite.md` for visual
-behavior. The current `studio-store.ts` and some `studio-contract.ts` types still model fixtures,
-so introduce a typed native adapter rather than casting native responses to those fixture roots.
-Reuse the existing PIX encoder/decoder in `pix.ts` and canonical operation encoding.
+Use the command/result and event tables below as the backend contract and
+`design-creative-suite.md` for visual behavior. Preserve the separation between native views
+and the editor model in `studio-store.ts`. Reuse the existing PIX codec and canonical operation
+encoding. Backend review acceptance does not independently accept the UI implementation or
+establish live two-client UI acceptance. Gate 4 backend work continues separately; coordinate
+Rust/native and shared-document edits.
 
 Connect list/open/create, frame and header edits, Index edits, pixel publication/bounded fetching,
 refresh events, recovery list/read/preview/apply/backup export and eviction acknowledgement.
@@ -48,14 +54,18 @@ pressure, with owner reachability returning without MLS churn. The final checkpo
 passes its 11 focused actor/preview/newcomer tests, shared native fixture, Clippy and all 19 native
 Studio tests plus native mutation checks on GitHub; the broad run on `487cb0e` passed 165 tests.
 Both scheduler changes have isolated mutation failures and restored passes. User adversarial
-review remains pending. One-second provisional-head pacing and preservation of queued retries
-across repeated Reads change no native commands/result shapes. Durable Closing overlays/repeated
+review accepts this bounded checkpoint with no required corrections. One-second provisional-head
+pacing and preservation of queued retries across repeated Reads change no native commands/result shapes. Durable Closing overlays/repeated
 tenure, signed repair and full acceptance remain.
+The next [Closing overlay proposal](GATE4-CLOSING-OVERLAY-REVIEW.md) awaits design review. It is
+an internal core/store foundation, not a callable command. Continue to disable durable overlay
+Save in Closing/Fault and awaiting-tenure previews; preserve unsaved editor work without claiming
+it is vault-saved. Its later actor/native integration will update this guide with actual commands.
 The accepted foundations and earlier review closures are recorded in
 [the provisional review note](GATE4-PROVISIONAL-READ-REVIEW.md) and HANDOVER.
 
-This guide describes native contracts. The user's frontend and visual design remain independently
-owned; the in-memory Studio editor is not connected end to end by this backend checkpoint.
+This guide describes native contracts. Frontend implementation and visual design remain
+independently owned; this backend documentation checkpoint changes no frontend code.
 
 ## Available now
 
@@ -64,8 +74,8 @@ The native entry points are [studio.rs](../apps/desktop/src-tauri/src/studio.rs)
 `studio_recovery_*` commands) and
 [creative_blobs.rs](../apps/desktop/src-tauri/src/creative_blobs.rs); registration and event
 forwarding are in [lib.rs](../apps/desktop/src-tauri/src/lib.rs). These are real actor/vault
-paths, not fixture functions. The current frontend `studio-store.ts` is still an in-memory
-editor model; its presence does not mean it calls these commands.
+paths. The frontend adapter/session modules above now call these commands and translate their
+results into the existing editor model.
 
 `studio_list` and `studio_read` can now return a distinct unconfirmed-history result:
 
@@ -248,9 +258,9 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 | Canonical UI surface | Backend availability / next hook |
 |---|---|
 | Settlement chip / rotation progress | `settlement-changed` invalidates the actual phase/recovery listing. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
-| Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Actor/native implementation passed review at `a89bde6`; NATIVE-TEST-001 is closed by user re-review at `134394e`. Frontend wiring and combined scheduling acceptance remain pending. |
+| Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Actor/native implementation and NATIVE-TEST-001 passed review; combined scheduling at `6b71d96` is now accepted. The frontend adapter handles this read-only result; live UI acceptance remains separate. |
 | History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available; signed repair has no actor/native command or `repairing` event yet. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
-| Local overlay while rotating | Keep editor work separately. Persisted overlay/replay orchestration is not yet a native command. Shared apply may refuse Closing/Fault. |
+| Local overlay while rotating | Preserve unsaved editor work. The [core/store overlay proposal](GATE4-CLOSING-OVERLAY-REVIEW.md) awaits design review; no durable overlay or replay command exists. Shared Apply refuses Closing/Fault. |
 | Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |
 | Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Refresh after the action and matching `settlement-changed` events. |
 | Claims, Ask, Pass, countdown | Pending Gate 5. Local fixture claims are not peer claims and never locks. |

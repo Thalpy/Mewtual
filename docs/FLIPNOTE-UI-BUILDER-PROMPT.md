@@ -1,5 +1,10 @@
 # Prompt for the Flipnote UI builder
 
+Status update, 2026-09-13: the initial integration below has landed (`0b6e870`).
+For follow-up work, extend `studio-native.ts`, `studio-session.ts` and the connected
+surface. Do not create another adapter or rebuild the mockup. The original handoff follows;
+current command availability and remaining backend gaps are in `FLIPNOTE-UI-HOOKS.md`.
+
 Connect the existing Flipnote mockup to the real backend. Preserve its current design, layout,
 components and interactions; build on what is already there.
 

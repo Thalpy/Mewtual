@@ -182,7 +182,18 @@ Remaining for Gate 4: running-app succession, signed fault/repair, and full-gate
 
 #### Gate 4 progress audit (2026-09-13)
 
-**Combined scheduling checkpoint `6b71d96` (2026-09-13; awaiting user review).** The three-member actor
+**Current Gate 4 position (2026-09-13).** The user accepts the combined scheduling checkpoint
+`6b71d96` with no production or test changes required. This closes block 1 of the four remaining
+work blocks. Three remain: (2) durable Closing overlays and repeated-owner tenure, (3) runtime
+signed fault repair, and (4) combined Gate 4 acceptance. These are unequal work areas, not a
+percentage or time estimate.
+
+The next bounded core/store proposal is [durable Closing overlay acceptance](GATE4-CLOSING-OVERLAY-REVIEW.md).
+It distinguishes an explicitly saved local branch from a failed ordinary Save's pending intent,
+retains the existing storage ceilings and defines restart/retry evidence. It awaits adversarial
+design review; no overlay command, automatic replay or new tenure authority is implemented.
+
+**Combined scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).** The three-member actor
 fixture retains three preview reservations: three real deliveries, or two deliveries plus a
 cancelled parser or a cancelled transport request. It restores only owner transport reachability and
 requires both Registry and Studio checkpoints, exact content and durable reopen within 40 seconds
@@ -199,8 +210,14 @@ The broad run on `487cb0e` passes 165 tests (one opt-in profile ignored); final 
 11 targeted actor tests, the shared native fixture, Clippy and 19 native Studio tests on GitHub,
 including both existing native mutation checks. The native abort regression now waits for actual
 final guard release after its unchanged held-while-paused assertions. Native/UI response shapes
-are unchanged. Exact validation and the requested user review are recorded in HANDOVER. Closing overlays/repeated tenure, signed repair and full Gate 4 acceptance
-remain separate outstanding blocks.
+are unchanged. Exact validation is recorded in HANDOVER. The user's review accepts this bounded
+checkpoint with no actionable production/test finding or required changes. The reviewer inspected
+source and actual GitHub native logs, but did not rerun Cargo locally; local actor/mutation evidence
+remains the recorded execution evidence. The broad 165-test run was on `487cb0e`, not final `6b71d96`.
+The combined authoritative target is Index plus its Registry bucket; Index/Flipnote previews supply
+pressure. Cancelled transport is a controlled lower-layer model, and 40 seconds is simulated scheduler
+time. Priority covers pending authoritative work, not preemption or a universal latency guarantee.
+Closing overlays/repeated tenure, signed repair and full Gate 4 acceptance remain outstanding.
 
 **Actor/native preview checkpoint (2026-09-13, implementation PASS at `a89bde6`).** The user's
 review found no blocking production defect. NATIVE-TEST-001 was a non-blocking P3 regression gap:
