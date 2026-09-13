@@ -1,13 +1,36 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-13. The user's review accepts actor scheduling and native preview
-implementation at `a89bde6` against `2a1814e`, with no blocking production defect.
-NATIVE-TEST-001 is a non-blocking P3: the prior native conversion test used an ordinary Index
-response. A test-only follow-up now exercises real actor previews through native conversion
-for Index and Flipnote, including expiry after conversion. [Validation on `c60de4e`](https://github.com/Thalpy/Mewtual/actions/runs/34779683539)
-passes all 19 native Studio tests and detects both isolated trust-flag/final-fence mutations.
-Source restoration and both regression reruns pass. User re-review is pending; the implementation
-PASS stands. TAIL-TEST-001 remains closed.
+Last checked: 2026-09-13. Actor scheduling and native preview implementation passed review
+at `a89bde6`. The user's re-review of `a89bde6...134394e` closes NATIVE-TEST-001 with no further
+changes required, for both Index and Flipnote. The reviewer inspected source and the GitHub job
+logs: 19 native tests passed, both mutations failed at their intended assertions, and restored
+regressions passed. Execution used the PR merge checkout for `c60de4e`; `134394e` adds only docs.
+The reviewer did not independently rerun Cargo. TAIL-TEST-001 also remains closed.
+
+## Handoff to the UI agent
+
+Copy the [UI builder prompt](FLIPNOTE-UI-BUILDER-PROMPT.md) to start integration of the existing
+mockup. Gate 4 backend work continues separately; coordinate edits to Rust/native and shared docs.
+
+Core Flipnote UI implementation and native integration can start now. Use the command/result
+and event tables below as the integration contract; use `design-creative-suite.md` for visual
+behavior. The current `studio-store.ts` and some `studio-contract.ts` types still model fixtures,
+so introduce a typed native adapter rather than casting native responses to those fixture roots.
+Reuse the existing PIX encoder/decoder in `pix.ts` and canonical operation encoding.
+
+Connect list/open/create, frame and header edits, Index edits, pixel publication/bounded fetching,
+refresh events, recovery list/read/preview/apply/backup export and eviction acknowledgement.
+Preserve unsaved editor work and same-request retry identity. Keep channel/epoch identifiers
+lossless, fence obsolete async results, and preserve conflicts/overflow/deletions in the adapter.
+
+`awaitingTenureReceipt: true` identifies a read-only history preview. `provisional: true` alone
+also appears on ordinary editable local views; it is not the read-only discriminator. Do not
+invent a phase, settlement receipt, author confirmation or publication claim for a preview.
+
+Leave backend-dependent actions unavailable for durable Closing overlays, signed repair,
+claims/Ask/Pass (Gate 5), and sound/linked Music/`.pixa` export (Gate 6). Recovery backup export
+is already available and uses a different format. These gaps and full Gate 4 acceptance do not
+block the core UI hookup, but full-suite behavior is not ready for release acceptance yet.
 
 The actor now schedules the reviewed provisional head, seed and signed-tail adapters through
 its detached job queue. A ready preview owns its shared seed reservation, releases its parser
@@ -19,9 +42,15 @@ native Studio tests on `febbd70`; two-client acceptance also passes. Broader str
 blocked by existing unused security-intent APIs, so these results do not mean the whole PR is green.
 See [HANDOVER](HANDOVER.md) for exact commands and current validation status.
 
-Gate 4 remains open. Remaining acceptance includes competing authoritative Studio/Registry
-installations under preview/cancellation pressure and owner reachability changes without MLS
-churn, then durable Closing overlays/repeated tenure, runtime signed repair and combined review.
+Gate 4 remains open. The combined actor regression now exercises competing authoritative
+Studio/Registry installations under retained-preview, cancelled-parser and cancelled-transport
+pressure, with owner reachability returning without MLS churn. The final checkpoint `6b71d96`
+passes its 11 focused actor/preview/newcomer tests, shared native fixture, Clippy and all 19 native
+Studio tests plus native mutation checks on GitHub; the broad run on `487cb0e` passed 165 tests.
+Both scheduler changes have isolated mutation failures and restored passes. User adversarial
+review remains pending. One-second provisional-head pacing and preservation of queued retries
+across repeated Reads change no native commands/result shapes. Durable Closing overlays/repeated
+tenure, signed repair and full acceptance remain.
 The accepted foundations and earlier review closures are recorded in
 [the provisional review note](GATE4-PROVISIONAL-READ-REVIEW.md) and HANDOVER.
 
@@ -151,19 +180,22 @@ Native busy/locked errors are ordinary refusal paths; do not spin or force-unloc
 
 ## Read model: adapt it, do not cast it to the fixture root
 
-Every non-null Studio response currently has:
+Every non-null Studio response has the common fields below and one of two trust states.
+Check `awaitingTenureReceipt` before using `epochId` to prepare an ordinary edit:
 
 ```ts
-{
-  v: 1,
-  epochId: string, // 32 hex, reuse on writes
-  epoch: string,   // u64 decimal, preserve losslessly
-  channel: string,
-  publication: "local",
-  provisional: true,
-  phase: "open" | "closing" | "settled" | "fault",
-  content: {kind: "index" | "flipnote", /* typed projection */}
-}
+type StudioReadResult = {
+  v: 1;
+  epochId: string; // 32 hex; only an ordinary editable view can supply a write epoch
+  epoch: string;   // u64 decimal, preserve losslessly
+  channel: string;
+  provisional: true;
+  content: {kind: "index" | "flipnote"; /* complete typed projection */};
+} & (
+  | {awaitingTenureReceipt: true; phase?: never; publication?: never}
+  | {awaitingTenureReceipt?: never; publication: "local";
+     phase: "open" | "closing" | "settled" | "fault"}
+);
 ```
 
 Index content has `objects`, `overflow`, `deletedObjects`, and `tombstones`, keyed by object id.
@@ -216,7 +248,7 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 | Canonical UI surface | Backend availability / next hook |
 |---|---|
 | Settlement chip / rotation progress | `settlement-changed` invalidates the actual phase/recovery listing. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
-| Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Actor/native implementation passed review at `a89bde6`; NATIVE-TEST-001 tracks independent native serialization/final-fence regression coverage. Frontend wiring and combined scheduling acceptance remain pending. |
+| Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Actor/native implementation passed review at `a89bde6`; NATIVE-TEST-001 is closed by user re-review at `134394e`. Frontend wiring and combined scheduling acceptance remain pending. |
 | History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available; signed repair has no actor/native command or `repairing` event yet. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
 | Local overlay while rotating | Keep editor work separately. Persisted overlay/replay orchestration is not yet a native command. Shared apply may refuse Closing/Fault. |
 | Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |

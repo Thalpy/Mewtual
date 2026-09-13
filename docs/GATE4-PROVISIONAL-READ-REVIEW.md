@@ -1,5 +1,25 @@
 # Gate 4: post-succession newcomer review
 
+**Combined scheduling checkpoint `6b71d96` (2026-09-13; awaiting user review).** The three-member actor
+fixture retains three preview reservations: three real deliveries, or two deliveries plus a
+cancelled parser or a cancelled transport request. It restores only owner transport reachability and
+requires both Registry and Studio checkpoints, exact content and durable reopen within 40 seconds
+of simulated scheduler time. Preview custodians remain retained throughout; no restart, unwatch,
+additional user Read or expiry of all original seeds enables the installations.
+
+This exposed a fast-retry defect: the provider's shared head rail allows a two-request burst, spent
+by Registry and Studio discovery. An immediate provisional head can repeatedly fail before a seed
+is fetched. The bounded preview queue now waits one second before its fresh head attempt, without
+holding a reservation or resetting that deadline on duplicate Hints. Queued targets defer new
+same-target page work so repeated Reads cannot bypass that wait. Authoritative work retains
+priority. Both new conditions have isolated mutation failures and restored-source passes.
+The broad run on `487cb0e` passes 165 tests (one opt-in profile ignored); final `6b71d96` passes
+11 targeted actor tests, the shared native fixture, Clippy and 19 native Studio tests on GitHub,
+including both existing native mutation checks. The native abort regression now waits for actual
+final guard release after its unchanged held-while-paused assertions. Native/UI response shapes
+are unchanged. Exact validation and the requested user review are recorded in HANDOVER. Closing overlays/repeated tenure, signed repair and full Gate 4 acceptance
+remain separate outstanding blocks.
+
 **Actor/native preview checkpoint (2026-09-13, implementation PASS at `a89bde6`).** The user's
 source review found no blocking production defect and raised NATIVE-TEST-001 (P3): the existing
 native test only exercised an ordinary Index. The test-only correction at `c60de4e` requires real
@@ -8,8 +28,10 @@ explicit preview flags without phase/publication. Expiry after successful conver
 only the preview-delivery fence while the other native checks stay valid.
 [Native validation](https://github.com/Thalpy/Mewtual/actions/runs/34779683539) passes all 19 Studio tests;
 changing the trust flag and removing only the final preview-validity condition each fails at
-its intended assertion. Byte-for-byte restoration and both reruns pass. NATIVE-TEST-001 awaits
-user re-review. This does not establish the combined authoritative-progress acceptance case.
+its intended assertion. Byte-for-byte restoration and both reruns pass. The user re-review of
+`a89bde6...134394e` closes NATIVE-TEST-001 without further changes. The reviewer also inspected
+the GitHub job logs (PR merge checkout for `c60de4e`), without independently rerunning Cargo.
+This does not establish the combined authoritative-progress acceptance case.
 TAIL-TEST-001
 is closed by the user's PASS of `2a1814e` against `47bf098`. The existing receiver now schedules
 provisional discovery, seed fetching and finite signed tails outside vault custody; cold workers

@@ -1,11 +1,32 @@
 # Design: the creative suite (draw, doodle, flipnote, emoji sound, play, knock)
 
+**Combined scheduling checkpoint `6b71d96` (2026-09-13; awaiting user review).** The three-member actor
+fixture retains three preview reservations: three real deliveries, or two deliveries plus a
+cancelled parser or a cancelled transport request. It restores only owner transport reachability and
+requires both Registry and Studio checkpoints, exact content and durable reopen within 40 seconds
+of simulated scheduler time. Preview custodians remain retained throughout; no restart, unwatch,
+additional user Read or expiry of all original seeds enables the installations.
+
+This exposed a fast-retry defect: the provider's shared head rail allows a two-request burst, spent
+by Registry and Studio discovery. An immediate provisional head can repeatedly fail before a seed
+is fetched. The bounded preview queue now waits one second before its fresh head attempt, without
+holding a reservation or resetting that deadline on duplicate Hints. Queued targets defer new
+same-target page work so repeated Reads cannot bypass that wait. Authoritative work retains
+priority. Both new conditions have isolated mutation failures and restored-source passes.
+The broad run on `487cb0e` passes 165 tests (one opt-in profile ignored); final `6b71d96` passes
+11 targeted actor tests, the shared native fixture, Clippy and 19 native Studio tests on GitHub,
+including both existing native mutation checks. The native abort regression now waits for actual
+final guard release after its unchanged held-while-paused assertions. Native/UI response shapes
+are unchanged. Exact validation and the requested user review are recorded in HANDOVER. Closing overlays/repeated tenure, signed repair and full Gate 4 acceptance
+remain separate outstanding blocks.
+
 **Actor/native preview checkpoint (2026-09-13, implementation PASS at `a89bde6`).** The user's
-review found no blocking production defect. NATIVE-TEST-001 is a non-blocking P3 regression gap:
+review found no blocking production defect. NATIVE-TEST-001 was a non-blocking P3 regression gap:
 the old native test converted an ordinary Index, so preview serialization and final delivery
 validity needed independent coverage. The test-only follow-up exercises real actor-produced
 Index/Flipnote previews and expiry after successful conversion. All 19 native tests and both
-mutation checks pass on `c60de4e`; source restoration/reruns pass. User re-review is pending.
+mutation checks pass on the PR merge checkout for `c60de4e`; source restoration/reruns pass.
+The user re-review of `a89bde6...134394e` closes NATIVE-TEST-001 without further changes.
 This acceptance does not close the combined scheduling regression or Gate 4. TAIL-TEST-001
 is closed by the user's PASS of `2a1814e` against `47bf098`. The existing receiver now schedules
 provisional discovery, seed fetching and finite signed tails outside vault custody; cold workers

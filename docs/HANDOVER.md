@@ -10,6 +10,88 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-13)
 
+- **Combined actor scheduling checkpoint `6b71d96` (2026-09-13; awaiting user review).**
+  The new `studio_exchange/tests/scheduling.rs` fixture joins three real MLS members and proves
+  the receiver's two peers over authenticated catch-up. The current owner has different, prepared
+  Studio Index and Registry checkpoints; another member supplies unconfirmed head/seed/signed-tail
+  history. Owner requests and inbound traffic are hidden at the test transport, without a membership
+  change. Actual spawned actors execute ordinary Ready/vault leases and detached jobs.
+
+  Three cases retain all three preview-eligible reservations: three actual native-delivery guards;
+  two guards plus a cancelled real blocking parser; or two guards plus a cancelled serialized seed
+  request in the simulated transport's outbound table. A test-only actor command observes the real
+  ready cache and probes the actual allocator; an optional barrier pauses a real parser after it
+  acquires both process permits. It does not inject cached data, selections, clocks or scheduling
+  decisions. Real deliveries retain their seeds after handoff cancellation, including after cache
+  eviction. The lower transport keeps request bytes and the original cancelled request's keepalive.
+
+  A fourth watched target produces an authenticated authoritative Hint but cannot obtain a preview
+  slot. Restoring only owner transport reachability must then install both authoritative classes in
+  at most 160 idle passes / 40 seconds of simulated time. The test checks exact distinct projections,
+  checkpoint identities, Studio Open state, Registry epoch, durable reopen, unchanged membership and
+  owner, and zero free preview slots throughout. No later user Read, unwatch, restart or release of
+  retained custodians enables progress; at least one original seed remains before its expiry.
+  Before reconnection, neither checkpoint exists in the receiver's vault.
+
+  The fixture exposed an actual pacing defect: Registry and Studio head discovery can consume the
+  provider's two-request burst, and the immediate third (provisional) request is rejected repeatedly.
+  The bounded preview queue now waits one second for the shared head rail to refill before fresh
+  discovery. It reserves no capacity during that delay; duplicate Hints preserve order/deadline,
+  and existing authoritative preparation/installation priority stays intact. No native shape changes.
+  Initial code/UI prompt: `487cb0efe822be64f40e4551bcb59a1cc451ec2c`. Its broad local `studio_`
+  run passes 165 tests with one opt-in profile ignored (873.08s). Its first native workflow caught
+  repeated Reads starting fresh page work while a preview retry waited, plus a post-abort assertion
+  racing the worker's final guard drops. Final code `6b71d963e61e8b204946a3b44e6eb4b6dadfc17d`
+  defers new same-target page work while that bounded retry is queued. The native abort test keeps
+  all held-while-paused assertions and waits up to five seconds for actual final guard release.
+
+  Removing only `head_after` pacing fails the intended `preview 0 never became ready` assertion
+  after an authenticated Hint (5.21s). Removing only queued-target deferral makes the existing
+  shared native fixture fail at real preview admission under repeated Reads (30.69s). Both
+  scripts require one executed failing test, the intended assertion and nonzero status; compile
+  failures or zero tests cannot count. Each restores original source bytes in `finally` and checks
+  exact equality. Commands: `python logs/gate4-scheduling-mutation.py` and
+  `python logs/gate4-scheduling-read-mutation.py`; logs have matching rate/read-mutation names.
+
+  Final restored-source runs use Rust 1.89, `_LINK_=/DEBUG:NONE`, `CARGO_INCREMENTAL=0`:
+  `cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app
+  --lib FILTER -- --test-threads=N`. Filters: `studio_actor_owner_return_` (3 passes, N=1, 25.21s),
+  `studio_preview_` (4, N=4, 5.04s), `studio_actor_post_succession_joiner` (4, N=2, 43.44s).
+  The combined cases install both classes after 22.75s / 33s / 33s of simulated time while all
+  three preview reservations remain occupied. `cargo test --locked -j 4 -p catcoms-app
+  --test studio_preview_fixture -- --nocapture` passes the Index/Flipnote shared fixture (2.07s).
+  `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings` passes (34.46s).
+  Root/native formatting passes. Exact local logs are `logs/gate4-scheduling-*.log`.
+
+  [Final native validation](https://github.com/Thalpy/Mewtual/actions/runs/34784331439), job
+  `103796946869`, passes all 19 Studio tests (5.72s). It used PR merge checkout
+  `f98b51007004086790c82b34a7a2b277402fee82` for `6b71d96`. The trust-flag mutation fails at its
+  intended assertion (1.17s); removing only final preview validity returns the expired JSON and
+  fails its intended assertion (1.16s). Source restoration and both reruns pass (2.10s each).
+  [Two-client acceptance](https://github.com/Thalpy/Mewtual/actions/runs/34784331297) passes all
+  Linux/Windows/NAT jobs. These targeted results do not claim the entire PR CI is green.
+
+  NATIVE-TEST-001 and TAIL-TEST-001 remain closed. This checkpoint requires user adversarial review;
+  it does not close durable Closing overlays/repeated tenure, signed repair or full Gate 4 acceptance.
+  The core UI can proceed using `FLIPNOTE-UI-BUILDER-PROMPT.md` and `FLIPNOTE-UI-HOOKS.md`.
+  Concurrent frontend changes are owned by the UI agent and are excluded from this backend commit.
+
+- **NATIVE-TEST-001 closed; core UI hookup ready to start (2026-09-13).**
+  The user's re-review accepts `a89bde6...134394e`, resolving the latter to
+  `134394e2fe163c62a08304dfb7082588c0a3bfed`, with no further changes required. Both Index and
+  Flipnote trust-state serialization and the isolated post-conversion preview fence are covered.
+  The reviewer inspected source and the actual GitHub job logs. Those runs used the PR merge
+  checkout for `c60de4e`; `134394e` is a documentation-only update. Cargo/mutations were not
+  independently rerun locally by the reviewer. The implementation PASS stands; this closes the
+  specific test finding, not combined scheduling acceptance or Gate 4.
+
+  The UI agent can now connect core Index/Flipnote read/create/edit, PIX save/fetch, invalidation
+  events, read-only awaiting-tenure previews and recovery controls. FLIPNOTE-UI-HOOKS now includes
+  a handoff scope and corrects the old ordinary-only read example to the two-result union.
+  Existing renderer stores/types are still fixtures and need an adapter. Backend work remains
+  for durable Closing overlays/repeated tenure, signed repair, claims and sound/Music/export.
+  This turn changes documentation only; no new production or test-code checkpoint needs review.
+
 - **Actor/native implementation PASS; NATIVE-TEST-001 follow-up (2026-09-13).**
   The user accepts `a89bde68dc1083f6eaab9b15f5cada3f1ca9d704` against
   `2a1814efc9fa1f22aed3c7ca5bbed627ae92f5d6`, finding no blocking production defect.
