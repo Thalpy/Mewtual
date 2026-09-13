@@ -188,9 +188,13 @@ impl PreviewRuntime {
             || self.queue.front().is_some_and(|r| now >= r.head_after)
     }
     pub(in crate::studio::receiver) fn defers(&self, target: StudioTarget, now: u64) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|r| r.watch.target == target)
+        // An explicit Read must not replace a queued retry with a new page/head cycle during
+        // its short rate delay. Other targets and already queued authoritative work still run.
+        self.queue.iter().any(|r| r.watch.target == target)
+            || self
+                .active
+                .as_ref()
+                .is_some_and(|r| r.watch.target == target)
             || self
                 .ready
                 .iter()

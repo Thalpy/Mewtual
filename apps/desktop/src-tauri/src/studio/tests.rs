@@ -528,8 +528,18 @@ async fn native_studio_running_worker_retains_fences_after_invoke_or_actor_abort
             task.await.unwrap();
         }
         drain.await.unwrap();
-        assert!(state.ui_session_commit.try_lock().is_ok());
-        assert!(state.servers.try_lock().is_ok());
+        // After actor abort, its detached worker can still be dropping the remaining lease
+        // fields when the store guard becomes available. Wait for actual fence release;
+        // the assertions above already prove they remained held while the worker was paused.
+        drop(
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let commit = state.ui_session_commit.lock().await;
+                let servers = state.servers.lock().await;
+                (commit, servers)
+            })
+            .await
+            .expect("completed native worker did not release its fences"),
+        );
         // A cancelled response is never shown, but an already-started save may finish. Reopen
         // the actual saved source with the durably saved MLS snapshot and verify the outcome.
         let server = Server::restore(
