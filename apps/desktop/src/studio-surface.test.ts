@@ -1,0 +1,148 @@
+// Compiled-component regressions for the two reactivity findings of the 0b6e870 review: the
+// surface must settle after a selection (no recurring recovery or read requests), and session
+// changes must reach the DOM through the revision bridge (pending read → editor, landed save →
+// new selected value, recovery item → disposition). The Svelte loader in scripts/ compiles the
+// real components; jsdom is the document; the fake bridge scripts every native answer.
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  CHANNEL, ME, SERVER, b64, deferred, fakeIpc, flipnoteContent, id32, id64, indexContent, indexEntry, ordinaryView, pixBytes, recoveryListing, version,
+  type FakeIpc,
+} from "./studio-testkit.ts";
+
+const OBJ = id32(0x0b);
+const F1 = id32(0x11);
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// The harness installs only what a sanitizer needs; a mounted editor needs a little more.
+const w = (globalThis as unknown as { window: Window & typeof globalThis }).window;
+Object.assign(globalThis, {
+  getComputedStyle: w.getComputedStyle.bind(w),
+  HTMLCanvasElement: w.HTMLCanvasElement,
+  HTMLInputElement: w.HTMLInputElement,
+  HTMLMediaElement: w.HTMLMediaElement, // the runtime's event delegation checks for it on every event
+  KeyboardEvent: w.KeyboardEvent,
+  MouseEvent: w.MouseEvent,
+  CustomEvent: w.CustomEvent,
+  Event: w.Event,
+  requestAnimationFrame: (fn: (t: number) => void) => setTimeout(() => fn(Date.now()), 0),
+  cancelAnimationFrame: clearTimeout,
+});
+// No canvas package under jsdom: every drawing path checks for a null context and returns.
+w.HTMLCanvasElement.prototype.getContext = (() => null) as unknown as typeof w.HTMLCanvasElement.prototype.getContext;
+
+const state = await import("./studio-state.svelte.ts");
+const { default: Studio } = await import("./Studio.svelte");
+const { mount, unmount, flushSync } = await import("svelte");
+
+function mountStudio(ipc: FakeIpc) {
+  state.useStudioIpc(ipc);
+  const notices: string[] = [];
+  const target = document.createElement("div");
+  document.body.appendChild(target);
+  const app = mount(Studio, {
+    target,
+    props: { me: ME, server: SERVER, channel: CHANNEL, nameOf: (id: string) => id.slice(0, 4), colorOf: () => "#000000", onnotice: (t: string) => notices.push(t) },
+  });
+  flushSync();
+  const count = (cmd: string) => ipc.calls.filter((c) => c.cmd === cmd).length;
+  const text = () => target.textContent ?? "";
+  const click = (selector: string, label?: string) => {
+    const el = [...target.querySelectorAll<HTMLButtonElement>(selector)].find((b) => !label || b.textContent?.trim() === label);
+    assert.ok(el, `no ${selector} ${label ?? ""}`);
+    el.click();
+    flushSync();
+  };
+  return { app, target, notices, count, text, click, done: () => { unmount(app); target.remove(); state.disposeStudio(); } };
+}
+
+async function settled(ms = 200) {
+  await wait(ms);
+  flushSync();
+}
+
+const pix = pixBytes(1);
+const frameView = (bytes = pix.length, cid = id64(1)) => ordinaryView(flipnoteContent({ frames: [{ id: F1, cid, bytes }] }));
+
+test("UI-001: selecting a flipnote reads it and lists its recovery once, then the surface settles", async () => {
+  const ipc = fakeIpc();
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat" }) } })));
+  ipc.on("studio_read", () => frameView());
+  ipc.on("request_blob_bounded", () => ({ bytes_b64: b64(pix), bytes: pix.length }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ, versions: [version(1)] }));
+  ipc.on("publish_pix", () => ({ cid: id64(2), bytes: pixBytes(2).length }));
+  ipc.on("studio_apply", () => frameView(pixBytes(2).length, id64(2)));
+  const m = mountStudio(ipc);
+  try {
+    await settled();
+    assert.equal(m.count("studio_list"), 1);
+    state.studio.selected = OBJ;
+    flushSync();
+    await settled(400);
+    assert.equal(m.count("studio_read"), 1, "one read for the selection");
+    assert.equal(m.count("studio_recovery_list"), 1, "one listing for the selection");
+    assert.ok(m.target.querySelector("input.st-title"), "the editor is on screen");
+    // Unrelated revisions (a blob landing, a save landing) do not restart the listing or the read.
+    const session = state.ensureStudio(ME);
+    session.saveFrame(OBJ, F1, pixBytes(2));
+    await settled(400);
+    assert.equal(m.count("studio_recovery_list"), 1);
+    assert.equal(m.count("studio_read"), 1);
+    assert.equal(m.count("studio_apply"), 1);
+    await settled(500);
+    assert.equal(m.count("studio_recovery_list"), 1, "still one listing after the surface has been idle");
+    assert.equal(m.count("studio_list"), 1, "and no index re-list without an event");
+  } finally {
+    m.done();
+  }
+});
+
+test("UI-002: a pending read becomes the editor, a landed save changes the shown value, a recovery item shows its disposition", async () => {
+  const ipc = fakeIpc();
+  const read = deferred<unknown>();
+  let reads = 0;
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat" }) } })));
+  ipc.on("studio_read", () => (++reads === 1 ? read.promise : frameView(4321, id64(2))));
+  ipc.on("request_blob_bounded", () => ({ bytes_b64: b64(pix), bytes: pix.length }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ, versions: [version(2)] }));
+  ipc.on("publish_pix", () => ({ cid: id64(2), bytes: pixBytes(2).length }));
+  ipc.on("studio_apply", () => frameView(4321, id64(2)));
+  ipc.on("studio_recovery_read", () => ({ v: 1, kind: "recoveryVersion", historical: true, version: version(2), channel: CHANNEL, content: flipnoteContent({ frames: [{ id: F1, cid: id64(9), bytes: pix.length, op: 300 }] }) }));
+  ipc.on("studio_recovery_preview", () => ({ v: 1, kind: "recoveryPreview", snapshot: id64(0x502), epochId: id32(0xe1), expectedProjection: id64(0x70), disposition: "conflict", body: null, originalAuthor: null }));
+  const m = mountStudio(ipc);
+  try {
+    await settled();
+    state.studio.selected = OBJ;
+    flushSync();
+    await settled();
+    // (1) pending read: the surface says so and shows no editor yet.
+    assert.match(m.text(), /Reading…/);
+    assert.equal(m.target.querySelector("input.st-title"), null);
+    read.resolve(frameView());
+    await settled();
+    const title = m.target.querySelector<HTMLInputElement>("input.st-title");
+    assert.ok(title, "the read landed in the editor");
+    assert.equal(title.value, "moon cat");
+    assert.match(m.text(), /0\.3 kib/, "the frame line shows the declared size of the selected value");
+    // (2) a landed save: the selected value's declared size changes on screen.
+    const session = state.ensureStudio(ME);
+    session.saveFrame(OBJ, F1, pixBytes(2));
+    await settled(400);
+    assert.equal(m.count("studio_apply"), 1);
+    assert.match(m.text(), /4\.2 kib/, "the returned view replaced the projection on screen");
+    assert.doesNotMatch(m.text(), /0\.3 kib/);
+    // (3) a recovery walk: the item's disposition reaches the rail.
+    m.click("button.st-itab", "music");
+    await settled();
+    assert.match(m.text(), /previous version · epoch 2/);
+    m.click("button.st-btn", "restore");
+    await settled(400);
+    assert.equal(m.count("studio_recovery_preview"), 1);
+    const items = [...m.target.querySelectorAll(".st-run li")].map((li) => li.textContent?.replace(/\s+/g, " ").trim());
+    assert.equal(items.length, 1);
+    assert.match(items[0] ?? "", /frame 1.*conflict/);
+    assert.match(m.text(), /walked/);
+  } finally {
+    m.done();
+  }
+});

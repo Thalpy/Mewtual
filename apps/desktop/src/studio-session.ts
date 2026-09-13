@@ -5,17 +5,24 @@
 //
 // Rules this class exists to keep (docs/FLIPNOTE-UI-HOOKS.md):
 // - A save is one complete request. A retry resends exactly it, nonce and epoch included; only an
-//   explicit "save again as a new edit" mints a new nonce against the current epoch.
+//   explicit "save again as a new edit" mints a new nonce against the current epoch. Recovery
+//   applies are saves too: their echoed preview payload is retained and retried the same way.
+// - Saves to one document run in order. An uncertain save blocks the later saves of its lane
+//   until it is retried or discarded on purpose; other documents keep moving.
 // - Unsaved pixels survive every failure. They stay on the record until the save lands or the
 //   member discards them on purpose.
 // - Every asynchronous result is fenced by scope generation (server, channel, session) and by a
-//   per-target request generation; a late result is dropped even after IPC delivered it.
+//   per-target request generation; a late result is dropped even after IPC delivered it, and a
+//   landed write supersedes the reads that were issued before it.
 // - A preview (`awaitingTenureReceipt`) is read-only: its epoch never authorizes an edit.
-// - Fetches are bounded by the declared size, validated as PIX1, prioritized by visibility and
-//   kept to a small in-flight count; a cid that was unavailable is asked for again only after an
-//   invalidation, never on every repaint.
+// - One fetch scheduler: thumbnails, the open frame, conflict actions and recovery all go through
+//   the same bounded, prioritized, deduplicated queue. A cid that was unavailable or failed
+//   transiently is asked again only after an invalidation or an explicit retry; content the
+//   decoder rejected is kept apart from that.
+// - State the surfaces read is replaced, never mutated in place, so a revision bridge sees a new
+//   reference whenever something changed.
 
-import { decodePix } from "./pix.ts";
+import { PixError, decodePix } from "./pix.ts";
 import { canonicalJson, randomElementId, type FlipnoteOp, type IndexOp } from "./studio-contract.ts";
 import {
   DEFAULT_FPS,
@@ -57,6 +64,7 @@ import {
   type NativeExpiry,
   type PixPublication,
   type PointerRestored,
+  type RecoveryApplied,
   type RecoveryApplyEdit,
   type RecoveryChoice,
   type RecoveryDisposition,
@@ -72,6 +80,7 @@ import {
 export type StudioScope = { server: number; channel: Decimal };
 
 export type SaveStatus = "queued" | "inflight" | "uncertain";
+export type SaveOutcome = "landed" | "uncertain" | "discarded";
 type SaveBase = {
   id: number;
   label: string;
@@ -81,6 +90,9 @@ type SaveBase = {
   /// Set when a later read of the same document carries a different epoch than the frozen
   /// request: the backend decides on retry; the member may instead re-author explicitly.
   epochChanged: boolean;
+  /// Resolved once, when the record lands, goes uncertain or is discarded (used by callers
+  /// that await one save, such as the recovery walk).
+  settle?: (outcome: SaveOutcome) => void;
 };
 export type SaveRecord = SaveBase &
   (
@@ -88,18 +100,22 @@ export type SaveRecord = SaveBase &
     | { kind: "frame"; object: Hex32; frame: Hex32; op: "insert" | "replace"; after: Hex32 | null; pix: Uint8Array; published: PixPublication | null; apply: ApplyRequest | null; force?: boolean }
     | { kind: "apply"; object: Hex32; request: ApplyRequest; op: FlipnoteOp }
     | { kind: "applyIndex"; request: ApplyIndexRequest; op: IndexOp; object: Hex32 }
-    | { kind: "recoveryApply"; object: Hex32 | null; edit: RecoveryApplyEdit }
+    | { kind: "recoveryApply"; object: Hex32 | null; edit: RecoveryApplyEdit; applied: RecoveryApplied | null }
   );
 
-export type BlobState = "held" | "fetching" | "queued" | "unavailable" | "invalid";
+/// held: decoded bytes are cached. fetching/queued: a job for this scope exists. unavailable:
+/// the backend answered null. failed: the request itself failed (busy, transport); retryable.
+/// invalid: the body failed the length or PIX1 check; content, not availability. idle: not asked.
+export type BlobState = "held" | "fetching" | "queued" | "unavailable" | "failed" | "invalid" | "idle";
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 type NewSave = DistributiveOmit<SaveRecord, "id" | "status" | "attempts" | "error" | "epochChanged">;
 
+export type RecoveryItemState = "pending" | "previewing" | "fetching" | "applying" | "applied" | "alreadySaved" | "uncertain" | RecoveryDisposition | "error";
 export type RecoveryItem = {
   choice: RecoveryChoice;
   label: string;
-  state: "pending" | "previewing" | "fetching" | "applying" | "applied" | "alreadySaved" | RecoveryDisposition | "error";
+  state: RecoveryItemState;
   error: string;
   originalAuthor: Hex64 | null;
 };
@@ -141,6 +157,16 @@ const BLOB_CACHE_BYTES = 8 * 1024 * 1024;
 const BLOB_CACHE_ENTRIES = 512;
 const RECENT_VIEWS = 8;
 
+type BlobJob = {
+  key: string;
+  cid: Hex64;
+  bytes: number;
+  priority: number;
+  generation: number;
+  started: boolean;
+  waiters: { resolve: (bytes: Uint8Array | null) => void; reject: (e: unknown) => void }[];
+};
+
 export class StudioSession {
   readonly ipc: StudioIpc;
   me: Hex64;
@@ -166,7 +192,10 @@ export class StudioSession {
 
   readonly saves: SaveRecord[] = [];
   private saveSeq = 0;
-  private saving = false;
+  /// The token of the worker that owns the save lane right now (0 = none). Only that worker
+  /// may release it; a worker from a cleared scope finds a different token and stands down.
+  private saving = 0;
+  private workerSeq = 0;
 
   receivePaused = false;
   readonly listeners = new Set<() => void>();
@@ -176,9 +205,10 @@ export class StudioSession {
   private readonly cacheBytesCap: number;
   private readonly blobs = new Map<Hex64, Uint8Array>();
   private cacheBytes = 0;
-  private readonly fetching = new Set<Hex64>();
-  private readonly queue: { cid: Hex64; bytes: number; priority: number }[] = [];
+  private readonly jobs = new Map<string, BlobJob>();
+  private inflight = 0;
   private readonly unavailable = new Set<Hex64>();
+  private readonly failed = new Map<Hex64, string>();
   private readonly invalid = new Map<Hex64, string>();
 
   // Recovery
@@ -188,8 +218,11 @@ export class StudioSession {
   recoveryError = "";
   readonly versions = new Map<Hex64, RecoveryVersionRead>();
   readonly exports = new Map<Hex64, RecoveryExport>();
+  /// An immutable snapshot of the current walk; replaced on every change.
   recoveryRun: RecoveryRun | null = null;
   pointer: PointerStep = { status: "idle", error: "", result: null };
+  private activeRun: { token: number; stop: boolean } | null = null;
+  private runSeq = 0;
 
   private indexReq = 0;
   private readonly docReq = new Map<Hex32, number>();
@@ -226,6 +259,7 @@ export class StudioSession {
   /// pending saves: their identity belongs to that channel and a retry there needs its scope back.
   setScope(scope: StudioScope | null): void {
     if (this.scope && scope && this.scope.server === scope.server && this.scope.channel === scope.channel) return;
+    if (!this.scope && !scope) return;
     this.clearScoped();
     this.scope = scope;
     this.generation++;
@@ -251,12 +285,18 @@ export class StudioSession {
     this.doc = null;
     this.known.clear();
     this.views.clear();
+    for (const s of this.saves) s.settle?.("discarded");
     this.saves.length = 0;
-    this.saving = false;
+    this.saving = 0;
     this.receivePaused = false;
-    this.queue.length = 0;
-    this.fetching.clear();
+    // Queued jobs are dropped; started ones keep their slot until they actually finish.
+    for (const [key, job] of this.jobs) {
+      if (job.started) continue;
+      for (const w of job.waiters) w.resolve(null);
+      this.jobs.delete(key);
+    }
     this.unavailable.clear();
+    this.failed.clear();
     this.invalid.clear();
     this.recoveryTarget = null;
     this.recoveryListing = null;
@@ -265,6 +305,7 @@ export class StudioSession {
     this.versions.clear();
     this.exports.clear();
     this.recoveryRun = null;
+    this.activeRun = null;
     this.pointer = { status: "idle", error: "", result: null };
     this.pendingIndex = false;
     this.pendingObjects.clear();
@@ -302,8 +343,8 @@ export class StudioSession {
     try { ev = parseStudioUpdated(payload); } catch { return; }
     if (!this.scope || ev.server !== this.scope.server || ev.channel !== this.scope.channel) return;
     // Every event invalidates the Index; a named object additionally invalidates that object.
-    // An unavailable blob may have arrived with it: let the next request try again.
-    if (ev.object) this.retryUnavailableFor(ev.object);
+    // A blob that was unavailable or failed may have arrived with it: let the next request try.
+    if (ev.object) this.releaseTransientFor(ev.object);
     this.invalidate({ index: true, objects: ev.object ? [ev.object] : [] });
   }
   onReceivePaused(payload: unknown): void {
@@ -370,7 +411,10 @@ export class StudioSession {
   /// Open (or re-read) a flipnote. Opening a different object drops the previous document but
   /// keeps its pending saves: they are addressed by object and finish or fail on their own.
   open(object: Hex32 | null, opts: { read?: boolean } = {}): void {
-    if (object === null) { this.doc = null; this.notify(); return; }
+    if (object === null) {
+      if (this.doc) { this.doc = null; this.notify(); }
+      return;
+    }
     if (this.doc?.object !== object) {
       this.doc = { object, view: null, model: null, loading: opts.read === false, absent: false, error: "" };
       this.notify();
@@ -385,7 +429,7 @@ export class StudioSession {
     const req = (this.docReq.get(object) ?? 0) + 1;
     this.docReq.set(object, req);
     const target = this.target();
-    if (this.doc?.object === object) { this.doc.loading = true; this.notify(); }
+    this.patchDoc(object, { loading: true });
     try {
       const view = await studioRead(this.ipc, target, object);
       if (!this.current(gen) || req !== this.docReq.get(object)) return;
@@ -396,18 +440,18 @@ export class StudioSession {
         this.noteEpoch(object, view.epochId);
       } else { this.known.delete(object); this.views.delete(object); }
       this.receivePaused = false;
-      if (this.doc?.object === object) {
-        this.doc.view = view;
-        this.doc.model = model;
-        this.doc.absent = view === null;
-        this.doc.error = "";
-      }
+      this.patchDoc(object, { view, model, absent: view === null, error: "", loading: false });
     } catch (e) {
       if (!this.current(gen) || req !== this.docReq.get(object)) return;
-      if (this.doc?.object === object) this.doc.error = reason(e);
-    } finally {
-      if (this.current(gen) && req === this.docReq.get(object) && this.doc?.object === object) { this.doc.loading = false; this.notify(); }
+      this.patchDoc(object, { error: reason(e), loading: false });
     }
+  }
+
+  /// Replace the open document's state (never mutate it) when it is this object.
+  private patchDoc(object: Hex32, patch: Partial<DocState>): void {
+    if (this.doc?.object !== object) return;
+    this.doc = { ...this.doc, ...patch };
+    this.notify();
   }
 
   /// A read carrying a different epoch than an uncertain save used marks that save.
@@ -443,10 +487,19 @@ export class StudioSession {
   }
 
   saveFrame(object: Hex32, frame: Hex32, pix: Uint8Array): void {
-    // A newer unsaved raster for the same frame replaces an older one that has not been
-    // published yet; one whose apply already has an identity keeps it (it may have committed).
+    // A newer raster for the same frame replaces an earlier record that has no apply identity
+    // yet (nothing of it can have committed); one with an identity keeps it and the newer
+    // pixels queue behind it in the same lane.
     const prior = this.saves.find((s) => s.kind === "frame" && s.object === object && s.frame === frame && s.status !== "inflight" && s.apply === null);
-    if (prior && prior.kind === "frame") { prior.pix = pix; prior.published = null; prior.error = ""; this.pump(); this.notify(); return; }
+    if (prior && prior.kind === "frame") {
+      prior.pix = pix;
+      prior.published = null;
+      prior.error = "";
+      prior.status = "queued";
+      this.notify();
+      this.pump();
+      return;
+    }
     this.enqueue({ kind: "frame", object, frame, op: "replace", after: null, pix, published: null, apply: null, label: "frame pixels" });
   }
 
@@ -505,10 +558,12 @@ export class StudioSession {
     this.enqueue({ kind: "applyIndex", object, op, label, request: { epochId: ep.epochId, nonce: this.newId(), body: canonicalJson(op) } });
   }
 
-  private enqueue(rec: NewSave): void {
-    this.saves.push({ ...rec, id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false } as SaveRecord);
+  private enqueue(rec: NewSave): SaveRecord {
+    const record = { ...rec, id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false } as SaveRecord;
+    this.saves.push(record);
     this.notify();
     this.pump();
+    return record;
   }
 
   /// Resend the same complete request.
@@ -543,12 +598,15 @@ export class StudioSession {
     this.pump();
   }
 
-  /// Drop a save on purpose. For a frame save this discards its unsaved pixels.
+  /// Drop a save on purpose. For a frame save this discards its unsaved pixels; the saves that
+  /// waited behind it in the same lane may then run.
   discard(id: number): void {
     const at = this.saves.findIndex((r) => r.id === id && r.status !== "inflight");
     if (at < 0) return;
-    this.saves.splice(at, 1);
+    const [s] = this.saves.splice(at, 1);
+    this.settleRecord(s, "discarded");
     this.notify();
+    this.pump();
   }
 
   /// The newest unsaved pixels for a frame, so an editor reopens what the member drew rather
@@ -565,12 +623,34 @@ export class StudioSession {
     return this.saves.filter((s) => (s.kind === "applyIndex" ? object === null || s.object === object : s.object === object));
   }
 
+  /// Queued saves that cannot run until this uncertain save is retried or discarded.
+  blockedBehind(id: number): number {
+    const s = this.saves.find((r) => r.id === id);
+    if (!s || s.status !== "uncertain") return 0;
+    const lane = laneOf(s);
+    return this.saves.filter((r) => r.id !== id && r.status === "queued" && laneOf(r) === lane).length;
+  }
+
+  /// One save at a time, in queue order within each lane (a document, or the Index). An
+  /// uncertain or in-flight save blocks the later saves of its lane; other lanes proceed.
   private pump(): void {
     if (this.saving) return;
-    const next = this.saves.find((s) => s.status === "queued");
+    const blocked = new Set<string>();
+    let next: SaveRecord | undefined;
+    for (const s of this.saves) {
+      const lane = laneOf(s);
+      if (blocked.has(lane)) continue;
+      if (s.status === "queued") { next = s; break; }
+      blocked.add(lane); // uncertain (or, defensively, inflight): nothing later in this lane runs
+    }
     if (!next) return;
-    this.saving = true;
-    void this.run(next).finally(() => { this.saving = false; this.pump(); });
+    const token = ++this.workerSeq;
+    this.saving = token;
+    void this.run(next).finally(() => {
+      if (this.saving !== token) return; // a cleared scope owns a different lane now
+      this.saving = 0;
+      this.pump();
+    });
   }
 
   private async run(s: SaveRecord): Promise<void> {
@@ -615,13 +695,11 @@ export class StudioSession {
       } else if (s.kind === "applyIndex") {
         const view = await studioApplyIndex(this.ipc, target, s.request);
         if (!this.current(gen)) return;
-        this.index = view;
-        this.indexModel = indexModel(view.content);
-        this.indexError = "";
+        this.landedIndex(view);
       } else {
         const applied = await recoveryApply(this.ipc, { ...target, object: s.object }, s.edit);
         if (!this.current(gen)) return;
-        void applied;
+        s.applied = applied;
         if (s.object) this.invalidate({ objects: [s.object] });
         else this.invalidate({ index: true });
       }
@@ -633,6 +711,7 @@ export class StudioSession {
       // uncertain. Keep the request and the pixels; the member retries or discards.
       s.status = "uncertain";
       s.error = reason(e);
+      this.settleRecord(s, "uncertain");
       this.notify();
     }
   }
@@ -643,12 +722,15 @@ export class StudioSession {
     this.known.set(object, { awaiting: view.awaitingTenureReceipt, phase: view.phase, epoch: view.epoch });
     const model = flipnoteModel(view.content);
     this.rememberView(object, view, model);
-    if (this.doc?.object === object) {
-      this.doc.view = view;
-      this.doc.model = model;
-      this.doc.absent = false;
-      this.doc.error = "";
-    }
+    this.patchDoc(object, { view, model, absent: false, error: "", loading: false });
+  }
+  /// The Index equivalent: a landed write is newer than any list still in flight.
+  private landedIndex(view: IndexView): void {
+    this.indexReq++;
+    this.index = view;
+    this.indexModel = indexModel(view.content);
+    this.indexError = "";
+    this.indexLoading = false;
   }
   private rememberView(object: Hex32, view: FlipnoteView, model: FlipnoteModel): void {
     this.views.delete(object);
@@ -658,7 +740,13 @@ export class StudioSession {
   private finish(s: SaveRecord): void {
     const at = this.saves.indexOf(s);
     if (at >= 0) this.saves.splice(at, 1);
+    this.settleRecord(s, "landed");
     this.notify();
+  }
+  private settleRecord(s: SaveRecord, outcome: SaveOutcome): void {
+    const settle = s.settle;
+    s.settle = undefined;
+    settle?.(outcome);
   }
 
   // --- Blobs ---------------------------------------------------------------------------------
@@ -670,70 +758,113 @@ export class StudioSession {
   }
   blobState(cid: Hex64): BlobState {
     if (this.blobs.has(cid)) return "held";
-    if (this.fetching.has(cid)) return "fetching";
-    if (this.queue.some((q) => q.cid === cid)) return "queued";
+    const job = this.jobs.get(`${this.generation}:${cid}`);
+    if (job) return job.started ? "fetching" : "queued";
     if (this.invalid.has(cid)) return "invalid";
+    if (this.failed.has(cid)) return "failed";
     if (this.unavailable.has(cid)) return "unavailable";
-    return "queued";
+    return "idle";
   }
   blobProblem(cid: Hex64): string {
-    return this.invalid.get(cid) ?? (this.unavailable.has(cid) ? "not available from any reachable member yet" : "");
+    return this.invalid.get(cid) ?? this.failed.get(cid) ?? (this.unavailable.has(cid) ? "not available from any reachable member yet" : "");
   }
 
   /// Ask for a frame's pixels. Lower priority runs first (0 = the frame on screen). A cid that
-  /// answered unavailable is not asked again until an invalidation clears it.
+  /// answered unavailable, failed or was rejected is not asked again until an invalidation or
+  /// an explicit retry clears it.
   want(cid: Hex64, bytes: number, priority = 2): void {
-    if (this.blobs.has(cid) || this.fetching.has(cid) || this.unavailable.has(cid) || this.invalid.has(cid)) return;
-    const q = this.queue.find((x) => x.cid === cid);
-    if (q) { q.priority = Math.min(q.priority, priority); return; }
-    this.queue.push({ cid, bytes, priority });
+    if (this.unavailable.has(cid) || this.failed.has(cid) || this.invalid.has(cid)) return;
+    this.scheduleFetch(cid, bytes, priority);
+  }
+
+  /// Explicit retry from the member: clears every hold on this cid and asks first.
+  retryBlob(cid: Hex64, bytes: number): void {
+    this.unavailable.delete(cid);
+    this.failed.delete(cid);
+    this.invalid.delete(cid);
+    this.scheduleFetch(cid, bytes, 0);
+  }
+
+  /// One bounded fetch for an action that needs the bytes now: it takes the front of the same
+  /// queue and the same in-flight slots, and shares an existing job for the cid.
+  fetchNow(cid: Hex64, bytes: number): Promise<Uint8Array | null> {
+    const held = this.blobs.get(cid);
+    if (held) return Promise.resolve(held);
+    this.unavailable.delete(cid);
+    this.failed.delete(cid);
+    const job = this.scheduleFetch(cid, bytes, -1);
+    if (!job) return Promise.resolve(this.blobs.get(cid) ?? null);
+    return new Promise((resolve, reject) => { job.waiters.push({ resolve, reject }); });
+  }
+
+  private scheduleFetch(cid: Hex64, bytes: number, priority: number): BlobJob | null {
+    if (this.blobs.has(cid) || !this.scope) return null;
+    const key = `${this.generation}:${cid}`;
+    let job = this.jobs.get(key);
+    if (job) {
+      if (!job.started && priority < job.priority) job.priority = priority;
+      return job;
+    }
+    job = { key, cid, bytes, priority, generation: this.generation, started: false, waiters: [] };
+    this.jobs.set(key, job);
     this.pumpFetches();
+    return job;
   }
 
   private pumpFetches(): void {
-    while (this.fetching.size < this.maxFetches && this.queue.length) {
-      this.queue.sort((a, b) => a.priority - b.priority);
-      const next = this.queue.shift()!;
-      void this.fetchOne(next.cid, next.bytes);
+    while (this.inflight < this.maxFetches) {
+      let next: BlobJob | null = null;
+      for (const job of this.jobs.values()) {
+        if (job.started || job.generation !== this.generation) continue;
+        if (!next || job.priority < next.priority) next = job;
+      }
+      if (!next) return;
+      void this.fetchOne(next);
     }
   }
 
-  private async fetchOne(cid: Hex64, bytes: number): Promise<void> {
-    const gen = this.generation;
+  private async fetchOne(job: BlobJob): Promise<void> {
+    job.started = true;
+    this.inflight++;
     const target = this.target();
-    this.fetching.add(cid);
     this.notify();
+    let result: Uint8Array | null = null;
+    let failure: unknown = null;
     try {
-      const got = await requestBlobBounded(this.ipc, target.server, cid, bytes);
-      if (!this.current(gen)) return;
-      if (!got) { this.unavailable.add(cid); return; }
-      try { decodePix(got); } catch (e) { this.invalid.set(cid, reason(e)); return; }
-      this.remember(cid, got);
+      const got = await requestBlobBounded(this.ipc, target.server, job.cid, job.bytes);
+      if (this.current(job.generation)) {
+        if (!got) this.unavailable.add(job.cid);
+        else {
+          decodePix(got);
+          this.remember(job.cid, got);
+          result = got;
+        }
+      }
     } catch (e) {
-      if (!this.current(gen)) return;
-      this.invalid.set(cid, reason(e));
+      failure = e;
+      if (this.current(job.generation)) {
+        // Length/base64/PIX1 failures are about the content named by this cid; anything else
+        // (busy, cancelled, transport) is about this attempt and may succeed next time.
+        if (e instanceof StudioNativeError || e instanceof PixError) this.invalid.set(job.cid, reason(e));
+        else this.failed.set(job.cid, reason(e));
+      }
     } finally {
-      this.fetching.delete(cid);
-      if (this.current(gen)) { this.notify(); this.pumpFetches(); }
+      // Release exactly this job's slot and marker; a same-cid job of a newer scope is its own.
+      this.inflight--;
+      if (this.jobs.get(job.key) === job) this.jobs.delete(job.key);
+      for (const w of job.waiters) {
+        if (failure && this.current(job.generation)) w.reject(failure);
+        else w.resolve(result);
+      }
+      this.notify();
+      this.pumpFetches();
     }
-  }
-
-  /// One bounded fetch outside the queue, for an action that needs the bytes now.
-  async fetchNow(cid: Hex64, bytes: number): Promise<Uint8Array | null> {
-    const held = this.blobs.get(cid);
-    if (held) return held;
-    const gen = this.generation;
-    const got = await requestBlobBounded(this.ipc, this.target().server, cid, bytes);
-    if (!this.current(gen)) return null;
-    if (!got) return null;
-    decodePix(got);
-    this.remember(cid, got);
-    return got;
   }
 
   private remember(cid: Hex64, bytes: Uint8Array): void {
     if (this.blobs.has(cid)) return;
     this.unavailable.delete(cid);
+    this.failed.delete(cid);
     this.invalid.delete(cid);
     this.blobs.set(cid, bytes);
     this.cacheBytes += bytes.length;
@@ -744,23 +875,27 @@ export class StudioSession {
     }
   }
 
-  private retryUnavailableFor(object: Hex32): void {
+  /// A document changed: what was unavailable or failed for its frames may be reachable now.
+  /// Rejected content stays rejected until an explicit retry.
+  private releaseTransientFor(object: Hex32): void {
+    this.failed.clear();
     if (this.doc?.object !== object || !this.doc.model) { this.unavailable.clear(); return; }
     for (const f of this.doc.model.frames) this.unavailable.delete(f.cid);
   }
 
   // --- Recovery ------------------------------------------------------------------------------
 
-  /// Point the rail at a document (null = the Index) and read its listing.
+  /// Point the rail at a document (null = the Index). The same target is a no-op; the listing
+  /// is read on a change of target, on an invalidation, or through an explicit refresh.
   watchRecovery(object: Hex32 | null): void {
-    if (this.recoveryTarget !== object) {
-      this.recoveryTarget = object;
-      this.recoveryListing = null;
-      this.recoveryError = "";
-      this.recoveryRun = null;
-      this.pointer = { status: "idle", error: "", result: null };
-      this.notify();
-    }
+    if (this.recoveryTarget === object && (this.recoveryListing || this.recoveryLoading || this.recoveryError)) return;
+    this.recoveryTarget = object;
+    this.recoveryListing = null;
+    this.recoveryError = "";
+    this.recoveryRun = null;
+    this.activeRun = null;
+    this.pointer = { status: "idle", error: "", result: null };
+    this.notify();
     void this.refreshRecovery();
   }
 
@@ -813,7 +948,9 @@ export class StudioSession {
     const object = this.recoveryTarget;
     const listing = await recoveryAcknowledge(this.ipc, { ...this.target(), object }, { oldestSnapshot: w.oldestSnapshot, stagedSnapshot: w.stagedSnapshot });
     if (!this.current(gen) || object !== this.recoveryTarget) return;
+    this.recoveryReq++; // a list still in flight is older than this answer
     this.recoveryListing = listing;
+    this.recoveryLoading = false;
     this.notify();
   }
 
@@ -846,66 +983,89 @@ export class StudioSession {
     return out;
   }
 
-  /// Walk a version's choices: preview, apply what is Ready, re-read, next. A partial walk is
-  /// saved content; the run reports each item's disposition and never calls itself a Restore.
+  /// Walk a version's choices: preview, apply what is Ready through the save queue, re-read,
+  /// next. A partial walk is saved content; the run reports each item's disposition and never
+  /// calls itself a Restore. An uncertain apply stops the walk: its exact payload stays on the
+  /// save record for retry, and a later walk previews afresh only after that is resolved.
   async runRecovery(snapshot: Hex64, mode: RecoveryMode): Promise<void> {
     const gen = this.generation;
     const object = this.recoveryTarget;
     const version = await this.readVersion(snapshot);
     if (!version || !this.current(gen)) return;
+    const token = ++this.runSeq;
+    const control = { token, stop: false };
+    this.activeRun = control;
     const run: RecoveryRun = {
       snapshot, mode, object, status: "running", error: "",
       items: this.choicesFor(version, mode).map(({ choice, label }) => ({ choice, label, state: "pending", error: "", originalAuthor: null })),
     };
-    this.recoveryRun = run;
-    this.notify();
+    const live = () => this.current(gen) && this.activeRun === control;
+    const publish = () => {
+      if (!live()) return;
+      this.recoveryRun = { ...run, items: run.items.map((i) => ({ ...i })) };
+      this.notify();
+    };
+    publish();
     const target = { ...this.target(), object };
     for (const item of run.items) {
-      if (!this.current(gen) || this.recoveryRun !== run || run.status === "stopped") return;
+      if (!live()) return;
+      if (control.stop) { run.status = "stopped"; publish(); return; }
       item.state = "previewing";
-      this.notify();
+      publish();
       try {
         const preview = await recoveryPreview(this.ipc, target, snapshot, item.choice, mode);
-        if (!this.current(gen) || this.recoveryRun !== run) return;
+        if (!live()) return;
         item.originalAuthor = preview.originalAuthor;
-        if (preview.disposition !== "ready" || preview.body === null) { item.state = preview.disposition; this.notify(); continue; }
+        if (preview.disposition !== "ready" || preview.body === null) { item.state = preview.disposition; publish(); continue; }
         if (item.choice.kind === "frame") {
-          // Pixels must be held locally before the Save that references them; fetch the exact
+          // Pixels must be held locally before the Save that references them: fetch the exact
           // historical value bounded by its declared size, then hold it through publication.
           const held = historicalBlob(version, item.choice.id, item.choice.value);
-          if (!held) { item.state = "error"; item.error = "the historical frame value is not in this version"; this.notify(); continue; }
+          if (!held) { item.state = "error"; item.error = "the historical frame value is not in this version"; publish(); continue; }
           item.state = "fetching";
-          this.notify();
+          publish();
           const bytes = await this.fetchNow(held.cid, held.bytes);
-          if (!this.current(gen) || this.recoveryRun !== run) return;
-          if (!bytes) { item.state = "error"; item.error = "pixels unavailable; not applied"; this.notify(); continue; }
+          if (!live()) return;
+          if (!bytes) { item.state = "error"; item.error = "pixels unavailable; not applied"; publish(); continue; }
           const p = await publishPix(this.ipc, target.server, bytes);
-          if (!this.current(gen) || this.recoveryRun !== run) return;
-          if (p.cid !== held.cid) { item.state = "error"; item.error = "held pixels do not name the historical cid"; this.notify(); continue; }
+          if (!live()) return;
+          if (p.cid !== held.cid) { item.state = "error"; item.error = "held pixels do not name the historical cid"; publish(); continue; }
         }
         item.state = "applying";
-        this.notify();
+        publish();
         const edit: RecoveryApplyEdit = { snapshot, choice: item.choice, mode, epochId: preview.epochId, expectedProjection: preview.expectedProjection, nonce: this.newId(), body: preview.body };
-        const applied = await recoveryApply(this.ipc, target, edit);
-        if (!this.current(gen) || this.recoveryRun !== run) return;
-        item.state = applied.alreadySaved ? "alreadySaved" : "applied";
-        this.notify();
+        const record = this.enqueue({ kind: "recoveryApply", object, edit, applied: null, label: `${mode}: ${item.label}` });
+        const outcome = await new Promise<SaveOutcome>((resolve) => { record.settle = resolve; });
+        if (!live()) return;
+        if (outcome !== "landed") {
+          // The complete payload is on the save record; only its exact retry may finish it.
+          item.state = "uncertain";
+          item.error = outcome === "uncertain" ? "apply uncertain; retry the same request from the save card, then run again" : "discarded";
+          run.status = "stopped";
+          run.error = "stopped at an uncertain apply";
+          publish();
+          return;
+        }
+        const applied = record.kind === "recoveryApply" ? record.applied : null;
+        item.state = applied?.alreadySaved ? "alreadySaved" : "applied";
+        publish();
         // Re-read before the next preview so its projection fingerprint is the current one.
         if (object) await this.refreshDoc(object); else await this.refreshIndex();
       } catch (e) {
-        if (!this.current(gen) || this.recoveryRun !== run) return;
+        if (!live()) return;
         item.state = "error";
         item.error = reason(e);
-        this.notify();
+        publish();
       }
     }
     run.status = "done";
-    this.notify();
+    publish();
     this.invalidate({ index: true, objects: object ? [object] : [], recovery: true });
   }
 
+  /// Stop after the item in progress; the walk reports "stopped".
   stopRecovery(): void {
-    if (this.recoveryRun && this.recoveryRun.status === "running") { this.recoveryRun.status = "stopped"; this.notify(); }
+    if (this.activeRun && this.recoveryRun?.status === "running") this.activeRun.stop = true;
   }
 
   /// The separate, separately retryable Registry pointer step for a document that was saved.
@@ -923,6 +1083,10 @@ export class StudioSession {
     }
     this.notify();
   }
+}
+
+function laneOf(s: SaveRecord): string {
+  return s.kind === "applyIndex" ? "index" : s.object ?? "index";
 }
 
 function usedEpoch(s: SaveRecord): Hex32 | null {

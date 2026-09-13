@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "node --experimental-strip-types --import ./scripts/test-dom.mjs --test src/*.test.ts",
+    "test": "node --experimental-strip-types --import ./scripts/test-dom.mjs --import ./scripts/test-svelte.mjs --test src/*.test.ts",
     "test:flows": "node scripts/flow-check.mjs",
     "test:startup": "node scripts/startup-check.mjs",
     "tauri": "tauri",

@@ -2,6 +2,7 @@
   // The studio's contextual sidebar: this channel's flipnotes and scores with what is actually
   // known about each (design-creative-suite.md section 5, "Studio"), read from the connected
   // session's Index view. Overflow and deleted entries stay visible as what they are.
+  import { untrack } from "svelte";
   import { ensureStudio, setStudioScope, studio } from "./studio-state.svelte.ts";
   import { PixRaster } from "./pix-canvas.ts";
   import { DEFAULT_PALETTE } from "./studio-store.ts";
@@ -20,7 +21,11 @@
   // At init, not in a derived: it writes shared state once, keyed on the identity at mount.
   // svelte-ignore state_referenced_locally
   const session = ensureStudio(me);
-  $effect(() => { setStudioScope(server, channel); });
+  // Tracked on the props only; the scope change itself runs untracked (see studio-state).
+  $effect(() => {
+    const s = server, c = channel;
+    untrack(() => setStudioScope(s, c));
+  });
 
   const model = $derived.by(() => { void studio.rev; return session.indexModel; });
   const indexView = $derived.by(() => { void studio.rev; return session.index; });

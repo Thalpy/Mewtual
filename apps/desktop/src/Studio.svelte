@@ -5,7 +5,7 @@
   // across retries, and what the backend does not offer yet (claims, sound, linked Music, .pixa
   // export, durable edits while rotating, signed repair) is shown as unavailable rather than
   // pretended.
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import { decodePix, pixToRgba } from "./pix.ts";
   import {
     CLEAR,
@@ -63,18 +63,27 @@
   // surface remounts with the tab, and the session outlives it.
   // svelte-ignore state_referenced_locally
   const session = ensureStudio(me);
-  $effect(() => { setStudioScope(server, channel); });
+  // Imperative session calls run untracked: an effect must depend on what selects the work
+  // (props, the selection), never on the revision the work itself bumps.
+  $effect(() => {
+    const s = server, c = channel;
+    untrack(() => setStudioScope(s, c));
+  });
   // The sidebar selects; the surface follows the selection (and re-opens after a remount).
   $effect(() => {
     const id = studio.selected;
-    if (id && session.doc?.object !== id) session.open(id);
-    else if (!id && session.doc) session.open(null);
+    untrack(() => {
+      if (id && session.doc?.object !== id) session.open(id);
+      else if (!id && session.doc) session.open(null);
+    });
   });
 
   const objectId = $derived(studio.selected);
+  // Each field is derived from the revision directly: the session replaces its document state
+  // on every change, but nothing downstream should hinge on that reference changing.
   const doc = $derived.by(() => { void studio.rev; return session.doc?.object === objectId ? session.doc : null; });
-  const view = $derived(doc?.view ?? null);
-  const model = $derived(doc?.model ?? null);
+  const view = $derived.by(() => { void studio.rev; const d = session.doc; return d?.object === objectId ? d.view : null; });
+  const model = $derived.by(() => { void studio.rev; const d = session.doc; return d?.object === objectId ? d.model : null; });
   const entry = $derived.by(() => {
     void studio.rev;
     const m = session.indexModel;
@@ -85,6 +94,7 @@
   const pending = $derived.by(() => { void studio.rev; return objectId ? session.pendingFor(objectId) : []; });
   const uncertain = $derived(pending.filter((s) => s.status === "uncertain"));
   const inflight = $derived(pending.some((s) => s.status !== "uncertain"));
+  const blockedCount = $derived.by(() => { void studio.rev; return uncertain.length ? session.blockedBehind(uncertain[0].id) : 0; });
   const pendingInserts = $derived(pending.filter((s): s is Extract<SaveRecord, { kind: "frame" }> => s.kind === "frame" && s.op === "insert"));
   const receivePaused = $derived.by(() => { void studio.rev; return session.receivePaused; });
 
@@ -488,8 +498,10 @@
     else if (rec) session.want(rec.cid, rec.bytes, 0);
   });
   $effect(() => {
-    // The recovery rail follows the open document.
-    if (objectId && !isScore) session.watchRecovery(objectId);
+    // The recovery rail follows the open document. Watching is idempotent for the same target,
+    // and it runs untracked so the listing it starts cannot re-trigger this effect.
+    const id = objectId, score = isScore;
+    untrack(() => { if (id && !score) session.watchRecovery(id); });
   });
 
   /// Thumbnail action: decode the frame's held bytes into a small canvas, or ask for them.
@@ -689,7 +701,7 @@
   function itemTone(s: RecoveryItem["state"]): string {
     if (s === "applied" || s === "alreadySaved" || s === "unchanged") return "ok";
     if (s === "error" || s === "deleted" || s === "missingTarget") return "danger";
-    if (s === "conflict" || s === "full") return "warn";
+    if (s === "conflict" || s === "full" || s === "uncertain") return "warn";
     return "info";
   }
 
@@ -806,7 +818,7 @@
     {#if uncertain.length}
       <div class="st-banner warn st-save">
         <span><b>save uncertain</b> · {uncertain[0].label}{#if uncertain.length > 1} · and {uncertain.length - 1} more{/if}</span>
-        <span class="micro wrap">{uncertain[0].error}{#if uncertain[0].epochChanged} · the document moved to a newer epoch since; a retry resends the original request and the backend decides{/if} · attempt {uncertain[0].attempts} · your work is kept</span>
+        <span class="micro wrap">{uncertain[0].error}{#if uncertain[0].epochChanged} · the document moved to a newer epoch since; a retry resends the original request and the backend decides{/if} · attempt {uncertain[0].attempts} · your work is kept{#if blockedCount} · {blockedCount} later {blockedCount === 1 ? "save waits" : "saves wait"} behind it{/if}</span>
         <span class="st-card-acts">
           <button type="button" class="st-btn primary" onclick={() => retrySave(uncertain[0])}>retry same request</button>
           {#if uncertain[0].kind === "frame" || uncertain[0].kind === "apply" || uncertain[0].kind === "applyIndex"}
@@ -865,8 +877,8 @@
           {#if !frameId}
             <div class="st-veil"><span>no frames yet</span><span class="micro">add one below to start drawing</span></div>
           {:else if !raster && frameRec}
-            {#if blobStateHere === "invalid" || blobStateHere === "unavailable"}
-              <div class="st-veil"><span>{blobStateHere === "invalid" ? "these pixels were rejected" : "pixels not available yet"}</span><span class="micro">{blobProblemOf(frameRec.cid) || "bounded by the declared size"} · {fmtKib(frameRec.bytes)}</span><span class="st-veil-acts"><button type="button" class="st-btn" onclick={() => { session.invalidate({ objects: [objectId] }); }}>ask again</button></span></div>
+            {#if blobStateHere === "invalid" || blobStateHere === "unavailable" || blobStateHere === "failed"}
+              <div class="st-veil"><span>{blobStateHere === "invalid" ? "these pixels were rejected" : blobStateHere === "failed" ? "fetching failed" : "pixels not available yet"}</span><span class="micro">{blobProblemOf(frameRec.cid) || "bounded by the declared size"} · {fmtKib(frameRec.bytes)}</span><span class="st-veil-acts"><button type="button" class="st-btn" onclick={() => session.retryBlob(frameRec!.cid, frameRec!.bytes)}>ask again</button></span></div>
             {:else}
               <div class="st-veil"><span>fetching {fmtKib(frameRec.bytes)}</span><span class="micro">bounded by the declared size · validated before it is shown</span></div>
             {/if}
@@ -1078,7 +1090,7 @@
               {/each}
               {#if run && run.object === objectId}
                 <div class="st-card">
-                  <span>{run.mode} from epoch {listing.versions.find((v) => v.snapshot === run.snapshot)?.epoch ?? "?"} · {run.status === "running" ? "in progress" : run.status === "stopped" ? "stopped" : "walked"}</span>
+                  <span>{run.mode} from epoch {listing.versions.find((v) => v.snapshot === run.snapshot)?.epoch ?? "?"} · {run.status === "running" ? "in progress" : run.status === "stopped" ? `stopped${run.error ? ` · ${run.error}` : ""}` : "walked"}</span>
                   <span class="micro wrap">each choice is previewed, applied only when ready, then the document is re-read · what was applied is saved content, not an all-or-nothing restore</span>
                   <ul class="st-run">
                     {#each run.items as it, i (i)}
@@ -1126,11 +1138,13 @@
           {@const st = blobStateOf(f.cid)}
           <button type="button" class="st-thumb" class:cur={f.id === frameId} class:over={!!f.overCap} class:conflict={f.conflicts.length > 0} onclick={() => openFrame(f.id)} title={f.overCap ? "over the cap: skipped in playback, greyed until trimmed" : st === "invalid" ? `pixels rejected: ${blobProblemOf(f.cid)}` : st === "unavailable" ? "pixels not available yet" : ""}>
             <span class="ix">{i + 1}</span>
-            <span class="fr" class:fetching={st === "fetching" || st === "queued"} class:missing={st === "unavailable" || st === "invalid"}>
+            <span class="fr" class:fetching={st === "fetching" || st === "queued" || st === "idle"} class:missing={st === "unavailable" || st === "invalid" || st === "failed"}>
               {#if st === "held"}
                 <canvas width="64" height="48" use:thumb={{ cid: f.cid, bytes: f.bytes, rev: studio.rev }}></canvas>
               {:else if st === "invalid"}
                 <span class="micro">rejected</span>
+              {:else if st === "failed"}
+                <span class="micro">failed</span>
               {:else if st === "unavailable"}
                 <span class="micro">not here</span>
               {:else}
